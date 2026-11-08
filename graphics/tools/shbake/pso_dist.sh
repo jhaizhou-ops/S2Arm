@@ -102,7 +102,7 @@ progress() {   # 进度行（看门狗按工作目录里有没有新写入判进
 # ---- mini 送片进程 ----
 rx() { if [ "$HOST" = local ]; then timeout "${2:-60}" bash -c "$1"; else timeout "${2:-60}" ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 "$HOST" "bash -c $(printf '%q' "$1")"; fi; }
 rp() { if [ "$HOST" = local ]; then echo "$1"; else echo "$HOST:$1"; fi; }
-rs() { [ -n "${S2A_REMOTE_SH:-}" ] || return 125; (cd "$R" && exec bash "$S2A_REMOTE_SH" "$@"); }   # 远端分发是可选钩子：没设 S2A_REMOTE_SH 就全在本机编   # remote.sh 按当前目录认仓库：调用方（出包流程）当前目录不一定在仓库里
+rs() { (cd "$R" && exec bash tools/remote.sh "$@"); }   # remote.sh 按当前目录认仓库：调用方（出包流程）当前目录不一定在仓库里
 release() { local n; for n in $INF; do [ -e "$LQ/done/$n" ] || rm -rf "$LQ/claim/$n"; done; INF=; }
 feeder() {
   local RH Q MJ c n seq=0 rpid out f kq=0 RUNID tmp M3SKIP=   # M3SKIP 必须显式赋空：set -u 下 local 只声明不赋值算未定义
@@ -112,7 +112,7 @@ feeder() {
   # 远端编片服务：remote.sh 只接提交态、拿远端满核槽（排队上限 = 本机做完为止，本机做完就杀）
   # 不经 rs 函数后台起：函数 & 先开一层子 shell、函数体的 ( … exec ) 再开一层，$! 是外层，kill $rpid 杀不到 remote.sh，
   #   它成孤儿继续排 / 占 mini 满核槽（10-21 每次重烘漏一个，14 个孤儿占槽，mini 一下午编 0 片）；这里只开一层、exec 后 $! 就是 remote.sh
-  (cd "$R" && S2A_REMOTE_WAIT_S=${S2A_REMOTE_WAIT_S:-3600} S2A_REMOTE_PRIO=${S2A_REMOTE_PRIO:-3} exec bash "$S2A_REMOTE_SH" --name "pso-$(basename "$R")" --timeout 3600 --env PSO_A --env PSO_PLAT --env PSO_M --env PSO_SV --env PSO_NTV --env PSO_NTJ --env PSO_MJ --env PSO_REMOTE_NT \
+  (cd "$R" && S2A_REMOTE_WAIT_S=${S2A_REMOTE_WAIT_S:-3600} S2A_REMOTE_PRIO=${S2A_REMOTE_PRIO:-3} exec bash tools/remote.sh --name "pso-$(basename "$R")" --timeout 3600 --env PSO_A --env PSO_PLAT --env PSO_M --env PSO_SV --env PSO_NTV --env PSO_NTJ --env PSO_MJ --env PSO_REMOTE_NT \
     -- bash graphics/tools/shbake/pso_dist.sh serve "$Q") > "$PSO_W/pso_mini.$PSO_A.$PSO_PLAT$PSO_M.log" 2>&1 &
   rpid=$!; trap 'kill $rpid 2> /dev/null; exit 143' TERM INT   # 被杀时带走 remote.sh（它一退，远端命令跟着被杀、远端满核槽放掉）
   # 函数库整份传一次（和 remote.sh 起服务并行）

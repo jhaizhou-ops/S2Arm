@@ -40,8 +40,8 @@ int main(void) {
     snprintf(T, sizeof T, "/tmp/t_mac_slot_hold.%d", (int)getpid()); mkdir(T, 0755);
     snprintf(SLOT, sizeof SLOT, "%s/slot", T); char cwd[512]; if (!getcwd(cwd, sizeof cwd)) return 1;
     snprintf(MS, sizeof MS, "%s/tools/mac_slot.sh", cwd);
-    if (getenv("S2A_MAC_SLOT_SH")) snprintf(MS, sizeof MS, "%s", getenv("S2A_MAC_SLOT_SH"));
-    const int have_ms = access(MS, R_OK) == 0;
+    const char *priv = getenv("S2A_PRIVATE_TOOLS"); if (priv && *priv) snprintf(MS, sizeof MS, "%s/mac_slot.sh", priv);
+    const int have_ms = priv && *priv && access(MS, R_OK) == 0;   // 公开仓 tools/mac_slot.sh 是薄壳，真拿槽要私仓那份
     char p[800], b[1200]; pid_t c; int rc;
     // ① 已拿着槽：仲裁换成假脚本，被调就留标记
     char fake[700]; snprintf(fake, sizeof fake, "%s/fake.sh", T); FILE *f = fopen(fake, "w"); fprintf(f, "touch %s/fake_called; echo /x\n", T); fclose(f);
@@ -53,7 +53,7 @@ int main(void) {
     rc = child(NULL, 0, "1", &c); b[0] = 0; slurp(p, b, sizeof b);
     snprintf(p, sizeof p, "%s/0", SLOT);
     CHECK(rc == 0 && b[0] && access(p, F_OK) != 0, "② 单机：照常往下（rc=%d）、没建槽", rc);
-    if (!have_ms) printf("－ 未覆盖：③④⑤ 真拿槽（仲裁脚本 tools/mac_slot.sh 是维护方私仓工具；S2A_MAC_SLOT_SH 指它才测）\n");
+    if (!have_ms) printf("－ 未覆盖：③④⑤ 真拿槽（仲裁脚本 tools/mac_slot.sh 是维护方私仓工具；设 S2A_PRIVATE_TOOLS 才测）\n");
     if (have_ms) {
     // ③ 有空槽
     snprintf(p, sizeof p, "%s/passed", T); unlink(p);

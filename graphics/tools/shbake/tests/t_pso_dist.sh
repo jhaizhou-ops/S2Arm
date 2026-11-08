@@ -30,9 +30,9 @@ export S2A_REMOTE=local S2A_REMOTE_ROOT=$T/rr S2A_REMOTE_LOGS=$T/logs HOME=$T/ho
 mkdir -p "$T/home" "$T/repo/tools/bin" "$T/repo/graphics/tools/shbake"; cd "$T/repo" || exit 1
 mkdir -p "$T/home/.s2arm/run/s2arm/bin"; echo '# 测试用局槽仲裁副本' > "$T/home/.s2arm/run/s2arm/bin/mac_slot-now.sh"   # remote.sh 本机缺副本不派（tools/mac_slot_frozen.sh）
 git init -q; git config user.email t@t; git config user.name t
-cp "$RT/tools/safe_killpg.sh" "$RT/tools/idle_timeout.sh" tools/; REM=${S2A_REMOTE_SH:-}
-if [ -n "$REM" ]; then cp "$REM" tools/remote.sh; cp "$(dirname "$REM")/disk_low.sh" tools/; export S2A_REMOTE_SH=$T/repo/tools/remote.sh
-else echo "－ 未覆盖：远端分发 ①②④⑤⑥⑦⑩⑫（没设 S2A_REMOTE_SH；远端脚本与这几例留维护方私仓）"; fi
+cp "$RT/tools/safe_killpg.sh" "$RT/tools/idle_timeout.sh" tools/; REM=${S2A_PRIVATE_TOOLS:+$S2A_PRIVATE_TOOLS/remote.sh}
+if [ -n "$REM" ] && [ -f "$REM" ]; then cp "$REM" tools/remote.sh; cp "$S2A_PRIVATE_TOOLS/disk_low.sh" tools/; else REM=
+echo "－ 未覆盖：远端分发 ①②④⑤⑥⑦⑩⑫（远端脚本 tools/remote.sh 是维护方私仓工具；设 S2A_PRIVATE_TOOLS 才测）"; fi
  cp "$RT/tools/bin/timeout" tools/bin/; cp "$H/pso_dist.sh" "$H/pso_chunk.sh" "$H/pso_isolate.py" graphics/tools/shbake/; git add -A; git commit -qm 1
 cat > "$T/fake_nt" <<'EOF'
 #!/bin/bash

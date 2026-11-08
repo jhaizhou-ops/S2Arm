@@ -171,6 +171,10 @@ def pairs(plat, use):
         if plat == 'ios':
             raise TargetError('用户包要目标设备：启动器 / 一键出包没传 S2A_PSO_ARCHS / S2A_PSO_OS（选的或连着的设备），不猜')
         want, src = [host_pair()], '用户包：出包的这台 Mac'
+    elif not Path(os.environ.get('S2A_OUR_DEVICES') or ROOT / 'pack' / 'our_devices.tsv').exists():   # 公开仓不带我方真机表（维护方私有）
+        if plat == 'ios':
+            raise TargetError('没有我方真机表（S2A_OUR_DEVICES / pack/our_devices.tsv 为维护方私有）：给 S2A_PSO_ARCHS / S2A_PSO_OS，或 S2A_PSO_ARCHS_ALL=1 出全集')
+        want, src = [host_pair()], '没有我方真机表：出包的这台 Mac'
     else:
         want, src = run_machines(plat), '跑局机清单 pack/our_devices.tsv'
     out, bad = [], []
