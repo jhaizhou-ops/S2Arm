@@ -8,13 +8,13 @@ ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 o=$(cd "$H" && python3 tools/shared_path_lint.py 2>&1); r=$?
 ck "本仓库：共享位置全部登记（$(echo "$o" | tail -1 | cut -c1-120)）" '[ $r = 0 ]'
 [ $r = 0 ] || echo "$o" | head -10
-mkdir -p $T/repo/tools $T/repo/native/src; cp "$H/tools/shared_path_lint.py" "$H/tools/shared_paths.tsv" $T/repo/tools/
+mkdir -p $T/repo/tools $T/repo/runtime/src; cp "$H/tools/shared_path_lint.py" "$H/tools/shared_paths.tsv" $T/repo/tools/
 cat > $T/repo/tools/new.sh <<'EOF'
 OUT=${OUT:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/newshared}; echo x > /tmp/fixed_name.log
 L=$(mktemp -d); echo y > /tmp/ok_$$.log; echo z > "$D/frames.tsv"; S=${S:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}
 EOF
 printf "import os\nP = os.path.expanduser('~/.s2arm/run/s2arm/pyshared')\n" > $T/repo/tools/new.py
-printf 'unsigned m = ~0u; unsigned long a = x & ~15ull;\n' > $T/repo/native/src/bits.c
+printf 'unsigned m = ~0u; unsigned long a = x & ~15ull;\n' > $T/repo/runtime/src/bits.c
 (cd $T/repo && git init -q && git add -A) > /dev/null
 o=$(cd $T/repo && python3 tools/shared_path_lint.py 2>&1); r=$?
 ck "新加未登记的共享缺省 → 红（退出 1）" '[ $r = 1 ]'

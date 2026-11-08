@@ -8,17 +8,17 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 export S2A_JOBS=6
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p $T/repo/pack $T/repo/tools $T/repo/gfx/tools/direct $T/repo/gfx/tools/shbake $T/repo/gfx/nvn/gfx/tools $T/repo/gfx/nvn/games $T/repo/gfx/nvn/tools $T/roots
+mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/tools/direct $T/repo/graphics/tools/shbake $T/repo/translator $T/repo/graphics/nvn/games $T/repo/graphics/nvn/tools $T/roots
 cp "$H/pack/resource_input_key.py" $T/repo/pack/; cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; cp "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/   # 各阶段实际读入进键（pack/stage_keyfiles.sh，10-30）
 cp "$H/pack/roots.sh" "$H/pack/srcs.sh" "$H/pack/stage_extract.sh" "$H/pack/ue_pak.py" $T/repo/pack/; cp "$H/tools/clonedir.py" "$H/tools/host_build.sh" "$H/tools/plock.sh" "$H/tools/flock_hold.py" "$H/tools/machine.sh" "$H/tools/nostall.py" "$H/tools/progress.sh" "$H/tools/nospace.sh" $T/repo/tools/
-cp "$H/graphics/tools/direct/extract.sh" $T/repo/gfx/tools/direct/; cp "$H/graphics/tools/shbake/pak_crypto.py" "$H/graphics/tools/shbake/unreal_pak.py" "$H/graphics/tools/shbake/zstd_lib.py" $T/repo/gfx/tools/shbake/
+cp "$H/graphics/tools/direct/extract.sh" $T/repo/graphics/tools/direct/; cp "$H/graphics/tools/shbake/pak_crypto.py" "$H/graphics/tools/shbake/unreal_pak.py" "$H/graphics/tools/shbake/zstd_lib.py" $T/repo/graphics/tools/shbake/
 # romfs_list.py：仓库里唯一的 RomFS 遍历（11-03），被测脚本经它列 RomFS
-cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/gfx/nvn/tools/
-cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/gfx/nvn/tools/
+cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/
+cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/
 for f in translator/uepak.py translator/unityfs.py graphics/nvn/games/game.py graphics/nvn/tools/nso_syms.py graphics/nvn/tools/lz4blk.py; do echo x > $T/repo/$f; done   # 只进键，假抽取器不导入
 # 假抽取器：记一行「工具 J DM_GAME DM_UE_SHADERS」（另记一行「splitcap DM_GLSLC_CAPTURE」），出最小产物；FAKE_FAIL=split 时 shader_split 失败；
 #   FAKE_FAIL=zero：shader_split 照常退 0、打运行时 GLSLC 的红行、表里 0 行，S2Arm 抽取 rows.tsv 只有表头（两边都 0 支）
-cat > $T/repo/gfx/nvn/gfx/tools/shader_split.py <<'EOF'
+cat > $T/repo/translator/shader_split.py <<'EOF'
 import os, sys
 open(os.environ['FAKE_CALLS'], 'a').write(f"split {os.environ.get('J')} {os.environ.get('DM_GAME')} {os.environ.get('DM_UE_SHADERS', '')}\nsplitcap {os.environ.get('DM_GLSLC_CAPTURE', '-')}\n")
 if os.environ.get('FAKE_FAIL') == 'split': print('[RED] Data/x: Unity serialized file without type trees'); sys.exit(1)
@@ -26,7 +26,7 @@ os.makedirs(sys.argv[3], exist_ok=True); open(os.path.join(sys.argv[3], 'vs.pkg'
 if os.environ.get('FAKE_FAIL') == 'zero': print('[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in x/glslc_capture: the shaders the game compiles at run time will have no translation')
 for p in sys.argv[4:7]: open(p, 'w').write('# t\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n' + ('' if os.environ.get('FAKE_FAIL') == 'zero' else 'vs.pkg\t0\tvertex\t0123456789abcdef\tmain\n'))
 EOF
-cat > $T/repo/gfx/tools/shbake/nxsh_extract.py <<'EOF'
+cat > $T/repo/graphics/tools/shbake/nxsh_extract.py <<'EOF'
 import os, sys
 a = sys.argv[2:sys.argv.index('--nso')] if '--nso' in sys.argv else sys.argv[2:]   # 资源目录（@<列表文件> 展开成一行一个，同 nxsh_extract.py）
 roots = [r for x in a for r in (open(x[1:], encoding='utf-8').read().splitlines() if x.startswith('@') else [x]) if r]
@@ -35,9 +35,9 @@ if os.environ.get('FAKE_FAIL') == 's2x': sys.exit('fake s2x fail')
 os.makedirs(os.path.join(sys.argv[1], 'src'), exist_ok=True); open(os.path.join(sys.argv[1], 'rows.tsv'), 'w').write('# 键\t阶段\t来源\t变体号\n' + ('' if os.environ.get('FAKE_FAIL') == 'zero' else 'r\n'))
 EOF
 # 解码器要不要 C#（stage_extract.sh 编宿主前判）：用真工具；占位 main 不是 NSO → 答 no（不带 C#，同改前）
-cp "$H/translator/oodle_needs_sdk.py" $T/repo/gfx/nvn/gfx/tools/
+cp "$H/translator/oodle_needs_sdk.py" $T/repo/translator/
 # 假离线编：--need 按 FAKE_GLSLC 答 yes / no；FAKE_GLSLC=1 时往输出目录写一份 .glslc，FAKE_FAIL=glslc 时打红行退 1
-cat > $T/repo/gfx/nvn/gfx/tools/glslc_offline.py <<'EOF'
+cat > $T/repo/translator/glslc_offline.py <<'EOF'
 import os, sys
 if sys.argv[1] == '--need': print('yes' if os.environ.get('FAKE_GLSLC') else 'no'); sys.exit(0)
 open(os.environ['FAKE_CALLS'], 'a').write(f"glslc {os.environ.get('J')} {sys.argv[1]}\n")
@@ -116,20 +116,20 @@ ck "P2-53 只变mtime：原键跳过" '[ $r = 0 ] && [ "$(cat "$(cur)/.stage_ext
 o=$(S 2>&1); r=$?
 ck "P2-53 内容不变再次调用：仍跳过" '[ $r = 0 ] && [ "$(n split)" = "$p253before" ] && [[ "$o" == *跳过* ]]'
 
-cp "$H/graphics/nvn/tools/gfx_api.py" $T/gfx_api.py; printf 'import sys\nprint("vulkan\\tvk")\n' > $T/repo/gfx/nvn/tools/gfx_api.py; (cd $T/repo && git -c user.email=t@t -c user.name=t commit -qam vk)
+cp "$H/graphics/nvn/tools/gfx_api.py" $T/gfx_api.py; printf 'import sys\nprint("vulkan\\tvk")\n' > $T/repo/graphics/nvn/tools/gfx_api.py; (cd $T/repo && git -c user.email=t@t -c user.name=t commit -qam vk)
 n0=$(n split); o=$(S 2>&1); r=$?
 ck "Vulkan 款 → 跳过、不抽（split $n0 → $(n split) 次）" '[ $r = 0 ] && [ "$(n split)" = "$n0" ] && [[ "$o" == *跳过* ]]'
 # 10-31 Mac 游戏库在 ~/Library/Application Support/ 下：DM_UE_SHADERS=$X/... 没加引号被拆词，env 把「Support/.../ue_shaders」当命令跑，直连抽取全挂
 SP="$T/Application Support"; mkdir -p "$SP/r/romfs" "$SP/r/exefs"; echo r > "$SP/r/romfs/f"; echo main > "$SP/r/exefs/main"
-o=$(bash $T/repo/gfx/tools/direct/extract.sh "$SP/r" "$SP/x" 2>&1); r=$?
+o=$(bash $T/repo/graphics/tools/direct/extract.sh "$SP/r" "$SP/x" 2>&1); r=$?
 ck "产物根 / 输出目录带空格 → 直连抽取照常、shader_split 拿到完整 DM_UE_SHADERS（rc=${r}，$(grep "^split " $T/calls | tail -1 | cut -d" " -f4-)）" '[ $r = 0 ] && [ "$(grep "^split " $T/calls | tail -1 | cut -d" " -f4-)" = "$SP/x/ue_shaders" ]'
 
 # 本轮上下文：运行两份完整阶段；计算入口与克隆交接分开计数，NVN/VK/GL均覆盖。
-cp "$H/pack/stage_direct.sh" $T/repo/pack/; cp "$H"/graphics/tools/direct/{run_knowledge,fout_want,pso_layout,run_pairs,se_want}.py "$H"/graphics/tools/direct/pso_layout.json $T/repo/gfx/tools/direct/   # stage_direct.sh 现出跑局知识快照（审计 #1534 P1-54）
+cp "$H/pack/stage_direct.sh" $T/repo/pack/; cp "$H"/graphics/tools/direct/{run_knowledge,fout_want,pso_layout,run_pairs,se_want}.py "$H"/graphics/tools/direct/pso_layout.json $T/repo/graphics/tools/direct/   # stage_direct.sh 现出跑局知识快照（审计 #1534 P1-54）
 cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" $T/repo/tools/
-printf 'def version(): return "fixture1"\n' > $T/repo/gfx/nvn/gfx/tools/dmsh_chain.py
+printf 'def version(): return "fixture1"\n' > $T/repo/translator/dmsh_chain.py
 printf '入\t%s\n' pack/stage_direct.sh graphics/tools/direct/direct_lib.sh > $T/repo/pack/stage_inputs/direct.tsv
-cat > $T/repo/gfx/tools/direct/direct_lib.sh <<'ONCE_LIB'
+cat > $T/repo/graphics/tools/direct/direct_lib.sh <<'ONCE_LIB'
 mkdir -p "$2/b-fixture"; echo k > "$2/keys.tsv"; echo x > "$2/b-fixture/x.metallib"
 echo '[直连库] fixture'
 ONCE_LIB
@@ -166,7 +166,7 @@ impl=pathlib.Path(__file__).with_name('resource_input_key_impl.py')
 exec(compile(impl.read_bytes(),str(impl),'exec'),globals())
 ONCE_WRAPPER
 for api in nvn vulkan gl; do
-  printf 'print("%s\\tfixture")\n' "$api" > $T/repo/gfx/nvn/tools/gfx_api.py
+  printf 'print("%s\\tfixture")\n' "$api" > $T/repo/graphics/nvn/tools/gfx_api.py
   (cd $T/repo && git add -A && git -c user.email=t@t -c user.name=t commit -qm "once-$api")
   g=once_$api; mkdir -p "$T/roots/$g@s0/romfs" "$T/roots/$g@s0/exefs"
   echo original > "$T/roots/$g@s0/romfs/f"; echo main > "$T/roots/$g@s0/exefs/main"

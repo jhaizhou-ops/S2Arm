@@ -5,7 +5,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 # 小仓库（gate_ios.sh 在仓库根跑、把整棵树 rsync 进镜像）
-mkdir -p $T/repo/tools $T/repo/native/ios && cp $H/tools/gate_ios.sh $T/repo/tools/ && cp $H/ios/embed.py $H/ios/macho_dylib.py $T/repo/native/ios/ && git -C $T/repo init -q && git -C $T/repo add -A && git -C $T/repo -c user.email=t@t -c user.name=t commit -qm t
+mkdir -p $T/repo/tools $T/repo/ios && cp $H/tools/gate_ios.sh $T/repo/tools/ && cp $H/ios/embed.py $H/ios/macho_dylib.py $T/repo/ios/ && git -C $T/repo init -q && git -C $T/repo add -A && git -C $T/repo -c user.email=t@t -c user.name=t commit -qm t
 # 改写产物（格式有效的假模块：门禁要用它真写一次游戏镜像包）：TEXT_END 0x5000、键页 0x8000、PATCH_OFF 0xC000、patched.bin 0xD000 字节
 mods() { mkdir -p "$1"; head -c 53248 /dev/zero > "$1/main.patched.bin"; printf '# TEXT_END 0x5000\n# PATCH_OFF 0xc000\n# KEY_PAGE_OFF 0x8000\n# KEY_PAGE_SIZE 0x4000\n' > "$1/main.fixups.tsv"; echo g > "$1/main.gates.tsv"; echo n > "$1/main.npdm"; }
 # 共享根：acnh@现行 → acnh@pkg-old（带改写产物）

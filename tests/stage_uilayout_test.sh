@@ -16,9 +16,9 @@ sed_edit() { sed -i.s2a-bak "$1" "$2" && rm -f "$2.s2a-bak"; }
 #   10-26 前的版本在起跑时记下的现行目录里核「只许替换」，⑥ 报红不通）
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p $T/repo/pack $T/repo/tools $T/repo/gfx/widen/scan $T/roots $T/widen $T/data/g/romfs/Layout
-mkdir -p $T/repo/gfx/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/gfx/nvn/tools/; cp "$H/pack/roots.sh" $T/repo/pack/; cp "${STAGE:-$H/pack/stage_uilayout.sh}" $T/repo/pack/stage_uilayout.sh; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
-gen() { cat > $T/repo/gfx/widen/scan/ui_lyt.py <<EOF
+mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/widen/scan $T/roots $T/widen $T/data/g/romfs/Layout
+mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/pack/roots.sh" $T/repo/pack/; cp "${STAGE:-$H/pack/stage_uilayout.sh}" $T/repo/pack/stage_uilayout.sh; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
+gen() { cat > $T/repo/graphics/widen/scan/ui_lyt.py <<EOF
 import os, sys
 if os.environ.get('FAKE_RACE') == '1':   # 并行阶段在生成期间提交：新现行 g@race，起跑时的版本删掉（同 pack/roots.sh 的「只留现行 + 上一版」）
     import shutil
@@ -33,7 +33,7 @@ open(os.path.join(d, 'a.zs'), 'w').write('$1:' + open(os.path.join(sys.argv[1], 
 if FAIL: print('界面布局：…报错 3（屏幕宽 2346）'); sys.exit(1)
 EOF
 }
-gen v1; echo y > $T/repo/gfx/widen/scan/yaz0enc.c
+gen v1; echo y > $T/repo/graphics/widen/scan/yaz0enc.c
 (cd $T/repo && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm x)
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared S2A_WIDEN_DIR=$T/widen
 printf orig-a > $T/data/g/romfs/Layout/a.zs; printf orig-b > $T/data/g/romfs/Layout/b.zs; printf orig-c > $T/data/g/romfs/Layout/c.zs

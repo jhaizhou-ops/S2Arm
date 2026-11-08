@@ -37,7 +37,7 @@ mkdir -p $T/repo/tools $T/repo/native $T/roots/acnh@1/x; cp $H/tools/mac_health.
 (cd $T/repo && git init -q); out=$(cd $T/repo && HEALTH_ROOT=$T/roots bash tools/mac_health.sh $T/h0 acnh 2>&1); r=$?
 ck "没有 runtime/run_mac.sh → 报红退出 2" '[ $r = 2 ] && grep -q "没有 Mac 入口" <<< "$out"'
 printf 'host:\n\t@echo "$$S2A_CS" >> builds.log\n' > $T/repo/Makefile   # 替身构建：真编一次记一行（带的 S2A_CS）
-cat > $T/repo/native/run_mac.sh <<'EOF'
+cat > $T/repo/runtime/run_mac.sh <<'EOF'
 echo "${S2A_HOST_PREBUILT:-}" > $2/prebuilt; [ -f "$S2A_IN/x/f" ] || exit 9; [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"; echo "${S2A_SCREEN_W:-无}" > $2/sw_env; printf 'S2A 就绪\nS2A 标记 MARK：帧 10\n' > $2/host.log; cp "$S2A_IN/../../frames_src.tsv" $2/frames.tsv 2>/dev/null || printf 'frame\twall_us\n1\t33333\n' > $2/frames.tsv
 EOF
 (cd $T/repo && COST_LINE=测试 COST_WHY=健康表单测 S2A_COST_TSV=$T/cost.tsv HEALTH_ROOT=$T/roots bash tools/mac_health.sh $T/h1 acnh > $T/h1.out 2>&1)

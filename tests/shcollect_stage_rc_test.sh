@@ -6,13 +6,13 @@
 set -eu
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/repo/pack/stages" "$T/repo/tools" "$T/repo/gfx/tools/shbake" "$T/roots/sample@seed/shaders/shcache/0100" "$T/tmp"
+mkdir -p "$T/repo/pack/stages" "$T/repo/tools" "$T/repo/graphics/tools/shbake" "$T/roots/sample@seed/shaders/shcache/0100" "$T/tmp"
 cp "$H/pack/stages/shaders.sh" "$T/repo/pack/stages/"
 cp "$H/pack/roots.sh" "$H/pack/stage_keyfiles.sh" "$T/repo/pack/"
 cp "$H/tools/stage_deps.py" "$T/repo/tools/"
 cp -R "$H/tools/stage_deps_hook" "$T/repo/tools/"
-cp "$H/graphics/tools/shbake/shcollect.sh" "$H/graphics/tools/shbake/"*.py "$T/repo/gfx/tools/shbake/"
-cat > "$T/repo/gfx/tools/shader_pack.sh" <<'SH'
+cp "$H/graphics/tools/shbake/shcollect.sh" "$H/graphics/tools/shbake/"*.py "$T/repo/graphics/tools/shbake/"
+cat > "$T/repo/graphics/tools/shader_pack.sh" <<'SH'
 [ "$1" = --key ] && { echo fixture-key; exit 0; }
 echo unexpected-bake >&2; exit 99
 SH
@@ -39,7 +39,7 @@ for f in shared.toc shared.data guest.toc; do printf 'synthetic %s\n' "$f" > "$J
 bad=0; n=0
 ck() { n=$((n + 1)); if eval "$2"; then echo "通 $n $1"; else echo "不通 $n $1"; bad=1; fi; }
 run_stage() { bash "$T/repo/pack/stages/shaders.sh" sample; }
-r=0; o=$(bash "$T/repo/gfx/tools/shbake/shcollect.sh" sample 2>&1) || r=$?
+r=0; o=$(bash "$T/repo/graphics/tools/shbake/shcollect.sh" sample 2>&1) || r=$?
 ck '真实收集器缺 guest.data 退出 1、末行明确拷贝失败' '[ "$r" = 1 ] && [[ "$o" == *拷贝失败* ]]'
 r=0; o=$(S2A_SHCOLLECT_RUN=1 run_stage 2>&1) || r=$?
 ck '开启收集失败必须中止，不能缓存命中跳过' '[ "$r" = 1 ] && [[ "$o" == *拷贝失败* ]] && [[ "$o" != *跳过* ]]'
@@ -53,7 +53,7 @@ mkdir -p "$T/empty-sched"
 r=0; o=$(S2A_SHCOLLECT_RUN=1 S2A_SCHED_DIR="$T/empty-sched" run_stage 2>&1) || r=$?
 ck '开启且真实收集成功，保留末行与原跳过路径' '[ "$r" = 0 ] && [[ "$o" == *"候选 0 份"* ]] && [[ "$o" == *跳过* ]]'
 # 缺入口的真实 bash 127 也必须原样传播，不依赖末行有没有【红】文字。
-rm "$T/repo/gfx/tools/shbake/shcollect.sh"
+rm "$T/repo/graphics/tools/shbake/shcollect.sh"
 r=0; o=$(S2A_SHCOLLECT_RUN=1 run_stage 2>&1) || r=$?
 ck '收集器入口缺失传播 127，不按日志文字猜成功' '[ "$r" = 127 ] && [[ "$o" != *跳过* ]]'
 echo "shcollect_stage_rc: $n 项，bad=$bad"; exit "$bad"

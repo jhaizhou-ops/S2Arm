@@ -6,10 +6,10 @@
 set -euo pipefail
 H=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/repo/gfx/tools/shbake" "$T/input space" "$T/bin"
-cp "$H/graphics/tools/shbake/pso_dist.sh" "$T/repo/gfx/tools/shbake/"
-P=$T/repo/gfx/tools/shbake/pso_dist.sh
-cat > "$T/repo/gfx/tools/shbake/pso_chunk.sh" <<'STUB'
+mkdir -p "$T/repo/graphics/tools/shbake" "$T/input space" "$T/bin"
+cp "$H/graphics/tools/shbake/pso_dist.sh" "$T/repo/graphics/tools/shbake/"
+P=$T/repo/graphics/tools/shbake/pso_dist.sh
+cat > "$T/repo/graphics/tools/shbake/pso_chunk.sh" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$1" >> "$PSO_TEST_CALLS"
 [ -f "$1" ] || exit 8

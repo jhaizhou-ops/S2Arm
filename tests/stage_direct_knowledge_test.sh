@@ -19,13 +19,13 @@
 #   反证：fixture 里的 stage_direct.sh 去掉「KT="$KT know-$KNK"」一行（= 修前只按游戏输入与代码进键）→ 新 P 行直连键不变
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p $T/repo/pack/stage_inputs $T/repo/tools $T/repo/gfx/nvn/tools $T/repo/gfx/nvn/gfx/tools $T/repo/gfx/tools/direct $T/repo/gfx/tools/shbake $T/repo/gfx/metal $T/roots $T/bin
+mkdir -p $T/repo/pack/stage_inputs $T/repo/tools $T/repo/graphics/nvn/tools $T/repo/translator $T/repo/graphics/tools/direct $T/repo/graphics/tools/shbake $T/repo/graphics/metal $T/roots $T/bin
 cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/stage_direct_seed.sh" "$H/pack/stage_keyfiles.sh" "$H/pack/resource_input_key.py" "$H/pack/ue_pak.py" \
    "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" $T/repo/pack/
 cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/
-cp "$H/graphics/nvn/tools/romfs_list.py" "$H/graphics/nvn/tools/gfx_api.py" $T/repo/gfx/nvn/tools/; cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/gfx/tools/shbake/
-for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json pso_seed.py; do cp "$H/graphics/tools/direct/$f" $T/repo/gfx/tools/direct/; done
-echo m > $T/repo/gfx/metal/gal_prog.m; printf 'def version(): return "v1"\n' > $T/repo/gfx/nvn/gfx/tools/dmsh_chain.py
+cp "$H/graphics/nvn/tools/romfs_list.py" "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/graphics/tools/shbake/
+for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json pso_seed.py; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done
+echo m > $T/repo/graphics/metal/gal_prog.m; printf 'def version(): return "v1"\n' > $T/repo/translator/dmsh_chain.py
 printf '入\t%s\n' pack/stage_direct.sh pack/ue_pak.py graphics/metal/gal_prog.m graphics/tools/direct/run_knowledge.py > $T/repo/pack/stage_inputs/direct.tsv
 printf '入\t%s\n' pack/stage_direct_seed.sh graphics/tools/direct/pso_seed.py graphics/tools/direct/pso_layout.json > $T/repo/pack/stage_inputs/direct_seed.tsv
 cat > $T/bin/xcrun <<'EOF'
@@ -38,7 +38,7 @@ chmod +x $T/bin/xcrun; export PATH=$T/bin:$PATH NXGAL_LIB=$T/libnxgal.dylib
 printf 'exit 0\n' > $T/repo/pack/stage_direct_profile.sh
 printf 'import json,os\nprint(json.dumps({"profile": os.path.dirname(__file__)+"/profile/0100", "profile_key": "profile1"}))\n' > $T/repo/pack/direct_profile_stage.py
 # 假出库：库键 A B C D；记调用次数；把拿到的跑局知识快照（S2A_RUN_KNOWLEDGE）的配对表留一份看
-cat > $T/repo/gfx/tools/direct/direct_lib.sh <<'EOF'
+cat > $T/repo/graphics/tools/direct/direct_lib.sh <<'EOF'
 O=$2; echo 1 >> "$FAKE_CALLS"; cp "${S2A_RUN_KNOWLEDGE:?没交快照}/pairs.tsv" "$FAKE_CALLS.pairs"
 mkdir -p "$O/b-v1"; echo m > "$O/b-v1/lib.idx"; printf '%s\n' aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb cccccccccccccccc dddddddddddddddd > "$O/keys.tsv"; echo '# map' > "$O/shader_map.tsv"
 printf '{"title": "0100AAAA00000000", "pso_seed": "gen"}\n' > "$O/direct_lib.json"
@@ -50,7 +50,7 @@ mkdir -p $T/roots/acnh@s0/romfs $T/roots/acnh@s0/exefs $T/home; echo r > $T/root
 printf 'title_id\t0100aaaa00000000\n' > $T/roots/acnh@s0/unpack.tsv; ln -s acnh@s0 $T/roots/acnh@现行
 SD=$T/run/s2arm/pso_seed/0100AAAA00000000; mkdir -p $SD
 A=aaaaaaaaaaaaaaaa B=bbbbbbbbbbbbbbbb C=cccccccccccccccc D=dddddddddddddddd
-R() { python3 - "$T/repo/gfx/tools/direct/pso_layout.json" "$@" <<'EOF'   # R <顶点键> <片元键> [画布 0 像素格式] → 一条 R 行（同 t_run_knowledge.py 的造法）
+R() { python3 - "$T/repo/graphics/tools/direct/pso_layout.json" "$@" <<'EOF'   # R <顶点键> <片元键> [画布 0 像素格式] → 一条 R 行（同 t_run_knowledge.py 的造法）
 import json, struct, sys
 L = json.load(open(sys.argv[1])); vs, fs = sys.argv[2:4]; cf = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 b = bytearray(L['skey_size']); b[0:24] = (vs + '_b').encode().ljust(24, b'\0'); o, w = L['fs']; b[o:o + w] = (fs + '_b').encode().ljust(w, b'\0'); b[L['cfmt']:L['cfmt'] + 4] = struct.pack('<I', cf)
@@ -105,11 +105,11 @@ o=$(bash $T/repo/tools/pso_seed_keep.sh --all); r=$?; MA=$SD/mac_$(pso_seed_mac_
 ck "⑪ 一次性迁移（--all，rc=${r}）：文稿 wire/<程序号>/pso_user.tsv 并进 pso_seed/<程序号>/mac_<本机名>.tsv（P(B,C) 1 行）、不收 .bak 目录" '[ $r = 0 ] && [ "$(cat "$MA")" = "$(printf "P\t%s\t%s" $B $C)" ] && [ ! -e $T/run/s2arm/pso_seed/0100AAAA00000000.bak ] && [ "$(grep -c 管线种子来源 <<< "$o")" = 1 ]'
 # ⑫ 种子表是锦上添花（审计 #1592 P1-100）：pso_seed.py 失败 → 种子段退 0、打一行【黄】写明缺了什么、现行照样提交（已有的种子表留着）、不记种子键；
 #   修好后再跑 → 重新生成（多出新 R 行）、记键。原先退 1，pack/refresh.sh 整次刷新停、这一次包不出
-M0=$(rows); R5=$(R $B $D); printf '%s\n' "$R5" >> $SD/job1.tsv; cp $T/repo/gfx/tools/direct/pso_seed.py $T/pso_seed.real   # R5：全新的 R 行（B→D 前面没用过）
-printf 'import sys\nsys.exit("模拟种子工具坏了")\n' > $T/repo/gfx/tools/direct/pso_seed.py
+M0=$(rows); R5=$(R $B $D); printf '%s\n' "$R5" >> $SD/job1.tsv; cp $T/repo/graphics/tools/direct/pso_seed.py $T/pso_seed.real   # R5：全新的 R 行（B→D 前面没用过）
+printf 'import sys\nsys.exit("模拟种子工具坏了")\n' > $T/repo/graphics/tools/direct/pso_seed.py
 OS=$(bash $T/repo/pack/stage_direct_seed.sh acnh 2>&1); RS=$?
 ck "⑫ 种子工具失败：种子段退 0（${RS}）、打【黄】写明缺的是首局预建、种子表照旧 ${M0} 行（实 $(rows)）、不记种子键" '[ $RS = 0 ] && [[ "$OS" == *【黄】*acnh*种子表这次没生成*模拟种子工具坏了*首局管线预建* ]] && [ "$(rows)" = "$M0" ] && [ ! -e "$(cur)/.stage_direct_seed" ]'
-cp $T/pso_seed.real $T/repo/gfx/tools/direct/pso_seed.py
+cp $T/pso_seed.real $T/repo/graphics/tools/direct/pso_seed.py
 OS=$(bash $T/repo/pack/stage_direct_seed.sh acnh 2>&1); RS=$?
 ck "⑫ 修好再跑：重新生成、种子表 +1 行（${M0} → $(rows)）、记种子键" '[ $RS = 0 ] && [ "$(rows)" = $((M0 + 1)) ] && [ -s "$(cur)/.stage_direct_seed" ]'
 source $T/repo/pack/roots.sh; _root_rm $T

@@ -8,16 +8,16 @@ command -v xxd >/dev/null || { echo "缺少阶段必需工具 xxd" >&2; exit 2; 
 H=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/repo/pack" "$T/repo/gfx/widen/scan" "$T/current/exefs" "$T/current/romfs" "$T/source/romfs/Layout"
+mkdir -p "$T/repo/pack" "$T/repo/graphics/widen/scan" "$T/current/exefs" "$T/current/romfs" "$T/source/romfs/Layout"
 cp "${STAGE:-$H/pack/stage_uilayout.sh}" "$T/repo/pack/stage_uilayout.sh"
-mkdir -p "$T/repo/gfx/nvn/tools" && cp "$H/graphics/nvn/tools/romfs_list.py" "$T/repo/gfx/nvn/tools/"   # 覆盖包目录名带原版盘点身份（审计 #1534 P1-54）
+mkdir -p "$T/repo/graphics/nvn/tools" && cp "$H/graphics/nvn/tools/romfs_list.py" "$T/repo/graphics/nvn/tools/"   # 覆盖包目录名带原版盘点身份（审计 #1534 P1-54）
 cat > "$T/repo/pack/roots.sh" <<'SH'
 root_cur() { printf '%s\n' "$TEST_CURRENT"; }
 # Overlay application is covered separately by stage_uilayout_test.sh.
 # Stop after cache generation, without Darwin clone commands or real assets.
 root_stage_done() { return 0; }
 SH
-cat > "$T/repo/gfx/widen/scan/ui_lyt.py" <<'PY'
+cat > "$T/repo/graphics/widen/scan/ui_lyt.py" <<'PY'
 import os, pathlib, sys
 with open(os.environ['TEST_CALLS'], 'a') as f:
     f.write('call\n')
@@ -34,7 +34,7 @@ elif mode == 'metadata':
 print('synthetic generator ' + mode)
 sys.exit(0 if mode in ('success', 'empty-success') else 1)
 PY
-printf 'synthetic encoder\n' > "$T/repo/gfx/widen/scan/yaz0enc.c"
+printf 'synthetic encoder\n' > "$T/repo/graphics/widen/scan/yaz0enc.c"
 head -c 96 /dev/zero > "$T/current/exefs/main"
 printf 'src=%s\n' "$T/source" > "$T/current/seed.txt"
 export TEST_CURRENT="$T/current" TEST_CALLS="$T/calls"

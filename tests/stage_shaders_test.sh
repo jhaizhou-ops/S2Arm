@@ -5,14 +5,14 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 unset S2A_PSO_OS   # 外层（门禁开头 source tools/toolchain.sh）解析出的目标 iOS 大版本不漏进来：键里的 -os 只由用例自己给（10-25 派 mini 时整批键多出 -os26 / -os27 判红）
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p $T/repo/pack $T/repo/tools $T/repo/gfx/tools $T/roots
+mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/tools $T/roots
 cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; cp "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/   # 各阶段实际读入进键（pack/stage_keyfiles.sh，10-30）
-mkdir -p $T/repo/gfx/tools/shbake; cp "$H/graphics/tools/shbake/shcollect.sh" "$H/graphics/tools/shbake/speccombo.py" "$H/graphics/tools/shbake/specpipe.py" "$H/graphics/tools/shbake/fbrvars.py" "$H/graphics/tools/shbake/psouse.py" "$H/graphics/tools/shbake/guest_cache.py" $T/repo/gfx/tools/shbake/; cp "$H/pack/roots.sh" "$H/pack/stage_shaders.sh" $T/repo/pack/; cp -R "$H/pack/stages" $T/repo/pack/; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
+mkdir -p $T/repo/graphics/tools/shbake; cp "$H/graphics/tools/shbake/shcollect.sh" "$H/graphics/tools/shbake/speccombo.py" "$H/graphics/tools/shbake/specpipe.py" "$H/graphics/tools/shbake/fbrvars.py" "$H/graphics/tools/shbake/psouse.py" "$H/graphics/tools/shbake/guest_cache.py" $T/repo/graphics/tools/shbake/; cp "$H/pack/roots.sh" "$H/pack/stage_shaders.sh" $T/repo/pack/; cp -R "$H/pack/stages" $T/repo/pack/; cp "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
 # 着色器预编按进度判卡死（10-23）：stage_shaders 经 graphics/tools/timeout_snap.sh（依赖 tools/safe_killpg.sh）跑 shader_pack
 # romfs_list.py：仓库里唯一的 RomFS 遍历（11-03），被测脚本经它列 RomFS
-mkdir -p $T/repo/gfx/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/gfx/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/gfx/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，照常烘）
-cp "$H/graphics/tools/timeout_snap.sh" $T/repo/gfx/tools/; cp "$H/tools/safe_killpg.sh" $T/repo/tools/
-cat > $T/repo/gfx/tools/shader_pack.sh <<'EOF'
+mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，照常烘）
+cp "$H/graphics/tools/timeout_snap.sh" $T/repo/graphics/tools/; cp "$H/tools/safe_killpg.sh" $T/repo/tools/
+cat > $T/repo/graphics/tools/shader_pack.sh <<'EOF'
 [ "$1" = --key ] && { echo "k${FAKE_KEY:-1}"; exit 0; }
 [ -n "${FAKE_CALLS:-}" ] && echo 1 >> "$FAKE_CALLS"; sleep "${FAKE_SLEEP:-0}"
 [ -n "${FAKE_ARGLOG:-}" ] && echo "$*" > "$FAKE_ARGLOG"
@@ -116,9 +116,9 @@ o=$(FAKE_KEY=70 S 2>&1); ck "沿用后同键再跑 → 跳过" '[[ "$o" == *跳�
 o=$(FAKE_KEY=71 S 2>&1); r=$?; c=$(cd -P $T/roots/acnh@现行 && pwd)
 ck "反证：产出不同（退出 0）→ 用新产出、键 = k71…" '[ $r = 0 ] && [[ "$(cat $c/.stage_shaders)" == k71* ]] && [[ "$o" != *产出与现行相同* ]]'
 # 开发刷新复用（S2A_SHADERS_REUSE 缺省 1，pack/ipa.sh 设 0）：现行包离线索引口径与 Ryujinx 缓存翻译器版本都同本树 → 不烘、现行不动、🟡；口径不同 → 照烘
-mkdir -p $T/repo/gfx/metal $T/repo/ryujinx/tree/src/Ryujinx.Graphics.Gpu/Shader/DiskCache
-printf '#define NXGAL_XC_VERSION 19u\n' > $T/repo/gfx/metal/gal_abi.h
-printf '        public const uint CodeGenVersion = 7354 + 6;\n' > $T/repo/ryujinx/tree/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+mkdir -p $T/repo/graphics/metal $T/repo/compat/tree/src/Ryujinx.Graphics.Gpu/Shader/DiskCache
+printf '#define NXGAL_XC_VERSION 19u\n' > $T/repo/graphics/metal/gal_abi.h
+printf '        public const uint CodeGenVersion = 7354 + 6;\n' > $T/repo/compat/tree/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
 (cd $T/repo && git add -A && git -c user.email=t@t -c user.name=t commit -qm caps)
 c=$(cd -P $T/roots/acnh@现行 && pwd); python3 -c "import struct,sys; open(sys.argv[1],'wb').write(struct.pack('<5I',0x494c4147,1,19,0,0))" $c/shaders/gal.idx
 for d in $c/shaders/shcache/*/; do python3 -c "import struct,sys; open(sys.argv[1],'wb').write(struct.pack('<3I',0,0,7360))" $d/shared.toc; done

@@ -10,16 +10,16 @@
 #   安卓键不带 Metal 编译器版本（#1425 审）：上游导出的 S2A_TC_METAL 换了版本，安卓跳过、iOS 重出
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-mkdir -p $T/repo/pack $T/repo/tools $T/repo/gfx/nvn $T/repo/gfx/tools/direct $T/repo/gfx/tools/shbake $T/roots
+mkdir -p $T/repo/pack $T/repo/tools $T/repo/graphics/nvn $T/repo/graphics/tools/direct $T/repo/graphics/tools/shbake $T/roots
 cp "$H/pack/resource_input_key.py" $T/repo/pack/; cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; cp "$H/tools/stage_deps.py" $T/repo/tools/; cp -R "$H/tools/stage_deps_hook" $T/repo/tools/   # 各阶段实际读入进键（pack/stage_keyfiles.sh，10-30）
 # romfs_list.py：仓库里唯一的 RomFS 遍历（11-03），被测脚本经它列 RomFS
-mkdir -p $T/repo/gfx/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/gfx/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/gfx/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，走 NVN 路径）
+mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/; cp "$H/graphics/nvn/tools/gfx_api.py" $T/repo/graphics/nvn/tools/   # 出包分流判法（假 main 不是 NSO → unknown，走 NVN 路径）
 cp "$H/pack/roots.sh" "$H/pack/stage_direct.sh" "$H/pack/stage_direct_gk.sh" "$H/pack/ipa_key.sh" "$H/pack/pkg_srcs.py" "$H/pack/pkg_inputs_key.py" "$H/pack/ue_pak.py" $T/repo/pack/; cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/machine.sh" "$H/tools/clonedir.py" "$H/tools/plock.sh" "$H/tools/flock_hold.py" $T/repo/tools/
-cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/gfx/tools/shbake/
-for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json runtime_only_lib.sh; do cp "$H/graphics/tools/direct/$f" $T/repo/gfx/tools/direct/; done   # 跑局知识快照进键（审计 #1534 P1-54；来源 S2A_PSO_SOURCES 指空目录，键规则在 tests/stage_direct_knowledge_test.sh 核）
-echo n > $T/repo/gfx/nvn/x; echo s > $T/repo/gfx/tools/shbake/x
+cp "$H/graphics/tools/shbake/pak_crypto.py" $T/repo/graphics/tools/shbake/
+for f in run_knowledge.py fout_want.py se_want.py run_pairs.py pso_layout.py pso_layout.json runtime_only_lib.sh; do cp "$H/graphics/tools/direct/$f" $T/repo/graphics/tools/direct/; done   # 跑局知识快照进键（审计 #1534 P1-54；来源 S2A_PSO_SOURCES 指空目录，键规则在 tests/stage_direct_knowledge_test.sh 核）
+echo n > $T/repo/graphics/nvn/x; echo s > $T/repo/graphics/tools/shbake/x
 export NXGAL_LIB=$T/libnxgal.dylib   # 调用方给了 libnxgal：stage_direct 不再现编（假仓库没有 graphics/metal）
-mkdir -p $T/repo/gfx/metal; echo m > $T/repo/gfx/metal/gal_prog.m   # 共享内存溢出改写源码也进阶段键（stage_direct.sh KT）
+mkdir -p $T/repo/graphics/metal; echo m > $T/repo/graphics/metal/gal_prog.m   # 共享内存溢出改写源码也进阶段键（stage_direct.sh KT）
 # Unit boundaries only; real profile preparation is covered in direct_profile_test.
 # No Xcode/compiler is used by this fake-library transaction test.
 mkdir -p $T/bin
@@ -42,7 +42,7 @@ EOF
 
 
 # 假出库：FAKE_NOPROF=1 = 没有配置档（只打 🟡 行、不出表）；FAKE_FAIL=1 = 失败；每次调用记一行到 FAKE_CALLS
-cat > $T/repo/gfx/tools/direct/direct_lib.sh <<'EOF'
+cat > $T/repo/graphics/tools/direct/direct_lib.sh <<'EOF'
 O=$2; echo "${NXGAL_LIB-未设}" >> "$FAKE_CALLS.gal"; echo 1 >> "$FAKE_CALLS"; echo "${S2A_DIRECT_TARGETS-未设}" >> "$FAKE_CALLS.tgt"; echo "${S2A_DIRECT_PUBLISH-未设}" >> "$FAKE_CALLS.pub"; echo "${J:-未设}" >> "$FAKE_CALLS.j"   # 记下本次出几个平台的库、几路并行
 [ "${FAKE_FAIL:-0}" = 1 ] && { echo "[直连库] 🔴 出库失败 rc=3"; exit 1; }
 [ "${FAKE_GAP:-0}" = 1 ] && { echo "[直连库] 🟡 直连缺口：NVN 着色器 翻不了 1 支（0123456789abcdef：桩原因），现有出库不支持部分出库，本款这次走通用"; exit 3; }
@@ -53,9 +53,9 @@ printf '# S2Arm 键\t直连键\ns2a0000000000001\taaaaaaaaaaaaaaaa\ns2a000000000
 echo "[直连库] 🟢 0100 直连库 b-v1：并集 1，出库 1，没出成 0"
 EOF
 # 出库代码键按声明表算（pack/stage_keyfiles.sh + pack/stage_inputs/direct.tsv，10-26 键收窄）+ 翻译链号：假仓库只列它有的几个文件、假链号 v1
-cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; mkdir -p $T/repo/pack/stage_inputs $T/repo/gfx/nvn/gfx/tools
+cp "$H/pack/stage_keyfiles.sh" $T/repo/pack/; mkdir -p $T/repo/pack/stage_inputs $T/repo/translator
 printf '入\t%s\n' pack/stage_direct.sh pack/ue_pak.py graphics/metal/gal_prog.m > $T/repo/pack/stage_inputs/direct.tsv
-printf 'def version(): return "v1"\n' > $T/repo/gfx/nvn/gfx/tools/dmsh_chain.py
+printf 'def version(): return "v1"\n' > $T/repo/translator/dmsh_chain.py
 (cd $T/repo && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm x)
 export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared FAKE_CALLS=$T/calls S2A_PSO_SOURCES=$T/nopso
 mkdir -p $T/roots/acnh@s0/romfs $T/roots/acnh@s0/exefs; echo r > $T/roots/acnh@s0/romfs/f; echo main > $T/roots/acnh@s0/exefs/main; printf "title_id\t0100aaaa00000000\n" > $T/roots/acnh@s0/unpack.tsv; mkdir -p $T/roots/acnh@s0/shaders; echo ksh > $T/roots/acnh@s0/.stage_shaders
@@ -113,7 +113,7 @@ ck "出 Mac 版 App（S2A_PACK_PLAT=macos）：只出 Mac 库，S2A_DIRECT_TARGE
 ck "出 Mac 版 App：发布 Mac 那份，S2A_DIRECT_PUBLISH=mac（实 $(tail -1 $T/calls.pub)；#897：修前包里是 iOS 库）" '[ "$(tail -1 $T/calls.pub)" = mac ]'
 rin 'chmod u+w romfs/macpkg; echo mac2 > romfs/macpkg'; o=$(S2A_PACK_PLAT=macos S2A_DIRECT_PUBLISH=ios S 2>&1)
 ck "调用方给 S2A_DIRECT_PUBLISH=ios 出 Mac 版：不收，仍发布 mac（实 $(tail -1 $T/calls.pub)）" '[ "$(tail -1 $T/calls.pub)" = mac ]'
-mkdir -p $T/repo/gfx/tools/direct/vklib; cat > $T/repo/gfx/tools/direct/vklib/dsh_vklib.py <<'EOF'
+mkdir -p $T/repo/graphics/tools/direct/vklib; cat > $T/repo/graphics/tools/direct/vklib/dsh_vklib.py <<'EOF'
 import os, sys
 open(os.environ['FAKE_CALLS'] + '.vkfp', 'a').write('1\n')
 if os.environ.get('FAKE_VKFP_FAIL') == '1': sys.exit('[RED] 桩：算不出指纹')

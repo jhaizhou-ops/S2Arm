@@ -27,7 +27,7 @@ scene() { echo "    | 现场：第 ${LR:-?} 轮日志尾"; tail -10 "$T/${LR:-x}
   grep -h '排队' $(ls -t "$T"/logs/pso-*/*.log 2> /dev/null | head -3) 2> /dev/null | tail -5 | sed 's/^/    | remote：/'; }
 ck() { if eval "$2"; then echo "✓ $1"; else echo "✗ $1"; scene; bad=1; fi; }
 export S2A_REMOTE=local S2A_REMOTE_ROOT=$T/rr S2A_REMOTE_LOGS=$T/logs HOME=$T/home S2A_REMOTE_WAIT_S=60
-mkdir -p "$T/home" "$T/repo/tools/bin" "$T/repo/gfx/tools/shbake"; cd "$T/repo" || exit 1
+mkdir -p "$T/home" "$T/repo/tools/bin" "$T/repo/graphics/tools/shbake"; cd "$T/repo" || exit 1
 mkdir -p "$T/home/.s2arm/run/s2arm/bin"; echo '# 测试用局槽仲裁副本' > "$T/home/.s2arm/run/s2arm/bin/mac_slot-now.sh"   # remote.sh 本机缺副本不派（tools/mac_slot_frozen.sh）
 git init -q; git config user.email t@t; git config user.name t
 cp "$RT/tools/safe_killpg.sh" "$RT/tools/idle_timeout.sh" tools/; REM=${S2A_REMOTE_SH:-}
@@ -73,7 +73,7 @@ export PSO_NT=$T/fake_nt PSO_REMOTE_NT=$T/fake_nt PSO_A=g PSO_PLAT=ios PSO_M=27 
 go() {   # go <标签> [环境…]：新产物目录（库放进去，分片脚本的库路径指向 o0 → 每次把库同步到 o0）跑一轮，回显远端 / 本机编译次数
   rm -rf "$T/o0" "$W"/*.hit "$W"/*.fail "$T/home/calls" "$T/rr/home/calls"; mkdir -p "$T/o0"; cp "$T"/lib/gal.*.metallib "$T/o0/"
   # 每轮用时与退出码进本单测日志（10-21 ⑥⑦ 负载 80 以上偶发双红、现场抓不到：再红时看是哪轮慢、是否撞 120 秒上限）
-  LR=$1; g0=$SECONDS; (cd "$T" && timeout 120 env PSO_O="$T/o0" "${@:2}" bash "$T/repo/gfx/tools/shbake/pso_dist.sh" run "$W/list") > "$T/$1.log" 2>&1; grc=$?; echo "  [计时] 第 $1 轮 $((SECONDS - g0)) 秒、退出码 ${grc}（124 = 撞上限）"   # 当前目录不在仓库里（出包流程不保证）
+  LR=$1; g0=$SECONDS; (cd "$T" && timeout 120 env PSO_O="$T/o0" "${@:2}" bash "$T/repo/graphics/tools/shbake/pso_dist.sh" run "$W/list") > "$T/$1.log" 2>&1; grc=$?; echo "  [计时] 第 $1 轮 $((SECONDS - g0)) 秒、退出码 ${grc}（124 = 撞上限）"   # 当前目录不在仓库里（出包流程不保证）
   RC=$(cat "$T/rr/home/calls" 2> /dev/null | grep -c .); LC=$(cat "$T/home/calls" 2> /dev/null | grep -c .)
   # 跑完不留进程（10-21：feeder 杀的是 rs 函数的外层子 shell，remote.sh 成孤儿继续排 / 占 mini 满核槽，每次重烘漏一个，mini 一下午编 0 片）
   for i in $(seq 1 50); do [ -z "$(left)" ] && break; sleep 0.2; done   # 远端子进程靠 stdin 断开感知、再收组，要 2–4 秒：按事件等，上限约 10 秒
@@ -108,7 +108,7 @@ iso() {   # iso <片号> <条数> <编译器>：单编一片（不经分发）�
     printf ']},"pipeline_descriptors":{"render_pipeline_descriptors":[],"compute_pipeline_descriptors":['
     for k in $(seq 0 $(($2 - 1))); do [ $k = 0 ] || printf ','; printf '{"compute_function_descriptor":"fnd:L%d","n":%d}' $k $k; done
     printf ']}}'; } > "$W/pso.$1.mtl4-json"
-  rm -f "$W/pso.$1.key"; (cd "$T" && PSO_O="$T/o0" PSO_NT="$3" timeout 120 bash "$T/repo/gfx/tools/shbake/pso_chunk.sh" "$W/pso.$1.mtl4-json") > "$T/iso$1.log" 2>&1
+  rm -f "$W/pso.$1.key"; (cd "$T" && PSO_O="$T/o0" PSO_NT="$3" timeout 120 bash "$T/repo/graphics/tools/shbake/pso_chunk.sh" "$W/pso.$1.mtl4-json") > "$T/iso$1.log" 2>&1
   IC=$(cat "$T/home/calls" 2> /dev/null | grep -c .)
 }
 printf '#!/bin/bash\no=; i=; a=("$@"); while [ $# -gt 0 ]; do [ "$1" = -N ] && i=$2; shift; done\ngrep -q %s "$i" && exit 1; exec "%s/fake_nt" "${a[@]}"\n' "'\"fnd:L3\"'" "$T" > "$T/bad3_nt"
@@ -146,7 +146,7 @@ for n in range(1500):   # 片 0 最小（排在最后编）：大的先编（LPT
 PY
 find "$B/w" -name 'pso.*.mtl4-json' | LC_ALL=C sort > "$B/list"; rm -rf "$T/o0"; mkdir -p "$T/o0"; cp "$T"/lib/gal.*.metallib "$T/o0/"
 g0=$SECONDS; (cd "$T" && timeout 300 env PATH="$B/bin:$PATH" HOME="$B/home" PSO_O="$T/o0" PSO_W="$B/w" PSO_PC="$B/pc" PSO_NT="$B/quick_nt" PSO_PJ=4 PSO_PROGRESS_S=2 S2A_PSO_REMOTE=off \
-  bash "$T/repo/gfx/tools/shbake/pso_dist.sh" run "$B/list" 1500) > "$T/13.log" 2>&1; brc=$?
+  bash "$T/repo/graphics/tools/shbake/pso_dist.sh" run "$B/list" 1500) > "$T/13.log" 2>&1; brc=$?
 BC=$(grep -c . "$B/basename.calls" 2> /dev/null); BC=${BC:-0}; NC=$(grep -c . "$B/home/calls" 2> /dev/null); NU=$(sort -u "$B/home/calls" 2> /dev/null | grep -c .)
 NB=0; for f in "$T"/o0/gal_pso.g.ios27.*.bin; do [ -e "$f" ] && NB=$((NB + 1)); done
 ck "⑬ 1500 片本机独编收尾：退出 ${brc}、编 ${NC} 次（不同片 ${NU}）、产物 ${NB}、收尾 basename ${BC} 次、用时 $((SECONDS - g0)) 秒、有进度行" \

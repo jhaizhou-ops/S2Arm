@@ -16,8 +16,8 @@ set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 # refresh.sh 开头的盘判定（tools/disk_low.sh disk_need）要随脚本拷进夹具，读数固定（S2A_DISK_FREE_G），不看本机实况
 mkdir -p $T/repo/pack $T/roots/acnh@v1/ctl; cp "$H/pack/refresh.sh" "$H/pack/roots.sh" $T/repo/pack/; mkdir -p $T/repo/tools; cp "$H/tools/disk_low.sh" "$H/tools/toolchain.sh" "$H/tools/toolchain.env" "$H/tools/cores.sh" "$H/tools/progress.sh" "$H/tools/plock.sh" "$H/tools/flock_hold.py" "$H/tools/mem_admit.sh" "$H/tools/mem_peak.tsv" "$H/tools/mem_peak_sample.py" $T/repo/tools/; export S2A_MEM_DIR=$T/mem; export S2A_DISK_FREE_G=999 S2A_REFRESH_LOCKS=$T/locks S2A_RUN_ROOT=$T/run; touch $T/roots/acnh@v1/ctl/control.nacp; ln -s acnh@v1 $T/roots/acnh@现行
-mkdir -p $T/repo/gfx/nvn/gfx/tools; printf 'import os\nprint(os.environ.get("FAKE_GLSLC", "no"))\n' > $T/repo/gfx/nvn/gfx/tools/glslc_offline.py   # 运行时 GLSLC 款判据桩（⑬c）
-cp "$H/pack/decoder_need.sh" $T/repo/pack/; mkdir -p $T/repo/gfx/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/gfx/nvn/tools/   # 解码器款判据（⑬e）：真判据读假根 RomFS
+mkdir -p $T/repo/translator; printf 'import os\nprint(os.environ.get("FAKE_GLSLC", "no"))\n' > $T/repo/translator/glslc_offline.py   # 运行时 GLSLC 款判据桩（⑬c）
+cp "$H/pack/decoder_need.sh" $T/repo/pack/; mkdir -p $T/repo/graphics/nvn/tools; cp "$H/graphics/nvn/tools/romfs_list.py" $T/repo/graphics/nvn/tools/   # 解码器款判据（⑬e）：真判据读假根 RomFS
 printf '#!/bin/bash\necho "原件核对桩 rc=${FAKE_SRCVER_RC:-0}"; exit ${FAKE_SRCVER_RC:-0}\n' > $T/repo/pack/srcver.sh   # 原件版本核对桩（pack/srcver.sh 自己的单测见 tests/srcver_test.sh）
 # 桩：记「阶段 起/止 时刻 开关」；stage_direct 按 FAKE_NODIRECT 决定出不出 keys.tsv；FAKE_FAIL=<阶段> 让那段退出 1（基础设施出错）；
 #   FAKE_GAP=<阶段> 让那段打「【黄】直连缺口：桩缺口 3 支」退出 3（内容缺口）；FAKE_DFAIL=<阶段> 让那段打「【红】直连库失败：…」退出 3（抽取：只有直连用的那两份抽不出）
