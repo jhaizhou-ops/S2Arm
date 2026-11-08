@@ -8,7 +8,7 @@ S2Arm 本身以 Apache License 2.0 授权（仓库根目录 [LICENSE](LICENSE) �
 | --- | --- | --- | --- | --- | --- |
 | Ryujinx 树 | 目录 `compat/tree`（旧文档记 1.3.2） | MIT | https://github.com/Ryujinx/Ryujinx ，许可 `compat/tree/LICENSE.txt` | 是（编进 Mac 宿主 / 出包工具） | 是（编进 iOS 宿主） |
 | Ryujinx WSI | 派生自 Ryujinx | MIT | `graphics/vulkan/wsi`，`LICENSE.Ryujinx.txt` | 安卓/Vulkan 构建用 | 否（不进 iOS IPA） |
-| 直连图形层部分代码 | 提交 `86d9ba12` | MIT | 许可全文 `graphics/nvn/LICENSE`，版权 © 2026 seedds | 是 | 是 |
+| 参考实现 直连层 | 提交 `86d9ba12` | MIT |  ，许可 `graphics/nvn/LICENSE`，版权 © 2026 seedds | 是 | 是 |
 | ns2pro-bridge | 基线 `4d7ce092` | MIT | https://github.com/DanielZhangyc/ns2pro-bridge ，`runtime/ns2pro/LICENSE` | 按需编进 framework 时是 | 按需编进 framework 时是 |
 | Vulkan-Headers | 1.4.363 | Apache-2.0 OR MIT | https://github.com/KhronosGroup/Vulkan-Headers ，`graphics/nvn/third_party/vulkan-headers` | 否（只是编译用头） | 否 |
 | SPIRV-Cross | vulkan-sdk-1.4.363.0 | Apache-2.0 | https://github.com/KhronosGroup/SPIRV-Cross ，源码在 `graphics/third_party/spirv_cross`（旧文档写「不进仓库」是错的）。命令行另从 Homebrew 打进 .app | 是（源码在引擎树；`spirv-cross` 在 Runtime/bin） | 是（`graphics/build.mk` 把源码编进 iOS 渲染器静态库 `libnxgal.a`，首遇着色器在机上现编用） |
@@ -68,7 +68,7 @@ S2Arm 本身以 Apache License 2.0 授权（仓库根目录 [LICENSE](LICENSE) �
 | d2r_vulkan_engine（已删除） | d2r-mobile 导入 | MIT（© 2026 jhaizhou）。原始来源「Harmony NVN-to-Vulkan implementation」为 jhz 自写，MIT（jhz 10-30 确认，原记在 `SOURCE.json` 的 `author` 字段） | 原 `graphics/third_party/d2r_vulkan_engine/`，2026-10-30 整目录删除（PR #1108）；来源/许可记录移到 `android/docs/direct-mode-d2r-study.md` §9 | 否（已删除，本仓不再分发逐字文件） |
 | .NET 运行时（linux-bionic） | 10.x | MIT | https://github.com/dotnet/runtime | 是（NativeAOT 静态编进单库） |
 | libopus / libvpx | 同上表 1.6.1 / 1.15.0 | BSD-3-Clause（附专利授权） | 按 sha256 取固定源码，不入库 | 是 |
-| Ryujinx 树、Ryujinx 子集、直连图形层等共用组件 | 同上表 | 同上表 | 同上表 | 是（安卓单库共用同一份托管代码与原生层） |
+| Ryujinx 树、Ryujinx 子集、参考实现 等共用组件 | 同上表 | 同上表 | 同上表 | 是（安卓单库共用同一份托管代码与原生层） |
 
 ## 已经从出包路径拿掉的 GPL
 

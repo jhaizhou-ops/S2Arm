@@ -7,7 +7,7 @@ set -u; H=$(cd "$(dirname "$0")/../.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/h
 ck() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; bad=1; fi; }
 cd "$H"
 /usr/bin/plutil -create xml1 "$T/Info.plist"
-cmd=$(sed -n 's/^.*\(\/usr\/bin\/plutil -insert UIApplicationShortcutItems -json "\$\$(cat native\/ios\/shortcuts.json)"\).*$/\1/p' runtime/build.mk | head -1)
+cmd=$(sed -n 's/^.*\(\/usr\/bin\/plutil -insert UIApplicationShortcutItems -json "\$\$(cat ios\/shortcuts.json)"\).*$/\1/p' runtime/build.mk | head -1)
 ck "③ build.mk 写入 UIApplicationShortcutItems" '[ -n "$cmd" ]'
 /usr/bin/plutil -insert UIApplicationShortcutItems -json "$(cat ios/shortcuts.json)" "$T/Info.plist" 2> "$T/err"
 got=$(python3 -c 'import plistlib,sys; print("|".join(i["UIApplicationShortcutItemType"]+"="+i["UIApplicationShortcutItemTitle"] for i in plistlib.load(open(sys.argv[1],"rb"))["UIApplicationShortcutItems"]))' "$T/Info.plist" 2>> "$T/err")

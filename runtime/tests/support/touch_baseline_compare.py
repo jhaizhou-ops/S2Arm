@@ -24,7 +24,7 @@ def run(*args, **kwargs):
 
 
 OUT.mkdir(parents=True, exist_ok=True)
-old = run("git", "show", f"{BASE}:ios/vpad.m", capture_output=True).stdout
+old = (ROOT / "runtime/tests/fixtures/touch_baseline" / f"vpad_{BASE}.m").read_text()   # 历史基准夹具（新仓无该提交）
 new = (ROOT / "ios/vpad.m").read_text()
 # Compile the real production frame/build-id accessors with their own state.
 frames = (ROOT / "runtime/src/ap_host.c").read_text()

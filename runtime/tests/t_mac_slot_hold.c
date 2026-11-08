@@ -40,6 +40,8 @@ int main(void) {
     snprintf(T, sizeof T, "/tmp/t_mac_slot_hold.%d", (int)getpid()); mkdir(T, 0755);
     snprintf(SLOT, sizeof SLOT, "%s/slot", T); char cwd[512]; if (!getcwd(cwd, sizeof cwd)) return 1;
     snprintf(MS, sizeof MS, "%s/tools/mac_slot.sh", cwd);
+    if (getenv("S2A_MAC_SLOT_SH")) snprintf(MS, sizeof MS, "%s", getenv("S2A_MAC_SLOT_SH"));
+    const int have_ms = access(MS, R_OK) == 0;
     char p[800], b[1200]; pid_t c; int rc;
     // ① 已拿着槽：仲裁换成假脚本，被调就留标记
     char fake[700]; snprintf(fake, sizeof fake, "%s/fake.sh", T); FILE *f = fopen(fake, "w"); fprintf(f, "touch %s/fake_called; echo /x\n", T); fclose(f);
@@ -51,6 +53,8 @@ int main(void) {
     rc = child(NULL, 0, "1", &c); b[0] = 0; slurp(p, b, sizeof b);
     snprintf(p, sizeof p, "%s/0", SLOT);
     CHECK(rc == 0 && b[0] && access(p, F_OK) != 0, "② 单机：照常往下（rc=%d）、没建槽", rc);
+    if (!have_ms) printf("－ 未覆盖：③④⑤ 真拿槽（仲裁脚本 tools/mac_slot.sh 是维护方私仓工具；S2A_MAC_SLOT_SH 指它才测）\n");
+    if (have_ms) {
     // ③ 有空槽
     snprintf(p, sizeof p, "%s/passed", T); unlink(p);
     rc = child(NULL, 1, "5", &c); b[0] = 0; slurp(p, b, sizeof b);
@@ -67,6 +71,7 @@ int main(void) {
     f = fopen(p, "w"); fprintf(f, "999999 死局 11-07 00:00:00\n"); fclose(f);
     rc = child(NULL, 1, "5", &c); b[0] = 0; slurp(p2, b, sizeof b); snprintf(want, sizeof want, "%d|%d s2arm-host", (int)c, (int)c);
     CHECK(rc == 0 && !strncmp(b, want, strlen(want)), "⑤ 死持有者的槽被收回、宿主拿到（实得「%s」）", b);
+    }
     char cmd[700]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", T); if (system(cmd)) {}
 #else
     printf("✓ 非 macOS：宿主不拿 Mac 局槽，跳过\n");
