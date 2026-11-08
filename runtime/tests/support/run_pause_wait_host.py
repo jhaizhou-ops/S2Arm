@@ -58,7 +58,7 @@ def adapt(root,out):
     text=must(text,'    mach_port_t mport;','    mach_port_t mport;\n'+field)
     text=must(text,'#if !defined(__APPLE__)\nstatic void pause_diag_boundary_locked',
                       '#if 1\nstatic void pause_diag_boundary_locked')
-    start=text.index('#if !defined(__APPLE__)\n#include "../../platforms/android/native/runtime/fault/thread_android.inc"')
+    start=text.index('#if !defined(__APPLE__)\n#include "../../android/native/runtime/fault/thread_android.inc"')
     end=text.index('#endif',start)+len('#endif')
     bridge='enum { ANDROID_VM_MAX_THREADS=1024 };\nstatic _Atomic unsigned android_vm_epoch;\nstatic _Atomic(thr_t*) android_vm_owner;\nstatic _Atomic unsigned host_barrier_hits;\nstatic void core_release(thr_t*),core_acquire(thr_t*),thr_free(thr_t*);\nstatic pthread_cond_t g_pause_cv;\nstatic _Atomic int g_frz;\nuint64_t plat_now_ns(void);\nstatic void android_vm_park(thr_t *t) {\n    (void)t; atomic_fetch_add(&host_barrier_hits,1);\n    while (atomic_load(&android_vm_epoch)) usleep(100);\n}\n'
     bridge+='static void android_vm_park_poll(thr_t *t,void (*poll)(thr_t *)) { atomic_fetch_add(&host_barrier_hits,1); do { if(poll)poll(t);if(!atomic_load(&android_vm_epoch))break;usleep(100); } while(1); }\nstatic void android_futex_wake(_Atomic unsigned *word) { (void)word; }\n'
