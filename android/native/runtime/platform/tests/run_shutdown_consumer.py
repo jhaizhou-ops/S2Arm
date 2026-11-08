@@ -15,7 +15,7 @@ import platform
 import subprocess
 import time
 
-ROOT = Path(__file__).resolve().parents[6]
+ROOT = Path(__file__).resolve().parents[5]
 PLATFORM = ROOT / "android/native/runtime/platform"
 
 

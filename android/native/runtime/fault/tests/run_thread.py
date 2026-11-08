@@ -11,7 +11,7 @@ import platform
 import shutil
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[6]
+ROOT = Path(__file__).resolve().parents[5]
 FAULT = Path('android/native/runtime/fault')
 SOURCES = [FAULT/'tests/thread_test.c', FAULT/'tests/thread_guest.S', FAULT/'tests/guest_stack.S',
            FAULT/'fault.c', FAULT/'trampoline.S', Path('android/native/guest_signal.c'),

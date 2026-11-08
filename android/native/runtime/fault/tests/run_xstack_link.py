@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[6]
+ROOT = Path(__file__).resolve().parents[5]
 FAULT = Path('android/native/runtime/fault')
 PRIVATE = ('g_xs_fn', 'g_xs_off')
 

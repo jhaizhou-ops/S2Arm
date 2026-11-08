@@ -21,7 +21,7 @@ import unittest
 
 import lz4.block
 
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 SS = None
 TAG = 0x9E2A83C1
 CTL = bytes.fromhex('34127698') + bytes(0x40)   # 控制段：魔数 + 内容（替身 ctl_len 按全长）

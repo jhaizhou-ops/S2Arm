@@ -25,7 +25,7 @@ ck('翻译器 dll / 源码不符 → 照停', dmsh_chain.own_compilers([DLL, SRC
 ck('混合：Metal 放行、其余照停', dmsh_chain.own_compilers([M, SC, MISS]), ([M], [SC, MISS]))
 ck('全符 → 都空', dmsh_chain.own_compilers([]), ([], []))
 # 真跑 direct_lib.sh 的生产取值 / 校验块；工具边界只提供合成 stdout、stderr 与退出码。
-root = Path(dmsh_chain.HERE).parents[3]
+root = Path(dmsh_chain.HERE).parent
 source = (root / 'graphics/tools/direct/direct_lib.sh').read_text()
 start = source.index('BE=$(')
 block = source[start:source.index('\nSPVC=', start)]

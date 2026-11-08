@@ -15,13 +15,13 @@
     <Nx>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../nvn/'))</Nx>
     <Ryu>$(MSBuildThisFileDirectory)../../../../compat/tree/src/</Ryu>
     <!-- 链版本：取直连图形层同一棵树的 graphics/nvn/dmsh_chain.h（载入端只认 json 里 chain = 它，见 nvn_mtl.m shader_load） -->
-    <DshChainHeader>$(Nx)graphics/nvn/dmsh_chain.h</DshChainHeader>
+    <DshChainHeader>$(Nx)gfx/nvn/dmsh_chain.h</DshChainHeader>
     <DshChain>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(DshChainHeader)')), 'DMSH_CHAIN "([0-9a-f]+)"').Groups[1].Value)</DshChain>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="*.cs" />
     <Compile Include="../compiler/Sha256.cs" Link="Sha256.cs" />
-    <Compile Include="$(Nx)graphics/tools/dmsh_xlate/Program.cs" Link="xlate/Program.cs" />
+    <Compile Include="$(Nx)../../translator/dmsh_xlate/Program.cs" Link="xlate/Program.cs" />
     <Compile Include="$(Nx)../widen/SpirvCbufUseText.cs" Link="xlate/SpirvCbufUseText.cs" />
   </ItemGroup>
   <ItemGroup>

@@ -12,7 +12,7 @@
 import os, struct, sys, tempfile, unittest, zlib
 from pathlib import Path
 
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 SS = None
 CTL = bytes.fromhex('34127698'); GFX = bytes.fromhex('78563412')
 

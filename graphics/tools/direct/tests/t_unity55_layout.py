@@ -18,7 +18,7 @@ import unittest
 
 import lz4.block
 
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 HASH = bytes.fromhex('4496e93f2179252104401c8dda0a1751')
 U = None
 SS = None

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-ROOT=Path(__file__).resolve().parents[6]
+ROOT=Path(__file__).resolve().parents[5]
 FAULT=Path('android/native/runtime/fault')
 SOURCES=[Path('runtime/src')/p for p in ('thread.c','crash.c','xstack.c','entry.S','gate.c')]+[FAULT/p for p in ('fault.c','trampoline.S','elf_host.c')]+[Path('android/native')/p for p in ('guest_signal.c','redzone.S')]
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()

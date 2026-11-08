@@ -8,7 +8,7 @@
 import os, sys, tempfile, unittest
 from pathlib import Path
 from unittest import mock
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 _PROF = tempfile.TemporaryDirectory(prefix='split-oodle-')   # 被测模块载入只读这份合成档案（不碰任何真游戏）
 (Path(_PROF.name) / 'game.tsv').write_text('shader_groups\tsynthetic=synthetic\nshader_note\tsynthetic\n')
 os.environ['DM_GAME'] = _PROF.name

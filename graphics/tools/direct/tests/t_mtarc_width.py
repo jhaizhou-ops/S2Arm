@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import zlib
 
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 SS = None
 FILES = [('sc\\NX_64\\root', b'SPK\0' + bytes(range(256)) * 8), ('system\\texture\\tiny', b'0123456789abcdef'), ('raw\\stored', b'stored as is')]
 

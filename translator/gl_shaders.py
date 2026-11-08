@@ -51,7 +51,7 @@ import mvgl
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graphics', 'nvn', 'tools')); import romfs_list
 import mbundle
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "graphics/tools"))
 from glsl.normalize import resources as normalize_resources
 from spirv_msl import SLOT_CLASS, metal_cmd
 from spirv_msl import translate as spirv_to_msl
@@ -127,7 +127,7 @@ def sources(roots):
                     yield text_of(open(p, 'rb').read()), stage_of(fn), '/' + rel(p, r)
 
 # GLSL 改写层（graphics/nvn/gfx/gl/gl_glsl_es.c）：离线链与宿主运行时兜底共用一份 C 实现；这里每个进程编一次它的命令行入口（S2A_GLSL_ES_MAIN），逐支调用
-ES_SRC = Path(__file__).resolve().parents[1] / "gl" / "gl_glsl_es.c"
+ES_SRC = Path(__file__).resolve().parents[1] / "graphics/nvn/gfx/gl" / "gl_glsl_es.c"
 _es_lock, _es_bin = threading.Lock(), None
 
 

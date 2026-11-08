@@ -16,7 +16,7 @@ import subprocess
 
 FAULT = Path(__file__).resolve().parents[1]
 NATIVE = FAULT.parent.parent
-ROOT = FAULT.parents[4]
+ROOT = FAULT.parents[3]
 
 
 def digest(path):

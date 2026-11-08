@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 
-TOOLS = Path(__file__).resolve().parents[3] / 'nvn/gfx/tools'
+TOOLS = Path(__file__).resolve().parents[4] / 'translator'
 SS = None
 
 

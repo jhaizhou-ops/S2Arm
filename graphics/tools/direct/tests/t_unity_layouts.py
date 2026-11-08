@@ -16,7 +16,7 @@ from pathlib import Path
 import lz4.block
 
 HERE = Path(__file__).resolve().parent
-TOOLS = HERE.parents[2] / 'nvn/gfx/tools'
+TOOLS = HERE.parents[3] / 'translator'
 sys.path.insert(0, str(HERE)); import unity_layouts_golden as G
 U = SS = None
 HASH = bytes.fromhex('266d5311000000000000000000000001')   # 不在任何已知表里的 type hash

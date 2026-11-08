@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[5]
+ROOT = HERE.parents[4]
 
 
 def main():

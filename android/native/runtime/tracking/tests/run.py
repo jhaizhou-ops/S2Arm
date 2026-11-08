@@ -21,7 +21,7 @@ def main():
     for page in (4096, 16384):
         if page not in models:
             print(f"SKIP {page}-byte model: kernel page is {kernel_page} bytes", flush=True)
-    root = Path(__file__).resolve().parents[6]
+    root = Path(__file__).resolve().parents[5]
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     flags = ["-D_GNU_SOURCE", "-std=gnu11", "-O2", "-g", "-Wall", "-Wextra", "-pthread", "-Iruntime/include"]

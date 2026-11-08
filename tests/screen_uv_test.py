@@ -7,7 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gfx" / "tools" / "direct" / "tests"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "graphics" / "tools" / "direct" / "tests"))
 import dshfn  # noqa: E402
 
 
