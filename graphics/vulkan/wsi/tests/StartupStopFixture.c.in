@@ -1,0 +1,34 @@
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+struct lease { int stops; } lease;
+static struct {
+    pthread_mutex_t stop_lock, lease_lock;
+    int stop_requested, guest_entered, stop_fd;
+    uint32_t stop_reason;
+    char stop_detail[256];
+    struct lease *lease;
+} g = { .stop_lock=PTHREAD_MUTEX_INITIALIZER, .lease_lock=PTHREAD_MUTEX_INITIALIZER };
+static void s2a_wsi_stop(struct lease *value) { value->stops++; }
+static void s2a_android_ui_stop(void) { }
+static int api;
+static int *s2a_host_get(void) { return &api; }
+PRODUCTION_METHODS
+static void *admit(void *value) { (void)value; s2a_android_host_try_enter_guest(); return NULL; }
+static void *stop(void *value) { (void)value; request_stop(NULL,0,"test"); return NULL; }
+static void reset(void) { g.stop_requested=0; g.guest_entered=0; lease.stops=0; g.lease=&lease; }
+int main(void) {
+    int fd[2]; if(pipe(fd)) return 2; g.stop_fd=fd[1];
+    reset(); request_stop(NULL,0,"startup");
+    if(lease.stops!=1 || s2a_android_host_try_enter_guest()) return 1;
+    reset(); if(!s2a_android_host_try_enter_guest()) return 1;
+    request_stop(NULL,0,"running"); if(lease.stops) return 1;
+    for(int i=0;i<128;i++) {
+        reset(); pthread_t a,b; pthread_create(&a,NULL,admit,NULL); pthread_create(&b,NULL,stop,NULL);
+        pthread_join(a,NULL); pthread_join(b,NULL);
+        if(lease.stops != !g.guest_entered) return 1;
+    }
+    close(fd[0]); close(fd[1]); puts("PASS native startup stop / admitted-guest ordering (128 races)"); return 0;
+}

@@ -1,0 +1,451 @@
+    internal static int Checks;
+    internal static void Check(bool condition, string name)
+    {
+        Checks++;
+        if (!condition) throw new Exception(name);
+    }
+    internal bool SuboptimalGeometry(SurfaceCapabilitiesKHR now)
+    {
+        Chain chain = _current;
+SUBOPTIMAL_GEOMETRY
+        return extentChanged;
+    }
+    internal static void TransformContract(string mode)
+    {
+        Environment.TickCount64 = 10000;
+        using var producer = new LeaseProducer();
+        var host = new AndroidVulkanSurface(producer.Lease);
+        var renderer = new VulkanRenderer();
+        // Unmodified r20 / G710 startup observations, including zero insets.
+        producer.State.Width = 2000; producer.State.Height = 2800; producer.State.Transform = 1;
+        producer.State.InsetTop = producer.State.InsetBottom = 0;
+        renderer.SurfaceApi.SetExtent(2000, 2800);
+        renderer.SurfaceApi.Caps.MaxImageExtent = new(4096, 4096);
+        renderer.SurfaceApi.Caps.CurrentTransform = mode == "contract-hint-only"
+            ? SurfaceTransformFlagsKHR.IdentityBitKhr : SurfaceTransformFlagsKHR.Rotate270BitKhr;
+        if (mode == "contract-insets")
+        {
+            producer.State.InsetLeft = 23; producer.State.InsetTop = 64;
+            producer.State.InsetRight = 41; producer.State.InsetBottom = 40;
+        }
+        producer.Lease.Poll();
+        if (mode == "contract-no-identity")
+        {
+            renderer.SurfaceApi.Caps.SupportedTransforms = SurfaceTransformFlagsKHR.Rotate270BitKhr;
+            bool rejected = false;
+            try { _ = new AndroidWindow(renderer, host, default, default); }
+            catch (NotSupportedException) { rejected = true; }
+            Check(rejected && renderer.SwapchainApi.Created == 0, "unsupported identity must still reject before allocation");
+            producer.Lease.Stop();
+            Check(producer.Lease.TryReleaseRetired(host.DestroySurface), "rejected construction leaves real lease releasable");
+            return;
+        }
+        var window = new AndroidWindow(renderer, host, default, default);
+        if (mode == "contract-device-stable")
+            for (int i = 0; i < 5400; i++) { Environment.TickCount64 += 100; window.Poll(); }
+        Check(renderer.SwapchainApi.Created == 1 && window._current != null,
+            "legal independent display rotation and buffer hint must create; nine minutes cannot repair a false equality gate");
+        Check(renderer.SwapchainApi.Last.ImageExtent.Width == 2000 && renderer.SwapchainApi.Last.ImageExtent.Height == 2800,
+            "r20 device observations must retain the actual logical window size");
+        Check(renderer.SwapchainApi.Last.PreTransform == SurfaceTransformFlagsKHR.IdentityBitKhr,
+            "independent buffer hint must not silently enable prerotation");
+        if (mode == "contract-hint-only")
+        {
+            foreach (uint hint in new uint[] { 8, 2, 4, 1, 8 })
+            {
+                renderer.SurfaceApi.Caps.CurrentTransform = (SurfaceTransformFlagsKHR)hint;
+                Check(!window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "buffer hint alone must not retire an identity chain");
+                window.Poll();
+            }
+            Check(renderer.SwapchainApi.Created == 1 && renderer.SwapchainApi.Destroyed == 0,
+                "hint-only changes must not churn chains");
+        }
+        if (mode is "contract-hint-first" or "contract-lease-first" or "contract-same-size")
+        {
+            if (mode == "contract-hint-first")
+            {
+                renderer.SurfaceApi.Caps.CurrentTransform = SurfaceTransformFlagsKHR.Rotate90BitKhr;
+                Check(!window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "early hint is not a lease revision");
+                window.Poll();
+                Check(renderer.SwapchainApi.Created == 1, "early hint must keep current geometry");
+            }
+            producer.Publish(mode == "contract-same-size" ? 2000 : 2800, mode == "contract-same-size" ? 2800 : 2000, 2);
+            window.Poll();
+            Check(renderer.SwapchainApi.Created == 2 && renderer.SwapchainApi.Destroyed == 1,
+                "actual lease rotation revision must retire and recreate regardless of hint");
+            Check(window._current.Record.Window == producer.State.Stamp && window._current.InitialState.Transform == 2,
+                "new chain must belong to the actual session/generation/revision");
+            if (mode == "contract-same-size")
+            {
+                producer.Publish(2800, 2000, 2); window.Poll();
+                Check(renderer.SwapchainApi.Created == 3 && renderer.SwapchainApi.Last.ImageExtent.Width == 2800,
+                    "later size revision must independently update the logical image");
+            }
+            renderer.SurfaceApi.Caps.CurrentTransform = SurfaceTransformFlagsKHR.Rotate180BitKhr;
+            Check(!window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "late independent hint must not churn current geometry");
+        }
+        if (mode is "contract-wrong-session" or "contract-old-revision")
+        {
+            if (mode == "contract-wrong-session") producer.State.Session = 2;
+            else producer.State.Revision = 0;
+            bool rejected = false;
+            try { window.Poll(); } catch (InvalidOperationException) { rejected = true; }
+            Check(rejected && renderer.SwapchainApi.Created == 1 && producer.Acks == 0,
+                "independent hint acceptance must not weaken lease identity/order checks");
+            producer.State.Session = 1; producer.State.Revision = 1;
+        }
+        Check(window._current.InitialState.InsetLeft == producer.State.InsetLeft &&
+            window._current.InitialState.InsetTop == producer.State.InsetTop &&
+            window._current.InitialState.InsetRight == producer.State.InsetRight &&
+            window._current.InitialState.InsetBottom == producer.State.InsetBottom, "independent hint must preserve insets");
+        window.Stop(); window.Poll();
+        Check(producer.Refs == 0 && producer.Acks == 1, "independent hint preserves real lease retirement");
+    }
+    internal static void Rotation(string mode)
+    {
+        Environment.TickCount64 = 10000;
+        using var producer = new LeaseProducer();
+        var host = new AndroidVulkanSurface(producer.Lease);
+        var renderer = new VulkanRenderer();
+        uint transform = mode == "rotation-90" ? 2u : mode == "rotation-identity" ? 1u : 8u;
+        bool staged = mode is "rotation-caps-first" or "rotation-lease-first" or "rotation-zero-insets";
+        producer.State.Width = staged ? 2000 : 2800;
+        producer.State.Height = staged ? 2800 : 2000;
+        producer.State.Transform = staged ? 1u : transform;
+        producer.State.InsetLeft = 23; producer.State.InsetRight = 41;
+        renderer.SurfaceApi.SetExtent(2000, 2800); // Persisting preferred extent from the real 9000 failure.
+        renderer.SurfaceApi.Caps.CurrentTransform = (SurfaceTransformFlagsKHR)producer.State.Transform;
+        if (mode == "rotation-bounds") renderer.SurfaceApi.Caps.MaxImageExtent = new(2700, 8192);
+        if (mode == "rotation-zero-insets") producer.State.InsetLeft = producer.State.InsetTop = producer.State.InsetRight = producer.State.InsetBottom = 0;
+        producer.Lease.Poll();
+        var window = new AndroidWindow(renderer, host, default, default);
+        if (mode == "rotation-bounds")
+        {
+            Check(renderer.SwapchainApi.Created == 0, "extent outside device bounds must defer without distortion");
+            renderer.SurfaceApi.Caps.MaxImageExtent = new(8192, 8192);
+            Environment.TickCount64 += 100;
+            window.Poll();
+        }
+        Check(renderer.SwapchainApi.Created == 1, "rotation must create using logical window extent despite stable preferred extent");
+        if (staged)
+        {
+            if (mode == "rotation-caps-first")
+            {
+                renderer.SurfaceApi.Caps.CurrentTransform = (SurfaceTransformFlagsKHR)transform;
+                Check(!window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "early buffer hint is not a window change");
+                window.Poll();
+                Check(renderer.SwapchainApi.Created == 1, "early hint must retain current window geometry");
+                producer.Publish(2800, 2000, transform);
+            }
+            else producer.Publish(2800, 2000, transform);
+            window.Poll();
+            Check(renderer.SwapchainApi.Created == 2, "actual rotation revision must progress independently of buffer hint");
+            renderer.SurfaceApi.Caps.CurrentTransform = (SurfaceTransformFlagsKHR)transform;
+            window.Poll();
+            Check(renderer.SwapchainApi.Created == 2, "late hint must not add a third chain");
+        }
+        Check(renderer.SwapchainApi.Last.ImageExtent.Width == producer.State.Width &&
+            renderer.SwapchainApi.Last.ImageExtent.Height == producer.State.Height, "image and inset coordinates must share logical extent");
+        Check(renderer.SwapchainApi.Last.PreTransform == SurfaceTransformFlagsKHR.IdentityBitKhr, "compositor rotation must not silently become prerotation");
+        Check(window._current.InitialState.InsetLeft == producer.State.InsetLeft &&
+            window._current.InitialState.InsetTop == producer.State.InsetTop &&
+            window._current.InitialState.InsetRight == producer.State.InsetRight &&
+            window._current.InitialState.InsetBottom == producer.State.InsetBottom, "rotation must preserve every inset");
+        Check(!window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "persistent preferred extent must not cause suboptimal recreation churn");
+        window.Stop(); window.Poll();
+        Check(producer.Refs == 0 && producer.Acks == 1 && host.Destroyed == 1, "rotation preserves lease ownership at stop");
+    }
+    internal static void Run(string mode)
+    {
+        if (mode.StartsWith("contract-")) { TransformContract(mode); return; }
+        if (mode.StartsWith("rotation-")) { Rotation(mode); return; }
+        Environment.TickCount64 = 10000;
+        using var producer = new LeaseProducer();
+        var host = new AndroidVulkanSurface(producer.Lease);
+        var renderer = new VulkanRenderer();
+        if (mode == "same-size-rotation")
+        {
+            producer.State.Width = 2000; producer.State.Height = 2800; producer.State.Transform = 1;
+            renderer.SurfaceApi.SetExtent(2000, 2800);
+        }
+        if (mode == "initial") renderer.SurfaceApi.Caps.MaxImageExtent = new(2700, 8192);
+        producer.Lease.Poll();
+        var window = new AndroidWindow(renderer, host, default, default);
+        if (mode == "initial")
+        {
+            Check(renderer.SwapchainApi.Created == 0 && window._current == null, "initial size outside bounds must defer without allocation");
+            renderer.SurfaceApi.Caps.MaxImageExtent = new(8192, 8192);
+            Environment.TickCount64 += 100;
+            window.Poll();
+        }
+        Check(renderer.SwapchainApi.Created == 1, "initial matching viewport must create");
+        Check(renderer.SwapchainApi.Last.ImageExtent.Width == producer.State.Width &&
+            renderer.SwapchainApi.Last.ImageExtent.Height == producer.State.Height, "initial extent identity");
+        if (mode is "matching" or "initial" or "zero-insets" or "same-size-rotation")
+        {
+            producer.Publish(2000, 2800, mode == "same-size-rotation" ? 2u : 1u);
+            if (mode == "zero-insets") producer.State.InsetTop = producer.State.InsetBottom = 0;
+            else renderer.SurfaceApi.SetExtent(2000, 2800);
+            window.Poll();
+            Check(renderer.SwapchainApi.Created == 2, "matching revision must recreate");
+            if (mode == "same-size-rotation")
+            {
+                producer.Publish(2800, 2000, 2); window.Poll();
+                Check(renderer.SwapchainApi.Created == 3, "later dimensions must independently recreate");
+            }
+        }
+        else
+        {
+            if (mode.StartsWith("invalid-"))
+            {
+                producer.Publish(2000, 2800, 1);
+                renderer.SurfaceApi.SetExtent(2000, 2800);
+                if (mode == "invalid-negative") producer.State.InsetLeft = -1;
+                if (mode == "invalid-full") producer.State.InsetTop = 2800;
+                if (mode == "invalid-overflow") producer.State.InsetLeft = producer.State.InsetRight = int.MaxValue;
+                bool rejected = false;
+                try { window.Poll(); }
+                catch (NotSupportedException) { rejected = true; }
+                Check(rejected && renderer.SwapchainApi.Created == 1, "invalid metadata must fail closed");
+                window.Stop(); window.Poll();
+                Check(producer.Acks == 1 && producer.Refs == 0, "rejected metadata retains releasable ownership");
+                return;
+            }
+            if (mode == "caps-first")
+            {
+                renderer.SurfaceApi.Caps.MaxImageExtent = new(1900, 8192);
+                Check(window.SuboptimalGeometry(renderer.SurfaceApi.Caps), "changed bounds must invalidate the selected extent");
+                // Real Present retires this same record when SUBOPTIMAL sees changed bounds.
+                // Only that observation is injected; real Poll/Create consume it below.
+                window.Ledger.RetireSwapchain(window._current.Record);
+            }
+            else
+            {
+                producer.Publish(2000, 2800, mode == "clamp" ? 1u : 2u);
+                renderer.SurfaceApi.Caps.MaxImageExtent = new(1900, 8192);
+                if (mode == "clamp")
+                {
+                    renderer.SurfaceApi.SetExtent(uint.MaxValue, uint.MaxValue);
+                    renderer.SurfaceApi.Caps.MaxImageExtent = new(1900, 8192);
+                }
+            }
+            window.Poll();
+            Check(renderer.SwapchainApi.Destroyed == 1, "old chain must retire using real ledger/pool");
+            Check(renderer.SwapchainApi.Created == 1 && window._current == null,
+                "inconsistent viewport must not create a swapchain");
+            Check(producer.Acks == 0 && producer.Lease.HeldGeneration == 1,
+                "geometry wait must retain surface/lease, not manufacture revoke ACK");
+            int queries = renderer.SurfaceApi.Queries;
+            for (int i = 0; i < 100; i++) window.Poll();
+            Check(renderer.SurfaceApi.Queries == queries, "same-stamp wait must not busy-query capabilities");
+            Check(renderer.SurfaceApi.FormatQueries == 2, "unready viewport must not enumerate formats or allocate resources");
+            if (mode == "lease-first")
+            {
+                renderer.SurfaceApi.Caps.MaxImageExtent = new(8192, 8192);
+                Environment.TickCount64 += 100;
+                window.Poll();
+                Check(renderer.SwapchainApi.Created == 2, "bounds recovery must progress without another lease revision");
+            }
+            else if (mode == "caps-first")
+            {
+                renderer.SurfaceApi.Caps.MaxImageExtent = new(8192, 8192);
+                producer.Publish(2000, 2800, 2);
+                window.Poll();
+                Check(renderer.SwapchainApi.Created == 2, "lease convergence must progress");
+            }
+            else if (mode == "clamp")
+            {
+                renderer.SurfaceApi.Caps.MaxImageExtent = new(8192, 8192);
+                Environment.TickCount64 += 100;
+                window.Poll();
+                Check(renderer.SwapchainApi.Created == 2, "clamp convergence must preserve inset coordinates");
+            }
+            else if (mode == "permanent")
+            {
+                for (int i = 0; i < 1000; i++) { Environment.TickCount64 += 100; window.Poll(); }
+                Check(renderer.SwapchainApi.Created == 1 && producer.Acks == 0,
+                    "persistent mismatch must remain unready without false creation or ACK");
+            }
+            else if (mode == "stop") window.Stop();
+            else if (mode == "revoke") producer.Revoke();
+        }
+        if (window._current != null)
+        {
+            Check(renderer.SwapchainApi.Last.PreTransform == SurfaceTransformFlagsKHR.IdentityBitKhr,
+                "no extra game rotation");
+            Check(window._current.InitialState.InsetTop == producer.State.InsetTop &&
+                window._current.InitialState.InsetBottom == producer.State.InsetBottom,
+                "insets must not be zeroed to pass validation");
+        }
+        if (mode != "revoke") window.Stop();
+        window.Poll();
+        Check(window._chains.Count == 0 && producer.Lease.HeldGeneration == 0 && producer.Acks == 1,
+            "stop/revoke must progress during geometry wait without frames");
+        Check(producer.Refs == 0 && host.Destroyed == 1, "surface/reference retirement once");
+    }
+}
+
+// Controlled API boundaries: actual production methods, real NativeLease/RetirementLedger;
+// no Android callbacks, driver, GPU, or native C lease is exercised.
+internal sealed unsafe class LeaseProducer : IDisposable
+{
+    private NativeLeaseApi _api;
+    private System.Runtime.InteropServices.GCHandle _handle;
+    public NativeLease Lease { get; }
+    public NativeLeaseState State = new() { Session = 1, Generation = 1, Revision = 1,
+        Window = 1, Width = 2800, Height = 2000, Transform = 1,
+        InsetTop = 64, InsetBottom = 40, Foreground = 1, RefreshHz = 120 };
+    public int Refs, Acks;
+    public LeaseProducer()
+    {
+        _handle = System.Runtime.InteropServices.GCHandle.Alloc(this);
+        _api = new() { Size = (uint)sizeof(NativeLeaseApi), Version = 1,
+            Lease = System.Runtime.InteropServices.GCHandle.ToIntPtr(_handle),
+            Take = &Take, Wait = &Wait, ReleaseWindow = &Release, Released = &Ack, Wake = &Wake };
+        fixed (NativeLeaseApi* api = &_api) Lease = new NativeLease((nint)api, 1, 1);
+    }
+    public void Publish(int width, int height, uint transform)
+    { State.Width = width; State.Height = height; State.Transform = transform; State.Revision++; }
+    public void Revoke() { State.Window = 0; State.Revision++; }
+    private static LeaseProducer Self(nint value) =>
+        (LeaseProducer)System.Runtime.InteropServices.GCHandle.FromIntPtr(value).Target!;
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static int Take(nint value, NativeLeaseState* state)
+    { var self = Self(value); *state = self.State; if (state->Window != 0) self.Refs++; return 0; }
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static int Wait(nint value, NativeLeaseState* state, int timeout) => 0;
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static void Release(nint value, nint window) { Self(value).Refs--; }
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static void Ack(nint value, ulong generation) { Self(value).Acks++; }
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    private static void Wake(nint value) { }
+    public void Dispose() => _handle.Free();
+}
+internal sealed class AndroidVulkanSurface(NativeLease lease)
+{
+    public Func<long> Lifecycle = () => 0;
+    public readonly NativeLease Lease = lease;
+    public bool HasPresentFences => true;
+    public SurfaceKHR Surface = new(1);
+    public int Destroyed;
+    public void DestroySurface() { Destroyed++; Surface = default; }
+    public void CreateSurface() => Surface = new(1);
+}
+internal sealed class VulkanRenderer
+{
+    public readonly DriverApi Api = new();
+    public readonly SurfaceApi SurfaceApi = new();
+    public readonly SwapchainApi SwapchainApi = new();
+    public readonly Pool CommandBufferPool = new();
+    public readonly Features EnabledDeviceFeatures = new();
+    public uint QueueFamilyIndex => 0;
+    public readonly object QueueLock = new();
+    public Silk.NET.Vulkan.Queue Queue;
+    public Action S2ADeviceCleanup;
+}
+internal sealed unsafe class SurfaceApi
+{
+    public int Queries, FormatQueries;
+    public SurfaceCapabilitiesKHR Caps = new() { CurrentExtent = new(2800, 2000),
+        MinImageExtent = new(1, 1), MaxImageExtent = new(8192, 8192),
+        SupportedUsageFlags = ImageUsageFlags.ColorAttachmentBit,
+        SupportedTransforms = SurfaceTransformFlagsKHR.IdentityBitKhr | SurfaceTransformFlagsKHR.Rotate90BitKhr |
+            SurfaceTransformFlagsKHR.Rotate180BitKhr | SurfaceTransformFlagsKHR.Rotate270BitKhr,
+        CurrentTransform = SurfaceTransformFlagsKHR.IdentityBitKhr,
+        MinImageCount = 2, MaxImageCount = 3,
+        SupportedCompositeAlpha = CompositeAlphaFlagsKHR.OpaqueBitKhr };
+    public void SetExtent(uint width, uint height) => Caps.CurrentExtent = new(width, height);
+    public Result GetPhysicalDeviceSurfaceSupport(PhysicalDevice p, uint q, SurfaceKHR s, out Silk.NET.Core.Bool32 supported)
+    { supported = true; return Result.Success; }
+    public Result GetPhysicalDeviceSurfaceCapabilities(PhysicalDevice p, SurfaceKHR s, out SurfaceCapabilitiesKHR caps)
+    { Queries++; caps = Caps; return Result.Success; }
+    public Result GetPhysicalDeviceSurfaceFormats(PhysicalDevice p, SurfaceKHR s, ref uint count, SurfaceFormatKHR* formats)
+    {
+        FormatQueries++;
+        count = 1;
+        if (formats != null) *formats = new(VkFormat.B8G8R8A8Unorm, ColorSpaceKHR.PaceSrgbNonlinearKhr);
+        return Result.Success;
+    }
+}
+internal sealed unsafe class SwapchainApi
+{
+    public int Created, Destroyed;
+    public SwapchainCreateInfoKHR Last;
+    public Result CreateSwapchain(Device device, in SwapchainCreateInfoKHR info, void* allocator, out SwapchainKHR value)
+    { Last = info; value = new((ulong)++Created); return Result.Success; }
+    public Result GetSwapchainImages(Device device, SwapchainKHR chain, ref uint count, Image* images)
+    { count = 3; if (images != null) for (int i = 0; i < 3; i++) images[i] = new((ulong)i + 1); return Result.Success; }
+    public void DestroySwapchain(Device device, SwapchainKHR chain, void* allocator) { Destroyed++; }
+}
+internal sealed unsafe class DriverApi
+{
+    public Result QueueWaitIdle(Silk.NET.Vulkan.Queue queue) => Result.Success;
+    public Result DeviceWaitIdle(Device device) => Result.Success;
+    public Result GetFenceStatus(Device device, Fence fence) => Result.Success;
+    public Result CreateImageView(Device d, in ImageViewCreateInfo info, void* allocator, out ImageView v)
+    { v = new(1); return Result.Success; }
+    public Result CreateSemaphore(Device d, in SemaphoreCreateInfo info, void* allocator, out Semaphore v)
+    { v = new(1); return Result.Success; }
+    public void DestroySemaphore(Device d, Semaphore s, void* allocator) { }
+    public void DestroyFence(Device d, Fence f, void* allocator) { }
+}
+internal sealed class Pool { public bool CollectCompleted() => true; }
+internal sealed class Features { public bool HasExtension(string name) => true; }
+internal sealed class FenceHolder { public Fence GetUnsafe() => default; public void Put() { } }
+internal sealed class DisposableImageView
+{ public DisposableImageView(DriverApi api, Device device, ImageView view) { } }
+internal sealed class TextureView
+{
+    public TextureView(VulkanRenderer renderer, Device device, DisposableImageView view, TextureCreateInfo info, VkFormat format) { }
+    public void Dispose() { }
+}
+internal static class FormatTable
+{ public static Ryujinx.Graphics.GAL.Format GetFormat(VkFormat format) => Ryujinx.Graphics.GAL.Format.B8G8R8A8Unorm; }
+internal static class ResultExtensions
+{ public static void ThrowOnError(this Result result) { if (result != Result.Success) throw new Exception(result.ToString()); } }
+// Same monotonic-clock API, controlled only in this host assembly. Production method bytes
+// remain unchanged; no sleep, actual-device convergence deadline or timing claim is tested.
+internal static class Environment
+{
+    public static long TickCount64 { get; set; }
+    public static int CurrentManagedThreadId => System.Environment.CurrentManagedThreadId;
+}
+internal static class Program
+{
+    static int Main(string[] args)
+    {
+        int failures = 0;
+        foreach (string mode in args.Length != 0 ? args : new[] { "contract-device-stable", "contract-insets",
+            "contract-hint-only", "contract-hint-first", "contract-lease-first", "contract-same-size",
+            "contract-no-identity", "contract-wrong-session", "contract-old-revision",
+            "rotation-identity", "rotation-90", "rotation-270",
+            "rotation-caps-first", "rotation-lease-first", "rotation-zero-insets", "rotation-bounds", "matching", "lease-first", "caps-first", "permanent", "stop", "revoke",
+            "initial", "same-size-rotation", "clamp", "zero-insets",
+            "invalid-negative", "invalid-full", "invalid-overflow" })
+        {
+            TextWriter original = Console.Error;
+            var log = new StringWriter();
+            Console.SetError(log);
+            try
+            {
+                AndroidWindow.Run(mode);
+                if (mode == "permanent")
+                {
+                    string text = log.ToString();
+                    AndroidWindow.Check(text.Split("[WSI] viewport").Length == 9, "snapshot budget must be eight");
+                    AndroidWindow.Check(text.Contains("state=unready") && text.Contains("furtherSnapshots=omitted"), "persistent mismatch/drop coverage explicit");
+                    AndroidWindow.Check(text.Contains("currentExtent=2800x2000") && text.Contains("selectedExtent=1900x2800") &&
+                        text.Contains("minExtent=1x1") && text.Contains("maxExtent=1900x8192") && text.Contains("currentTransform=") &&
+                        text.Contains("reason=extent-outside-bounds") && !text.Contains("transform-mismatch"),
+                        "raw extent/limit/transform evidence must be retained");
+                }
+                Console.WriteLine("PASS " + mode);
+            }
+            catch (Exception error) { failures++; Console.WriteLine("FAIL " + mode + ": " + error); }
+            finally { Console.SetError(original); Console.Error.Write(log.ToString()); }
+        }
+        Console.WriteLine($"{AndroidWindow.Checks} checks; {failures} failures; actual CreateSwapchain/Poll + lease/ledger, controlled boundaries; no GPU/Android.");
+        return failures == 0 ? 0 : 1;
+    }
+}

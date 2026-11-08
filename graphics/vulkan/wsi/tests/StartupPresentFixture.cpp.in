@@ -1,0 +1,24 @@
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include "runtime/runtime.h"
+using jlong = long long;
+using jclass = void*;
+struct JNIEnv {};
+#define S2A_ANDROID_GAME_RUNTIME 1
+static int available, calls;
+static uint32_t phase;
+extern "C" int s2a_android_runtime_status(uint64_t, struct s2a_android_runtime_status* output) {
+    output->last_phase = phase; return available ? 0 : -100;
+}
+static uint64_t s2a_android_services_present_count() { calls++; return 42; }
+PRODUCTION_METHODS
+int main() {
+    assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==0 && calls==0);
+    available=1;
+    for (phase=S2A_RUNTIME_CREATED;phase<S2A_RUNTIME_GUEST_RUNNING;phase++)
+        assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==0 && calls==0);
+    phase=S2A_RUNTIME_GUEST_RUNNING;
+    assert(Java_org_s2arm_android_NativeBridge_gamePresentCount(nullptr,nullptr)==42 && calls==1);
+    puts("PASS native present counter cannot initialize NativeAOT before guest admission");
+}

@@ -1,0 +1,475 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
+namespace S2Arm.Backends.Vulkan.Wsi;
+internal static class S2AFrameTrace
+{
+    internal static long Next;
+    internal static long Begin() => ++Next;
+    internal static ulong ElapsedNs(long started) => (ulong)started * 1000;
+}
+internal sealed unsafe class AndroidWindow : WindowBase
+{
+    PENDING_BODY
+    CHAIN_BODY
+    private readonly Renderer _renderer = new();
+    private readonly Host _host = new();
+    private readonly int _device = 0, _physical = 0;
+    private readonly List<Pending> _pending = [];
+    private readonly List<Chain> _chains = [];
+    private Chain _current;
+    private bool _surfaceLost;
+    private const int PresentFenceGraceMs = 250;
+    private readonly List<Semaphore> _deferredPresentSemaphores = [];
+    private readonly List<Fence> _deferredPresentFences = [];
+    private int _idleAssumptionCount, _fenceGraceFallbacks, _revokeImmediateRetirements;
+    private int _publishedDeferredSemaphores, _publishedDeferredFences;
+    private bool _graveyardWarning;
+    private bool _stopped, _linear = true;
+    private static bool _s2aFirstPresentLogged;
+    private readonly double[] _s2aFrameMs = new double[600];
+    private int _s2aFrameCount;
+    private long _s2aLastPresentTick;
+    private void S2AReportFrameTimes() {}
+    private long _lastCreate, _lastSuboptimalLog;
+    public ulong QueuedGamePresents { get; private set; }
+    public bool Retired => _stopped && _current == null && _chains.Count == 0 && Lease.HeldGeneration == 0;
+    private NativeLease Lease => _host.Lease;
+    private RetirementLedger Ledger => Lease.Retirement;
+    SUMMARY_PROPERTY
+    PRODUCTION_METHODS
+    private void CreateSwapchain() { _renderer.SurfaceApi.GetPhysicalDeviceSurfaceCapabilities(_physical, _host.Surface, out _).ThrowOnError(); _renderer.Creates++; }
+    private static void s2a_android_game_touch_viewport(ulong g,int x,int y,int w,int h,int bw,int bh) {}
+    private static ulong tracedAcquire, tracedPresent, tracedCount;
+    private static void s2a_frame_log_present_timed(ulong a, ulong p) { tracedAcquire = a; tracedPresent = p; tracedCount++; }
+    internal static int Checks;
+    internal static void Check(bool condition, string message) { Checks++; if (!condition) throw new Exception(message); }
+    internal void Run(string mode)
+    {
+        Producer.Reset();
+        S2AFrameTrace.Next = 0; tracedAcquire = tracedPresent = tracedCount = 0;
+        TestClock.Value = 1000;
+        Lease.Poll();
+        _host.HasPresentFences = mode is not ("no-fence" or "same-image" or "revoke-early-prior" or "present-out-of-date-nofence" or "present-nofence-stamp-two" or "present-nofence-revoke" or "present-nofence-surface-lost" or "present-nofence-queue-error" or "present-nofence-device-lost" or "present-nofence-graveyard");
+        Chain chain = new() {
+            Record = Ledger.RegisterSwapchain(Lease.State.Stamp, 2,
+                _host.HasPresentFences ? RetirementMode.EnabledPresentFence : RetirementMode.Reacquire),
+            InitialState = Lease.State, Width = 1280, Height = 720,
+            Images = [new Image(), new Image()], Views = [new TextureView(), new TextureView()],
+            Acquire = [new Semaphore {Handle=1}, new Semaphore {Handle=2}],
+            Finished = [new Semaphore {Handle=11}, new Semaphore {Handle=12}],
+            Swapchain = new SwapchainKHR {Handle=1}
+        };
+        _current=chain; _chains.Add(chain);
+        AcquireRecord previous = null;
+        if (mode is "old-present" or "no-fence" or "same-image" or "revoke-early-prior")
+        {
+            previous=Ledger.BeginAcquire(chain.Record, 9);
+            Ledger.FinishAcquire(previous,AcquireOutcome.Acquired,mode=="same-image"?0:1);
+            Ledger.SubmitQueued(previous);
+            Ledger.PresentReturned(previous,PresentOutcome.Queued,_host.HasPresentFences);
+            Ledger.ObserveSubmitCompletion(previous);
+            _pending.Add(new Pending {Record=previous,Present=new Fence {Handle=_host.HasPresentFences ? 101ul : 0ul}});
+        }
+        Action change=()=> {
+            if(mode=="focus") Producer.State.Foreground=0;
+            else if(mode=="revision") Producer.State.Revision++;
+            else if(mode=="revoke") { Producer.State.Window=0; Producer.State.Revision++; }
+            else Producer.State.Stopping=1;
+        };
+        if(mode=="stop-before") change();
+        else if(mode!="normal" && !mode.StartsWith("acquire-") && !mode.StartsWith("present-")) _renderer.SwapchainApi.AfterAcquire=change;
+        if(mode is "revoke-early" or "revoke-early-prior")
+            _renderer.SwapchainApi.AfterAcquire=()=> {
+                // A concurrent poll between acquire and submit delivers the revocation
+                // before Present's drain check: the race the abandoned path claimed to handle.
+                Producer.State.Window=0; Producer.State.Revision++; Lease.Poll();
+            };
+        if(mode=="timeout-stop") _renderer.SwapchainApi.AcquireResult=Result.Timeout;
+        if(mode=="submit-failure") _renderer.CommandBufferPool.FailSubmit=true;
+        if(mode=="pool-pending") _renderer.CommandBufferPool.Completed=false;
+        if(mode=="device-lost") _renderer.SwapchainApi.AfterAcquire=()=>Ledger.LoseDevice();
+        // P1-51: 陈旧链错误只回收本链，不判死会话；设备丢失仍判死。
+        if(mode=="acquire-out-of-date") _renderer.SwapchainApi.AcquireResult=Result.ErrorOutOfDateKhr;
+        if(mode=="acquire-surface-lost") { _renderer.SwapchainApi.AcquireResult=Result.ErrorSurfaceLostKhr; _renderer.SurfaceApi.LostHandle=1; }
+        if(mode=="acquire-device-lost") _renderer.SwapchainApi.AcquireResult=Result.ErrorDeviceLost;
+        if(mode=="present-out-of-date") _renderer.SwapchainApi.PresentResult=Result.ErrorOutOfDateKhr;
+        if(mode=="present-surface-lost") { _renderer.SwapchainApi.PresentImageResult=Result.ErrorSurfaceLostKhr; _renderer.SurfaceApi.LostHandle=1; }
+        if(mode=="present-device-lost") _renderer.SwapchainApi.PresentResult=Result.ErrorDeviceLost;
+        if(mode is "present-mixed-unknown" or "present-unknown-mixed") { _renderer.SwapchainApi.PresentResult=mode=="present-mixed-unknown" ? Result.ErrorOutOfDateKhr : Result.ErrorUnknown; _renderer.SwapchainApi.PresentImageResult=mode=="present-mixed-unknown" ? Result.ErrorUnknown : Result.ErrorSurfaceLostKhr; }
+        if(mode=="present-out-of-date-nofence") { _renderer.SwapchainApi.PresentResult=Result.ErrorOutOfDateKhr; }
+        // P1-72：1 s 取图预算只计连续前台毫秒。后台冻结（代元 -1）或代元翻转都不能把预算耗尽。
+        if(mode is "acquire-bg-freeze" or "acquire-epoch-reset")
+        {
+            long started=Environment.TickCount64;
+            _host.Lifecycle = mode=="acquire-bg-freeze"
+                ? () => Environment.TickCount64-started<600 ? 1 : -1
+                : (Func<long>)(() => (Environment.TickCount64-started)/400);
+            _renderer.SwapchainApi.AcquireResult=Result.Timeout;
+            _renderer.SwapchainApi.AfterAcquire=()=>{ if(Environment.TickCount64-started>1400) _renderer.SwapchainApi.AcquireResult=Result.Success; };
+        }
+        if(mode=="present-fence-background-revoke")
+        {
+            long epoch=-1; _host.Lifecycle=()=>epoch;
+            _renderer.SwapchainApi.PresentResult=Result.ErrorOutOfDateKhr;
+            Present(new TextureView(),new ImageCrop(),null);
+            _renderer.Api.SubmitComplete=true;
+            Producer.State.Foreground=0; Producer.State.Window=0; Producer.State.Revision++;
+            long start=TestClock.Value; Poll();
+            Check(Producer.Acks==1 && TestClock.Value-start<1000,"background revoke with unsignaled fence must ACK within native deadline");
+            Check(_revokeImmediateRetirements==1 && _fenceGraceFallbacks==0,"revoke skip must have distinct counter");
+            Check(RetirementSummary.Contains("idleRetirements=1 fenceGraceFallbacks=0 revokeImmediateRetirements=1 deferredSemaphores=2 deferredFences=1"), "published summary must include live deferred resources: " + RetirementSummary);
+            Console.WriteLine("PASS " + mode); return;
+        }
+        if(mode=="present-fence-foreground-grace")
+        {
+            long epoch=1; _host.Lifecycle=()=>epoch;
+            _renderer.SwapchainApi.PresentResult=Result.ErrorOutOfDateKhr;
+            Present(new TextureView(),new ImageCrop(),null);
+            _renderer.Api.SubmitComplete=true;
+            Poll();
+            TestClock.Value+=100; Poll();
+            epoch=-1; TestClock.Value+=10000; Poll();
+            epoch=2; TestClock.Value+=10000; Poll();
+            Check(_renderer.Api.QueueWaitCalls==0,"background freeze must not consume fence grace");
+            TestClock.Value+=249; Poll();
+            Check(_renderer.Api.QueueWaitCalls==0,"foreground grace expires too early");
+            TestClock.Value++; Poll();
+            Check(_renderer.Api.QueueWaitCalls==1,"foreground grace did not expire");
+            Console.WriteLine("PASS " + mode); return;
+        }
+        if(mode=="present-fence-graveyard")
+        {
+            var capture=new StringWriter(); var oldError=Console.Error; Console.SetError(capture);
+            try
+            {
+                Ledger.RetireSwapchain(chain.Record); Ledger.ConfirmSwapchainDestroyed(chain.Record);
+                chain.Record=Ledger.RegisterSwapchain(Lease.State.Stamp,65,RetirementMode.EnabledPresentFence);
+                chain.Images=new Image[65]; chain.Views=Array.Empty<TextureView>();
+                chain.Acquire=Array.Empty<Semaphore>(); chain.Finished=Array.Empty<Semaphore>();
+                for(int i=0;i<65;i++)
+                {
+                    var rec=Ledger.BeginAcquire(chain.Record,(ulong)(1000+i));
+                    Ledger.FinishAcquire(rec,AcquireOutcome.Acquired,i); Ledger.SubmitQueued(rec);
+                    Ledger.PresentReturned(rec,PresentOutcome.Queued,true); Ledger.ObserveSubmitCompletion(rec);
+                    _pending.Add(new Pending {Record=rec,Present=new Fence{Handle=(ulong)(100+i)}});
+                }
+                Ledger.RetireSwapchain(chain.Record); Poll(); TestClock.Value+=300; Poll();
+                Check(_deferredPresentFences.Count==65 && _deferredPresentSemaphores.Count==0,"fixture must quarantine 65 fences only");
+                Check(RetirementSummary.Contains("deferredSemaphores=0 deferredFences=65"),"published fence count must match retained resources");
+                Check(capture.ToString().Contains("deferredFences=65"),"fences alone must trigger graveyard warning");
+            }
+            finally { Console.SetError(oldError); }
+            Console.WriteLine("PASS " + mode); return;
+        }
+        if(mode=="present-nofence-graveyard")
+        {
+            var capture=new StringWriter(); var oldError=Console.Error; Console.SetError(capture);
+            try
+            {
+                for(int i=0;i<33;i++)
+                {
+                    var testChain=i==0 ? chain : new Chain {
+                        Record=Ledger.RegisterSwapchain(Lease.State.Stamp,2,RetirementMode.Reacquire),
+                        Images=[new Image(),new Image()], Views=[new TextureView(),new TextureView()],
+                        Acquire=[new Semaphore{Handle=1},new Semaphore{Handle=2}],
+                        Finished=[new Semaphore{Handle=11},new Semaphore{Handle=12}],
+                        Swapchain=new SwapchainKHR{Handle=(ulong)(i+1)} };
+                    if(i!=0) _chains.Add(testChain);
+                    var record=Ledger.BeginAcquire(testChain.Record,(ulong)(1000+i));
+                    Ledger.FinishAcquire(record,AcquireOutcome.Acquired,0); Ledger.SubmitQueued(record);
+                    Ledger.PresentReturned(record,PresentOutcome.Queued,false); Ledger.ObserveSubmitCompletion(record);
+                    Ledger.RetireSwapchain(testChain.Record);
+                    _renderer.Api.QueueWaitIdle(_renderer.Queue); Ledger.ObserveQueueIdleAssumption(testChain.Record);
+                    int before=_deferredPresentSemaphores.Count;
+                    DestroyChain(testChain);
+                    Check(_deferredPresentSemaphores.Count-before==testChain.Images.Length,"each retirement quarantines at most image count");
+                }
+                Check(_deferredPresentSemaphores.Count==66,"retired present semaphores lost");
+                Check(capture.ToString().Split("deferredSemaphores=66 deferredFences=0 total=66 exceed 64").Length==2,"threshold warning must occur once with count");
+                Check(!Trace.Events.Contains("destroy-finished"),"present wait semaphores destroyed before device cleanup");
+                var failedWindow=new AndroidWindow();
+                failedWindow._deferredPresentSemaphores.Add(new Semaphore{Handle=11});
+                failedWindow._renderer.Api.DeviceWaitResult=Result.ErrorDeviceLost;
+                bool failed=false; try { failedWindow.ReleaseDeferredPresentResources(); } catch(InvalidOperationException) {failed=true;}
+                Check(failed && failedWindow._deferredPresentSemaphores.Count==1 && !Trace.Events.Contains("destroy-finished"),"device idle failure must retain resources");
+                failedWindow._renderer.Api.DeviceWaitResult=Result.Success;
+                failed=false; try { failedWindow.ReleaseDeferredPresentResources(); } catch(InvalidOperationException) {failed=true;}
+                Check(failed && failedWindow._deferredPresentSemaphores.Count==1,"latched device loss must prevent retry release");
+                _renderer.S2ADeviceCleanup=ReleaseDeferredPresentResources;
+                _renderer.S2ADeviceCleanup();
+                Check(_deferredPresentSemaphores.Count==0 && Trace.Events.Contains("destroy-finished"),"device teardown must release deferred resources");
+                Check(Trace.Events.IndexOf("device-idle-success") < Trace.Events.IndexOf("destroy-finished"),"device idle must precede deferred semaphore destruction");
+            }
+            finally { Console.SetError(oldError); }
+            Console.WriteLine("PASS " + mode); return;
+        }
+        if(mode is "present-nofence-revoke" or "present-nofence-surface-lost" or "present-fence-never-imported" or "present-nofence-queue-error" or "present-nofence-device-lost")
+        {
+            if(mode=="present-nofence-surface-lost") { _renderer.SwapchainApi.PresentResult=Result.ErrorSurfaceLostKhr; _renderer.SurfaceApi.LostHandle=1; }
+            if(mode=="present-fence-never-imported") _renderer.SwapchainApi.PresentResult=Result.ErrorOutOfDateKhr;
+            Present(new TextureView(),new ImageCrop(),null);
+            var prior=_pending[0].Record;
+            if(mode=="present-nofence-revoke") {Producer.State.Window=0; Producer.State.Revision++;}
+            if(mode is "present-nofence-queue-error" or "present-nofence-device-lost") Producer.State.Revision++;
+            Poll();
+            Check(_renderer.Api.QueueWaitCalls==0 && _renderer.SwapchainApi.Destroyed==0,"unfinished submit must not wait idle");
+            _renderer.Api.SubmitComplete=true;
+            if(mode=="present-fence-never-imported")
+            {
+                Poll();
+                Check(_renderer.Api.QueueWaitCalls==0 && _renderer.SwapchainApi.Destroyed==0,"fence grace must allow real completion");
+                TestClock.Value+=300;
+            }
+            if(mode=="present-nofence-device-lost") _renderer.Api.WaitResult=Result.ErrorDeviceLost;
+            if(mode=="present-nofence-queue-error") _renderer.Api.WaitResult=Result.ErrorUnknown;
+            Exception idleError=null;
+            try { Poll(); } catch(Exception error) { idleError=error; }
+            if(mode is "present-nofence-device-lost" or "present-nofence-queue-error")
+            {
+                Check(idleError!=null && _renderer.SwapchainApi.Destroyed==0 && Producer.Acks==0,"failed queue wait must retain chain and lease");
+                Check(Ledger.DeviceLost==(mode=="present-nofence-device-lost"),"device lost must be latched only on DEVICE_LOST");
+                Console.WriteLine("PASS " + mode); return;
+            }
+            Check(idleError==null && prior.PresentAssumedIdle && !prior.PresentDone,"queue idle assumption must not become present completion");
+            Check(_renderer.Api.QueueWaitCalls==1 && _renderer.SwapchainApi.Destroyed==1,"queue idle retirement did not complete");
+            Check(Trace.Events.IndexOf("submit-complete") < Trace.Events.IndexOf("queue-idle") && Trace.Events.IndexOf("queue-idle") < Trace.Events.IndexOf("destroy-chain"),"submit -> idle -> destroy order");
+            Check(!Trace.Events.Contains("destroy-finished"),"assumed present semaphore must be deferred");
+            if(mode=="present-nofence-revoke")
+                Check(Producer.Acks==1 && Trace.Events.IndexOf("destroy-chain") < Trace.Events.IndexOf("destroy-surface") && Trace.Events.IndexOf("destroy-surface") < Trace.Events.IndexOf("ack"),"lease order must be chain -> surface -> ACK");
+            else Check(_renderer.Creates==1,"replacement chain not created");
+            if(mode=="present-nofence-surface-lost") Check(_host.Surface.Handle!=1,"lost surface was reused");
+            if(mode=="present-fence-never-imported") Check(_deferredPresentFences.Count==1,"unproven fence must be deferred to device teardown");
+            Console.WriteLine("PASS " + mode); return;
+        }
+        if(mode=="present-nofence-stamp-two")
+        {
+            Present(new TextureView(),new ImageCrop(),null);
+            _renderer.SwapchainApi.ImageIndex=1;
+            Present(new TextureView(),new ImageCrop(),null);
+            Check(_renderer.SwapchainApi.Presents==2,"two distinct images must be presented");
+            Check(!_renderer.SwapchainApi.SawPresentFenceInfo,"Reacquire mode must not attach present fence pNext");
+            Producer.State.Revision++; Poll();
+            Check(_renderer.Api.QueueWaitCalls==0 && _renderer.SwapchainApi.Destroyed==0,"uncompleted submissions must block idle and destruction");
+            _renderer.Api.SubmitComplete=true; Poll();
+            Check(_renderer.Api.QueueWaitCalls==1 && _renderer.SwapchainApi.Destroyed==1 && _renderer.Creates==1,"completed submits must allow queue-idle retirement and recreation");
+            Check(Trace.Events.TakeWhile(e => e != "queue-idle").Count(e => e == "submit-complete") == 2,"both submit fences must be observed before queue idle");
+            Check(Trace.Events.IndexOf("submit-complete") < Trace.Events.IndexOf("queue-idle") && Trace.Events.IndexOf("queue-idle") < Trace.Events.IndexOf("destroy-chain"),"submit -> idle -> destroy order");
+            Check(!Trace.Events.Contains("destroy-finished"),"assumed present wait semaphores must survive swapchain destruction");
+            Console.WriteLine("PASS " + mode); return;
+        }
+        Exception failure=null;
+        try { Present(new TextureView(),new ImageCrop(),null); }
+        catch(Exception error) { failure=error; }
+        if(mode is "acquire-out-of-date" or "acquire-surface-lost")
+        {
+            Check(failure==null,mode+" killed the session: "+failure);
+            Check(_renderer.CommandBufferPool.Submits==0 && _renderer.SwapchainApi.Presents==0,"no-image acquire still submitted/presented");
+            Check(chain.Record.Retiring,"stale acquire result did not retire the chain");
+            Check(chain.Record.Acquires.Count==0,"no-image acquire retained semaphore debt");
+            Poll();
+            Check(_renderer.SwapchainApi.Destroyed==1 && _renderer.Creates==1,"Poll did not retire+rebuild after "+mode);
+            if(mode=="acquire-surface-lost") Check(_host.Surface.Handle!=1 && _host.Destroyed==1,"lost surface must be destroyed and replaced");
+            Check(QueuedGamePresents==0,"rejected frame counted as a game present");
+            Console.WriteLine($"PASS {mode}"); return;
+        }
+        if(mode is "present-mixed-unknown" or "present-unknown-mixed") { Check(failure is InvalidOperationException,"mixed stale/unknown must be fatal"); Console.WriteLine("PASS mixed stale/unknown fatal"); return; }
+        if(mode=="acquire-device-lost" || mode=="present-device-lost")
+        {
+            Check(failure!=null,mode+" must stay fatal");
+            Check(Ledger.DeviceLost,"device loss not latched in the ledger");
+            Console.WriteLine($"PASS {mode} retained fatal: {failure.Message}"); return;
+        }
+        if(mode is "present-out-of-date" or "present-surface-lost" or "present-out-of-date-nofence")
+        {
+            Check(failure==null,mode+" killed the session: "+failure);
+            Check(_renderer.SwapchainApi.Presents==1,"QueuePresent was not attempted");
+            Check(QueuedGamePresents==0,"rejected present counted as a game frame");
+            Check(chain.Record.Retiring,"stale present result did not retire the chain");
+            Check(Ledger.Blockers(chain.Record).UncertainOperations==1,"stale present not recorded as uncertain");
+            _renderer.Api.SubmitComplete=true; _renderer.Api.PresentComplete=true; Poll();
+            if(mode=="present-out-of-date-nofence")
+            {
+                Check(_renderer.SwapchainApi.Destroyed==1 && _renderer.Creates==1 && chain.Record.PresentAssumedIdle,"no-fence stale present must use explicit idle assumption");
+                Check(_deferredPresentSemaphores.Count==2,"all finished semaphores must be deferred");
+            }
+            else
+            {
+                Check(_renderer.SwapchainApi.Destroyed==1 && _renderer.Creates==1,"fenced uncertain present did not retire+rebuild");
+                Check(_renderer.Api.QueueWaitCalls==0 && !chain.Record.PresentAssumedIdle && _renderer.SwapchainApi.SawPresentFenceInfo,"signaled present fence must use pNext, not idle fallback");
+                if(mode=="present-surface-lost") Check(_host.Surface.Handle!=1 && _host.Destroyed==1,"lost surface must be destroyed and replaced");
+            }
+            Console.WriteLine($"PASS {mode}"); return;
+        }
+        if(mode is "acquire-bg-freeze" or "acquire-epoch-reset")
+        {
+            Check(failure==null,"foreground-frozen acquire budget expired: "+failure);
+            Check(QueuedGamePresents==1 && _renderer.CommandBufferPool.Submits==1,"resumed acquire did not finish the frame");
+            Console.WriteLine($"PASS {mode}"); return;
+        }
+        if(mode is "submit-failure" or "device-lost")
+        {
+            Check(failure!=null,"Actual failure was swallowed");
+            Check(!Ledger.CanDestroySwapchain(chain.Record),"Failure manufactured safe destruction");
+            Check(Producer.Acks==0 && _renderer.SwapchainApi.Destroyed==0,"Failed operation released live ownership");
+            Console.WriteLine($"PASS {mode} retained: {failure.Message}"); return;
+        }
+        if(failure!=null) throw new Exception("NORMAL_TRANSITION_FAILED: "+mode,failure);
+        if(mode is "stop-before" or "timeout-stop")
+        {
+            Check(_renderer.CommandBufferPool.Submits==0,"Unsuccessful acquire submitted");
+            Check(_renderer.SwapchainApi.Presents==0,"Unsuccessful acquire presented");
+            Check(chain.Record.Acquires.Count==0,"No-image acquire retained semaphore debt");
+            Check(Retired,"Stop without accepted work failed retirement");
+            Console.WriteLine($"PASS {mode}"); return;
+        }
+        Check(_renderer.CommandBufferPool.Submits==1,"Accepted image did not get exactly one real queue submission");
+        Check(_renderer.CommandBufferPool.Waited==1,"Acquire semaphore omitted/replaced");
+        Check(_pending.Count==1+(previous==null?0:1),"Pending final source use missing");
+        var current=_pending.Single(p=>p.Record!=previous).Record;
+        Check(!current.SubmitDone && !Ledger.SourceUseComplete(current),"Submission alone completed source use");
+        Check(!current.PresentDone,"Missing presentation was forged as completed");
+        bool normal=mode=="normal";
+        Check(_renderer.SwapchainApi.Presents==(normal?1:0),"Invalidated frame presented");
+        Check(_renderer.CommandBufferPool.Signalled==(normal?11ul:0ul),"Unpresented frame signalled render-finished semaphore");
+        Check(QueuedGamePresents==(normal?1ul:0ul),"Non-present incorrectly counted as game frame");
+        if (normal) Check(tracedCount == 1 && tracedAcquire == 1000 && tracedPresent == 2000,
+                          "successful frame did not submit its own acquire/present timings");
+        else Check(tracedCount == 0, "unpresented frame emitted timing record");
+        Check(_renderer.SwapchainApi.Destroyed==0 && Producer.Acks==0,"Early image/lease release");
+        if(!normal)
+        {
+            bool rejected=false;
+            try { Ledger.BeginAcquire(chain.Record,77); } catch(InvalidOperationException) { rejected=true; }
+            Check(rejected,"Retirement drain reopened frame admission");
+            rejected=false;
+            try { Ledger.PresentReturned(current,PresentOutcome.Queued,true); } catch(InvalidOperationException) { rejected=true; }
+            Check(rejected,"Retirement-only record was allowed to present");
+        }
+        Poll();
+        Check(_renderer.SwapchainApi.Destroyed==0 && Producer.Acks==0,"Pending submit fence ignored");
+        Check(_renderer.CommandBufferPool.Fence.Puts==0,"Source fence reference released before completion");
+        if(normal) { Producer.State.Stopping=1; Poll(); }
+        // Once revoke is observed, an unsignaled fence may take the explicit immediate
+        // idle assumption. Signal here to keep these cases testing the real-fence path.
+        if(normal || mode=="old-present") _renderer.Api.PresentComplete=true;
+        _renderer.Api.SubmitComplete=true;
+        Poll();
+        Check(current.SubmitDone && Ledger.SourceUseComplete(current),"Actual submit completion not consumed");
+        Check(_renderer.CommandBufferPool.Fence.Puts==1,"Exact source fence reference not retired once");
+        if(normal || mode=="old-present")
+            Check(_renderer.Api.QueueWaitCalls==0, "signaled fence must win over revoke fallback");
+        else if(previous!=null && mode is not ("same-image" or "no-fence" or "revoke-early-prior"))
+        {
+            Check(_renderer.SwapchainApi.Destroyed==0,"Old presentation erased by new drain submit");
+            Check(Ledger.Blockers(chain.Record).Presents==1,"Presentation debt lost");
+            _renderer.Api.PresentComplete=true;
+            Poll();
+        }
+        if(mode=="pool-pending")
+        {
+            Check(Ledger.Blockers(chain.Record).Empty,"Completed drain retains ledger debt");
+            Check(_renderer.SwapchainApi.Destroyed==0 && Producer.Acks==0,"Ledger completion bypassed pool source ownership");
+            _renderer.CommandBufferPool.Completed=true; Poll();
+        }
+        if(mode=="same-image") Check(previous.PresentDone,"Exact reacquire wait did not retire previous same-image present");
+        if(mode is "no-fence" or "revoke-early-prior")
+        {
+            Check(previous.PresentAssumedIdle && !previous.PresentDone,"no-fence debt must be assumed, not recorded as fence proof");
+            Check(_renderer.SwapchainApi.Destroyed==1 && Producer.Acks==1,"idle fallback must unblock revoke");
+            Check(_deferredPresentSemaphores.Count==2,"no-fence finished semaphores remain until device teardown");
+        }
+        else
+        {
+            Check(_renderer.SwapchainApi.Destroyed==1,"Completed chain not destroyed exactly once");
+            Check(chain.Views.All(v=>v.Disposed),"Image views not retired");
+            Check(_renderer.Api.DestroyedSemaphores==4,"Swapchain semaphores not retired");
+            Check(Producer.Acks==(mode is "focus" or "revision" ? 0:1),"Wrong generation acknowledgement");
+        }
+        Console.WriteLine($"PASS {mode}");
+    }
+}
+internal abstract class WindowBase {public abstract void Present(ITexture texture,ImageCrop crop,Action callback);}
+internal interface ITexture {}
+internal sealed class TextureView : ITexture {public int Width=1280,Height=720; public bool Disposed; public void Dispose()=>Disposed=true;}
+internal struct ImageCrop {public int Left,Right,Top,Bottom; public bool FlipX,FlipY,IsStretched; public float AspectRatioX=16,AspectRatioY=9; public ImageCrop() {} }
+internal record struct Extents2D(int X1,int Y1,int X2,int Y2);
+internal struct Image {}
+internal struct Semaphore {public ulong Handle;}
+internal struct Fence {public ulong Handle;}
+internal struct SwapchainKHR {public ulong Handle;}
+internal struct CommandBuffer {}
+internal enum Result {Success,SuboptimalKhr,Timeout,NotReady,ErrorOutOfDateKhr,ErrorSurfaceLostKhr,ErrorDeviceLost,ErrorUnknown}
+internal static class Results {public static void ThrowOnError(this Result r) {if(r!=Result.Success)throw new Exception("Driver "+r);}}
+internal enum ImageLayout {Undefined,General,PresentSrcKhr}
+internal enum AccessFlags {ColorAttachmentWriteBit=1}
+internal enum PipelineStageFlags {AllCommandsBit,ColorAttachmentOutputBit}
+internal enum StructureType {ImageMemoryBarrier,SwapchainPresentFenceInfoExt,FenceCreateInfo,PresentInfoKhr}
+internal enum ImageAspectFlags {ColorBit}
+internal struct ImageSubresourceRange {public ImageSubresourceRange(ImageAspectFlags a,int b,int c,int d,int e) {}}
+internal struct ImageMemoryBarrier {public StructureType SType; public AccessFlags SrcAccessMask,DstAccessMask; public ImageLayout OldLayout,NewLayout; public uint SrcQueueFamilyIndex,DstQueueFamilyIndex; public Image Image; public ImageSubresourceRange SubresourceRange;}
+internal static class Vk {public const uint QueueFamilyIgnored=uint.MaxValue;}
+internal unsafe struct SwapchainPresentFenceInfoEXT {public StructureType SType; public uint SwapchainCount; public Fence* PFences;}
+internal struct FenceCreateInfo {public StructureType SType;}
+internal unsafe struct PresentInfoKHR {public StructureType SType; public void* PNext; public uint WaitSemaphoreCount,SwapchainCount; public Semaphore* PWaitSemaphores; public SwapchainKHR* PSwapchains; public uint* PImageIndices; public Result* PResults;}
+internal struct Extent2D {public uint Width,Height; public Extent2D(uint w,uint h){Width=w;Height=h;}}
+internal enum SurfaceTransformFlagsKHR {IdentityBitKhr=1}
+internal struct SurfaceCapabilitiesKHR {public Extent2D CurrentExtent,MinImageExtent,MaxImageExtent; public SurfaceTransformFlagsKHR CurrentTransform;}
+internal sealed class FenceHolder {public int Gets,Puts; public void Get()=>Gets++; public void Put()=>Puts++; public Fence GetUnsafe()=>new(){Handle=1};}
+internal sealed class CommandBufferScoped(FenceHolder f) {public CommandBuffer CommandBuffer; public FenceHolder GetFence()=>f;}
+internal sealed class Pool {
+ public readonly FenceHolder Fence=new(); public int Submits;public ulong Waited,Signalled; public bool FailSubmit;
+ public CommandBufferScoped Rent()=>new(Fence);
+ public void Return(CommandBufferScoped c,ReadOnlySpan<Semaphore> wait,ReadOnlySpan<PipelineStageFlags> stages,ReadOnlySpan<Semaphore> signal) {
+  if(FailSubmit)throw new Exception("Injected actual QueueSubmit failure");
+  AndroidWindow.Check(wait.Length==1 && stages.Length==1,"Drain did not wait one acquire");
+  Waited=wait[0].Handle; Signalled=signal.Length==0?0:signal[0].Handle; Submits++;
+ }
+ public bool Completed=true; public bool CollectCompleted()=>Completed;
+}
+internal static class Trace { internal static readonly List<string> Events = new(); }
+internal sealed unsafe class Api {
+ public bool SubmitComplete,PresentComplete; public int DestroyedSemaphores,QueueWaitCalls; public Result WaitResult=Result.Success,DeviceWaitResult=Result.Success;
+ public Result DeviceWaitIdle(int device) {Trace.Events.Add(DeviceWaitResult==Result.Success?"device-idle-success":"device-idle-failed");return DeviceWaitResult;}
+ public Result QueueWaitIdle(int q) {QueueWaitCalls++; Trace.Events.Add("queue-idle"); return WaitResult;}
+ public Result GetFenceStatus(int d,Fence f) {var ready=(f.Handle<100?SubmitComplete:PresentComplete); if(ready && f.Handle<100) Trace.Events.Add("submit-complete"); return ready?Result.Success:Result.NotReady;}
+ public Result CreateFence(int d,in FenceCreateInfo i,void* a,out Fence f) {f=new(){Handle=100};return Result.Success;}
+ public void DestroyFence(int d,Fence f,void* a) {}
+ public void DestroySemaphore(int d,Semaphore s,void* a) {DestroyedSemaphores++;if(s.Handle>=11) Trace.Events.Add("destroy-finished");}
+ public void CmdPipelineBarrier(CommandBuffer c,PipelineStageFlags s,PipelineStageFlags t,int dep,int n,void* p,int m,void* q,int k,in ImageMemoryBarrier b) {}
+}
+internal sealed unsafe class SwapchainApi {
+ public Action AfterAcquire; public int Presents,Destroyed; public uint ImageIndex; public bool SawPresentFenceInfo;
+ public Result AcquireResult=Result.Success,PresentResult=Result.Success,PresentImageResult=Result.Success;
+ public Result AcquireNextImage(int d,SwapchainKHR s,ulong timeout,Semaphore semaphore,Fence f,ref uint image) {image=ImageIndex; AfterAcquire?.Invoke();return AcquireResult;}
+ public Result QueuePresent(int q,in PresentInfoKHR i) {Presents++;SawPresentFenceInfo=i.PNext!=null;*i.PResults=PresentImageResult;return PresentResult;}
+ public void DestroySwapchain(int d,SwapchainKHR s,void* a) {Destroyed++; Trace.Events.Add("destroy-chain");}
+}
+internal sealed class SurfaceApi {public ulong LostHandle; public Result GetPhysicalDeviceSurfaceCapabilities(int p,Fence s,out SurfaceCapabilitiesKHR c) {c=new(){CurrentExtent=new(){Width=1280,Height=720},MinImageExtent=new(1,1),MaxImageExtent=new(4096,4096)};return s.Handle==LostHandle ? Result.ErrorSurfaceLostKhr : Result.Success;}}
+internal sealed class Helper {public void BlitColor(Renderer r,CommandBufferScoped c,TextureView s,TextureView t,Extents2D a,Extents2D b,bool linear,bool clear) {}}
+internal sealed class AutoFlush {public void Present() {}}
+internal sealed class Pipeline {public readonly AutoFlush AutoFlush=new();}
+internal sealed class Features {public bool HasExtension(string s)=>true;}
+internal sealed class Renderer {
+ public readonly Api Api=new();public readonly Pool CommandBufferPool=new();public readonly SwapchainApi SwapchainApi=new();public readonly SurfaceApi SurfaceApi=new();
+ public readonly Pipeline PipelineInternal=new();public readonly Helper HelperShader=new(); public readonly object QueueLock=new();public int Queue,Creates; public Action S2ADeviceCleanup;
+ public readonly Features EnabledDeviceFeatures=new(); public void FlushAllCommands() {}
+}
+internal sealed class Host {public readonly NativeLease Lease=Producer.Create();public bool HasPresentFences;public long S2AStartedTick;public Func<long> Lifecycle=()=>0;public Fence Surface=new(){Handle=1};public int Destroyed;public void DestroySurface(){Destroyed++;Trace.Events.Add("destroy-surface");Surface=default;}public void CreateSurface(){Surface=new(){Handle=2};}}
+internal static unsafe class Producer {
+ internal static NativeLeaseState State;internal static int Acks;
+ internal static void Reset() {State=new(){Session=1,Generation=1,Revision=1,Window=42,Width=1280,Height=720,Foreground=1,RefreshHz=60};Acks=0;}
+ internal static NativeLease Create() {NativeLeaseApi api=new(){Size=(uint)sizeof(NativeLeaseApi),Version=1,Lease=1,Wait=&Wait,Take=&Take,ReleaseWindow=&Release,Released=&Ack,Wake=&Wake};return new NativeLease((nint)(&api),1,1);}
+ [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvCdecl)})]private static int Wait(nint l,NativeLeaseState* s,int ms)=>0;
+ [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvCdecl)})]private static int Take(nint l,NativeLeaseState* s){*s=State;return 0;}
+ [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvCdecl)})]private static void Release(nint l,nint w){}
+ [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvCdecl)})]private static void Ack(nint l,ulong g){Acks++;Trace.Events.Add("ack");}
+ [UnmanagedCallersOnly(CallConvs=new[]{typeof(CallConvCdecl)})]private static void Wake(nint l){}
+}
+internal static class Program {static int Main(string[] args) {new AndroidWindow().Run(args[0]);Console.WriteLine($"PASS {AndroidWindow.Checks} checks; actual Present/Poll/NativeLease/Ledger; controlled driver only, no GPU/native memory.");return 0;}}
+
+internal static class TestClock { internal static long Value; internal static long Now => Value; }

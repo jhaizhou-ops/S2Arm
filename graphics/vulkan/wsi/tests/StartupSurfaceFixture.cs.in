@@ -1,0 +1,110 @@
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
+using S2Arm.Backends.Vulkan.Wsi;
+using S2Arm.Backends.Vulkan.Runtime;
+struct SurfaceKHR { public ulong Handle; }
+struct Instance { }
+unsafe struct AndroidSurfaceCreateInfoKHR { public int SType; public nint* Window; }
+static class StructureType { public const int AndroidSurfaceCreateInfoKhr = 1; }
+struct Result { public void ThrowOnError() { } }
+class Vk { public bool TryGetInstanceExtension(Instance value, out AndroidSurface surface) { surface = new(); return true; } }
+unsafe class AndroidSurface {
+    public Result CreateAndroidSurface(Instance instance, in AndroidSurfaceCreateInfoKHR info, void* allocator, out SurfaceKHR surface) {
+        Program.Creates++; Program.CreatedWindow = (nint)info.Window; surface = new() { Handle = 1 }; return new();
+    }
+}
+unsafe class Boundary {
+    NativeLease _lease = null!; nint _leaseApi; ulong _session = 7; SurfaceKHR _surface; Instance _instance; AndroidSurface _android = null!;
+    bool _transferFullClears; Func<long> _lifecycle = null!;
+    public Boundary(nint api) { _leaseApi = api; }
+    PRODUCTION_CONSTRUCTOR
+    public Func<long> Lifecycle => _lifecycle;
+    public void Start() { CreateInitialSurface(new(), new()); }
+    PRODUCTION_METHODS
+}
+unsafe class Program {
+    public static int Creates; public static nint CreatedWindow;
+    static int waits, acks; static readonly int[] refs = new int[5]; static NativeLeaseState state;
+    static string mode = ""; static bool badWait;
+    static NativeLeaseState Window(ulong generation, bool foreground, bool size = true) => new() {
+        Session = 7, Generation = generation, Window = (nint)generation, Width = size ? 800 : 0, Height = size ? 600 : 0, Foreground = foreground ? 1 : 0 };
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int Take(nint lease, NativeLeaseState* output) { *output = state; if (output->Window != 0) refs[(int)output->Window]++; return 0; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static int Wait(nint lease, NativeLeaseState* seen, int milliseconds) {
+        waits++; badWait |= milliseconds != 25 || Creates != 0 || waits > 8;
+        if (waits > 8) { state.Window = 0; state.Stopping = 1; return 1; }
+        if (mode == "stop" || mode == "take-stop") { state.Window = 0; state.Stopping = 1; }
+        else if (mode == "taken-revoke" && waits == 1) state.Window = 0;
+        else if (mode == "zero-size") state = Window(1, true);
+        else state = Window(2, true);
+        return 1;
+    }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static void Release(nint lease, nint window) { refs[(int)window]--; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static void Ack(nint lease, ulong generation) { acks++; }
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    static void Wake(nint lease) { }
+    static void Check(bool value, string why) { if (!value) throw new Exception(why); }
+    static void Surface(string test) {
+        mode = test; Creates = waits = acks = 0; badWait = false; Array.Clear(refs);
+        state = test is "taken-revoke" or "take-stop" ? Window(1, false)
+            : test == "zero-size" ? Window(1, true, false) : new() { Session = 7, Generation = 1 };
+        NativeLeaseApi api = new() { Size = (uint)sizeof(NativeLeaseApi), Version = 1, Lease = 1,
+            Take = &Take, Wait = &Wait, ReleaseWindow = &Release, Released = &Ack, Wake = &Wake };
+        bool cancelled = false;
+        try { new Boundary((nint)(&api)).Start(); }
+        catch (OperationCanceledException) { cancelled = true; }
+        Check(!badWait && waits > 0, "must use bounded lease waits before surface creation");
+        if (test is "stop" or "take-stop") {
+            Check(cancelled && Creates == 0 && refs[1] == 0, "stop cancels bootstrap without a surface or retained take");
+            Check(acks == (test == "take-stop" ? 1 : 0), "only a real held generation may ACK");
+        } else {
+            Check(!cancelled && Creates == 1 && CreatedWindow == (test == "zero-size" ? 1 : 2), "only the resumed valid generation may create the first surface");
+            Check(acks == (test == "taken-revoke" ? 1 : 0), "revoked pre-surface take must be released/ACKed");
+            Check(refs[1] == (test == "zero-size" ? 1 : 0) && refs[2] == (test == "zero-size" ? 0 : 1), "no old generation leaked or fake release of the adopted window");
+        }
+        Console.WriteLine("PASS bootstrap " + test);
+    }
+    static void Budget() {
+        using var ready = new ManualResetEventSlim(); long time = 0; int sample = 0;
+        bool ok = StartupWait.Wait(ready, () => {
+            int step = sample++;
+            if (step == 0) return 0;
+            if (step == 1) return -1;
+            if (step == 2) return 2;
+            ready.Set(); return 2;
+        }, 100, () => { time += sample <= 2 ? 60_000 : 10; return time; });
+        Check(ok, "background and epoch transition must not expire the startup budget");
+        ready.Reset(); time = 0; sample = 0;
+        Check(StartupWait.Wait(ready, () => {
+            int step = sample++;
+            if (step == 0 || step == 1) return 0;
+            if (step == 2) return 2; // pause/resume happened between foreground samples
+            ready.Set(); return 2;
+        }, 100, () => { time += sample == 0 ? 0 : sample == 1 ? 80 : sample == 2 ? 60_000 : 30; return time; }),
+            "resume begins a fresh continuous-foreground budget");
+        ready.Reset(); time = 0;
+        Check(!StartupWait.Wait(ready, () => 0, 100, () => time += 60), "persistent foreground stall must time out");
+        ready.Set(); Check(StartupWait.Wait(ready, () => 0, 100), "published readiness wins without a spurious wait");
+        Console.WriteLine("PASS startup foreground budget");
+    }
+    static void LifecycleConstructor() {
+        Func<long> clock = () => 7;
+        var boundary = new Boundary(1, 7, false, clock);
+        Check(ReferenceEquals(clock, boundary.Lifecycle), "constructor must retain exact lifecycle clock");
+        bool rejected = false;
+        try { _ = new Boundary(1, 7, false, null!); } catch (ArgumentNullException) { rejected = true; }
+        Check(rejected, "missing lifecycle clock must be rejected");
+        var parameters = typeof(Boundary).GetConstructor(new[] { typeof(nint), typeof(ulong), typeof(bool), typeof(Func<long>) })!.GetParameters();
+        Check(!parameters[3].IsOptional, "lifecycle clock must be required");
+        Console.WriteLine("PASS lifecycle constructor contract");
+    }
+    static int Main() {
+        try { LifecycleConstructor(); foreach (string test in new[] { "absent", "taken-revoke", "zero-size", "stop", "take-stop" }) Surface(test); Budget(); return 0; }
+        catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+    }
+}

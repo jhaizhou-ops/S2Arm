@@ -1,0 +1,249 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+namespace S2Arm.Backends.Vulkan.Wsi;
+internal sealed unsafe class AndroidWindow
+{
+    PENDING_BODY
+    CHAIN_BODY
+    private readonly Renderer _renderer = new();
+    private readonly Host _host = new();
+    private readonly int _device = 0;
+    private readonly List<Pending> _pending = [];
+    private readonly List<Chain> _chains = [];
+    private Chain _current;
+    private bool _surfaceLost;
+    private const int PresentFenceGraceMs = 250;
+    private readonly List<Semaphore> _deferredPresentSemaphores = [];
+    private readonly List<Fence> _deferredPresentFences = [];
+    private int _idleAssumptionCount, _fenceGraceFallbacks, _revokeImmediateRetirements;
+    private int _publishedDeferredSemaphores, _publishedDeferredFences;
+    private bool _graveyardWarning;
+    private bool _stopped = true;
+    public ulong QueuedGamePresents { get; private set; }
+    private NativeLease Lease => _host.Lease;
+    private RetirementLedger Ledger => Lease.Retirement;
+    PRODUCTION_METHODS
+    private void CreateSwapchain() => throw new Exception("Unexpected creation");
+    internal static int Checks;
+    private static void Check(bool condition, string message)
+    {
+        Checks++;
+        if (!condition) throw new Exception(message);
+    }
+    private Chain Setup(bool fence, int images)
+    {
+        _host.HasPresentFences = fence;
+        _renderer.EnabledDeviceFeatures.Extension = fence;
+        Chain chain = new()
+        {
+            Record = Ledger.RegisterSwapchain(Lease.State.Stamp, images,
+                fence ? RetirementMode.EnabledPresentFence : RetirementMode.Reacquire),
+            InitialState = Lease.State, Width = 1280, Height = 720,
+            Images = new Image[images], Swapchain = new SwapchainKHR { Handle = 1 },
+        };
+        _current = chain;
+        _chains.Add(chain);
+        return chain;
+    }
+    private void Queue(Chain chain, bool fence, int images, ulong firstSemaphore = 1)
+    {
+        chain.LastAcquire = chain.LastPresent = chain.LastPresentSwapchain = Result.Success;
+        for (int i = 0; i < images; i++)
+        {
+            var acquire = Ledger.BeginAcquire(chain.Record, firstSemaphore + (ulong)i);
+            Ledger.FinishAcquire(acquire, AcquireOutcome.Acquired, i);
+            Ledger.SubmitQueued(acquire);
+            Ledger.PresentReturned(acquire, PresentOutcome.Queued, fence);
+            _pending.Add(new Pending { Record = acquire, Submit = new FenceHolder(),
+                Present = new Fence { Handle = fence ? (ulong)(100 + i) : 0 } });
+            QueuedGamePresents++;
+        }
+    }
+    internal void Run(bool fence, bool pool, bool revision, int images, int brokenSink = 0)
+    {
+        Chain chain = Setup(fence, images);
+        // Keep a real outstanding acquire when checking pending diagnostics; idle cannot retire it.
+        if (!fence) Ledger.BeginAcquire(chain.Record, 999);
+        var capture = new StringWriter();
+        TextWriter original = Console.Error;
+        Console.SetError(brokenSink == 0 ? capture : new BrokenWriter(brokenSink));
+        try
+        {
+            ReportStartup(chain); ReportStartup(chain);
+            Queue(chain, fence, images);
+            Poll();
+            Check(Ledger.Blockers(chain.Record).Submits == 0, "Actual submit observations were not consumed");
+            Check(Ledger.Blockers(chain.Record).Presents == images, "Submit completion falsely retired present");
+            if (revision) { Lease.State.Revision++; Lease.State.InsetTop = 12; }
+            else { chain.RetirementReason = "suboptimal-extent-change"; Ledger.RetireSwapchain(chain.Record); }
+            Poll(); Poll();
+            _renderer.Api.PresentComplete = fence;
+            _renderer.CommandBufferPool.Completed = pool;
+            // Exercise the diagnostic interval only, not a simulated GPU timeout/proof.
+            chain.RetiringSince = Environment.TickCount64 - 2500;
+            chain.LastReport = Environment.TickCount64 - 2001;
+            Poll();
+            bool retained = !fence || !pool;
+            Check(_chains.Contains(chain) == retained, "Diagnostic changed upstream retention/destruction");
+            Check(_current == null, "Retired chain resumed as current");
+            int polls = 4;
+            if (retained)
+            {
+                chain.LastReport = Environment.TickCount64 - 2001;
+                Poll(); polls++;
+                Check(_chains.Contains(chain), "Elapsed time manufactured retirement proof");
+            }
+            Check(_renderer.Api.Queries == images + (fence ? images * 4 : 0),
+                "Diagnostics added a fence query or changed observation consumption");
+            Check(_renderer.CommandBufferPool.Calls == (fence ? 2 : 0),
+                "Diagnostics changed upstream pool collection count, including the second destroy check");
+            Check(_renderer.Api.DestroyedFences == (fence ? images : 0), "Present fences changed ownership");
+            Check(_renderer.SwapchainApi.Destroyed == (retained ? 0 : 1), "Swapchain destruction changed");
+            Check(Lease.Polls == polls, "Diagnostic added lease polling");
+            if (brokenSink != 0) return;
+            string text = capture.ToString();
+            Check(text.Split("[WSI] startup").Length == 2, "Per-chain startup budget changed");
+            Check(text.Contains($"enabledMaintenance1={fence} enabledExtension={fence}"), "Enabled state misreported");
+            Check(text.Split("phase=begin").Length == 2, "First retirement must be logged once per chain");
+            Check(text.Contains("reason=" + (revision ? "retire (stamp-change)" : "suboptimal-extent-change")), "Retirement reason lost");
+            Check(text.Contains(revision ? "now=1/1/2:" : "now=1/1/1:"), "Current stamp lost");
+            Check(text.Contains("old=1/1/1:"), "Original swapchain stamp lost");
+            Check(text.Contains("poolCollected=not-attempted"), "Unattempted pool claimed complete");
+            Check(!text.Contains("phase=timeout"), "Diagnostic restored the removed runtime timeout");
+            if (retained)
+            {
+                string last = text.Split('\n').Last(l => l.Contains("phase=pending"));
+                Check(last.Contains(fence ? "blockers=0/0/0/0" : $"blockers=1/0/{images}/0"), "Ledger cause misreported");
+                Check(last.Contains(fence ? "poolCollected=False" : "poolCollected=not-attempted"), "Pool cause misreported");
+                Check(text.Split('\n').Count(l => l.StartsWith("[WSI] pending serial=") && !l.Contains("omitted=")) == (fence ? 0 : Math.Min(8, images)), "Pending budget/ownership mismatch");
+                Check(text.Contains("omitted=") == (!fence && images > 8), "Diagnostic truncation not explicit");
+                if (!fence) Check(text.Contains("submitDone=True submitStatus=Success presentCalled=True fenceAttached=False presentDone=False presentStatus=unobserved"), "Pending observations incomplete");
+            }
+            else Check(text.Contains("[WSI] destroyed serial=1"), "Actual destruction not observed");
+            Console.WriteLine($"PASS fence={fence} pool={pool} revision={revision} images={images}");
+        }
+        finally { Console.SetError(original); }
+    }
+    internal void ChainIsolation()
+    {
+        // Ledger permits distinct revisions. This checks diagnostic identity/filtering only;
+        // it does not claim production CreateSwapchain allows concurrent chains.
+        var capture = new StringWriter(); TextWriter original = Console.Error; Console.SetError(capture);
+        try
+        {
+            Chain first = Setup(false, 1); Queue(first, false, 1);
+            Ledger.BeginAcquire(first.Record, 999); // retain an actual unresolved acquire for diagnostics
+            Lease.State.Revision++;
+            Chain second = Setup(false, 1); Queue(second, false, 1, 20);
+            ReportStartup(first); ReportStartup(first); ReportStartup(second); ReportStartup(second);
+            Ledger.RetireSwapchain(first.Record);
+            Poll();
+            first.RetiringSince = Environment.TickCount64 - 2500;
+            first.LastReport = Environment.TickCount64 - 2001;
+            Poll();
+            string text = capture.ToString();
+            Check(text.Split("[WSI] startup").Length == 3, "Startup budget must be per-chain");
+            Check(text.Contains("state=1/1/1:") && text.Contains("state=1/1/2:"), "Startup revisions mixed");
+            Check(text.Contains("pending serial=1 image=0") && !text.Contains("pending serial=2 image="), "Retired-chain detail included a foreign pending record");
+            Check(text.Contains("old=1/1/1:") && text.Contains("now=1/1/2:"), "Retirement snapshots mixed");
+            Check(_current == second && _chains.Count == 2, "Diagnostic changed unrelated chain ownership");
+            Check(_renderer.Api.Queries == 2 && _renderer.CommandBufferPool.Calls == 0, "Identity diagnostic added GPU queries");
+            Console.WriteLine("PASS per-chain identity and pending filtering");
+        }
+        finally { Console.SetError(original); }
+    }
+    internal void AcquireBudget()
+    {
+        Chain chain = Setup(false, 1);
+        var capture = new StringWriter(); TextWriter original = Console.Error; Console.SetError(capture);
+        try
+        {
+            chain.LastAcquireReport = Environment.TickCount64 - 2001;
+            ObserveAcquire(chain, Result.SuboptimalKhr);
+            for (int i = 0; i < 1000; i++) ObserveAcquire(chain, Result.SuboptimalKhr);
+            Check(capture.ToString().Split("acquire suboptimal").Length == 2, "Acquire logged every frame");
+            Check(chain.LastAcquire == Result.SuboptimalKhr, "Raw acquire result lost");
+            ObserveAcquire(chain, Result.NotReady);
+            Check(chain.LastAcquire == Result.NotReady, "Retry result was replaced by success");
+            chain.LastAcquireReport = Environment.TickCount64 - 2001;
+            ObserveAcquire(chain, Result.SuboptimalKhr);
+            Check(capture.ToString().Split("acquire suboptimal").Length == 3, "Acquire diagnostic never resumed");
+            Check(_renderer.Api.Queries == 0 && _renderer.CommandBufferPool.Calls == 0, "Acquire observation queried driver");
+            Console.WriteLine("PASS acquire result capture and bounded reporting");
+        }
+        finally { Console.SetError(original); }
+    }
+}
+// Controlled boundary observations only. No real VkDevice, surface, lease ABI, queue or GPU.
+internal struct Fence { public ulong Handle; }
+internal struct Semaphore { public ulong Handle => 0; }
+internal struct Image { }
+internal struct SwapchainKHR { public ulong Handle; }
+internal sealed class TextureView { public void Dispose() { } }
+internal sealed class FenceHolder { public Fence GetUnsafe() => new() { Handle = 1 }; public void Put() { } }
+internal enum Result { Success, NotReady, SuboptimalKhr, ErrorDeviceLost }
+internal static class ResultExtensions { public static void ThrowOnError(this Result result) { if (result != Result.Success) throw new Exception(result.ToString()); } }
+internal sealed unsafe class Api
+{
+    public bool PresentComplete;
+    public Result QueueWaitIdle(int queue) => Result.Success;
+    public int Queries, DestroyedFences;
+    public Result GetFenceStatus(int device, Fence fence) { Queries++; return fence.Handle < 100 || PresentComplete ? Result.Success : Result.NotReady; }
+    public void DestroyFence(int device, Fence fence, void* allocator) { DestroyedFences++; }
+    public void DestroySemaphore(int device, Semaphore semaphore, void* allocator) { }
+}
+internal sealed class Pool { public bool Completed = true; public int Calls; public bool CollectCompleted() { Calls++; return Completed; } }
+internal sealed unsafe class SwapchainApi { public int Destroyed; public void DestroySwapchain(int device, SwapchainKHR swapchain, void* allocator) { Destroyed++; } }
+internal sealed class Features { public bool Extension; public bool HasExtension(string name) => Extension; }
+internal sealed class Renderer { public readonly object QueueLock = new(); public int Queue => 0; public readonly Api Api = new(); public readonly Pool CommandBufferPool = new(); public readonly SwapchainApi SwapchainApi = new(); public readonly Features EnabledDeviceFeatures = new(); }
+internal sealed class Host { public Func<long> Lifecycle=()=>0; public readonly NativeLease Lease = new(); public bool HasPresentFences; public Fence Surface = default; public void DestroySurface() { } public void CreateSurface() => throw new Exception("Unexpected surface"); }
+internal struct NativeLeaseState
+{
+    public ulong Session, Generation, Revision;
+    public int Width, Height, InsetLeft, InsetTop, InsetRight, InsetBottom, Foreground, Stopping;
+    public uint Transform;
+    public float RefreshHz;
+    public WindowStamp Stamp => new(Session, Generation, Revision);
+}
+internal sealed class NativeLease
+{
+    public NativeLeaseState State = new() { Session = 1, Generation = 1, Revision = 1, Width = 1280, Height = 720, Foreground = 1, Stopping = 0, RefreshHz = 60, Transform = 0, InsetLeft = 0, InsetRight = 0, InsetBottom = 0 };
+    public readonly RetirementLedger Retirement = new(1, 1);
+    public ulong HeldGeneration => 1;
+    public bool RetirementRequested => false;
+    public int WindowForSurface => 0;
+    public int Polls;
+    public void Poll() { Polls++; }
+    public void Stop() { Retirement.Stop(); }
+    public void TryReleaseRetired(Action action) => throw new Exception("Unexpected release");
+    public bool MayPresent(WindowStamp stamp) => false;
+}
+internal sealed class BrokenWriter(int mode) : TextWriter
+{
+    public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+    public override void WriteLine(string? text)
+    {
+        if (mode == 1) throw new IOException("Controlled sink failure");
+        throw new ObjectDisposedException("Controlled sink disposal");
+    }
+}
+internal static class Program
+{
+    static int Main()
+    {
+        foreach (bool fence in new[] { false, true })
+        foreach (bool revision in new[] { false, true })
+            new AndroidWindow().Run(fence, true, revision, 3);
+        new AndroidWindow().Run(true, false, false, 3);
+        new AndroidWindow().Run(false, true, true, 11);
+        new AndroidWindow().Run(false, true, false, 3, brokenSink: 1);
+        new AndroidWindow().Run(true, true, false, 3, brokenSink: 2);
+        new AndroidWindow().ChainIsolation();
+        new AndroidWindow().AcquireBudget();
+        Console.WriteLine($"PASS {AndroidWindow.Checks} checks; exact production methods + ledger, controlled observations; GPU/Android NOT RUN.");
+        return 0;
+    }
+}

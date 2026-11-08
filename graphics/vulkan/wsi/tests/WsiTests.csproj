@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WsiSource Condition="'$(WsiSource)' == ''">$(MSBuildThisFileDirectory)..</WsiSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(WsiSource)/RetirementLedger.cs" Link="RetirementLedger.cs" />
+    <Compile Include="$(WsiSource)/NativeLease.cs" Link="NativeLease.cs" />
+  </ItemGroup>
+  <Target Name="BuildHeaderLayout" AfterTargets="Build">
+    <Exec Command="cc -std=c11 -Wall -Wextra -Werror -DLAYOUT_ONLY -I&quot;$(MSBuildThisFileDirectory)../../../../android/native&quot; &quot;$(MSBuildThisFileDirectory)lease_fixture.c&quot; -o &quot;$(TargetDir)abi-layout&quot;" />
+    <Exec Command="&quot;$(TargetDir)abi-layout&quot; &gt; &quot;$(TargetDir)abi-layout.txt&quot;" />
+  </Target>
+</Project>
