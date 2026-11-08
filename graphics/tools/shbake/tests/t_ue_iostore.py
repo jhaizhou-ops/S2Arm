@@ -231,13 +231,13 @@ if old_src is not None:
     # 改前文件就地跑：它按 __file__ 找 graphics/tools/shbake/pak_crypto.py，所以摆成同样的目录形状
     old_py = os.path.join(T, 'oldtree', 'pack', 'ue_pak_old.py')
     os.makedirs(os.path.dirname(old_py), exist_ok=True)
-    os.makedirs(os.path.join(T, 'oldtree', 'gfx', 'tools', 'shbake'), exist_ok=True)
-    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'pak_crypto.py'), os.path.join(T, 'oldtree', 'gfx', 'tools', 'shbake', 'pak_crypto.py'))
-    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'unreal_pak.py'), os.path.join(T, 'oldtree', 'gfx', 'tools', 'shbake', 'unreal_pak.py'))
-    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'zstd_lib.py'), os.path.join(T, 'oldtree', 'gfx', 'tools', 'shbake', 'zstd_lib.py'))   # unreal_pak 导入的 zstd 解压入口
+    os.makedirs(os.path.join(T, 'oldtree', 'graphics', 'tools', 'shbake'), exist_ok=True)
+    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'pak_crypto.py'), os.path.join(T, 'oldtree', 'graphics', 'tools', 'shbake', 'pak_crypto.py'))
+    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'unreal_pak.py'), os.path.join(T, 'oldtree', 'graphics', 'tools', 'shbake', 'unreal_pak.py'))
+    shutil.copy(os.path.join(H, 'graphics', 'tools', 'shbake', 'zstd_lib.py'), os.path.join(T, 'oldtree', 'graphics', 'tools', 'shbake', 'zstd_lib.py'))   # unreal_pak 导入的 zstd 解压入口
     # ue_pak / uepak 的 RomFS 遍历经它（仓库里唯一的 RomFS 遍历）
-    os.makedirs(os.path.join(T, 'oldtree', 'gfx', 'nvn', 'tools'), exist_ok=True)
-    shutil.copy(os.path.join(H, 'graphics', 'nvn', 'tools', 'romfs_list.py'), os.path.join(T, 'oldtree', 'gfx', 'nvn', 'tools', 'romfs_list.py'))
+    os.makedirs(os.path.join(T, 'oldtree', 'graphics', 'nvn', 'tools'), exist_ok=True)
+    shutil.copy(os.path.join(H, 'graphics', 'nvn', 'tools', 'romfs_list.py'), os.path.join(T, 'oldtree', 'graphics', 'nvn', 'tools', 'romfs_list.py'))
     open(old_py, 'w').write(old_src)
     rc5, log5 = run_ue_pak(os.path.join(r2, 'romfs'), os.path.join(r2, 'out_old'), old_py)
     old_list = listing(os.path.join(r2, 'out_old'))

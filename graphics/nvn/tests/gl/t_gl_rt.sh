@@ -9,17 +9,17 @@ PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}; [ -x "$PY" ] || PY=python3
 for t in glslangValidator spirv-cross; do command -v $t > /dev/null || { echo "✗ t_gl_rt：没有 ${t}（brew install glslang spirv-cross）"; exit 1; }; done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; mkdir -p "$T/cap" "$T/lib" "$T/o" "$T/fb"
 for s in vert frag; do k=$(shasum -a 256 "$H/tri.$s" | cut -c1-16); cp "$H/tri.$s" "$T/cap/$k.$s"; done
-"$PY" "$NV/graphics/tools/gl_shaders.py" "$T/cap" "$T/lib" > "$T/lib.log" 2>&1 || { echo "✗ t_gl_rt：出库失败"; cat "$T/lib.log"; exit 1; }
+"$PY" "$NV/../../translator/gl_shaders.py" "$T/cap" "$T/lib" > "$T/lib.log" 2>&1 || { echo "✗ t_gl_rt：出库失败"; cat "$T/lib.log"; exit 1; }
 # 就绪判定用的三个游戏数据目录（<目录>/shaders/direct/gl/）：只有表头（空输入出库）、tri 的表 + 库、同一张表没有库
 mkdir -p "$T/empty_in" "$T/gd_lib/shaders/direct" "$T/gd_nolib/shaders/direct/gl"
-"$PY" "$NV/graphics/tools/gl_shaders.py" "$T/empty_in" "$T/gd_empty/shaders/direct" > "$T/empty.log" 2>&1 || { echo "✗ t_gl_rt：空输入出表失败"; cat "$T/empty.log"; exit 1; }
+"$PY" "$NV/../../translator/gl_shaders.py" "$T/empty_in" "$T/gd_empty/shaders/direct" > "$T/empty.log" 2>&1 || { echo "✗ t_gl_rt：空输入出表失败"; cat "$T/empty.log"; exit 1; }
 cp -R "$T/lib/gl" "$T/gd_lib/shaders/direct/gl"; cp "$T/lib/gl/gl_shaders.tsv" "$T/gd_nolib/shaders/direct/gl/"
 make -s -C "$NV" glx-mac > "$T/glx.log" 2>&1 || { echo "✗ t_gl_rt：libglx 编不出"; tail -5 "$T/glx.log"; exit 1; }
 make -s -C "$R/graphics/metal" "$R/build/gal/libspvc.a" > "$T/spvc.log" 2>&1 || { echo "✗ t_gl_rt：SPIRV-Cross 库编不出"; tail -5 "$T/spvc.log"; exit 1; }
-CF=(-std=gnu11 -fobjc-arc -O1 -g -Wall -Wno-unused-function -I"$NV/graphics/nvn/include" -I"$NV/host" -I"$R/runtime/include")
+CF=(-std=gnu11 -fobjc-arc -O1 -g -Wall -Wno-unused-function -I"$NV/gfx/nvn/include" -I"$NV/host" -I"$R/runtime/include")
 for f in "$NV"/gfx/gl/*.m; do clang "${CF[@]}" -c "$f" -o "$T/o/$(basename "$f" .m).o" || { echo "✗ t_gl_rt：编译失败（${f}）"; exit 1; }; done
 ar rcs "$T/libgl.a" "$T"/o/*.o
-clang "${CF[@]}" -o "$T/t_gl_rt" "$H/t_gl_rt.m" "$T/libgl.a" "$R/build/nvn/mac/libglx.a" "$R/build/gal/libspvc.a" "$NV/graphics/nvn/nvn_fps.c" \
+clang "${CF[@]}" -o "$T/t_gl_rt" "$H/t_gl_rt.m" "$T/libgl.a" "$R/build/nvn/mac/libglx.a" "$R/build/gal/libspvc.a" "$NV/gfx/nvn/nvn_fps.c" \
   $(python3 "$R/tools/weak_link_decl.py" flags nvntest) -lc++ -framework Metal -framework Foundation || { echo "✗ t_gl_rt：链接失败"; exit 1; }
 rc=0
 for pass in 1 2; do

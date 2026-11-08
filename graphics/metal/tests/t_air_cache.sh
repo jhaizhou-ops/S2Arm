@@ -23,7 +23,7 @@ for n in 1 48; do want=$([ $n = 1 ] && echo 3 || echo 1); tag=$([ $n = 1 ] && ec
   run $n; ck "$tag ③ 条目克隆不了：不崩、退出 0、命中 0、现编 3（$(hit)；$(grep -m1 -E 'Error|Traceback' "$T/log")）" '[ "$(cat $T/rc)" = 0 ] && [ "$(hit)" = "缓存命中 0，现编 3" ]'
   ents $n | while read -r f; do chmod 644 "$f"; done
   # ④ 只改编译旗（MATH，如去掉 -fpreserve-invariance），同一份缓存：必须全部重编（11-01 审计 P2-41：旗不在键里，旧 .air 照样命中，改旗要等清缓存才生效）
-  F=$T/fake$n; mkdir -p "$F/graphics/metal/tools" "$F/tools"; cp "$R"/gfx/metal/tools/*.py "$F/graphics/metal/tools/"; cp "$R/tools/toolchain.env" "$R"/tools/*.py "$F/tools/"
+  F=$T/fake$n; mkdir -p "$F/graphics/metal/tools" "$F/tools"; cp "$R"/graphics/metal/tools/*.py "$F/graphics/metal/tools/"; cp "$R/tools/toolchain.env" "$R"/tools/*.py "$F/tools/"
   python3 -c "import sys; p=sys.argv[1]; t=open(p).read(); a=\"MATH = ['-fmetal-math-mode=relaxed', '-fpreserve-invariance']\"; assert t.count(a)==1; open(p,'w').write(t.replace(a, \"MATH = ['-fmetal-math-mode=relaxed']\"))" "$F/graphics/metal/tools/gal_offline.py"
   run $n; GAL_UNITY_N=$n GAL_XC_DONE=1 GAL_AIR_CACHE=$T/c$n python3 "$F/graphics/metal/tools/gal_offline.py" "$T/src" "$T/o" ios > "$T/log" 2>&1; echo $? > "$T/rc"
   ck "$tag ④ 只改编译旗：命中 0、现编 3（$(hit)）" '[ "$(cat $T/rc)" = 0 ] && [ "$(hit)" = "缓存命中 0，现编 3" ]'

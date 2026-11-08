@@ -30,7 +30,10 @@ export S2A_REMOTE=local S2A_REMOTE_ROOT=$T/rr S2A_REMOTE_LOGS=$T/logs HOME=$T/ho
 mkdir -p "$T/home" "$T/repo/tools/bin" "$T/repo/gfx/tools/shbake"; cd "$T/repo" || exit 1
 mkdir -p "$T/home/.s2arm/run/s2arm/bin"; echo '# 测试用局槽仲裁副本' > "$T/home/.s2arm/run/s2arm/bin/mac_slot-now.sh"   # remote.sh 本机缺副本不派（tools/mac_slot_frozen.sh）
 git init -q; git config user.email t@t; git config user.name t
-cp "$RT/tools/remote.sh" "$RT/tools/safe_killpg.sh" "$RT/tools/disk_low.sh" "$RT/tools/idle_timeout.sh" tools/; cp "$RT/tools/bin/timeout" tools/bin/; cp "$H/pso_dist.sh" "$H/pso_chunk.sh" "$H/pso_isolate.py" graphics/tools/shbake/; git add -A; git commit -qm 1
+cp "$RT/tools/safe_killpg.sh" "$RT/tools/idle_timeout.sh" tools/; REM=${S2A_REMOTE_SH:-}
+if [ -n "$REM" ]; then cp "$REM" tools/remote.sh; cp "$(dirname "$REM")/disk_low.sh" tools/; export S2A_REMOTE_SH=$T/repo/tools/remote.sh
+else echo "－ 未覆盖：远端分发 ①②④⑤⑥⑦⑩⑫（没设 S2A_REMOTE_SH；远端脚本与这几例留维护方私仓）"; fi
+ cp "$RT/tools/bin/timeout" tools/bin/; cp "$H/pso_dist.sh" "$H/pso_chunk.sh" "$H/pso_isolate.py" graphics/tools/shbake/; git add -A; git commit -qm 1
 cat > "$T/fake_nt" <<'EOF'
 #!/bin/bash
 case $HOME in */rr/home) touch "${HOME%/rr/home}/remote_tried";; esac   # 远端（假家目录）编了一片：落标记，本机 wait_nt 据此开工
@@ -78,12 +81,15 @@ go() {   # go <标签> [环境…]：新产物目录（库放进去，分片脚�
 }
 LEFT=
 allok() { local n; for n in $(seq 0 15); do [ "$(cat "$T/o0/gal_pso.g.ios27.$n.bin" 2> /dev/null)" = "$(exp $n)" ] || return 1; done; }
+if [ -n "$REM" ]; then
 rm -f "$T/remote_tried"; go 1 PSO_NT=$T/wait_nt; MS=$(grep -o 'mini [0-9]* 片' "$T/1.log" | grep -o '[0-9]*')
 ck "① mini 可用：产物齐且对、两边都编（远端 ${RC} / 本机 ${LC}）、合计 16、分工行 mini ${MS:-?} 片 = 远端次数、缓存 $(find "$T/pc" -name '*.bin' | grep -c .) 项" \
   'allok && [ $RC -ge 1 ] && [ $LC -ge 1 ] && [ $((RC + LC)) = 16 ] && [ "${MS:-x}" = $RC ] && [ "$(find "$T/pc" -name "*.bin" | grep -c .)" = 16 ]'
 go 2; ck "② 同输入再来：全命中（命中标记 $(ls "$W"/*.hit 2> /dev/null | grep -c .)）、两边 0 次（远端 ${RC} / 本机 ${LC}）、产物同 ①" 'allok && [ $RC = 0 ] && [ $LC = 0 ] && [ "$(ls "$W"/*.hit | grep -c .)" = 16 ]'
 rm -rf "$T/pc"
+fi
 go 3 S2A_PSO_REMOTE=off; ck "③ S2A_PSO_REMOTE=off：远端 ${RC}、本机 ${LC}" 'allok && [ $RC = 0 ] && [ $LC = 16 ]'
+if [ -n "$REM" ]; then
 rm -rf "$T/pc"; mkdir -p "$T/rr/tools/bin"; printf '#!/bin/sh\necho 9.9.9\n' > "$T/rr/tools/bin/bash"; chmod +x "$T/rr/tools/bin/bash"
 go 4; rm -rf "$T/rr/tools"; ck "④ 远端工具链不同：全在本机（远端 ${RC} / 本机 ${LC}）、产物齐对" 'allok && [ $RC = 0 ] && [ $LC = 16 ] && grep -qE "远端服务没起来|远端服务起来前本机已全部领完" "$T/4.log"'
 rm -rf "$T/pc"; echo x >> tools/remote.sh
@@ -92,6 +98,7 @@ rm -rf "$T/pc"
 rm -f "$T/remote_tried"; go 6 PSO_NT=$T/wait_nt PSO_REMOTE_NT=$T/fail_nt; ck "⑥ 远端编译全失败：退回本机重编（本机 ${LC}）、产物齐对、没有 .fail" 'allok && [ $LC = 16 ] && ! ls "$W"/*.fail > /dev/null 2>&1 && grep -q "编失败" "$T/6.log"'
 rm -rf "$T/pc"
 rm -f "$T/remote_tried"; go 7 PSO_NT=$T/wait_nt PSO_REMOTE_NT=$T/die_nt; ck "⑦ 远端服务中途被杀：在途退回本机（远端 ${RC} / 本机 ${LC}）、产物齐对、日志报远端服务退了" 'allok && [ $RC = 0 ] && [ $LC = 16 ] && grep -q "远端服务退了" "$T/7.log"'
+fi
 # ⑧ 一片 6 条里第 3 条让编译器崩（pso_isolate.py）：期望隔离出它、其余 5 条照收进归档（内容 = 去掉第 3 条的描述）、.bad 点名 s3、没有 .fail
 # ⑨ 一片 20 条全编不过：期望坏的超过上限 8 就停、按整片失败（.fail、没有归档、没有 .bad），试编次数 < 整片二分 2×20−1 = 39
 iso() {   # iso <片号> <条数> <编译器>：单编一片（不经分发），回显本机编译次数 IC
@@ -111,6 +118,7 @@ ck "⑧ 一片 6 条第 3 条致崩：隔离出 s3、其余 5 条照收、没有
 iso 21 20 "$T/allbad_nt"
 ck "⑨ 一片 20 条全编不过：超上限即停、按整片失败（.fail、无归档、无 .bad），试编 ${IC} 次 < 39" '[ -e "$W/pso_g.ios27.21.fail" ] && [ ! -e "$T/o0/gal_pso.g.ios27.21.bin" ] && [ ! -e "$W/pso_g.ios27.21.bad" ] && [ $IC -lt 39 ] && [ $IC -ge 9 ]'
 # ⑩ 远端满核槽被占（别的远端任务拿着）、本机先全领完：feeder 收掉还在排队的 remote.sh（10-21 漏下的孤儿在 mini 槽前排了一小时）
+if [ -n "$REM" ]; then
 rm -rf "$T/pc"; mkdir -p "$T/logs/slot.local.1"; echo $$ > "$T/logs/slot.local.1/pid"   # 清产物缓存：前几例已填满，不清全命中、本机 0 次
 go 10; rm -rf "$T/logs/slot.local.1"; ck "⑩ 远端槽被占、本机先领完：全在本机（远端 ${RC} / 本机 ${LC}）、产物齐对、日志报本机已全部领完" 'allok && [ $RC = 0 ] && [ $LC = 16 ] && grep -q "远端服务起来前本机已全部领完" "$T/10.log"'
 # ⑫ PSO_NTJ=5（编译线程数，进缓存键）：本机与远端编译器都拿到 -j 5（远端经 remote.sh --env 带过去；--put 按本机键入缓存，两边线程数不同缓存就错）
@@ -118,6 +126,7 @@ printf '#!/bin/bash\necho "$*" >> "$HOME/args"; exec "%s/fake_nt" "$@"\n' "$T" >
 rm -rf "$T/pc" "$T/remote_tried" "$T/home/args" "$T/rr/home/args"; go 12 PSO_NTJ=5 PSO_NT=$T/jrw_nt PSO_REMOTE_NT=$T/jr_nt
 JA=$(cat "$T/home/args" "$T/rr/home/args" 2> /dev/null | grep -c .); JR=$(grep -c -- ' -j 5 ' "$T/rr/home/args" 2> /dev/null); JL=$(grep -c -- ' -j 5 ' "$T/home/args" 2> /dev/null)
 ck "⑫ PSO_NTJ=5：远端 ${RC} 片调用里带 -j 5 的 ${JR:-0}、本机 ${LC} 片里 ${JL:-0}，产物齐对" 'allok && [ $RC -ge 1 ] && [ "${JR:-0}" = $RC ] && [ "${JL:-0}" = $LC ] && [ $JA = 16 ]'
+fi
 # ⑬ 大清单本机独编收尾（10-25 #266 M5 Max 6357 片：送片进程不在时空转的工人每轮逐个 basename + cat 全部领标记，一轮十几分钟，看门狗 600 秒杀阶段）：
 #   1500 片、S2A_PSO_REMOTE=off、本机 4 个工人，最小的一片编 4 秒（别的工人先扫完一轮进入收尾）。PATH 最前放 basename 垫片记调用次数。
 #   期望（按规则手写）：每片恰好编 1 次（1500）、产物 1500 个；收尾 basename 调用 0 次（旧实现每轮 1500 次）；日志有「进度：… 做完 1500 / 1500 片」

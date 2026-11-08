@@ -72,7 +72,7 @@ if [ -z "${DSH_EXAM:-}" ]; then
   { "${LS[@]}" --keys sample:300 --seed-pairs; "${LS[@]}" --keys sample:40; "${LS[@]}" --keys sample:500 --seed-pairs; cat "$T/fk.txt"; } | LC_ALL=C sort -u > "$T/exk.txt"
   # 考卷按 库版本 V + 翻译指纹 xlate_fp 分目录：10-30 起 V 只随 ABI 变，翻译器改了 V 不变，只按 V 分会拿旧翻译器出的考卷对拍
   read -r CHAIN XFP < <(cd "$R/translator" && python3 -c 'import dmsh_chain; print(dmsh_chain.version(), dmsh_chain.xlate_fp())') && [ -n "${XFP:-}" ] || { echo "S2A.Dsh 对拍：算不出离线链版本 / 翻译指纹 → 红"; exit 1; }
-  BFP=$(cat "$R"/gfx/tools/direct/dsh/batch/*.cs "$R/graphics/tools/direct/dsh/batch/dsh_batch.csproj" | shasum | cut -c1-8)   # 出库进程（编排、编批库、发布）不在翻译指纹里：改了它考卷要重出
+  BFP=$(cat "$R"/graphics/tools/direct/dsh/batch/*.cs "$R/graphics/tools/direct/dsh/batch/dsh_batch.csproj" | shasum | cut -c1-8)   # 出库进程（编排、编批库、发布）不在翻译指纹里：改了它考卷要重出
   EC=${DSH_EXAM_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/gate_dsh}; E=$EC/$(cat "$IN/inputs.sha")-$CHAIN-$XFP$BFP-$(shasum < "$T/exk.txt" | cut -c1-8); REF=$E/mac/b-$CHAIN
   if [ ! -f "$E/done" ]; then
     mkdir -p "$EC"; X=$(mktemp -d "$EC/.mk.XXXXXX")

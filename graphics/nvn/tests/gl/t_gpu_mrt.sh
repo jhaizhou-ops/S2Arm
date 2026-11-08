@@ -16,7 +16,7 @@ for source in mrt.vert mrt.frag tri.vert tri.frag; do
     key=$(shasum -a 256 "$H/$source" | cut -c1-16)
     cp "$H/$source" "$OUT/cap/$key.${source##*.}"
 done
-"$PY" "$NV/graphics/tools/gl_shaders.py" "$OUT/cap" "$OUT/lib" >"$OUT/shaders.log" 2>&1 || { cat "$OUT/shaders.log"; exit 1; }
+"$PY" "$NV/../../translator/gl_shaders.py" "$OUT/cap" "$OUT/lib" >"$OUT/shaders.log" 2>&1 || { cat "$OUT/shaders.log"; exit 1; }
 make -C "$R" -j "${GL_MRT_JOBS:-1}" -f Makefile -f "$H/gpu_mrt.mk" gl-gpu-mrt-build \
     GL_MRT_OUT="$OUT" GL_MRT_ARCHIVE="${GL_MRT_ARCHIVE:-}" >"$OUT/build.log" 2>&1 || { cat "$OUT/build.log"; exit 1; }
 mkdir -p "$OUT/run/shaders"

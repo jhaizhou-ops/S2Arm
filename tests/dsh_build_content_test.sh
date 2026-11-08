@@ -7,7 +7,7 @@ set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' 
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 R=$T/repo; mkdir -p $R/translator $R/graphics/nvn/gfx/nvn $R/graphics/tools/direct $R/graphics/metal $R/compat/tree/src
 cp "$H/translator/dsh_batch.py" "$H/translator/xlock.py" $R/translator/; cp -R "$H/translator/dmsh_xlate" $R/translator/; cp "$H/graphics/nvn/gfx/nvn/dmsh_chain.h" $R/graphics/nvn/gfx/nvn/   # xlock.py：dsh_batch.py 的跨平台文件锁（#1100 W6）
-cp -R "$H/graphics/tools/direct/dsh" "$H/graphics/tools/direct/compiler" $R/graphics/tools/direct/; cp -R "$H/graphics/widen" $R/graphics/; cp "$H"/gfx/metal/gal_spvx.* $R/graphics/metal/
+cp -R "$H/graphics/tools/direct/dsh" "$H/graphics/tools/direct/compiler" $R/graphics/tools/direct/; cp -R "$H/graphics/widen" $R/graphics/; cp "$H"/graphics/metal/gal_spvx.* $R/graphics/metal/
 cp "$H/compat/tree/Directory.Build.props" $R/compat/tree/; for p in Ryujinx.Graphics.Shader Spv.Generator Ryujinx.Common; do cp -R "$H/compat/tree/src/$p" $R/compat/tree/src/; done
 rm -rf $R/graphics/tools/direct/dsh/bin $R/graphics/tools/direct/dsh/obj $R/build
 # 假 dotnet：build 记一行参数、按 FAKE_RC 退出并放一个 dll；<dll> --xfp 打 16 位十六进制

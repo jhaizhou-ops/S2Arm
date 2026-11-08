@@ -94,7 +94,7 @@ sites() { local out= e; for e in "$@"; do out+="${out:+,}${e%:*}"; done; echo "$
 pick() { local e; for e in "${EX[@]}"; do case " $* " in *" ${e##*:} "*) echo "$e";; esac; done; }   # 只留给定种类
 # 先验种类：同款别的构建号的启用表里「启用 = 1」的种类（仓库表优先、再自动表；同档位优先、没有再另一档位）。表头 模块 偏移 种类 启用
 prior_kinds() { local m f; for m in "$MODE" $([ "$MODE" = handheld ] && echo docked || echo handheld); do
-    for f in "$R"/gfx/widen/tables/"${G}"_*/widen_enable.$m.tsv "$AUTO"/"${G}"_*/widen_enable.$m.tsv; do
+    for f in "$R"/graphics/widen/tables/"${G}"_*/widen_enable.$m.tsv "$AUTO"/"${G}"_*/widen_enable.$m.tsv; do
       [ -f "$f" ] && [ "$(basename "$(dirname "$f")")" != "${G}_$BID" ] || continue
       awk -F'\t' 'NR > 1 && $4 == 1 { print $3 }' "$f" | sort -u | tr '\n' ' '; return; done; done; }
 try_kinds() { local A; A=($(pick "$@")); [ ${#A[@]} -gt 0 ] && try "${A[@]}"; }
@@ -102,7 +102,7 @@ N=0; GOOD=; GD=
 try() { [ $N -lt "$MAX" ] || return 1; N=$((N + 1)); loop "t$N" "$(sites "$@")" "$FR" && { GOOD=("$@"); GD=t$N; return 0; }; return 1; }
 # 移植：同款别的构建号的表旁有启用点特征（widen_sig.<档位>.tsv，闭环写表时生成）就按特征移植到本版本（widen_sig.py port），移植出且探测局执行到的点先上闭环。
 #   游戏一更新构建号就变，按构建号绑定的表不生效（10-26 动森新版：表在 5d913cf7、现行 ff1d1c05，退回整套放宽出拉丝）。移植不了的点记黄，照旧走下面的自动探测
-PT=(); for f in "$R"/gfx/widen/tables/"${G}"_*/widen_sig.$MODE.tsv "$AUTO"/"${G}"_*/widen_sig.$MODE.tsv; do
+PT=(); for f in "$R"/graphics/widen/tables/"${G}"_*/widen_sig.$MODE.tsv "$AUTO"/"${G}"_*/widen_sig.$MODE.tsv; do
   [ -f "$f" ] && [ "$(basename "$(dirname "$f")")" != "${G}_$BID" ] || continue
   PS=$("$PYS" "$H/widen_sig.py" port "$src/exefs" "$f" "$src/widen_sites.tsv" 2>> "$O/$MODE.log"); prc=$?
   [ $prc = 0 ] || echo "$(date '+%m-%d %H:%M') 🟡 移植 $(basename "$(dirname "$f")")：有点没移植成（明细见上；退回自动探测选点）" >> "$O/$MODE.log"

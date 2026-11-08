@@ -54,13 +54,13 @@ fi
 tu=$((SECONDS - s)); s=$SECONDS
 # 运行时 GLSLC 款（main 或 RomFS 的 NRO 模块有 GLSL 源码、main 导入 glslcCompile、另有模块定义它）：出包期用游戏自带的编译器离线编（要不要编由 glslc_offline.py 自己判，不需要就一行、不出文件）
 prog "GLSLC 离线编（${J} 路）"
-"$PY" "$R/tools/nostall.py" --watch "$X" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/glslc_offline.py" "$ROOT" "$X/glslc_capture" > "$X/glslc.log" 2>&1 \
+"$PY" "$R/tools/nostall.py" --watch "$X" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/glslc_offline.py" "$ROOT" "$X/glslc_capture" > "$X/glslc.log" 2>&1 \
   || { say "🔴 直连库失败：GLSLC 离线编失败（$(why "$X/glslc.log")；$X/glslc.log）"; exit 3; }
 say "$(tail -1 "$X/glslc.log")"
 GC=(); ls "$X/glslc_capture"/*.glslc > /dev/null 2>&1 && GC=(DM_GLSLC_CAPTURE="$X/glslc_capture")   # 编出了才指给 shader_split（没编的款照旧读 <版本目录>/glslc_capture）
 tg=$((SECONDS - s)); s=$SECONDS
 prog "抽取着色器（直连抽取，${J} 路）"
-env ${GC[@]+"${GC[@]}"} "DM_UE_SHADERS=$X/ue_shaders" "DM_OODLE_LOG_DIR=$X" "$PY" "$R/tools/nostall.py" --watch "$X" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/shader_split.py" "@$X/roms.lst" "@$X/mains.lst" "$X/pkg" \
+env ${GC[@]+"${GC[@]}"} "DM_UE_SHADERS=$X/ue_shaders" "DM_OODLE_LOG_DIR=$X" "$PY" "$R/tools/nostall.py" --watch "$X" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/shader_split.py" "@$X/roms.lst" "@$X/mains.lst" "$X/pkg" \
   "$X/split/shader_map.tsv" "$X/split/shader_facts.tsv" "$X/split/shader_pairs.tsv" > "$X/split.log" 2>&1 \
   || { say "🔴 直连库失败：直连抽取失败（$(why "$X/split.log")；$X/split.log）"; tail -3 "$X/split.log"; exit 3; }
 ts=$((SECONDS - s)); s=$SECONDS

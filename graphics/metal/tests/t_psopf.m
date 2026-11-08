@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
     CHECK(ga == 1 && a[0] == 1 && a[1] == 1 && a[8] == 0, "期望 现编 1、特化 1、预取取用 0，实得 现编 %llu 特化 %llu 取用 %llu（子进程 %d）", a[0], a[1], a[8], ga);
     // 真收集器出用表（仓库根 = 可执行文件所在 build/gal 的上两级）
     char rr[1100]; snprintf(rr, sizeof rr, "%s", argv[0]); char *bd = dirname(rr); char cmd[4000], ut[1200];
-    snprintf(cmd, sizeof cmd, "S2A_SHCOLLECT='%s/col' python3 '%s/../../gfx/tools/shbake/psouse.py' t '%s/log.1' > /dev/null && cp '%s/col/t/pso_use.tsv' '%s/pso_use.tsv'", root, bd, pk, root, pk);
+    snprintf(cmd, sizeof cmd, "S2A_SHCOLLECT='%s/col' python3 '%s/../../graphics/tools/shbake/psouse.py' t '%s/log.1' > /dev/null && cp '%s/col/t/pso_use.tsv' '%s/pso_use.tsv'", root, bd, pk, root, pk);
     int rc = system(cmd); snprintf(ut, sizeof ut, "%s/pso_use.tsv", pk);
     int nb = 0, nf = 0; char ln[2048], pn[64] = ""; f = fopen(ut, "r");
     while (f && fgets(ln, sizeof ln, f)) { char *t1 = strchr(ln, '\t'); if (ln[0] == '#' || !t1) continue; if (t1[1] == 'b') nb++; else if (t1[1] == 'f') nf++; if (!pn[0]) sscanf(t1 + 3, "%63[^\t]", pn); }

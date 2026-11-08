@@ -58,7 +58,7 @@ mkdir -p $T/bin "$S2A_BUILD_CACHE/sources/$OK"; cp $T/ok.bytes "$S2A_BUILD_CACHE
 for c in curl gh wget; do printf '#!/bin/sh\necho "$0 $*" >> %s/net.log\nexit 7\n' "$T" > $T/bin/$c; chmod +x $T/bin/$c; done
 o=$(PATH=$T/bin:$PATH s2a_source_fetch hit.tar.gz "$DEAD" "$OK" 2> $T/e1); r=$?
 ck "① 缓存命中：打印缓存路径、没调任何下载命令（rc=${r}）" '[ $r = 0 ] && [ "$o" = "$S2A_BUILD_CACHE/sources/$OK/hit.tar.gz" ] && [ ! -e $T/net.log ]'
-o=$(PATH=$T/bin:$PATH bash -c 'set -euo pipefail; . "$1/android/tools/ndk_toolchain.sh"; . "$1/android/tools/fetch_source.sh"; . "$1/android/codecs/cache.sh"; cache_root=$2; codec_prepare hit.tar.gz "$3" "$4"; codec_source "$4"' _ "$H" $T/codec "$DEAD" "$OK" 2> $T/e1b); r=$?
+o=$(PATH=$T/bin:$PATH bash -c 'set -euo pipefail; . "$1/platforms/android/tools/ndk_toolchain.sh"; . "$1/platforms/android/tools/fetch_source.sh"; . "$1/platforms/android/codecs/cache.sh"; cache_root=$2; codec_prepare hit.tar.gz "$3" "$4"; codec_source "$4"' _ "$H" $T/codec "$DEAD" "$OK" 2> $T/e1b); r=$?
 ck "① 无代理 + 源不可达 + 缓存命中：codec_prepare 走完、codecs/sources 里是同一份字节、没联网（rc=${r}）" '[ $r = 0 ] && cmp -s "$o" $T/ok.bytes && [ "$o" = "$T/codec/codecs/sources/$OK.tar.gz" ] && [ ! -e $T/net.log ]'
 [ $r = 0 ] || cat $T/e1b
 

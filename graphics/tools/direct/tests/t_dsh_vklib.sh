@@ -38,14 +38,14 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 cat "$T/test.out"
 ck() { if [ "$2" = "$3" ]; then echo "✓ $1"; else echo "✗ $1：期望 $2，实际 $3"; bad=1; fi; }
 ne() { if [ -n "$2" ] && [ -n "$3" ] && [ "$2" != "$3" ]; then echo "✓ $1"; else echo "✗ $1：改前 $2，改后 $3"; bad=1; fi; }
-fp() { "$DN" msbuild "$1/graphics/tools/direct/vklib/S2A.DshVkLib.csproj" -t:VkFpPrint -nologo 2> /dev/null | sed -n 's/^ *VKFP=//p'; }
+fp() { "$DN" msbuild "$1/gfx/tools/direct/vklib/S2A.DshVkLib.csproj" -t:VkFpPrint -nologo 2> /dev/null | sed -n 's/^ *VKFP=//p'; }
 F0=$(fp "$R")
 [[ $F0 =~ ^[0-9a-f]{16}$ ]] || red "VkFpPrint 没打出 16 位指纹（实 ${F0}）"
 ck "⑥ 编进工具的源码部分与 VkFpPrint 相同（${F0}）" "$F0" "$(sed -n 's/^VKFP_SRC=//p' "$T/test.out")"
 C=$T/fpcopy; V=$C/graphics/tools/direct/vklib
 copy() { rm -rf "$C" && mkdir -p "$C/graphics/tools/direct/dsh/batch" "$C/graphics/metal" "$C/translator" "$C/graphics/third_party" && cp "$R/graphics/tools/direct/dsh/DshVk.cs" "$C/graphics/tools/direct/dsh/" \
   && cp "$R/graphics/tools/direct/dsh/batch/PkgRead.cs" "$R/graphics/tools/direct/dsh/batch/LibPack.cs" "$C/graphics/tools/direct/dsh/batch/" \
-  && cp -R "$R/graphics/tools/direct/vklib" "$V" && rm -rf "$V/bin" "$V/obj" && cp "$R"/gfx/metal/gal_abi.h "$R"/gfx/metal/gal_spvx.[ch] "$R"/gfx/metal/gal_spill.[ch] "$R"/gfx/metal/gal_colorround.[ch] "$C/graphics/metal/" \
+  && cp -R "$R/graphics/tools/direct/vklib" "$V" && rm -rf "$V/bin" "$V/obj" && cp "$R"/graphics/metal/gal_abi.h "$R"/graphics/metal/gal_spvx.[ch] "$R"/graphics/metal/gal_spill.[ch] "$R"/graphics/metal/gal_colorround.[ch] "$C/graphics/metal/" \
   && cp "$R/translator/dmsh_chain.lock" "$C/translator/" && cp -R "$R/graphics/third_party/spirv_cross" "$C/graphics/third_party/" || red "拷不出指纹输入到 $C"; }
 copy; ck "⑦ 同一份源码拷到别的目录 → 指纹相同" "$F0" "$(fp "$C")"
 for f in graphics/tools/direct/dsh/DshVk.cs graphics/tools/direct/dsh/batch/PkgRead.cs graphics/tools/direct/dsh/batch/LibPack.cs graphics/tools/direct/vklib/VkLib.cs graphics/tools/direct/vklib/VkFp.targets graphics/tools/direct/vklib/S2A.DshVkLib.csproj graphics/metal/gal_spill.c translator/dmsh_chain.lock graphics/third_party/spirv_cross/spirv_msl.cpp; do

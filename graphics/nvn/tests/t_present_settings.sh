@@ -23,7 +23,7 @@ nvn="$root/build/nvn/mac/libnvn.a"
 gal="$out/gal/mac/libnxgal.a"
 common=(-O1 -g -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" -I"$root/runtime/include")
 objects=()
-for src in "$root"/native/src/*.c "$root"/native/src/*.S "$root/platform/apple/plat_apple.c" "$root/graphics/track/track.c" "$root/graphics/track/glue.c"; do
+for src in "$root"/runtime/src/*.c "$root"/runtime/src/*.S "$root/platform/apple/plat_apple.c" "$root/graphics/track/track.c" "$root/graphics/track/glue.c"; do
     rel=${src#"$root"/}
     [[ "$rel" != runtime/src/host_main.c ]] || continue
     object="$out/host/${rel//\//_}.o"

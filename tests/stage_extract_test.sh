@@ -125,7 +125,7 @@ o=$(bash $T/repo/gfx/tools/direct/extract.sh "$SP/r" "$SP/x" 2>&1); r=$?
 ck "产物根 / 输出目录带空格 → 直连抽取照常、shader_split 拿到完整 DM_UE_SHADERS（rc=${r}，$(grep "^split " $T/calls | tail -1 | cut -d" " -f4-)）" '[ $r = 0 ] && [ "$(grep "^split " $T/calls | tail -1 | cut -d" " -f4-)" = "$SP/x/ue_shaders" ]'
 
 # 本轮上下文：运行两份完整阶段；计算入口与克隆交接分开计数，NVN/VK/GL均覆盖。
-cp "$H/pack/stage_direct.sh" $T/repo/pack/; cp "$H"/gfx/tools/direct/{run_knowledge,fout_want,pso_layout,run_pairs,se_want}.py "$H"/gfx/tools/direct/pso_layout.json $T/repo/gfx/tools/direct/   # stage_direct.sh 现出跑局知识快照（审计 #1534 P1-54）
+cp "$H/pack/stage_direct.sh" $T/repo/pack/; cp "$H"/graphics/tools/direct/{run_knowledge,fout_want,pso_layout,run_pairs,se_want}.py "$H"/graphics/tools/direct/pso_layout.json $T/repo/gfx/tools/direct/   # stage_direct.sh 现出跑局知识快照（审计 #1534 P1-54）
 cp "$H/tools/toolchain.sh" "$H/tools/toolchain.env" $T/repo/tools/
 printf 'def version(): return "fixture1"\n' > $T/repo/gfx/nvn/gfx/tools/dmsh_chain.py
 printf '入\t%s\n' pack/stage_direct.sh graphics/tools/direct/direct_lib.sh > $T/repo/pack/stage_inputs/direct.tsv

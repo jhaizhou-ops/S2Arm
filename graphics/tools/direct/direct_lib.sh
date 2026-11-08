@@ -31,7 +31,7 @@ say() { echo "[直连库] $*"; }
 # Windows 出包机（#1100 W6）：没有 Homebrew 的 spirv-cross，PATH 上没有就用仓库同一份源码（= 链锁版本）现编命令行、放进 PATH（translator/spvc_inproc.py cli）
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
   export PYTHONUTF8=1   # Windows 的 Python 缺省按系统代码页（GBK）写标准输出，中文 / 🟢 写不出就抛错；日志一律 UTF-8，同 Mac
-  command -v spirv-cross > /dev/null || { SC=$("$PY" "$NX/graphics/tools/spvc_inproc.py" cli) && SC=$(cygpath -u "$SC") || { say "🔴 Windows 上编不出 spirv-cross 命令行（translator/spvc_inproc.py cli）"; exit 1; }; PATH="${SC%/*}:$PATH"; export PATH; };;
+  command -v spirv-cross > /dev/null || { SC=$("$PY" "$NX/../../translator/spvc_inproc.py" cli) && SC=$(cygpath -u "$SC") || { say "🔴 Windows 上编不出 spirv-cross 命令行（translator/spvc_inproc.py cli）"; exit 1; }; PATH="${SC%/*}:$PATH"; export PATH; };;
 esac
 # 失败分类（10-25 总指挥，同抽取阶段的原则）：退出 3 = 内容缺口（某支着色器翻不了、本款用了直连还没实现的结构），本款这次出不了直连库，打「🟡 直连缺口：<类别> <计数>」，
 #   refresh 走通用、285 款普查按它归类派单；能部分出库的照常出（退 0，末行黄、列没出成的类别与计数）。其余非 0 = 基础设施出错（缺文件、工具 / 编译器起不来、
@@ -92,14 +92,14 @@ PY
   if [ "$NOSPV" = 1 ] && [ "${NRT:-0}" = 0 ]; then
     # 出包不起局（11-05 jhz：出包从不允许起一局游戏；原先在 Mac 上直连起宿主 60 秒抓 SPIR-V、Windows 上退 75 交回 Mac）：只出表头、没有库，keys.tsv 为空，
     #   全部交设备首遇现编（hle_vk.m → vk_rt.inc 后台编、编好持久化，下次开机直接读），同 OpenGL 款离线 0 支的做法；Mac、Windows 同一条路
-    "$PY" "$NX/graphics/tools/vk_shaders.py" --header-only "$C/vkmac" --ios "$OUT" > "$C/vk_shaders.log" 2>&1 || { say "🔴 Vulkan 表头没写出（$C/vk_shaders.log）"; tail -3 "$C/vk_shaders.log"; exit 1; }
+    "$PY" "$NX/../../translator/vk_shaders.py" --header-only "$C/vkmac" --ios "$OUT" > "$C/vk_shaders.log" 2>&1 || { say "🔴 Vulkan 表头没写出（$C/vk_shaders.log）"; tail -3 "$C/vk_shaders.log"; exit 1; }
     [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.tsv"; exit 1; }
     : > "$OUT/keys.tsv"
     say "🟡 Vulkan 款 ${TID}：RomFS / 追加内容里没有 SPIR-V（游戏运行时生成），跑局知识里也没有，出包不起局，只出表头、全部设备首遇现编（vk/vk_shaders.tsv），$((SECONDS - s)) 秒"
     exit 0
   fi
   [ "${NRT:-0}" = 0 ] || say "Vulkan 款 ${TID}：跑局知识里有设备现编存下的 SPIR-V ${NRT} 支，照 RomFS 一起翻进离线库"
-  "$PY" "$R/tools/nostall.py" --watch "$C/vkmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/vk_shaders.py" "${DIRS[@]}" "$C/vkmac" --ios "$OUT" > "$C/vk_shaders.log" 2>&1; vrc=$?
+  "$PY" "$R/tools/nostall.py" --watch "$C/vkmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/vk_shaders.py" "${DIRS[@]}" "$C/vkmac" --ios "$OUT" > "$C/vk_shaders.log" 2>&1; vrc=$?
   [ "$vrc" = 0 ] || { [ "$vrc" = 1 ] && gap "$C/vk_shaders.log" "Vulkan 着色器"; say "🔴 Vulkan 着色器离线翻译失败 rc=${vrc}（$C/vk_shaders.log）"; tail -3 "$C/vk_shaders.log"; exit 1; }
   [ -s "$OUT/vk/vk_shaders.metallib" ] && [ -s "$OUT/vk/vk_shaders.tsv" ] || { say "🔴 没出 $OUT/vk/vk_shaders.metallib / .tsv"; exit 1; }
   grep -v '^#' "$OUT/vk/vk_shaders.tsv" | cut -f1 | sort -u > "$OUT/keys.tsv"
@@ -114,7 +114,7 @@ if [ "${API%%	*}" = gl ]; then
   C=${S2A_DIRECT_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/direct/$TID}; mkdir -p "$C" "$OUT"; s=$SECONDS
   : > "$C/gl.stage.$$"; trap 'rm -f "$C/gl.stage.$$"' EXIT   # 同 Vulkan 分支：出库期间的占用标记
   INS=("$ROOT/romfs" "$ROOT/exefs/main"); for a in "$ROOT"/aoc/*/; do [ -d "$a" ] && INS+=("${a%/}"); done
-  "$PY" "$R/tools/nostall.py" --watch "$C/glmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/gl_shaders.py" "${INS[@]}" "$C/glmac" --ios "$OUT" > "$C/gl_shaders.log" 2>&1; grc=$?
+  "$PY" "$R/tools/nostall.py" --watch "$C/glmac" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/gl_shaders.py" "${INS[@]}" "$C/glmac" --ios "$OUT" > "$C/gl_shaders.log" 2>&1; grc=$?
   # gl_shaders.py 翻成的照写库、有翻不了的退 1，汇总行「GLSL 汇总：成功 N、失败 M」：N > 0 = 部分出库（照常出、末行黄）；成功 0 或别的退出码 = 判不清，报红
   GOK=$(sed -n 's/^GLSL 汇总：成功 \([0-9]*\)、失败 \([0-9]*\).*/\1 \2/p' "$C/gl_shaders.log" | tail -1); GMISS=0
   if [ "$grc" = 1 ] && [ "${GOK%% *}" -gt 0 ] 2> /dev/null; then GMISS=${GOK##* }
@@ -141,7 +141,7 @@ case "$PUB" in ios) [ "$NOIOS" = 0 ] || { say "🔴 发布 iOS 库却没出 iOS 
   android) [ "$VK" = 1 ] || { say "🔴 发布安卓库却没出安卓那份（S2A_DIRECT_TARGETS=${S2A_DIRECT_TARGETS:-}）"; exit 1; };; *) say "🔴 S2A_DIRECT_PUBLISH=${PUB} 不认识（ios / mac / android）"; exit 1;; esac
 [ "$VK" = 0 ] || [ "$PUB" = android ] || { say "🔴 只出安卓 Vulkan 库（S2A_DIRECT_TARGETS=android）却要发布 ${PUB}"; exit 1; }
 C=${S2A_DIRECT_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/direct/$TID}; OUT=$(mkdir -p "$OUT" && cd "$OUT" && pwd -P) || exit 1
-V=$(cd "$NX/graphics/tools" && "$PY" -c 'import dmsh_chain; print(dmsh_chain.version())') || { say "🔴 取不到链版本"; exit 1; }
+V=$(cd "$NX/gfx/tools" && "$PY" -c 'import dmsh_chain; print(dmsh_chain.version())') || { say "🔴 取不到链版本"; exit 1; }
 # 缓存只剩内容寻址仓 $C/store（dmsh_store.py 分片文件，10-31 出包线深修：按键小文件马车8 一款 66 万个）与上次的日志 $C/logs/；
 #   旧布局（$C/mac/b-<链>/、$C/mac/cas/{shader,index,variant,unity,metallib}/、$C/ios/b-<链>/、$C/work/）第一次碰到整个删掉（旧链号整代不留）
 #   改名挪开是瞬间的，真删放后台：旧布局一款几十万个小文件，同步 rm -rf 把出库卡住半小时（10-31 马车8 03:51 → 04:24 全在删）。
@@ -243,7 +243,7 @@ cp "$W/merged/shader_facts.tsv" "$W/profile/$TID/shader_facts.tsv"   # 答案表
 #   抽取键不变（不为几支转储重抽 4 万支），直连阶段键另算 rt_shaders 内容（pack/stage_direct.sh）
 if ls "$ROOT"/rt_shaders/*.code > /dev/null 2>&1; then
   n0=$(grep -c . "$W/profile/$TID/shader_map.tsv")
-  "$PY" "$NX/graphics/tools/rt_dump_merge.py" "$ROOT/rt_shaders" "$W/merged/pkg" "$W/profile/$TID/shader_map.tsv" "$W/profile/$TID/shader_facts.tsv" > "$W/rt_dump.log" 2>&1 \
+  "$PY" "$NX/../../translator/rt_dump_merge.py" "$ROOT/rt_shaders" "$W/merged/pkg" "$W/profile/$TID/shader_map.tsv" "$W/profile/$TID/shader_facts.tsv" > "$W/rt_dump.log" 2>&1 \
     || { say "🔴 真机转储着色器并不进库（$(tail -1 "$W/rt_dump.log")；$W/rt_dump.log）"; exit 1; }
   tail -n +$((n0 + 1)) "$W/profile/$TID/shader_map.tsv" | cut -f4 >> "$W/merged/union_keys.tsv"
   say "$(tail -1 "$W/rt_dump.log")"
@@ -316,12 +316,12 @@ KM=; [ "${S2A_DIRECT_KEEP:-0}" = 1 ] && { rm -rf "$C/keep" && mkdir -p "$C/keep/
 #   11-01 出包线：出库链整条在 C# 一个进程里（graphics/tools/direct/dsh/batch/Build.cs：翻译、逐键收尾、变体、编批库、两张表、发布打包全在线程池里并发，
 #   Metal 由并发闸限路数），替掉 Python 的 dmsh_par.py / dmsh_build.py（GIL 把编批库段卡在一核）。链号、配置档输入摘要先由 dmsh_chain.py 核过工具再给
 # stdout 只收链号 / 程序号 / 输入摘要；编译器版本提示走 stderr，合流会把 note: 误读成链号。
-BE=$(cd "$NX/graphics/tools" && "$PY" dmsh_chain.py --build-env "$W/profile_rows.txt" 2> "$W/build_env.log") || { say "🔴 出库前核工具 / 链号失败"; cat "$W/build_env.log" >&2; printf '%s\n' "$BE" | tail -3 >&2; exit 1; }
+BE=$(cd "$NX/gfx/tools" && "$PY" dmsh_chain.py --build-env "$W/profile_rows.txt" 2> "$W/build_env.log") || { say "🔴 出库前核工具 / 链号失败"; cat "$W/build_env.log" >&2; printf '%s\n' "$BE" | tail -3 >&2; exit 1; }
 cat "$W/build_env.log" >&2
 read -r BV BG BI < <(printf '%s\n' "$BE"); [ "$BV" = "$V" ] || { say "🔴 链号前后不一（${V} / ${BV}）"; exit 1; }
-SPVC=$(cd "$NX/graphics/tools" && "$PY" -c 'import spvc_inproc; print(spvc_inproc.lib_path())') || { say "🔴 spirv-cross 进程内库编不出"; exit 1; }
+SPVC=$(cd "$NX/gfx/tools" && "$PY" -c 'import spvc_inproc; print(spvc_inproc.lib_path())') || { say "🔴 spirv-cross 进程内库编不出"; exit 1; }
 BA=(--pkg "$W/merged/pkg" --profile "$P" --game "$BG" --chain "$V" --inputs "$BI" --profile-rows "$W/profile_rows.txt" --out "$MS" --iosout "$OS" --publish "$PUB"
-    --cas "$C/store" --nxgal "${NXGAL_LIB:-$R/build/gal/libnxgal.dylib}" --spvc "$SPVC" -j "$J" --lock "$NX/graphics/tools/dmsh_chain.lock")
+    --cas "$C/store" --nxgal "${NXGAL_LIB:-$R/build/gal/libnxgal.dylib}" --spvc "$SPVC" -j "$J" --lock "$NX/../../translator/dmsh_chain.lock")
 [ "$NOMAC" = 1 ] && BA+=(--no-mac); [ "$NOIOS" = 1 ] && BA+=(--no-ios); [ -n "$KM" ] && BA+=(--export-mac "$KM")
 #   dsh_batch 的临时工作目录（spill.dat / side_*.dat，大款几十 GB）按 .NET 习惯落 TMPDIR = 内置盘 /var/folders（11-02 本机内置盘 15 分钟掉 61 GB 就是它）；
 #   改落本次出库的工作目录 $W/tmp（在缓存目录 $C 下 = 2T 数据区，随 $W 出库收尾一起清）
@@ -331,7 +331,7 @@ BA=(--pkg "$W/merged/pkg" --profile "$P" --game "$BG" --chain "$V" --inputs "$BI
 BTX=; case "${TMPDIR:-}" in ''|/var/folders/*|/private/var/folders/*|/tmp|/tmp/*|/private/tmp|/private/tmp/*|*/AppData/Local/Temp|*/AppData/Local/Temp/*|*'\AppData\Local\Temp'*) BT=$W/tmp;;
   *) BT=${TMPDIR%/}/dsh_batch.$$; BTX=$BT;; esac
 mkdir -p "$BT"
-TMPDIR="$BT" "$PY" "$R/tools/nostall.py" --watch "$MS" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/dsh_batch.py" build "${BA[@]}" > "$W/build.log" 2>&1
+TMPDIR="$BT" "$PY" "$R/tools/nostall.py" --watch "$MS" --watch "$OUT" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/dsh_batch.py" build "${BA[@]}" > "$W/build.log" 2>&1
 brc=$?
 # Windows 进程退出码经 Git Bash 只留低 8 位：127 = 0xC000007F（STATUS_DISK_FULL），不是 bash 的「命令找不到」（11-07 天眼两次）
 DF=; [ "$brc" = 127 ] && case $(uname -s 2> /dev/null) in MINGW*|MSYS*|CYGWIN*) DF="；127 = 盘满（STATUS_DISK_FULL 0xC000007F 低 8 位），看临时目录 ${BT} 与缓存 ${C} 所在盘";; esac
@@ -339,7 +339,7 @@ DF=; [ "$brc" = 127 ] && case $(uname -s 2> /dev/null) in MINGW*|MSYS*|CYGWIN*) 
 # 核产物出自本树的翻译器（11-06 时之笛第 49 版：DSH_BATCH_CMD 指到天眼上按旧树编的 dsh_batch.exe，它键里的翻译器指纹是旧的，41971 支全命中旧缓存，
 #   2ce17db8c 的翻译器改动没进包、出库照报绿）：dsh_batch 把自己的翻译器指纹 xfp 与 --lock 文件摘要写进库印章 inputs.tsv（Build.cs WriteStamp），
 #   这里拿本树算的 dmsh_chain.xlate_fp()（与 C# 编译期 Xfp 同一份清单、同一算法）与本树锁文件摘要逐项比，不等 / 印章没这两行（旧程序）报红。只核产物，不管出库命令经谁转手
-XC=$(cd "$NX/graphics/tools" && "$PY" dmsh_chain.py --check-stamp "$OS/b-$V" 2>&1) || { say "🔴 直连库不是本树的翻译器出的：${XC}（DSH_BATCH_CMD=${DSH_BATCH_CMD:-未设}）"; exit 1; }
+XC=$(cd "$NX/gfx/tools" && "$PY" dmsh_chain.py --check-stamp "$OS/b-$V" 2>&1) || { say "🔴 直连库不是本树的翻译器出的：${XC}（DSH_BATCH_CMD=${DSH_BATCH_CMD:-未设}）"; exit 1; }
 # 没出成的按类别计数（dmsh_build.py 逐支记进 _b_build.json 的 st：translation failed / MSL failed / metal failed / …），末行黄行带上，普查按它归类
 GAPS=$("$PY" -c 'import json,sys,collections
 c = collections.Counter(r["st"] for r in json.load(open(sys.argv[1])) if r["st"] != "ok")
@@ -391,7 +391,7 @@ if [ "${GLX%%	*}" = 1 ]; then
   if ! command -v glslangValidator > /dev/null || ! command -v spirv-cross > /dev/null; then GLMSG="🟡 另带 GL 的着色器库没出：缺 glslangValidator / spirv-cross（brew install glslang spirv-cross）"
   else
     INS=("$ROOT/romfs" "$ROOT/exefs/main"); for a in "$ROOT"/aoc/*/; do [ -d "$a" ] && INS+=("${a%/}"); done
-    "$PY" "$R/tools/nostall.py" --watch "$C/glmac" --watch "$OS" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/graphics/tools/gl_shaders.py" "${INS[@]}" "$C/glmac" --ios "$OS" > "$W/gl_shaders.log" 2>&1; grc=$?
+    "$PY" "$R/tools/nostall.py" --watch "$C/glmac" --watch "$OS" "${S2A_NOSTALL_S:-600}" -- "$PY" "$NX/../../translator/gl_shaders.py" "${INS[@]}" "$C/glmac" --ios "$OS" > "$W/gl_shaders.log" 2>&1; grc=$?
     GOK=$(sed -n 's/^GLSL 汇总：成功 \([0-9]*\)、失败 \([0-9]*\).*/\1 \2/p' "$W/gl_shaders.log" | tail -1)
     if [ "$grc" = 0 ] && [ "$GOK" = "0 0" ] && [ -s "$OS/gl/gl_shaders.tsv" ]; then GLMSG="🟡 另带 GL 离线 0 支 GLSL：只出表头、界面那部分运行时首遇现编，$((SECONDS - s)) 秒"
     elif { [ "$grc" = 0 ] || { [ "$grc" = 1 ] && [ "${GOK%% *}" -gt 0 ] 2> /dev/null; }; } && [ -s "$OS/gl/gl_shaders.metallib" ] && [ -s "$OS/gl/gl_shaders.tsv" ]; then

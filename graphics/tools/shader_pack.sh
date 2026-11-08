@@ -160,7 +160,7 @@ T1=$(date +%s)
 #   命中就克隆进 work/，不重抽（10-21 测试出包线：键变多是翻译器 / 翻译代码改了，游戏没变；巫师3 / 怪猎每次重抽 97 秒）。每个程序号留最近 2 份
 XC=${S2A_SHX_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/shx}
 IFP=$(input_fp "$ROOT") || exit 1
-XK=$TID-$({ printf '%s\n' "$IFP"; cat "$R"/gfx/tools/shbake/*.py "$R"/gfx/tools/nxfmt.py "$R"/gfx/tools/yaz0dec.c; "$PY" --version 2>&1; "$PY" -c 'import lz4; print(lz4.__version__)' 2>&1; } | shasum -a 256 | cut -c1-24)
+XK=$TID-$({ printf '%s\n' "$IFP"; cat "$R"/graphics/tools/shbake/*.py "$R"/graphics/tools/nxfmt.py "$R"/graphics/tools/yaz0dec.c; "$PY" --version 2>&1; "$PY" -c 'import lz4; print(lz4.__version__)' 2>&1; } | shasum -a 256 | cut -c1-24)
 if [ -f "$XC/$XK/ok" ] && cp -cR "$XC/$XK/." "$W/" && rm -f "$W/ok"; then t "  抽取：缓存命中（$XC/${XK}），不重抽"
 else
 # 抽着色器只做一次（10-25 jhz）：前面的抽取阶段（pack/stage_extract.sh）出过 <产物根>/extract/（有 ok）就克隆它的 S2Arm 抽取，不重抽（同一份 nxsh_extract、同样含追加内容）；
@@ -256,7 +256,7 @@ if "$PY" -c "import json,sys;d=json.loads(sys.argv[1]);sys.exit(0 if d.get('ok')
 BC=${S2A_BAKE_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/bake}; BK=
 if [ "$BC" != off ] && tool_keys; then
   BENV=$( { find "$R" -name '*.cs' -not -path '*/obj/*' -not -path '*/bin/*' -print0 | xargs -0 grep -ohE 'GetEnvironmentVariable\("[A-Za-z0-9_]+"'
-    grep -ohE 'getenv\("[A-Za-z0-9_]+"' "$R"/gfx/metal/tools/gal_xc.c "$R"/gfx/metal/*.m; } | sed -E 's/.*\("//; s/"$//' | LC_ALL=C sort -u | grep -vxE 'HOME|PATH|XDG_SESSION_TYPE|GAL_XC_J')
+    grep -ohE 'getenv\("[A-Za-z0-9_]+"' "$R"/graphics/metal/tools/gal_xc.c "$R"/graphics/metal/*.m; } | sed -E 's/.*\("//; s/"$//' | LC_ALL=C sort -u | grep -vxE 'HOME|PATH|XDG_SESSION_TYPE|GAL_XC_J')
   if echo "$BENV" | grep -qx S2A_PROG_TABLE && echo "$BENV" | grep -qx NXGAL_VPULL; then
     BK=$TID-$( { echo "cs $CS"; echo "xc $XC"; echo "plat $PLAT extrap $(extrap_of "$ROOT")"
       for v in $BENV; do echo "$v=${!v-（未设）}"; done
