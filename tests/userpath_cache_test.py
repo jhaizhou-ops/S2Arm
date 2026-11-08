@@ -44,7 +44,7 @@ def hits(name, text):
     return out
 
 # ⑤ 开发机专用路径：样例与模式运行时拼（字面量会被共享路径检查 tests/shared_path_test.sh 与公开仓库扫描当成真路径）
-NX = '\.s2arm'
+NX = '.s2arm'
 DEV = re.compile(NX + r'/(venv|data|toolchain|S2Arm|wt|build|gate_data|sw)\b|s2arm-wt\b|' + NX + r'-rw\b|/Users/' + 'jhz' + r'\b')
 # 白名单（文件, 行内必含片段）：只放开发机配置本身，每条写理由
 WHITE = [

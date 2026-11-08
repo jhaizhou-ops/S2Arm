@@ -49,7 +49,7 @@ graphics/vulkan/	图形后端	Vulkan	直连Vulkan
 platform/plat.h	平台接口	契约	共用层
 platform/plat_asm.h	平台接口	契约	共用层
 platform/build.mk	平台接口	构建	终端壳
-platforms/apple/	平台接口	苹果族	终端壳
+platform/apple/	平台接口	苹果族	终端壳
 shell/	平台壳	iOS游戏库界面	终端壳
 launchers/macos/frontend/	平台壳	Mac前端(NX2Apple快照)	终端壳
 launchers/macos/adapter/	平台壳	苹果前端适配层	终端壳
@@ -60,7 +60,7 @@ android/native/direct/	图形后端	直连Vulkan(暂居)	直连Vulkan
 android/native/plat_android.c	平台接口	Linux族(暂居)	直连Vulkan
 macos/	平台壳	Mac原生	终端壳
 launchers/macos/	平台壳	Mac	终端壳
-platforms/linux/	平台壳	Linux启动器	终端壳
+launchers/linux/	平台壳	Linux启动器	终端壳
 pack/	核心	公共出包	共用层
 pack/targets/	平台壳	终端出包	按目标
 pack/ipa.sh	平台壳	iOS出包	终端壳

@@ -976,7 +976,7 @@ class Profiles(unittest.TestCase):
         generated = stage.select(self.root, self.out)
         sandbox = self.base / "library-repo"
         nx = sandbox / "graphics/nvn"
-        tools = nx / "graphics/tools"; tools.mkdir(parents=True)
+        tools = sandbox / "translator"; tools.mkdir(parents=True)
         games = nx / "games"; games.mkdir()
         shutil.copyfile(REPO / "graphics/nvn/games/game.py", games / "game.py")
         shutil.copyfile(REPO / "graphics/nvn/games/zero_skip.tsv", games / "zero_skip.tsv")   # 出库按程序号挑零源跳过事实写进 game.tsv（direct_lib.sh）
