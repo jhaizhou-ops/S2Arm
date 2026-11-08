@@ -141,7 +141,7 @@ case "$PUB" in ios) [ "$NOIOS" = 0 ] || { say "🔴 发布 iOS 库却没出 iOS 
   android) [ "$VK" = 1 ] || { say "🔴 发布安卓库却没出安卓那份（S2A_DIRECT_TARGETS=${S2A_DIRECT_TARGETS:-}）"; exit 1; };; *) say "🔴 S2A_DIRECT_PUBLISH=${PUB} 不认识（ios / mac / android）"; exit 1;; esac
 [ "$VK" = 0 ] || [ "$PUB" = android ] || { say "🔴 只出安卓 Vulkan 库（S2A_DIRECT_TARGETS=android）却要发布 ${PUB}"; exit 1; }
 C=${S2A_DIRECT_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/direct/$TID}; OUT=$(mkdir -p "$OUT" && cd "$OUT" && pwd -P) || exit 1
-V=$(cd "$NX/gfx/tools" && "$PY" -c 'import dmsh_chain; print(dmsh_chain.version())') || { say "🔴 取不到链版本"; exit 1; }
+V=$(cd "$NX/../../translator" && "$PY" -c 'import dmsh_chain; print(dmsh_chain.version())') || { say "🔴 取不到链版本"; exit 1; }
 # 缓存只剩内容寻址仓 $C/store（dmsh_store.py 分片文件，10-31 出包线深修：按键小文件马车8 一款 66 万个）与上次的日志 $C/logs/；
 #   旧布局（$C/mac/b-<链>/、$C/mac/cas/{shader,index,variant,unity,metallib}/、$C/ios/b-<链>/、$C/work/）第一次碰到整个删掉（旧链号整代不留）
 #   改名挪开是瞬间的，真删放后台：旧布局一款几十万个小文件，同步 rm -rf 把出库卡住半小时（10-31 马车8 03:51 → 04:24 全在删）。
@@ -316,10 +316,10 @@ KM=; [ "${S2A_DIRECT_KEEP:-0}" = 1 ] && { rm -rf "$C/keep" && mkdir -p "$C/keep/
 #   11-01 出包线：出库链整条在 C# 一个进程里（graphics/tools/direct/dsh/batch/Build.cs：翻译、逐键收尾、变体、编批库、两张表、发布打包全在线程池里并发，
 #   Metal 由并发闸限路数），替掉 Python 的 dmsh_par.py / dmsh_build.py（GIL 把编批库段卡在一核）。链号、配置档输入摘要先由 dmsh_chain.py 核过工具再给
 # stdout 只收链号 / 程序号 / 输入摘要；编译器版本提示走 stderr，合流会把 note: 误读成链号。
-BE=$(cd "$NX/gfx/tools" && "$PY" dmsh_chain.py --build-env "$W/profile_rows.txt" 2> "$W/build_env.log") || { say "🔴 出库前核工具 / 链号失败"; cat "$W/build_env.log" >&2; printf '%s\n' "$BE" | tail -3 >&2; exit 1; }
+BE=$(cd "$NX/../../translator" && "$PY" dmsh_chain.py --build-env "$W/profile_rows.txt" 2> "$W/build_env.log") || { say "🔴 出库前核工具 / 链号失败"; cat "$W/build_env.log" >&2; printf '%s\n' "$BE" | tail -3 >&2; exit 1; }
 cat "$W/build_env.log" >&2
 read -r BV BG BI < <(printf '%s\n' "$BE"); [ "$BV" = "$V" ] || { say "🔴 链号前后不一（${V} / ${BV}）"; exit 1; }
-SPVC=$(cd "$NX/gfx/tools" && "$PY" -c 'import spvc_inproc; print(spvc_inproc.lib_path())') || { say "🔴 spirv-cross 进程内库编不出"; exit 1; }
+SPVC=$(cd "$NX/../../translator" && "$PY" -c 'import spvc_inproc; print(spvc_inproc.lib_path())') || { say "🔴 spirv-cross 进程内库编不出"; exit 1; }
 BA=(--pkg "$W/merged/pkg" --profile "$P" --game "$BG" --chain "$V" --inputs "$BI" --profile-rows "$W/profile_rows.txt" --out "$MS" --iosout "$OS" --publish "$PUB"
     --cas "$C/store" --nxgal "${NXGAL_LIB:-$R/build/gal/libnxgal.dylib}" --spvc "$SPVC" -j "$J" --lock "$NX/../../translator/dmsh_chain.lock")
 [ "$NOMAC" = 1 ] && BA+=(--no-mac); [ "$NOIOS" = 1 ] && BA+=(--no-ios); [ -n "$KM" ] && BA+=(--export-mac "$KM")
@@ -339,7 +339,7 @@ DF=; [ "$brc" = 127 ] && case $(uname -s 2> /dev/null) in MINGW*|MSYS*|CYGWIN*) 
 # 核产物出自本树的翻译器（11-06 时之笛第 49 版：DSH_BATCH_CMD 指到天眼上按旧树编的 dsh_batch.exe，它键里的翻译器指纹是旧的，41971 支全命中旧缓存，
 #   2ce17db8c 的翻译器改动没进包、出库照报绿）：dsh_batch 把自己的翻译器指纹 xfp 与 --lock 文件摘要写进库印章 inputs.tsv（Build.cs WriteStamp），
 #   这里拿本树算的 dmsh_chain.xlate_fp()（与 C# 编译期 Xfp 同一份清单、同一算法）与本树锁文件摘要逐项比，不等 / 印章没这两行（旧程序）报红。只核产物，不管出库命令经谁转手
-XC=$(cd "$NX/gfx/tools" && "$PY" dmsh_chain.py --check-stamp "$OS/b-$V" 2>&1) || { say "🔴 直连库不是本树的翻译器出的：${XC}（DSH_BATCH_CMD=${DSH_BATCH_CMD:-未设}）"; exit 1; }
+XC=$(cd "$NX/../../translator" && "$PY" dmsh_chain.py --check-stamp "$OS/b-$V" 2>&1) || { say "🔴 直连库不是本树的翻译器出的：${XC}（DSH_BATCH_CMD=${DSH_BATCH_CMD:-未设}）"; exit 1; }
 # 没出成的按类别计数（dmsh_build.py 逐支记进 _b_build.json 的 st：translation failed / MSL failed / metal failed / …），末行黄行带上，普查按它归类
 GAPS=$("$PY" -c 'import json,sys,collections
 c = collections.Counter(r["st"] for r in json.load(open(sys.argv[1])) if r["st"] != "ok")
