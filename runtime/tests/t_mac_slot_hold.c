@@ -76,6 +76,6 @@ int main(void) {
 #else
     printf("✓ 非 macOS：宿主不拿 Mac 局槽，跳过\n");
 #endif
-    if (bad) printf("✗ t_mac_slot_hold：%d 处不符\n", bad); else printf("✓ t_mac_slot_hold：0 处不符（共 5 项）\n");   // runtime/gate.sh 按「✓ / ✗ t_」行判组
+    if (bad) printf("✗ t_mac_slot_hold：%d 处不符\n", bad); else printf("✓ t_mac_slot_hold：0 处不符（共 %d 项%s）\n", have_ms ? 5 : 2, have_ms ? "" : "，③④⑤ 未覆盖");   // runtime/gate.sh 按「✓ / ✗ t_」行判组
     return bad ? 1 : 0;
 }

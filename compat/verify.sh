@@ -33,7 +33,7 @@ COMMIT=$(awk -F'\t' '$1=="commit"{print $2}' "$TMP/UPSTREAM")
 while IFS=$'\t' read -r k p id mode; do
     [ "$k" = path ] || continue
     [ -n "$mode" ] || { echo "UPSTREAM 的 path 行缺模式列（${p}）：用新版 import_upstream.sh 重新生成" >&2; exit 2; }
-    git cat-file -e "$id" 2>/dev/null || { echo "仓库里没有上游对象 ${id}（${p}）：历史里缺「上游原样」那一笔" >&2; exit 2; }
+    git cat-file -e "$id" 2>/dev/null || { echo "仓库里没有上游对象 ${id}（${p}）：先跑 compat/fetch_base.sh 取上游原样对象" >&2; exit 2; }
     type=blob; [ "$mode" = 040000 ] && type=tree
     case "$p" in
         src/*/*) echo "不支持的导入路径深度：$p" >&2; exit 2 ;;
@@ -86,11 +86,11 @@ unset GIT_INDEX_FILE
 if [ $TREES -eq 1 ]; then echo "$EXPECT $CUR"; exit $err; fi
 
 if [ "$EXPECT" = "$CUR" ] && [ $err -eq 0 ]; then
-    echo "ryujinx 核对：一致（上游 ${COMMIT:0:12} + $n 个补丁 = 树内源码${REV:+，提交 $(git rev-parse --short "$REV")}）"
+    echo "兼容层核对：一致（上游 ${COMMIT:0:12} + $n 个补丁 = 树内源码${REV:+，提交 $(git rev-parse --short "$REV")}）"
     exit 0
 fi
 if [ "$EXPECT" != "$CUR" ]; then
-    echo "ryujinx 核对：树内源码 ≠ 上游 + 补丁。差异文件（A = 树内多出 / D = 树内缺 / M = 内容不同）："
+    echo "兼容层核对：树内源码 ≠ 上游 + 补丁。差异文件（A = 树内多出 / D = 树内缺 / M = 内容不同）："
     git diff-tree -r --name-status "$EXPECT" "$CUR" | sed 's/^/    /' | head -50
     echo "  改了 compat/tree 就要用 compat/patch_new.sh 生成补丁并在改动清单写理由。"
 fi
