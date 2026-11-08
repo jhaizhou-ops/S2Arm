@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "integer/carry-exponent",
+  "stage": "fragment",
+  "instructions": [
+    "MOV32I R0 0x3f000000",
+    "IADD32I R0 R0 0x00800000",
+    "MOV32I R1 0",
+    "MOV32I R2 0",
+    "MOV32I R3 0x3f800000",
+    "EXIT"
+  ],
+  "expected": [
+    255,
+    0,
+    0,
+    255
+  ],
+  "rules": [
+    "IADD32I carry across mantissa"
+  ],
+  "reference": "0x3f000000 + 0x00800000 = 0x3f800000 (IEEE754 1.0)"
+}

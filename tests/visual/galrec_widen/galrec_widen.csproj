@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 录像上验宽屏识别（不起局、不用 GPU）。构建请带 artifacts 目录，免得往 compat/tree 里写 obj。 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../graphics/widen/S2Arm.Gfx.Widen.csproj" />
+    <ProjectReference Include="../galrec/S2Arm.GalRec.csproj" />
+  </ItemGroup>
+</Project>

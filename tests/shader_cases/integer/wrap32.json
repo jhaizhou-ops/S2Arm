@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "integer/wrap32",
+  "stage": "fragment",
+  "instructions": [
+    "MOV32I R0 0xffffffff",
+    "IADD32I R0 R0 1",
+    "MOV32I R1 0",
+    "MOV32I R2 0",
+    "MOV32I R3 0x3f800000",
+    "EXIT"
+  ],
+  "expected": [
+    0,
+    0,
+    0,
+    255
+  ],
+  "rules": [
+    "IADD32I unsigned modulo 2^32"
+  ],
+  "reference": "(2^32-1+1) mod 2^32 = 0; float bits 0 => red 0"
+}

@@ -1,0 +1,13 @@
+#version 450
+// 存储缓冲越界读 / 写 / 原子与读数据决定的循环（同 tests/dsh_harden_test.sh 第一支）
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer A { uint a[4]; };
+layout(std430, set = 0, binding = 1) buffer O { uint o[4]; };
+layout(std430, set = 0, binding = 2) readonly buffer P { uint idx; uint n; };
+void main() {
+    o[0] = a[idx];
+    a[idx] = 77u;
+    o[2] = atomicAdd(a[idx], 5u);
+    uint c = 0u; for (uint i = 0u; i < n; i++) c++;
+    o[1] = c;
+}

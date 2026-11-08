@@ -1,0 +1,4 @@
+2026-10-21 14:32:34.043 S2Arm[1700:248509] [gal] 帧节拍：交换间隔 1，每帧 16.7 ms（60 帧/秒）
+自动玩家结论：没到 MARK；导航卡住（步数到上限 80）；按键 101 下（翻页 14）、模型 12 次、回放 0 步；点触没反应 0 次；小结 /private/var/mobile/Containers/Data/Application/CB228855-1A8F-483B-8A21-2581C4DE9C03/Documents/ap_summary.json
+[s2a] 收到 自动玩家结束：优雅退出
+[s2a] 优雅退出完成（0.061 秒）

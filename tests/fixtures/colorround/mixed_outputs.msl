@@ -1,0 +1,33 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 out_attr0 [[color(0)]];
+    int4 out_attr1 [[color(1)]];
+    float4 out_attr2 [[color(2)]];
+    float gl_FragDepth [[depth(any)]];
+};
+
+struct main0_in
+{
+    float4 in_attr0 [[user(locn0)]];
+};
+
+[[ early_fragment_tests ]] fragment main0_out main0(main0_in in [[stage_in]], constant uint* fp_c3 [[buffer(1)]])
+{
+    main0_out out = {};
+    if (in.in_attr0.x > 0.5)
+    {
+        out.out_attr0 = in.in_attr0;
+        out.out_attr1 = int4(1, 2, 3, 4);
+        out.gl_FragDepth = 0.5;
+        return out;
+    }
+    out.out_attr2 = float4(as_type<float>(fp_c3[0]));
+    out.gl_FragDepth = 1.0;
+    return out;
+}
+

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "float/subtract",
+  "stage": "fragment",
+  "instructions": [
+    "FADD32I R0 RZ 0.75",
+    "FADD32I R0 R0 -0.25",
+    "MOV32I R1 0",
+    "MOV32I R2 0",
+    "MOV32I R3 0x3f800000",
+    "EXIT"
+  ],
+  "expected": [
+    128,
+    0,
+    0,
+    255
+  ],
+  "rules": [
+    "FADD32I negative operand"
+  ],
+  "reference": "0.75-0.25=0.5; UNORM8 nearest(0.5*255)=128"
+}

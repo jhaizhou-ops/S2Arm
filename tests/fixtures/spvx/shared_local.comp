@@ -1,0 +1,13 @@
+#version 450
+// 共享内存（Workgroup）与局部数组（Private / Function）的动态下标、向量分量的动态下标
+layout(local_size_x = 8) in;
+layout(std430, set = 0, binding = 0) buffer O { uint o[8]; };
+layout(std430, set = 0, binding = 1) readonly buffer P { uint idx; uint k; };
+shared uint s[8];
+void main() {
+    uint t[4] = uint[4](1u, 2u, 3u, 4u);
+    s[gl_LocalInvocationIndex] = gl_LocalInvocationIndex;
+    barrier();
+    uvec4 v = uvec4(t[0], t[1], t[2], t[3]);
+    o[gl_LocalInvocationIndex & 7u] = s[idx] + t[k] + v[k];
+}

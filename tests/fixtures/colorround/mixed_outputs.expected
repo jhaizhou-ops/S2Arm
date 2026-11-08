@@ -1,0 +1,56 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 out_attr0 [[color(0)]];
+    int4 out_attr1 [[color(1)]];
+    float4 out_attr2 [[color(2)]];
+    float gl_FragDepth [[depth(any)]];
+};
+
+struct main0_in
+{
+    float4 in_attr0 [[user(locn0)]];
+};
+
+#ifndef S2A_HALF_ROUND
+#define S2A_HALF_ROUND
+static inline float s2a_half_rtz(float x) {
+    uint u = as_type<uint>(x), e = (u >> 23) & 255u;
+    if (e == 255u) return x;
+    if (e > 142u) u = (u & 0x80000000u) | 0x477fe000u;
+    else if (e >= 113u) u &= 0xffffe000u;
+    else if (e >= 103u) u &= ~((1u << (126u - e)) - 1u);
+    else u &= 0x80000000u;
+    return as_type<float>(u);
+}
+static inline float4 s2a_half_rtz(float4 x) {
+    return float4(s2a_half_rtz(x.x), s2a_half_rtz(x.y), s2a_half_rtz(x.z), s2a_half_rtz(x.w));
+}
+#endif
+[[ early_fragment_tests ]] fragment main0_out main0(main0_in in [[stage_in]], constant uint* fp_c3 [[buffer(1)]], constant uint& s2a_half_mask [[buffer(27)]])
+{
+    main0_out out = {};
+    if (in.in_attr0.x > 0.5)
+    {
+        out.out_attr0 = in.in_attr0;
+        out.out_attr1 = int4(1, 2, 3, 4);
+        out.gl_FragDepth = 0.5;
+        {
+            if (s2a_half_mask & 1u) out.out_attr0 = s2a_half_rtz(out.out_attr0);
+            if (s2a_half_mask & 4u) out.out_attr2 = s2a_half_rtz(out.out_attr2);
+            return out;
+        }
+    }
+    out.out_attr2 = float4(as_type<float>(fp_c3[0]));
+    out.gl_FragDepth = 1.0;
+    {
+        if (s2a_half_mask & 1u) out.out_attr0 = s2a_half_rtz(out.out_attr0);
+        if (s2a_half_mask & 4u) out.out_attr2 = s2a_half_rtz(out.out_attr2);
+        return out;
+    }
+}
+

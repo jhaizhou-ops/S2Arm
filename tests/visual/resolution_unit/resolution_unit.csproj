@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../graphics/widen/gal/S2Arm.Gfx.Widen.Gal.csproj" />
+    <ProjectReference Include="../../../graphics/metal/cs/NxGal.csproj" />
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="../galrec/S2Arm.GalRec.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,49 @@
+category	input	expected
+email	联系 synth.user+diag@example.invalid	联系 [EMAIL]
+email	contact=synth@example.invalid; next=ok	contact=[EMAIL]; next=ok
+email	not-an-email@localhost	not-an-email@localhost
+email	version 1.2.3 build 456	version 1.2.3 build 456
+team	DEVELOPMENT_TEAM = ABCDE12345	DEVELOPMENT_TEAM = [TEAM_ID]
+team	Signing with team ABCDE12345.	Signing with team [TEAM_ID].
+team	DEVELOPMENT_TEAM = "ABCDE12345"	DEVELOPMENT_TEAM = "[TEAM_ID]"
+team	build ABCDE12345	build ABCDE12345
+team	DEVELOPMENT_TEAM = XABCDE12345Y	DEVELOPMENT_TEAM = XABCDE12345Y
+bundle	已申请 s2arm.abcde12345.0100aabbccdd0000 的描述文件	已申请 s2arm.[TEAM_ID].0100aabbccdd0000 的描述文件
+bundle	"bundle":"s2arm.ABCDE12345.0100AABBCCDD0000"	"bundle":"s2arm.[TEAM_ID].0100AABBCCDD0000"
+bundle	程序号 0100aabbccdd0000	程序号 0100aabbccdd0000
+bundle	s2arm.abcde123456.0100aabbccdd0000	s2arm.abcde123456.0100aabbccdd0000
+udid	connected 0000abcd-0123456789abcdef	connected [DEVICE_ID]
+udid	udid=0000abcd-0123456789abcdef	udid=[REDACTED]
+udid	NCA 0123456789abcdef0123456789abcdef	NCA 0123456789abcdef0123456789abcdef
+udid	x0000abcd-0123456789abcdefy	x0000abcd-0123456789abcdefy
+udid_legacy	connected device 0123456789abcdef0123456789abcdef01234567	connected device [DEVICE_ID]
+udid_legacy	SERIAL 0123456789ABCDEF0123456789ABCDEF01234567	SERIAL [DEVICE_ID]
+udid_legacy	udid: 0123456789abcdef0123456789abcdef01234567	udid: [REDACTED]
+udid_legacy	commit 0123456789abcdef0123456789abcdef01234567	commit 0123456789abcdef0123456789abcdef01234567
+udid_legacy	device build 0123456789abcdef0123456789abcdef	device build 0123456789abcdef0123456789abcdef
+device_name	连接 "合成甲的iPhone" 完成	连接 "[DEVICE_NAME]的iPhone" 完成
+device_name	合成乙的iPad	[DEVICE_NAME]的iPad
+device_name	build 12345 version 1.2.3	build 12345 version 1.2.3
+device_name	iPhone iPad	iPhone iPad
+email	a=b@example.invalid	[EMAIL]
+email	contact=a=b@example.invalid; next=ok	contact=[EMAIL]; next=ok
+email	o'brien@example.invalid	[EMAIL]
+email	{"email":"x!y@example.invalid"}	{"email":"[EMAIL]"}
+email	email = "a=b@example.invalid"	email = "[EMAIL]"
+email	reply-to: a/b@example.invalid	reply-to: [EMAIL]
+email	a!#$%&'*+-/=?^_`{|}~b@example.invalid	[EMAIL]
+email	payload=a=b@example.invalid	[EMAIL]
+email	a=b@localhost	a=b@localhost
+udid	{"serial":"ab\"PrivateTail","ok":true}	{"serial":"[REDACTED]","ok":true}
+udid	serial='ab\'PrivateTail'	serial='[REDACTED]'
+udid	serial="Private Tail	serial="[REDACTED]
+udid	"serial":"a""b"	"serial":"[REDACTED]"
+udid	"serial":""	"serial":"[REDACTED]"
+udid	device_id="Private Tail"	device_id="[REDACTED]"
+udid	device_model=public	device_model=public
+email	a!email=b@example.invalid	[EMAIL]
+email	o'email=a@example.invalid	[EMAIL]
+udid	{"serial":"💠Private\" Tail","ok":true}	{"serial":"[REDACTED]","ok":true}
+udid	uuid=serial: PRIVATE	uuid=[REDACTED] [REDACTED]
+udid	serial=ab"Private Tail"	serial=[REDACTED]
+udid	serial=ab]PrivateTail	serial=[REDACTED]

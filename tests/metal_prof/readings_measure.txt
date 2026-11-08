@@ -1,0 +1,7 @@
+# 说明：本文件测的是生成器产物（夹具不入库，两条命令各造一份）：
+#   python3 tests/metal_prof/gen_fixtures.py --target 1MB  --out build/metal_prof/fixture_1mb.metal
+#   python3 tests/metal_prof/gen_fixtures.py --target 10MB --out build/metal_prof/fixture_10mb.metal
+tests/metal_prof/fixture_1mb.metal: 1.63 秒 / 1.044 MiB = 1.56 秒每 MiB（函数 1009，1.60–2.06，load 11.0）
+tests/metal_prof/fixture_10mb.metal: 12.60 秒 / 10.146 MiB = 1.24 秒每 MiB（函数 9678，10.77–13.64，load 8.2）
+读数写入 tests/metal_prof/readings_measure.tsv
+编译调用 8 次

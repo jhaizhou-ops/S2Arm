@@ -1,0 +1,38 @@
+#!/bin/bash
+# 申请开发描述文件的红因单测（pack/ensure_profile.sh，假 xcodebuild，约 1 秒）：bash tests/ensure_profile_test.sh
+#   ① 假 xcodebuild 打 Xcode 26 缺 iOS 平台组件的原文（「iOS 26.5 is not installed. Please download and install the platform from Xcode」）并退 65
+#      → 退 1、有一行「【红】本机 Xcode 没装 iOS 平台组件 … xcodebuild -downloadPlatform iOS」（11-05 七龙珠Z 新包名签不了）
+#   ② 别的编译错误（假 xcodebuild 打 error: Signing requires a development team）→ 退 1、不出平台组件那行（只认真缺平台）
+#   ③ S2A_PROFILE_NEED_UDIDS=「U1 U2」、描述文件目录里本包名一份只含 U1、一份含 U1 U2、别的包名一份只含 U1（假 security cms 原样吐文件）
+#      → 只有「本包名缺 U2」那份移进 <产物根>/.stale_profiles/，另两份原地不动；假 xcodebuild 成功 → 退 0（11-07 Duo 登记前申请的描述文件装不上 Duo）
+#   ④ 没给 S2A_PROFILE_NEED_UDIDS → 一份都不移
+#   ⑤ dev_sign.py：S2A_PROFILE_NEED_UDIDS 里有描述文件没有的设备 → 退 3、点名缺的那台；都有 → 不报缺设备（往下走到挑签名身份，假 security 没身份 → 报钥匙串，退 3）；
+#      ipa_tail.test_udids：名单只有全 0 占位 → 空（玩家机不核）
+set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
+mkdir -p "$T/bin"; printf '{}\n' > "$T/ent.plist"
+fake() { printf '#!/bin/bash\necho "%s"\nexit 65\n' "$1" > "$T/bin/xcodebuild"; chmod +x "$T/bin/xcodebuild"; }
+run() { PATH="$T/bin:$PATH" S2A_ROOTS="$T/roots" bash "$H/pack/ensure_profile.sh" com.example.t1 TEAM123 "$T/ent.plist" 2>&1; }
+ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
+fake '		{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device, error:iOS 26.5 is not installed. Please download and install the platform from Xcode > Settings > Components. }'
+o=$(run); r=$?
+ck "① 缺 iOS 平台组件 → 退 ${r}（期望 1）、给出修法行" '[ $r = 1 ] && grep -q "【红】本机 Xcode 没装 iOS 平台组件.*xcodebuild -downloadPlatform iOS" <<< "$o"'
+fake 'error: Signing for "Prov" requires a development team.'
+o=$(run); r=$?
+ck "② 别的签名错误 → 退 ${r}（期望 1）、不出平台组件行" '[ $r = 1 ] && ! grep -q "没装 iOS 平台组件" <<< "$o"'
+P=$T/prof; mkdir -p "$P"; pl() { printf '<plist><dict><key>application-identifier</key><string>%s</string><key>ProvisionedDevices</key><array>%s</array></dict></plist>\n' "$1" "$2"; }
+pl TEAM123.com.example.t1 '<string>U1</string>' > "$P/old.mobileprovision"; pl TEAM123.com.example.t1 '<string>U1</string><string>U2</string>' > "$P/new.mobileprovision"
+pl TEAM123.com.example.other '<string>U1</string>' > "$P/other.mobileprovision"
+printf '#!/bin/bash\n[ "$1 $2 $3" = "cms -D -i" ] && exec cat "$4"\nexit 1\n' > "$T/bin/security"; chmod +x "$T/bin/security"
+printf '#!/bin/bash\nexit 0\n' > "$T/bin/xcodebuild"; chmod +x "$T/bin/xcodebuild"
+o=$(S2A_PROFILE_DIRS="$P" run); r=$?
+ck "④ 没给测试机名单 → 一份不移（rc=${r}）" '[ $r = 0 ] && [ -f "$P/old.mobileprovision" ] && [ ! -d "$T/roots/.stale_profiles" ]'
+o=$(S2A_PROFILE_DIRS="$P" S2A_PROFILE_NEED_UDIDS='U1 U2' run); r=$?
+ck "③ 只移本包名缺 U2 的那份、另两份不动（rc=${r}）" '[ $r = 0 ] && [ -f "$T/roots/.stale_profiles/old.mobileprovision" ] && [ ! -e "$P/old.mobileprovision" ] && [ -f "$P/new.mobileprovision" ] && [ -f "$P/other.mobileprovision" ] && grep -q "移走缺测试机 U2 的旧描述文件 old.mobileprovision" <<< "$o"'
+# ⑤ dev_sign：假 security 吐的是真 plist（dev_sign 用 plistlib 解）
+mkdir -p "$T/home/Library/MobileDevice/Provisioning Profiles" "$T/app"
+python3 -c 'import plistlib,sys,datetime;plistlib.dump({"Entitlements":{"application-identifier":"TEAM123.com.example.t1","get-task-allow":True},"ProvisionedDevices":["U1"],"ExpirationDate":datetime.datetime(2030,1,1)},open(sys.argv[1],"wb"))' "$T/home/Library/MobileDevice/Provisioning Profiles/a.mobileprovision"
+ds() { HOME="$T/home" PATH="$T/bin:$PATH" python3 "$H/pack/dev_sign.py" "$T/app" com.example.t1 TEAM123 "$T/ent.plist" 2>&1; }
+o=$(S2A_PROFILE_NEED_UDIDS='U1 U2' ds); r=$?; o2=$(S2A_PROFILE_NEED_UDIDS='U1' ds); r2=$?
+u=$(S2A_MACHINE_NO_LOCAL=1 S2A_DEVICES_NO_LOCAL=1 python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import ipa_tail;print(repr(ipa_tail.test_udids()))' "$H/pack")
+ck "⑤ dev_sign 缺 U2 → 退 ${r}、点名 U2；都有 → 不报缺设备（${r2}）；占位名单 → 测试机空（${u}）" '[ $r = 3 ] && grep -q "不含测试机 U2" <<< "$o" && ! grep -q "不含测试机" <<< "$o2" && [ "$u" = "'"''"'" ]'
+[ $bad = 0 ] && echo "✅ 申请描述文件红因全通" || { echo "🔴 申请描述文件红因有不通项"; exit 1; }

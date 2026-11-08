@@ -1,0 +1,17 @@
+# 单结构放大：每种结构各造一份独立文件（--structure X --target 4MB / 10MB），各 1 次冷编译
+# 机器：Apple Silicon Mac，Xcode 27.1，Apple metal 32023.921；load average 8–11（开跑前 8.20，跑完 10.68）
+# 用法：python3 tests/metal_prof/gen_fixtures.py --structure <结构> --target <大小> --out <文件>
+#       xcrun -sdk iphoneos metal -c <文件> -o /tmp/x.air
+
+结构            文件字节     秒       秒/MiB
+deep_if        4231070     24.94    5.90
+big_switch     4211527      5.51    1.31
+huge_body      4200281      5.34    1.27
+inline         4347430     12.00    2.76
+deep_if       10576998    119.10   11.25
+
+# 每 MiB 成本的体量曲线（同一结构、同一批机器状态）：
+# deep_if     0.25 MiB 1.12  →  2.55 MiB 3.09  →  4.03 MiB 5.90  →  10.09 MiB 11.25   秒/MiB（随体量涨）
+# inline      0.26 MiB 3.54  →  2.59 MiB 2.86  →  4.15 MiB 2.76                       （不随体量涨）
+# big_switch  0.26 MiB 1.54  →  2.51 MiB 1.35  →  4.02 MiB 1.31                       （不随体量涨）
+# huge_body   0.27 MiB 1.71  →  2.52 MiB 1.56  →  4.01 MiB 1.27                       （不随体量涨）

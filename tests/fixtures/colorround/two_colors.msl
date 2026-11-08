@@ -1,0 +1,19 @@
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 out_attr0 [[color(0)]];
+    float4 out_attr1 [[color(1)]];
+};
+
+fragment main0_out main0(float4 gl_FragCoord [[position]])
+{
+    main0_out out = {};
+    out.out_attr0 = float4(0.25, 0.5, 0.75, 1.0);
+    out.out_attr1 = gl_FragCoord * 0.001;
+    return out;
+}
+

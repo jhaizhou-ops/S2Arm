@@ -1,0 +1,17 @@
+2026-10-24 14:10:02.100 S2Arm[5510:881001] [gal] 帧节拍：交换间隔 2，每帧 33.3 ms（30 帧/秒）
+2026-10-24 14:10:05.400 S2Arm[5510:881001] [gc] 帧 1840 第 412 次：gen2 压缩，晋升 128400 KB，固定 12，停顿 18.60 ms，堆 1240 MB
+[现场] ===== 全线程现场：出图停住看门：停在第 1840 帧已 10 秒（88 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 3/88 tid 881010「.NET BGC」在跑 优先级 31 QoS UTILITY 用户态 4.61 s
+[现场]     pc gc_heap::mark_phase+0x88（S2Arm）
+[现场]     #0 S_P_CoreLib_System_GC__BackgroundGCThread+0x1a8（S2Arm）
+[现场]     #1 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 20/88 tid 881060「S2A.GPU」等待 优先级 47 QoS UI 用户态 3.02 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 gal_present+0x1e4（S2Arm）
+[现场] 线程 40/88 tid 881100「nx-172」等待 优先级 47 QoS UI 用户态 51.30 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_GC__WaitForGCCompletion+0x84（S2Arm）
+[现场]     #2 GCHeap__GarbageCollect+0x120（S2Arm）
+[现场] ===== 现场完 =====

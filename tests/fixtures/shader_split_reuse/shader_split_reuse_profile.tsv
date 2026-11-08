@@ -1,0 +1,3 @@
+# Self-authored C fixture; the extractor only needs these two profile fields.
+shader_groups
+shader_note	0BSD C executable built with Clang, LLD and elf2nso

@@ -1,0 +1,18 @@
+<!-- nx_unpack 的 NCZ 还原单测（10-26 Vulkan·GL 线，解包泛化）：合成「原 NCA」字节，按公开 NCZ 格式做出整流 / 分块两种 NCZ，
+     核 NczCore 还原出的字节与原 NCA 逐字节相同。不用游戏文件、不要密钥。由 ../nx_unpack_ncz_test.sh 编与跑。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>NczTest</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../pack/nx_unpack/Ncz.cs" />
+    <Compile Include="../../pack/nx_unpack/Copies.cs" />
+    <Compile Include="../../pack/nx_unpack/ProgramPick.cs" />
+    <PackageReference Include="Ryujinx.LibHac" Version="0.21.0-alpha.133" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+  </ItemGroup>
+</Project>

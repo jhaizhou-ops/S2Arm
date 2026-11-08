@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Compile the production allocator/reservations/constants, not a copied binding formula. -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/ResourceCounts.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Constants.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Vulkan/Constants.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.GAL/Capabilities.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.GAL/SystemMemoryType.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.GAL/IComputeTranslationProfileProvider.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.GAL/Format.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/ResourceReservationCounts.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/S2AStorageOobRecord.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/ShaderStage.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/TextureFormat.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/IoUsage.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/FeatureFlags.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/TargetApi.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/SetBindingPair.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/StructuredIr/IoDefinition.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/IoVariable.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/StorageKind.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/AggregateType.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="HostStubs.cs" />
+  </ItemGroup>
+</Project>

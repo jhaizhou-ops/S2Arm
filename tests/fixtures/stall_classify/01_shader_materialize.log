@@ -1,0 +1,27 @@
+[现场] ===== 全线程现场：出图停住看门：停在第 707 帧已 10 秒（119 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 44/119 tid 741943「S2A.GPU」等待 优先级 47 QoS UI 用户态 5.89 s
+[现场]     pc RhSpinWait+0x28（S2Arm）
+[现场]     lr RhSpinWait+0x20（S2Arm）
+[现场]     #0 S_P_CoreLib_System_Threading_Thread__SpinWait+0x1c（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_SpinWait__SpinOnceCore+0x78（S2Arm）
+[现场]     #2 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ProgramQueue__WaitForProgram+0x58（S2Arm）
+[现场]     #3 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_CommandHelper___c___InitLookup_b__5_1<Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Commands_SetProgramCommand>+0x58（S2Arm）
+[现场]     #4 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__RenderLoop+0x1cc（S2Arm）
+[现场]     #5 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__RunLoop+0x200（S2Arm）
+[现场]     #6 S2A_Gfx_S2A_Gfx_RenderLoop__Run+0x140（S2Arm）
+[现场]     #7 S2A_Gfx_S2A_Gfx_RenderLoop__Entry+0x58（S2Arm）
+[现场]     #8 gal_thread_tramp+0x50（S2Arm）
+[现场]     #9 _pthread_start+0x88（libsystem_pthread.dylib）
+[现场] 线程 91/119 tid 742076「S2A.GPU.Emu」等待 优先级 47 QoS UI 用户态 0.64 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     lr <redacted>+0x400（libsystem_pthread.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_WaitSubsystem_WaitableObject__Wait+0x84（S2Arm）
+[现场]     #2 S_P_CoreLib_System_Threading_WaitHandle__WaitOneNoCheck+0x12c（S2Arm）
+[现场]     #3 S_P_CoreLib_System_Threading_Condition__Wait_1+0xc8（S2Arm）
+[现场]     #4 S_P_CoreLib_System_Threading_ManualResetEventSlim__Wait_4+0x29c（S2Arm）
+[现场]     #5 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__InvokeCommand+0x64（S2Arm）
+[现场]     #6 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ThreadedProgram__CheckProgramLink+0x78（S2Arm）
+[现场]     #7 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterializeCore+0x460（S2Arm）
+[现场]     #8 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterialize+0x58（S2Arm）
+[现场]     #9 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_ShaderSpecializationList__Materialize+0x5c（S2Arm）

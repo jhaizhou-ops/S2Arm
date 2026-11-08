@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>S2A.ShaderFaultCacheTest</AssemblyName>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- #723 P1：负缓存是纯逻辑（不引用 Ryujinx 类型），单文件编译，不拉整个 Gpu 工程（同 tests/multirange 的写法） -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs" Link="S2AShaderFaultCache.cs" />
+  </ItemGroup>
+</Project>

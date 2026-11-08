@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Explicit source list: never compile the game-derived S2AMacroTable.g.cs. -->
+    <Compile Include="../../graphics/tools/macrogen/MacroGen.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroJitContext.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/IMacroEE.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/AluOperation.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/AluRegOperation.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Engine/MME/AssignmentOperation.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Device/IDeviceState.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="$(SyntheticTable)" Condition="'$(SyntheticTable)' != ''" />
+  </ItemGroup>
+</Project>

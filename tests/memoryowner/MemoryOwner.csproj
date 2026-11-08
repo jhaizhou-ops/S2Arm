@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <MemoryOwnerSource Condition="'$(MemoryOwnerSource)' == ''">$(MSBuildThisFileDirectory)../../compat/tree/src/Ryujinx.Common/Memory/MemoryOwner.cs</MemoryOwnerSource>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MemoryOwnerSource)" Link="MemoryOwner.cs" />
+  </ItemGroup>
+</Project>

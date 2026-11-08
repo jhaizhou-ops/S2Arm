@@ -1,0 +1,17 @@
+<!-- tessref：曲面细分双后端对拍（我方 Metal 渲染器的计算展开 vs Ryujinx Vulkan 后端 @ MoltenVK，原生 Metal 细分），用例 SPIR-V 由 gen_cases.py 生成。
+     只作测试工具，不进产品。依赖 libnxgal.dylib（make -C graphics/metal，拷进 OutDir）。构建：dotnet build 带 artifacts-path 与 -p:OutDir=<目录>。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../graphics/metal/cs/NxGal.csproj" />
+    <ProjectReference Include="../refvk/RefVk.csproj" />
+  </ItemGroup>
+</Project>

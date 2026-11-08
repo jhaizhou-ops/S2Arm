@@ -1,0 +1,21 @@
+<!-- galplay：GAL 录像回放进我方 Metal 渲染器（可选套通用宽屏包装层），指定上屏帧存 PNG。只读录像，不起游戏局。
+     依赖 libnxgal.dylib（make -C graphics/metal）。构建：dotnet build 带 artifacts-path 与 OutDir（NxGal 工程的 OutDir 仍是旧库层级）、RyuGpu 指仓内 compat/tree。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <PropertyGroup><DefineConstants>$(DefineConstants);WIDEN_LAZY</DefineConstants></PropertyGroup>
+  <ItemGroup><Compile Include="../widen_scanbench/WidenOldModel.cs" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../galrec/S2Arm.GalRec.csproj" />
+    <ProjectReference Include="../../../graphics/widen/gal/S2Arm.Gfx.Widen.Gal.csproj" />
+    <ProjectReference Include="../../../graphics/metal/cs/NxGal.csproj" />
+    <ProjectReference Include="../refvk/RefVk.csproj" />
+  </ItemGroup>
+</Project>

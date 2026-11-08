@@ -1,0 +1,16 @@
+<!-- 参照渲染器：Ryujinx 自带 Vulkan 后端（仓内锁版本 compat/tree，原样）无窗口跑在本机 MoltenVK 上，作双后端对拍的尺子。只作测试工具，不进产品。
+     自旧库 S2A 497552d sw/gfx/gal/replay/RefVk 迁入。MoltenVK 路径：环境变量 REFVK_MOLTENVK，缺省 /opt/homebrew/lib/libMoltenVK.dylib。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>RefVk</AssemblyName>
+    <RootNamespace>RefVk</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,28 @@
+2026-10-24 13:05:11.186 S2Arm[4102:772001] [gal] 上传租约：在途 1、等归还 0
+[现场] ===== 全线程现场：崩溃 信号 11（118 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+2026-10-24 13:05:11.187 S2Arm[4102:772002] [gal] 【红】上传租约超时：租约 41 已被渲染线程持有 12.4 秒未归还（提交 8 次），先打现场
+[现场] 线程 9/118 tid 772045「.NET BGC」等待 优先级 31 QoS UTILITY 用户态 0.31 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_GC__WaitForBackgroundThread+0x64（S2Arm）
+[现场]     #2 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 22/118 tid 772061「AudioRendererManager.Worker」在跑 优先级 47 QoS UI 用户态 3.20 s
+[现场]     pc AudioRendererManager__MixNextBuffer+0x1a8（S2Arm）
+[现场]     #0 AudioRendererManager__MixNextBuffer+0x1a8（S2Arm）
+[现场]     #1 AudioRendererManager__WorkerLoop+0x2a0（S2Arm）
+[现场] 线程 31/118 tid 772109「S2A.GPU」等待 优先级 47 QoS UI 用户态 12.40 s
+[现场]     pc semaphore_wait_trap+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 gal_pso_job_wait+0x20（S2Arm）
+[现场]     #2 gal_pso_get+0x2338（S2Arm）
+[现场]     #3 prepare_draw+0x4a8（S2Arm）
+[现场] 线程 44/118 tid 772180「S2A.GPU.Emu」在跑 优先级 47 QoS UI 用户态 6.11 s（本线程，发起现场）
+[现场]     pc __pthread_kill+0x8（libsystem_pthread.dylib）
+[现场]     lr <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #0 __pthread_kill+0x8（libsystem_pthread.dylib）
+[现场]     #1 <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #2 pthread_kill+0x10c（libsystem_pthread.dylib）
+[现场]     #3 abort+0x94（libsystem_c.dylib）
+[现场]     #4 nxgal_prog_load_binary+0x2d0（S2Arm）
+[现场]     #5 S_P_CoreLib_System_RuntimeExceptionHelpers__Throw+0x1c（S2Arm）
+[现场] ===== 现场完 =====

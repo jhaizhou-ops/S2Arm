@@ -1,0 +1,2 @@
+rc=-1 bytes=0
+ERROR: 共享内存 36880 字节超限，但有 1 处非 spvUnsafeArray 的 threadgroup 声明，改不了

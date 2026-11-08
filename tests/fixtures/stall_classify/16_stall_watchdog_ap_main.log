@@ -1,0 +1,41 @@
+2026-10-24 13:41:02.700 S2Arm[5210:902001] [gal] 帧节拍：交换间隔 2，每帧 33.3 ms（30 帧/秒）
+[现场] ===== 全线程现场：出图停住看门：停在第 707 帧已 10 秒（121 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 3/121 tid 902004「ap_main」在跑 优先级 47 QoS UI 用户态 0.00 s（本线程，发起现场）
+[现场]     pc on_stall_dump+0x1c4（S2Arm）
+[现场]     lr s2a_stall_watch_step+0x2b8（S2Arm）
+[现场]     #0 on_stall_dump+0x1c4（S2Arm）
+[现场]     #1 s2a_stall_watch_step+0x2b8（S2Arm）
+[现场]     #2 s2a_host_frame_tick+0x8c（S2Arm）
+[现场]     #3 ap_dispatch+0x1f0（S2Arm）
+[现场]     #4 ap_main+0x84（S2Arm）
+[现场] 线程 9/121 tid 902045「.NET BGC」等待 优先级 31 QoS UTILITY 用户态 0.36 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_GC__WaitForBackgroundThread+0x64（S2Arm）
+[现场]     #2 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 22/121 tid 902061「AudioRendererManager.Worker」等待 优先级 47 QoS UI 用户态 0.02 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 AudioRendererManager__WorkerLoop+0x2a0（S2Arm）
+[现场]     #1 AudioRendererManager__Run+0x88（S2Arm）
+[现场] 线程 44/121 tid 902143「S2A.GPU」等待 优先级 47 QoS UI 用户态 5.89 s
+[现场]     pc RhSpinWait+0x28（S2Arm）
+[现场]     lr RhSpinWait+0x20（S2Arm）
+[现场]     #0 S_P_CoreLib_System_Threading_Thread__SpinWait+0x1c（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_SpinWait__SpinOnceCore+0x78（S2Arm）
+[现场]     #2 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ProgramQueue__WaitForProgram+0x58（S2Arm）
+[现场]     #3 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_CommandHelper___c___InitLookup_b__5_1<Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Commands_SetProgramCommand>+0x58（S2Arm）
+[现场]     #4 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__RenderLoop+0x1cc（S2Arm）
+[现场] 线程 91/121 tid 902276「S2A.GPU.Emu」等待 优先级 47 QoS UI 用户态 0.64 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     lr <redacted>+0x400（libsystem_pthread.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_WaitSubsystem_WaitableObject__Wait+0x84（S2Arm）
+[现场]     #2 S_P_CoreLib_System_Threading_WaitHandle__WaitOneNoCheck+0x12c（S2Arm）
+[现场]     #3 S_P_CoreLib_System_Threading_Condition__Wait_1+0xc8（S2Arm）
+[现场]     #4 S_P_CoreLib_System_Threading_ManualResetEventSlim__Wait_4+0x29c（S2Arm）
+[现场]     #5 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__InvokeCommand+0x64（S2Arm）
+[现场]     #6 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ThreadedProgram__CheckProgramLink+0x78（S2Arm）
+[现场]     #7 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterializeCore+0x460（S2Arm）
+[现场]     #8 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterialize+0x58（S2Arm）
+[现场]     #9 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_ShaderSpecializationList__Materialize+0x5c（S2Arm）
+[现场] ===== 现场完 =====

@@ -1,0 +1,27 @@
+[现场] ===== 全线程现场：出图停住看门：停在第 1259 帧已 10 秒（159 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 43/159 tid 765696「S2A.GPU」等待 优先级 47 QoS UI 用户态 1.47 s
+[现场]     pc semaphore_wait_trap+0x8（libsystem_kernel.dylib）
+[现场]     lr <redacted>+0x1c（libdispatch.dylib）
+[现场]     #0 <redacted>+0x9c（libdispatch.dylib）
+[现场]     #1 gal_pso_job_wait+0x20（S2Arm）
+[现场]     #2 gal_pso_get+0x2338（S2Arm）
+[现场]     #3 prepare_draw+0x4a8（S2Arm）
+[现场]     #4 nxgal_draw_indexed+0x4f8（S2Arm）
+[现场]     #5 NxGal_NxGal_N__nxgal_draw_indexed+0x90（S2Arm）
+[现场]     #6 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__RenderLoop+0x1cc（S2Arm）
+[现场]     #7 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__RunLoop+0x200（S2Arm）
+[现场]     #8 S2A_Gfx_S2A_Gfx_RenderLoop__Run+0x140（S2Arm）
+[现场]     #9 S2A_Gfx_S2A_Gfx_RenderLoop__Entry+0x58（S2Arm）
+[现场] 线程 87/159 tid 765778「S2A.GPU.Emu」等待 优先级 47 QoS UI 用户态 1.03 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     lr <redacted>+0x400（libsystem_pthread.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_WaitSubsystem_WaitableObject__Wait+0x84（S2Arm）
+[现场]     #2 S_P_CoreLib_System_Threading_WaitHandle__WaitOneNoCheck+0x12c（S2Arm）
+[现场]     #3 S_P_CoreLib_System_Threading_Condition__Wait_1+0xc8（S2Arm）
+[现场]     #4 S_P_CoreLib_System_Threading_ManualResetEventSlim__Wait_4+0x29c（S2Arm）
+[现场]     #5 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_ThreadedRenderer__InvokeCommand+0x64（S2Arm）
+[现场]     #6 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ThreadedProgram__CheckProgramLink+0x78（S2Arm）
+[现场]     #7 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterializeCore+0x460（S2Arm）
+[现场]     #8 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterialize+0x58（S2Arm）
+[现场]     #9 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_ShaderSpecializationList__Materialize+0x5c（S2Arm）

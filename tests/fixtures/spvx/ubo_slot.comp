@@ -1,0 +1,12 @@
+#version 450
+// 常量缓冲按 NVN 槽查界长表（cp_c7 钳、cp_c1 不钳）与存储缓冲运行时数组（同 tests/dsh_harden_test.sh 第二支）
+layout(local_size_x = 1) in;
+layout(std140, set = 0, binding = 9) uniform U7 { vec4 data[4096]; } cp_c7;
+layout(std140, set = 0, binding = 2) uniform U1 { vec4 data[4096]; } cp_c1;
+layout(std430, set = 0, binding = 0) buffer O { uint o[4]; };
+layout(std430, set = 0, binding = 1) readonly buffer P { uint idx; uint rt[]; };
+void main() {
+    o[0] = floatBitsToUint(cp_c7.data[idx].x);
+    o[1] = floatBitsToUint(cp_c1.data[idx].x);
+    o[2] = rt[idx];
+}

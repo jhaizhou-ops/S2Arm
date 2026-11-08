@@ -1,0 +1,18 @@
+[s2a] 低区账 [托管 OOM]：按标签（含尾部）：文件页 517 MB、标签 0 1007 MB、标签 100 492 MB、标签 2 392 MB、标签 30 153 MB、标签 3 66 MB、标签 22 64 MB
+2026-10-24 12:19:21.963 S2Arm[2437:609368] [gal] 【红】GPU 模拟线程异常退出：System.Reflection.TargetInvocationException: Exception has been thrown by the target of an invocation.
+ ---> System.OutOfMemoryException: Insufficient memory to continue the execution of the program.
+2026-10-24 12:19:21.963 S2Arm[2437:609368]    at System.Activator.CreateInstance[T]() + 0x38
+   --- End of inner exception stack trace ---
+   at System.Activator.CreateInstance[T]() + 0xc4
+   at Spv.Generator.GeneratorPool`1.AddChunkIfNeeded() + 0x68
+   at Spv.Generator.GeneratorPool`1.Allocate() + 0x2c
+2026-10-24 12:19:21.963 S2Arm[2437:609368]    at Spv.Generator.Module.FNegate(Instruction resultType, Instruction operand) + 0x38
+[s2a] 低区账 [崩溃时]：空洞合计 T 582 MB、最大一块 B 572 MB、保留量 R 256 MB；文件句柄已开 n 149 / 软上限 S 2560；管线归档 169 MB、写跟踪快照池 32 MB、命令分配器 228 MB；拦不到的（Metal 内部 / malloc / 运行时）1117 MB
+[现场] ===== 全线程现场：崩溃 信号 6（114 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 52/114 tid 609368「S2A.GPU.Emu」在跑 优先级 47 QoS UI 用户态 20.89 s（本线程，发起现场）
+[现场]     pc on_crash+0x478（S2Arm）
+[现场]     lr 0
+[现场]     #0 on_crash+0x478（S2Arm）
+[现场]     #1 <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #2 pthread_kill+0x10c（libsystem_pthread.dylib）
+[现场]     #3 abort+0x94（libsystem_c.dylib）

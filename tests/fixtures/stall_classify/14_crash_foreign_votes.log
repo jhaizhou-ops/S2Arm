@@ -1,0 +1,26 @@
+[现场] ===== 全线程现场：崩溃 信号 11（131 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 7/131 tid 833001「.NET BGC」等待 优先级 31 QoS UTILITY 用户态 0.44 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_GC__WaitForBackgroundThread+0x64（S2Arm）
+[现场]     #2 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 18/131 tid 833040「S2A.GPU.Emu」等待 优先级 47 QoS UI 用户态 9.02 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 Ryujinx_Graphics_GAL_Ryujinx_Graphics_GAL_Multithreading_Resources_ThreadedProgram__CheckProgramLink+0x78（S2Arm）
+[现场]     #2 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterializeCore+0x460（S2Arm）
+[现场]     #3 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_DiskCache_DiskCacheHostStorage__S2AMaterialize+0x58（S2Arm）
+[现场]     #4 Ryujinx_Graphics_Gpu_Ryujinx_Graphics_Gpu_Shader_ShaderSpecializationList__Materialize+0x5c（S2Arm）
+[现场] 线程 42/131 tid 833260「S2A.GPU」等待 优先级 47 QoS UI 用户态 5.21 s
+[现场]     pc semaphore_wait_trap+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 gal_pso_job_wait+0x20（S2Arm）
+[现场]     #2 gal_pso_get+0x2338（S2Arm）
+[现场]     #3 prepare_draw+0x4a8（S2Arm）
+[现场] 线程 57/131 tid 833611「nx-57」在跑 优先级 47 QoS UI 用户态 2.08 s（本线程，发起现场）
+[现场]     pc nxgal_prog_load_binary+0x2f0（S2Arm）
+[现场]     lr nxgal_prog_load_binary+0x2d8（S2Arm）
+[现场]     #0 nxgal_prog_load_binary+0x2f0（S2Arm）
+[现场]     #1 S_P_CoreLib_System_RuntimeExceptionHelpers__Throw+0x1c（S2Arm）
+[现场]     #2 <redacted>+0x88（libsystem_platform.dylib）
+[现场] ===== 现场完 =====

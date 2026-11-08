@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "float/add",
+  "stage": "fragment",
+  "instructions": [
+    "FADD32I R0 RZ 0.25",
+    "FADD32I R0 R0 0.5",
+    "MOV32I R1 0",
+    "MOV32I R2 0",
+    "MOV32I R3 0x3f800000",
+    "EXIT"
+  ],
+  "expected": [
+    191,
+    0,
+    0,
+    255
+  ],
+  "rules": [
+    "FADD32I"
+  ],
+  "reference": "0.25+0.5=0.75; UNORM8 nearest(0.75*255)=191"
+}

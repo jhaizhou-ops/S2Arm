@@ -1,0 +1,44 @@
+# macOS 专有命令用法（cp -c / stat -f / sed -i ''）白名单：只在 Mac 上跑的存量脚本，路径<TAB>理由（tests/macos_only_lint.py 读）
+# 11-01 建表时的存量 39 个，没有逐个核它们是否真的只在 Mac 跑；新脚本不许往这里加，除非写明为什么只在 Mac 跑（例：要 Xcode / devicectl / APFS）
+graphics/metal/tests/t_m3pack.sh	存量（11-01 建表）
+graphics/tools/shader_pack.sh	存量（11-01 建表）
+graphics/tools/shbake/pso_chunk.sh	存量（11-01 建表）
+graphics/tools/shbake/pso_dist.sh	存量（11-01 建表）
+graphics/tools/shbake/tests/t_out_fp.sh	存量（11-01 建表）
+graphics/tools/shbake/xc_key.sh	存量（11-01 建表）
+graphics/tools/timeout_snap.sh	存量（11-01 建表）
+pack/ensure_profile.sh	存量（11-01 建表）
+pack/ipa.sh	存量（11-01 建表）
+compat/import_upstream.sh	存量（11-01 建表）
+compat/truth/build_truth.sh	存量（11-01 建表）
+compat/truth/run_fps.sh	存量（11-01 建表）
+compat/truth/run_truth.sh	存量（11-01 建表）
+services/nxaot.sh	存量（11-01 建表）
+tests/chain_window_test.sh	存量（11-01 建表）
+tests/dev_run_test.sh	存量（11-01 建表）
+tests/gate_mini_test.sh	存量（11-01 建表）
+tests/gc_test.sh	存量（11-01 建表）
+tests/pack_test.sh	存量（11-01 建表）
+tests/prebuilt_tools_test.sh	存量（11-01 建表）
+tests/rc_lint_test.sh	存量（11-01 建表）
+tests/remote_test.sh	存量（11-01 建表）
+tests/stage_shaders_test.sh	存量（11-01 建表）
+tests/test_cache_test.sh	存量（11-01 建表）
+tests/visual/diff_rec.sh	存量（11-01 建表）
+tests/visual/diff_store.sh	存量（11-01 建表）
+tests/widen_auto_infra_test.sh	存量（11-01 建表）
+tools/app_only.sh	存量（11-01 建表）
+tools/devbattery.sh	存量（11-01 建表）
+tools/disk_guard.sh	存量（11-01 建表）
+tools/disk_watch.sh	存量（11-01 建表）
+tools/gc.sh	存量（11-01 建表）
+tools/mac_slot.sh	存量（11-01 建表）
+tools/remote.sh	存量（11-01 建表）
+tools/sched.sh	存量（11-01 建表）
+tools/train.sh	存量（11-01 建表）
+tools/train_post.sh	存量（11-01 建表）
+tools/census/census.sh	普查只在 Mac 本机 / Air 上跑（APFS 克隆 cp -c、2T 数据卷、机械盘读锁），不在 Linux 跑
+tests/census_test.sh	测 census.sh（只在 Mac 跑）
+tools/ops/work_cleaner.sh	Mac 工作盘清理器：只在 Mac 运行区常驻（APFS 工作盘、lsof 当前目录、ps -E 进程环境、stat -f / %B 创建时间），不在 Linux / Windows 跑
+tools/ops/guard_lib.sh	Mac 运维看守库：只给运行区常驻脚本（清理器等）用
+tests/work_cleaner_test.sh	清理器单测：被测实现只在 Mac 跑（ps -E、stat -f %B、BSD sed -i），门禁在 mini（Mac）上跑

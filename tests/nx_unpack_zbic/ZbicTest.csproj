@@ -1,0 +1,15 @@
+<!-- nx_unpack 的 ZBIC 单测：自写解码器 ZbicDecoder.cs（BIC 表头 + RFC 8878）解测试帧与合成原文逐字节相同、各种坏数据报错，
+     以及 NsoZbic.Normalize 的 NSO 规整（不用游戏文件、不要密钥、不引第三方包）。由 ../nx_unpack_zbic_test.sh 编与跑。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AssemblyName>ZbicTest</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../pack/nx_unpack/NsoZbic.cs" />
+    <Compile Include="../../pack/nx_unpack/ZbicDecoder.cs" />
+  </ItemGroup>
+</Project>

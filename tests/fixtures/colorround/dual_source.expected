@@ -1,0 +1,36 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 out_attr0 [[color(0), index(0)]];
+    float4 out_attr1 [[color(0), index(1)]];
+};
+
+#ifndef S2A_HALF_ROUND
+#define S2A_HALF_ROUND
+static inline float s2a_half_rtz(float x) {
+    uint u = as_type<uint>(x), e = (u >> 23) & 255u;
+    if (e == 255u) return x;
+    if (e > 142u) u = (u & 0x80000000u) | 0x477fe000u;
+    else if (e >= 113u) u &= 0xffffe000u;
+    else if (e >= 103u) u &= ~((1u << (126u - e)) - 1u);
+    else u &= 0x80000000u;
+    return as_type<float>(u);
+}
+static inline float4 s2a_half_rtz(float4 x) {
+    return float4(s2a_half_rtz(x.x), s2a_half_rtz(x.y), s2a_half_rtz(x.z), s2a_half_rtz(x.w));
+}
+#endif
+fragment main0_out main0(constant uint& s2a_half_mask [[buffer(27)]])
+{
+    main0_out out = {};
+    out.out_attr0 = float4(1.0);
+    out.out_attr1 = float4(0.5);
+    {
+        if (s2a_half_mask & 1u) out.out_attr0 = s2a_half_rtz(out.out_attr0);
+        return out;
+    }
+}
+

@@ -1,0 +1,16 @@
+<!-- 宽屏核心 C 接口对拍（画幅线）：把 graphics/widen 按 NativeAOT 编成动态库，由 capi_test.c 经 export/s2a_widen.h 调——
+     查 C 边界的结构布局、零分配在 NativeAOT 发布版上量（JIT / 单测量不到值元组排序这类隐藏分配）。跑法：bash tests/visual/widen_capi/run.sh -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../graphics/widen/S2Arm.Gfx.Widen.csproj" />
+    <UnmanagedEntryPointsAssembly Include="S2Arm.Gfx.Widen" />
+  </ItemGroup>
+</Project>

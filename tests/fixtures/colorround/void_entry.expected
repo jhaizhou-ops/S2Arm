@@ -1,0 +1,9 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+fragment void main0(device uint* fp_s0 [[buffer(2)]])
+{
+    fp_s0[0] = 1u;
+}
+

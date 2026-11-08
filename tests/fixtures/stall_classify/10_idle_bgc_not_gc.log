@@ -1,0 +1,12 @@
+2026-10-24 14:20:00.000 S2Arm[6000:991001] [gal] 帧节拍：交换间隔 2，每帧 33.3 ms（30 帧/秒）
+[现场] ===== 全线程现场：出图停住看门：停在第 2500 帧已 10 秒（70 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 3/70 tid 991010「.NET BGC」等待 优先级 31 QoS UTILITY 用户态 0.07 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_GC__WaitForBackgroundThread+0x64（S2Arm）
+[现场]     #2 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 20/70 tid 991060「S2A.GPU」等待 优先级 47 QoS UI 用户态 3.02 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 gal_present+0x1e4（S2Arm）
+[现场] ===== 现场完 =====

@@ -1,0 +1,13 @@
+# 动森 IPC 对拍真值侧时间表（compat/truth/run_truth.sh；底本旧库 .wip/truth/tent.sched）：<起跑后秒> <FIFO 指令>
+# 带存档读盘 → 标题按 A 三次 → 岛上推左摇杆 右 / 左 / 上 / 下、右摇杆 上 / 下 各一段（和我方自动玩家探测同四向），沿途截图核进度
+40 A,HOLD:6
+48 A,HOLD:6
+56 A,HOLD:6
+110 SHOT:island
+120 L:32767:0,HOLD:54
+124 L:-32767:0,HOLD:54
+128 L:0:32767,HOLD:54
+132 L:0:-32767,HOLD:54
+136 R:0:32767,HOLD:54
+140 R:0:-32767,HOLD:54
+146 SHOT:after_stick

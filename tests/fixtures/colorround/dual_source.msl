@@ -1,0 +1,18 @@
+#include <metal_stdlib>
+
+using namespace metal;
+
+struct main0_out
+{
+    float4 out_attr0 [[color(0), index(0)]];
+    float4 out_attr1 [[color(0), index(1)]];
+};
+
+fragment main0_out main0()
+{
+    main0_out out = {};
+    out.out_attr0 = float4(1.0);
+    out.out_attr1 = float4(0.5);
+    return out;
+}
+

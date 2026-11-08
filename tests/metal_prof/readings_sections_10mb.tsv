@@ -1,0 +1,5 @@
+source	section	bytes	mib	functions	reps	median_s	min_s	max_s	s_per_mib	air_bytes	calib_s	load1
+fixture_10mb.metal	deep_if	2647129	2.524	551	2	7.79	7.74	7.84	3.09	440704		9.2
+fixture_10mb.metal	big_switch	2633818	2.512	173	2	3.39	3.38	3.41	1.35	771072		9.2
+fixture_10mb.metal	huge_body	2637956	2.516	77	2	3.93	3.67	4.19	1.56	1028736		8.7
+fixture_10mb.metal	inline	2719264	2.593	8877	2	7.42	7.37	7.47	2.86	2047072		8.2

@@ -1,0 +1,156 @@
+#!/bin/bash
+# 门禁覆盖：graphics/metal/gal_spvx.m graphics/metal/gal_spvx.c graphics/metal/gal_spvx.h graphics/tools/direct/dsh/SpvCross.cs graphics/tools/direct/dsh/Dsh.cs graphics/nvn/gfx/nvn/nvn_refl.m graphics/nvn/gfx/nvn/nvn_refl.h tests/dsh_harden_test.sh
+# 直连着色器链的越界保护（#1204 T1：S2A.Dsh 交 SPIRV-Cross 前调 NxgalSpvCross.Harden = libnxgal nxgal_spv_harden，与通用路径同一份 gal_spvx.m；直连不加循环上限（11-01 总指挥定，见 gal_spvx.m spv_harden）；约 20 秒，要 Metal）
+#   一支 GLSL 计算核（存储数组 a 声明 4 个元素，下标 idx 与循环次数 n 都从缓冲读，编译期不知道）：
+#     o[0] = a[idx]（越界读）；a[idx] = 77（越界写）；atomicAdd(a[idx], 5)（越界原子，返回值进 o[2]）；for (c < n) c++ → o[1] = c（读数据决定的循环）
+#   缓冲布局：a 所在 MTLBuffer 64 字节，a[0..3] = 10..13，a[4..15] 哨兵 0xAAAA0000 + i；idx = 6、n = 2^24（单线程几毫秒，改前跑满也不会挂死 GPU）
+#   期望（按 gal_spvx.m 文件头的口径手算，不跑被测实现）：加固后 o[0] = a[3] = 13（越界读只钳下标，11-01 总指挥定撤掉读回 0）、哨兵 a[4..15] 全不变（越界写 / 原子不执行）、o[2] = 0（越界原子回 0）、
+#     o[1] = 2^24（直连链不加循环上限：读数据决定的循环照原样跑满；通用链的上限由 graphics/metal/tests/t_prog 管）
+#   反证（同一支 SPIR-V 不加固，改前直连链的样子）：o[0] = 哨兵 a[6] = 0xAAAA0006、a[6] 被写成 77 + 5
+#   另核：直连 Compile 里交 SPIRV-Cross 的两处（Msl 本地函数、TessMsl）都先经 NxgalSpvCross.Harden；S2A.Dsh 翻译指纹输入含 gal_spvx.m
+# 第二支（11-02 重进：直连宿主只知道 NVN 槽，界长表按槽索引；首版按 SPIR-V 绑定号，宿主不认、读空指针被撤）：常量缓冲 cp_c7（NVN 槽 4，SPIR-V 绑定号 9）与 cp_c1（着色器自带常量段），
+#   存储缓冲 P { uint idx; uint rt[]; }（运行时数组，加固用 OpArrayLength → SPIRV-Cross spvBufferSizeConstants）：o[0] = cp_c7.data[idx].x、o[1] = cp_c1.data[idx].x、o[2] = rt[idx]，idx = 6
+#   布局：两个常量缓冲各 16 个 vec4，第 i 个的 x = 0xC7000000 + i / 0xC1000000 + i（按位）；P 64 字节 = [6, 0xBBBB0001, …]；界长表 gal_ubo_len[4] = 4（游戏只绑了 64 字节）、其余 0；
+#     spvBufferSizeConstants[P 的 [[id]]] = 16（字节：idx + rt 3 个）
+#   期望（手算）：MSL 有成员 gal_ubo_len 且只读 [4u]（槽，不是绑定号 9）；有 spvBufferSizeConstants[P 的 id]；
+#     加固 o[0] = 0xC7000003（钳到第 4 个 vec4）、o[1] = 0xC1000006（c1 不钳）、o[2] = rt[2] = 0xBBBB0003；反证不加固 o[0] = 0xC7000006、o[2] = 0xBBBB0007
+#   另核：宿主表长 NVN_UBOLEN_N 与 NXGAL_DIRECT_UBOLEN_N 一致；Dsh.cs 反射认 gal_ubo_len / spvBufferSizeConstants；nvn_refl.m 认 ubolen / sbsize；nvn_mtl.m encode_args 填这两种
+set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/dsh_harden.XXXXXX"); trap 'rm -rf "$T"' EXIT; bad=0
+command -v glslangValidator > /dev/null || { echo "✗ dsh_harden：没有 glslangValidator"; exit 2; }
+ck() { if [ "$2" = "$3" ]; then echo "✓ $1"; else echo "✗ $1：期望 $2，实际 $3"; bad=1; fi; }
+D=$H/graphics/tools/direct/dsh
+ck "Compile 的 Msl 本地函数先加固" 1 "$(grep -c 'Xc.Msl(NxgalSpvCross.Harden(XIo.ReadAllBytes(spvPath))' "$D/Dsh.cs")"
+ck "曲面 TessMsl 先加固" 1 "$(grep -c 'NxgalSpvCross.TessMsl(NxgalSpvCross.Harden(' "$D/Dsh.cs")"
+ck "翻译指纹输入含 gal_spvx.m" 1 "$(grep -c 'DshXfpInput Include="$(Nx)../metal/gal_spvx.m"' "$D/S2A.Dsh.csproj")"
+ck "翻译指纹输入含 gal_spvx.c（#783 加固代码所在）" 1 "$(grep -c 'DshXfpInput Include="$(Nx)../metal/gal_spvx.c;' "$D/S2A.Dsh.csproj")"
+cat > "$T/k.comp" <<'EOF'
+#version 450
+layout(local_size_x = 1) in;
+layout(std430, set = 0, binding = 0) buffer A { uint a[4]; };
+layout(std430, set = 0, binding = 1) buffer O { uint o[4]; };
+layout(std430, set = 0, binding = 2) readonly buffer P { uint idx; uint n; };
+void main() {
+    o[0] = a[idx];
+    a[idx] = 77u;
+    o[2] = atomicAdd(a[idx], 5u);
+    uint c = 0u; for (uint i = 0u; i < n; i++) c++;
+    o[1] = c;
+}
+EOF
+glslangValidator -V -S comp "$T/k.comp" -o "$T/k.spv" > "$T/gv.log" 2>&1 || { echo "✗ glslangValidator 失败：$(tail -2 "$T/gv.log")"; exit 1; }
+make -s -C "$H/graphics/metal" "$H/build/gal/libnxgal.dylib" > "$T/mk.log" 2>&1 || { echo "✗ libnxgal 编不过：$(tail -2 "$T/mk.log")"; exit 1; }
+python3 - "$H" "$T" <<'PY' || exit 1
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], 'graphics/tools/direct/tests')); import dshfn
+t = sys.argv[2]; spv = open(os.path.join(t, 'k.spv'), 'rb').read().hex()
+r = dshfn.batch([('msl_raw', [spv]), ('msl_hardened', [spv])], nxgal=os.path.join(sys.argv[1], 'build/gal/libnxgal.dylib'))
+for nm, x in zip(('raw', 'hard'), r):
+    if 'ok' not in x: sys.exit(f'✗ {nm} 出 MSL 失败：{x}')
+    open(os.path.join(t, nm + '.metal'), 'w').write(x['ok'])
+PY
+cat > "$T/run.m" <<'EOF'
+#import <Metal/Metal.h>
+#include <stdio.h>
+int main(int argc, char **argv) { @autoreleasepool {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
+    NSString *src = [NSString stringWithContentsOfFile:@(argv[1]) encoding:NSUTF8StringEncoding error:nil];
+    id<MTLLibrary> lib = [d newLibraryWithSource:src options:nil error:&e]; if (!lib) { printf("编不过：%s\n", e.description.UTF8String); return 2; }
+    id<MTLFunction> f = [lib newFunctionWithName:@"main0"]; id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:f error:&e];
+    if (!ps) { printf("管线：%s\n", e.description.UTF8String); return 2; }
+    id<MTLBuffer> a = [d newBufferWithLength:64 options:MTLResourceStorageModeShared], o = [d newBufferWithLength:16 options:MTLResourceStorageModeShared], p = [d newBufferWithLength:8 options:MTLResourceStorageModeShared];
+    uint32_t *A = a.contents; for (int i = 0; i < 16; i++) A[i] = i < 4 ? 10 + i : 0xAAAA0000u + i;
+    memset(o.contents, 0xff, 16); ((uint32_t *)p.contents)[0] = 6; ((uint32_t *)p.contents)[1] = 1u << 24;
+    id<MTLArgumentEncoder> ae = [f newArgumentEncoderWithBufferIndex:0]; id<MTLBuffer> ab = [d newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
+    [ae setArgumentBuffer:ab offset:0]; [ae setBuffer:a offset:0 atIndex:atoi(argv[2])]; [ae setBuffer:o offset:0 atIndex:atoi(argv[3])]; [ae setBuffer:p offset:0 atIndex:atoi(argv[4])];   // 参数块成员 id：SPIRV-Cross 按出现顺序给，不按 binding
+    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:ab offset:0 atIndex:0];
+    [ce useResource:a usage:MTLResourceUsageRead | MTLResourceUsageWrite]; [ce useResource:o usage:MTLResourceUsageWrite]; [ce useResource:p usage:MTLResourceUsageRead];
+    [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { printf("GPU 错误：%s\n", cb.error.description.UTF8String); return 3; }
+    uint32_t *O = o.contents; int sent = 1; for (int i = 4; i < 16; i++) sent &= A[i] == 0xAAAA0000u + i;
+    printf("%u %u %u %d %u\n", O[0], O[1], O[2], sent, A[6]);
+    return 0;
+} }
+EOF
+xcrun clang -fobjc-arc -framework Metal -framework Foundation "$T/run.m" -o "$T/run" 2> "$T/cc.log" || { echo "✗ 执行器编不过：$(head -3 "$T/cc.log")"; exit 1; }
+ids() { for ty in A O P; do sed -n "s/.*device $ty\* m_[0-9]* \[\[id(\([0-9]*\))\]\];.*/\1/p" "$1" | head -1; done | tr '\n' ' '; }
+read -r r0 r1 r2 rs r6 <<< "$("$T/run" "$T/raw.metal" $(ids "$T/raw.metal"))"; read -r h0 h1 h2 hs h6 <<< "$("$T/run" "$T/hard.metal" $(ids "$T/hard.metal"))"
+ck "加固：越界读钳到末元素 a[3] = 13" 13 "$h0"
+ck "加固：越界写 / 原子不落（哨兵 a[4..15] 全不变）" 1 "$hs"
+ck "加固：越界原子返回 0" 0 "$h2"
+ck "加固：直连不加循环上限，读数据决定的循环照原样跑满 2^24" 16777216 "$h1"
+ck "反证（不加固）：越界读到相邻哨兵 0xAAAA0006" $((0xAAAA0006)) "$r0"
+ck "反证（不加固）：越界写 + 原子穿进 a[6] = 82" 82 "$r6"
+# ---- 第二支：直连界长表按 NVN 槽 ----
+ck "宿主表长与加固表长一致" "$(sed -n 's/^#define NXGAL_DIRECT_UBOLEN_N \([0-9]*\).*/\1/p' "$H/graphics/metal/gal_abi.h")" "$(sed -n 's/^#define NVN_UBOLEN_N \([0-9]*\).*/\1/p' "$H/graphics/nvn/gfx/nvn/nvn_refl.h")"
+ck "Dsh.cs 反射认 gal_ubo_len / spvBufferSizeConstants" 2 "$(grep -c 'nm == "gal_ubo_len") e.Set("kind", "ubolen")\|nm == "spvBufferSizeConstants") e.Set("kind", "sbsize")' "$D/Dsh.cs")"
+ck "nvn_refl.m 认 ubolen / sbsize" 2 "$(grep -c 'isEqualToString:@"ubolen"\]) r->kind = NVN_RB_UBOLEN\|isEqualToString:@"sbsize"\]) r->kind = NVN_RB_SBSZ' "$H/graphics/nvn/gfx/nvn/nvn_refl.m")"
+# 审计 #1646 P1-65 起统一缓冲界长表在参数循环后填（要先知道各槽指针后实际有多少字节），存储缓冲表照旧当场填：三处都在才算接上
+ck "nvn_mtl.m encode_args 填两张表" 3 "$(grep -c 'b->kind == NVN_RB_UBOLEN) { ul_aid = aid\|b->kind == NVN_RB_SBSZ) { slots\[aid\] = len_fill\|slots\[ul_aid\] = len_fill(sh, nvn_stage, NVN_RB_UBOLEN, ubcap)' "$H/graphics/nvn/gfx/nvn/nvn_mtl.m")"
+cat > "$T/u.comp" <<'EOF'
+#version 450
+layout(local_size_x = 1) in;
+layout(std140, set = 0, binding = 9) uniform U7 { vec4 data[4096]; } cp_c7;
+layout(std140, set = 0, binding = 2) uniform U1 { vec4 data[4096]; } cp_c1;
+layout(std430, set = 0, binding = 0) buffer O { uint o[4]; };
+layout(std430, set = 0, binding = 1) readonly buffer P { uint idx; uint rt[]; };
+void main() {
+    o[0] = floatBitsToUint(cp_c7.data[idx].x);
+    o[1] = floatBitsToUint(cp_c1.data[idx].x);
+    o[2] = rt[idx];
+}
+EOF
+glslangValidator -V -S comp "$T/u.comp" -o "$T/u.spv" > "$T/gv2.log" 2>&1 || { echo "✗ glslangValidator 失败（第二支）：$(tail -2 "$T/gv2.log")"; exit 1; }
+python3 - "$H" "$T" <<'PY' || exit 1
+import os, sys
+sys.path.insert(0, os.path.join(sys.argv[1], 'graphics/tools/direct/tests')); import dshfn
+t = sys.argv[2]; spv = open(os.path.join(t, 'u.spv'), 'rb').read().hex()
+r = dshfn.batch([('msl_raw', [spv]), ('msl_hardened', [spv])], nxgal=os.path.join(sys.argv[1], 'build/gal/libnxgal.dylib'))
+for nm, x in zip(('uraw', 'uhard'), r):
+    if 'ok' not in x: sys.exit(f'✗ {nm} 出 MSL 失败：{x}')
+    open(os.path.join(t, nm + '.metal'), 'w').write(x['ok'])
+PY
+cat > "$T/urun.m" <<'EOF'
+#import <Metal/Metal.h>
+#include <stdio.h>
+#include <stdlib.h>
+// argv: metal c7 c1 O P ulen sizes（参数块成员 id，-1 = 没有该成员）
+int main(int argc, char **argv) { @autoreleasepool {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil; int id_[6]; for (int i = 0; i < 6; i++) id_[i] = atoi(argv[2 + i]);
+    NSString *src = [NSString stringWithContentsOfFile:@(argv[1]) encoding:NSUTF8StringEncoding error:nil];
+    id<MTLLibrary> lib = [d newLibraryWithSource:src options:nil error:&e]; if (!lib) { printf("编不过：%s\n", e.description.UTF8String); return 2; }
+    id<MTLFunction> f = [lib newFunctionWithName:@"main0"]; id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:f error:&e];
+    if (!ps) { printf("管线：%s\n", e.description.UTF8String); return 2; }
+    id<MTLBuffer> c7 = [d newBufferWithLength:256 options:MTLResourceStorageModeShared], c1 = [d newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> o = [d newBufferWithLength:16 options:MTLResourceStorageModeShared], p = [d newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> ul = [d newBufferWithLength:64 options:MTLResourceStorageModeShared], sz = [d newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    uint32_t *C7 = c7.contents, *C1 = c1.contents, *P = p.contents, *U = ul.contents, *Z = sz.contents;
+    for (int i = 0; i < 16; i++) { C7[4 * i] = 0xC7000000u + i; C1[4 * i] = 0xC1000000u + i; P[i] = 0xBBBB0000u + i; }
+    P[0] = 6; memset(o.contents, 0xff, 16); memset(U, 0, 64); U[4] = 4; memset(Z, 0, 256); if (id_[3] >= 0) Z[id_[3]] = 16;
+    id<MTLArgumentEncoder> ae = [f newArgumentEncoderWithBufferIndex:0]; id<MTLBuffer> ab = [d newBufferWithLength:ae.encodedLength options:MTLResourceStorageModeShared];
+    [ae setArgumentBuffer:ab offset:0]; id<MTLBuffer> bs[6] = { c7, c1, o, p, ul, sz };
+    for (int i = 0; i < 6; i++) if (id_[i] >= 0) [ae setBuffer:bs[i] offset:0 atIndex:id_[i]];
+    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:ab offset:0 atIndex:0]; [ce setBuffer:sz offset:0 atIndex:25];   // 25：SPIRV-Cross 入口里不读的那份长度表参数
+    for (int i = 0; i < 6; i++) [ce useResource:bs[i] usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    if (cb.error) { printf("GPU 错误：%s\n", cb.error.description.UTF8String); return 3; }
+    uint32_t *O = o.contents; printf("%u %u %u\n", O[0], O[1], O[2]);
+    return 0;
+} }
+EOF
+xcrun clang -fobjc-arc -framework Metal -framework Foundation "$T/urun.m" -o "$T/urun" 2> "$T/cc2.log" || { echo "✗ 执行器编不过（第二支）：$(head -3 "$T/cc2.log")"; exit 1; }
+mid() { local v; v=$(sed -n "s/.*[ *]$2 \[\[id(\([0-9]*\))\]\];.*/\1/p" "$1" | head -1); echo "${v:--1}"; }
+tid() { local v; v=$(sed -n "s/.*device $2\* m_[0-9]* \[\[id(\([0-9]*\))\]\];.*/\1/p" "$1" | head -1); echo "${v:--1}"; }
+uargs() { echo "$(mid "$1" cp_c7) $(mid "$1" cp_c1) $(tid "$1" O) $(tid "$1" P) $(mid "$1" gal_ubo_len) $(mid "$1" spvBufferSizeConstants)"; }
+UH=$T/uhard.metal; PI=$(tid "$UH" P)
+ck "直连：参数块有成员 gal_ubo_len" 1 "$([ "$(mid "$UH" gal_ubo_len)" -ge 0 ] && echo 1 || echo 0)"
+ck "直连：界长表只按 NVN 槽读 [4u]（不按绑定号 9）" "4u" "$(grep -o 'gal_ubo_len)\._m0\[[0-9]*u\]' "$UH" | sed 's/.*\[\(.*\)\]/\1/' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+ck "直连：存储缓冲长度按 P 的 [[id]] 取" 1 "$(grep -c "spvBufferSizeConstants\[$PI\];" "$UH" | awk '{print ($1 > 0)}')"
+read -r g0 g1 g2 <<< "$("$T/urun" "$UH" $(uargs "$UH"))"; read -r w0 w1 w2 <<< "$("$T/urun" "$T/uraw.metal" $(uargs "$T/uraw.metal"))"
+ck "直连加固：常量缓冲按槽表钳到第 4 个 vec4" $((0xC7000003)) "$g0"
+ck "直连加固：c1 不钳" $((0xC1000006)) "$g1"
+ck "直连加固：存储缓冲运行时数组按字节数表钳到 rt[2]" $((0xBBBB0003)) "$g2"
+ck "反证（不加固）：常量缓冲读到第 7 个 vec4" $((0xC7000006)) "$w0"
+ck "反证（不加固）：运行时数组读到 rt[6]" $((0xBBBB0007)) "$w2"
+[ $bad = 0 ] && echo "dsh_harden：全过" || echo "dsh_harden：有失败"; exit $bad

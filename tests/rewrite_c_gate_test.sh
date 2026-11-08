@@ -1,0 +1,23 @@
+#!/bin/bash
+# C 改写器（出包唯一路径）的两项金样挂进门禁：合成语料 × 苹果 / 安卓 × 自旋全部产物（rewrite_c_test.py），FAR 补丁容量重选（rewrite_front_synth_test.py，#290）。
+#   10-31 删 Python 改写器前是 C / Python 对拍，之后对仓库里的金样（tests/rewrite_golden.py）。
+#   两个 .py 没有 .sh 壳时门禁不跑（10-26 #420 翻 C 为缺省时补）；C 命令行按出包同一入口取（pack/rewriter.py c-path），不是另编一份。
+#   另两项要宿主 C 接口测试程序 s2a-rewrite-api-test（出包不编它）：C 接口隔离与坏输入（rewrite_c_api_test.py）、SDK 代码形态契约（rewrite_sdk_c_test.py）。
+#   它们按同目录找测试程序，所以在 build/rewriter-api-test 开 S2A_REWRITER_API_TEST 同源同依赖另编一份命令行 + 测试程序（10-29 接线扫描查出门禁一直没跑）
+# 门禁覆盖：runtime/rewriter/* pack/rewriter.py tests/rewrite_golden.py tests/fixtures/rewrite_golden/*
+set -u
+H=$(cd "$(dirname "$0")/.." && pwd)
+PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}   # 钉版解释器（lz4：rewrite_c_test 造 lz4 压缩输入）
+C=$("$PY" "$H/pack/rewriter.py" c-path 2>/dev/null | tail -1); [ -x "$C" ] || { echo "🔴 取不到出包 C 改写器（pack/rewriter.py c-path）"; exit 1; }
+rc=0
+REW=$C "$PY" "$H/tests/rewrite_c_test.py" || { echo "🔴 rewrite_c_test 没过（上面一行写明是产物差、退出码差还是超时）"; rc=1; }
+REW=$C "$PY" "$H/tests/rewrite_front_synth_test.py" || { echo "🔴 rewrite_front_synth_test：C 的 FAR 容量重选与金样不符"; rc=1; }
+DEPS=$("$PY" "$H/pack/rewriter.py" deps-path) || { echo "🔴 取不到 C 改写器固定依赖（pack/rewriter.py deps-path）"; exit 1; }
+AB="$H/build/rewriter-api-test"
+{ cmake -S "$H/runtime/rewriter" -B "$AB" -DS2A_REWRITER_DEPS="$DEPS" -DCMAKE_BUILD_TYPE=Release -DS2A_REWRITER_API_TEST=ON \
+  && cmake --build "$AB" --config Release --target s2a-rewrite s2a-rewrite-api-test --parallel 2; } > "$AB.log" 2>&1 \
+  || { echo "🔴 编 C 接口测试程序失败（全文 $AB.log）"; tail -5 "$AB.log"; exit 1; }
+REW=$AB/s2a-rewrite "$PY" "$H/tests/rewrite_c_api_test.py" || { echo "🔴 rewrite_c_api_test：C 接口隔离 / 坏输入处理不符"; rc=1; }
+REW=$AB/s2a-rewrite "$PY" "$H/tests/rewrite_sdk_c_test.py" || { echo "🔴 rewrite_sdk_c_test：SDK 代码形态 / 导出返回契约不符"; rc=1; }
+[ $rc = 0 ] && echo "✅ C 改写器合成语料金样 + FAR 重选金样 + C 接口 + SDK 形态契约全过（C $(basename "$(dirname "$C")")）"
+exit $rc

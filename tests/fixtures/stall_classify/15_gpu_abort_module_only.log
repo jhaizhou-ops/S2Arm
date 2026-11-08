@@ -1,0 +1,9 @@
+[现场] ===== 全线程现场：崩溃 信号 6（119 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 44/119 tid 772180「S2A.GPU」在跑 优先级 47 QoS UI 用户态 11.02 s（本线程，发起现场）
+[现场]     pc abort+0x94（libsystem_c.dylib）
+[现场]     lr <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #0 abort+0x94（libsystem_c.dylib）
+[现场]     #1 <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #2 <redacted>+0xd0（AGXMetalG18P）
+[现场]     #3 IOGPUMetalResourcePoolCreatePooledResource+0x1b8（IOGPUMetal）
+[现场] ===== 现场完 =====

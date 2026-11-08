@@ -1,0 +1,5 @@
+#version 450
+// 审计 #1534 P1-66：存储图像原子（MSL 3.1 原生；2.3 时 SPIRV-Cross 另造一个宿主不绑的模拟缓冲）。256 个调用往 4×1 图像的 4 个纹素各加 64 次 1
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, r32ui) uniform uimage2D img;
+void main() { imageAtomicAdd(img, ivec2(int(gl_GlobalInvocationID.x & 3u), 0), 1u); }

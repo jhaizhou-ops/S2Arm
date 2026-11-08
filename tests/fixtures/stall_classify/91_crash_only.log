@@ -1,0 +1,9 @@
+2026-10-24 12:00:00.000 S2Arm[900:1] [gal] 帧节拍：交换间隔 2，每帧 33.3 ms（30 帧/秒）
+[现场] ===== 全线程现场：崩溃 信号 6（114 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 52/114 tid 609368「S2A.GPU.Emu」在跑 优先级 47 QoS UI 用户态 20.89 s（本线程，发起现场）
+[现场]     pc on_crash+0x478（S2Arm）
+[现场]     lr 0
+[现场]     #0 on_crash+0x478（S2Arm）
+[现场]     #1 <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #2 pthread_kill+0x10c（libsystem_pthread.dylib）
+[现场]     #3 abort+0x94（libsystem_c.dylib）

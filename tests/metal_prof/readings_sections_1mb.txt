@@ -1,0 +1,8 @@
+# 说明：本文件测的是生成器产物（夹具不入库）：
+#   python3 tests/metal_prof/gen_fixtures.py --target 1MB --out build/metal_prof/fixture_1mb.metal
+deep_if        264784 B    0.28 秒  =   1.12 秒每 MiB（0.27–0.29，函数 56）
+big_switch     275780 B    0.41 秒  =   1.54 秒每 MiB（0.38–0.42，函数 19）
+huge_body      277884 B    0.45 秒  =   1.71 秒每 MiB（0.45–0.47，函数 9）
+inline         275936 B    0.93 秒  =   3.54 秒每 MiB（0.91–0.97，函数 925）
+读数写入 tests/metal_prof/readings_sections_1mb.tsv
+编译调用 16 次

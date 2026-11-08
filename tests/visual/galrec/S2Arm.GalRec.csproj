@@ -1,0 +1,17 @@
+<!-- GAL 调用流录像（S2AGAL01）：录制层、读端、最小回放器。自旧库 S2A 497552d sw/gfx/tools/ryu_judge/galrec 原样迁入（命名空间保留 RyuJudge.GalRec，录像格式不变）。
+     只依赖仓内锁版本 Ryujinx GAL。构建请带 artifacts 目录，免得往 compat/tree 里写 obj。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2Arm.GalRec</AssemblyName>
+    <RootNamespace>RyuJudge.GalRec</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+</Project>

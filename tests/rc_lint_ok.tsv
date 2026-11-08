@@ -1,0 +1,19 @@
+# 路径<TAB>规整命令<TAB>逐项原因；这些是存量例外，不是安全证明。
+# 修复、删除或改命令后须同步删除条目；不绑定行号；拿不准的交出包运维线确认。
+pack/ipa.sh	cp "$L" "$S2A_ROOTS/.failed/${G}_ipa_build.log"	原始失败路径复制构建日志，失败后仍退出但可能丢诊断副本；待出包运维线确认是否需单独报错。
+pack/ipa.sh	cp "$SA/$k" "$W/pkg/"	存档附带的时间/语言/地区/时区文件在存在性条件后复制，失败未阻止后续登记；待出包运维线确认。
+pack/ipa.sh	cp "$SA/user" "$W/pkg/save/"	建档用户号存在时复制，cp 失败未判；待出包运维线确认。
+pack/ipa.sh	cp -cR "$SA/$d" "$W/pkg/save/"	device/account 存档目录存在时克隆，cp 失败未判；待出包运维线确认。
+pack/ipa.sh	cp -cR "$SA/padrec" "$W/pkg/"	录制目录与 TSV 存在后克隆，链尾 cp 没有终止兜底；待出包运维线确认。
+pack/roots.sh	cp "$w/.root_src" "$r/.root_src" 2 > /dev/null	重放时按祖先关系继承来源戳，条件之后的 cp 失败未判；待出包运维线确认。
+pack/roots.sh	ln -sfn "$(basename "$s")" "$S2A_ROOTS/$1@现行"	私有根初次克隆后更新现行链接，失败只 echo 红字并继续；待出包运维线确认。
+pack/roots.sh	mv "$r" "$w"	重放临时根改名，函数内不假设调用点 errexit；返回码是否所有调用点都接住待出包运维线确认。
+pack/srcs.sh	mv "$b.tmp.$$" "$b" 2 > /dev/null	内容寻址工具目录发布失败后清理临时目录并继续返回路径；并发赢家与真实错误未区分，待出包运维线确认。
+pack/srcver.sh	mv "$C.tmp.$$" "$C"	版本核对缓存原子改名未判，后续仍读缓存；待出包运维线确认。
+pack/stage_direct.sh	cp "$W/direct_lib.log" "$S2A_ROOTS/.failed/${G}_direct_lib.log"	直连出库失败后复制诊断，随后 abort/退出；诊断副本失败未单独处理，待出包运维线确认。
+pack/stage_direct.sh	cp "$W/gal_build.log" "$S2A_ROOTS/.failed/${G}_gal_build.log"	libnxgal 构建失败路径保存日志，之后退出但复制可能失败；待出包运维线确认。
+pack/stage_direct.sh	mv "$W/direct.tmp" "$W/shaders/direct"	有 keys.tsv 时移动直连库，失败后仍可能写阶段戳并提交；待出包运维线确认。
+pack/stage_extract.sh	cp "$W/extract.log" "$S2A_ROOTS/.failed/${G}_extract.log"	抽取失败路径保存日志，随后 abort/退出；复制失败未独立报出，待出包运维线确认。
+pack/stage_rewrite.sh	cp "$W/$m.rewrite.log" "$S2A_ROOTS/.failed/${G}_$m.log"	改写失败后保存模块日志，随后清理/退出；诊断副本失败未判，待出包运维线确认。
+pack/stage_uilayout.sh	mv "$T" "$OV" 2 > /dev/null	布局缓存发布失败只清理自己的临时目录，可能是并发赢家，也可能是真错误；待出包运维线确认。
+pack/stages/unpack.sh	mv "$OLD" "$OUT"	新根发布失败后的旧根回滚，随后固定退出 1，但回滚本身失败未单独报出；待出包运维线确认。

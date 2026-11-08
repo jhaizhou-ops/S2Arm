@@ -1,0 +1,20 @@
+#include <metal_stdlib>
+using namespace metal;
+template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num ? Num : 1];
+    thread T& operator [] (size_t pos) thread { return elements[pos]; }
+    threadgroup T& operator [] (size_t pos) threadgroup { return elements[pos]; }
+    device T& operator [] (size_t pos) device { return elements[pos]; }
+};
+struct B { uint v[64]; };
+kernel void main0(device B& b [[buffer(0)]], uint3 gl_LocalInvocationID [[thread_position_in_threadgroup]], uint3 gl_WorkGroupID [[threadgroup_position_in_grid]])
+{
+    threadgroup spvUnsafeArray<uint, 6000> _40;
+    threadgroup spvUnsafeArray<float4, 1200> _41;
+    _40[gl_LocalInvocationID.x] = gl_WorkGroupID.x;
+    _41[gl_LocalInvocationID.x % 1200u] = float4(float(gl_WorkGroupID.x));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    b.v[gl_LocalInvocationID.x & 63u] = _40[(gl_LocalInvocationID.x + 7u) % 6000u] + uint(_41[(gl_LocalInvocationID.x + 3u) % 1200u].y);
+}

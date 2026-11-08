@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>S2A.GpuBufferHoleTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../compat/tree/src/ARMeilleure/ARMeilleure.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Cpu/Ryujinx.Cpu.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 空渲染器桩与 control-tests 共享同一实现：GAL 调用全空转，建缓冲只记尺寸 -->
+    <Compile Include="../../graphics/vulkan/runtime/control-tests/ControlledRenderer.cs" Link="NullRenderer.cs" />
+  </ItemGroup>
+</Project>

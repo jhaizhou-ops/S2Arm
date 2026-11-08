@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- 与现有翻译器测试相同的 friend assembly，只为访问实际 IR 发射器。 -->
+    <AssemblyName>dsh_cmp</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="shf_ir.cs" />
+    <Reference Include="Ryujinx.Graphics.Shader">
+      <HintPath>$(ShaderDir)/Ryujinx.Graphics.Shader.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

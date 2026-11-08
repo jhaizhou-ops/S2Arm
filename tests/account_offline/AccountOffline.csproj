@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/ResultCode.cs" Link="ResultCode.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/ManagerServer.cs" Link="ManagerServer.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/IManagerForApplication.cs" Link="IManagerForApplication.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/IManagerForSystemService.cs" Link="IManagerForSystemService.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs" Link="AsyncExecution.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs" Link="IAsyncContext.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncNetworkServiceLicenseKindContext.cs" Link="LicenseContext.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.HLE/HOS/Services/Account/Acc/Types/NetworkServiceLicenseKind.cs" Link="NetworkServiceLicenseKind.cs" />
+  </ItemGroup>
+</Project>

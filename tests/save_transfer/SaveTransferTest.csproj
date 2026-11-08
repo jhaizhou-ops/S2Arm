@@ -1,0 +1,24 @@
+<!-- 门禁手动：要私有游戏数据：由 tests/t_save_transfer_real.sh 带真实数据根、游戏标识和 G05 归档运行 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>$(DefineConstants);SAVE_TRANSFER_TEST</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../platform/apple/cs/S2A.Apple.csproj" />
+    <PackageReference Include="LibHac" Version="0.19.0" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
+    <Compile Include="Program.cs" />
+    <Compile Include="ZipVariants.cs" />
+    <Compile Include="OwnershipVariant.cs" />
+    <Compile Include="../../services/S2A.Services/SaveTransfer.cs" />
+    <Compile Include="../../services/S2A.Services/SaveTransferArchive.cs" />
+    <Compile Include="../../services/S2A.Services/SaveTransferTransaction.cs" />
+    <Compile Include="../../services/S2A.Services/SaveTransferIndex.cs" />
+    <Compile Include="../../services/S2A.Services/SaveTransferZipBounds.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,12 @@
+<!-- 门禁手动：要私有游戏数据与参数：设备拉回的真实 7360 着色器缓存目录、真实 7359 离线着色器包目录和程序号三个参数（用法见同目录 README.md），手动回归 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../graphics/loop/S2A.Gfx.csproj" />
+  </ItemGroup>
+</Project>

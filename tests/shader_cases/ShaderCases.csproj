@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ShaderRoot Condition="'$(ShaderRoot)' == ''">$(MSBuildThisFileDirectory)../../compat/tree/src/Ryujinx.Graphics.Shader</ShaderRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Runner.cs" />
+    <Compile Include="IrEvidence.cs" />
+    <Compile Include="$(ShaderRoot)/**/*.cs" Exclude="../../compat/tree/src/Ryujinx.Graphics.Shader/obj/**;../../compat/tree/src/Ryujinx.Graphics.Shader/bin/**" />
+    <Compile Include="../../compat/tree/src/Spv.Generator/**/*.cs" Exclude="../../compat/tree/src/Spv.Generator/obj/**;../../compat/tree/src/Spv.Generator/bin/**" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Hash128.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Utilities/BitUtils.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Utilities/BitfieldExtensions.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Memory/IArray.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Memory/StructArrayHelpers.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/Pools/ObjectPool.cs" />
+  </ItemGroup>
+</Project>

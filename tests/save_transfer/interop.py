@@ -1,0 +1,285 @@
+"""Exercise production G05 CLI and G06 Execute using real LibHac directory saves.
+
+The payload is public repository text, not game progress. No Context substitutes,
+hand-encoded IMKV records, player data, keys or network access are used.
+"""
+
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import uuid
+import warnings
+import zipfile
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "pack/jobs"))
+import saves
+
+DOTNET, DRIVER = sys.argv[1:]
+GAME_ID = "0100000000000000"
+USER = "00000000000000010000000000000000"
+OTHER_USER = "00000000000000020000000000000000"
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value))
+    path.chmod(0o600)
+
+
+def snapshot(root, exported=False):
+    def selected(p):
+        name = p.relative_to(root).as_posix()
+        return not exported or saves.allowed(name, directory=p.is_dir()) or (
+            p.is_dir() and name in ("bis", "bis/user", "bis/system", "system"))
+    return (
+        sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_dir() and selected(p)),
+        {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+         for p in root.rglob("*") if p.is_file() and selected(p)},
+    )
+
+
+def zip64(data, *, count=None, size=None, sentinels=False):
+    end = len(data) - 22
+    assert data[end:end + 4] == b"PK\x05\x06"
+    _, _, _, _, n, length, offset, _ = struct.unpack_from("<4s4H2IH", data, end)
+    record = struct.pack("<4sQ2H2I4Q", b"PK\x06\x06", 44, 45, 45, 0, 0,
+                         n if count is None else count, n if count is None else count,
+                         length if size is None else size, offset)
+    tail = bytearray(data[end:])
+    if sentinels:
+        struct.pack_into("<2H2I", tail, 8, 0xffff, 0xffff, 0xffffffff, 0xffffffff)
+    return data[:end] + record + struct.pack("<4sIQI", b"PK\x06\x07", 0, end, 1) + tail
+
+
+with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as temporary:
+    scratch = Path(temporary).resolve()
+    library = scratch / "library"
+    private = scratch / "private"
+    request_path = scratch / "request.json"
+    config = dict(schema=1, privateRoot=str(private), engineDir=str(REPO),
+                  library=str(library), developerDir="/Applications/Xcode.app/Contents/Developer")
+
+    def python_call(operation, *, expected=None, **extra):
+        write_json(request_path, config | dict(operation=operation, gameId=GAME_ID,
+                                             taskId=uuid.uuid4().hex) | extra)
+        process = subprocess.run([sys.executable, str(REPO / "pack/jobs/main.py"),
+                                  "--request", str(request_path)], capture_output=True, text=True, timeout=60)
+        events = [json.loads(line) for line in process.stdout.splitlines() if line.startswith("{")]
+        results = [event for event in events if event.get("type") == "result"]
+        assert results, (process.stdout, process.stderr)
+        result = results[-1]
+        if expected:
+            codes = [d.get("code") for d in result.get("diagnostics", [])]
+            assert process.returncode == 1 and expected in codes, (expected, result, process.stderr)
+            return expected
+        assert process.returncode == 0 and result["state"] == "succeeded", (result, process.stderr)
+        return result["result"]
+
+    config["libraryId"] = python_call("setup")["libraryId"]
+    # A test application identity for public file payloads. The content digest is
+    # computed from the actual repository file; this is never an imported game.
+    game = dict(id=GAME_ID, name="Public-file LibHac interoperability", packages=[
+        dict(type="base", titleId=GAME_ID, baseId=GAME_ID, version=1,
+             sha256=hashlib.sha256((REPO / "README.md").read_bytes()).hexdigest(),
+             path=str(REPO / "README.md"))])
+    write_json(library / "catalog.json", dict(schema=1, games=[game]))
+    identity = saves.identity(game)
+    source = library / "saves" / GAME_ID
+    subprocess.run([DOTNET, DRIVER, "--create", str(source), str(REPO), USER], check=True, timeout=60)
+    assert next(source.glob("bis/user/save/*/0/nested/readme.md")).read_bytes() == (REPO / "README.md").read_bytes()
+    payloads = list(source.glob("bis/user/save/*/0/contributing.md"))
+    assert len(payloads) == 2 and all(p.read_bytes() == (REPO / "CONTRIBUTING.md").read_bytes() for p in payloads)
+    assert len(list(source.glob("bis/user/save/*/0/empty"))) == 1
+    expected = snapshot(source)
+    exported = snapshot(source, exported=True)
+
+    def csharp_call(operation, path=None, *, root=source, game_identity=identity,
+                    expected_code=None, **extra):
+        request = dict(operation=operation, dataRoot=str(root), workRoot=str(scratch / "csharp-work"),
+                       game=game_identity, path=str(path) if path else None) | extra
+        write_json(request_path, request)
+        process = subprocess.run([DOTNET, DRIVER, "--request", str(request_path)],
+                                 capture_output=True, text=True, check=True, timeout=60)
+        response = json.loads(process.stdout)
+        if expected_code:
+            assert not response["ok"] and response["error"]["code"] == expected_code, response
+            return expected_code
+        assert response["ok"], response
+        return response["result"]
+
+    python_archive, csharp_archive = scratch / "g05.s2asave", scratch / "g06.s2asave"
+    python_call("saveBackup", path=str(python_archive))
+    p = python_call("saveInspect", path=str(python_archive))
+    c = csharp_call("inspect", python_archive)
+    assert p["manifest"] == c["manifest"]
+    assert {e["type"] for e in c["manifest"]["saveEntries"]} == {"account", "device"}
+    assert c["manifest"]["users"]["ids"] == [USER]
+    # G05 writes force_zip64=True local headers even for these small files.
+    with zipfile.ZipFile(python_archive) as archive:
+        first = archive.infolist()[0]
+        local = python_archive.read_bytes()[first.header_offset:]
+        assert struct.unpack_from("<2I", local, 18) == (0xffffffff, 0xffffffff)
+    print("PASS G05 force_zip64 export -> G06 inspect; manifests, account/device ownership agree")
+
+    for name, transformed in (
+        ("zip64", zip64(python_archive.read_bytes())),
+        ("zip64-sentinels", zip64(python_archive.read_bytes(), sentinels=True)),
+    ):
+        path = scratch / (name + ".s2asave")
+        path.write_bytes(transformed)
+        assert python_call("saveInspect", path=str(path))["manifest"] == csharp_call("inspect", path)["manifest"]
+        print("PASS both accept " + name)
+
+    target = scratch / "csharp-target"
+    preview = csharp_call("inspect", python_archive, root=target)
+    csharp_call("restore", python_archive, root=target, archiveSha256=preview["archiveSha256"],
+                targetFingerprint=preview["targetFingerprint"])
+    assert snapshot(target) == exported
+    csharp_call("export", csharp_archive, root=target)
+    preview = python_call("saveInspect", path=str(csharp_archive))
+    assert preview["manifest"]["files"] == p["manifest"]["files"]
+    assert preview["manifest"]["directories"] == p["manifest"]["directories"]
+    assert preview["manifest"]["saveEntries"] == p["manifest"]["saveEntries"]
+    # Real file change followed by Python's confirmed restore tests replacement
+    # and preservation of non-exported saveMeta, not just archive readability.
+    changed = next(source.glob("bis/user/save/*/0/nested/readme.md"))
+    changed.write_bytes((REPO / "CONTRIBUTING.md").read_bytes())
+    preview = python_call("saveInspect", path=str(csharp_archive))
+    result = python_call("saveRestore", path=str(csharp_archive), **preview)
+    assert result["committed"] and snapshot(source) == expected
+    assert snapshot(target) == exported
+    print(f"PASS G05 -> G06 restore/export -> G05 restore; {p['fileCount']} files, directories, SHA256 and owners match")
+
+    def compare(path, code="save_invalid", *, root=source):
+        assert python_call("saveInspect", path=str(path), expected=code) == csharp_call(
+            "inspect", path, root=root, expected_code=code)
+
+    def rewrite(name, mutate=None, extra=None, duplicate=False):
+        path = scratch / (name + ".s2asave")
+        with zipfile.ZipFile(python_archive) as src, zipfile.ZipFile(path, "w") as dst:
+            for entry in src.infolist():
+                content = src.read(entry)
+                if entry.filename == "manifest.json" and mutate:
+                    manifest = json.loads(content)
+                    mutate(manifest)
+                    content = json.dumps(manifest).encode()
+                dst.writestr(entry.filename, content)
+            if extra:
+                dst.writestr(extra, (REPO / "README.md").read_bytes())
+            if duplicate:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    dst.writestr("manifest.json", src.read("manifest.json"))
+        return path
+
+    compare(rewrite("wrong-game", lambda m: m["game"].update(id="0100000000000001")), "save_wrong_game")
+    compare(rewrite("wrong-version", lambda m: m["game"].update(version=2)), "save_version")
+    compare(rewrite("wrong-content", lambda m: m["game"].update(contentIdentity="0" * 64)), "save_version")
+    compare(rewrite("path-traversal", extra="payload/../escape"))
+    compare(rewrite("duplicate-path", duplicate=True))
+    print("PASS both implementations reject wrong game/version/content, traversal and duplicate paths with identical reason codes")
+
+    other = scratch / "other-user"
+    subprocess.run([DOTNET, DRIVER, "--create", str(other), str(REPO), OTHER_USER], check=True, timeout=60)
+    original = scratch / "original"
+    shutil.move(source, original)
+    shutil.copytree(other, source)
+    compare(python_archive, "save_wrong_user", root=other)
+    shutil.rmtree(source)
+    shutil.move(original, source)
+    print("PASS both reject independently API-created different account owner: save_wrong_user")
+
+    data = csharp_archive.read_bytes()
+    # A real pipe is unseekable, so ZipFile must emit data descriptors. This
+    # exercises the reader with an actual streamed archive, without fake streams.
+    descriptor = scratch / "descriptor.s2asave"
+    read_fd, write_fd = os.pipe()
+    def collect():
+        with os.fdopen(read_fd, "rb") as src, descriptor.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+    reader = threading.Thread(target=collect)
+    reader.start()
+    with os.fdopen(write_fd, "wb") as stream, zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        with zipfile.ZipFile(python_archive) as src:
+            for entry in src.infolist():
+                dst.writestr(entry.filename, src.read(entry))
+    reader.join()
+    assert python_call("saveInspect", path=str(descriptor))["manifest"] == csharp_call("inspect", descriptor)["manifest"]
+    print("PASS both accept archive written to real pipe with data descriptors")
+    cases = {
+        "zip64-count-limit": zip64(data, count=20002),
+        "zip64-directory-limit": zip64(data, size=(32 << 20) + 1),
+    }
+    local_name = bytearray(data)
+    local_name[30] ^= 1
+    cases["local-central-name-mismatch"] = local_name
+    missing_zip64 = bytearray(data)
+    struct.pack_into("<2H2I", missing_zip64, len(data) - 22 + 8,
+                     0xffff, 0xffff, 0xffffffff, 0xffffffff)
+    cases["zip64-missing-record"] = missing_zip64
+    for name, field, value, fmt in (
+        ("eocd-count-mismatch", 8, 1, "<2H"),
+        ("eocd-directory-limit", 12, (32 << 20) + 1, "<I"),
+    ):
+        transformed = bytearray(data)
+        struct.pack_into(fmt, transformed, len(data) - 22 + field,
+                         *([value, value] if fmt == "<2H" else [value]))
+        cases[name] = transformed
+    stored = rewrite("stored")
+    transformed = bytearray(stored.read_bytes())
+    with zipfile.ZipFile(stored) as archive:
+        entry = next(e for e in archive.infolist() if e.file_size > 0)
+        offset = entry.header_offset
+        names, extras = struct.unpack_from("<2H", transformed, offset + 26)
+        transformed[offset + 30 + names + extras] ^= 1
+    cases["payload-crc-corruption"] = transformed
+    for name, transformed in cases.items():
+        path = scratch / (name + ".s2asave")
+        path.write_bytes(transformed)
+        compare(path)
+        print("PASS both reject " + name + ": save_invalid")
+    assert snapshot(source) == expected
+    # 审计 P2-11：失败原因转人话。期望手算：errno 28 / 69 → 空间不足（save_space）；无权限类型或 errno 13 → 没有权限；
+    #   InvalidData / Json → 备份损坏；其它 IOException（errno 5）→ 读写出错；ArgumentException → 数据不符；且都不带异常类型名
+    want = [("IOException", "save_space", "空间不足"), ("IOException", "save_space", "空间不足"),
+            ("UnauthorizedAccessException", "save_invalid", "没有权限"), ("IOException", "save_invalid", "没有权限"),
+            ("InvalidDataException", "save_invalid", "损坏"), ("JsonException", "save_invalid", "损坏"),
+            ("IOException", "save_invalid", "读写存档时出错"), ("ArgumentException", "save_invalid", "数据不符")]
+    got = [json.loads(l) for l in subprocess.run([DOTNET, DRIVER, "--describe"], check=True, timeout=60, capture_output=True, text=True).stdout.splitlines()]
+    assert len(got) == len(want), got
+    for g, (t, code, word) in zip(got, want):
+        assert (g["type"], g["code"]) == (t, code) and word in g["message"] and t not in g["message"], (g, t, code, word)
+        print(f"PASS 失败原因人话 {t} → {code}：{g['message']}")
+    # 审计 P2-24：恢复复制数据根时跳过存档三处、其余文件走 APFS 克隆。期望手算：512 MiB 非存档文件原样出现在目标、内容一致；
+    #   存档文件（bis/user/save 下）不出现；走的是 APFS 克隆：克隆出的文件写入前与源共用物理块，首块物理设备偏移（fcntl F_LOG2PHYS）
+    #   与源相同，流式拷贝则不同。11-02 起按这个事实判，不按耗时判（原判据 < 200 ms，mini 负载高时克隆调用本身 385 ms 误红）
+    big_root = scratch / "copytree-src"; big_dst = scratch / "copytree-dst"
+    (big_root / "bis/user/save/0000000000000001/0").mkdir(parents=True)
+    (big_root / "bis/user/save/0000000000000001/0/progress").write_bytes(b"save-bytes")
+    (big_root / "system").mkdir(); (big_root / "system/Profiles.json").write_text("{}")
+    (big_root / "games/shader").mkdir(parents=True)
+    blob = os.urandom(1 << 20) * 512
+    (big_root / "games/shader/cache.bin").write_bytes(blob)
+    out = subprocess.run([DOTNET, DRIVER, "--copytree", str(big_root), str(big_dst)], check=True, timeout=120, capture_output=True, text=True).stdout
+    ms = json.loads(out.strip().splitlines()[-1])["ms"]
+    assert (big_dst / "games/shader/cache.bin").read_bytes() == blob, "非存档文件内容不一致"
+    assert not (big_dst / "bis/user/save/0000000000000001/0/progress").exists() and not (big_dst / "system/Profiles.json").exists(), "存档三处不该被复制"
+    if sys.platform == "darwin":
+        def phys(p):   # 首块物理设备偏移：struct log2phys {u32 flags; off_t contigbytes; off_t devoffset;}（pack 4，共 20 字节）
+            fd = os.open(p, os.O_RDONLY)
+            try: return struct.unpack("<Iqq", fcntl.fcntl(fd, 49, b"\0" * 20))[2]   # 49 = F_LOG2PHYS
+            finally: os.close(fd)
+        src_at, dst_at = phys(big_root / "games/shader/cache.bin"), phys(big_dst / "games/shader/cache.bin")
+        assert src_at == dst_at, f"512 MiB 非存档文件没走克隆：首块物理偏移 源 {src_at} / 目标 {dst_at}（{ms} ms）"
+        print(f"PASS 恢复复制数据根：跳过存档三处、512 MiB 非存档文件走 APFS 克隆（首块物理偏移同 {src_at}，{ms} ms）")
+    else:
+        print(f"PASS 恢复复制数据根：跳过存档三处、512 MiB 非存档文件内容一致（{ms} ms；非 macOS 不核克隆）")
+    print("Public-file G05/G06 interoperability passed; no game or player progress was tested.")

@@ -1,0 +1,4 @@
+[
+  {"name":"vertex_id", "vertex":"fixture_vertex", "fragment":"fixture_fragment", "color":"rgba8unorm", "samples":1, "blend":"none", "topology":"triangle", "attributes":[], "buffers":[]},
+  {"name":"vertex_buffer", "vertex":"fixture_attributes", "fragment":"fixture_fragment", "color":"bgra8unorm", "samples":1, "blend":"alpha", "topology":"triangle", "attributes":[{"index":0,"buffer":0,"offset":0,"format":"float2"}], "buffers":[{"index":0,"stride":8}]}
+]

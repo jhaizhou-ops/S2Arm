@@ -1,0 +1,32 @@
+[现场] ===== 全线程现场：崩溃 信号 6（147 条线程，另写 <App 数据目录>/Documents/threads.txt）=====
+[现场] 线程 12/147 tid 811045「.NET BGC」等待 优先级 31 QoS UTILITY 用户态 0.51 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 S_P_CoreLib_System_Threading_ManualResetEventSlim__Wait_4+0x29c（S2Arm）
+[现场]     #2 S_P_CoreLib_System_GC__WaitForBackgroundThread+0x64（S2Arm）
+[现场]     #3 S_P_CoreLib_System_GC__BackgroundGCThread+0x1a8（S2Arm）
+[现场]     #4 gc_heap::background_gc_thread_stub+0x30（S2Arm）
+[现场] 线程 23/147 tid 811070「AudioRendererManager.Worker」等待 优先级 47 QoS UI 用户态 0.03 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 AudioRendererManager__WorkerLoop+0x2a0（S2Arm）
+[现场]     #1 AudioRendererManager__Run+0x88（S2Arm）
+[现场] 线程 24/147 tid 811071「{AudioMain}」等待 优先级 47 QoS UI 用户态 0.02 s
+[现场]     pc __psynch_cvwait+0x8（libsystem_kernel.dylib）
+[现场]     #0 AudioRendererManager__RenderLoop+0x1c0（S2Arm）
+[现场]     #1 AudioRendererManager__Run+0x88（S2Arm）
+[现场] 线程 31/147 tid 811109「S2A.GPU」等待 优先级 47 QoS UI 用户态 8.10 s
+[现场]     pc semaphore_wait_trap+0x8（libsystem_kernel.dylib）
+[现场]     #0 S_P_CoreLib_System_Threading_WaitSubsystem_ThreadWaitInfo__Wait+0x1d4（S2Arm）
+[现场]     #1 gal_pso_job_wait+0x20（S2Arm）
+[现场]     #2 gal_pso_get+0x2338（S2Arm）
+[现场]     #3 prepare_draw+0x4a8（S2Arm）
+[现场] 线程 83/147 tid 811832「nx-83」在跑 优先级 47 QoS UI 用户态 4.77 s（本线程，发起现场）
+[现场]     pc __pthread_kill+0x8（libsystem_pthread.dylib）
+[现场]     lr <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #0 __pthread_kill+0x8（libsystem_pthread.dylib）
+[现场]     #1 <redacted>+0x38（libsystem_platform.dylib）
+[现场]     #2 pthread_kill+0x10c（libsystem_pthread.dylib）
+[现场]     #3 abort+0x94（libsystem_c.dylib）
+[现场]     #4 pso_desc_cold.1+0x28（S2Arm）
+[现场]     #5 gal_pso_get+0x1a40（S2Arm）
+[现场] ===== 现场完 =====
