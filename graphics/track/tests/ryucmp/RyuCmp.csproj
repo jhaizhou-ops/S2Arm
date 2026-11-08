@@ -1,0 +1,14 @@
+<!-- 写跟踪对拍：Ryujinx 原版 MemoryTracking（4 KB 模型、写时同步发事件）vs 我方 16 KB 跟踪（真内存、真缺页、提交前排空）。用法见 Program.cs 头 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <RyuTree Condition="'$(RyuTree)' == ''">$(MSBuildThisFileDirectory)../../../../compat/tree</RyuTree>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuTree)/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,76 @@
+; 曲面单测 TCS：4 个输出控制点照抄输入；细分因子外 4 内 4（四边形、整数分区）；每片属性（位置 1）= 片号
+               OpCapability Tessellation
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint TessellationControl %main "main" %inv %outv %id %prim %patchv %tlo %tli
+               OpExecutionMode %main OutputVertices 4
+               OpExecutionMode %main Quads
+               OpExecutionMode %main SpacingEqual
+               OpExecutionMode %main VertexOrderCw
+               OpDecorate %inv Location 0
+               OpDecorate %outv Location 0
+               OpDecorate %patchv Location 1
+               OpDecorate %patchv Patch
+               OpDecorate %id BuiltIn InvocationId
+               OpDecorate %prim BuiltIn PrimitiveId
+               OpDecorate %tlo BuiltIn TessLevelOuter
+               OpDecorate %tlo Patch
+               OpDecorate %tli BuiltIn TessLevelInner
+               OpDecorate %tli Patch
+       %void = OpTypeVoid
+        %fnv = OpTypeFunction %void
+        %f32 = OpTypeFloat 32
+         %v4 = OpTypeVector %f32 4
+        %i32 = OpTypeInt 32 1
+        %u32 = OpTypeInt 32 0
+        %u32c = OpConstant %u32 32
+         %u4 = OpConstant %u32 4
+         %u2 = OpConstant %u32 2
+         %c0 = OpConstant %i32 0
+         %c1 = OpConstant %i32 1
+         %c2 = OpConstant %i32 2
+         %c3 = OpConstant %i32 3
+       %four = OpConstant %f32 4
+      %arrIn = OpTypeArray %v4 %u32c
+     %arrOut = OpTypeArray %v4 %u4
+       %arr4 = OpTypeArray %f32 %u4
+       %arr2 = OpTypeArray %f32 %u2
+     %pArrIn = OpTypePointer Input %arrIn
+    %pArrOut = OpTypePointer Output %arrOut
+      %pArr4 = OpTypePointer Output %arr4
+      %pArr2 = OpTypePointer Output %arr2
+       %pIv4 = OpTypePointer Input %v4
+       %pOv4 = OpTypePointer Output %v4
+       %pIi = OpTypePointer Input %i32
+       %pOf = OpTypePointer Output %f32
+        %inv = OpVariable %pArrIn Input
+       %outv = OpVariable %pArrOut Output
+     %patchv = OpVariable %pOv4 Output
+         %id = OpVariable %pIi Input
+       %prim = OpVariable %pIi Input
+        %tlo = OpVariable %pArr4 Output
+        %tli = OpVariable %pArr2 Output
+       %main = OpFunction %void None %fnv
+          %l = OpLabel
+          %i = OpLoad %i32 %id
+        %src = OpAccessChain %pIv4 %inv %i
+          %v = OpLoad %v4 %src
+        %dst = OpAccessChain %pOv4 %outv %i
+               OpStore %dst %v
+         %pr = OpLoad %i32 %prim
+        %prf = OpConvertSToF %f32 %pr
+        %pvv = OpCompositeConstruct %v4 %prf %prf %prf %prf
+               OpStore %patchv %pvv
+         %o0 = OpAccessChain %pOf %tlo %c0
+               OpStore %o0 %four
+         %o1 = OpAccessChain %pOf %tlo %c1
+               OpStore %o1 %four
+         %o2 = OpAccessChain %pOf %tlo %c2
+               OpStore %o2 %four
+         %o3 = OpAccessChain %pOf %tlo %c3
+               OpStore %o3 %four
+         %n0 = OpAccessChain %pOf %tli %c0
+               OpStore %n0 %four
+         %n1 = OpAccessChain %pOf %tli %c1
+               OpStore %n1 %four
+               OpReturn
+               OpFunctionEnd

@@ -1,0 +1,26 @@
+; t_border 顶点（手写 SPIR-V）：gl_Position = 输入位置 0（vec4，属性给 3 分量、w 补 1）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %pos %out
+               OpDecorate %pos Location 0
+               OpMemberDecorate %PerVertex 0 BuiltIn Position
+               OpDecorate %PerVertex Block
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %int = OpTypeInt 32 1
+        %v4f = OpTypeVector %float 4
+      %int_0 = OpConstant %int 0
+     %ptrv4i = OpTypePointer Input %v4f
+        %pos = OpVariable %ptrv4i Input
+  %PerVertex = OpTypeStruct %v4f
+     %ptrPVo = OpTypePointer Output %PerVertex
+        %out = OpVariable %ptrPVo Output
+     %ptrv4o = OpTypePointer Output %v4f
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %p = OpLoad %v4f %pos
+         %op = OpAccessChain %ptrv4o %out %int_0
+               OpStore %op %p
+               OpReturn
+               OpFunctionEnd

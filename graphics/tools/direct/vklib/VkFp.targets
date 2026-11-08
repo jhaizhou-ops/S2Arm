@@ -1,0 +1,66 @@
+<!-- #783 Vulkan 侧指纹 VkFp（直连线 11-02 答 a）：离线 Vulkan 库 b-<链号>-vk/lib.idx 头部另记它，运行时比自己的不等就整库不用、全走现编。
+     出包 Vulkan 入口做成 FILES 之外的独立工程后，Vulkan 侧翻译代码变了链号不跟着变，翻译器指纹 Xfp（S2A.Dsh.csproj 的 DshXfpInput，DshVk.cs 除外）也不变，所以另算一份。
+     输入（源码部分 VkFp.V）：dsh/DshVk.cs + 本目录（vklib/）下除 bin、obj 与点文件外的全部文件（含本文件与工程文件；以后加的源码自动算进来）
+       + libnxgal 导出接口与它的实现（graphics/metal/gal_abi.h、gal_spvx / gal_spill / gal_colorround 的 .c / .h）
+       + SPIRV-Cross：链锁 translator/dmsh_chain.lock（锁着 spirv-cross 版本）与 dsh_vklib.py 编命令行用的仓库内源码 graphics/third_party/spirv_cross
+       + 与 dsh_batch 共用的读包 / 读表 graphics/tools/direct/dsh/batch/PkgRead.cs 与库容器 LibPack.cs（工程文件编进来，不在 S2A.Dsh 的 Xfp 里）。
+     翻译器本体不在这里：dsh_vklib 运行时把 VkFp.V 与 S2A.Dsh 的翻译器指纹 DshCompiler.Xfp（DshXfpInput：S2A.Dsh 源码 + Ryujinx 着色器翻译器等）
+       合成完整指纹 VkLib.Fp（#1419 直连缺陷线审 1），写进库、汇总行；安卓运行时编进同一份 S2A.Dsh，能算出同一个值。
+     算法同 S2A.Dsh.csproj 的 DshXfpHash：逐个 SHA-256，按仓库相对路径（/ 分隔）排序拼成「路径 \t 哈希 \n」再取 SHA-256 前 16 位十六进制，与机器、检出路径无关，任一字节变就变。
+     要同一指纹的工程（dsh_vklib；以后读库的运行时）都 Import 本文件：编译时生成 S2A.DshVkLib.VkFp.V；dotnet msbuild <工程> -t:VkFpPrint 只打印「VKFP=…」、不编。 -->
+<Project>
+  <PropertyGroup>
+    <VkFpRepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../'))</VkFpRepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <VkFpInput Include="$(MSBuildThisFileDirectory)../dsh/DshVk.cs" />
+    <VkFpInput Include="$(MSBuildThisFileDirectory)**/*" Exclude="$(MSBuildThisFileDirectory)bin/**;$(MSBuildThisFileDirectory)obj/**;$(MSBuildThisFileDirectory)**/.*" />
+    <VkFpInput Include="$(VkFpRepoRoot)graphics/metal/gal_abi.h;$(VkFpRepoRoot)graphics/metal/gal_spvx.c;$(VkFpRepoRoot)graphics/metal/gal_spvx.h;$(VkFpRepoRoot)graphics/metal/gal_spill.c;$(VkFpRepoRoot)graphics/metal/gal_spill.h;$(VkFpRepoRoot)graphics/metal/gal_colorround.c;$(VkFpRepoRoot)graphics/metal/gal_colorround.h" />
+    <VkFpInput Include="$(VkFpRepoRoot)graphics/tools/direct/dsh/batch/PkgRead.cs;$(VkFpRepoRoot)graphics/tools/direct/dsh/batch/LibPack.cs" />
+    <VkFpInput Include="$(VkFpRepoRoot)translator/dmsh_chain.lock;$(VkFpRepoRoot)graphics/third_party/spirv_cross/*.cpp;$(VkFpRepoRoot)graphics/third_party/spirv_cross/*.hpp;$(VkFpRepoRoot)graphics/third_party/spirv_cross/*.h" />
+  </ItemGroup>
+  <UsingTask TaskName="VkFpHash" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <Root ParameterType="System.String" Required="true" />
+      <Fp ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        // 同 DshXfpHash：任务按 netstandard 编，用老接口
+        string root = Path.GetFullPath(Root).Replace('\\', '/').TrimEnd('/') + "/";
+        using (var sha = SHA256.Create())
+        {
+            System.Func<byte[], string> hex = h => System.BitConverter.ToString(h).Replace("-", "").ToLowerInvariant();
+            var rows = new System.Collections.Generic.List<string>();
+            foreach (var p in Files.Select(f => Path.GetFullPath(f.ItemSpec).Replace('\\', '/')).Distinct())
+            {
+                if (!p.StartsWith(root, System.StringComparison.Ordinal)) { Log.LogError("Vulkan 侧指纹输入不在仓库里：" + p); return false; }
+                if (!File.Exists(p)) { Log.LogError("Vulkan 侧指纹输入不在：" + p); return false; }
+                rows.Add(p.Substring(root.Length) + "\t" + hex(sha.ComputeHash(File.ReadAllBytes(p))) + "\n");
+            }
+            rows.Sort(System.StringComparer.Ordinal);
+            Fp = hex(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(string.Concat(rows)))).Substring(0, 16);
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="VkFpCompute">
+    <VkFpHash Files="@(VkFpInput)" Root="$(VkFpRepoRoot)">
+      <Output TaskParameter="Fp" PropertyName="VkFp" />
+    </VkFpHash>
+  </Target>
+  <Target Name="VkFpConst" BeforeTargets="CoreCompile" DependsOnTargets="VkFpCompute">
+    <WriteLinesToFile File="$(IntermediateOutputPath)VkFp.g.cs" Overwrite="true" WriteOnlyWhenDifferent="true" Lines="namespace S2A.DshVkLib { public static class VkFp { public const string V = &quot;$(VkFp)&quot;%3B } }" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)VkFp.g.cs" />
+      <FileWrites Include="$(IntermediateOutputPath)VkFp.g.cs" />
+    </ItemGroup>
+  </Target>
+  <Target Name="VkFpPrint" DependsOnTargets="VkFpCompute">
+    <Message Importance="high" Text="VKFP=$(VkFp)" />
+  </Target>
+</Project>

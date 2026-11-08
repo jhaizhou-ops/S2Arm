@@ -1,0 +1,35 @@
+; t_fbr 反例顶点：同 t_fbr_vsp，但 locK.x 写成 (w−x)·0.5（左右镜像位置，不是当前像素）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in0 %pos %o4
+               OpDecorate %in0 Location 0
+               OpDecorate %o4 Location 4
+               OpDecorate %pos BuiltIn Position
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v4f = OpTypeVector %float 4
+     %ptrOv4 = OpTypePointer Output %v4f
+        %pos = OpVariable %ptrOv4 Output
+         %o4 = OpVariable %ptrOv4 Output
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in0 = OpVariable %ptrIv4 Input
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+      %fhalf = OpConstant %float 0.5
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %a = OpLoad %v4f %in0
+          %x = OpCompositeExtract %float %a 0
+          %y = OpCompositeExtract %float %a 1
+          %z = OpCompositeExtract %float %a 2
+          %p = OpCompositeConstruct %v4f %x %y %z %f1
+               OpStore %pos %p
+         %sx = OpFSub %float %f1 %x
+         %hx = OpFMul %float %sx %fhalf
+         %sy = OpFAdd %float %f1 %y
+         %hy = OpFMul %float %fhalf %sy
+          %o = OpCompositeConstruct %v4f %hx %hy %f0 %f1
+               OpStore %o4 %o
+               OpReturn
+               OpFunctionEnd

@@ -1,0 +1,30 @@
+; 曲面单测顶点着色器（Ryujinx 风格：输出 gl_PerVertex 块 + 位置 0 通用输出）：输出 = 输入属性 0（曲面片空间坐标）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %inpos %outv %pv
+               OpDecorate %inpos Location 0
+               OpDecorate %outv Location 0
+               OpMemberDecorate %PV 0 BuiltIn Position
+               OpMemberDecorate %PV 1 BuiltIn PointSize
+               OpDecorate %PV Block
+       %void = OpTypeVoid
+        %fnv = OpTypeFunction %void
+        %f32 = OpTypeFloat 32
+         %v4 = OpTypeVector %f32 4
+        %i32 = OpTypeInt 32 1
+         %c0 = OpConstant %i32 0
+         %PV = OpTypeStruct %v4 %f32
+      %ptrPV = OpTypePointer Output %PV
+     %ptrIv4 = OpTypePointer Input %v4
+     %ptrOv4 = OpTypePointer Output %v4
+         %pv = OpVariable %ptrPV Output
+      %inpos = OpVariable %ptrIv4 Input
+       %outv = OpVariable %ptrOv4 Output
+       %main = OpFunction %void None %fnv
+          %l = OpLabel
+          %p = OpLoad %v4 %inpos
+               OpStore %outv %p
+         %pp = OpAccessChain %ptrOv4 %pv %c0
+               OpStore %pp %p
+               OpReturn
+               OpFunctionEnd

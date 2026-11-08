@@ -1,0 +1,27 @@
+#version 450
+layout(local_size_x=8,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,r32ui) uniform uimageBuffer cp_i_cb2_48_r32ui;
+layout(set=0,binding=1,r32ui) writeonly uniform uimageBuffer cp_i_cb2_4A_r32ui;
+void main() {
+    uint i=gl_LocalInvocationID.x;
+    imageStore(cp_i_cb2_48_r32ui,int(i),uvec4(100u+i));
+    if(i==0u) {
+        imageStore(cp_i_cb2_48_r32ui,63,uvec4(0));
+        imageStore(cp_i_cb2_48_r32ui,62,uvec4(0));
+    }
+    memoryBarrierImage(); barrier();
+    uint success=imageAtomicCompSwap(cp_i_cb2_48_r32ui,int(i),100u+i,120u+i);
+    uint failed=imageAtomicCompSwap(cp_i_cb2_48_r32ui,int(i),100u+i,777u);
+    memoryBarrierImage(); barrier();
+    imageStore(cp_i_cb2_4A_r32ui,int(4*i),uvec4(success));
+    imageStore(cp_i_cb2_4A_r32ui,int(4*i+1),uvec4(failed));
+    imageStore(cp_i_cb2_4A_r32ui,int(4*i+2),imageLoad(cp_i_cb2_48_r32ui,int(i)));
+    uint old=imageAtomicCompSwap(cp_i_cb2_48_r32ui,63,0u,i+1u);
+    imageStore(cp_i_cb2_4A_r32ui,int(4*i+3),uvec4(old));
+    uint expected=0u,observed;
+    do {
+        observed=imageAtomicCompSwap(cp_i_cb2_48_r32ui,62,expected,expected+1u);
+        if(observed!=expected) expected=observed; else break;
+    } while(true);
+    imageStore(cp_i_cb2_4A_r32ui,int(48+i),uvec4(expected));
+}

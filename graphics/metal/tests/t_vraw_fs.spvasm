@@ -1,0 +1,22 @@
+; 原始位顶点输入单测片元：把顶点着色器透传的寄存器位原样写进 RGBA32Uint 目标
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %vi %co
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %vi Location 0
+               OpDecorate %vi Flat
+               OpDecorate %co Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+       %v4u = OpTypeVector %uint 4
+     %ptrInU = OpTypePointer Input %v4u
+    %ptrOutU = OpTypePointer Output %v4u
+         %vi = OpVariable %ptrInU Input
+         %co = OpVariable %ptrOutU Output
+       %main = OpFunction %void None %fn
+          %l = OpLabel
+          %c = OpLoad %v4u %vi
+               OpStore %co %c
+               OpReturn
+               OpFunctionEnd

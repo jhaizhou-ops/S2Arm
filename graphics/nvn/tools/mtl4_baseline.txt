@@ -1,0 +1,3 @@
+227
+# 第一行是基线数（graphics/gate.sh 只读第一行）。只许减不许增；增加必须在下面写明原因，并由画面线在 PR 上认可。
+# 10-30 226 → 227（帧率能耗线 e60/metalfx-video）：直连上屏 MetalFX 空间放大在 Metal 4 下只能经 Metal 4 编译器建放大器（newSpatialScalerWithDevice:compiler:），nvn_present_fx.inc 的 MTL4CompilerDescriptor 一处，没有 Metal 3 / 包装函数替代。

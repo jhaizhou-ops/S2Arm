@@ -19,7 +19,7 @@
 #   +0x340 哈希表偏移（u32，实际总是 0x350）；+0x344 哈希个数（u32）；表内每项 32 字节 = 一个 NRO 整文件的 SHA-256。
 import hashlib, os, struct, sys
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py，walk 同 os.walk）
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'gfx', 'nvn', 'tools')); import romfs_list
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'graphics', 'nvn', 'tools')); import romfs_list
 
 PAGE = 0x1000
 CHUNK = 64 << 20          # 扫描分块（内存只占一块 + 重叠）

@@ -1,0 +1,51 @@
+# 直连帧率上限回归（#604）
+
+`S2A_FPS=0/30/60/120` 是额外上限。NVN、Vulkan、OpenGL 都取原节拍周期与上限周期的较大值；不修改游戏交换间隔，不代替 60 帧补丁。`0` 不添加节拍等待，原生 30 帧游戏设为 60/120 后仍按原节拍运行。
+
+30 上限在最终周期兼容 30 Hz 整拍时复用显示链接的 30 Hz 模式；interval 1、2 都能在 30 Hz 链接上等待一拍，不会叠加为 15 帧。自动低频通过既有原生 30 的稳定判据或 30 上限选择：最终周期 50 ms 请求 20 Hz，33.3 ms 请求 30 Hz。换档前新目标周期须连续保持一秒，两个方向相同；单帧偏离不切档，仍按当前链接速率向上取整等待。这个稳定秒与原生30资格同时计时，不额外再等一秒。其他不兼容周期保留请求的 60/120 Hz 基准，不再因一次慢周期锁定整个会话。NVN present 仍只入队，取图阶段等节拍；GL 和 Vulkan 复用各自既有的交换/取图等待。
+
+`preferredFrameRateRange` 是系统尽力满足的提示。20 Hz 请求生效时，包括首次创建链接，生产 delegate 在虚拟节拍过滤前记录真实单调时钟；每30个回调间隔取一次中位数。若不在45..55 ms内，本会话禁用20 Hz，打红并在下一次present立即请求60 Hz，让50 ms按3拍等待。成功批次后继续检测，不能只验证首次获准；session清理复位。日志的请求60 Hz不等于实际回调已达到60 Hz，真实拒绝、恢复及iPad行为均须分别实测。
+
+只采真实前台有焦点且没有处在显示链接卡顿中的间隔。Mac壳按App活跃与游戏窗key状态、iOS壳按UIKit活跃生命周期发布原子焦点与`now_ns()`激活时间；回调线程不读AppKit/UIKit。失焦、激活时刻跨过上个样本或卡顿恢复都会清掉未满批次，跨边界的间隔不计。原显示链接卡顿守护也读这两个真实getter，失焦时间不再被无壳弱实现当成前台时间；原输入处理、后台暂停、队列退路与红阈值保持。
+
+GL interval 0、上限 120 在 120 Hz 链接上只等一个实际拍；正的游戏交换间隔仍按 60 Hz 的 vsync 换算。NVN `DM_PRESENT_HZ=0` 在链接上原来仍等 interval 1 的两个 120 Hz 拍，设置 0/60/120 都保留原来的 60 帧节拍。额外上限不解除这条既有节拍。
+
+显式诊断 `DM_PRESENT_HZ`、`DM_FPS` 保留原本含义，`S2A_FPS` 会继续限制它们产生的更快周期；`DM_FPS=30` 仍是 backend 强制 30 Hz 测试 pin，不同于用户额外上限，interval 3 可故意保留 66.7 ms 量化。没有显示链接时 `DM_PRESENT_HZ=0 S2A_FPS=0` 保留无锁行为。`DM_PRESENT_INTERVAL=display` 仍是原有的间隔覆盖，不由上限启用。当前 S2Arm 宿主未启用旧 `DM_DETCLOCK` 确定时钟，实际限帧使用单调时钟。设置值在进程启动读取，不提供热切换。HUD 的有效目标是实际生效周期 max(游戏间隔周期, 1/上限) 对应的帧率，同时用于显示和慢帧阈值；GL 交换间隔 0（游戏不锁垂直同步）时目标就是上限，没有上限时写「未取得」、按中位间隔判慢帧（#619 F-hud-cap-above-game）。
+
+## 运行
+
+核心检查需要 Apple 芯片 Mac、支持 Metal 4 的系统/设备、可显示窗口的桌面会话和当前 Xcode；不要求 120 Hz 屏幕。先按 [生产依赖说明](README_present_residency.md#准备生产依赖)准备与被测源码一致的 Widen，再执行：
+
+```bash
+FPS_WIDEN_LIB=/绝对路径/S2Arm.Gfx.Widen.dylib \
+  bash graphics/nvn/tests/t_fps_limit.sh
+```
+
+默认只运行核心 **56 项**，结尾须为 `fps limit core matrix: 56/56 passed`，并明确打印「120 Hz专项未执行」。原 40 项保留：24 个无窗口场景测四个上限及原生间隔；10 个可见窗口场景测 Metal 3/4 × 三前端的 30 上限和 interval 2；6 个 HUD 场景在真实帧循环中停顿 200 ms，对照生产时间戳核目标 30、慢帧分子和 108 个真实间隔的分母。
+
+新增16项为Metal3/4各八项：interval3 × 四个上限的真实acquire/显示50ms及链接20Hz；`2→3→2`的30→60→20→60→30Hz（低频档表示不了新周期立即回60Hz，同一周期稳1秒再降）及逐帧`2↔3`回60Hz一次、周期41.7ms；cap30的`2→3→1`恢复30Hz且仍为33.3ms；显式`DM_FPS=30/60`与30上限边界。动态局保留首12帧真实acquire耗时和正显示时间差；两个方向首10帧分别应在旧30/20Hz链接等待66.7/50ms，稳定后再核最终周期。正式runner以真实`present pacing mode`日志核交替阶段没有范围setter，帧号强制转数字后比较327..435，不能把字符串34误算进该范围。`FPS_INTERVAL3_ONLY=1`只运行这16项，不能代替完整核心矩阵。
+
+`FPS_TEST_DEACTIVATE=1`仅用于独立真实NVN窗口、静态interval3的受控拒绝探针：在第75帧对测试进程自己调用一次`NSApp deactivate`，不激活其他App、不构造回调或时间。该专项只保留API/队列检查并输出真实窗口与回调读数，不执行前台显示数量/周期验收，不能替代默认场景；普通前台场景的全部原阈值保持。若没有实际失去active或出现拒绝条件，必须报告未命中，不重试造出15Hz，不把API检查通过当作退路通过。
+
+焦点与卡顿边界有两个独立专项，分别设`FPS_FOCUS_ONLY=1`或`FPS_STALL_ONLY=1`运行同一runner，各为Metal3/4两项，不计入核心56/专项16。焦点专项通过本进程临时普通窗口接过key，再在App仍活跃且临时窗仍为key时交还游戏窗；没有激活其他App、直接调用key的override方法或伪造通知。记录真实App/key/getter/激活时间；未实际失焦并恢复就exit2。检查失焦段没有中位批准/拒绝，恢复后须重新收满30间隔（至少30×45ms）且20Hz仍可用。
+
+卡顿专项仅使用已有`DM_TEST_LINK_STALL=0.5,0.5`，实际暂停/恢复`CAMetalDisplayLink`，核真实`display link recovered`、清批次与后续20Hz合格中位；没触发真实恢复就exit2。这两个专项只核相应API与采样边界，期间的非前台/暂停呈现不能套普通前台显示数量/周期判据，也不能代替它。普通前台16项全部原断言保持；背景降低回调率不再作为“前台20Hz被拒绝”的证据，真实前台拒绝/60Hz获准仍需另测。
+
+有实际 120 Hz 屏幕时，另执行下列命令，**仅运行 26 项**高刷新率检查：
+
+```bash
+FPS_HIGH_REFRESH=1 FPS_WIDEN_LIB=/绝对路径/S2Arm.Gfx.Widen.dylib \
+  bash graphics/nvn/tests/t_fps_limit.sh
+```
+
+高刷子矩阵保留原14项，加两后端 × interval3 × 四个上限，以及两后端普通/回到1的动态切换，共26项。原高刷场景核实际120Hz，自动interval3核真实50ms及20Hz；动态稳定阶段期望30→20→30Hz。逐帧2↔3的内容平均帧率是24，但异步变频提示不能保证callback平均24Hz；该阶段记录实际频率并核20..30Hz请求区间，沿用10%测量容差，出帧周期及显示数量阈值保持。cap30的3→1恢复30Hz并核33.3ms。窗口所属NSScreen能力或高刷场景实际链接达不到120时明确`UNTESTED`、退出2，不能计通过；完整成功须为`fps limit 120 Hz matrix: 26/26 passed, 0 untested`。两套都实际通过才能合并报告82项，默认56项不能写成82/82。
+
+测试只读使用预先准备的生产 Widen，不发布、不还原 NuGet。缺失依赖退出 2。NVN/GAL、完整原生宿主与 Mac 前端均从被测树编译；通过生产静态库和真实入口调用三前端，不提供宿主、链接或图形替身。核心默认产物在 `build/tests/fps-limit`，高刷新率默认在 `build/tests/fps-limit-high-refresh`；`FPS_LIMIT_BUILD` 可指定私有输出目录，`link-inputs.sha256` 记录实际链接身份。
+
+有节拍场景量 60 个周期；GL 无节拍、上限 0 的窗口控制量 240 周期，给合法 FIFO 合并留下足够真实显示样本。窗口检查有界等待足够的正时间戳，保持至少 45 次实际显示及原周期判据；0 单列为未确认显示，明确丢弃单列，均不计成功。NVN 同时核公开 GetPresentInterval 未改、present 不承担限帧等待；runner 保留生产 GPU 完成/错误检查，核实际后端选路并拒绝 GPU/Metal 验证错误。
+
+不能要求每票都触发呈现回调：[addPresentedHandler](https://developer.apple.com/documentation/metal/mtldrawable/addpresentedhandler(_:))约定在已呈现后回调，[presentedTime](https://developer.apple.com/documentation/metal/mtldrawable/presentedtime) 的 0 同时涵盖尚未显示和系统跳过。修正这一 API 契约不降低实际显示数量或时间阈值，也不把 GPU 完成当作已经显示。
+
+旧代码反证可用 `FPS_SOURCE_ROOT` 指向固定旧工作树，保持测试源文件不变；`FPS_LIMIT_BUILD` 必须另设私有目录。所有场景仍执行原断言，不修改预期以适应旧实现。
+
+通过只表示上述 Mac 接口与节拍回归，不代表游戏逻辑、真实游戏帧率、移动设备、长期稳定性或能耗验收。

@@ -1,0 +1,36 @@
+; t_fbr 顶点（SSA 写法、独立 gl_Position 变量、整向量写）：gl_Position = (a.x, a.y, a.z, 1)；out loc4 = ((x+w)·0.5, 0.5·(w+y), 0, w)
+; y 号为正：只在正向视口（ydown = 1）时是当前像素
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in0 %pos %o4
+               OpDecorate %in0 Location 0
+               OpDecorate %o4 Location 4
+               OpDecorate %pos BuiltIn Position
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v4f = OpTypeVector %float 4
+     %ptrOv4 = OpTypePointer Output %v4f
+        %pos = OpVariable %ptrOv4 Output
+         %o4 = OpVariable %ptrOv4 Output
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in0 = OpVariable %ptrIv4 Input
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+      %fhalf = OpConstant %float 0.5
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %a = OpLoad %v4f %in0
+          %x = OpCompositeExtract %float %a 0
+          %y = OpCompositeExtract %float %a 1
+          %z = OpCompositeExtract %float %a 2
+          %p = OpCompositeConstruct %v4f %x %y %z %f1
+               OpStore %pos %p
+         %sx = OpFAdd %float %x %f1
+         %hx = OpFMul %float %sx %fhalf
+         %sy = OpFAdd %float %f1 %y
+         %hy = OpFMul %float %fhalf %sy
+          %o = OpCompositeConstruct %v4f %hx %hy %f0 %f1
+               OpStore %o4 %o
+               OpReturn
+               OpFunctionEnd

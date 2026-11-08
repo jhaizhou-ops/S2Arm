@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>
+<Compile Include="../../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs" Link="BufferedQuery.cs" />
+<Compile Include="../../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs" Link="CounterQueue.cs" />
+<Compile Include="../../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs" Link="CounterQueueEvent.cs" />
+</ItemGroup></Project>

@@ -1,0 +1,14 @@
+{
+  "repository": "",
+  "commit": "86d9ba123967cfe520e556e882dcd4e0ef7ba272",
+  "license": "MIT (../LICENSE)",
+  "files": [
+    {
+      "local": "../games/profile_guess.py",
+      "upstream": "dm/games/profile_guess.py",
+      "upstream_sha256": "56751ebfb36b77a319e2ca259a319166126c0e933cdedadb79a379daffd4c520",
+      "local_sha256": "7eeb93a35c54ea6053ab90b7d8239a616edd233df72da0630e835acb41070d2b",
+      "mode": "upstream rules; S2Arm: NSO LZ4 segments via lz4blk.py (no hard python-lz4 dependency); modules = every module except rtld and the NVIDIA GPU drivers, gpu_driver_modules() for pack/stage_rewrite.sh (10-25, Horizon semantics); 10-28: Unity / Unreal markers derive present_interval_derived display (60 fps zero-config, gated at run time by the L3 table fps_l3_results.tsv); 10-29: UE4 marker must start a word (Diablo III VALUE4), Unreal present_interval_derived needs a .pak / .utoc, Unity 6000.x versions; 10-30: graphics vulkan by gfx_api.vulkan_why (one rule with the pack split), including Vulkan looked up by name through nn::ro::LookupSymbol (Minecraft); #1201 删除 4 个无引用助手；11-03 fix/win-pathsep：路径列表按 os.pathsep 拆（Windows）；11-03 fix/romfs-once：RomFS 文件头经 graphics/nvn/tools/romfs_list.py（仓库里唯一的 RomFS 遍历，按内容身份共用清单）；11-05 fix/vk-no-boot-capture：vk_capture 判语改为「出包不起局、设备首遇现编」（出包不再起局抓着色器）"
+    }
+  ]
+}

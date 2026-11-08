@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x=1,local_size_y=1,local_size_z=1) in;
+#ifdef SIGNED_IMAGE
+layout(set=0,binding=0,r32i) uniform iimageBuffer cp_i_cb2_48_r32i;
+#define INPUT cp_i_cb2_48_r32i
+#define VALUE int
+#else
+layout(set=0,binding=0,r32ui) uniform uimageBuffer cp_i_cb2_48_r32ui;
+#define INPUT cp_i_cb2_48_r32ui
+#define VALUE uint
+#endif
+layout(set=0,binding=1,r32ui) writeonly uniform uimageBuffer cp_i_cb2_4A_r32ui;
+void main() {
+    // All atomic operations leave a zero null-resource sink unchanged.
+    uint loaded=uint(imageLoad(INPUT,0).x);
+    uint failed=uint(imageAtomicCompSwap(INPUT,0,VALUE(123),VALUE(17)));
+    memoryBarrierImage();
+    imageStore(cp_i_cb2_4A_r32ui,0,uvec4(loaded));
+    imageStore(cp_i_cb2_4A_r32ui,1,uvec4(failed));
+    imageStore(cp_i_cb2_4A_r32ui,2,uvec4(uint(imageLoad(INPUT,0).x)));
+}

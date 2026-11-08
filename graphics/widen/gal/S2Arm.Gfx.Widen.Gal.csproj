@@ -1,0 +1,16 @@
+<!-- 通用宽屏 GAL 包装层（IRenderer 装饰）。引用仓内锁版本 Ryujinx GAL；核心算法在 ../S2Arm.Gfx.Widen.csproj（不依赖 Ryujinx）。
+     构建请带 artifacts 目录（dotnet build 加 artifacts-path 指到 build/dotnet），免得往 compat/tree 里写 obj -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <RootNamespace>S2Arm.Gfx.Widen.Gal</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S2Arm.Gfx.Widen.csproj" />
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+</Project>

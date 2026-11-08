@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=8,local_size_y=1,local_size_z=1) in;
+#ifdef SIGNED_IMAGE
+layout(set=0,binding=0,r32i) readonly uniform iimage3D cp_i_cb2_48_r32i;
+layout(set=0,binding=1,r32i) writeonly uniform iimage3D cp_i_cb2_4A_r32i;
+#define INPUT cp_i_cb2_48_r32i
+#define OUTPUT cp_i_cb2_4A_r32i
+#else
+layout(set=0,binding=0,r32ui) readonly uniform uimage3D cp_i_cb2_48_r32ui;
+layout(set=0,binding=1,r32ui) writeonly uniform uimage3D cp_i_cb2_4A_r32ui;
+#define INPUT cp_i_cb2_48_r32ui
+#define OUTPUT cp_i_cb2_4A_r32ui
+#endif
+void main() {
+    uint i=gl_LocalInvocationID.x;
+    ivec3 p=ivec3(int(i&1u),int((i>>1)&1u),int((i>>2)&1u));
+    imageStore(OUTPUT,ivec3(int(32+i),0,0),imageLoad(INPUT,p));
+}

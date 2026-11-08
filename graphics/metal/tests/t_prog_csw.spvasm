@@ -1,0 +1,48 @@
+; t_prog 循环上限的权重下限（gal_spvx.m GAL_LOOP_WMIN_LOG2_CS）：线程组 4，单块循环 n = 0; do { n++; } while (n < 2^22);
+; 循环头标签到回边 = 标签 + 读 + 加 + 存 + 比较 + 合并 + 条件分支 = 7 条 → 不设下限权重 8（允许 2^19 次，比旧口径宽）；下限 16 → 2^22 / 16 = 2^18 次 = 旧口径计算上限
+; o[0] = atomicMax(n)、o[1] = atomicMin(n)
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %arru ArrayStride 4
+               OpMemberDecorate %SA 0 Offset 0
+               OpDecorate %SA BufferBlock
+               OpDecorate %so DescriptorSet 1
+               OpDecorate %so Binding 1
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+   %uint_big = OpConstant %uint 4194304
+       %arru = OpTypeRuntimeArray %uint
+         %SA = OpTypeStruct %arru
+      %ptrSA = OpTypePointer Uniform %SA
+         %so = OpVariable %ptrSA Uniform
+       %ptru = OpTypePointer Uniform %uint
+      %ptrfu = OpTypePointer Function %uint
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %n = OpVariable %ptrfu Function
+               OpStore %n %uint_0
+               OpBranch %hdr
+        %hdr = OpLabel
+         %nv = OpLoad %uint %n
+         %n1 = OpIAdd %uint %nv %uint_1
+               OpStore %n %n1
+         %lt = OpULessThan %bool %n1 %uint_big
+               OpLoopMerge %mrg %hdr None
+               OpBranchConditional %lt %hdr %mrg
+        %mrg = OpLabel
+         %nf = OpLoad %uint %n
+        %po0 = OpAccessChain %ptru %so %int_0 %int_0
+         %r0 = OpAtomicUMax %uint %po0 %uint_1 %uint_0 %nf
+        %po1 = OpAccessChain %ptru %so %int_0 %int_1
+         %r1 = OpAtomicUMin %uint %po1 %uint_1 %uint_0 %nf
+               OpReturn
+               OpFunctionEnd

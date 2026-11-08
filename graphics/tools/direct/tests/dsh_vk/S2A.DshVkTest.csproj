@@ -1,0 +1,12 @@
+<!-- #783 出包 Vulkan 产物单测（graphics/tools/direct/tests/t_dsh_vk.sh 调）：原创合成着色器走 DshVk.CompileWithSpv，核 _b.spv 的绑定号 = _b.json 的 arg_id -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../dsh/S2A.Dsh.csproj" />
+  </ItemGroup>
+</Project>

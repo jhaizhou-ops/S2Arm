@@ -1,0 +1,21 @@
+; t_logicop 片元（有符号整数输出）：o0 = ivec4(-0x0F0F0F10, 0x12345678, 0, 0)，位置 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+        %v4i = OpTypeVector %int 4
+         %b0 = OpConstant %int -252645136
+         %b1 = OpConstant %int 305419896
+         %i0 = OpConstant %int 0
+          %b = OpConstantComposite %v4i %b0 %b1 %i0 %i0
+     %ptrv4o = OpTypePointer Output %v4i
+         %o0 = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+               OpStore %o0 %b
+               OpReturn
+               OpFunctionEnd

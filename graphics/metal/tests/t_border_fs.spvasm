@@ -1,0 +1,49 @@
+; t_border 片元（手写 SPIR-V，形态照 Ryujinx：常量缓冲集 0 绑定 19、组合贴图采样器集 2 绑定 128）：
+;   o0 = texture(tex, cb.d[0].xy)；o1 = textureGather(tex, cb.d[0].xy, 1)
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0 %o1
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+               OpDecorate %o1 Location 1
+               OpDecorate %arr4 ArrayStride 16
+               OpMemberDecorate %C 0 Offset 0
+               OpDecorate %C Block
+               OpDecorate %cb DescriptorSet 0
+               OpDecorate %cb Binding 19
+               OpDecorate %tex DescriptorSet 2
+               OpDecorate %tex Binding 128
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+        %v2f = OpTypeVector %float 2
+        %v4f = OpTypeVector %float 4
+     %uint_4 = OpConstant %uint 4
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+       %arr4 = OpTypeArray %v4f %uint_4
+          %C = OpTypeStruct %arr4
+       %ptrC = OpTypePointer Uniform %C
+         %cb = OpVariable %ptrC Uniform
+     %ptrv4u = OpTypePointer Uniform %v4f
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+       %simg = OpTypeSampledImage %img
+    %ptrsimg = OpTypePointer UniformConstant %simg
+        %tex = OpVariable %ptrsimg UniformConstant
+     %ptrv4o = OpTypePointer Output %v4f
+         %o0 = OpVariable %ptrv4o Output
+         %o1 = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %cp = OpAccessChain %ptrv4u %cb %int_0 %int_0
+          %c = OpLoad %v4f %cp
+         %uv = OpVectorShuffle %v2f %c %c 0 1
+          %t = OpLoad %simg %tex
+          %s = OpImageSampleImplicitLod %v4f %t %uv
+          %g = OpImageGather %v4f %t %uv %int_1
+               OpStore %o0 %s
+               OpStore %o1 %g
+               OpReturn
+               OpFunctionEnd

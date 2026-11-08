@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- S2AConsumer=apple：编苹果消费者（不定义 S2A_ANDROID），同一夹具核苹果排空不直接读客人页（审计 #806 第 5 条） -->
+    <DefineConstants Condition="'$(S2AConsumer)' != 'apple'">$(DefineConstants);S2A_ANDROID</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../metal/cs/NxTrack.cs" Link="NxTrack.cs" />
+  </ItemGroup>
+</Project>

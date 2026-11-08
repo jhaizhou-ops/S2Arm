@@ -1,0 +1,85 @@
+; t_lodbias 顶点（GLSL 经 glslangValidator -V 生成后 spirv-dis 反汇编，形态照 Ryujinx：常量缓冲集 0 绑定 19、组合贴图采样器集 2）：
+;   gl_Position = pos；v = textureLod(vtex 绑定 129, (0.3, 0.6), cb.d[0].y).r（顶点只有显式 LOD：SPIRV-Cross 出 level(...)）
+;; SPIR-V
+;; Version: 1.0
+;; Generator: Khronos Glslang Reference Front End; 11
+;; Bound: 43
+;; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %_ %pos %v
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %gl_PerVertex "gl_PerVertex"
+               OpMemberName %gl_PerVertex 0 "gl_Position"
+               OpMemberName %gl_PerVertex 1 "gl_PointSize"
+               OpMemberName %gl_PerVertex 2 "gl_ClipDistance"
+               OpMemberName %gl_PerVertex 3 "gl_CullDistance"
+               OpName %_ ""
+               OpName %pos "pos"
+               OpName %v "v"
+               OpName %vtex "vtex"
+               OpName %C "C"
+               OpMemberName %C 0 "d"
+               OpName %cb "cb"
+               OpDecorate %gl_PerVertex Block
+               OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
+               OpMemberDecorate %gl_PerVertex 1 BuiltIn PointSize
+               OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance
+               OpMemberDecorate %gl_PerVertex 3 BuiltIn CullDistance
+               OpDecorate %pos Location 0
+               OpDecorate %v Flat
+               OpDecorate %v Location 0
+               OpDecorate %vtex Binding 129
+               OpDecorate %vtex DescriptorSet 2
+               OpDecorate %_arr_v4float_uint_4 ArrayStride 16
+               OpDecorate %C Block
+               OpMemberDecorate %C 0 Offset 0
+               OpDecorate %cb Binding 19
+               OpDecorate %cb DescriptorSet 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+       %uint = OpTypeInt 32 0
+     %uint_1 = OpConstant %uint 1
+%_arr_float_uint_1 = OpTypeArray %float %uint_1
+%gl_PerVertex = OpTypeStruct %v4float %float %_arr_float_uint_1 %_arr_float_uint_1
+%_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
+          %_ = OpVariable %_ptr_Output_gl_PerVertex Output
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+        %pos = OpVariable %_ptr_Input_v4float Input
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%_ptr_Output_float = OpTypePointer Output %float
+          %v = OpVariable %_ptr_Output_float Output
+         %23 = OpTypeImage %float 2D 0 0 0 1 Unknown
+         %24 = OpTypeSampledImage %23
+%_ptr_UniformConstant_24 = OpTypePointer UniformConstant %24
+       %vtex = OpVariable %_ptr_UniformConstant_24 UniformConstant
+    %v2float = OpTypeVector %float 2
+%float_0_300000012 = OpConstant %float 0.300000012
+%float_0_600000024 = OpConstant %float 0.600000024
+         %31 = OpConstantComposite %v2float %float_0_300000012 %float_0_600000024
+     %uint_4 = OpConstant %uint 4
+%_arr_v4float_uint_4 = OpTypeArray %v4float %uint_4
+          %C = OpTypeStruct %_arr_v4float_uint_4
+%_ptr_Uniform_C = OpTypePointer Uniform %C
+         %cb = OpVariable %_ptr_Uniform_C Uniform
+%_ptr_Uniform_float = OpTypePointer Uniform %float
+     %uint_0 = OpConstant %uint 0
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %18 = OpLoad %v4float %pos
+         %20 = OpAccessChain %_ptr_Output_v4float %_ %int_0
+               OpStore %20 %18
+         %27 = OpLoad %24 %vtex
+         %38 = OpAccessChain %_ptr_Uniform_float %cb %int_0 %int_0 %uint_1
+         %39 = OpLoad %float %38
+         %40 = OpImageSampleExplicitLod %v4float %27 %31 Lod %39
+         %42 = OpCompositeExtract %float %40 0
+               OpStore %v %42
+               OpReturn
+               OpFunctionEnd

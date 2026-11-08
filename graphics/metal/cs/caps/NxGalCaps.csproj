@@ -1,0 +1,19 @@
+<!-- GAL Metal 渲染器的能力表（NxCaps.Build）单独成工程：渲染器 NxGal 与离线着色器烘焙器 S2A.ShBake 共用同一份。
+     烘焙器只引用本工程、不引用 NxGal——着色器阶段键（tools/csproj_closure.py）只认真正影响翻译结果的源码，渲染器其余代码改动不触发各款着色器重烘。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>NxGalCaps</AssemblyName>
+    <RootNamespace>NxGal</RootNamespace>
+    <Nullable>disable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <OutDir>$(MSBuildThisFileDirectory)../../../../build/gal/caps/</OutDir>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <RyuGpu Condition="'$(RyuGpu)' == ''">$(MSBuildThisFileDirectory)../../../../compat/tree</RyuGpu>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuGpu)/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+</Project>

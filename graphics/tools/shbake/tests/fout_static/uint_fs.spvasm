@@ -1,0 +1,25 @@
+; 片元：0 号目标本身是 uint4 输出（Uint 变体的形状），存进去的值来自 OpBitcast int → uint。
+; 期望（手算）：0——规则只认「浮点输出按整数位写」，已是整数类型的输出不算（10-25 马车8 对拍：6611 支 Uint 变体曾被误计）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+     %v4uint = OpTypeVector %uint 4
+   %p_v4uint = OpTypePointer Output %v4uint
+     %p_uint = OpTypePointer Output %uint
+         %o0 = OpVariable %p_v4uint Output
+       %i0 = OpConstant %int 0
+       %i3 = OpConstant %int 3
+       %main = OpFunction %void None %fn
+          %l = OpLabel
+       %sum = OpIAdd %int %i3 %i3
+      %bits = OpBitcast %uint %sum
+       %ch0 = OpAccessChain %p_uint %o0 %i0
+               OpStore %ch0 %bits
+               OpReturn
+               OpFunctionEnd

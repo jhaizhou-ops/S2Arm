@@ -1,0 +1,16 @@
+<!-- S2A.Dsh 对拍工具（graphics/tools/direct/tests/t_dsh.sh 调）：直连包记录逐键现编，与离线链产物比 .metal 逐字节、.json 按语义 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <!-- 与玩家包宿主（NativeAOT）同口径关掉反射式 System.Text.Json：兜底现编里漏用泛型 JsonArray.Add<int> 之类在这里当场红（11-02 疯狂兔子整批 NotSupportedException） -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../dsh/S2A.Dsh.csproj" />
+  </ItemGroup>
+</Project>

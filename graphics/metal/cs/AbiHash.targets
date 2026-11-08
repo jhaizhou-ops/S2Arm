@@ -1,0 +1,19 @@
+<!-- ABI 指纹（NxGal.csproj 与 ryu_judge/nxgal/NxGal.Link.csproj 共用）：编译前由 ../tools/abi_hash.py 从 ../gal_abi.h 生成 NxGal.Abi.Hash，
+     C 端 Makefile 用同一脚本生成 NXGAL_ABI_HASH；NxRenderer.Initialize 比对 nxgal_abi_hash()，不一致当场报错 -->
+<Project>
+  <!-- 路径在目标里定：导入时 IntermediateOutputPath 还没定义（10-19 生成文件落进源码目录，被链接工程的 *.cs 重复编进来） -->
+  <Target Name="AbiHashPaths">
+    <PropertyGroup>
+      <AbiHashSrc>$(MSBuildThisFileDirectory)../gal_abi.h</AbiHashSrc>
+      <AbiHashTool>$(MSBuildThisFileDirectory)../tools/abi_hash.py</AbiHashTool>
+      <AbiHashOut>$([MSBuild]::NormalizePath('$(ProjectDir)', '$(IntermediateOutputPath)', 'AbiHash.g.cs'))</AbiHashOut>   <!-- 用 artifacts-path 构建时中间目录是绝对路径：NormalizePath 取它本身，不拼进源码目录 -->
+    </PropertyGroup>
+  </Target>
+  <Target Name="GenAbiHash" BeforeTargets="CoreCompile" DependsOnTargets="AbiHashPaths" Inputs="$(AbiHashSrc);$(AbiHashTool)" Outputs="$(AbiHashOut)">
+    <MakeDir Directories="$([MSBuild]::NormalizePath('$(ProjectDir)', '$(IntermediateOutputPath)'))" />
+    <Exec Command="python3 &quot;$(AbiHashTool)&quot; &quot;$(AbiHashSrc)&quot; --cs &quot;$(AbiHashOut)&quot;" />
+  </Target>
+  <Target Name="AddAbiHash" BeforeTargets="CoreCompile" AfterTargets="GenAbiHash">
+    <ItemGroup><Compile Include="$(AbiHashOut)" /></ItemGroup>
+  </Target>
+</Project>

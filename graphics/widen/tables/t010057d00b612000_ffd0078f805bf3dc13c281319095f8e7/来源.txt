@@ -1,0 +1,13 @@
+10-25 候选点集：auto_table 探测出 main 8 点 + sdk 39 点（~/.s2arm/run/s2arm/widen/auto2/t010057d00b612000_ffd0078f805bf3dc13c281319095f8e7/handheld.log 的「probe 点集」行），
+wide_scan 另出的 asp 点 main:0x1f3af4 也算在内。本表取 main-only 变体 9 点（1 asp + 8 movz）：
+main:0x1f3af4(asp)、0x33f508、0x33f878、0x340c90、0x3419e0、0x341a0c、0x3518ac、0x3fa6fc、0x402244。
+另一份 main+sdk 变体 58 点（9 main + 49 sdk）没采用：sdk 这 49 点改动面大得多、没有单独验，main 这 9 点已经能让画面满宽。
+
+Mac 闭环（graphics/widen/scan/closed_loop.sh）没跑成，不是判否：10-25 三次探测局都是「没到 MARK」——自动玩家没进战斗场景，
+存档目录只有 account/ user/（见 auto2/…/handheld.log 的「探测局没到 MARK（自动玩家没进游戏场景；录一份存档…）」）。
+按 README 的第二层口径这一条尚未验，请在列车里补跑；若闭合结论是「不过」，删掉本目录 + verified.tsv 那一行即可。
+
+真机（iPhone 16 Pro，屏 2868×1320，出图 1564×720，掌机档）：10-26、10-27 两局满屏，四边到边、无黑边、无重影、无拉丝；
+截图 docs/validation/widen-itb-20261027/（标题界面 2868×1320、战斗场景 2224×1023）。
+量化：16:9 会左右各留 261 px 黑边，实测 0；横纵缩放 2868/1564 = 1.8338 与 1320/720 = 1.8333，差 0.03%（1320 高内 ≤ 0.4 px）。
+出图 1564×720 也说明这 9 点是「整幅画幅线」而非「撑宽后只画左 1920 列」——后者是八方2 当年被判否的形态（见其来源.txt）。

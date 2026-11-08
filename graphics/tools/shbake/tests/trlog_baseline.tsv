@@ -1,0 +1,3 @@
+# 翻译告警棘轮基线（tests/t_trlog.sh）：种类<TAB>次数上限。样本 = TrLogSelfTest 手拼程序（1 条 Invalid + 1 条 Bpt stub）；只减不增，减了同笔改小
+Invalid instruction at 0x# (0x#).	1
+Shader instruction Bpt is not implemented.	1

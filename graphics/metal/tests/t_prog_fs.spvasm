@@ -1,0 +1,72 @@
+; t_prog 端到端片元着色器（手写 SPIR-V，形态照 Ryujinx：常量缓冲集 0、组合贴图采样器集 2，绑定号按 Gpu 层片元段：常量 19、贴图 128 / 129）
+; 等价 GLSL：
+;   layout(set=0,binding=0)   uniform S { vec4 d[4]; } sb;      // 支撑缓冲：d[1] = 缩放
+;   layout(set=0,binding=19)  uniform C { vec4 d[4]; } cb;      // d[2] = 颜色（取下标 2：同时验常量缓冲内偏移）
+;   layout(set=2,binding=129) uniform sampler2D unused_tex;      // 声明在 128 之前且不用：验「按绑定号排序」与「不用的也进结构体」
+;   layout(set=2,binding=128) uniform sampler2D tex;
+;   layout(location=0) out vec4 o;
+;   void main() { o = texture(tex, gl_FragCoord.xy / 4.0) * cb.d[2] * sb.d[1]; }
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %fc %o
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %fc BuiltIn FragCoord
+               OpDecorate %o Location 0
+               OpDecorate %arr4 ArrayStride 16
+               OpMemberDecorate %S 0 Offset 0
+               OpDecorate %S Block
+               OpMemberDecorate %C 0 Offset 0
+               OpDecorate %C Block
+               OpDecorate %sb DescriptorSet 0
+               OpDecorate %sb Binding 0
+               OpDecorate %cb DescriptorSet 0
+               OpDecorate %cb Binding 19
+               OpDecorate %unused DescriptorSet 2
+               OpDecorate %unused Binding 129
+               OpDecorate %tex DescriptorSet 2
+               OpDecorate %tex Binding 128
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %v2f = OpTypeVector %float 2
+       %v4f = OpTypeVector %float 4
+     %uint_4 = OpConstant %uint 4
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+      %int_2 = OpConstant %int 2
+  %float_q = OpConstant %float 0.25
+       %arr4 = OpTypeArray %v4f %uint_4
+          %S = OpTypeStruct %arr4
+          %C = OpTypeStruct %arr4
+       %ptrS = OpTypePointer Uniform %S
+       %ptrC = OpTypePointer Uniform %C
+         %sb = OpVariable %ptrS Uniform
+         %cb = OpVariable %ptrC Uniform
+     %ptrv4u = OpTypePointer Uniform %v4f
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+       %simg = OpTypeSampledImage %img
+    %ptrsimg = OpTypePointer UniformConstant %simg
+     %unused = OpVariable %ptrsimg UniformConstant
+        %tex = OpVariable %ptrsimg UniformConstant
+     %ptrv4i = OpTypePointer Input %v4f
+         %fc = OpVariable %ptrv4i Input
+     %ptrv4o = OpTypePointer Output %v4f
+          %o = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %f4 = OpLoad %v4f %fc
+         %fxy = OpVectorShuffle %v2f %f4 %f4 0 1
+         %uv = OpVectorTimesScalar %v2f %fxy %float_q
+          %t = OpLoad %simg %tex
+         %tc = OpImageSampleImplicitLod %v4f %t %uv
+        %cp2 = OpAccessChain %ptrv4u %cb %int_0 %int_2
+         %c2 = OpLoad %v4f %cp2
+        %sp1 = OpAccessChain %ptrv4u %sb %int_0 %int_1
+         %s1 = OpLoad %v4f %sp1
+         %m1 = OpFMul %v4f %tc %c2
+         %m2 = OpFMul %v4f %m1 %s1
+               OpStore %o %m2
+               OpReturn
+               OpFunctionEnd

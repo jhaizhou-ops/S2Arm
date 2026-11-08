@@ -1,0 +1,15 @@
+<!-- 多线程渲染器等程序不自旋单测（10-24 画面·着色器线，Ryujinx 补丁 progq-wait-block）：ProgramQueue.WaitForProgram 对所等程序阻塞查询、
+     还在待编队列里的当场建。由 ../t_prog_queue.sh 编与跑（产物放仓库 build/）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2A.ProgQueueTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../../../compat/tree/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,24 @@
+<!-- 直连统一着色器编译器：离线 CLI 与 Android NativeAOT 共编同一份源码。
+     只消费真实 NVN 快照（由调用方提供代码/控制段/C1/绑定事实）与 EffectiveProfile；
+     不建 Vulkan/Metal 设备、不读游戏文件、不用进程内命令行工具。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2A.DirectCompiler</AssemblyName>
+    <RootNamespace>S2A.DirectCompiler</RootNamespace>
+    <RyuGpu Condition="'$(RyuGpu)' == ''">$(MSBuildThisFileDirectory)../../../../compat/tree</RyuGpu>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../widen/shader/SpirvCbufUse.cs" Link="SpirvCbufUse.cs" />
+    <Compile Remove="cli/**" />
+    <Compile Remove="tests/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuGpu)/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+  </ItemGroup>
+  <!-- 翻译闭包身份（W2.1）：构建期按源码闭包生成并嵌入，CLI/设备/生产者同源读取。 -->
+  <Import Project="DirectClosure.targets" />
+</Project>

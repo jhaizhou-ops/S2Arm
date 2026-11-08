@@ -1,0 +1,46 @@
+#version 450
+layout(local_size_x=8, local_size_y=1, local_size_z=1) in;
+#ifdef SIGNED_IMAGE
+layout(set=0,binding=0,r32i) coherent uniform iimage3D cp_i_cb2_48_r32i;
+layout(set=0,binding=1,r32i) writeonly uniform iimage3D cp_i_cb2_4A_r32i;
+#define VALUE int
+#define VECTOR ivec4
+#define INPUT cp_i_cb2_48_r32i
+#define OUTPUT cp_i_cb2_4A_r32i
+#define INITIAL(i) (-100-int(i))
+#else
+layout(set=0,binding=0,r32ui) coherent uniform uimage3D cp_i_cb2_48_r32ui;
+layout(set=0,binding=1,r32ui) writeonly uniform uimage3D cp_i_cb2_4A_r32ui;
+#define VALUE uint
+#define VECTOR uvec4
+#define INPUT cp_i_cb2_48_r32ui
+#define OUTPUT cp_i_cb2_4A_r32ui
+#define INITIAL(i) (100u+i)
+#endif
+void main() {
+    uint i=gl_LocalInvocationID.x;
+    ivec3 p=ivec3(int(i&1u),int((i>>1)&1u),int((i>>2)&1u));
+    VALUE initial=INITIAL(i), next=initial+VALUE(20);
+    imageStore(INPUT,p,VECTOR(initial));
+    if(i==0u) {
+        imageStore(INPUT,ivec3(3,3,3),VECTOR(0));
+        imageStore(INPUT,ivec3(2,3,3),VECTOR(0));
+    }
+    memoryBarrierImage(); barrier();
+    VALUE success=imageAtomicCompSwap(INPUT,p,initial,next);
+    VALUE failed=imageAtomicCompSwap(INPUT,p,initial,VALUE(777));
+    memoryBarrierImage(); barrier();
+    VALUE loaded=imageLoad(INPUT,p).x;
+    imageStore(OUTPUT,ivec3(int(4*i),0,0),VECTOR(success));
+    imageStore(OUTPUT,ivec3(int(4*i+1),0,0),VECTOR(failed));
+    imageStore(OUTPUT,ivec3(int(4*i+2),0,0),VECTOR(loaded));
+    VALUE old=imageAtomicCompSwap(INPUT,ivec3(3,3,3),VALUE(0),VALUE(i+1));
+    imageStore(OUTPUT,ivec3(int(4*i+3),0,0),VECTOR(old));
+    VALUE expected=VALUE(0), observed;
+    do {
+        observed=imageAtomicCompSwap(INPUT,ivec3(2,3,3),expected,expected+VALUE(1));
+        if(observed!=expected) expected=observed;
+        else break;
+    } while(true);
+    imageStore(OUTPUT,ivec3(int(48+i),0,0),VECTOR(expected));
+}

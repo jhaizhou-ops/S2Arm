@@ -1,0 +1,145 @@
+; t_prog 越界与循环上限（gal_spvx.m）：手写 SPIR-V，资源形状照 Ryujinx（常量缓冲 Block{uvec4 d[4096]} 集 0、存储缓冲 Uniform+BufferBlock 运行时数组 集 1、共享内存 Workgroup 定长数组）
+; 等价 GLSL（线程组 4，i = gl_GlobalInvocationID.x）：
+;   ① o[i]    = a[i+4]                 a 绑定 16 字节（4 个）→ 越界读钳到 a[3] 读 13（10-21 ~ 11-01 曾读回 0，代价大撤掉）
+;   ② o[4+i]  = ub.d[i+2].x            常量缓冲绑定 48 字节（3 个 vec4）→ i=0 读 d[2]；i≥1 越界钳到 d[2] 读 1002（10-21 ~ 11-01 曾读回 0）
+;   ③ a[i+4]  = 555                    越界写不执行（a 之后紧挨的哨兵不变）
+;   ④ o[8+i]  = atomicAdd(a[i+8], 1)   越界原子不执行、返回 0；o[24+i] = atomicAdd(o[12+i], 5) 界内原子照常
+;   ⑤ wg[i] = i+20; wg[i+4] = 999; barrier; o[16+i] = wg[i+4]   共享内存越界写不执行、读钳到 wg[3]
+;   ⑥ n = 0; while (a[0] != 0 && n < 2^22) n++; o[20+i] = n     数据决定次数的循环：计算阶段上限 2^18 截断（没改写也只到 2^22，单测不会挂死 GPU）
+;   ⑦ o[28+i] = ub.d[0][i & 3]          分量下标 x & 3 静态可证在界内：不钳（10-21 前多一条钳位）；d[0] = (1000,0,0,0)
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %arru ArrayStride 4
+               OpDecorate %arrc ArrayStride 16
+               OpMemberDecorate %U 0 Offset 0
+               OpDecorate %U Block
+               OpMemberDecorate %SA 0 Offset 0
+               OpDecorate %SA BufferBlock
+               OpMemberDecorate %SO 0 Offset 0
+               OpDecorate %SO BufferBlock
+               OpDecorate %ub DescriptorSet 0
+               OpDecorate %ub Binding 0
+               OpDecorate %sa DescriptorSet 1
+               OpDecorate %sa Binding 0
+               OpDecorate %so DescriptorSet 1
+               OpDecorate %so Binding 1
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+        %v3u = OpTypeVector %uint 3
+        %v4u = OpTypeVector %uint 4
+      %int_0 = OpConstant %int 0
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
+    %uint_28 = OpConstant %uint 28
+     %uint_4 = OpConstant %uint 4
+     %uint_5 = OpConstant %uint 5
+     %uint_8 = OpConstant %uint 8
+    %uint_12 = OpConstant %uint 12
+    %uint_16 = OpConstant %uint 16
+    %uint_20 = OpConstant %uint 20
+    %uint_24 = OpConstant %uint 24
+   %uint_555 = OpConstant %uint 555
+   %uint_999 = OpConstant %uint 999
+  %uint_4096 = OpConstant %uint 4096
+   %uint_big = OpConstant %uint 4194304
+   %uint_264 = OpConstant %uint 264
+       %arrc = OpTypeArray %v4u %uint_4096
+       %arru = OpTypeRuntimeArray %uint
+       %arrw = OpTypeArray %uint %uint_4
+          %U = OpTypeStruct %arrc
+         %SA = OpTypeStruct %arru
+         %SO = OpTypeStruct %arru
+       %ptrU = OpTypePointer Uniform %U
+      %ptrSA = OpTypePointer Uniform %SA
+      %ptrSO = OpTypePointer Uniform %SO
+       %ptrW = OpTypePointer Workgroup %arrw
+         %ub = OpVariable %ptrU Uniform
+         %sa = OpVariable %ptrSA Uniform
+         %so = OpVariable %ptrSO Uniform
+         %wg = OpVariable %ptrW Workgroup
+       %ptru = OpTypePointer Uniform %uint
+     %ptrv4u = OpTypePointer Uniform %v4u
+      %ptrwu = OpTypePointer Workgroup %uint
+      %ptrfu = OpTypePointer Function %uint
+     %ptrv3i = OpTypePointer Input %v3u
+        %gid = OpVariable %ptrv3i Input
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %n = OpVariable %ptrfu Function
+               OpStore %n %uint_0
+          %g = OpLoad %v3u %gid
+          %i = OpCompositeExtract %uint %g 0
+         %i4 = OpIAdd %uint %i %uint_4
+        %pa1 = OpAccessChain %ptru %sa %int_0 %i4
+         %a1 = OpLoad %uint %pa1
+        %po1 = OpAccessChain %ptru %so %int_0 %i
+               OpStore %po1 %a1
+         %i2 = OpIAdd %uint %i %uint_2
+         %pu = OpAccessChain %ptrv4u %ub %int_0 %i2
+         %u4 = OpLoad %v4u %pu
+         %ux = OpCompositeExtract %uint %u4 0
+        %po2 = OpAccessChain %ptru %so %int_0 %i4
+               OpStore %po2 %ux
+        %pa3 = OpAccessChain %ptru %sa %int_0 %i4
+               OpStore %pa3 %uint_555
+         %i8 = OpIAdd %uint %i %uint_8
+        %pa4 = OpAccessChain %ptru %sa %int_0 %i8
+         %r4 = OpAtomicIAdd %uint %pa4 %uint_1 %uint_0 %uint_1
+        %po4 = OpAccessChain %ptru %so %int_0 %i8
+               OpStore %po4 %r4
+        %i12 = OpIAdd %uint %i %uint_12
+        %po5 = OpAccessChain %ptru %so %int_0 %i12
+         %r5 = OpAtomicIAdd %uint %po5 %uint_1 %uint_0 %uint_5
+        %i24 = OpIAdd %uint %i %uint_24
+       %po5b = OpAccessChain %ptru %so %int_0 %i24
+               OpStore %po5b %r5
+        %v20 = OpIAdd %uint %i %uint_20
+        %pw1 = OpAccessChain %ptrwu %wg %i
+               OpStore %pw1 %v20
+        %pw2 = OpAccessChain %ptrwu %wg %i4
+               OpStore %pw2 %uint_999
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+        %pw3 = OpAccessChain %ptrwu %wg %i4
+         %w3 = OpLoad %uint %pw3
+        %i16 = OpIAdd %uint %i %uint_16
+        %po6 = OpAccessChain %ptru %so %int_0 %i16
+               OpStore %po6 %w3
+               OpBranch %hdr
+        %hdr = OpLabel
+               OpLoopMerge %mrg %cont None
+               OpBranch %chk
+        %chk = OpLabel
+        %pa0 = OpAccessChain %ptru %sa %int_0 %int_0
+         %a0 = OpLoad %uint %pa0
+         %nz = OpINotEqual %bool %a0 %uint_0
+         %nv = OpLoad %uint %n
+         %lt = OpULessThan %bool %nv %uint_big
+         %go = OpLogicalAnd %bool %nz %lt
+               OpBranchConditional %go %body %mrg
+       %body = OpLabel
+         %n1 = OpIAdd %uint %nv %uint_1
+               OpStore %n %n1
+               OpBranch %cont
+       %cont = OpLabel
+               OpBranch %hdr
+        %mrg = OpLabel
+         %nf = OpLoad %uint %n
+        %i20 = OpIAdd %uint %i %uint_20
+        %po7 = OpAccessChain %ptru %so %int_0 %i20
+               OpStore %po7 %nf
+         %im = OpBitwiseAnd %uint %i %uint_3
+         %pm = OpAccessChain %ptru %ub %int_0 %uint_0 %im
+          %m = OpLoad %uint %pm
+        %i28 = OpIAdd %uint %i %uint_28
+        %po8 = OpAccessChain %ptru %so %int_0 %i28
+               OpStore %po8 %m
+               OpReturn
+               OpFunctionEnd

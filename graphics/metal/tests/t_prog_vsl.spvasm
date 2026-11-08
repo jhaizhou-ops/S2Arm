@@ -1,0 +1,46 @@
+; t_prog 分层顶点着色器（手写 SPIR-V）：同时写点大小与层号（八方2 新架构局两支管线建不出的形态：Ryujinx 分层渲染 / 顶点阶段写层号）
+; 等价 GLSL：
+;   layout(location=0) in vec2 pos;
+;   void main() { gl_Position = vec4(pos, 0.0, 1.0); gl_PointSize = 1.0; gl_Layer = 1; }
+               OpCapability Shader
+               OpCapability ShaderViewportIndexLayerEXT
+               OpExtension "SPV_EXT_shader_viewport_index_layer"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %pos %out %layer
+               OpDecorate %pos Location 0
+               OpMemberDecorate %PerVertex 0 BuiltIn Position
+               OpMemberDecorate %PerVertex 1 BuiltIn PointSize
+               OpDecorate %PerVertex Block
+               OpDecorate %layer BuiltIn Layer
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %int = OpTypeInt 32 1
+       %v2f = OpTypeVector %float 2
+       %v4f = OpTypeVector %float 4
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+     %ptrv2i = OpTypePointer Input %v2f
+        %pos = OpVariable %ptrv2i Input
+  %PerVertex = OpTypeStruct %v4f %float
+     %ptrPVo = OpTypePointer Output %PerVertex
+        %out = OpVariable %ptrPVo Output
+     %ptrv4o = OpTypePointer Output %v4f
+      %ptrfo = OpTypePointer Output %float
+      %ptrio = OpTypePointer Output %int
+      %layer = OpVariable %ptrio Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %p = OpLoad %v2f %pos
+         %px = OpCompositeExtract %float %p 0
+         %py = OpCompositeExtract %float %p 1
+       %pos4 = OpCompositeConstruct %v4f %px %py %float_0 %float_1
+         %op = OpAccessChain %ptrv4o %out %int_0
+               OpStore %op %pos4
+         %pp = OpAccessChain %ptrfo %out %int_1
+               OpStore %pp %float_1
+               OpStore %layer %int_1
+               OpReturn
+               OpFunctionEnd

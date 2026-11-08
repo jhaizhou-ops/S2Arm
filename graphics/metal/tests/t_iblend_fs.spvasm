@@ -1,0 +1,21 @@
+; t_iblend 片元：整数输出 o0 = uvec4(0x5A, 0xA5, 0, 0)（位置 0，无符号）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %v4u = OpTypeVector %uint 4
+        %u5a = OpConstant %uint 90
+        %ua5 = OpConstant %uint 165
+         %u0 = OpConstant %uint 0
+        %val = OpConstantComposite %v4u %u5a %ua5 %u0 %u0
+     %ptrv4o = OpTypePointer Output %v4u
+         %o0 = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+               OpStore %o0 %val
+               OpReturn
+               OpFunctionEnd

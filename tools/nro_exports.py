@@ -8,7 +8,7 @@
 # 用法：tools/nro_exports.py <romfs 目录> <输出 tsv>；退出码 0（没有 NRO 不出表也是 0），读坏 NRO 报红退出 1
 import os, struct, sys
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py，walk 同 os.walk）
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gfx', 'nvn', 'tools')); import romfs_list
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'graphics', 'nvn', 'tools')); import romfs_list
 
 def exports(path):
     d = open(path, 'rb').read()

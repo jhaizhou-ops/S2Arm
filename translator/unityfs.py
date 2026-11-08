@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+# Unity asset bundle reader (enough for shaders): UnityFS bundle → serialized files → objects decoded by their type trees → each platform's subprograms of a Shader.
+#   · UnityFS ('UnityFS\0', format 6..8): big-endian header + block info (LZMA / LZ4 / LZ4HC or stored) + data blocks; the block info lists the file nodes (offset, size, path).
+#   · Serialized file (format 17..22): metadata (Unity version, type table with type trees, object table) + object data. Without type trees the Shader layout is generated from the Unity version (shader_layout). A type tree string offset with the high bit set refers to Unity's built-in common string table,
+#     which is not shipped with the assets; it is taken from the game's own main ('AABB\0AnimationClip\0…', see common_strings). A type tree node is 32 bytes from format 19 (Unity 2019.1, the trailing
+#     refTypeHash u64) and 24 bytes before it (format 17: Unity 5.5 to 2018.4).
+#   · Shader (class 48): the compressedBlob of platform platforms[i] is LZ4-compressed in segments offsets[i][s] / compressedLengths[i][s] / decompressedLengths[i][s] (2019.3 and later);
+#     inside a decompressed segment: u32 subprogram count, then 12-byte entries {offset, length, segment}. Before 2019.3 each platform has one segment (offsets[i] is a number) and the entries are
+#     8 bytes {offset, length}. A subprogram = version, program type, stats, keywords, program code bytes, ...
+#     From Unity 2021.2 (subprogram version 202012090) the local keyword list is gone; Unity 2022 also keeps each program's parameters in the blob as entries of their own (the parsed form's
+#     m_ParameterBlobIndices), and the code entries are the m_BlobIndex of m_PlayerSubPrograms (Ace Attorney Investigations Collection, Unity 2022.3.17f1)
+#   The pre-2019.3 layouts were found by armyja on Cuphead (Unity 2017.4.9f1, serialized format 17), GitHub pull request #2
+# Only depends on lz4 (the same package shader_split uses for NSOs)
+import lzma, struct
+
+CLASS_SHADER = 48
+
+def _lz4(raw, size):
+    import lz4.block
+    return lz4.block.decompress(raw, uncompressed_size=size)
+
+def _decomp(raw, size, kind):
+    if kind == 0: return raw
+    if kind == 1:   # Unity's LZMA: 5 property bytes + raw stream
+        props = raw[0]; dict_size = struct.unpack_from('<I', raw, 1)[0]
+        lc, lp, pb = props % 9, (props // 9) % 5, props // 45
+        f = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': dict_size, 'lc': lc, 'lp': lp, 'pb': pb}])
+        return f.decompress(raw[5:], size)[:size]
+    if kind in (2, 3): return _lz4(raw, size)
+    raise ValueError(f'UnityFS: unknown compression {kind}')
+
+def _cstr(d, p):
+    e = d.index(b'\0', p); return d[p:e].decode('utf-8', 'replace'), e + 1
+
+def bundle_files(d):
+    """UnityFS bundle → [(path, bytes)]"""
+    if d[:8] != b'UnityFS\0': raise ValueError('not UnityFS')
+    fmt = struct.unpack_from('>I', d, 8)[0]
+    _, p = _cstr(d, 12); _, p = _cstr(d, p)
+    size, csz, usz, flags = struct.unpack_from('>qIII', d, p); p += 20
+    if fmt >= 7: p = (p + 15) & ~15
+    if flags & 0x80: info_raw = d[len(d) - csz:]
+    else: info_raw = d[p:p + csz]; p += csz
+    info = _decomp(info_raw, usz, flags & 0x3f)
+    q = 16; nb = struct.unpack_from('>i', info, q)[0]; q += 4
+    blocks = []
+    for _ in range(nb):
+        u, c, f = struct.unpack_from('>IIH', info, q); q += 10; blocks.append((u, c, f))
+    nn = struct.unpack_from('>i', info, q)[0]; q += 4
+    nodes = []
+    for _ in range(nn):
+        off, sz, f = struct.unpack_from('>qqI', info, q); q += 20
+        name, q = _cstr(info, q); nodes.append((off, sz, name))
+    if flags & 0x200: p = (p + 15) & ~15   # BlockInfoNeedPaddingAtStart
+    out = bytearray()
+    for u, c, f in blocks:
+        out += _decomp(d[p:p + c], u, f & 0x3f); p += c
+    return [(name, bytes(out[off:off + sz])) for off, sz, name in nodes]
+
+def bundle_version(d):
+    """UnityFS bundle → the Unity version its header records ('2019.4.31f1'; the serialized files inside may record none)"""
+    _, p = _cstr(d, 12); v, _ = _cstr(d, p); return v
+
+def common_strings(image):
+    """Unity's common string table in the game's main → {offset: string}"""
+    a = image.find(b'AABB\0AnimationClip\0AnimationCurve\0')
+    if a < 0: raise ValueError('no Unity common string table in main (AABB\\0AnimationClip...)')
+    tab, p = {}, a
+    while True:
+        e = image.index(b'\0', p)
+        if e == p: break
+        s = image[p:e]
+        if not all(0x20 <= ch < 0x7f for ch in s): break
+        tab[p - a] = s.decode(); p = e + 1
+    return tab
+
+class Node:
+    __slots__ = ('type', 'name', 'size', 'flags', 'kids')
+    def __init__(s, t, n, z, f): s.type, s.name, s.size, s.flags, s.kids = t, n, z, f, []
+
+class Reader:
+    def __init__(s, d, le): s.d, s.p, s.e = d, 0, '<' if le else '>'
+    def u(s, fmt):
+        v = struct.unpack_from(s.e + fmt, s.d, s.p); s.p += struct.calcsize(s.e + fmt); return v[0] if len(v) == 1 else v
+    def align(s): s.p = (s.p + 3) & ~3
+
+PRIM = {'SInt8': 'b', 'UInt8': 'B', 'char': 'B', 'bool': '?', 'SInt16': 'h', 'short': 'h', 'UInt16': 'H', 'unsigned short': 'H',
+        'SInt32': 'i', 'int': 'i', 'UInt32': 'I', 'unsigned int': 'I', 'Type*': 'i', 'SInt64': 'q', 'long long': 'q', 'UInt64': 'Q',
+        'unsigned long long': 'Q', 'FileSize': 'Q', 'float': 'f', 'double': 'd'}
+
+def _read(r, n):
+    if n.type in PRIM and not n.kids:
+        v = r.u(PRIM[n.type])
+    elif n.type == 'string':
+        ln = r.u('i'); v = r.d[r.p:r.p + ln]; r.p += ln
+        try: v = v.decode('utf-8')
+        except UnicodeDecodeError: pass
+        if n.kids and n.kids[0].flags & 0x4000: r.align()
+    elif n.kids and n.kids[0].type == 'Array':
+        arr = n.kids[0]; cnt = r.u('i'); el = arr.kids[1]
+        if el.type in ('UInt8', 'char', 'SInt8') and not el.kids: v = r.d[r.p:r.p + cnt]; r.p += cnt
+        elif el.type in PRIM and not el.kids:
+            f = PRIM[el.type]; w = struct.calcsize(f); v = list(struct.unpack_from(r.e + f * cnt, r.d, r.p)); r.p += w * cnt
+        else: v = [_read(r, el) for _ in range(cnt)]
+        if arr.flags & 0x4000: r.align()
+    elif n.type == 'TypelessData':
+        cnt = r.u('i'); v = r.d[r.p:r.p + cnt]; r.p += cnt
+    else:
+        v = {k.name: _read(r, k) for k in n.kids}
+    if n.flags & 0x4000: r.align()
+    return v
+
+class NoTree(ValueError):
+    """the serialized file has no type tree and no tree of the same class and hash to borrow"""
+
+# Layouts for serialized files that carry no type tree and whose Shader type hash no bundle lends a tree for (Unity's own data.unity3d / unity default resources / Data/*.assets).
+# A layout is one struct per line, "Name: type field; type field; …", in serialization order. A type is a primitive, a struct of the layout, string, vector<element name:type>,
+# map<data:pair(key type,value type)>; a trailing ~ = the container's Array is not aligned after it, ! = the field itself is aligned after it (the 0x4000 flags).
+# The Shader layout is generated from the Unity version the serialized file records (shader_layout), not written out per type hash: a hash names one Unity version's layout, so a table of
+# hashes grows with every game (S2Arm 10-29: 4 of 5 Unity games in a census stopped on hashes the table did not have: Unity 2017.4, 2019.2, 2019.4). The version rules are those of
+# AssetStudio d158e864 (MIT)'s Shader reader (Classes/Shader.cs; source and license: THIRD_PARTY.md), plus the Unity 2022 fields it does not read (m_PlayerSubPrograms,
+# m_ParameterBlobIndices, stageCounts), from the type trees of Ace Attorney Investigations Collection's bundles (2022.3.17f1). The generated layouts equal, byte for byte, the layouts
+# written out here before for 5.5.0p1, 2020.3.18f1 / 2020.3.30f1 and 2022.3.17f1, each checked against real type trees or AssetStudio (graphics/tools/direct/tests/t_unity_layouts.py).
+# A generated layout must consume each object exactly (serialized_objects, layouts=True): a rule that is wrong for some version stops loud instead of reading garbage.
+# No type tree database or dump is shipped or copied: AssetRipper's TypeTreeDumps (the source of the TPK packages UnityPy and AssetRipper read) has no license, so it is not used
+# (the 2018.3 Shader and 2022.3 ComputeShader layouts once copied from it are gone, 10-29), and AssetRipper itself is GPL-3.0.
+# ComputeShader has no layout here at all: without a type tree its kernels' code is found in the object bytes (shader_split.unity_scan_kernels)
+SHADER_VERSIONS = ((5, 5, 0), (2022, 3, 999))   # the range the rules cover; outside it a file without a type tree has no layout (NoTree)
+
+def unity_version(s):
+    """Unity version string ('2017.4.15f1') → (major, minor, patch), or None when the file does not record one ('', '0.0.0')"""
+    import re
+    m = re.match(r'(\d+)\.(\d+)\.(\d+)', s or '')
+    v = tuple(map(int, m.groups())) if m else None
+    return v if v and v[0] else None
+
+def player_fields(v):
+    """does Unity v's Shader have the player's subprograms (m_PlayerSubPrograms), parameter entries of their own (m_ParameterBlobIndices) and stage counts? True / False, or None
+    between the last version known without them and the first known with them: Unity 2021.3.34f1 has them (Servonauts' bundles), 2022.3.5f1 (Brain Memory Training Academy) and
+    2022.3.17f1 (Ace Attorney) too, AssetStudio's reads of 2021.2 and 2022.1 do not; within 2021.3.0–2021.3.33 and 2022.1–2022.3.4 the objects decide (shader_layouts)"""
+    if v >= (2022, 3, 5) or (2021, 3, 34) <= v < (2021, 4): return True
+    if (2021, 3) <= v < (2021, 4) or (2022, 1) <= v < (2022, 3, 5): return None
+    return False
+
+def shader_layouts(v):
+    """Unity version → the candidate layouts of its Shader: one, or two where player_fields does not know (the one that reads every object exactly is taken)"""
+    p = player_fields(v)
+    return [shader_layout(v, p)] if p is not None else [shader_layout(v, False), shader_layout(v, True)]
+
+def shader_layout(v, blob_index=None):
+    """Unity version (major, minor, patch) → the layout of its Shader (class 48), in the notation above; blob_index = with the Unity 2022 player fields (None: by player_fields)"""
+    def ge(*w): return v >= w
+    params = ge(2020, 3, 2) and not (2021, 0) <= v < (2021, 1, 1)   # SerializedProgramParameters per subprogram + common parameters: 2020.3.2 and 2021.1.1 on
+    partial_cb = ge(2020, 3, 2) and not (2021, 0) <= v < (2021, 1, 4)   # ConstantBuffer.m_IsPartialCB: 2020.3.2 and 2021.1.4 on
+    if blob_index is None: blob_index = bool(player_fields(v))
+    flt = 'SerializedShaderFloatValue'
+    state = ['string m_Name'] + [f'SerializedShaderRTBlendState rtBlend{i}' for i in range(8)] + ['bool! rtSeparateBlend'] + [f'{flt} zClip'] * ge(2017, 2) + \
+            [f'{flt} zTest', f'{flt} zWrite', f'{flt} culling'] + [f'{flt} conservative'] * ge(2020, 1) + [f'{flt} offsetFactor', f'{flt} offsetUnits', f'{flt} alphaToMask'] + \
+            ['SerializedStencilOp stencilOp', 'SerializedStencilOp stencilOpFront', 'SerializedStencilOp stencilOpBack', f'{flt} stencilReadMask', f'{flt} stencilWriteMask', f'{flt} stencilRef',
+             f'{flt} fogStart', f'{flt} fogEnd', f'{flt} fogDensity', 'SerializedShaderVectorValue fogColor', 'int fogMode', 'int gpuProgramID', 'SerializedTagMap m_Tags', 'int m_LOD', 'bool! lighting']
+    plist = ['vector<data:VectorParameter> m_VectorParams', 'vector<data:MatrixParameter> m_MatrixParams', 'vector<data:TextureParameter> m_TextureParams', 'vector<data:BufferBinding> m_BufferParams',
+             'vector<data:ConstantBuffer> m_ConstantBuffers', 'vector<data:BufferBinding> m_ConstantBufferBindings', 'vector<data:UAVParameter> m_UAVParams'] + ['vector<data:SamplerParameter> m_Samplers'] * ge(2017)
+    if (2019,) <= v < (2021, 2): kw = ['vector<data:UInt16> m_GlobalKeywordIndices', 'vector<data:UInt16> m_LocalKeywordIndices']
+    else: kw = ['vector<data:UInt16>' + ('' if ge(2017) else '~') + ' m_KeywordIndices']   # before 2017 the keyword indices are not aligned
+    sub = ['unsigned int m_BlobIndex', 'ParserBindChannels m_Channels'] + kw + ['SInt8 m_ShaderHardwareTier', 'SInt8! m_GpuProgramType'] + \
+          (['SerializedProgramParameters m_Parameters'] if params else plist) + ([('SInt64' if ge(2021) else 'int') + ' m_ShaderRequirements'] if ge(2017, 2) else [])
+    prog = ['vector<data:SerializedSubProgram> m_SubPrograms'] + \
+           ['vector<data:vector<data:SerializedPlayerSubProgram>> m_PlayerSubPrograms', 'vector<data:vector<data:unsigned int>> m_ParameterBlobIndices'] * blob_index + \
+           ['SerializedProgramParameters m_CommonParameters'] * params + ['vector<data:UInt16> m_SerializedKeywordStateMask'] * ge(2022, 1)
+    progs = [f'SerializedProgram prog{s}' for s in ('Vertex', 'Fragment', 'Geometry', 'Hull', 'Domain')] + ['SerializedProgram progRayTracing'] * ge(2019, 3)
+    pas = (['vector<data:Hash128> m_EditorDataHash', 'vector<data:UInt8> m_Platforms'] if ge(2020, 2) else []) + \
+          (['vector<data:UInt16> m_LocalKeywordMask', 'vector<data:UInt16> m_GlobalKeywordMask'] if (2020, 2) <= v < (2021, 2) else []) + \
+          ['map<data:pair(string,int)>~ m_NameIndices', 'int m_Type', 'SerializedShaderState m_State', 'unsigned int m_ProgramMask'] + progs + \
+          (['bool m_HasInstancingVariant', 'bool! m_HasProceduralInstancingVariant'] if ge(2018) else ['bool! m_HasInstancingVariant']) + \
+          ['string m_UseName', 'string m_Name', 'string m_TextureName', 'SerializedTagMap m_Tags'] + ['vector<data:UInt16> m_SerializedKeywordStateMask'] * ((2021, 2) <= v < (2022, 1))
+    parsed = ['SerializedProperties m_PropInfo', 'vector<data:SerializedSubShader> m_SubShaders'] + ['vector<data:string> m_KeywordNames', 'vector<data:UInt8> m_KeywordFlags'] * ge(2021, 2) + \
+             ['string m_Name', 'string m_CustomEditorName', 'string m_FallbackName', 'vector<data:SerializedShaderDependency> m_Dependencies'] + \
+             ['vector<data:SerializedCustomEditorForRenderPipeline> m_CustomEditorForRenderPipelines'] * ge(2021) + ['bool! m_DisableNoSubshadersMessage']
+    seg = 'vector<data:vector<data:unsigned int>>' if ge(2019, 3) else 'vector<data:unsigned int>'   # 2019.3 on: several segments per platform
+    shader = ['string m_Name', 'SerializedShader m_ParsedForm', 'vector<data:unsigned int> platforms', f'{seg} offsets', f'{seg} compressedLengths', f'{seg} decompressedLengths',
+              'vector<data:UInt8> compressedBlob'] + ['vector<data:unsigned int> stageCounts'] * blob_index + ['vector<data:PPtr<Shader>> m_Dependencies'] + \
+             ['map<data:pair(string,PPtr<Texture>)>~ m_NonModifiableTextures'] * ge(2018) + ['bool! m_ShaderIsBaked']
+    structs = [
+        ('SerializedTextureProperty', ['string m_DefaultName', 'int m_TexDim']),
+        ('SerializedProperty', ['string m_Name', 'string m_Description', 'vector<data:string> m_Attributes', 'int m_Type', 'unsigned int m_Flags'] +
+                               [f'float m_DefValue[{i}]' for i in range(4)] + ['SerializedTextureProperty m_DefTexture']),
+        ('SerializedProperties', ['vector<data:SerializedProperty> m_Props']),
+        ('Hash128', [f'UInt8 bytes[{i}]' for i in range(16)] if ge(2020, 2) else None),
+        ('SerializedShaderFloatValue', ['float val', 'string name']),
+        ('SerializedShaderRTBlendState', [f'{flt} {n}' for n in ('srcBlend', 'destBlend', 'srcBlendAlpha', 'destBlendAlpha', 'blendOp', 'blendOpAlpha', 'colMask')]),
+        ('SerializedStencilOp', [f'{flt} {n}' for n in ('pass', 'fail', 'zFail', 'comp')]),
+        ('SerializedShaderVectorValue', [f'{flt} {n}' for n in 'xyzw'] + ['string name']),
+        ('SerializedTagMap', ['map<data:pair(string,string)>~ tags']),
+        ('SerializedShaderState', state),
+        ('ShaderBindChannel', ['SInt8 source', 'SInt8 target']),
+        ('ParserBindChannels', ['vector<data:ShaderBindChannel>! m_Channels', 'int m_SourceMap']),
+        ('VectorParameter', ['int m_NameIndex', 'int m_Index', 'int m_ArraySize', 'SInt8 m_Type', 'SInt8! m_Dim']),
+        ('MatrixParameter', ['int m_NameIndex', 'int m_Index', 'int m_ArraySize', 'SInt8 m_Type', 'SInt8! m_RowCount']),
+        ('TextureParameter', ['int m_NameIndex', 'int m_Index', 'int m_SamplerIndex'] + ['bool m_MultiSampled'] * ge(2017, 3) + ['SInt8! m_Dim']),
+        ('BufferBinding', ['int m_NameIndex', 'int m_Index'] + ['int m_ArraySize'] * ge(2020)),
+        ('StructParameter', ['int m_NameIndex', 'int m_Index', 'int m_ArraySize', 'int m_StructSize', 'vector<data:VectorParameter> m_VectorMembers', 'vector<data:MatrixParameter> m_MatrixMembers']
+                            if ge(2017, 3) else None),
+        ('ConstantBuffer', ['int m_NameIndex', 'vector<data:MatrixParameter> m_MatrixParams', 'vector<data:VectorParameter> m_VectorParams'] +
+                           ['vector<data:StructParameter> m_StructParams'] * ge(2017, 3) + ['int m_Size'] + ['bool! m_IsPartialCB'] * partial_cb),
+        ('UAVParameter', ['int m_NameIndex', 'int m_Index', 'int m_OriginalIndex']),
+        ('SamplerParameter', ['unsigned int sampler', 'int bindPoint'] if ge(2017) else None),
+        ('SerializedProgramParameters', plist if params else None),
+        ('SerializedSubProgram', sub),
+        ('SerializedPlayerSubProgram', ['unsigned int m_BlobIndex', 'vector<data:UInt16> m_KeywordIndices', 'SInt64 m_ShaderRequirements', 'SInt8! m_GpuProgramType'] if blob_index else None),
+        ('SerializedProgram', prog),
+        ('SerializedPass', pas),
+        ('SerializedSubShader', ['vector<data:SerializedPass> m_Passes', 'SerializedTagMap m_Tags', 'int m_LOD']),
+        ('SerializedShaderDependency', ['string from', 'string to']),
+        ('SerializedCustomEditorForRenderPipeline', ['string customEditorName', 'string renderPipelineType'] if ge(2021) else None),
+        ('SerializedShader', parsed),
+        ('PPtr<Shader>', ['int m_FileID', 'SInt64 m_PathID']),
+        ('PPtr<Texture>', ['int m_FileID', 'SInt64 m_PathID'] if ge(2018) else None),
+        ('Shader', shader)]
+    return ''.join(f'{name}: {"; ".join(fields)}\n' for name, fields in structs if fields)
+
+SHADER_5_5, SHADER_2018_3, SHADER_2020_3, SHADER_2022_3 = (shader_layout(v) for v in ((5, 5, 0), (2018, 3, 10), (2020, 3, 18), (2022, 3, 17)))
+CLASS_COMPUTE_SHADER = 72
+KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751')): ('Shader', SHADER_5_5),
+               (CLASS_SHADER, bytes.fromhex('ea424a5fc1e48db62144df956f9e1005')): ('Shader', SHADER_2022_3),
+               (CLASS_SHADER, bytes.fromhex('a30e3dcf6c6d25153d6f64e5e41caf4e')): ('Shader', SHADER_2020_3),
+               (CLASS_SHADER, bytes.fromhex('8db760073e1392061e4a36995f0735af')): ('Shader', SHADER_2018_3)}
+
+def _split_top(s, sep):   # s split at sep outside <> and ()
+    out, depth, cur = [], 0, ''
+    for ch in s:
+        if ch in '<(': depth += 1
+        elif ch in '>)': depth -= 1
+        if ch == sep and not depth: out.append(cur); cur = ''
+        else: cur += ch
+    return out + [cur]
+
+def tree_from_layout(root, layout):
+    """a KNOWN_TREES entry → the type tree's root Node, as a serialized file with type trees would give it (types, names and alignment flags; byte sizes are not kept)"""
+    structs = {}
+    for line in layout.strip().split('\n'):
+        name, body = line.split(': ', 1)
+        structs[name] = [f.rsplit(' ', 1) for f in body.split('; ')]
+    def node(t, name):
+        flags = 0
+        if t.endswith('!'): t, flags = t[:-1], 0x4000
+        arr_align = 0x4000
+        if t.endswith('~'): t, arr_align = t[:-1], 0
+        def array(el):
+            a = Node('Array', 'Array', -1, arr_align); a.kids = [Node('int', 'size', 4, 0), el]; return a
+        if t == 'string':
+            n = Node('string', name, -1, flags); n.kids = [array(Node('char', 'data', 1, 0))]
+        elif t.startswith(('vector<', 'map<')):
+            kind, inner = t[:-1].split('<', 1); el_name, el_type = inner.split(':', 1)
+            n = Node(kind, name, -1, flags); n.kids = [array(node(el_type, el_name))]
+        elif t.startswith('pair('):
+            first, second = _split_top(t[5:-1], ',')
+            n = Node('pair', name, -1, flags); n.kids = [node(first, 'first'), node(second, 'second')]
+        elif t in structs:
+            n = Node(t, name, -1, flags); n.kids = [node(ft, fn) for ft, fn in structs[t]]
+        elif t in PRIM: n = Node(t, name, struct.calcsize(PRIM[t]), flags)
+        else: raise ValueError(f'type tree layout: unknown type {t}')
+        return n
+    return node(root, 'Base')
+
+_KNOWN = {}
+def known_tree(cid, h):
+    if (cid, h) not in _KNOWN: _KNOWN[cid, h] = tree_from_layout(*KNOWN_TREES[cid, h])
+    return _KNOWN[cid, h]
+
+class LayoutMismatch(ValueError):
+    """a layout generated from the file's Unity version does not read an object exactly: the version rules are wrong for this version"""
+
+_LAYOUT = {}
+def version_trees(cid, v):
+    """the candidate type trees generated from Unity version v for class cid (shader_layouts), or [] when there are no rules for it (only Shader, within SHADER_VERSIONS)"""
+    if cid != CLASS_SHADER or v is None or not SHADER_VERSIONS[0] <= v <= SHADER_VERSIONS[1]: return []
+    if v not in _LAYOUT: _LAYOUT[v] = [tree_from_layout('Shader', t) for t in shader_layouts(v)]
+    return _LAYOUT[v]
+
+def _exact(d, le, root):
+    """object bytes d read by type tree root, which must consume them exactly → (object, None), or (None, why not)"""
+    o = Reader(d, le); o.d = d
+    try: val = _read(o, root)
+    except (struct.error, IndexError, ValueError, MemoryError, OverflowError) as e: return None, str(e)
+    return (val, None) if o.p == len(d) else (None, f'reads {o.p} of its {len(d)} bytes')
+
+def _metadata(d, common, want, trees):
+    """serialized file → (little endian, Unity version string, [(class ID, type hash, its type tree or None)], [(path ID, start, size, type index)], data offset)"""
+    msz, fsz, ver, doff = struct.unpack_from('>IIII', d, 0)
+    if not 17 <= ver <= 22: raise ValueError(f'serialized file format {ver} is not supported')
+    p = 16; le = d[p] == 0; p += 4
+    if ver >= 22: msz, fsz, doff, _ = struct.unpack_from('>Iqqq', d, p); p += 28
+    r = Reader(d, le); r.p = p
+    uver, r.p = _cstr(d, r.p); r.u('i'); tt = r.u('?')
+    tlist = []
+    for _ in range(r.u('i')):
+        cid = r.u('i'); r.u('B'); r.u('h')
+        if cid == 114: r.p += 16   # script ID
+        h = d[r.p:r.p + 16]; r.p += 16
+        root = None
+        if tt:
+            nn, sb = r.u('i'), r.u('i'); raw = [r.u('HBBIIiiiQ' if ver >= 19 else 'HBBIIiii') for _ in range(nn)]   # refTypeHash from format 19
+            buf = d[r.p:r.p + sb]; r.p += sb
+            def st(o):
+                if o & 0x80000000: return common.get(o & 0x7fffffff, f'?{o & 0x7fffffff}')
+                return buf[o:buf.index(b'\0', o)].decode('utf-8', 'replace')
+            stack = []
+            for _v, lv, _tf, to, no, bs, _ix, mf, *_ in raw:
+                nd = Node(st(to), st(no), bs, mf)
+                del stack[lv:]
+                if stack: stack[-1].kids.append(nd)
+                else: root = nd
+                stack.append(nd)
+            if ver >= 21: n = r.u('i'); r.p += 4 * n   # type dependencies
+            if trees is not None and (want is None or cid in want): trees.setdefault((cid, h), root)
+        elif trees is not None: root = trees.get((cid, h))
+        tlist.append((cid, h, root))
+    objs = []
+    for _ in range(r.u('i')):
+        r.align(); pid = r.u('q'); start = r.u('q') if ver >= 22 else r.u('I'); size = r.u('I'); ti = r.u('i')
+        objs.append((pid, start, size, ti))
+    return le, uver, tlist, objs, doff
+
+def serialized_objects(d, common, want=None, trees=None, layouts=False, engine=''):
+    """serialized file → yields (class ID, path ID, object dict); want = only decode these class IDs.
+    trees = {(class ID, type hash): type tree}: files with type trees record theirs, files without (the game's own data.unity3d and so on) borrow one of the same class and hash -- the same hash means the same layout.
+    layouts = a class no tree is found for takes the layout generated from the Unity version the file records (engine = the bundle's version, for a file that records none), which must read every object exactly"""
+    le, uver, tlist, objs, doff = _metadata(d, common, want, trees)
+    v = unity_version(uver) or unity_version(engine)
+    picked = {}   # type index → the generated tree that reads all its objects exactly
+    for pid, start, size, ti in objs:
+        cid, h, root = tlist[ti]
+        if want and cid not in want: continue
+        data = d[doff + start:doff + start + size]
+        if root is None and layouts:
+            if ti not in picked:
+                cands = version_trees(cid, v)
+                if not cands:
+                    raise NoTree(f'class {cid} (type hash {h.hex()}, Unity {uver or engine or "?"}): ' + ('the file records no Unity version' if v is None else f'no layout rules for class {cid} of this version'))
+                mine = [o for o, (_, _, _, t) in enumerate(objs) if t == ti]
+                fits = [c for c in cands if all(_exact(d[doff + objs[o][1]:doff + objs[o][1] + objs[o][2]], le, c)[0] is not None for o in mine)]
+                if len(fits) != 1:
+                    why = _exact(data, le, cands[0])[1] if not fits else f'{len(fits)} candidate layouts read all {len(mine)} objects'
+                    raise LayoutMismatch(f'class {cid} (type hash {h.hex()}) object {pid}: the layout of Unity {uver or engine} does not fit ({why})')
+                picked[ti] = fits[0]
+            yield cid, pid, _exact(data, le, picked[ti])[0]
+            continue
+        if root is None: raise NoTree(f'class {cid} (type hash {h.hex()}) has no type tree available')
+        o = Reader(d, le); o.d = data
+        yield cid, pid, _read(o, root)
+
+def raw_objects(d, common, want):
+    """serialized file → yields (class ID, path ID, object bytes) of the classes in want, whatever type trees there are"""
+    le, uver, tlist, objs, doff = _metadata(d, common, want, None)
+    for pid, start, size, ti in objs:
+        if tlist[ti][0] in want: yield tlist[ti][0], pid, d[doff + start:doff + start + size]
+
+def is_serialized(d):
+    """does it look like a serialized file (big-endian header: format 17..22; from 22 the sizes follow +0x14)"""
+    if len(d) < 48: return False
+    ver = struct.unpack_from('>I', d, 8)[0]
+    if not 17 <= ver <= 22 or d[16] not in (0, 1): return False
+    if ver >= 22: msz, fsz, doff = struct.unpack_from('>Iqq', d, 20)
+    else: msz, fsz, _, doff = struct.unpack_from('>IIII', d, 0)
+    return fsz == len(d) and 0 < msz < fsz and doff <= fsz
+
+def shader_programs(sh, only=None):
+    """Shader object → yields (platform, subprogram index, subprogram bytes); only = the subprogram indices to yield (None: all)"""
+    blob = sh['compressedBlob']
+    for i, plat in enumerate(sh['platforms']):
+        offs, clen, dlen = sh['offsets'][i], sh['compressedLengths'][i], sh['decompressedLengths'][i]
+        if not isinstance(offs, list):   # before 2019.3: one segment per platform, 8-byte entries {offset, length}
+            s0 = _lz4(blob[offs:offs + clen], dlen); n = struct.unpack_from('<I', s0, 0)[0]
+            for k in range(n):
+                off, ln = struct.unpack_from('<II', s0, 4 + 8 * k)
+                if only is None or k in only: yield plat, k, s0[off:off + ln]
+            continue
+        segs = [_lz4(blob[o:o + c], u) for o, c, u in zip(offs, clen, dlen)]
+        if not segs: continue
+        s0 = segs[0]; n = struct.unpack_from('<I', s0, 0)[0]
+        for k in range(n):
+            off, ln, seg = struct.unpack_from('<III', s0, 4 + 12 * k)
+            if only is None or k in only: yield plat, k, segs[seg][off:off + ln]
+
+def subprogram(b):
+    """subprogram header → (version, program type, keywords, local keywords, program code, offset after the code)"""
+    r = Reader(b, True)
+    ver, ptype = r.u('i'), r.u('i'); r.p += 12
+    if ver >= 201608170: r.p += 4
+    def strs():
+        out = []
+        for _ in range(r.u('i')):
+            ln = r.u('i'); out.append(b[r.p:r.p + ln].decode('utf-8', 'replace')); r.p += ln; r.align()
+        return out
+    kw = strs(); lkw = strs() if 201806140 <= ver < 202012090 else []   # subprogram version 202012090 (Unity 2021.2 on) has no local keyword list (Ace Attorney Investigations Collection, Unity 2022.3)
+    ln = r.u('i'); code = b[r.p:r.p + ln]; r.p += ln; r.align()
+    return ver, ptype, kw, lkw, code, r.p

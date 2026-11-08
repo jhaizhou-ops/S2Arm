@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GalRoot>../../../../compat/tree/src/Ryujinx.Graphics.GAL</GalRoot>
+    <CommonRoot>../../../../compat/tree/src/Ryujinx.Common</CommonRoot>
+    <ShaderRoot>../../../../compat/tree/src/Ryujinx.Graphics.Shader</ShaderRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../*.cs;Program.cs;MetadataBoundaryTests.cs;S1Tests.cs;S2Tests.cs;FrozenProfileTests.cs" />
+    <Compile Include="$(GalRoot)/IComputeTranslationProfileProvider.cs;$(GalRoot)/ShaderSource.cs;$(GalRoot)/ShaderInfo.cs;$(GalRoot)/ResourceLayout.cs;$(GalRoot)/ProgramPipelineState.cs;$(GalRoot)/IProgram.cs;$(GalRoot)/IProgramBinaryLoadFailure.cs;$(GalRoot)/ProgramLinkStatus.cs;$(GalRoot)/Capabilities.cs;$(GalRoot)/SystemMemoryType.cs;$(GalRoot)/BlendDescriptor.cs;$(GalRoot)/DepthTestDescriptor.cs;$(GalRoot)/StencilTestDescriptor.cs;$(GalRoot)/VertexAttribDescriptor.cs;$(GalRoot)/ColorF.cs;$(GalRoot)/BlendFactor.cs;$(GalRoot)/BlendOp.cs;$(GalRoot)/CompareOp.cs;$(GalRoot)/StencilOp.cs;$(GalRoot)/DepthMode.cs;$(GalRoot)/PrimitiveTopology.cs;$(GalRoot)/Face.cs;$(GalRoot)/Format.cs;$(GalRoot)/LogicalOp.cs;$(GalRoot)/FrontFace.cs;$(GalRoot)/PolygonModeMask.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="$(CommonRoot)/Memory/StructArrayHelpers.cs;$(CommonRoot)/Memory/IArray.cs;$(ShaderRoot)/Translation/TranslationOptions.cs;$(ShaderRoot)/Translation/TranslationFlags.cs;$(ShaderRoot)/ShaderStage.cs;$(ShaderRoot)/Translation/TargetLanguage.cs;$(ShaderRoot)/Translation/TargetApi.cs" Link="Production/%(Filename)%(Extension)" />
+  </ItemGroup>
+  <Target Name="AssembleHostFixtures" AfterTargets="Build">
+    <!-- Original text fixtures; offline tools, never game or driver binaries. -->
+    <MakeDir Directories="$(TargetDir)fixtures" />
+    <Exec Command="spirv-as --target-env vulkan1.2 &quot;$(MSBuildThisFileDirectory)compute.spvasm&quot; -o &quot;$(TargetDir)fixtures/compute.spv&quot;" />
+    <Exec Command="spirv-as --target-env vulkan1.2 &quot;$(MSBuildThisFileDirectory)vertex.spvasm&quot; -o &quot;$(TargetDir)fixtures/vertex.spv&quot;" />
+    <Exec Command="spirv-as --target-env vulkan1.2 &quot;$(MSBuildThisFileDirectory)fragment.spvasm&quot; -o &quot;$(TargetDir)fixtures/fragment.spv&quot;" />
+    <Exec Command="spirv-val --target-env vulkan1.2 &quot;$(TargetDir)fixtures/compute.spv&quot;" />
+    <Exec Command="spirv-val --target-env vulkan1.2 &quot;$(TargetDir)fixtures/vertex.spv&quot;" />
+    <Exec Command="spirv-val --target-env vulkan1.2 &quot;$(TargetDir)fixtures/fragment.spv&quot;" />
+  </Target>
+</Project>

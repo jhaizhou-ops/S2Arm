@@ -1,0 +1,17 @@
+<!-- 写跟踪 × GPFIFO 排空时机单测：游戏在 GPU 线程处理上一条命令期间写了被跟踪内存、再提交下一条，处理下一条时 Ryujinx 必须已知这次写。用法见 Program.cs 头 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <RyuTree Condition="'$(RyuTree)' == ''">$(MSBuildThisFileDirectory)../../../../compat/tree</RyuTree>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuTree)/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />
+    <ProjectReference Include="$(RyuTree)/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+    <!-- 产品的写跟踪 C# 一半原样编进来（DllImport s2a_native → build_run.sh 编的 libs2a_native.dylib） -->
+    <Compile Include="$(MSBuildThisFileDirectory)../../../metal/cs/NxTrack.cs" Link="NxTrack.cs" />
+  </ItemGroup>
+</Project>

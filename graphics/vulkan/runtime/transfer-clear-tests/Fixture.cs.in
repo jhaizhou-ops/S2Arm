@@ -1,0 +1,106 @@
+// Exact production eligibility/dispatch methods, recording endpoints. Not a GPU test.
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Ryujinx.Graphics.GAL;
+using Silk.NET.Vulkan;
+using VkFormat = Silk.NET.Vulkan.Format;
+using GalFormat = Ryujinx.Graphics.GAL.Format;
+namespace Ryujinx.Graphics.Vulkan;
+static class Record { public static readonly List<string> Calls = new(); public static float[] Color = [.25f,.5f,.75f,1f]; public static void Add(string s) => Calls.Add(s); }
+enum ComponentType { Float }
+sealed class Info { public Target Target = Target.Texture2D; public int Samples = 1, Width = 32, Height = 32; public GalFormat Format = GalFormat.R8G8B8A8Unorm; }
+sealed class TextureStorage { public VkFormat VkFormat = VkFormat.R8G8B8A8Unorm; public Info Info = new(); public ImageUsageFlags UsageFlags = ImageUsageFlags.TransferDstBit; }
+sealed class TextureView
+{
+    public bool Valid = true;
+    public TextureStorage Storage = new(); public Info Info = new();
+    public VkFormat VkFormat = VkFormat.R8G8B8A8Unorm; public int FirstLayer, FirstLevel;
+    public int Width => Info.Width; public int Height => Info.Height;
+    public ImageOwner GetImage() => new();
+    public static void InsertImageBarrier(Api api, CommandBuffer cb, Image image, AccessFlags src, AccessFlags dst,
+        PipelineStageFlags ss, PipelineStageFlags ds, ImageAspectFlags aspect, int firstLayer, int firstLevel, int layers, int levels)
+    {
+        if (cb.Handle != 1 || image.Handle != 7 || firstLayer != 0 || firstLevel != 0 || layers != 1 || levels != 1 || aspect != ImageAspectFlags.ColorBit) throw new Exception("barrier range/owner");
+        bool before = dst == AccessFlags.TransferWriteBit;
+        if (before ? src != (AccessFlags.MemoryReadBit|AccessFlags.MemoryWriteBit) || ss != PipelineStageFlags.AllCommandsBit || ds != PipelineStageFlags.TransferBit
+                   : src != AccessFlags.TransferWriteBit || dst != (AccessFlags.MemoryReadBit|AccessFlags.MemoryWriteBit) || ss != PipelineStageFlags.TransferBit || ds != PipelineStageFlags.AllCommandsBit) throw new Exception("barrier scopes");
+        Record.Add(before ? "barrier-before" : "barrier-after");
+    }
+}
+sealed class ImageOwner { public ImageValue Get(int cbs) { if(cbs!=1)throw new Exception("owner");Record.Add("retain");return new(); } }
+sealed class ImageValue { public Image Value => new(7); }
+sealed class FramebufferParams
+{
+    public uint Width=32,Height=32; public TextureView Texture = new();
+    public bool IsValidColorAttachment(int index) => index==0 && Texture!=null;
+    public TextureView GetColorView(int index) => Texture;
+    public ComponentType GetAttachmentComponentType(int index) => ComponentType.Float;
+}
+sealed class FormatCapabilities { public bool Transfer = true; public bool OptimalFormatSupports(FormatFeatureFlags f, GalFormat format) => Transfer && f==FormatFeatureFlags.TransferDstBit; }
+sealed class Barriers { public void Flush(int cb,bool active,object holder,object end) { if(active)throw new Exception("active barrier flush");Record.Add("flush-barriers"); } }
+sealed class Helper { public void Clear(VulkanRenderer gd,TextureView dst,ReadOnlySpan<float> color,uint mask,int w,int h,ComponentType type,Rectangle<int> scissor) => Record.Add("helper"); }
+sealed class VulkanRenderer
+{
+    public bool IsQualcommProprietary=true,TransferFullClears=true; public long TransferFullClearCount;
+    public readonly Api Api=new();public readonly Barriers Barriers=new();public readonly Helper HelperShader=new();public readonly FormatCapabilities FormatCapabilities=new();
+}
+sealed class Api
+{
+    public unsafe void CmdClearColorImage(CommandBuffer cb,Image image,ImageLayout layout,in ClearColorValue color,uint count,in ImageSubresourceRange range)
+    {
+        if(cb.Handle!=1||image.Handle!=7||layout!=ImageLayout.General||count!=1||range.BaseMipLevel!=0||range.LevelCount!=1||range.BaseArrayLayer!=0||range.LayerCount!=1||range.AspectMask!=ImageAspectFlags.ColorBit)throw new Exception("clear range/owner");
+        fixed(ClearColorValue* p=&color){float* c=(float*)p;for(int i=0;i<4;i++)if(BitConverter.SingleToInt32Bits(c[i])!=BitConverter.SingleToInt32Bits(Record.Color[i]))throw new Exception("clear color bits changed");}
+        Record.Add("clear");
+    }
+}
+sealed class AutoFlushCounter { public bool Pending;public bool ShouldFlushQuery()=>Pending; }
+sealed class PipelineFull
+{
+    public readonly VulkanRenderer Gd=new();public FramebufferParams FramebufferParams=new();
+    public Rectangle<int> ClearScissor=new(0,0,32,32);public object _activeConditionalRender;
+    public readonly AutoFlushCounter AutoFlush=new();public int Cbs=1;public CommandBuffer CommandBuffer=new(1);
+    private int _transferClearsSinceFlush;private const int MaxTransferClears=64;
+    private HashSet<(Silk.NET.Vulkan.Format, uint)> _transferClearFallbacks;
+    public void FlushCommandsImpl(){ Record.Add("submit"); /* FLUSH_RESET */ AutoFlush.Pending=false; }
+    public void EndRenderPass()=>Record.Add("end-pass");
+    public void ClearRenderTargetColor(int index,int layer,int count,ColorF color)=>Record.Add("attachment-clear");
+    // CLEAR_METHOD
+    // TRANSFER_METHOD
+    // DIAGNOSTIC_METHOD
+}
+static class Proof
+{
+    static int checks;
+    static void Check(bool value,string why){checks++;if(!value)throw new Exception(why+": "+string.Join('/',Record.Calls));}
+    static void Draw(PipelineFull p,int layer=0,int count=1,uint mask=15)=>p.ClearRenderTargetColor(0,layer,count,mask,new ColorF(Record.Color[0],Record.Color[1],Record.Color[2],Record.Color[3]));
+    public static void Main()
+    {
+        foreach(VkFormat format in new[]{VkFormat.R8G8B8A8Unorm,VkFormat.B8G8R8A8Unorm,VkFormat.R8G8B8A8Srgb,VkFormat.R16G16B16A16Sfloat,
+            VkFormat.B10G11R11UfloatPack32,VkFormat.R8Unorm,VkFormat.R16G16SNorm,VkFormat.R8Uint}){
+            var p=new PipelineFull();p.FramebufferParams.Texture.VkFormat=format;p.FramebufferParams.Texture.Storage.VkFormat=format;
+            Record.Calls.Clear();Draw(p);Check(string.Join('/',Record.Calls)=="end-pass/flush-barriers/retain/barrier-before/clear/barrier-after","eligible ordered clear");Check(p.Gd.TransferFullClearCount==1,"count actual successful path");
+        }
+        Action<PipelineFull>[] rejects={
+            p=>p.Gd.TransferFullClears=false,p=>p._activeConditionalRender=new(),p=>p.FramebufferParams.Texture.Valid=false,
+            p=>p.FramebufferParams.Texture.Storage=null,p=>{p.FramebufferParams.Texture.VkFormat=VkFormat.R32G32B32A32Sfloat;p.FramebufferParams.Texture.Storage.VkFormat=VkFormat.R32G32B32A32Sfloat;},
+            p=>p.FramebufferParams.Texture.Storage.VkFormat=VkFormat.B8G8R8A8Unorm,p=>p.FramebufferParams.Texture.FirstLayer=1,p=>p.FramebufferParams.Texture.FirstLevel=1,
+            p=>p.FramebufferParams.Texture.Info.Target=Target.Texture2DArray,p=>p.FramebufferParams.Texture.Storage.Info.Target=Target.Texture2DArray,
+            p=>p.FramebufferParams.Texture.Info.Samples=4,p=>p.FramebufferParams.Texture.Storage.Info.Samples=4,
+            p=>p.FramebufferParams.Texture.Storage.Info.Width=64,p=>p.FramebufferParams.Texture.Storage.Info.Height=64,
+            p=>p.FramebufferParams.Width=16,p=>p.FramebufferParams.Height=16,
+            p=>p.ClearScissor=new(1,0,32,32),p=>p.ClearScissor=new(0,1,32,32),p=>p.ClearScissor=new(0,0,16,32),p=>p.ClearScissor=new(0,0,32,16),
+            p=>p.FramebufferParams.Texture.Storage.UsageFlags=0,p=>p.Gd.FormatCapabilities.Transfer=false
+        };
+        foreach(var reject in rejects){var p=new PipelineFull();reject(p);Record.Calls.Clear();Draw(p);Check(!Record.Calls.Contains("clear"),"ineligible must keep old path");Check(Record.Calls.Contains("helper"),"old compatibility path retained");}
+        foreach(var args in new[]{(1,1,15u),(0,2,15u),(0,1,7u)}){var p=new PipelineFull();Record.Calls.Clear();Draw(p,args.Item1,args.Item2,args.Item3);Check(Record.Calls.SequenceEqual(new[]{"helper"}),"layer/mask fallback");}
+        var other=new PipelineFull();other.Gd.IsQualcommProprietary=false;Record.Calls.Clear();Draw(other);Check(Record.Calls.SequenceEqual(new[]{"attachment-clear"}),"other vendors unchanged");
+        var pending=new PipelineFull();pending.AutoFlush.Pending=true;Record.Calls.Clear();Draw(pending);Check(Record.Calls[0]=="submit"&&Record.Calls.Contains("clear"),"pending-query progress before clear");
+        var batch=new PipelineFull();Record.Calls.Clear();for(int i=0;i<130;i++)Draw(batch);Check(Record.Calls.Count(x=>x=="submit")==2,"bounded recording with reset");Check(batch.Gd.TransferFullClearCount==130,"no clear dropped");
+        var invalid=new PipelineFull();invalid.FramebufferParams=null;Record.Calls.Clear();Draw(invalid);Check(Record.Calls.Count==0,"no framebuffer remains no-op");
+        var integer=new PipelineFull();integer.FramebufferParams.Texture.VkFormat=VkFormat.R8Uint;integer.FramebufferParams.Texture.Storage.VkFormat=VkFormat.R8Uint;
+        Record.Color=[BitConverter.Int32BitsToSingle(17),0,0,BitConverter.Int32BitsToSingle(255)];Record.Calls.Clear();Draw(integer);
+        Check(Record.Calls.Contains("clear"),"integer clear keeps raw bits, no numeric float cast");
+        Console.WriteLine($"PASS {checks} production transfer-clear dispatch/guard checks; no GPU in this harness.");
+    }
+}

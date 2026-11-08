@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x=1,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,r32ui) uniform uimage3D cp_i_cb2_48_r32ui[2];
+layout(set=0,binding=1,r32ui) writeonly uniform uimage3D cp_i_cb2_4A_r32ui;
+void main() {
+    uint old=imageAtomicCompSwap(cp_i_cb2_48_r32ui[gl_LocalInvocationID.x&1u],ivec3(0),0u,1u);
+    imageStore(cp_i_cb2_4A_r32ui,ivec3(0),uvec4(old));
+}

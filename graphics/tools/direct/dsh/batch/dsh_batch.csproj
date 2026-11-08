@@ -1,0 +1,19 @@
+<!-- 出包每键改写的常驻批量进程（dmsh_build.py 调，见 Program.cs 文件头） -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+  <!-- 大对象堆碎片高时压缩（0–9，越大越积极）：编批库每次编译都分配 MB 级临时大数组（批库源码、metallib），大对象堆缺省不压缩，碎片随编译次数（≈ 键数）线性攒，
+       11-02 本机 Jetsam（怪猎 96 GB / 马力欧派对 52 GB 同时跑）。异度3 实测：峰值 18.2 → 13.8 GB、墙钟 225 → 213 秒、产物逐字节同；Workstation GC 峰值一样且慢 81%，不换 -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S2A.Dsh.csproj" />
+  </ItemGroup>
+</Project>

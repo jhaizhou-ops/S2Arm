@@ -1,0 +1,21 @@
+; 曲面单测片元：输出 = 输入位置 0
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %inc %outc
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %inc Location 0
+               OpDecorate %outc Location 0
+       %void = OpTypeVoid
+        %fnv = OpTypeFunction %void
+        %f32 = OpTypeFloat 32
+         %v4 = OpTypeVector %f32 4
+       %pIv4 = OpTypePointer Input %v4
+       %pOv4 = OpTypePointer Output %v4
+        %inc = OpVariable %pIv4 Input
+       %outc = OpVariable %pOv4 Output
+       %main = OpFunction %void None %fnv
+          %l = OpLabel
+          %c = OpLoad %v4 %inc
+               OpStore %outc %c
+               OpReturn
+               OpFunctionEnd

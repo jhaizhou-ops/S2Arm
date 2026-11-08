@@ -1,0 +1,36 @@
+<!-- 着色器离线全量翻译（出包用，不启动游戏）：游戏文件抽出集 → Ryujinx 磁盘缓存（含宿主程序二进制）+ SPIR-V。调 Ryujinx 原翻译器，见 ShaderBake.cs 头注释。
+     由 shader_pack.sh 编与调用；输出到 build/shbake/。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2A.ShBake</AssemblyName>
+    <RootNamespace>S2A.ShBake</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <OutDir>$(MSBuildThisFileDirectory)../../../build/shbake/</OutDir>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>$(NoWarn);CS8500</NoWarn>
+    <RyuGpu Condition="'$(RyuGpu)' == ''">$(MSBuildThisFileDirectory)../../../compat/tree</RyuGpu>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- tests/ 下是独立的单测工程（tests/spec），不编进烘焙器 -->
+    <Compile Remove="tests/**" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- S2：Android Vulkan 宿主程序记录（VKPB v1）、显式翻译 profile 与离线包 manifest；
+         与运行时（Ryujinx.Graphics.Vulkan / graphics/vulkan/cache）显式 source-link 同一份源码，不复制实现 -->
+    <Compile Include="../../vulkan/cache/ProgramBinary*.cs" Link="ProgramCache/%(Filename)%(Extension)" />
+    <Compile Include="../../vulkan/cache/VulkanProfile.cs" Link="ProgramCache/VulkanProfile.cs" />
+    <Compile Include="../../vulkan/cache/ShaderPackLayout.cs" Link="ProgramCache/ShaderPackLayout.cs" />
+    <Compile Include="../../vulkan/cache/ShaderPackManifest.cs" Link="ProgramCache/ShaderPackManifest.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuGpu)/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="../../metal/cs/caps/NxGalCaps.csproj" />   <!-- 只引渲染器的能力表（翻译结果依赖它），不引渲染器本体：着色器阶段键（tools/csproj_closure.py）不随渲染器其余代码变 -->
+    <ProjectReference Include="../../widen/shader/S2Arm.Gfx.Widen.Shader.csproj" />   <!-- 宽屏着色器改写（画幅线）：出库前 WidenIndex.Transform，与运行时同一份；只引着色器改写工程，不引运行时宽屏逻辑与 GAL 包装层（着色器阶段键不随它们变） -->
+  </ItemGroup>
+</Project>

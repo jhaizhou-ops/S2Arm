@@ -1,0 +1,16 @@
+<!-- 帧率能耗线的 C# 宿主侧：渲染循环（取代 Ryujinx 桌面版 WindowBase.RenderLoop）。进 services/aot 的 NativeAOT 镜像 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>S2A.Gfx</AssemblyName>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <RyuTree Condition="'$(RyuTree)' == ''">$(MSBuildThisFileDirectory)../../compat/tree</RyuTree>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../metal/cs/NxGal.csproj" />
+    <ProjectReference Include="$(RyuTree)/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
+  </ItemGroup>
+</Project>

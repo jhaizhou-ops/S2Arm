@@ -1,0 +1,36 @@
+; t_logicop 片元（整数输出 + 丢弃）：gl_FragCoord.x < 16 丢弃，否则 o0 = uvec4(0x0F0F3C33, 0xA5A5A5A5, 0, 0)
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0 %fc
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+               OpDecorate %fc BuiltIn FragCoord
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+      %float = OpTypeFloat 32
+        %v4f = OpTypeVector %float 4
+       %uint = OpTypeInt 32 0
+        %v4u = OpTypeVector %uint 4
+         %b0 = OpConstant %uint 0x0F0F3C33
+         %b1 = OpConstant %uint 0xA5A5A5A5
+         %u0 = OpConstant %uint 0
+          %b = OpConstantComposite %v4u %b0 %b1 %u0 %u0
+        %f16 = OpConstant %float 16
+     %ptrv4i = OpTypePointer Input %v4f
+         %fc = OpVariable %ptrv4i Input
+     %ptrv4o = OpTypePointer Output %v4u
+         %o0 = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %p = OpLoad %v4f %fc
+          %x = OpCompositeExtract %float %p 0
+       %left = OpFOrdLessThan %bool %x %f16
+               OpSelectionMerge %cont None
+               OpBranchConditional %left %kill %cont
+       %kill = OpLabel
+               OpKill
+       %cont = OpLabel
+               OpStore %o0 %b
+               OpReturn
+               OpFunctionEnd

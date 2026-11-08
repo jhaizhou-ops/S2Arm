@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><LangVersion>preview</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><AssemblyName>Ryujinx.Graphics.Shader</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems><NoWarn>CS8632</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="source/**/*.cs" Condition="Exists('source')"/>
+    <Compile Include="../../../../compat/tree/src/Ryujinx.Graphics.Shader/**/*.cs" Exclude="../../../../compat/tree/src/Ryujinx.Graphics.Shader/**/obj/**;../../../../compat/tree/src/Ryujinx.Graphics.Shader/**/bin/**" Condition="!Exists('source')" />
+    <Compile Include="../../cache/ComputeTranslationProfile.cs;../../../../compat/tree/src/Ryujinx.Graphics.GAL/IComputeTranslationProfileProvider.cs;../../../../compat/tree/src/Ryujinx.Graphics.GAL/Capabilities.cs;../../../../compat/tree/src/Ryujinx.Graphics.GAL/Format.cs;../../../../compat/tree/src/Ryujinx.Graphics.GAL/SystemMemoryType.cs;../../../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs;../../../../compat/tree/src/Ryujinx.Graphics.Gpu/GraphicsConfig.cs;../../../metal/cs/caps/NxCaps.cs" Condition="!Exists('source')" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj;../../../../compat/tree/src/Spv.Generator/Spv.Generator.csproj" Condition="!Exists('source')" />
+    <EmbeddedResource Include="../../../../compat/tree/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/HelperFunctions/*.glsl" Link="CodeGen/Glsl/HelperFunctions/%(Filename)%(Extension)" Condition="!Exists('source')" /><Compile Include="Program.cs"/><Compile Include="LateInterfaceCases.cs"/><Compile Include="VtgLayerCase.cs"/><Compile Include="SpirvLayerCase.cs"/>
+    <Reference Condition="Exists('source')" Include="Ryujinx.Common"><HintPath>deps/Ryujinx.Common.dll</HintPath></Reference>
+    <Reference Condition="Exists('source')" Include="Spv.Generator"><HintPath>deps/Spv.Generator.dll</HintPath></Reference>
+    <EmbeddedResource Include="source/CodeGen/Glsl/HelperFunctions/*.glsl"/>
+  </ItemGroup>
+</Project>

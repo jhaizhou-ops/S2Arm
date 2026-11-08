@@ -1,0 +1,33 @@
+; Authored host fixture. set0 UBO is read, set1 SSBO is written, SpecId7 changes the output.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %ubo %out
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %ubo DescriptorSet 0
+OpDecorate %ubo Binding 0
+OpDecorate %out DescriptorSet 1
+OpDecorate %out Binding 3
+OpDecorate %delta SpecId 7
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%delta = OpSpecConstant %uint 1
+%block = OpTypeStruct %uint
+%up = OpTypePointer Uniform %block
+%sp = OpTypePointer StorageBuffer %block
+%ui = OpTypePointer Uniform %uint
+%si = OpTypePointer StorageBuffer %uint
+%ubo = OpVariable %up Uniform
+%out = OpVariable %sp StorageBuffer
+%main = OpFunction %void None %fn
+%label = OpLabel
+%a = OpAccessChain %ui %ubo %zero
+%b = OpLoad %uint %a
+%c = OpIAdd %uint %b %delta
+%d = OpAccessChain %si %out %zero
+OpStore %d %c
+OpReturn
+OpFunctionEnd

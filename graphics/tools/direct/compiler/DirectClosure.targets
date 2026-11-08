@@ -1,0 +1,50 @@
+<Project>
+  <!-- W2.1：直连翻译闭包（s2a-direct-closure-v1）在构建期生成并嵌入编译器。
+       来源：真正影响翻译输出的源码/嵌入资源/工程与包锁文件（见 closure.py 的规则）。
+       生成物落在中间目录，只加入本工程编译项；不进仓库、不参与自身哈希。 -->
+  <PropertyGroup>
+    <DirectRyuSrc>$(MSBuildThisFileDirectory)../../../../compat/tree/src/</DirectRyuSrc>
+    <DirectRyuRoot>$(MSBuildThisFileDirectory)../../../../compat/tree/</DirectRyuRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <DirectClosureSource Include="$(MSBuildThisFileDirectory)*.cs" />
+    <DirectClosureSource Include="$(MSBuildThisFileDirectory)../../../widen/shader/SpirvCbufUse.cs" />
+    <!-- 编译器自己的工程文件也算输入：TargetFramework/DefineConstants 等改变产物语义。 -->
+    <DirectClosureSource Include="$(MSBuildThisFileDirectory)*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Graphics.Gpu/**/*.cs;$(DirectRyuSrc)Ryujinx.Graphics.Gpu/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Graphics.Shader/**/*.cs;$(DirectRyuSrc)Ryujinx.Graphics.Shader/**/*.glsl;$(DirectRyuSrc)Ryujinx.Graphics.Shader/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Graphics.GAL/**/*.cs;$(DirectRyuSrc)Ryujinx.Graphics.GAL/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Graphics.Texture/**/*.cs;$(DirectRyuSrc)Ryujinx.Graphics.Texture/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Graphics.Device/**/*.cs;$(DirectRyuSrc)Ryujinx.Graphics.Device/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Ryujinx.Common/**/*.cs;$(DirectRyuSrc)Ryujinx.Common/*.csproj" />
+    <DirectClosureSource Include="$(DirectRyuSrc)Spv.Generator/**/*.cs;$(DirectRyuSrc)Spv.Generator/*.csproj" />
+    <!-- GAL 链接了一份仓库内共享源码（S2Arm 的 compute 翻译配置），必须计入闭包。 -->
+    <DirectClosureSource Include="$(MSBuildThisFileDirectory)../../../vulkan/cache/ComputeTranslationProfile.cs" />
+    <DirectClosureSource Include="$(DirectRyuRoot)Directory.Build.props;$(DirectRyuRoot)Directory.Packages.props;$(DirectRyuRoot)global.json;$(DirectRyuRoot)nuget.config" />
+    <!-- 排除中间产物与编辑器残留（与各工程 DefaultItemExcludes 的 ._* 口径一致）。 -->
+    <DirectClosureSource Remove="**/obj/**;**/bin/**;**/._*;**/*.tmp" />
+  </ItemGroup>
+
+  <Target Name="DirectClosurePaths">
+    <PropertyGroup>
+      <!-- 路径在目标里定：导入时 IntermediateOutputPath 还没定义。 -->
+      <DirectClosureList>$([MSBuild]::NormalizePath('$(ProjectDir)', '$(IntermediateOutputPath)', 'direct-closure-inputs.txt'))</DirectClosureList>
+      <DirectClosureCs>$([MSBuild]::NormalizePath('$(ProjectDir)', '$(IntermediateOutputPath)', 'DirectBuildIdentity.g.cs'))</DirectClosureCs>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="GenDirectClosure" BeforeTargets="CoreCompile" DependsOnTargets="DirectClosurePaths">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(DirectClosureList)'))" />
+    <WriteLinesToFile File="$(DirectClosureList)" Lines="@(DirectClosureSource)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <!-- 有效构建选项一起进摘要：只改 DefineConstants 也要让身份失效（v2 规则）。 -->
+    <PropertyGroup>
+      <DirectClosureOptions>Configuration=$(Configuration)|TargetFramework=$(TargetFramework)|DefineConstants=$(DefineConstants)|LangVersion=$(LangVersion)|Nullable=$(Nullable)|Optimize=$(Optimize)|Deterministic=$(Deterministic)</DirectClosureOptions>
+    </PropertyGroup>
+    <Exec Command="python3 &quot;$(MSBuildThisFileDirectory)closure.py&quot; --root &quot;$(MSBuildThisFileDirectory)../../../..&quot; --list &quot;$(DirectClosureList)&quot; --cs &quot;$(DirectClosureCs)&quot; --options &quot;$(DirectClosureOptions)&quot;" />
+  </Target>
+
+  <Target Name="AddDirectClosure" BeforeTargets="CoreCompile" AfterTargets="GenDirectClosure">
+    <ItemGroup><Compile Include="$(DirectClosureCs)" /></ItemGroup>
+  </Target>
+</Project>

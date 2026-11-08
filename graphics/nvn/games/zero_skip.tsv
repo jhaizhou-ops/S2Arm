@@ -1,0 +1,7 @@
+# 零源跳过事实表（nvn_mtl.m zskip_can_draw）：「它采样的贴图全是 0、系数有限 ⇒ 输出全 0」，按片元着色器键逐款登记。
+# 出库时 graphics/tools/direct/direct_lib.sh 按程序号挑出本款的行，写成随包 game.tsv 的 zero_skip 键（配置档自己写了 zero_skip 的以配置档为准）；
+#   跳过只在 TBDR 开时生效（zskip_on），其余条件（目标已全 0、无深度模板写、遮挡查询不计数）运行时逐次核。
+# 证明：逐行读本款这个键的翻译（直连库 b-<链版本>/<键>_b.metal）与反射（<键>_b.json 的 bindings：kind cbuf 的 reg），输出对采样值齐次线性、无常数项，
+#   系数 = 常量缓冲寄存器 <ubo> 第 <向量> 个 vec4 的第 <分量> 个分量（没有系数写 -1 -1 -1）。键是我方 dm_ctl_sha16（控制段 + 代码），不是小菠萝的 sw_ctl_sha16。
+# 程序号	片元着色器键	常量缓冲寄存器	向量	分量	着色器与证明
+0100726014352000	2bcd0a940ff3f011	4	1	0	暗黑2 ps_outline_blur_p 第 0 变体（小菠萝同一着色器键 4a819818b8e489c5，nvn_mtl.m 零源跳过表）：沿行或列循环 2n+1 次 sample 累加，结尾 out.m_30 = 和 × fp_c7._m0[1].x；fp_c7 = cbuf reg 4（10-26 链 d34f57cab743 逐行核）

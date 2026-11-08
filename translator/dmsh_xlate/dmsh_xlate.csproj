@@ -1,0 +1,58 @@
+<!-- Switch shader → SPIR-V translation tool. It references the Ryujinx shader translator of the repository's one Ryujinx tree (compat/tree, the same assembly the generic mode and S2A.Dsh use); -p:RyuSrc=<dir> points it at another copy. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../compat/tree</RyuSrc>
+  </PropertyGroup>
+  <!-- S2Arm widen: the generic mode's SPIR-V analyses (graphics/widen/shader, its own project: uniform reads, fetch scales) for res cbuf_use / tex_scales, and the read text format -->
+  <PropertyGroup>
+    <WidenSrc>$(MSBuildThisFileDirectory)../../graphics/widen/</WidenSrc>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(WidenSrc)SpirvCbufUseText.cs" Link="widen/SpirvCbufUseText.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
+    <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="$(WidenSrc)shader/S2Arm.Gfx.Widen.Shader.csproj" />
+  </ItemGroup>
+  <!-- Embeds its own source: the source-sha argument prints its hash, by which dmsh_chain.py checks that the translator was built from the in-repo source -->
+  <ItemGroup>
+    <EmbeddedResource Include="Program.cs" LogicalName="src0" />
+    <EmbeddedResource Include="dmsh_xlate.csproj" LogicalName="src1" />
+    <EmbeddedResource Include="$(WidenSrc)SpirvCbufUseText.cs" LogicalName="src2" />
+  </ItemGroup>
+  <!-- S2Arm: the translator's library sources (the Ryujinx shader translator of compat/tree, and graphics/widen/shader) as a manifest of SHA-256 per file, embedded as src3.
+       The generic mode and S2A.Dsh build these from source on every build while this tool is a prebuilt (dmsh_xlate_bin): with the manifest in the source sha,
+       dmsh_chain.py stops when they changed and the prebuilt was not rebuilt, so the offline libraries and the on-device fallback compile can not drift apart.
+       Paths are written relative to the two roots, as ryu/... and widen/... (no machine path in the assembly); the source-sha argument sorts the lines (dmsh_chain.py xlate_source_sha does the same).
+       The committed build (dmsh_xlate_bin) is made with -p:PathMap=<repository root>=/s2arm -p:EnableSourceLink=false -p:EnableSourceControlManagerQueries=false,
+       so the assemblies and pdb carry no machine path either (tools/public_repo_scan.py home_path) -->
+  <Target Name="S2ALibSourceManifest" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <S2ARyuFull>$([System.IO.Path]::GetFullPath('$(RyuSrc)/src/'))</S2ARyuFull>
+      <S2AWidenFull>$([System.IO.Path]::GetFullPath('$(WidenSrc)shader/'))</S2AWidenFull>
+      <S2AManifest>$(IntermediateOutputPath)lib_sources.tsv</S2AManifest>
+    </PropertyGroup>
+    <ItemGroup>
+      <S2ARyuSrc Include="$(S2ARyuFull)Ryujinx.Graphics.Shader/**/*.cs;$(S2ARyuFull)Ryujinx.Graphics.Shader/**/*.glsl;$(S2ARyuFull)Ryujinx.Graphics.Shader/*.csproj;$(S2ARyuFull)Ryujinx.Common/**/*.cs;$(S2ARyuFull)Ryujinx.Common/*.csproj;$(S2ARyuFull)Spv.Generator/**/*.cs;$(S2ARyuFull)Spv.Generator/*.csproj"
+                 Exclude="$(S2ARyuFull)**/obj/**;$(S2ARyuFull)**/bin/**;$(S2ARyuFull)**/._*" />
+      <S2AWidenSrc Include="$(S2AWidenFull)**/*.cs;$(S2AWidenFull)*.csproj" Exclude="$(S2AWidenFull)**/obj/**;$(S2AWidenFull)**/bin/**;$(S2AWidenFull)**/._*" />
+    </ItemGroup>
+    <GetFileHash Files="@(S2ARyuSrc)" Algorithm="SHA256" HashEncoding="hex"><Output TaskParameter="Items" ItemName="S2ARyuHash" /></GetFileHash>
+    <GetFileHash Files="@(S2AWidenSrc)" Algorithm="SHA256" HashEncoding="hex"><Output TaskParameter="Items" ItemName="S2AWidenHash" /></GetFileHash>
+    <PropertyGroup>
+      <S2ARyuLines>@(S2ARyuHash->'%(FullPath)&#9;%(FileHash)')</S2ARyuLines>
+      <S2AWidenLines>@(S2AWidenHash->'%(FullPath)&#9;%(FileHash)')</S2AWidenLines>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(S2AManifest)" Overwrite="true" WriteOnlyWhenDifferent="true"
+                      Lines="$([MSBuild]::Unescape($(S2ARyuLines.Replace('$(S2ARyuFull)', 'ryu/'))));$([MSBuild]::Unescape($(S2AWidenLines.Replace('$(S2AWidenFull)', 'widen/'))))" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(S2AManifest)" LogicalName="src3" />
+      <FileWrites Include="$(S2AManifest)" />
+    </ItemGroup>
+  </Target>
+</Project>

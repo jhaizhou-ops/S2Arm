@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeSource Condition="'$(RuntimeSource)' == ''">$(MSBuildThisFileDirectory)../AndroidVulkanRuntime.cs</RuntimeSource>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RuntimeSource)" Link="AndroidVulkanRuntime.cs" />
+    <Compile Include="../StartupWait.cs" Link="StartupWait.cs" />
+    <!-- S2 装包端与运行时共用同一份纯 C# 实现；Vulkan 程序记录本身在依赖的 Ryujinx.Graphics.Vulkan 里 -->
+    <Compile Include="../../cache/ShaderPackLayout.cs" Link="ProgramCache/ShaderPackLayout.cs" />
+    <Compile Include="../../cache/ShaderPackManifest.cs" Link="ProgramCache/ShaderPackManifest.cs" />
+    <Compile Include="../../cache/ShaderPackArchive.cs" Link="ProgramCache/ShaderPackArchive.cs" />
+    <Compile Include="../../cache/ShaderPackInstaller.cs" Link="ProgramCache/ShaderPackInstaller.cs" />
+    <Reference Condition="'$(Dependencies)' != ''" Include="$(Dependencies)/*.dll" Exclude="$(Dependencies)/Ryujinx.Graphics.Gpu.dll;$(Dependencies)/Runtime.Tests.dll" />
+    <Reference Condition="'$(GpuAssembly)' != ''" Include="Ryujinx.Graphics.Gpu"><HintPath>$(GpuAssembly)</HintPath></Reference>
+  </ItemGroup>
+  <ItemGroup Condition="'$(GpuAssembly)' == ''">
+    <ProjectReference Include="../../../../services/S2A.Services/S2A.Services.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj" />
+  </ItemGroup>
+  <Target Name="RequiredAssemblies" BeforeTargets="ResolveReferences" Condition="'$(GpuAssembly)' != ''">
+    <Error Condition="!Exists('$(GpuAssembly)')" Text="GpuAssembly must point at the actual tested producer." />
+    <Error Condition="!Exists('$(Dependencies)/Ryujinx.Graphics.Vulkan.dll')" Text="The harness needs the real Vulkan backend assembly for the profile/offline-pack path." />
+  </Target>
+  <Target Name="BuildHostAuthority" AfterTargets="Build">
+    <PropertyGroup><NativeSuffix>.so</NativeSuffix><NativeSuffix Condition="$([MSBuild]::IsOSPlatform('OSX'))">.dylib</NativeSuffix></PropertyGroup>
+    <Exec Command="cc -shared -fPIC -pthread -std=gnu11 -I&quot;$(MSBuildThisFileDirectory)../../../../android/native&quot; &quot;$(MSBuildThisFileDirectory)backing_test.c&quot; -o &quot;$(TargetDir)libs2a_backing_test$(NativeSuffix)&quot;" />
+    <Exec Command="cc -shared -fPIC &quot;$(MSBuildThisFileDirectory)capacity_stub.c&quot; -o &quot;$(TargetDir)libs2arm_android$(NativeSuffix)&quot;" />
+  </Target>
+</Project>

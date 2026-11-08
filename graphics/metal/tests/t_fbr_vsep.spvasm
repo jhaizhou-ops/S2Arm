@@ -1,0 +1,79 @@
+; t_fbr_vsp + 宽屏外推尾声（独立 gl_Position 变量形态；支持缓冲 = 集 0 绑定 0，s2a_widen 在成员 2 偏移 32）。原文：
+; t_fbr 顶点（SSA 写法、独立 gl_Position 变量、整向量写）：gl_Position = (a.x, a.y, a.z, 1)；out loc4 = ((x+w)·0.5, 0.5·(w+y), 0, w)
+; y 号为正：只在正向视口（ydown = 1）时是当前像素
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in0 %pos %o4
+               OpDecorate %in0 Location 0
+               OpDecorate %o4 Location 4
+               OpDecorate %pos BuiltIn Position
+               OpMemberDecorate %SB 0 Offset 0
+               OpMemberDecorate %SB 1 Offset 16
+               OpMemberDecorate %SB 2 Offset 32
+               OpDecorate %SB Block
+               OpDecorate %sb DescriptorSet 0
+               OpDecorate %sb Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v4f = OpTypeVector %float 4
+        %int = OpTypeInt 32 1
+         %i0 = OpConstant %int 0
+         %i1 = OpConstant %int 1
+         %i2 = OpConstant %int 2
+       %bool = OpTypeBool
+        %v4i = OpTypeVector %int 4
+         %SB = OpTypeStruct %v4f %v4i %v4i
+      %ptrSB = OpTypePointer Uniform %SB
+         %sb = OpVariable %ptrSB Uniform
+      %ptrUi = OpTypePointer Uniform %int
+     %ptrOv4 = OpTypePointer Output %v4f
+        %pos = OpVariable %ptrOv4 Output
+         %o4 = OpVariable %ptrOv4 Output
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in0 = OpVariable %ptrIv4 Input
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+      %fhalf = OpConstant %float 0.5
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %a = OpLoad %v4f %in0
+          %x = OpCompositeExtract %float %a 0
+          %y = OpCompositeExtract %float %a 1
+          %z = OpCompositeExtract %float %a 2
+          %p = OpCompositeConstruct %v4f %x %y %z %f1
+               OpStore %pos %p
+         %sx = OpFAdd %float %x %f1
+         %hx = OpFMul %float %sx %fhalf
+         %sy = OpFAdd %float %f1 %y
+         %hy = OpFMul %float %fhalf %sy
+          %o = OpCompositeConstruct %v4f %hx %hy %f0 %f1
+               OpStore %o4 %o
+         ; 宽屏外推尾声（形状照 graphics/widen/shader/SpirvEdgePush.cs Patch）：门限² = s2a_widen.y、外推量 d = .x、横向收缩 z = .z（浮点位）
+         %w_pe = OpAccessChain %ptrUi %sb %i2 %i1
+         %w_ei = OpLoad %int %w_pe
+         %w_e2 = OpBitcast %float %w_ei
+         %w_pd = OpAccessChain %ptrUi %sb %i2 %i0
+         %w_di = OpLoad %int %w_pd
+         %w_dd = OpBitcast %float %w_di
+         %w_nd = OpFNegate %float %w_dd
+         %w_pz = OpAccessChain %ptrUi %sb %i2 %i2
+         %w_zi = OpLoad %int %w_pz
+         %w_zz = OpBitcast %float %w_zi
+         %w_sc = OpFSub %float %f1 %w_zz
+         %wv = OpLoad %v4f %pos
+         %wx0 = OpCompositeExtract %float %wv 0
+         %wxm = OpFMul %float %wx0 %w_sc
+         %www = OpCompositeExtract %float %wv 3
+         %wt = OpFDiv %float %wxm %www
+         %wt2 = OpFMul %float %wt %wt
+         %w_big = OpFOrdGreaterThan %bool %wt2 %w_e2
+         %w_neg = OpFOrdLessThan %bool %wt %f0
+         %w_sd = OpSelect %float %w_neg %w_nd %w_dd
+         %w_sh = OpFMul %float %w_sd %www
+         %w_shz = OpSelect %float %w_big %w_sh %f0
+         %wx2 = OpFAdd %float %wxm %w_shz
+         %wv2 = OpCompositeInsert %v4f %wx2 %wv 0
+               OpStore %pos %wv2
+               OpReturn
+               OpFunctionEnd

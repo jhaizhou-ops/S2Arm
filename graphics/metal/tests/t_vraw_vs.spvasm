@@ -1,0 +1,55 @@
+; 原始位顶点输入单测（t_draw「原始位顶点输入」段）：形态照 Ryujinx 补丁 vattr-raw——顶点输入一律 uvec4、名字 s2a_raw<位置>，用处按指令类型位转换
+; 等价 GLSL：
+;   layout(location=0) in uvec4 s2a_raw0; layout(location=1) in uvec4 s2a_raw1; layout(location=0) flat out uvec4 v;
+;   void main() { gl_Position = uintBitsToFloat(s2a_raw0); v = uvec4(s2a_raw1.x, s2a_raw1.y, s2a_raw1.z, s2a_raw1.w); }
+; 位置 0 整向量读、位置 1 按分量经 OpAccessChain 读（Ryujinx 生成的形态），两种读法都覆盖
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %r0 %r1 %vo %out
+               OpName %r0 "s2a_raw0"
+               OpName %r1 "s2a_raw1"
+               OpDecorate %r0 Location 0
+               OpDecorate %r1 Location 1
+               OpDecorate %vo Location 0
+               OpDecorate %vo Flat
+               OpMemberDecorate %PerVertex 0 BuiltIn Position
+               OpDecorate %PerVertex Block
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %v4f = OpTypeVector %float 4
+       %v4u = OpTypeVector %uint 4
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+      %int_2 = OpConstant %int 2
+      %int_3 = OpConstant %int 3
+    %ptrInUC = OpTypePointer Input %uint
+     %ptrInU = OpTypePointer Input %v4u
+    %ptrOutU = OpTypePointer Output %v4u
+         %r0 = OpVariable %ptrInU Input
+         %r1 = OpVariable %ptrInU Input
+         %vo = OpVariable %ptrOutU Output
+  %PerVertex = OpTypeStruct %v4f
+     %ptrPVo = OpTypePointer Output %PerVertex
+        %out = OpVariable %ptrPVo Output
+     %ptrv4o = OpTypePointer Output %v4f
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %a = OpLoad %v4u %r0
+          %p = OpBitcast %v4f %a
+         %op = OpAccessChain %ptrv4o %out %int_0
+               OpStore %op %p
+        %q0 = OpAccessChain %ptrInUC %r1 %int_0
+        %c0 = OpLoad %uint %q0
+        %q1 = OpAccessChain %ptrInUC %r1 %int_1
+        %c1 = OpLoad %uint %q1
+        %q2 = OpAccessChain %ptrInUC %r1 %int_2
+        %c2 = OpLoad %uint %q2
+        %q3 = OpAccessChain %ptrInUC %r1 %int_3
+        %c3 = OpLoad %uint %q3
+          %b = OpCompositeConstruct %v4u %c0 %c1 %c2 %c3
+               OpStore %vo %b
+               OpReturn
+               OpFunctionEnd

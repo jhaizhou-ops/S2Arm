@@ -1,0 +1,188 @@
+#version 450
+/* Copyright (c) 2020-2026 Hans-Kristian Arntzen
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#extension GL_EXT_samplerless_texture_functions : require
+// S2ARM LOCAL: glslangValidator 也要求显式声明 include 扩展；glslc 下无差。
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "rgtc.h"
+
+layout(set = 0, binding = 0, rgba8) writeonly uniform image2D uOutput;
+layout(set = 0, binding = 1) uniform utexture2D uInput;
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+} registers;
+
+layout(constant_id = 0) const bool USE_ALPHA = false;
+layout(constant_id = 1) const int BC_VERSION = 1;
+
+// S2ARM LOCAL: keep endpoints as raw 5/6/5 integers and decode with the same integer
+// magic as bcdec__smooth_half_block. The upstream float path (v/31 + mix + UNORM store
+// rounding) lands one level off bcdec on some drivers (78 pixels on RTX 5090).
+ivec3 decode_endpoint_color(uint color)
+{
+    ivec3 c = ivec3(color) >> ivec3(11, 5, 0);
+    c &= ivec3(31, 63, 31);
+    return c;
+}
+
+// 5/6/5 source lanes -> 8-bit channel, identical to bcdec.
+ivec3 expand_endpoint_color(ivec3 c)
+{
+    return ivec3((c.r * 527 + 23) >> 6,
+                 (c.g * 259 + 33) >> 6,
+                 (c.b * 527 + 23) >> 6);
+}
+
+// (2*a + b) / 3 in 888 space straight from 5/6/5 lanes (bcdec 351/2763 magic).
+ivec3 interp_third_565(ivec3 a, ivec3 b)
+{
+    return ivec3(((2 * a.r + b.r) *  351 +   61) >>  7,
+                 ((2 * a.g + b.g) * 2763 + 1039) >> 11,
+                 ((2 * a.b + b.b) *  351 +   61) >>  7);
+}
+
+// (a + b) / 2 in 888 space (bcdec BC1A mode, 1053/4145 magic).
+ivec3 interp_half_565(ivec3 a, ivec3 b)
+{
+    return ivec3(((a.r + b.r) * 1053 +  125) >>  8,
+                 ((a.g + b.g) * 4145 + 1019) >> 11,
+                 ((a.b + b.b) * 1053 +  125) >>  8);
+}
+
+bool decode_endpoints_color(uint payload, out ivec3 ep0, out ivec3 ep1)
+{
+    uint color0 = payload & 0xffffu;
+    uint color1 = payload >> 16u;
+    bool opaque_mode = (BC_VERSION > 1) || (color0 > color1);
+    ep0 = decode_endpoint_color(color0);
+    ep1 = decode_endpoint_color(color1);
+    return opaque_mode;
+}
+
+vec4 interpolate_endpoint_color(ivec3 ep0, ivec3 ep1, int bits, bool opaque_mode)
+{
+    if (opaque_mode)
+    {
+        // S2ARM LOCAL: integer interpolation, bit-exact with bcdec.
+        ivec3 rgb = bits == 0 ? expand_endpoint_color(ep0)
+                  : bits == 1 ? expand_endpoint_color(ep1)
+                  : bits == 2 ? interp_third_565(ep0, ep1)
+                  : interp_third_565(ep1, ep0);
+        return vec4(vec3(rgb) / 255.0, 1.0);
+    }
+    if (bits == 3)
+        return vec4(0);
+    ivec3 rgb = bits == 0 ? expand_endpoint_color(ep0)
+              : bits == 1 ? expand_endpoint_color(ep1)
+              : interp_half_565(ep0, ep1);
+    return vec4(vec3(rgb) / 255.0, 1.0);
+}
+
+float decode_alpha_4bit(uvec2 payload, int pixel)
+{
+    uint offset = pixel * 4;
+    return float((payload[offset >> 5] >> (offset & 31)) & 0xf) / 15.0;
+}
+
+// S2ARM LOCAL: BC3 的 alpha 插值用截断整数数学，与主机 CPU 参考 bcdec__smooth_alpha_block
+// 位级一致（上游 decode_alpha_rgtc 用 float mix + 图像存储四舍五入，边界值差 ±1）。
+// RGTC 族（BC4/BC5）继续走 rgtc.h 的版本——其 CPU 参考 bcdec__bc4_block 是四舍五入权重，与 float 一致。
+float decode_alpha_bc3(uvec2 payload, int linear_pixel)
+{
+	uint ep0 = payload.x & 0xffu;
+	uint ep1 = (payload.x >> 8) & 0xffu;
+	bool range7 = ep0 > ep1;
+
+	int bit_offset = 16 + linear_pixel * 3;
+	uint bits;
+	if (bit_offset <= 29)
+		bits = bitfieldExtract(payload.x, bit_offset, 3);
+	else if (bit_offset >= 32)
+		bits = bitfieldExtract(payload.y, bit_offset - 32, 3);
+	else
+		bits = bitfieldExtract(payload.x, 31, 1) | ((payload.y & 3) << 1);
+
+	uint res;
+	if (bits < 2)
+		res = bits != 0 ? ep1 : ep0;
+	else if (range7)
+		res = ((8u - bits) * ep0 + (bits - 1u) * ep1) / 7u;
+	else if (bits > 5)
+		res = (bits & 1u) * 255u;
+	else
+		res = ((6u - bits) * ep0 + (bits - 1u) * ep1) / 5u;
+
+	return float(res) / 255.0;
+}
+
+ivec2 build_coord()
+{
+    ivec2 base = ivec2(gl_WorkGroupID.xy) * 8;
+    base.x += 4 * (int(gl_LocalInvocationID.z) & 1);
+    base.y += 2 * (int(gl_LocalInvocationID.z) & 2);
+    base += ivec2(gl_LocalInvocationID.xy);
+    return base;
+}
+
+void main()
+{
+    ivec2 coord = build_coord();
+    if (any(greaterThanEqual(coord, registers.resolution)))
+        return;
+
+    ivec2 tile_coord = coord >> 2;
+    ivec2 pixel_coord = coord & 3;
+    int linear_pixel = 4 * pixel_coord.y + pixel_coord.x;
+    uvec4 payload = texelFetch(uInput, tile_coord, 0);
+
+    uvec2 color_payload, alpha_payload;
+    if (BC_VERSION == 1)
+        color_payload = payload.xy;
+    else
+        color_payload = payload.zw;
+
+    float alpha;
+    if (BC_VERSION > 1)
+    {
+        alpha_payload = payload.xy;
+        int ep0, ep1;
+        if (BC_VERSION == 2)
+            alpha = decode_alpha_4bit(alpha_payload, linear_pixel);
+        else
+            alpha = decode_alpha_bc3(alpha_payload, linear_pixel);
+    }
+
+    ivec3 ep0, ep1;
+    bool opaque_mode = decode_endpoints_color(color_payload.x, ep0, ep1);
+    vec4 decoded = interpolate_endpoint_color(ep0, ep1, int((color_payload.y >> (2 * linear_pixel)) & 3), opaque_mode);
+    if (!USE_ALPHA)
+        decoded.a = 1.0;
+    else if (BC_VERSION > 1)
+        decoded.a = alpha;
+
+    imageStore(uOutput, coord, decoded);
+}

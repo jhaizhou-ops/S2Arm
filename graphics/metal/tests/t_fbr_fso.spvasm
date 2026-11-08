@@ -1,0 +1,48 @@
+; t_fbr 片元（「采样的是别的贴图」正反对照）：绑定 129 在当前像素采样（uv = in4.xy ÷ in4.w，证得出）；
+; 绑定 128 在 uv + (1/32, 0) 采样（右邻像素，证不出）；out loc1 = t129(uv) + 0·t128(uv')
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %in4 %o1
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %in4 Location 4
+               OpDecorate %o1 Location 1
+               OpDecorate %t128 DescriptorSet 2
+               OpDecorate %t128 Binding 128
+               OpDecorate %t129 DescriptorSet 2
+               OpDecorate %t129 Binding 129
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v2f = OpTypeVector %float 2
+        %v4f = OpTypeVector %float 4
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+       %simg = OpTypeSampledImage %img
+    %ptrsimg = OpTypePointer UniformConstant %simg
+       %t128 = OpVariable %ptrsimg UniformConstant
+       %t129 = OpVariable %ptrsimg UniformConstant
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in4 = OpVariable %ptrIv4 Input
+     %ptrOv4 = OpTypePointer Output %v4f
+         %o1 = OpVariable %ptrOv4 Output
+         %f0 = OpConstant %float 0
+        %c32 = OpConstant %float 0.03125
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %a = OpLoad %v4f %in4
+         %ax = OpCompositeExtract %float %a 0
+         %ay = OpCompositeExtract %float %a 1
+         %aw = OpCompositeExtract %float %a 3
+          %u = OpFDiv %float %ax %aw
+          %v = OpFDiv %float %ay %aw
+         %uv = OpCompositeConstruct %v2f %u %v
+         %u2 = OpFAdd %float %u %c32
+        %uv2 = OpCompositeConstruct %v2f %u2 %v
+         %s9 = OpLoad %simg %t129
+         %c9 = OpImageSampleImplicitLod %v4f %s9 %uv
+         %s8 = OpLoad %simg %t128
+         %c8 = OpImageSampleImplicitLod %v4f %s8 %uv2
+         %z8 = OpVectorTimesScalar %v4f %c8 %f0
+          %c = OpFAdd %v4f %c9 %z8
+               OpStore %o1 %c
+               OpReturn
+               OpFunctionEnd

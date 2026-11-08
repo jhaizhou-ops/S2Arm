@@ -1,0 +1,15 @@
+<!-- 免解读缓存分块存储单测（10-24 帧率能耗线，Ryujinx 补丁 seg-chunks）：S2AOpChunks 按需分块、长大不产生垃圾、一段不跨块、清空后零分配；
+     反证 = 旧写法（一整块翻倍增长）放满同样条数的托管分配。由 ../t_seg_chunks.sh 编与跑（产物放仓库 build/）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2A.SegChunksTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../../../compat/tree/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+  </ItemGroup>
+</Project>

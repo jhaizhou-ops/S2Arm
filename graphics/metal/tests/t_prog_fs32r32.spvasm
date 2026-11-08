@@ -1,0 +1,145 @@
+; t_prog 片元输入上限（Apple GPU 片元最多 124 个输入分量）：声明 32 个 vec4 输入，读其中 32 个求和写出。由 tools/gen_fs32.py 生成
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %in0 %in1 %in2 %in3 %in4 %in5 %in6 %in7 %in8 %in9 %in10 %in11 %in12 %in13 %in14 %in15 %in16 %in17 %in18 %in19 %in20 %in21 %in22 %in23 %in24 %in25 %in26 %in27 %in28 %in29 %in30 %in31 %out
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %in0 Location 0
+               OpDecorate %in1 Location 1
+               OpDecorate %in2 Location 2
+               OpDecorate %in3 Location 3
+               OpDecorate %in4 Location 4
+               OpDecorate %in5 Location 5
+               OpDecorate %in6 Location 6
+               OpDecorate %in7 Location 7
+               OpDecorate %in8 Location 8
+               OpDecorate %in9 Location 9
+               OpDecorate %in10 Location 10
+               OpDecorate %in11 Location 11
+               OpDecorate %in12 Location 12
+               OpDecorate %in13 Location 13
+               OpDecorate %in14 Location 14
+               OpDecorate %in15 Location 15
+               OpDecorate %in16 Location 16
+               OpDecorate %in17 Location 17
+               OpDecorate %in18 Location 18
+               OpDecorate %in19 Location 19
+               OpDecorate %in20 Location 20
+               OpDecorate %in21 Location 21
+               OpDecorate %in22 Location 22
+               OpDecorate %in23 Location 23
+               OpDecorate %in24 Location 24
+               OpDecorate %in25 Location 25
+               OpDecorate %in26 Location 26
+               OpDecorate %in27 Location 27
+               OpDecorate %in28 Location 28
+               OpDecorate %in29 Location 29
+               OpDecorate %in30 Location 30
+               OpDecorate %in31 Location 31
+               OpDecorate %out Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %v4 = OpTypeVector %float 4
+       %pin = OpTypePointer Input %v4
+      %pout = OpTypePointer Output %v4
+       %in0 = OpVariable %pin Input
+       %in1 = OpVariable %pin Input
+       %in2 = OpVariable %pin Input
+       %in3 = OpVariable %pin Input
+       %in4 = OpVariable %pin Input
+       %in5 = OpVariable %pin Input
+       %in6 = OpVariable %pin Input
+       %in7 = OpVariable %pin Input
+       %in8 = OpVariable %pin Input
+       %in9 = OpVariable %pin Input
+       %in10 = OpVariable %pin Input
+       %in11 = OpVariable %pin Input
+       %in12 = OpVariable %pin Input
+       %in13 = OpVariable %pin Input
+       %in14 = OpVariable %pin Input
+       %in15 = OpVariable %pin Input
+       %in16 = OpVariable %pin Input
+       %in17 = OpVariable %pin Input
+       %in18 = OpVariable %pin Input
+       %in19 = OpVariable %pin Input
+       %in20 = OpVariable %pin Input
+       %in21 = OpVariable %pin Input
+       %in22 = OpVariable %pin Input
+       %in23 = OpVariable %pin Input
+       %in24 = OpVariable %pin Input
+       %in25 = OpVariable %pin Input
+       %in26 = OpVariable %pin Input
+       %in27 = OpVariable %pin Input
+       %in28 = OpVariable %pin Input
+       %in29 = OpVariable %pin Input
+       %in30 = OpVariable %pin Input
+       %in31 = OpVariable %pin Input
+        %out = OpVariable %pout Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %l0 = OpLoad %v4 %in0
+         %l1 = OpLoad %v4 %in1
+         %l2 = OpLoad %v4 %in2
+         %l3 = OpLoad %v4 %in3
+         %l4 = OpLoad %v4 %in4
+         %l5 = OpLoad %v4 %in5
+         %l6 = OpLoad %v4 %in6
+         %l7 = OpLoad %v4 %in7
+         %l8 = OpLoad %v4 %in8
+         %l9 = OpLoad %v4 %in9
+         %l10 = OpLoad %v4 %in10
+         %l11 = OpLoad %v4 %in11
+         %l12 = OpLoad %v4 %in12
+         %l13 = OpLoad %v4 %in13
+         %l14 = OpLoad %v4 %in14
+         %l15 = OpLoad %v4 %in15
+         %l16 = OpLoad %v4 %in16
+         %l17 = OpLoad %v4 %in17
+         %l18 = OpLoad %v4 %in18
+         %l19 = OpLoad %v4 %in19
+         %l20 = OpLoad %v4 %in20
+         %l21 = OpLoad %v4 %in21
+         %l22 = OpLoad %v4 %in22
+         %l23 = OpLoad %v4 %in23
+         %l24 = OpLoad %v4 %in24
+         %l25 = OpLoad %v4 %in25
+         %l26 = OpLoad %v4 %in26
+         %l27 = OpLoad %v4 %in27
+         %l28 = OpLoad %v4 %in28
+         %l29 = OpLoad %v4 %in29
+         %l30 = OpLoad %v4 %in30
+         %l31 = OpLoad %v4 %in31
+         %s1 = OpFAdd %v4 %l0 %l1
+         %s2 = OpFAdd %v4 %s1 %l2
+         %s3 = OpFAdd %v4 %s2 %l3
+         %s4 = OpFAdd %v4 %s3 %l4
+         %s5 = OpFAdd %v4 %s4 %l5
+         %s6 = OpFAdd %v4 %s5 %l6
+         %s7 = OpFAdd %v4 %s6 %l7
+         %s8 = OpFAdd %v4 %s7 %l8
+         %s9 = OpFAdd %v4 %s8 %l9
+         %s10 = OpFAdd %v4 %s9 %l10
+         %s11 = OpFAdd %v4 %s10 %l11
+         %s12 = OpFAdd %v4 %s11 %l12
+         %s13 = OpFAdd %v4 %s12 %l13
+         %s14 = OpFAdd %v4 %s13 %l14
+         %s15 = OpFAdd %v4 %s14 %l15
+         %s16 = OpFAdd %v4 %s15 %l16
+         %s17 = OpFAdd %v4 %s16 %l17
+         %s18 = OpFAdd %v4 %s17 %l18
+         %s19 = OpFAdd %v4 %s18 %l19
+         %s20 = OpFAdd %v4 %s19 %l20
+         %s21 = OpFAdd %v4 %s20 %l21
+         %s22 = OpFAdd %v4 %s21 %l22
+         %s23 = OpFAdd %v4 %s22 %l23
+         %s24 = OpFAdd %v4 %s23 %l24
+         %s25 = OpFAdd %v4 %s24 %l25
+         %s26 = OpFAdd %v4 %s25 %l26
+         %s27 = OpFAdd %v4 %s26 %l27
+         %s28 = OpFAdd %v4 %s27 %l28
+         %s29 = OpFAdd %v4 %s28 %l29
+         %s30 = OpFAdd %v4 %s29 %l30
+         %s31 = OpFAdd %v4 %s30 %l31
+               OpStore %out %s31
+               OpReturn
+               OpFunctionEnd

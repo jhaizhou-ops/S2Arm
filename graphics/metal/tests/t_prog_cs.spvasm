@@ -1,0 +1,65 @@
+; t_prog 端到端计算着色器（手写 SPIR-V，存储缓冲照 Ryujinx：Uniform + BufferBlock、集 1；常量缓冲集 0）
+; 等价 GLSL：
+;   layout(local_size_x = 4) in;
+;   layout(set=0,binding=0) uniform S { uvec4 d[1]; } sb;        // d[0].x = 乘数
+;   layout(set=1,binding=1) buffer Out { uint b[]; } ob;          // 声明在 In 之前：验按绑定号排序
+;   layout(set=1,binding=0) buffer In  { uint a[]; } ib;
+;   void main() { uint i = gl_GlobalInvocationID.x; ob.b[i] = ib.a[i] * sb.d[0].x + uint(ib.a.length()); }   // .length() 走缓冲长度表
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %arru ArrayStride 4
+               OpDecorate %arr1 ArrayStride 16
+               OpMemberDecorate %S 0 Offset 0
+               OpDecorate %S Block
+               OpMemberDecorate %In 0 Offset 0
+               OpDecorate %In BufferBlock
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %Out BufferBlock
+               OpDecorate %sb DescriptorSet 0
+               OpDecorate %sb Binding 0
+               OpDecorate %ob DescriptorSet 1
+               OpDecorate %ob Binding 1
+               OpDecorate %ib DescriptorSet 1
+               OpDecorate %ib Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %v3u = OpTypeVector %uint 3
+       %v4u = OpTypeVector %uint 4
+     %uint_1 = OpConstant %uint 1
+      %int_0 = OpConstant %int 0
+       %arr1 = OpTypeArray %v4u %uint_1
+       %arru = OpTypeRuntimeArray %uint
+          %S = OpTypeStruct %arr1
+         %In = OpTypeStruct %arru
+        %Out = OpTypeStruct %arru
+       %ptrS = OpTypePointer Uniform %S
+      %ptrIn = OpTypePointer Uniform %In
+     %ptrOut = OpTypePointer Uniform %Out
+         %sb = OpVariable %ptrS Uniform
+         %ob = OpVariable %ptrOut Uniform
+         %ib = OpVariable %ptrIn Uniform
+     %ptru_u = OpTypePointer Uniform %uint
+     %ptrv4u = OpTypePointer Uniform %v4u
+     %ptrv3i = OpTypePointer Input %v3u
+        %gid = OpVariable %ptrv3i Input
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %g = OpLoad %v3u %gid
+          %i = OpCompositeExtract %uint %g 0
+         %ap = OpAccessChain %ptru_u %ib %int_0 %i
+          %a = OpLoad %uint %ap
+         %sp = OpAccessChain %ptrv4u %sb %int_0 %int_0
+         %s4 = OpLoad %v4u %sp
+         %sx = OpCompositeExtract %uint %s4 0
+         %am = OpIMul %uint %a %sx
+          %n = OpArrayLength %uint %ib 0
+          %r = OpIAdd %uint %am %n
+         %bp = OpAccessChain %ptru_u %ob %int_0 %i
+               OpStore %bp %r
+               OpReturn
+               OpFunctionEnd

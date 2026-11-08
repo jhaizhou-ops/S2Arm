@@ -1,0 +1,100 @@
+; t_fbr 顶点（形态照 Ryujinx：gl_PerVertex 块、输出先写缺省值、中间值经函数局部变量 Store / Load）：
+;   gl_Position = (a.x, a.y, a.z, 1)；out loc4 = ((x+w)·0.5, (−y+w)·0.5, 0, w)——y 号为负：只在翻转视口（ydown = 0）时是当前像素
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %in0 %pv %o4
+               OpDecorate %in0 Location 0
+               OpDecorate %o4 Location 4
+               OpMemberDecorate %PV 0 BuiltIn Position
+               OpMemberDecorate %PV 1 BuiltIn PointSize
+               OpDecorate %PV Block
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %int = OpTypeInt 32 1
+        %v4f = OpTypeVector %float 4
+         %PV = OpTypeStruct %v4f %float
+      %ptrPV = OpTypePointer Output %PV
+         %pv = OpVariable %ptrPV Output
+     %ptrOv4 = OpTypePointer Output %v4f
+         %o4 = OpVariable %ptrOv4 Output
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in0 = OpVariable %ptrIv4 Input
+      %ptrIf = OpTypePointer Input %float
+      %ptrOf = OpTypePointer Output %float
+      %ptrFf = OpTypePointer Function %float
+         %i0 = OpConstant %int 0
+         %i1 = OpConstant %int 1
+         %i2 = OpConstant %int 2
+         %i3 = OpConstant %int 3
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+      %fhalf = OpConstant %float 0.5
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %vx = OpVariable %ptrFf Function
+         %vy = OpVariable %ptrFf Function
+         %vw = OpVariable %ptrFf Function
+        %vny = OpVariable %ptrFf Function
+        %vsx = OpVariable %ptrFf Function
+        %vsy = OpVariable %ptrFf Function
+         %d0 = OpAccessChain %ptrOf %pv %i0 %i0
+               OpStore %d0 %f0
+         %d1 = OpAccessChain %ptrOf %pv %i0 %i1
+               OpStore %d1 %f0
+         %d2 = OpAccessChain %ptrOf %pv %i0 %i2
+               OpStore %d2 %f0
+         %d3 = OpAccessChain %ptrOf %pv %i0 %i3
+               OpStore %d3 %f1
+         %e0 = OpAccessChain %ptrOf %o4 %i0
+               OpStore %e0 %f0
+         %e1 = OpAccessChain %ptrOf %o4 %i1
+               OpStore %e1 %f0
+         %e2 = OpAccessChain %ptrOf %o4 %i2
+               OpStore %e2 %f0
+         %e3 = OpAccessChain %ptrOf %o4 %i3
+               OpStore %e3 %f1
+         %ax = OpAccessChain %ptrIf %in0 %i0
+         %lx = OpLoad %float %ax
+               OpStore %vx %lx
+         %ay = OpAccessChain %ptrIf %in0 %i1
+         %ly = OpLoad %float %ay
+               OpStore %vy %ly
+         %az = OpAccessChain %ptrIf %in0 %i2
+         %lz = OpLoad %float %az
+               OpStore %vw %f1
+         %px = OpAccessChain %ptrOf %pv %i0 %i0
+         %qx = OpLoad %float %vx
+               OpStore %px %qx
+         %py = OpAccessChain %ptrOf %pv %i0 %i1
+         %qy = OpLoad %float %vy
+               OpStore %py %qy
+         %pz = OpAccessChain %ptrOf %pv %i0 %i2
+               OpStore %pz %lz
+         %pw = OpAccessChain %ptrOf %pv %i0 %i3
+         %qw = OpLoad %float %vw
+               OpStore %pw %qw
+         %t1 = OpLoad %float %vx
+         %t2 = OpLoad %float %vw
+         %s1 = OpFAdd %float %t1 %t2
+         %h1 = OpFMul %float %s1 %fhalf
+               OpStore %vsx %h1
+         %t3 = OpLoad %float %vy
+         %n3 = OpFNegate %float %t3
+               OpStore %vny %n3
+         %t4 = OpLoad %float %vny
+         %t5 = OpLoad %float %vw
+         %s2 = OpFAdd %float %t4 %t5
+         %h2 = OpFMul %float %s2 %fhalf
+               OpStore %vsy %h2
+         %ox = OpAccessChain %ptrOf %o4 %i0
+         %u1 = OpLoad %float %vsx
+               OpStore %ox %u1
+         %oy = OpAccessChain %ptrOf %o4 %i1
+         %u2 = OpLoad %float %vsy
+               OpStore %oy %u2
+         %ow = OpAccessChain %ptrOf %o4 %i3
+         %u3 = OpLoad %float %vw
+               OpStore %ow %u3
+               OpReturn
+               OpFunctionEnd

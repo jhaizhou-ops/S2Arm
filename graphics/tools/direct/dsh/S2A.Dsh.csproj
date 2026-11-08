@@ -1,0 +1,93 @@
+<!-- 直连模式「兜底现编」库 S2A.Dsh：直连离线链（translator/dmsh_build.py）单个键出库那条路的 C# 移植，iPhone 上运行时调（导出 s2a_dsh_compile，见 DshCApi.cs）。
+     翻译器 dmsh_xlate/Program.cs 原样编进本程序集；Ryujinx 着色器翻译器与宽屏着色器分析直接引 compat/tree 与 graphics/widen/shader 的工程（与通用模式、离线 dmsh_xlate 同一份程序集）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>S2A.Dsh</AssemblyName>
+    <RootNamespace>S2A.Dsh</RootNamespace>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <Nx>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../nvn/'))</Nx>
+    <Ryu>$(MSBuildThisFileDirectory)../../../../compat/tree/src/</Ryu>
+    <!-- 链版本：取直连图形层同一棵树的 graphics/nvn/dmsh_chain.h（载入端只认 json 里 chain = 它，见 nvn_mtl.m shader_load） -->
+    <DshChainHeader>$(Nx)graphics/nvn/dmsh_chain.h</DshChainHeader>
+    <DshChain>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(DshChainHeader)')), 'DMSH_CHAIN "([0-9a-f]+)"').Groups[1].Value)</DshChain>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="../compiler/Sha256.cs" Link="Sha256.cs" />
+    <Compile Include="$(Nx)graphics/tools/dmsh_xlate/Program.cs" Link="xlate/Program.cs" />
+    <Compile Include="$(Nx)../widen/SpirvCbufUseText.cs" Link="xlate/SpirvCbufUseText.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(Ryu)Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
+    <ProjectReference Include="$(Nx)../widen/shader/S2Arm.Gfx.Widen.Shader.csproj" />
+  </ItemGroup>
+  <!-- 翻译器指纹 Xfp：影响现编输出的 C# 源码（本工程静态 Compile 进来的全部 + Ryujinx 着色器翻译器 / 它出 SPIR-V 用的 Spv.Generator / 宽屏着色器分析三个工程目录下除 bin、obj 与点文件（.DS_Store 等）外的全部文件，含 .csproj 与嵌入资源）
+       逐个 SHA-256，按仓库相对路径（/ 分隔）排序拼成「路径 \t 哈希 \n」再取 SHA-256 前 16 位十六进制：与机器、检出路径无关，任一字节变就变。
+       链号 DMSH_CHAIN 只随宿主 / 库接口变，App 升级换翻译器链号不动；设备兜底目录跨更新保留，现编结果 json 带 xfp，宿主（dsh_miss.inc dsh_have、nvn_mtl.m shader_build 兜底那支）比 s2a_dsh_xfp() 不等就不复用 -->
+  <PropertyGroup>
+    <DshRepoRoot>$([System.IO.Path]::GetFullPath('$(Nx)../../'))</DshRepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 求值期的 @(Compile) 只有上面静态登记的源码（SDK 在目标里生成的 obj 下 AssemblyInfo 等不在内，免得指纹随配置 / RID 变） -->
+    <!-- DshVk.cs 除外：安卓 Vulkan 导出（XGS / _b.spv）独立一支，Metal 出库路径不引用它（tests/dshvk_fp_exclude_test.sh 断言），改它不该让各款 Metal 冷翻译；
+         安卓离线包身份走 ShaderPackManifest 的程序集 MVID，不靠本指纹。哪天 Metal 路径调用它，删掉这个 Exclude（断言会先红） -->
+    <DshXfpInput Include="@(Compile)" Exclude="DshVk.cs" />
+    <!-- 直连出库进程里影响翻译产物的那段（包记录切片、交给 DshCompiler 的参数与开关、配对顶点读片元 MSL 的来源）：dsh_batch 编它、本工程不编，只进指纹。
+         Build.cs 等其余 batch 源码是编排，不进（改它们只让直连阶段热重跑）。这份 DshXfpInput 是翻译器指纹输入的唯一来源：dmsh_chain.py xlate_fp 用
+         dotnet msbuild -getItem:DshXfpInput 取同一份清单、按同一算法算（tests/xfp_single_source_test.sh 断言两边相等） -->
+    <DshXfpInput Include="batch/BuildXlate.cs" />
+    <!-- 包记录怎么切（BuildXlate.cs 调它）：与出包 Vulkan 库工具共用的一份读法，改了同组输入翻出的产物就变 -->
+    <DshXfpInput Include="batch/PkgRead.cs" />
+    <!-- 加固算法（#1204 T1）：Compile 交 SPIRV-Cross 前经 libnxgal 调它改写 SPIR-V，改了它出库结果就变 -->
+    <DshXfpInput Include="$(Nx)../metal/gal_spvx.m" />
+    <!-- 11-02 #783：加固代码挪进不引 Metal 的 gal_spvx.c（+ gal_spvx.h），gal_spvx.m 只剩 #include；三份都进指纹，改哪份都刷新 -->
+    <DshXfpInput Include="$(Nx)../metal/gal_spvx.c;$(Nx)../metal/gal_spvx.h" />
+    <DshXfpInput Include="$(Ryu)Ryujinx.Graphics.Shader/**/*;$(Ryu)Spv.Generator/**/*;$(Nx)../widen/shader/**/*" Exclude="$(Ryu)Ryujinx.Graphics.Shader/bin/**;$(Ryu)Ryujinx.Graphics.Shader/obj/**;$(Ryu)Spv.Generator/bin/**;$(Ryu)Spv.Generator/obj/**;$(Nx)../widen/shader/bin/**;$(Nx)../widen/shader/obj/**;$(Ryu)Ryujinx.Graphics.Shader/**/.*;$(Ryu)Spv.Generator/**/.*;$(Nx)../widen/shader/**/.*" />
+  </ItemGroup>
+  <UsingTask TaskName="DshXfpHash" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <Root ParameterType="System.String" Required="true" />
+      <Xfp ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        // 任务按 netstandard 编：没有 Path.GetRelativePath / SHA256.HashData / Convert.ToHexString，用老接口
+        string root = Path.GetFullPath(Root).Replace('\\', '/').TrimEnd('/') + "/";
+        using (var sha = SHA256.Create())
+        {
+            System.Func<byte[], string> hex = h => System.BitConverter.ToString(h).Replace("-", "").ToLowerInvariant();
+            var rows = new System.Collections.Generic.List<string>();
+            foreach (var p in Files.Select(f => Path.GetFullPath(f.ItemSpec).Replace('\\', '/')).Distinct())
+            {
+                if (!p.StartsWith(root, System.StringComparison.Ordinal)) { Log.LogError("翻译器指纹输入不在仓库里：" + p); return false; }
+                rows.Add(p.Substring(root.Length) + "\t" + hex(sha.ComputeHash(File.ReadAllBytes(p))) + "\n");
+            }
+            rows.Sort(System.StringComparer.Ordinal);   // 每行以相对路径开头、路径各不同：按行排即按路径排
+            Xfp = hex(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(string.Concat(rows)))).Substring(0, 16);
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="DshChainConst" BeforeTargets="CoreCompile">
+    <Error Condition="'$(DshChain)' == ''" Text="$(DshChainHeader) 里没有 DMSH_CHAIN" />
+    <DshXfpHash Files="@(DshXfpInput)" Root="$(DshRepoRoot)">
+      <Output TaskParameter="Xfp" PropertyName="DshXfp" />
+    </DshXfpHash>
+    <WriteLinesToFile File="$(IntermediateOutputPath)DshChain.g.cs" Overwrite="true" WriteOnlyWhenDifferent="true" Lines="namespace S2A.Dsh { static class DshChain { public const string V = &quot;$(DshChain)&quot;%3B public const string Xfp = &quot;$(DshXfp)&quot;%3B } }" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)DshChain.g.cs" />
+      <FileWrites Include="$(IntermediateOutputPath)DshChain.g.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

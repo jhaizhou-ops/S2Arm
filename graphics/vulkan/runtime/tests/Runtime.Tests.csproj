@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../metal/cs/caps/NxGalCaps.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="../../../../services/S2A.Services/S2A.Services.csproj" />
+    <Compile Include="../../cache/ShaderPackLayout.cs" Link="ProgramCache/ShaderPackLayout.cs" />
+    <Compile Include="../../cache/ShaderPackManifest.cs" Link="ProgramCache/ShaderPackManifest.cs" />
+    <Compile Include="../../cache/ShaderPackArchive.cs" Link="ProgramCache/ShaderPackArchive.cs" />
+    <Compile Include="../../cache/ShaderPackInstaller.cs" Link="ProgramCache/ShaderPackInstaller.cs" />
+    <Compile Include="../AndroidVulkanRuntime.cs" Link="AndroidVulkanRuntime.cs" />
+    <Compile Include="../StartupWait.cs" Link="StartupWait.cs" />
+    <Compile Include="../../../metal/cs/NxTrack.cs" Link="NxTrack.cs" />
+  </ItemGroup>
+  <Target Name="BuildAssetBoundary" AfterTargets="Build">
+    <PropertyGroup><NativeSuffix>.so</NativeSuffix><NativeSuffix Condition="$([MSBuild]::IsOSPlatform('OSX'))">.dylib</NativeSuffix></PropertyGroup>
+    <Exec Command="cc -shared -fPIC &quot;$(MSBuildThisFileDirectory)asset_fixture.c&quot; -o &quot;$(TargetDir)libs2arm_android$(NativeSuffix)&quot;" />
+  </Target>
+</Project>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType><TargetFramework>net10.0</TargetFramework><AssemblyName>libepoch_managed</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><PublishAot>true</PublishAot><NativeLib>Shared</NativeLib>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack><DisableUnsupportedError>true</DisableUnsupportedError>
+    <InvariantGlobalization>true</InvariantGlobalization><EnableDefaultCompileItems>false</EnableDefaultCompileItems><NuGetAudit>false</NuGetAudit>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Native.cs" />
+    <Compile Include="$(RepoRoot)compat/tree/src/Ryujinx.Tests.Memory/MockVirtualMemoryManager.cs" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />
+  </ItemGroup>
+</Project>

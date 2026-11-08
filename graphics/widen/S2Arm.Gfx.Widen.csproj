@@ -1,0 +1,14 @@
+<!-- 通用宽屏 · 运行时逻辑（画幅线）：逐帧放宽 / 改写常量 / 界面层判定（WidenFrame、WidenRewriter）与镜头位姿（CameraTrack）。
+     着色器改写在 shader/（出包烘焙只引那一个工程）；GAL 包装层在 gal/。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>S2Arm.Gfx.Widen</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup><Compile Remove="gal/**;shader/**" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="shader/S2Arm.Gfx.Widen.Shader.csproj" /></ItemGroup>
+</Project>

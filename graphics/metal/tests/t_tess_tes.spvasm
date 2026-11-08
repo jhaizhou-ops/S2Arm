@@ -1,0 +1,83 @@
+; 曲面单测 TES：位置 = 四角双线性（角序 (0,0)(1,0)(1,1)(0,1)）映到规范化坐标；颜色 = (4u(1-u), 每片属性.x, 0, 1)
+               OpCapability Tessellation
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint TessellationEvaluation %main "main" %inv %patchv %tc %pv %outc
+               OpExecutionMode %main Quads
+               OpExecutionMode %main SpacingEqual
+               OpExecutionMode %main VertexOrderCw
+               OpDecorate %inv Location 0
+               OpDecorate %patchv Location 1
+               OpDecorate %patchv Patch
+               OpDecorate %tc BuiltIn TessCoord
+               OpDecorate %outc Location 0
+               OpMemberDecorate %PV 0 BuiltIn Position
+               OpMemberDecorate %PV 1 BuiltIn PointSize
+               OpDecorate %PV Block
+       %void = OpTypeVoid
+        %fnv = OpTypeFunction %void
+        %f32 = OpTypeFloat 32
+         %v3 = OpTypeVector %f32 3
+         %v4 = OpTypeVector %f32 4
+        %i32 = OpTypeInt 32 1
+        %u32 = OpTypeInt 32 0
+       %u32c = OpConstant %u32 32
+         %c0 = OpConstant %i32 0
+         %c1 = OpConstant %i32 1
+         %c2 = OpConstant %i32 2
+         %c3 = OpConstant %i32 3
+        %f0 = OpConstant %f32 0
+        %f1 = OpConstant %f32 1
+        %f2 = OpConstant %f32 2
+        %f4 = OpConstant %f32 4
+      %arrIn = OpTypeArray %v4 %u32c
+     %pArrIn = OpTypePointer Input %arrIn
+       %pIv4 = OpTypePointer Input %v4
+       %pIv3 = OpTypePointer Input %v3
+       %pOv4 = OpTypePointer Output %v4
+         %PV = OpTypeStruct %v4 %f32
+        %pPV = OpTypePointer Output %PV
+        %inv = OpVariable %pArrIn Input
+     %patchv = OpVariable %pIv4 Input
+         %tc = OpVariable %pIv3 Input
+         %pv = OpVariable %pPV Output
+       %outc = OpVariable %pOv4 Output
+       %main = OpFunction %void None %fnv
+          %l = OpLabel
+          %t = OpLoad %v3 %tc
+          %u = OpCompositeExtract %f32 %t 0
+          %w = OpCompositeExtract %f32 %t 1
+        %a0 = OpAccessChain %pIv4 %inv %c0
+        %p0 = OpLoad %v4 %a0
+        %a1 = OpAccessChain %pIv4 %inv %c1
+        %p1 = OpLoad %v4 %a1
+        %a2 = OpAccessChain %pIv4 %inv %c2
+        %p2 = OpLoad %v4 %a2
+        %a3 = OpAccessChain %pIv4 %inv %c3
+        %p3 = OpLoad %v4 %a3
+       %d01 = OpFSub %v4 %p1 %p0
+      %s01 = OpVectorTimesScalar %v4 %d01 %u
+       %e0 = OpFAdd %v4 %p0 %s01
+       %d32 = OpFSub %v4 %p2 %p3
+      %s32 = OpVectorTimesScalar %v4 %d32 %u
+       %e1 = OpFAdd %v4 %p3 %s32
+       %de = OpFSub %v4 %e1 %e0
+       %se = OpVectorTimesScalar %v4 %de %w
+      %pos = OpFAdd %v4 %e0 %se
+       %px = OpCompositeExtract %f32 %pos 0
+       %py = OpCompositeExtract %f32 %pos 1
+      %px2 = OpFMul %f32 %px %f2
+      %py2 = OpFMul %f32 %py %f2
+       %nx = OpFSub %f32 %px2 %f1
+       %ny = OpFSub %f32 %py2 %f1
+      %clp = OpCompositeConstruct %v4 %nx %ny %f0 %f1
+       %pp = OpAccessChain %pOv4 %pv %c0
+               OpStore %pp %clp
+      %omu = OpFSub %f32 %f1 %u
+       %r0 = OpFMul %f32 %u %omu
+        %r = OpFMul %f32 %r0 %f4
+       %pa = OpLoad %v4 %patchv
+        %g = OpCompositeExtract %f32 %pa 0
+      %col = OpCompositeConstruct %v4 %r %g %f0 %f1
+               OpStore %outc %col
+               OpReturn
+               OpFunctionEnd

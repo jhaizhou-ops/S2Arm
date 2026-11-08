@@ -1,0 +1,66 @@
+; 曲面单测 TES（审计 #1534 P1-43）：域着色器里一次存储图像原子（GLSL imageAtomicAdd(r32ui image, (0,0), 1)，glslangValidator -V 后 spirv-dis）。
+;   MSL 3.1 译成贴图原生原子 .atomic_fetch_add(；2.3 时 SPIRV-Cross 另造 cnt_atomic 模拟缓冲（宿主不绑）
+               OpCapability Tessellation
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint TessellationEvaluation %4 "main" %24 %27
+               OpExecutionMode %4 Quads
+               OpExecutionMode %4 SpacingEqual
+               OpExecutionMode %4 VertexOrderCw
+               OpSource GLSL 450
+               OpName %4 "main"
+               OpName %9 "cnt"
+               OpName %22 "gl_PerVertex"
+               OpMemberName %22 0 "gl_Position"
+               OpMemberName %22 1 "gl_PointSize"
+               OpMemberName %22 2 "gl_ClipDistance"
+               OpMemberName %22 3 "gl_CullDistance"
+               OpName %24 ""
+               OpName %27 "gl_TessCoord"
+               OpDecorate %9 Binding 0
+               OpDecorate %9 DescriptorSet 0
+               OpDecorate %22 Block
+               OpMemberDecorate %22 0 BuiltIn Position
+               OpMemberDecorate %22 1 BuiltIn PointSize
+               OpMemberDecorate %22 2 BuiltIn ClipDistance
+               OpMemberDecorate %22 3 BuiltIn CullDistance
+               OpDecorate %27 BuiltIn TessCoord
+          %2 = OpTypeVoid
+          %3 = OpTypeFunction %2
+          %6 = OpTypeInt 32 0
+          %7 = OpTypeImage %6 2D 0 0 0 2 R32ui
+          %8 = OpTypePointer UniformConstant %7
+          %9 = OpVariable %8 UniformConstant
+         %10 = OpTypeInt 32 1
+         %11 = OpTypeVector %10 2
+         %12 = OpConstant %10 0
+         %13 = OpConstantComposite %11 %12 %12
+         %14 = OpConstant %6 1
+         %15 = OpConstant %6 0
+         %16 = OpTypePointer Image %6
+         %19 = OpTypeFloat 32
+         %20 = OpTypeVector %19 4
+         %21 = OpTypeArray %19 %14
+         %22 = OpTypeStruct %20 %19 %21 %21
+         %23 = OpTypePointer Output %22
+         %24 = OpVariable %23 Output
+         %25 = OpTypeVector %19 3
+         %26 = OpTypePointer Input %25
+         %27 = OpVariable %26 Input
+         %28 = OpTypeVector %19 2
+         %31 = OpConstant %19 0
+         %32 = OpConstant %19 1
+         %36 = OpTypePointer Output %20
+          %4 = OpFunction %2 None %3
+          %5 = OpLabel
+         %17 = OpImageTexelPointer %16 %9 %13 %15
+         %18 = OpAtomicIAdd %6 %17 %14 %15 %14
+         %29 = OpLoad %25 %27
+         %30 = OpVectorShuffle %28 %29 %29 0 1
+         %33 = OpCompositeExtract %19 %30 0
+         %34 = OpCompositeExtract %19 %30 1
+         %35 = OpCompositeConstruct %20 %33 %34 %31 %32
+         %37 = OpAccessChain %36 %24 %12
+               OpStore %37 %35
+               OpReturn
+               OpFunctionEnd

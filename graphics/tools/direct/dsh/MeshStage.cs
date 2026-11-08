@@ -1,0 +1,206 @@
+// NVN2（Switch 2）任务 / 网格着色器 → Metal 对象 / 网格函数。移植自 上游参考实现（MIT） dm/gfx/tools/dmsh_meshstage.py（主线提交 1d4b8e82b，MIT），按我方链改写：
+//   控制段 +0x56 阶段字节 6 任务（ts）/ 7 网格（ms），SPH 却读作顶点或域。翻译器把它当计算着色器翻（去掉 0x80 字节 SPH，作业 stage_memory 给阶段内存在共享内存里的位置：
+//   InstEmitAmpereMem.cs AIsberd / AStageOut 按 IGpuAccessor.QueryAmpereStageMemory 读写），本文件把翻出的计算核包成 Metal 的阶段函数：包装填阶段输入、调计算核本体、把阶段输出交给 Metal。
+// 阶段内存（共享内存，Memory()；本体开始时全 0）：
+//   字 0       本组工作组号（ISBERD 模式 0x78）：任务 = 本次绘制起始工作组号 + 线程组号；无任务的网格同
+//   INPUT      网格着色器读的、它的任务写的载荷（ISBERD 模式 0x38）。字 0 = 本组在其任务派生里的序号（硬件放的，包装填）
+//   输出       任务的载荷（0xb8）：字 1 = 要派生的网格工作组数，记录从 +0x10 起；
+//              或网格的属性（0xf8）：每 32 个顶点 / 32 个图元一块，每个分量 0x80 字节（一顶点或一图元一字），先 SPH OMAP 开的顶点分量、再逐图元 SPH 的
+//   图元       网格的图元字节：+3 图元数（0x88），+4 起每三角形三个索引字节（0x80）
+// 接口约定：side-session-notes 22_网格着色接口约定.md（入口名、缓冲槽 29、反射字段）
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+
+namespace S2A.Dsh
+{
+    /// <summary>任务 / 网格着色器的事实（控制段 + 整个代码区）</summary>
+    internal sealed class MeshInfo
+    {
+        public string Kind;                 // "ts" / "ms"
+        public int Threads, Payload;        // +0x58 每组线程数，+0x5a 载荷字节数
+        public bool Task;                   // 网格：+0x5e 非 0 = 有任务着色器
+        public int MaxV, MaxP;              // 网格：+0x60 / +0x62 最多顶点 / 图元
+        public List<(int? N, int C)> Vertex = new(), Primitive = new();   // 属性区的分量顺序：(null, c) 位置分量，(n, c) 通用属性 n 的分量 c
+
+        public JsonObject ToJson()
+        {
+            static JsonArray Comps(List<(int? N, int C)> l) => new(l.Select(x => (JsonNode)new JsonArray(x.N is int n ? JsonValue.Create(n) : null, JsonValue.Create(x.C))).ToArray());
+            return new JsonObject { ["kind"] = Kind, ["threads"] = Threads, ["payload"] = Payload, ["task"] = Task, ["max_v"] = MaxV, ["max_p"] = MaxP, ["vertex"] = Comps(Vertex), ["primitive"] = Comps(Primitive) };
+        }
+        public static MeshInfo FromJson(JsonObject o)
+        {
+            static List<(int?, int)> Comps(JsonNode a) => a.AsArray().Select(x => (x[0] is JsonNode n ? (int?)(int)n : null, (int)x[1])).ToList();
+            return new MeshInfo { Kind = (string)o["kind"], Threads = (int)o["threads"], Payload = (int)o["payload"], Task = (bool)o["task"], MaxV = (int)o["max_v"], MaxP = (int)o["max_p"], Vertex = Comps(o["vertex"]), Primitive = Comps(o["primitive"]) };
+        }
+    }
+
+    internal static class MeshStage
+    {
+        public const int WORKGROUP = 0, INPUT = 0x10, BLOCK = 32;
+        public const int METAL_MAX_VERTICES = 256, METAL_MAX_PRIMITIVES = 512;   // Metal 网格的上限
+        public const int METAL_MAX_GRID = 1024;                                // 一个对象线程组能派生的网格线程组数
+        public const int METAL_MAX_SHARED = 0x8000;                            // Metal 函数的线程组内存
+        public const int FIRST_SLOT = 29;                                      // 宿主放「本次绘制起始工作组号」的缓冲槽（接口约定 3）
+
+        /// <summary>控制段阶段字节 → "ts" / "ms" / null</summary>
+        public static string Kind(byte[] ctl) => ctl != null && ctl.Length > 0x56 ? ctl[0x56] switch { 6 => "ts", 7 => "ms", _ => null } : null;
+
+        /// <summary>SPH 的 OMAP 开的分量，按属性区顺序：先位置（字节 0x35 第 4..7 位），再通用属性 n（0x36 起每属性一个半字节，第 c 位 = 分量 c）</summary>
+        public static List<(int? N, int C)> SphOutputs(ReadOnlySpan<byte> sph)
+        {
+            var o = new List<(int?, int)>();
+            for (int c = 0; c < 4; c++) if ((sph[0x35] >> (4 + c) & 1) != 0) o.Add((null, c));
+            for (int n = 0; n < 32; n++) for (int c = 0; c < 4; c++) if ((sph[0x36 + n / 2] >> (4 * (n % 2) + c) & 1) != 0) o.Add((n, c));
+            return o;
+        }
+
+        /// <summary>控制段 + 整个代码区（SPH、指令、网格的逐图元 SPH）→ 事实。+0x64 是逐图元 SPH 在代码区里的偏移（+0x68 第 7 位置位时）</summary>
+        public static MeshInfo Info(byte[] ctl, byte[] area)
+        {
+            var kind = Kind(ctl) ?? throw new DshError("bad record", "控制段阶段字节不是 6 / 7");
+            if (ctl.Length < 0x6c) throw new DshError("bad record", $"任务 / 网格控制段只有 0x{ctl.Length:x} 字节（要读 +0x68）");
+            var i = new MeshInfo { Kind = kind, Threads = BitConverter.ToUInt16(ctl, 0x58), Payload = BitConverter.ToUInt16(ctl, 0x5a) };
+            if (kind == "ms")
+            {
+                if (area.Length < 0x80) throw new DshError("bad record", "网格代码区不足 0x80 字节的 SPH");
+                i.Task = ctl[0x5e] != 0; i.MaxV = BitConverter.ToUInt16(ctl, 0x60); i.MaxP = BitConverter.ToUInt16(ctl, 0x62);
+                uint at = (ctl[0x68] & 0x80) != 0 ? BitConverter.ToUInt32(ctl, 0x64) : 0;
+                if (at != 0 && at + 0x80L > area.Length) throw new DshError("bad record", $"逐图元 SPH 偏移 0x{at:x} 出了代码区");
+                i.Vertex = SphOutputs(area.AsSpan(0, 0x80));
+                if (at != 0) i.Primitive = SphOutputs(area.AsSpan((int)at, 0x80)).Where(c => c.N != null).ToList();
+            }
+            return i;
+        }
+
+        /// <summary>（翻译器要的阶段内存偏移：工作组号、输入、输出、图元字节；共享内存字节数）</summary>
+        public static (int[] Lay, int Size) Memory(MeshInfo i)
+        {
+            int outp = INPUT + ((i.Payload + 15) & ~15);
+            if (i.Kind == "ts") return (new[] { WORKGROUP, INPUT, outp, outp + i.Payload }, outp + ((i.Payload + 3) & ~3));
+            int blocks = (Math.Max(Math.Max(i.MaxV, i.MaxP), 1) + BLOCK - 1) / BLOCK;
+            int prim = outp + blocks * Math.Max(i.Vertex.Count + i.Primitive.Count, 1) * BLOCK * 4;
+            return (new[] { WORKGROUP, INPUT, outp, prim }, prim + ((4 + 3 * Math.Max(i.MaxP, 1) + 3) & ~3));
+        }
+
+        /// <summary>指令里有自己的共享内存访问（LDS / STS / ATOMS：DecoderAmpere 的 Ampere 操作码）：会压在阶段内存上，控制段又不给它的大小</summary>
+        public static bool OwnShared(ReadOnlySpan<byte> code)
+        {
+            for (int o = 0; o + 16 <= code.Length; o += 16)
+                if ((BitConverter.ToUInt16(code[o..]) & 0xfff) is 0x984 or 0x388 or 0x988 or 0x38c or 0x98c or 0xf8c) return true;
+            return false;
+        }
+
+        // 计算核、它的参数、SPIRV-Cross 排在阶段内存之前的线程变量（私有变量的初值：GlobalToStorage.TryGenerateRawStorageOp 的上次命中项 uint _N = 0u;，上游参考实现（MIT）0f510fd5），再是阶段内存（第一个 threadgroup 数组）
+        static readonly Regex s_kernel = new(@"kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*((?:(?!threadgroup\b)[^\n{};]+;\n\s*)*)threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n", RegexOptions.CultureInvariant);
+        static readonly Regex s_name = new(@"(\w+)\s*(?:\[\[.*\]\])?$", RegexOptions.CultureInvariant);
+        static readonly Regex s_attr = new(@"\s*\[\[.*\]\]$", RegexOptions.CultureInvariant);
+        static readonly Regex s_thread = new(@"^(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$", RegexOptions.CultureInvariant);
+
+        /// <summary>参数表按最外层逗号切</summary>
+        static List<string> Params(string text)
+        {
+            var o = new List<string>(); int depth = 0; var cur = new StringBuilder();
+            foreach (char ch in text)
+            {
+                if (ch == ',' && depth == 0) { o.Add(cur.ToString().Trim()); cur.Clear(); continue; }
+                if (ch is '(' or '[' or '<') depth++;
+                if (ch is ')' or ']' or '>') depth--;
+                cur.Append(ch);
+            }
+            if (cur.ToString().Trim().Length > 0) o.Add(cur.ToString().Trim());
+            return o;
+        }
+
+        static string Name(string p)
+        {
+            var m = s_name.Match(p);
+            if (!m.Success) throw new DshError("mesh stage failed", "计算核参数里找不到名字：" + p);
+            return m.Groups[1].Value;
+        }
+
+        /// <summary>属性区分量拼成 float4：b[k] 是字的表达式，null = 着色器不写的分量（同顶点输出的初值 0, 0, 0, 1）</summary>
+        static string Component(string[] b) => "float4(" + string.Join(", ", Enumerable.Range(0, 4).Select(k => b[k] != null ? $"as_type<float>({b[k]})" : k == 3 ? "1.0" : "0.0")) + ")";
+
+        /// <summary>{n: [分量 x / y / z / w 在 comps 里的序号或 null]}，按 n 首次出现的顺序（null = 位置）</summary>
+        static List<(int? N, int?[] Idx)> Members(List<(int? N, int C)> comps)
+        {
+            var o = new List<(int?, int?[])>();
+            foreach (var n in comps.Select(x => x.N).Distinct())
+                o.Add((n, Enumerable.Range(0, 4).Select(c => { int k = comps.IndexOf((n, c)); return k >= 0 ? (int?)k : null; }).ToArray()));
+            return o;
+        }
+
+        /// <summary>翻好的计算核包成对象函数 main0（ts），或网格函数 main0 与 main0_z（ms：两种深度约定，同顶点着色器 VsDepth：main0 近平面 -w、main0_z 近平面 0）</summary>
+        public static string ToStage(string msl, MeshInfo i)
+        {
+            string kind = i.Kind;
+            var m = s_kernel.Match(msl);
+            if (!m.Success) throw new DshError("mesh stage failed", kind + ": 没有以阶段内存开头的 kernel main0");
+            var ps = Params(m.Groups[1].Value); string local = m.Groups[2].Value.Trim(); int words = int.Parse(m.Groups[3].Value); string mem = m.Groups[4].Value;
+            var names = ps.Select(Name).ToList();
+            var plain = ps.Select(p => s_attr.Replace(p, "")).ToList();
+            // 计算核本体改成内联函数，阶段内存由包装持有：本体里的提前返回（没东西可写的线程）回到包装，照样交输出。线程变量留在本体里：每线程调一次，同计算核
+            string src = msl[..m.Index] + "static inline __attribute__((always_inline)) void dm_stage_body(" + string.Join(", ", plain.Append($"threadgroup spvUnsafeArray<uint, {words}>& {mem}")) + ")\n{\n"
+                + (local.Length > 0 ? "    " + local + "\n" : "") + msl[(m.Index + m.Length)..];
+            string call = "dm_stage_body(" + string.Join(", ", names.Append(mem)) + ");";
+            // 线程号 / 线程组号：计算核参数里有就用它的（一个属性在函数里只能出现一次），没有就包装自己加参数
+            var own = new Dictionary<string, string>();
+            foreach (var p in ps) { var t = s_thread.Match(p); if (t.Success) own[t.Groups[3].Value] = t.Groups[2].Value + (t.Groups[1].Value == "uint3" ? ".x" : ""); }
+            string lid = own.GetValueOrDefault("thread_position_in_threadgroup", "dm_lid"), tg = own.GetValueOrDefault("threadgroup_position_in_grid", "dm_tg");
+            var extra = new List<string>();
+            foreach (var (a, v) in new[] { ("thread_position_in_threadgroup", "dm_lid"), ("threadgroup_position_in_grid", "dm_tg") }) if (!own.ContainsKey(a)) extra.Add($"uint {v} [[{a}]]");
+            var (lay, _) = Memory(i);
+            int thr = i.Threads, pay = (i.Payload + 3) >> 2;
+            int wg = lay[0] >> 2, inp = lay[1] >> 2, outw = lay[2] >> 2, prim = lay[3];
+            string start = $"    threadgroup spvUnsafeArray<uint, {words}> {mem};\n"
+                         + $"    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n"
+                         + "    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
+            string head = $"struct dm_payload_t {{ uint w[{Math.Max(pay, 1)}]; }};\n";
+            string sig = string.Join(", ", ps.Concat(extra));
+            string first = $"constant uint* dm_first [[buffer({FIRST_SLOT})]]";   // 本次绘制起始工作组号，宿主绑（接口约定 3）
+            if (kind == "ts")
+                return src + "\n" + head
+                    + $"[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {first})\n{{\n{start}"
+                    + $"    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n"
+                    + $"    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                    + $"    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{outw}u + i];\n"
+                    + $"    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{outw + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n";
+            if (i.MaxV > METAL_MAX_VERTICES || i.MaxP > METAL_MAX_PRIMITIVES) throw new DshError("mesh stage failed", $"ms: {i.MaxV} 顶点 / {i.MaxP} 图元超 Metal 网格上限（{METAL_MAX_VERTICES} / {METAL_MAX_PRIMITIVES}）");
+            int nv = i.Vertex.Count;
+            int stride = Math.Max(nv + i.Primitive.Count, 1) * BLOCK;   // 一块属性的字数
+            string[] Word(int?[] comps) => Enumerable.Range(0, 4).Select(k => comps[k] is int c ? $"{mem}[b + {c * BLOCK}u]" : null).ToArray();
+            var vm = Members(i.Vertex);
+            var pm = Members(i.Primitive).Select(x => (x.N, x.Idx.Select(c => c is int ci ? (int?)(ci + nv) : null).ToArray())).ToList();
+            if (!vm.Any(x => x.N == null)) throw new DshError("mesh stage failed", "ms: SPH 没开位置分量");
+            head += "struct dm_vertex_t {\n    float4 position [[position]];\n" + string.Concat(vm.Where(x => x.N != null).Select(x => $"    float4 a{x.N} [[user(locn{x.N})]];\n")) + "};\n"
+                  + (pm.Count > 0 ? "struct dm_prim_t {\n" + string.Concat(pm.Select(x => $"    float4 p{x.N} [[user(locn{x.N})]];\n")) + "};\n" : "")
+                  + $"using dm_mesh_t = metal::mesh<dm_vertex_t, {(pm.Count > 0 ? "dm_prim_t" : "void")}, {i.MaxV}, {i.MaxP}, metal::topology::triangle>;\n";
+            string Block(string v) => $"{outw}u + ({v} / {BLOCK}u) * {stride}u + {v} % {BLOCK}u";
+            string sets = string.Concat(vm.Select(x => $"        v.{(x.N == null ? "position" : $"a{x.N}")} = {Component(Word(x.Idx))};\n"));
+            string psets = string.Concat(pm.Select(x => $"        p.p{x.N} = {Component(Word(x.Item2))};\n"));
+            string Entry(string name, bool gl)
+            {
+                // 有任务时输入是载荷，字 0 = 本组在其任务派生里的序号（硬件放的；任务从 +4 起写，+0 不是它写的字）
+                string fill = i.Task
+                    ? $"    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n"
+                      + "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                      + $"    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n"
+                    : $"    if ({lid} == 0u) {mem}[{wg}] = dm_first[0] + {tg};\n";
+                return $"[[mesh]] void {name}({sig}, dm_mesh_t dm_out" + (i.Task ? ", const object_data dm_payload_t& dm_payload [[payload]]" : $", {first}") + $")\n{{\n{start}{fill}"
+                    + $"    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                    + $"    uint np = min({mem}[{prim >> 2}] >> 24, {i.MaxP}u);\n"
+                    + $"    if ({lid} == 0u) dm_out.set_primitive_count(np);\n"
+                    + $"    for (uint n = {lid}; n < {i.MaxV}u; n += {thr}u)\n    {{\n        uint b = {Block("n")};\n        dm_vertex_t v;\n{sets}"
+                    + (gl ? "        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n" : "")
+                    + "        dm_out.set_vertex(n, v);\n    }\n"
+                    + (pm.Count > 0 ? $"    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {Block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n" : "")
+                    + $"    for (uint n = {lid}; n < np * 3u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n";
+            }
+            return src + "\n" + head + Entry("main0", true) + "\n" + Entry("main0_z", false);
+        }
+    }
+}

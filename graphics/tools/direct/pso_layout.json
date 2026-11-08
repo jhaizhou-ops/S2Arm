@@ -1,0 +1,19 @@
+{
+  "comment": "pso_skey 布局与整数像素格式（graphics/tools/direct/pso_layout_gen.m 在 Mac 上导出，勿手改；tests/pso_layout_test.sh 核）",
+  "skey_size": 432,
+  "fs": [24, 24],
+  "merged": 50,
+  "fz": 51,
+  "cfmt": 104,
+  "blend_en": 148,
+  "blend0": 160,
+  "lmap": 416,
+  "blend_bits": {
+    "src_rgb": [3, 7],
+    "dst_rgb": [10, 7],
+    "src_a": [17, 7],
+    "dst_a": [24, 7]
+  },
+  "uint_formats": [13, 23, 33, 53, 63, 73, 91, 103, 113, 123],
+  "sint_formats": [14, 24, 34, 54, 64, 74, 104, 114, 124]
+}

@@ -1,0 +1,20 @@
+; t_wline 片元：o0 = (1, 0, 0, 1)
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o0
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %o0 Location 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %v4f = OpTypeVector %float 4
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+        %red = OpConstantComposite %v4f %f1 %f0 %f0 %f1
+     %ptrv4o = OpTypePointer Output %v4f
+         %o0 = OpVariable %ptrv4o Output
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+               OpStore %o0 %red
+               OpReturn
+               OpFunctionEnd

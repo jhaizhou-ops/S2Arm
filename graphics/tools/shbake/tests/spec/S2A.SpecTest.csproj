@@ -1,0 +1,16 @@
+<!-- 包内特化核对单测（10-21 画面·着色器线 spec）：构造「磁盘缓存条目的特化状态」与「运行时真值」逐字段不符，期望核对判不符 + 红行；相符 / 翻译没读过的字段不判。
+     由 ../t_spec_verify.sh 编与跑（产物与中间件放仓库 build/，不往 compat/tree 写 obj）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>S2A.SpecTest</AssemblyName>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../../../compat/tree/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+  </ItemGroup>
+</Project>

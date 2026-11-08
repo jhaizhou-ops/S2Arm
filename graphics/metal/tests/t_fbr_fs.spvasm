@@ -1,0 +1,124 @@
+; t_fbr 第二次绘制的片元（形态照 Ryujinx 塞尔达 a33fb3ce8c28cac0：中间值经函数局部变量、坐标 = in4.c × (1 ÷ in4.w) ÷ 缩放因子、外包 select(isnan) 兜底）：
+;   缩放因子 S = flag ? float(textureSize(t, 0).c) : 1.0，flag = (bitcast<int>(sb.m1.z) >> 0) & 1 ≠ 0（同 Ryujinx s2a_flags.z「片元阶段贴图非归一化位图」）
+;   out loc1 = texture(t, uv)；t = 集 2 绑定 128
+               OpCapability Shader
+               OpCapability ImageQuery
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %in4 %o1
+               OpExecutionMode %main OriginUpperLeft
+               OpDecorate %in4 Location 4
+               OpDecorate %o1 Location 1
+               OpMemberDecorate %SB 0 Offset 0
+               OpMemberDecorate %SB 1 Offset 16
+               OpDecorate %SB Block
+               OpDecorate %sb DescriptorSet 0
+               OpDecorate %sb Binding 0
+               OpDecorate %tex DescriptorSet 2
+               OpDecorate %tex Binding 128
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+        %int = OpTypeInt 32 1
+       %bool = OpTypeBool
+        %v2f = OpTypeVector %float 2
+        %v4f = OpTypeVector %float 4
+        %v2i = OpTypeVector %int 2
+        %v4i = OpTypeVector %int 4
+        %v2b = OpTypeVector %bool 2
+         %SB = OpTypeStruct %v4f %v4i
+      %ptrSB = OpTypePointer Uniform %SB
+         %sb = OpVariable %ptrSB Uniform
+      %ptrUi = OpTypePointer Uniform %int
+        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+       %simg = OpTypeSampledImage %img
+    %ptrsimg = OpTypePointer UniformConstant %simg
+        %tex = OpVariable %ptrsimg UniformConstant
+     %ptrIv4 = OpTypePointer Input %v4f
+        %in4 = OpVariable %ptrIv4 Input
+      %ptrIf = OpTypePointer Input %float
+     %ptrOv4 = OpTypePointer Output %v4f
+         %o1 = OpVariable %ptrOv4 Output
+      %ptrFf = OpTypePointer Function %float
+      %ptrFb = OpTypePointer Function %bool
+         %i0 = OpConstant %int 0
+         %i1 = OpConstant %int 1
+         %i2 = OpConstant %int 2
+         %i3 = OpConstant %int 3
+         %f0 = OpConstant %float 0
+         %f1 = OpConstant %float 1
+       %v2f0 = OpConstantComposite %v2f %f0 %f0
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %vw = OpVariable %ptrFf Function
+         %vx = OpVariable %ptrFf Function
+         %vy = OpVariable %ptrFf Function
+        %vrw = OpVariable %ptrFf Function
+        %vff = OpVariable %ptrFf Function
+      %vflag = OpVariable %ptrFb Function
+        %vSx = OpVariable %ptrFf Function
+        %vSy = OpVariable %ptrFf Function
+        %vmx = OpVariable %ptrFf Function
+        %vmy = OpVariable %ptrFf Function
+         %vu = OpVariable %ptrFf Function
+         %vv = OpVariable %ptrFf Function
+         %aw = OpAccessChain %ptrIf %in4 %i3
+         %lw = OpLoad %float %aw
+               OpStore %vw %lw
+         %ax = OpAccessChain %ptrIf %in4 %i0
+         %lx = OpLoad %float %ax
+               OpStore %vx %lx
+         %ay = OpAccessChain %ptrIf %in4 %i1
+         %ly = OpLoad %float %ay
+               OpStore %vy %ly
+         %tw = OpLoad %float %vw
+         %rw = OpFDiv %float %f1 %tw
+               OpStore %vrw %rw
+         %fa = OpAccessChain %ptrUi %sb %i1 %i2
+         %fl = OpLoad %int %fa
+         %ff = OpBitcast %float %fl
+               OpStore %vff %ff
+         %g0 = OpLoad %float %vff
+         %gi = OpBitcast %int %g0
+         %sh = OpShiftRightLogical %int %gi %i0
+         %an = OpBitwiseAnd %int %sh %i1
+         %ne = OpINotEqual %bool %an %i0
+               OpStore %vflag %ne
+         %s0 = OpLoad %simg %tex
+         %m0 = OpImage %img %s0
+         %z0 = OpImageQuerySizeLod %v2i %m0 %i0
+         %zx = OpCompositeExtract %int %z0 0
+         %zy = OpCompositeExtract %int %z0 1
+        %zxf = OpConvertSToF %float %zx
+        %zyf = OpConvertSToF %float %zy
+         %b0 = OpLoad %bool %vflag
+         %Sx = OpSelect %float %b0 %zxf %f1
+               OpStore %vSx %Sx
+         %b1 = OpLoad %bool %vflag
+         %Sy = OpSelect %float %b1 %zyf %f1
+               OpStore %vSy %Sy
+         %k0 = OpLoad %float %vx
+         %k1 = OpLoad %float %vrw
+         %mx = OpFMul %float %k0 %k1
+               OpStore %vmx %mx
+         %k2 = OpLoad %float %vy
+         %k3 = OpLoad %float %vrw
+         %my = OpFMul %float %k2 %k3
+               OpStore %vmy %my
+         %k4 = OpLoad %float %vmx
+         %k5 = OpLoad %float %vSx
+          %u = OpFDiv %float %k4 %k5
+               OpStore %vu %u
+         %k6 = OpLoad %float %vmy
+         %k7 = OpLoad %float %vSy
+          %v = OpFDiv %float %k6 %k7
+               OpStore %vv %v
+         %s1 = OpLoad %simg %tex
+         %k8 = OpLoad %float %vu
+         %k9 = OpLoad %float %vv
+         %uv = OpCompositeConstruct %v2f %k8 %k9
+        %nan = OpIsNan %v2b %uv
+        %sel = OpSelect %v2f %nan %v2f0 %uv
+          %c = OpImageSampleImplicitLod %v4f %s1 %sel None
+               OpStore %o1 %c
+               OpReturn
+               OpFunctionEnd

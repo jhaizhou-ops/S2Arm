@@ -1,0 +1,59 @@
+; t_prog 循环上限按整次派发缩小（gal_spvx.m）：线程组 4，每线程 n = 0; while (a[0] != 0) n++;（a[0] 恒非 0，只靠上限停）
+; o[0] = atomicMax(n)、o[1] = atomicMin(n)：所有线程同样跑到上限，两者应相等（不受线程间互写影响）
+; 循环头标签到回边：头块 3 + 判断块 5（读 a[0] 的下标钳位另加 1–2）+ 循环体 6 + 续块 2 = 17–18 条 → 权重 32
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 4 1 1
+               OpDecorate %arru ArrayStride 4
+               OpMemberDecorate %SA 0 Offset 0
+               OpDecorate %SA BufferBlock
+               OpDecorate %sa DescriptorSet 1
+               OpDecorate %sa Binding 0
+               OpDecorate %so DescriptorSet 1
+               OpDecorate %so Binding 1
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+      %int_1 = OpConstant %int 1
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+       %arru = OpTypeRuntimeArray %uint
+         %SA = OpTypeStruct %arru
+      %ptrSA = OpTypePointer Uniform %SA
+         %sa = OpVariable %ptrSA Uniform
+         %so = OpVariable %ptrSA Uniform
+       %ptru = OpTypePointer Uniform %uint
+      %ptrfu = OpTypePointer Function %uint
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %n = OpVariable %ptrfu Function
+               OpStore %n %uint_0
+               OpBranch %hdr
+        %hdr = OpLabel
+               OpLoopMerge %mrg %cont None
+               OpBranch %chk
+        %chk = OpLabel
+        %pa0 = OpAccessChain %ptru %sa %int_0 %int_0
+         %a0 = OpLoad %uint %pa0
+         %nz = OpINotEqual %bool %a0 %uint_0
+               OpBranchConditional %nz %body %mrg
+       %body = OpLabel
+         %nv = OpLoad %uint %n
+         %n1 = OpIAdd %uint %nv %uint_1
+         %n2 = OpIAdd %uint %n1 %uint_0
+               OpStore %n %n2
+               OpBranch %cont
+       %cont = OpLabel
+               OpBranch %hdr
+        %mrg = OpLabel
+         %nf = OpLoad %uint %n
+        %po0 = OpAccessChain %ptru %so %int_0 %int_0
+         %r0 = OpAtomicUMax %uint %po0 %uint_1 %uint_0 %nf
+        %po1 = OpAccessChain %ptru %so %int_0 %int_1
+         %r1 = OpAtomicUMin %uint %po1 %uint_1 %uint_0 %nf
+               OpReturn
+               OpFunctionEnd

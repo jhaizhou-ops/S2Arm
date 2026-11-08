@@ -1,0 +1,18 @@
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %pos
+OpDecorate %pos BuiltIn Position
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4 = OpTypeVector %float 4
+%ptr = OpTypePointer Output %v4
+%zero = OpConstant %float 0
+%one = OpConstant %float 1
+%p = OpConstantComposite %v4 %zero %zero %zero %one
+%pos = OpVariable %ptr Output
+%main = OpFunction %void None %fn
+%label = OpLabel
+OpStore %pos %p
+OpReturn
+OpFunctionEnd

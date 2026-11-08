@@ -1,0 +1,109 @@
+; t_prog 共享内存溢出（gal_prog.m spill_msl）：共享内存总量 36928 字节 > Apple 上限 32 KB，最大的数组 big 溢出到设备内存（每线程组一段），small 留在线程组内存
+; 等价 GLSL（线程组 256，派发 4 组；l = gl_LocalInvocationID.x，g = gl_WorkGroupID.x）：
+;   shared uint big[9216];   // 36864 字节
+;   shared uint small[16];   // 64 字节
+;   for (k = 0; k < 36; k++) big[k*256 + l] = g*65536 + k*256 + l;   // 每组 256 线程写满 9216 个
+;   if (l < 16) small[l] = l*3 + g;
+;   barrier();
+;   atomicAdd(big[9215], 1);                                           // 组内 256 线程原子加
+;   barrier();
+;   o[g*256 + l] = big[9215 - l*36] + (small[l & 15] << 24);           // 读别的线程写的格（验屏障对溢出段可见）
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %lid %wid
+               OpExecutionMode %main LocalSize 256 1 1
+               OpDecorate %lid BuiltIn LocalInvocationId
+               OpDecorate %wid BuiltIn WorkgroupId
+               OpDecorate %arru ArrayStride 4
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %Out BufferBlock
+               OpDecorate %ob DescriptorSet 1
+               OpDecorate %ob Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+        %v3u = OpTypeVector %uint 3
+      %int_0 = OpConstant %int 0
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
+    %uint_15 = OpConstant %uint 15
+    %uint_16 = OpConstant %uint 16
+    %uint_24 = OpConstant %uint 24
+    %uint_36 = OpConstant %uint 36
+   %uint_256 = OpConstant %uint 256
+   %uint_264 = OpConstant %uint 264
+  %uint_9215 = OpConstant %uint 9215
+  %uint_9216 = OpConstant %uint 9216
+ %uint_65536 = OpConstant %uint 65536
+     %arrbig = OpTypeArray %uint %uint_9216
+      %arrsm = OpTypeArray %uint %uint_16
+       %arru = OpTypeRuntimeArray %uint
+        %Out = OpTypeStruct %arru
+     %ptrOut = OpTypePointer Uniform %Out
+       %ptru = OpTypePointer Uniform %uint
+     %ptrbig = OpTypePointer Workgroup %arrbig
+      %ptrsm = OpTypePointer Workgroup %arrsm
+      %ptrwu = OpTypePointer Workgroup %uint
+      %ptrin = OpTypePointer Input %v3u
+         %ob = OpVariable %ptrOut Uniform
+        %big = OpVariable %ptrbig Workgroup
+         %sm = OpVariable %ptrsm Workgroup
+        %lid = OpVariable %ptrin Input
+        %wid = OpVariable %ptrin Input
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+         %lv = OpLoad %v3u %lid
+          %l = OpCompositeExtract %uint %lv 0
+         %wv = OpLoad %v3u %wid
+          %g = OpCompositeExtract %uint %wv 0
+         %gb = OpIMul %uint %g %uint_65536
+               OpBranch %head
+       %head = OpLabel
+          %k = OpPhi %uint %uint_0 %entry %kn %cont
+               OpLoopMerge %merge %cont None
+               OpBranch %body
+       %body = OpLabel
+       %k256 = OpIMul %uint %k %uint_256
+        %idx = OpIAdd %uint %k256 %l
+        %val = OpIAdd %uint %gb %idx
+         %bp = OpAccessChain %ptrwu %big %idx
+               OpStore %bp %val
+               OpBranch %cont
+       %cont = OpLabel
+         %kn = OpIAdd %uint %k %uint_1
+          %c = OpULessThan %bool %kn %uint_36
+               OpBranchConditional %c %head %merge
+      %merge = OpLabel
+       %lt16 = OpULessThan %bool %l %uint_16
+               OpSelectionMerge %m2 None
+               OpBranchConditional %lt16 %ws %m2
+         %ws = OpLabel
+         %l3 = OpIMul %uint %l %uint_3
+         %sv = OpIAdd %uint %l3 %g
+         %sp = OpAccessChain %ptrwu %sm %l
+               OpStore %sp %sv
+               OpBranch %m2
+         %m2 = OpLabel
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+         %ap = OpAccessChain %ptrwu %big %uint_9215
+        %old = OpAtomicIAdd %uint %ap %uint_2 %uint_0 %uint_1
+               OpControlBarrier %uint_2 %uint_2 %uint_264
+        %l36 = OpIMul %uint %l %uint_36
+         %ri = OpISub %uint %uint_9215 %l36
+         %rp = OpAccessChain %ptrwu %big %ri
+         %rv = OpLoad %uint %rp
+         %lm = OpBitwiseAnd %uint %l %uint_15
+        %sp2 = OpAccessChain %ptrwu %sm %lm
+        %smv = OpLoad %uint %sp2
+         %sh = OpShiftLeftLogical %uint %smv %uint_24
+        %res = OpIAdd %uint %rv %sh
+       %g256 = OpIMul %uint %g %uint_256
+         %oi = OpIAdd %uint %g256 %l
+         %op = OpAccessChain %ptru %ob %int_0 %oi
+               OpStore %op %res
+               OpReturn
+               OpFunctionEnd

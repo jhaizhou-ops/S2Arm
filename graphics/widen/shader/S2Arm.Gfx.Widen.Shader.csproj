@@ -1,0 +1,11 @@
+<!-- 通用宽屏 · 着色器改写（画幅线）：出包烘焙（graphics/tools/shbake）与运行时同一份——顶点越界外推、片元 y 去缩放、常量读法分析、程序宽屏元数据索引。
+     单独成工程：着色器阶段键（tools/csproj_closure.py）只认这里，改运行时宽屏逻辑（../WidenFrame.cs 等）不触发九款重新翻译。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>S2Arm.Gfx.Widen</RootNamespace>
+  </PropertyGroup>
+</Project>

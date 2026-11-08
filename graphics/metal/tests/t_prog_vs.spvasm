@@ -1,0 +1,60 @@
+; t_prog 端到端顶点着色器（手写 SPIR-V，形态照 Ryujinx：常量缓冲 = Block 结构 { vec4 d[N] }，集 0；绑定 0 = 支撑缓冲）
+; 等价 GLSL：
+;   layout(set=0,binding=0) uniform S { vec4 d[4]; } sb;
+;   layout(location=0) in vec2 pos; layout(location=2) in uint dummy;
+;   void main() { gl_Position = vec4(pos * sb.d[0].xy + vec2(float(dummy)), 0.0, 1.0); }
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %pos %dummy %out
+               OpDecorate %pos Location 0
+               OpDecorate %dummy Location 2
+               OpMemberDecorate %PerVertex 0 BuiltIn Position
+               OpDecorate %PerVertex Block
+               OpDecorate %arr4 ArrayStride 16
+               OpMemberDecorate %S 0 Offset 0
+               OpDecorate %S Block
+               OpDecorate %sb DescriptorSet 0
+               OpDecorate %sb Binding 0
+       %void = OpTypeVoid
+         %fn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+       %v2f = OpTypeVector %float 2
+       %v4f = OpTypeVector %float 4
+     %uint_4 = OpConstant %uint 4
+      %int_0 = OpConstant %int 0
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+       %arr4 = OpTypeArray %v4f %uint_4
+          %S = OpTypeStruct %arr4
+       %ptrS = OpTypePointer Uniform %S
+         %sb = OpVariable %ptrS Uniform
+     %ptrv4u = OpTypePointer Uniform %v4f
+     %ptrv2i = OpTypePointer Input %v2f
+      %ptrui = OpTypePointer Input %uint
+        %pos = OpVariable %ptrv2i Input
+      %dummy = OpVariable %ptrui Input
+  %PerVertex = OpTypeStruct %v4f
+     %ptrPVo = OpTypePointer Output %PerVertex
+        %out = OpVariable %ptrPVo Output
+     %ptrv4o = OpTypePointer Output %v4f
+       %main = OpFunction %void None %fn
+      %entry = OpLabel
+          %p = OpLoad %v2f %pos
+          %d = OpLoad %uint %dummy
+         %df = OpConvertUToF %float %d
+        %dv2 = OpCompositeConstruct %v2f %df %df
+        %sp0 = OpAccessChain %ptrv4u %sb %int_0 %int_0
+         %s0 = OpLoad %v4f %sp0
+        %sxy = OpVectorShuffle %v2f %s0 %s0 0 1
+         %ps = OpFMul %v2f %p %sxy
+        %ps2 = OpFAdd %v2f %ps %dv2
+         %px = OpCompositeExtract %float %ps2 0
+         %py = OpCompositeExtract %float %ps2 1
+        %pos4 = OpCompositeConstruct %v4f %px %py %float_0 %float_1
+         %op = OpAccessChain %ptrv4o %out %int_0
+               OpStore %op %pos4
+               OpReturn
+               OpFunctionEnd

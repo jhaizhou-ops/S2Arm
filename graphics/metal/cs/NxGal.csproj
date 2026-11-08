@@ -1,0 +1,24 @@
+<!-- GAL Metal 渲染器的 C# 薄适配：实现 Ryujinx.Graphics.GAL 接口，全部调用直落 C ABI（../gal_abi.h，库名 nxgal）。
+     Mac：宿主进程里由 hostfxr 加载，nxgal 解析到主程序导出（或 NXGAL_LIB 指定的 libnxgal.dylib）；iOS：NativeAOT DirectPInvoke 静态链。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>NxGal</AssemblyName>
+    <RootNamespace>NxGal</RootNamespace>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <OutDir>$(MSBuildThisFileDirectory)../../../build/gal/cs/</OutDir>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <RyuGpu Condition="'$(RyuGpu)' == ''">$(MSBuildThisFileDirectory)../../../compat/tree</RyuGpu>
+  </PropertyGroup>
+  <Import Project="AbiHash.targets" />
+  <ItemGroup>
+    <Compile Remove="caps/**" />   <!-- 能力表单独成工程（caps/NxGalCaps.csproj，烘焙器共用），这里按工程引用 -->
+    <ProjectReference Include="caps/NxGalCaps.csproj" />
+    <ProjectReference Include="$(RyuGpu)/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj" />
+    <ProjectReference Include="$(RyuGpu)/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />   <!-- NxTrack：MemoryTracking / MemoryPermission -->
+  </ItemGroup>
+</Project>

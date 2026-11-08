@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <AssemblyName>S2A.DirectCompiler.Tests</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../compiler/S2A.DirectCompiler.csproj" />
+    <!-- Exercise the exact NativeAOT C-ABI shim on the host as well. -->
+    <Compile Include="../../../../../android/core-runtime/DirectAbi.cs" Link="Android/DirectAbi.cs" />
+    <Compile Include="../../../../../android/core-runtime/DirectCompileNative.cs" Link="Android/DirectCompileNative.cs" />
+  </ItemGroup>
+</Project>
