@@ -40,7 +40,7 @@ EOF
 echo 'HOST_SRCS := $(wildcard ../src/*.c)' > "$R/runtime/build.mk"   # 苹果：通配 runtime/src/*.c 全链
 cat > "$R/android/CMakeLists.txt" <<'EOF'               # 安卓：core 名单只含 alpha
 set(core alpha)
-set(android_src runtime/caller.c runtime/oldgap_use.c)
+set(android_src native/caller.c native/oldgap_use.c)
 foreach(x IN LISTS core)
   list(APPEND SRCS runtime/src/${x}.c)
 endforeach()
