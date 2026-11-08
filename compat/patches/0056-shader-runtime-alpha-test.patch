@@ -1,0 +1,193 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 335dd47e204671924fb8956a31ee991d5bf2fd4f..a8c571a43ecf9011e174ca74c3f1f39395a077fd 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -705,6 +705,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 _state.State.AlphaTestEnable,
+                 _state.State.AlphaTestRef,
+                 _state.State.AlphaTestFunc);
++
++            _context.SupportBufferUpdater.SetS2AAlphaTest(_state.State.AlphaTestEnable, _state.State.AlphaTestRef, _state.State.AlphaTestFunc);   // S2A：着色器按支持缓冲做透明测试
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+index 7090e6e4c31b99c88c38aba417ba52f21f4e9314..1a9093b0dfef5214932456a704d1c9cb665d3d64 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+@@ -207,6 +207,22 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+         }
+ 
++        public void SetS2AAlphaTest(bool enable, float reference, CompareOp op)   // S2A：透明测试运行时化（SupportBuffer.FragmentAlphaTest：X 比较方式、Y 参考值）
++        {
++            int code = !enable ? 8 : op switch   // AlphaTestOp：Never 1 … Always 8（同 GpuChannelGraphicsState.CreateShaderGraphicsState）
++            {
++                CompareOp.Never or CompareOp.NeverGl => 1, CompareOp.Less or CompareOp.LessGl => 2, CompareOp.Equal or CompareOp.EqualGl => 3,
++                CompareOp.LessOrEqual or CompareOp.LessOrEqualGl => 4, CompareOp.Greater or CompareOp.GreaterGl => 5, CompareOp.NotEqual or CompareOp.NotEqualGl => 6,
++                CompareOp.GreaterOrEqual or CompareOp.GreaterOrEqualGl => 7, _ => 8,
++            };
++            int rb = BitConverter.SingleToInt32Bits(reference);
++            if (_data.FragmentAlphaTest.X != code || _data.FragmentAlphaTest.Y != rb)
++            {
++                _data.FragmentAlphaTest.X = code; _data.FragmentAlphaTest.Y = rb;
++                MarkDirty(SupportBuffer.FragmentAlphaTestOffset, SupportBuffer.FieldSize);
++            }
++        }
++
+         public void SetViewportSize(float viewportWidth, float viewportHeight)
+         {
+             if (_data.ViewportSize.X != viewportWidth || _data.ViewportSize.Y != viewportHeight)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 2a7c52a17b80d6f2d9e87e14fede83bbad5a9ba1..30e57c005cbdd13c99e67fa9120744719c15dbee 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const ushort FileFormatVersionMajor = 1;
+         private const ushort FileFormatVersionMinor = 2;
+         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
+-        private const uint CodeGenVersion = 7354 + 1;   // S2A +1：特化状态运行时化（DepthMode 改读支持缓冲）后翻译结果变了，旧磁盘缓存整份作废，免得编译期版本被不比 DepthMode 的匹配错配
++        private const uint CodeGenVersion = 7354 + 2;   // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试）
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index 58af1d23c07dfc4fb59a17ddca73601ceeff6543..53a3b9f6ffae36ee3df306b46a6df3fb84466929 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -38,7 +38,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             S2AA2cRead = 1 << 9,    // S2AStateRead 位 i ↔ 1 << (9 + i)
+             S2ADepthRead = 1 << 10,
+             S2ACbdpRead = 1 << 11,
+-            S2AReadMask = S2AA2cRead | S2ADepthRead | S2ACbdpRead,
++            S2AAlphaRead = 1 << 12,
++            S2AReadMask = S2AA2cRead | S2ADepthRead | S2ACbdpRead | S2AAlphaRead,
+         }
+ 
+         private QueriedStateFlags _queriedState;
+@@ -605,7 +606,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return false;
+             }
+ 
+-            if (graphicsState.AlphaTestEnable &&
++            if (graphicsState.AlphaTestEnable && (!s2aTracked || (_queriedState & QueriedStateFlags.S2AAlphaRead) != 0) &&   // S2A：运行时化后不读比较方式 / 参考值，不比
+                 (graphicsState.AlphaTestCompare != GraphicsState.AlphaTestCompare ||
+                 graphicsState.AlphaTestReference != GraphicsState.AlphaTestReference))
+             {
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 59f4b6d352e2dffb7d3c8bf16ae0eb046258ace9..7b2c2179b92dac743f39cef16fe01af517a282dc 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -9,7 +9,7 @@ namespace Ryujinx.Graphics.Shader
+     /// <summary>S2A：翻译读过的特化状态位（S2AReportStateUse 的 readFlags；特化状态序列化按位存，只增不改位号）</summary>
+     public static class S2AStateRead
+     {
+-        public const uint A2c = 1, Depth = 2, Cbdp = 4;
++        public const uint A2c = 1, Depth = 2, Cbdp = 4, Alpha = 8;
+     }
+ 
+     public interface IGpuAccessor : ILogger
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index b83e90182988657fd40796d06eb152838685c48b..a2f6b605f65b1d381211393430f65360c89a2292 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -88,7 +88,7 @@ namespace Ryujinx.Graphics.Shader
+             ]);
+         }
+ 
+-        public Vector4<int> FragmentAlphaTest;
++        public Vector4<int> FragmentAlphaTest;   // S2A：X = AlphaTestOp（关时 Always）、Y = 参考值 float 位（透明测试运行时化，EmitterContext.S2AAlphaTestRuntime）
+         public Array8<Vector4<int>> FragmentIsBgra;
+         public Vector4<float> ViewportInverse;
+         public Vector4<float> ViewportSize;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+index 6ccdc76e8f2a14dd23e296e4e66a45e6d81012a5..941cb6c2bbb0e66684524654708312a7b5431c36 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -327,6 +327,34 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         private bool S2ADepthRuntime() => TranslatorContext.S2ARuntimeState && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl();
+ 
++        private void S2AAlphaTestRuntime()
++        {
++            Operand op = this.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.FragmentAlphaTest), Const(0));
++            Operand pass;
++            if ((TranslatorContext.Definitions.OmapTargets & 8) != 0)
++            {
++                Operand alpha = Register(3, RegisterType.Gpr);
++                Operand alphaRef = this.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.FragmentAlphaTest), Const(1));   // float 位（IR 操作数不分类型）
++                Operand Is(AlphaTestOp o) => this.ICompareEqual(op, Const((int)o));
++                Operand Cmp(Instruction c) => Add(Instruction.FP32 | c, Local(), alpha, alphaRef);
++                pass = Is(AlphaTestOp.Always);
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.Equal), Cmp(Instruction.CompareEqual)));
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.Greater), Cmp(Instruction.CompareGreater)));
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.GreaterOrEqual), Cmp(Instruction.CompareGreaterOrEqual)));
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.Less), Cmp(Instruction.CompareLess)));
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.LessOrEqual), Cmp(Instruction.CompareLessOrEqual)));
++                pass = this.BitwiseOr(pass, this.BitwiseAnd(Is(AlphaTestOp.NotEqual), Cmp(Instruction.CompareNotEqual)));
++            }
++            else
++            {
++                pass = this.ICompareNotEqual(op, Const((int)AlphaTestOp.Never));   // 不写 alpha：原版只在 Never 时丢弃
++            }
++            Operand passLabel = Label();
++            this.BranchIfTrue(passLabel, pass);
++            this.Discard();
++            this.MarkLabel(passLabel);
++        }
++
+         public void PrepareForVertexReturn(out Operand oldXLocal, out Operand oldYLocal, out Operand oldZLocal)
+         {
+             if (TranslatorContext.Definitions.ViewportTransformDisable)
+@@ -452,7 +480,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     this.Store(StorageKind.Output, IoVariable.FragmentOutputDepth, null, src);
+                 }
+ 
+-                AlphaTestOp alphaTestOp = TranslatorContext.Definitions.AlphaTestCompare;
++                // S2A：透明测试运行时化——开着时比较方式 / 参考值读支持缓冲 FragmentAlphaTest，一份着色器覆盖全部比较方式与参考值（只有透明测试开的程序带 discard，
++                // 普通绘制仍是无 discard 的那份，保住分块延迟渲染的隐藏面剔除）。离线烘焙器给每个程序再出一份「透明测试开」的特化状态
++                bool s2aAlphaRt = TranslatorContext.S2ARuntimeState && TranslatorContext.Definitions.S2AAlphaTestEnabled;
++                if (s2aAlphaRt) S2AAlphaTestRuntime();
++
++                AlphaTestOp alphaTestOp = s2aAlphaRt ? AlphaTestOp.Always : TranslatorContext.Definitions.AlphaTestCompare;
+ 
+                 if (alphaTestOp != AlphaTestOp.Always)
+                 {
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index a78c08642ecbea3694019ce1e12ef936a22da2a3..5ea49b8c5db091a8e8d2feef168ae78844329100 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -21,7 +21,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         // S2A（10-19 出包线）：记下这次翻译实际读了哪些特化状态，缓存匹配只比读过的（ShaderSpecializationState.MatchesGraphics）；原版无条件比 a2c 抖动与全部 32 个属性类型，
+         // 同一份翻译结果因没读过的字段不同而未命中、运行时现翻（动森首局现翻 8 支：代码全同，只差 a2c_dither / 未用位置的属性类型）
+-        public bool S2AA2cRead, S2ADepthRead;
++        public bool S2AA2cRead, S2ADepthRead, S2AAlphaRead;
+         public uint S2AAttrIntUse, S2AAttrSintUse;   // S2A：顶点属性读出值进了整数运算的位置 / 其中有带符号用法的（Transforms/S2AAttrIntUse，离线烘焙器出整数类别变体用）
+         public uint S2AAttrRead;
+         public bool AlphaToCoverageDitherEnable { get { S2AA2cRead = true; return _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable; } }
+@@ -31,8 +31,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public float PointSize => _graphicsState.PointSize;
+ 
+-        public AlphaTestOp AlphaTestCompare => _graphicsState.AlphaTestCompare;
+-        public float AlphaTestReference => _graphicsState.AlphaTestReference;
++        public AlphaTestOp AlphaTestCompare { get { S2AAlphaRead = true; return _graphicsState.AlphaTestCompare; } }   // S2A：读了才进匹配（比较方式 / 参考值）
++        public float AlphaTestReference { get { S2AAlphaRead = true; return _graphicsState.AlphaTestReference; } }
++        public bool S2AAlphaTestEnabled => _graphicsState.AlphaTestCompare != AlphaTestOp.Always;   // S2A：运行时化只要「开没开」（匹配仍比 AlphaTestEnable），不记读过
+ 
+         public bool GpPassthrough { get; }
+         public bool LastInVertexPipeline { get; set; }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 1bb73331b0e5a29cf09c1c76481a2924ed83b905..f8cccc9fae42c557301ac55101b8b2a70ac10cea 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -237,7 +237,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         }
+ 
+         // S2A：把这次翻译读过的特化状态报给访问器（写进特化状态，缓存匹配只比读过的）
+-        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse((Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0), Definitions.S2AAttrRead);
++        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse((Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0) | (Definitions.S2AAlphaRead ? S2AStateRead.Alpha : 0), Definitions.S2AAttrRead);
+ 
+         public ShaderProgram Translate(TranslatorContext other, bool asCompute = false)
+         {

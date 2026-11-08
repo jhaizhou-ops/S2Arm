@@ -1,0 +1,21 @@
+diff --git a/src/Ryujinx.Audio/AudioManager.cs b/src/Ryujinx.Audio/AudioManager.cs
+index bde4103e0222250e6dd41a591b86c3204891b6c1..ec18edbec4a30929f1b59ffe83d6114af28568b3 100644
+--- a/src/Ryujinx.Audio/AudioManager.cs
++++ b/src/Ryujinx.Audio/AudioManager.cs
+@@ -97,12 +97,14 @@ namespace Ryujinx.Audio
+ 
+                 lock (_lock)
+                 {
++                    // S2Arm: reset before running the updates, not after: a driver signal raised while they run (e.g. a buffer
++                    // queued and consumed meanwhile) was cleared by the late Reset and its buffers waited for an unrelated event
++                    _updateRequiredEvents[0].Reset();
++
+                     foreach (Action action in _actions)
+                     {
+                         action?.Invoke();
+                     }
+-
+-                    _updateRequiredEvents[0].Reset();
+                 }
+             }
+         }

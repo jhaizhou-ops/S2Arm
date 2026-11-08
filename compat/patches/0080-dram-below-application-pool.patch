@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+index 5543ff31f50a32de9236df4a89f4ce28e1844ec5..6ec44974948d780b359e67bdcbeaf8da350f5017 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+@@ -53,7 +53,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+ 
+         public NvHostAsGpuDeviceFile(ServiceCtx context, IVirtualMemoryManager memory, ulong owner) : base(context, owner)
+         {
+-            _asContext = new AddressSpaceContext(context.Device.Gpu.CreateMemoryManager(owner, context.Device.Memory.Size));
++            _asContext = new AddressSpaceContext(context.Device.Gpu.CreateMemoryManager(owner, context.Device.Configuration.MemoryConfiguration.DramSize));
+             _memoryAllocator = new NvMemoryAllocator();
+         }
+ 
+diff --git a/src/Ryujinx.HLE/Switch.cs b/src/Ryujinx.HLE/Switch.cs
+index 90af47988ac737d05161403fa1841a445ef6716d..d432f1892feea3573d6bd3e376141981a0bc9d73 100644
+--- a/src/Ryujinx.HLE/Switch.cs
++++ b/src/Ryujinx.HLE/Switch.cs
+@@ -83,7 +83,12 @@ namespace Ryujinx.HLE
+ #pragma warning disable IDE0055 // Disable formatting
+             DirtyHacks        = new DirtyHacks(Configuration.Hacks);
+             AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(Configuration.AudioDeviceDriver);
+-            Memory            = new MemoryBlock(Configuration.MemoryConfiguration.DramSize, memoryAllocationFlags);
++            // S2Arm: the application pool (top of DRAM) is the game's memory, and the game runs in the host 64 GB address window, not in this block.
++            // Reserve only DRAM below the application pool (kernel / service / nv / applet pools: 811 MB on 4 GiB); on iPhone the address space
++            // outside the window has no 4 GB hole when a game fills the window. Any allocation from the application pool now faults loudly.
++            ulong dramBelowApplicationPool = Configuration.MemoryConfiguration.DramSize -
++                HOS.Kernel.Common.KSystemControl.GetApplicationPoolSize(Configuration.MemoryConfiguration.KernelMemoryArrange);
++            Memory            = new MemoryBlock(dramBelowApplicationPool, memoryAllocationFlags);
+             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
+             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
+             System            = new HOS.Horizon(this);

@@ -1,0 +1,165 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shader.cs b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+index 811b80d7269c4f0bb809b5587f877a20daef4da7..2b429171723b391786070dc0c853f9442933a35e 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Shader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+@@ -14,6 +14,10 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private static readonly nint _ptrMainEntryPointName = Marshal.StringToHGlobalAnsi("main");
+ 
++        // GLSL is compiled for the device's own Vulkan version: SPIR-V 1.5 is not valid on a
++        // Vulkan 1.1 device, and Adreno's 1.1 driver rejects it at vkCreateShaderModule time.
++        internal static uint TargetVulkanVersion = Vk.Version12.Value;
++
+         private readonly Vk _api;
+         private readonly Device _device;
+         private readonly ShaderStageFlags _stage;
+@@ -75,8 +79,9 @@ namespace Ryujinx.Graphics.Vulkan
+             CompileOptions* options = api.CompileOptionsInitialize();
+ 
+             api.CompileOptionsSetSourceLanguage(options, SourceLanguage.Glsl);
+-            api.CompileOptionsSetTargetSpirv(options, SpirvVersion.Shaderc15);
+-            api.CompileOptionsSetTargetEnv(options, TargetEnv.Vulkan, Vk.Version12);
++            api.CompileOptionsSetTargetSpirv(options,
++                TargetVulkanVersion >= Vk.Version12.Value ? SpirvVersion.Shaderc15 : SpirvVersion.Shaderc13);
++            api.CompileOptionsSetTargetEnv(options, TargetEnv.Vulkan, TargetVulkanVersion);
+ 
+             CompilationResult* scr = api.CompileIntoSpv(compiler, glsl, (nuint)glsl.Length, GetShaderCShaderStage(stage), "Ryu", "main", options);
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 2871b66f75b46082a6c4b42750a40e85e4fc0e8f..0c48b2c8fb8a2d5d1f1261ff9c8045d0729ce3f5 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -391,13 +391,53 @@ namespace Ryujinx.Graphics.Vulkan
+                 features2.PNext = &supportedFeaturesDynamicAttachmentFeedbackLoopLayout;
+             }
+ 
++            // Vulkan 1.2 core feature structs are not legal in a 1.1 instance/device query chain;
++            // on a 1.1 device the matching KHR/EXT feature structs are chained instead (below).
++            bool hasVulkan12 = physicalDevice.PhysicalDeviceProperties.ApiVersion >= Vk.Version12.Value;
++
+             PhysicalDeviceVulkan12Features supportedPhysicalDeviceVulkan12Features = new()
+             {
+                 SType = StructureType.PhysicalDeviceVulkan12Features,
+                 PNext = features2.PNext,
+             };
+ 
+-            features2.PNext = &supportedPhysicalDeviceVulkan12Features;
++            if (hasVulkan12)
++            {
++                features2.PNext = &supportedPhysicalDeviceVulkan12Features;
++            }
++
++            // Vulkan 1.1 devices expose the same features through promoted extensions. Query them
++            // with their own structs and enable those extensions at device creation.
++            bool hasDescriptorIndexing = !hasVulkan12 && physicalDevice.IsDeviceExtensionPresent("VK_EXT_descriptor_indexing");
++            bool hasUniformBufferStandardLayout = !hasVulkan12 && physicalDevice.IsDeviceExtensionPresent("VK_KHR_uniform_buffer_standard_layout");
++            bool has8BitStorage = !hasVulkan12 && physicalDevice.IsDeviceExtensionPresent("VK_KHR_8bit_storage");
++            bool hasFloat16Int8 = !hasVulkan12 && physicalDevice.IsDeviceExtensionPresent("VK_KHR_shader_float16_int8");
++
++            PhysicalDeviceDescriptorIndexingFeaturesEXT supportedDescriptorIndexing = new()
++            {
++                SType = StructureType.PhysicalDeviceDescriptorIndexingFeaturesExt,
++                PNext = features2.PNext,
++            };
++            PhysicalDeviceUniformBufferStandardLayoutFeatures supportedUniformBufferStandardLayout = new()
++            {
++                SType = StructureType.PhysicalDeviceUniformBufferStandardLayoutFeatures,
++                PNext = features2.PNext,
++            };
++            PhysicalDevice8BitStorageFeatures supported8BitStorage = new()
++            {
++                SType = StructureType.PhysicalDevice8BitStorageFeatures,
++                PNext = features2.PNext,
++            };
++            PhysicalDeviceShaderFloat16Int8Features supportedFloat16Int8 = new()
++            {
++                SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
++                PNext = features2.PNext,
++            };
++
++            if (hasFloat16Int8) features2.PNext = &supportedFloat16Int8;
++            if (has8BitStorage) features2.PNext = &supported8BitStorage;
++            if (hasUniformBufferStandardLayout) features2.PNext = &supportedUniformBufferStandardLayout;
++            if (hasDescriptorIndexing) features2.PNext = &supportedDescriptorIndexing;
+ 
+             PhysicalDeviceExtendedDynamicStateFeaturesEXT supportedDynamicState = new()
+             {
+@@ -576,7 +616,44 @@ namespace Ryujinx.Graphics.Vulkan
+                 ShaderOutputViewportIndex = supportedPhysicalDeviceVulkan12Features.ShaderOutputViewportIndex,
+             };
+ 
+-            pExtendedFeatures = &featuresVk12;
++            if (hasVulkan12)
++            {
++                pExtendedFeatures = &featuresVk12;
++            }
++
++            PhysicalDeviceDescriptorIndexingFeaturesEXT featuresDescriptorIndexing = new()
++            {
++                SType = StructureType.PhysicalDeviceDescriptorIndexingFeaturesExt,
++                PNext = pExtendedFeatures,
++                ShaderSampledImageArrayNonUniformIndexing = supportedDescriptorIndexing.ShaderSampledImageArrayNonUniformIndexing,
++                ShaderStorageImageArrayNonUniformIndexing = supportedDescriptorIndexing.ShaderStorageImageArrayNonUniformIndexing,
++                RuntimeDescriptorArray = supportedDescriptorIndexing.RuntimeDescriptorArray,
++            };
++            PhysicalDeviceUniformBufferStandardLayoutFeatures featuresUniformBufferStandardLayout = new()
++            {
++                SType = StructureType.PhysicalDeviceUniformBufferStandardLayoutFeatures,
++                PNext = pExtendedFeatures,
++                UniformBufferStandardLayout = supportedUniformBufferStandardLayout.UniformBufferStandardLayout,
++            };
++            PhysicalDevice8BitStorageFeatures features8BitStorage = new()
++            {
++                SType = StructureType.PhysicalDevice8BitStorageFeatures,
++                PNext = pExtendedFeatures,
++                StorageBuffer8BitAccess = supported8BitStorage.StorageBuffer8BitAccess,
++                UniformAndStorageBuffer8BitAccess = supported8BitStorage.UniformAndStorageBuffer8BitAccess,
++            };
++            PhysicalDeviceShaderFloat16Int8Features featuresFloat16Int8 = new()
++            {
++                SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
++                PNext = pExtendedFeatures,
++                ShaderFloat16 = supportedFloat16Int8.ShaderFloat16,
++                ShaderInt8 = supportedFloat16Int8.ShaderInt8,
++            };
++
++            if (hasFloat16Int8) pExtendedFeatures = &featuresFloat16Int8;
++            if (has8BitStorage) pExtendedFeatures = &features8BitStorage;
++            if (hasUniformBufferStandardLayout) pExtendedFeatures = &featuresUniformBufferStandardLayout;
++            if (hasDescriptorIndexing) pExtendedFeatures = &featuresDescriptorIndexing;
+ 
+             PhysicalDeviceIndexTypeUint8FeaturesEXT featuresIndexU8;
+ 
+@@ -669,6 +746,10 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();
++            if (hasDescriptorIndexing) enabledExtensions = enabledExtensions.Append("VK_EXT_descriptor_indexing").ToArray();
++            if (hasUniformBufferStandardLayout) enabledExtensions = enabledExtensions.Append("VK_KHR_uniform_buffer_standard_layout").ToArray();
++            if (has8BitStorage) enabledExtensions = enabledExtensions.Append("VK_KHR_8bit_storage").ToArray();
++            if (hasFloat16Int8) enabledExtensions = enabledExtensions.Append("VK_KHR_shader_float16_int8").ToArray();
+             PhysicalDeviceSwapchainMaintenance1FeaturesEXT enabledSwapchainMaintenance = new();
+             if (canQuerySwapchainMaintenance && supportedSwapchainMaintenance.SwapchainMaintenance1)
+             {
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 76c5cc952ac0402448d1c03e140c615605c636c0..85586d67be91888d62d65bf8b266479ecedc1379 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -452,9 +452,15 @@ namespace Ryujinx.Graphics.Vulkan
+             _surface = _getSurface(_instance.Instance, Api);
+             _physicalDevice = VulkanInitialization.FindSuitablePhysicalDevice(Api, _instance, _surface, _preferredGpuId);
+ 
+-            if (WindowFactory != null && _physicalDevice.PhysicalDeviceProperties.ApiVersion < Vk.Version12.Value)
++            Shader.TargetVulkanVersion = _physicalDevice.PhysicalDeviceProperties.ApiVersion < Vk.Version12.Value
++                ? Vk.Version11.Value
++                : Vk.Version12.Value;
++
++            // Vulkan 1.1 devices are supported: 1.2 core feature structs are not chained there, and
++            // the renderer consumes whatever the capability snapshot reports as enabled.
++            if (WindowFactory != null && _physicalDevice.PhysicalDeviceProperties.ApiVersion < Vk.Version11.Value)
+             {
+-                throw new NotSupportedException("Android's current Vulkan feature chain requires device API 1.2 or newer.");
++                throw new NotSupportedException("Android's Vulkan backend requires device API 1.1 or newer.");
+             }
+ 
+             uint queueFamilyIndex = VulkanInitialization.FindSuitableQueueFamily(Api, _physicalDevice, _surface, out uint maxQueueCount);

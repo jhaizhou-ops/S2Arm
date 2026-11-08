@@ -1,0 +1,54 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index 30aba2efdd7fbf290c078b2bb7e16757bb64256e..19f0053b15ba18b5acca52c198d49ef0a2c5188a 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -333,8 +333,9 @@ namespace Ryujinx.HLE.HOS
+                 State.DockedMode = newState;
+                 PerformanceState.PerformanceMode = State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
+ 
+-                AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
+-                AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
++                // S2Arm：游戏显式关了哪条通知就不发那条（缺省都发，与原行为一致）
++                if (AppletState.OperationModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
++                if (AppletState.PerformanceModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
+                 AppletState.MessageEvent.ReadableEvent.Signal();
+ 
+                 SignalDisplayResolutionChange();
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+index 35c8775684d58e096d523c41144d9467768bf837..91172055d9291fd4255433da7136c845f3d2c3a9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+@@ -151,6 +151,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+             Logger.Stub?.PrintStub(LogClass.ServiceAm, new { operationModeChangedNotification });
+ 
+             _operationModeChangedNotification = operationModeChangedNotification;
++            context.Device.System.AppletState.OperationModeChangedNotification = operationModeChangedNotification;   // S2Arm：ChangeDockedModeState 看它
+ 
+             return ResultCode.Success;
+         }
+@@ -164,6 +165,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+             Logger.Stub?.PrintStub(LogClass.ServiceAm, new { performanceModeChangedNotification });
+ 
+             _performanceModeChangedNotification = performanceModeChangedNotification;
++            context.Device.System.AppletState.PerformanceModeChangedNotification = performanceModeChangedNotification;
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+index 89909588665932fb89b1f462dd487594d2f07942..f0827ac10316f7f3110e2c7b57fa9d91f5788c83 100644
+--- a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
++++ b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+@@ -16,9 +16,11 @@ namespace Ryujinx.HLE.HOS.SystemState
+ 
+         public IdDictionary IndirectLayerHandles { get; }
+ 
+-        // S2Arm（缺口扫描族 1，11-01）：游戏经 ISelfController 设的焦点开关，原先存在 ISelfController 里读完即弃。
+-        //   失焦暂停缺省开（与主机一致：应用失焦即挂起，游戏用 SetOutOfFocusSuspendingEnabled(false) 关）
++        // S2Arm（缺口扫描族 1 / 2，11-01）：游戏经 ISelfController 设的焦点 / 模式通知开关，原先各自存在 ISelfController 里读完即弃。
++        //   失焦暂停缺省开（与主机一致：应用失焦即挂起，游戏用 SetOutOfFocusSuspendingEnabled(false) 关）；模式变化通知缺省开，游戏显式关了才不发
+         public bool OutOfFocusSuspending { get; private set; } = true;
++        public bool OperationModeChangedNotification { get; set; } = true;
++        public bool PerformanceModeChangedNotification { get; set; } = true;
+         public (bool, bool, bool) FocusHandlingMode { get; set; }
+         // 宿主接线（S2A.Services）：失焦暂停开关变了就告诉平台壳（平台壳失焦时据此冻结客机）
+         public static System.Action<bool> OutOfFocusSuspendingChanged;

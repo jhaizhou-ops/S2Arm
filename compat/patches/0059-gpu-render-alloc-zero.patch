@@ -1,0 +1,319 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index eff835cce0cf3ff903b79e4998d526787258c2d1..e63a1ed3b490d3af6b85d9e5e731715e5aa84256 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -215,7 +215,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         public void DispatchCalls()
+         {
+             // Use this opportunity to also dispose any pending channels that were closed.
++            long s2aT = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（段）
+             _context.RunDeferredActions();
++            if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0003, t - s2aT); s2aT = t; }
+ 
+             // Process command buffers.
+             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
+@@ -229,6 +231,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+ 
+                 ReadOnlySpan<int> words = entry.Fetch(entry.Processor.MemoryManager, flushCommandBuffer);
++                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0001, t - s2aT); s2aT = t; }
+ 
+                 // If we are changing the current channel,
+                 // we need to force all the host state to be updated.
+@@ -239,6 +242,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+ 
+                 entry.Processor.Process(entry.EntryAddress, words);
++                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0002, t - s2aT); s2aT = t; }
+ 
+                 // S2Arm: the snapshot is not referenced after processing (the replay cache keeps operations, not words)
+                 if (entry.PooledWords)
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+index 250fa14c009d1e8274f1465c0608c4674424d6a3..237d38a0e8479da392969ef00e402e8dd0e63094 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+@@ -66,15 +66,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             public int Index, Method, Sub, Count;
+         }
+ 
+-        private sealed class S2ASeg
++        private struct S2ASeg
+         {
+             public int Len;
+             public DmaState Start, End;
+-            public S2AOp[] Ops;
++            public int OpStart, OpCount; // 操作序列在 _s2aArena 里的位置
+         }
+ 
+-        private const int S2ASegMinLen = 8, S2ASegCap = 32768;
+-        private readonly Dictionary<ulong, S2ASeg> _s2aSegs = new();
++        // 零分配（10-20 帧率能耗线：动森岛上稳态渲染线程分配的 96% 是录段时 new S2ASeg + ToArray，约每帧 14 段、每段 930 B）：
++        // 段是值类型、字典按上限一次分配好；操作序列追加进一块预分配的环形区，区满或段数到上限整表清空（与原上限清空同义，旧区里的记录随之作废）。
++        private const int S2ASegMinLen = 8, S2ASegCap = 32768, S2AArenaOps = 1 << 20; // 区 1M 条操作 ≈ 20 MB（原 ToArray 存满上限约 30 MB）
++        private readonly Dictionary<ulong, S2ASeg> _s2aSegs = new(S2ASegCap);
++        private readonly S2AOp[] _s2aArena = new S2AOp[S2AArenaOps];
++        private int _s2aArenaPos;
+         // S2A：两次准入——段第一次未命中只把键记进这张直接映射表（哈希高 16 位定位，64K 项、只分配一次），照常解读、不记录不入缓存；
+         // 同一键再次未命中才记录入缓存。只出现一次的段（内联常量数据等）若每次都入缓存，旧库实测动森岛上 60 秒托管分配 468 MB（稳态的 97%）。
+         private const int S2ASeenBits = 16;
+@@ -113,9 +117,46 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             _s2aRec?.Add(new S2AOp { Kind = kind, Index = index, Method = method, Sub = sub, Count = count, IsLast = isLast });
+         }
+ 
+-        private void S2AReplay(ulong baseGpuVa, ReadOnlySpan<int> cb, S2ASeg seg)
++        // S2A：等价核对（S2A_SEGCHECK=1，诊断）：命中时不回放，照常解读并重新记录，与缓存里的记录逐条比、结束状态比；不一致计数并打前 5 条。执行走原解读，结果本身不受影响
++        private static readonly bool S2ASegCheck = Environment.GetEnvironmentVariable("S2A_SEGCHECK") == "1";
++        private static long _s2aCheckHits, _s2aCheckBad;
++        private static readonly bool S2ASegCorrupt = Environment.GetEnvironmentVariable("S2A_SEGCHECK_CORRUPT") == "1";
++
++        private void S2ACheckHit(ulong baseGpuVa, ReadOnlySpan<int> cb, in S2ASeg seg)
+         {
+-            S2AOp[] ops = seg.Ops;
++            _s2aRec = _s2aRecBuf;
++            _s2aRec.Clear();
++            try
++            {
++                ProcessCore(baseGpuVa, cb);
++            }
++            finally
++            {
++                _s2aRec = null;
++            }
++
++            ReadOnlySpan<S2AOp> want = _s2aArena.AsSpan(seg.OpStart, seg.OpCount), got = CollectionsMarshal.AsSpan(_s2aRecBuf);
++            bool ok = want.Length == got.Length && S2AStateEq(seg.End, _state);
++            for (int i = 0; ok && i < want.Length; i++)
++            {
++                ok = want[i].Kind == got[i].Kind && want[i].IsLast == got[i].IsLast && want[i].Index == got[i].Index && want[i].Method == got[i].Method && want[i].Sub == got[i].Sub && want[i].Count == got[i].Count;
++            }
++
++            _s2aCheckHits++;
++            if (!ok && ++_s2aCheckBad <= 5)
++            {
++                Console.Error.WriteLine($"[段缓存] 【红】等价核对不一致：段长 {cb.Length}，记录 {want.Length} 条 / 重解 {got.Length} 条，区位 {seg.OpStart}");
++            }
++
++            if ((_s2aCheckHits & 0xffff) == 0)
++            {
++                Console.Error.WriteLine($"[段缓存] 等价核对：命中 {_s2aCheckHits}，不一致 {_s2aCheckBad}");
++            }
++        }
++
++        private void S2AReplay(ulong baseGpuVa, ReadOnlySpan<int> cb, in S2ASeg seg)
++        {
++            ReadOnlySpan<S2AOp> ops = _s2aArena.AsSpan(seg.OpStart, seg.OpCount);
+             for (int i = 0; i < ops.Length; i++)
+             {
+                 ref readonly S2AOp op = ref ops[i];
+@@ -144,13 +185,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+                         break;
+                     case 2:
+-                        _3dClass.ConstantBufferUpdate(cb.Slice(op.Index, op.Count));
++                        { long s2aCb0 = S2AAllocTrace.Begin(); _3dClass.ConstantBufferUpdate(cb.Slice(op.Index, op.Count)); S2AAllocTrace.End(0x30_0000, s2aCb0); } // S2A：渲染线程分配拆账
+                         break;
+                 }
+             }
+ 
+             _state = seg.End;
++            long s2aA0 = S2AAllocTrace.Begin(); // S2A：渲染线程分配拆账
+             _3dClass.FlushUboDirty();
++            S2AAllocTrace.End(0x30_0001, s2aA0);
+         }
+ 
+         private readonly ThreedClass _3dClass;
+@@ -196,7 +239,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+             if (_s2aSegs.TryGetValue(key, out S2ASeg seg) && seg.Len == commandBuffer.Length && S2AStateEq(seg.Start, start))
+             {
+-                S2AReplay(baseGpuVa, commandBuffer, seg);
++                if (S2ASegCheck)
++                {
++                    S2ACheckHit(baseGpuVa, commandBuffer, in seg);
++                    return;
++                }
++
++                S2AReplay(baseGpuVa, commandBuffer, in seg);
+                 return;
+             }
+ 
+@@ -220,12 +269,27 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 _s2aRec = null;
+             }
+ 
+-            if (_s2aSegs.Count >= S2ASegCap)
++            int nOps = _s2aRecBuf.Count;
++            if (nOps > S2AArenaOps)
++            {
++                return; // 一段的操作多过整块区：不进缓存（照常解读过了）
++            }
++
++            if (_s2aSegs.Count >= S2ASegCap || _s2aArenaPos + nOps > S2AArenaOps)
+             {
++                _s2aArenaPos = 0;
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0006, 1); // S2A：拆账诊断（清空次数）
+                 _s2aSegs.Clear();
+             }
+ 
+-            _s2aSegs[key] = new S2ASeg { Len = commandBuffer.Length, Start = start, End = _state, Ops = _s2aRecBuf.ToArray() };
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(_s2aSegs.ContainsKey(key) ? 0x40_0005 : 0x40_0007, 1); // S2A：拆账诊断（覆盖已有键 / 新键）
++
++            long s2aR0 = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（段）
++            CollectionsMarshal.AsSpan(_s2aRecBuf).CopyTo(_s2aArena.AsSpan(_s2aArenaPos, nOps));
++            if (S2ASegCorrupt && nOps > 0) _s2aArena[_s2aArenaPos].Index ^= 1; // S2A：核对器正对照（故意改坏记录）
++            _s2aSegs[key] = new S2ASeg { Len = commandBuffer.Length, Start = start, End = _state, OpStart = _s2aArenaPos, OpCount = nOps };
++            _s2aArenaPos += nOps;
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0004, GC.GetAllocatedBytesForCurrentThread() - s2aR0);
+         }
+ 
+         /// <summary>
+@@ -290,7 +354,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+             }
+ 
++            long s2aA0 = S2AAllocTrace.Begin(); // S2A：渲染线程分配拆账
+             _3dClass.FlushUboDirty();
++            S2AAllocTrace.End(0x30_0001, s2aA0);
+         }
+ 
+         /// <summary>
+@@ -354,7 +420,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 meth.SecOp == SecOp.NonIncMethod)
+             {
+                 S2ARecOp(2, offset + 1, 0, 0, meth.MethodCount, false); // S2A：免解读缓存记录
+-                _3dClass.ConstantBufferUpdate(commandBuffer.Slice(offset + 1, meth.MethodCount));
++                long s2aA0 = S2AAllocTrace.Begin(); _3dClass.ConstantBufferUpdate(commandBuffer.Slice(offset + 1, meth.MethodCount)); S2AAllocTrace.End(0x30_0000, s2aA0); // S2A：渲染线程分配拆账
+ 
+                 return true;
+             }
+@@ -368,6 +434,26 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         /// <param name="gpuVa">GPU virtual address where the command word is located</param>
+         /// <param name="meth">Method to be processed</param>
+         private void Send(ulong gpuVa, int offset, int argument, int subChannel, bool isLastCall)
++        {
++            if (S2AAllocTrace.On) // S2A：渲染线程分配拆账
++            {
++                long a0 = S2AAllocTrace.Begin();
++                try
++                {
++                    SendCore(gpuVa, offset, argument, subChannel, isLastCall);
++                }
++                finally
++                {
++                    S2AAllocTrace.End(offset >= 0xe00 ? 0x10_0000 | ((offset >> 1) & MacroIndexMask) : (subChannel << 16) | (offset * 4), a0);
++                }
++
++                return;
++            }
++
++            SendCore(gpuVa, offset, argument, subChannel, isLastCall);
++        }
++
++        private void SendCore(ulong gpuVa, int offset, int argument, int subChannel, bool isLastCall)
+         {
+             if (offset < 0x60)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0cb1758730fd141cffba5202991c851ced5f62e9
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -0,0 +1,98 @@
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.Linq;
++
++namespace Ryujinx.Graphics.Gpu
++{
++    /// <summary>
++    /// S2A：渲染线程托管分配按 GPFIFO 分派点拆账（S2A_ALLOC_TRACE=1，定位用；关着只有一次静态布尔判断）。
++    /// 键：3D / 计算 / 2D 等类方法 = 子通道 &lt;&lt; 16 | 字节偏移；宏 = 0x10_0000 | 宏号；内联数据 = 0x20_0000 | 子通道；常量缓冲更新 = 0x30_0000；FlushUboDirty = 0x30_0001。
++    /// 嵌套调用不重复计（只在最外层计）。每 20 秒打一次累计前 20（[分配·渲染] 行），口径同服务层 S2A_ALLOC_TRACE。
++    /// </summary>
++    public static class S2AAllocTrace
++    {
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++
++        private static readonly Dictionary<int, (long Bytes, long Calls)> _acc = new();
++        private static int _depth;
++        private static long _nextDump;
++
++        public static long Begin()
++        {
++            if (!On || _depth++ != 0)
++            {
++                return -1;
++            }
++
++            return GC.GetAllocatedBytesForCurrentThread();
++        }
++
++        public static void End(int key, long a0)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            _depth--;
++
++            if (a0 < 0)
++            {
++                return;
++            }
++
++            long d = GC.GetAllocatedBytesForCurrentThread() - a0;
++
++            if (d > 0)
++            {
++                _acc.TryGetValue(key, out var v);
++                _acc[key] = (v.Bytes + d, v.Calls + 1);
++            }
++
++            long now = Stopwatch.GetTimestamp();
++
++            if (now >= _nextDump)
++            {
++                if (_nextDump != 0)
++                {
++                    Dump();
++                }
++
++                _nextDump = now + Stopwatch.Frequency * 20;
++            }
++        }
++
++        /// <summary>包含式段计数（不参与嵌套去重，与上面的分派点并列看）：0x40_0001 取命令（Fetch）、0x40_0002 Process 整段（含其中分派）、0x40_0003 RunDeferredActions、0x40_0004 免解读缓存录段。</summary>
++        public static void Raw(int key, long bytes)
++        {
++            if (bytes > 0)
++            {
++                _acc.TryGetValue(key, out var v);
++                _acc[key] = (v.Bytes + bytes, v.Calls + 1);
++            }
++        }
++
++        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键" };
++
++        private static string Name(int key) => (key >> 20) switch
++        {
++            0 => $"方法 子通道 {key >> 16} 偏移 0x{key & 0xffff:x}",
++            1 => $"宏 {key & 0xffff}",
++            2 => $"内联数据 子通道 {key & 0xffff}",
++            4 => _rawNames[key & 0xf],
++            _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
++        };
++
++        private static void Dump()
++        {
++            long total = _acc.Where(kv => kv.Key >> 20 != 4).Sum(kv => kv.Value.Bytes);
++            Console.Error.WriteLine($"[分配·渲染] GPFIFO 分派累计 {total} B（前 20，字节 / 有分配的调用次数）：");
++
++            foreach (var kv in _acc.OrderByDescending(kv => kv.Value.Bytes).Take(24))
++            {
++                Console.Error.WriteLine($"[分配·渲染]   {Name(kv.Key)}：{kv.Value.Bytes} B / {kv.Value.Calls} 次");
++            }
++        }
++    }
++}

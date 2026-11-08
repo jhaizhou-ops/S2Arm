@@ -1,0 +1,51 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
+index 9e329b8dbfca7aec15f03cb54184c8f7f01a6dca..919f6e96788f3f9faea3f0c533f5dc98d3478736 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
+@@ -14,6 +14,11 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AsyncContext
+         public KEvent SystemEvent { get; }
+         public bool IsInitialized { get; private set; }
+         public bool IsRunning { get; private set; }
++        // S2Arm: completion state of the task itself. HasDone / GetResult answer from it, not from the event: the SDK attaches the event as an
++        //   auto-clear nn::os::SystemEvent, so waiting on it resets the signal, and nn::account::AsyncContext's destructor aborts when HasDone says
++        //   false (Zelda: Ocarina of Time's EnsureIdTokenCacheAsync, Break 2162-0001 at boot). Set before the event is signalled
++        private volatile bool _done;
++        public bool IsDone => _done;
+ 
+         public AsyncExecution(KEvent asyncEvent)
+         {
+@@ -40,9 +45,10 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AsyncContext
+                     Logger.Warning?.Print(LogClass.ServiceAcc, $"Exception: {ex.Message}");
+                 }
+ 
+-                SystemEvent.ReadableEvent.Signal();
+-
+                 IsRunning = false;
++                _done = true;
++
++                SystemEvent.ReadableEvent.Signal();
+             }, _token);
+ 
+             IsInitialized = true;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
+index 91daba5f0e40c5f075bfae9b41574e96fd6b0dce..0b771de82611101620a4fc1a3a165fd478def084 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
+@@ -54,7 +54,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+                 return ResultCode.AsyncExecutionNotInitialized;
+             }
+ 
+-            context.ResponseData.Write(AsyncExecution.SystemEvent.ReadableEvent.IsSignaled());
++            context.ResponseData.Write(AsyncExecution.IsDone);   // S2Arm: the task's state, not the (auto-cleared) event, see AsyncExecution.IsDone
+ 
+             return ResultCode.Success;
+         }
+@@ -68,7 +68,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+                 return ResultCode.AsyncExecutionNotInitialized;
+             }
+ 
+-            if (!AsyncExecution.SystemEvent.ReadableEvent.IsSignaled())
++            if (!AsyncExecution.IsDone)
+             {
+                 return ResultCode.Unknown41;
+             }

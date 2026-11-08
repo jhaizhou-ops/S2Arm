@@ -1,0 +1,710 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BinarySerializer.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BinarySerializer.cs
+index 76975c13b06b563c07e523df23f3ea706d0dcb53..336a9962089cc55f174047476c6e316aa7cea275 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BinarySerializer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BinarySerializer.cs
+@@ -32,10 +32,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         public readonly void Read<T>(ref T data) where T : unmanaged
+         {
+             Span<byte> buffer = MemoryMarshal.Cast<T, byte>(MemoryMarshal.CreateSpan(ref data, 1));
+-            for (int offset = 0; offset < buffer.Length;)
+-            {
+-                offset += _activeStream.Read(buffer[offset..]);
+-            }
++            _activeStream.ReadExactly(buffer);
+         }
+ 
+         /// <summary>
+@@ -79,16 +76,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+ 
+             // Structs are expected to expand but not shrink between versions.
+-            if (size > Unsafe.SizeOf<T>())
++            if (size < 0 || size > Unsafe.SizeOf<T>())
+             {
+                 throw new DiskCacheLoadException(DiskCacheLoadResult.FileCorruptedInvalidLength);
+             }
+ 
+             Span<byte> buffer = MemoryMarshal.Cast<T, byte>(MemoryMarshal.CreateSpan(ref data, 1))[..size];
+-            for (int offset = 0; offset < buffer.Length;)
+-            {
+-                offset += _activeStream.Read(buffer[offset..]);
+-            }
++            _activeStream.ReadExactly(buffer);
+         }
+ 
+         /// <summary>
+@@ -136,7 +130,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     _activeStream = new BrotliStream(_stream, CompressionMode.Decompress, true);
+                     break;
+                 default:
+-                    throw new ArgumentException($"Invalid compression algorithm \"{algorithm}\"");
++                    throw new InvalidDataException($"Invalid compression algorithm \"{algorithm}\"");
+             }
+         }
+ 
+@@ -196,25 +190,35 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             {
+                 case CompressionAlgorithm.None:
+                     stream.ReadExactly(data);
++                    // Only bounded host records have a known compressed extent. Unbounded
++                    // guest streams may contain another record immediately after this one.
++                    if (stream is BoundedReadStream && stream.Position != stream.Length)
++                    {
++                        throw new InvalidDataException("Uncompressed cache record length does not match its declaration.");
++                    }
+                     break;
+                 case CompressionAlgorithm.Deflate:
+-                    stream = new DeflateStream(stream, CompressionMode.Decompress, true);
+-                    for (int offset = 0; offset < data.Length;)
++                    using (DeflateStream compressed = new(stream, CompressionMode.Decompress, true))
+                     {
+-                        offset += stream.Read(data[offset..]);
++                        compressed.ReadExactly(data);
++                        if (compressed.ReadByte() != -1)
++                        {
++                            throw new InvalidDataException("Decompressed cache record exceeds its declared length.");
++                        }
+                     }
+-
+-                    stream.Dispose();
+                     break;
+                 case CompressionAlgorithm.Brotli:
+-                    stream = new BrotliStream(stream, CompressionMode.Decompress, true);
+-                    for (int offset = 0; offset < data.Length;)
++                    using (BrotliStream compressed = new(stream, CompressionMode.Decompress, true))
+                     {
+-                        offset += stream.Read(data[offset..]);
++                        compressed.ReadExactly(data);
++                        if (compressed.ReadByte() != -1)
++                        {
++                            throw new InvalidDataException("Decompressed cache record exceeds its declared length.");
++                        }
+                     }
+-
+-                    stream.Dispose();
+                     break;
++                default:
++                    throw new InvalidDataException($"Invalid compression algorithm \"{algorithm}\"");
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BoundedReadStream.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BoundedReadStream.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..81c10ab60b130a8014dec0016ec4e1957d7c81b6
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BoundedReadStream.cs
+@@ -0,0 +1,39 @@
++using System;
++using System.IO;
++
++namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
++{
++    /// <summary>Read-only view of one compressed record; disposing it leaves the cache file open.</summary>
++    sealed class BoundedReadStream : Stream
++    {
++        private readonly Stream _source;
++        private readonly long _length;
++        private long _remaining;
++
++        public BoundedReadStream(Stream source, long length)
++        {
++            _source = source;
++            _length = length;
++            _remaining = length;
++        }
++
++        public override bool CanRead => true;
++        public override bool CanSeek => false;
++        public override bool CanWrite => false;
++        public override long Length => _length;
++        public override long Position { get => _length - _remaining; set => throw new NotSupportedException(); }
++
++        public override int Read(Span<byte> buffer)
++        {
++            int read = _source.Read(buffer[..(int)Math.Min(buffer.Length, _remaining)]);
++            _remaining -= read;
++            return read;
++        }
++
++        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
++        public override void Flush() => throw new NotSupportedException();
++        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
++        public override void SetLength(long value) => throw new NotSupportedException();
++        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
+index cecfe9acf8b673f18fbfbc192791ae369479963a..86da8f5f07fe3739eea3a3967fc5663d3c23ea69 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="fileName">Name of the file</param>
+         /// <param name="writable">Indicates if the file will be read or written</param>
+         /// <returns>File stream</returns>
+-        public static FileStream OpenFile(string basePath, string fileName, bool writable)
++        public static FileStream OpenFile(string basePath, string fileName, bool writable, int bufferSize = 4096)
+         {
+             string fullPath = Path.Combine(basePath, fileName);
+ 
+@@ -35,7 +35,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+             try
+             {
+-                return new FileStream(fullPath, mode, access, FileShare.Read);
++                // Lazy readers remain open while the single background writer appends records.
++                // Writers publish TOC entries only after their data is flushed.
++                return new FileStream(fullPath, mode, access, writable ? FileShare.Read : FileShare.ReadWrite, bufferSize);
+             }
+             catch (IOException ioException)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index ce9f8b7ec1d7fd30960cf56befcdeefac010b066..999571b2d46590afd499cbfe6202282f39604aca 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -210,12 +210,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="basePath">Base path of the shader cache</param>
+         public DiskCacheHostStorage(string basePath)
+         {
+-            _basePath = basePath;
+-            _guestStorage = new DiskCacheGuestStorage(basePath);
++            _basePath = string.IsNullOrEmpty(basePath) ? basePath : Path.GetFullPath(basePath);
++            _guestStorage = new DiskCacheGuestStorage(_basePath);
+ 
+             if (CacheEnabled)
+             {
+-                Directory.CreateDirectory(basePath);
++                Directory.CreateDirectory(_basePath);
+             }
+         }
+ 
+@@ -244,7 +244,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         {
+             string apiName = context.Capabilities.Api.ToString().ToLowerInvariant();
+             string vendorName = RemoveInvalidCharacters(context.Capabilities.VendorName.ToLowerInvariant());
+-            return $"{apiName}_{vendorName}_bin"; // S2A：主机缓存存渲染器自己的程序二进制，另起文件名，不与原版 SPIR-V 打包格式混读
++            // Legacy host files have no effective-capability identity and are deliberately not
++            // trusted. Guest/shared records remain usable for on-demand translation. The same
++            // identity is used by ShBake and runtime (including NxGal, which reports Vulkan).
++            return $"{apiName}_{vendorName}_bin_{HostCacheCapabilities.GetIdentity(context.Capabilities)}";
+         }
+ 
+         /// <summary>
+@@ -594,6 +597,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private Stream _lazySharedData;
+         private Stream _lazyHostToc;
+         private Stream _lazyHostData;
++        private ulong _lazyTimestamp;
+         private readonly object _lazyLock = new();
+ 
+         // S2Arm（帧率能耗线 10-24，GC）：启动时载入的客体代码共享表（下标 = 客体代码号），按需程序只存下标；
+@@ -680,6 +684,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// </summary>
+         private (ShaderSpecializationState specState, byte[] hostCode, CachedShaderStage[] shaders) S2AReadParts(S2ALazyProgram lazy)
+         {
++            if (_lazyTimestamp != lazy.Timestamp)
++            {
++                _lazySharedData?.Dispose();
++                _lazySharedData = null;
++                CloseHostStreams(ref _lazyHostToc, ref _lazyHostData);
++                _lazyTimestamp = lazy.Timestamp;
++            }
+             _lazySharedData ??= DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: false);
+             _lazySharedData.Seek((long)lazy.DataOffset, SeekOrigin.Begin);
+ 
+@@ -846,7 +857,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="dataFileStream">Host data file stream, initialized if needed</param>
+         /// <param name="guestShaders">Guest shader code for each active stage</param>
+         /// <param name="programIndex">Index of the program on the cache</param>
+-        /// <param name="expectedTimestamp">Timestamp of the shared cache file. The host file must be newer than it</param>
++        /// <param name="expectedTimestamp">Creation token of the shared cache generation; the host file must match it</param>
+         /// <returns>Host binary code, or null if not found</returns>
+         private (byte[], CachedShaderStage[]) ReadHostCode(
+             GpuContext context,
+@@ -856,59 +867,77 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             int programIndex,
+             ulong expectedTimestamp)
+         {
+-            if (tocFileStream == null && dataFileStream == null)
++            string tocFilePath = Path.Combine(_basePath, GetHostTocFileName(context));
++            string dataFilePath = Path.Combine(_basePath, GetHostDataFileName(context));
++
++            // A context capability change must not keep using handles opened for another
++            // identity. A rejected header must not become accepted on the next lazy read.
++            if (tocFileStream is not FileStream tocFile || tocFile.Name != tocFilePath ||
++                dataFileStream is not FileStream dataFile || dataFile.Name != dataFilePath)
+             {
+-                string tocFilePath = Path.Combine(_basePath, GetHostTocFileName(context));
+-                string dataFilePath = Path.Combine(_basePath, GetHostDataFileName(context));
++                CloseHostStreams(ref tocFileStream, ref dataFileStream);
+ 
+                 if (!File.Exists(tocFilePath) || !File.Exists(dataFilePath))
+                 {
+                     return (null, null);
+                 }
+ 
+-                tocFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: false);
+-                dataFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: false);
+-
+-                BinarySerializer tempTocReader = new(tocFileStream);
+-
+-                TocHeader header = new();
+-
+-                tempTocReader.Read(ref header);
+-
+-                if (header.Timestamp < expectedTimestamp)
++                try
+                 {
+-                    return (null, null);
++                    // Admission must observe the current header, not FileStream's buffered
++                    // copy of a generation that a writer has since replaced in this file.
++                    tocFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: false, bufferSize: 1);
++                    dataFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: false);
++                }
++                catch
++                {
++                    CloseHostStreams(ref tocFileStream, ref dataFileStream);
++                    throw;
+                 }
+             }
+ 
+-            int offset = Unsafe.SizeOf<TocHeader>() + programIndex * Unsafe.SizeOf<OffsetAndSize>();
+-            if (offset + Unsafe.SizeOf<OffsetAndSize>() > tocFileStream.Length)
++            tocFileStream.Seek(0, SeekOrigin.Begin);
++            BinarySerializer tocReader = new(tocFileStream);
++            TocHeader header = new();
++
++            if (!tocReader.TryRead(ref header) || header.Magic != TochMagic ||
++                header.FormatVersion != FileFormatVersionPacked || header.CodeGenVersion != CodeGenVersion ||
++                header.Timestamp != expectedTimestamp)
+             {
++                CloseHostStreams(ref tocFileStream, ref dataFileStream);
+                 return (null, null);
+             }
+ 
+-            if ((ulong)offset >= (ulong)dataFileStream.Length)
++            long offset = Unsafe.SizeOf<TocHeader>() + (long)programIndex * Unsafe.SizeOf<OffsetAndSize>();
++            if (programIndex < 0 || offset + Unsafe.SizeOf<OffsetAndSize>() > tocFileStream.Length)
+             {
+-                throw new DiskCacheLoadException(DiskCacheLoadResult.FileCorruptedGeneric);
++                return (null, null);
+             }
+ 
+             tocFileStream.Seek(offset, SeekOrigin.Begin);
+-
+-            BinarySerializer tocReader = new(tocFileStream);
+-
+             OffsetAndSize offsetAndSize = new();
+             tocReader.Read(ref offsetAndSize);
+ 
+-            if (offsetAndSize.Offset >= (ulong)dataFileStream.Length)
++            // Sparse TOC slots are zero-filled. Offset 0 is a valid first data record;
++            // only an empty size pair denotes a missing host program.
++            if (offsetAndSize.UncompressedSize == 0 && offsetAndSize.CompressedSize == 0)
++            {
++                return (null, null);
++            }
++
++            if (offsetAndSize.UncompressedSize == 0 || offsetAndSize.UncompressedSize > int.MaxValue ||
++                offsetAndSize.CompressedSize == 0 || offsetAndSize.Offset >= (ulong)dataFileStream.Length ||
++                offsetAndSize.CompressedSize > (ulong)dataFileStream.Length - offsetAndSize.Offset)
+             {
+                 throw new DiskCacheLoadException(DiskCacheLoadResult.FileCorruptedGeneric);
+             }
+ 
+             dataFileStream.Seek((long)offsetAndSize.Offset, SeekOrigin.Begin);
+-
+             byte[] hostCode = new byte[offsetAndSize.UncompressedSize];
+-
+-            BinarySerializer.ReadCompressed(dataFileStream, hostCode);
++            using (BoundedReadStream compressedRecord = new(dataFileStream, offsetAndSize.CompressedSize))
++            {
++                BinarySerializer.ReadCompressed(compressedRecord, hostCode);
++            }
+ 
+             CachedShaderStage[] shaders = new CachedShaderStage[guestShaders.Length];
+             BinarySerializer dataReader = new(dataFileStream);
+@@ -935,6 +964,14 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             return (hostCode, shaders);
+         }
+ 
++        private static void CloseHostStreams(ref Stream tocFileStream, ref Stream dataFileStream)
++        {
++            tocFileStream?.Dispose();
++            dataFileStream?.Dispose();
++            tocFileStream = null;
++            dataFileStream = null;
++        }
++
+         /// <summary>
+         /// Gets output streams for the disk cache, for faster batch writing.
+         /// </summary>
+@@ -942,13 +979,26 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <returns>A collection of disk cache output streams</returns>
+         public DiskCacheOutputStreams GetOutputStreams(GpuContext context)
+         {
+-            FileStream tocFileStream = DiskCacheCommon.OpenFile(_basePath, SharedTocFileName, writable: true);
+-            FileStream dataFileStream = DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: true);
+-
+-            FileStream hostTocFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
+-            FileStream hostDataFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
+-
+-            return new DiskCacheOutputStreams(tocFileStream, dataFileStream, hostTocFileStream, hostDataFileStream);
++            FileStream tocFileStream = null;
++            FileStream dataFileStream = null;
++            FileStream hostTocFileStream = null;
++            FileStream hostDataFileStream = null;
++            try
++            {
++                tocFileStream = DiskCacheCommon.OpenFile(_basePath, SharedTocFileName, writable: true);
++                dataFileStream = DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: true);
++                hostTocFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
++                hostDataFileStream = DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
++                return new DiskCacheOutputStreams(tocFileStream, dataFileStream, hostTocFileStream, hostDataFileStream);
++            }
++            catch
++            {
++                tocFileStream?.Dispose();
++                dataFileStream?.Dispose();
++                hostTocFileStream?.Dispose();
++                hostDataFileStream?.Dispose();
++                throw;
++            }
+         }
+ 
+         /// <summary>
+@@ -960,6 +1010,17 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="streams">Output streams to use</param>
+         public void AddShader(GpuContext context, CachedShaderProgram program, ReadOnlySpan<byte> hostCode, DiskCacheOutputStreams streams = null)
+         {
++            // Batch handles belong to one cache root and one capability identity. Reject
++            // cross-domain use before appending either guest code or shared indices.
++            if (streams != null &&
++                (streams.TocFileStream.Name != Path.Combine(_basePath, SharedTocFileName) ||
++                 streams.DataFileStream.Name != Path.Combine(_basePath, SharedDataFileName) ||
++                 streams.HostTocFileStream.Name != Path.Combine(_basePath, GetHostTocFileName(context)) ||
++                 streams.HostDataFileStream.Name != Path.Combine(_basePath, GetHostDataFileName(context))))
++            {
++                throw new InvalidOperationException("Disk cache output streams belong to another cache or capability identity.");
++            }
++
+             uint stagesBitMask = 0;
+ 
+             for (int index = 0; index < program.Shaders.Length; index++)
+@@ -976,64 +1037,86 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 stagesBitMask |= 1u << index;
+             }
+ 
+-            FileStream tocFileStream = streams != null ? streams.TocFileStream : DiskCacheCommon.OpenFile(_basePath, SharedTocFileName, writable: true);
+-            FileStream dataFileStream = streams != null ? streams.DataFileStream : DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: true);
++            FileStream tocFileStream = streams?.TocFileStream;
++            FileStream dataFileStream = streams?.DataFileStream;
+ 
+-            ulong timestamp = (ulong)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
+-
+-            if (tocFileStream.Length == 0)
++            TocHeader sharedHeader = new();
++            try
+             {
+-                TocHeader header = new();
+-                CreateToc(tocFileStream, ref header, TocsMagic, CodeGenVersion, timestamp);
+-            }
++                tocFileStream ??= DiskCacheCommon.OpenFile(_basePath, SharedTocFileName, writable: true);
++                dataFileStream ??= DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: true);
++                if (tocFileStream.Length == 0)
++                {
++                    // Use the shared header's creation token for every host append, rather
++                    // than the time of the append. Ticks reduce same-second collisions; this
++                    // is a generation consistency check, not a globally unique cache ID.
++                    CreateToc(tocFileStream, ref sharedHeader, TocsMagic, CodeGenVersion, (ulong)DateTime.UtcNow.Ticks);
++                }
++                else
++                {
++                    tocFileStream.Seek(0, SeekOrigin.Begin);
++                    BinarySerializer headerReader = new(tocFileStream);
++                    if (!headerReader.TryRead(ref sharedHeader) || sharedHeader.Magic != TocsMagic ||
++                        sharedHeader.FormatVersion != FileFormatVersionPacked || sharedHeader.CodeGenVersion != CodeGenVersion ||
++                        (tocFileStream.Length - Unsafe.SizeOf<TocHeader>()) % sizeof(ulong) != 0)
++                    {
++                        throw new DiskCacheLoadException(DiskCacheLoadResult.FileCorruptedGeneric);
++                    }
++                }
+ 
+-            tocFileStream.Seek(0, SeekOrigin.End);
+-            dataFileStream.Seek(0, SeekOrigin.End);
++                long programIndex = (tocFileStream.Length - Unsafe.SizeOf<TocHeader>()) / sizeof(ulong);
++                tocFileStream.Seek(0, SeekOrigin.End);
++                dataFileStream.Seek(0, SeekOrigin.End);
+ 
+-            BinarySerializer tocWriter = new(tocFileStream);
+-            BinarySerializer dataWriter = new(dataFileStream);
++                BinarySerializer tocWriter = new(tocFileStream);
++                BinarySerializer dataWriter = new(dataFileStream);
+ 
+-            ulong dataOffset = (ulong)dataFileStream.Position;
+-            tocWriter.Write(ref dataOffset);
++                ulong dataOffset = (ulong)dataFileStream.Position;
+ 
+-            DataEntry entry = new()
+-            {
+-                StagesBitMask = stagesBitMask,
+-            };
++                DataEntry entry = new()
++                {
++                    StagesBitMask = stagesBitMask,
++                };
+ 
+-            dataWriter.BeginCompression(DiskCacheCommon.GetCompressionAlgorithm());
+-            dataWriter.Write(ref entry);
++                dataWriter.BeginCompression(DiskCacheCommon.GetCompressionAlgorithm());
++                dataWriter.Write(ref entry);
+ 
+-            DataEntryPerStage stageEntry = new();
++                DataEntryPerStage stageEntry = new();
+ 
+-            for (int index = 0; index < program.Shaders.Length; index++)
+-            {
+-                CachedShaderStage shader = program.Shaders[index];
+-                if (shader == null)
++                for (int index = 0; index < program.Shaders.Length; index++)
+                 {
+-                    continue;
+-                }
++                    CachedShaderStage shader = program.Shaders[index];
++                    if (shader == null)
++                    {
++                        continue;
++                    }
+ 
+-                stageEntry.GuestCodeIndex = _guestStorage.AddShader(shader.Code, shader.Cb1Data);
++                    stageEntry.GuestCodeIndex = _guestStorage.AddShader(shader.Code, shader.Cb1Data);
+ 
+-                dataWriter.Write(ref stageEntry);
+-            }
++                    dataWriter.Write(ref stageEntry);
++                }
+ 
+-            program.SpecializationState.Write(ref dataWriter);
+-            dataWriter.EndCompression();
++                program.SpecializationState.Write(ref dataWriter);
++                dataWriter.EndCompression();
+ 
+-            if (streams == null)
+-            {
+-                tocFileStream.Dispose();
+-                dataFileStream.Dispose();
+-            }
++                // Publish shared indices only after the corresponding record is readable.
++                dataFileStream.Flush();
++                tocWriter.Write(ref dataOffset);
++                tocFileStream.Flush();
+ 
+-            if (hostCode.IsEmpty)
++                if (!hostCode.IsEmpty)
++                {
++                    WriteHostCode(context, hostCode, program.Shaders, streams, sharedHeader.Timestamp, programIndex);
++                }
++            }
++            finally
+             {
+-                return;
++                if (streams == null)
++                {
++                    tocFileStream?.Dispose();
++                    dataFileStream?.Dispose();
++                }
+             }
+-
+-            WriteHostCode(context, hostCode, program.Shaders, streams, timestamp);
+         }
+ 
+         /// <summary>
+@@ -1078,58 +1161,82 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="shaders">Shader stages to be added to the host cache</param>
+         /// <param name="streams">Output streams to use</param>
+         /// <param name="timestamp">File creation timestamp</param>
++        /// <param name="programIndex">Shared TOC index; missing host programs must not compact it</param>
+         private void WriteHostCode(
+             GpuContext context,
+             ReadOnlySpan<byte> hostCode,
+             CachedShaderStage[] shaders,
+             DiskCacheOutputStreams streams,
+-            ulong timestamp)
++            ulong timestamp,
++            long programIndex)
+         {
+-            FileStream tocFileStream = streams != null ? streams.HostTocFileStream : DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
+-            FileStream dataFileStream = streams != null ? streams.HostDataFileStream : DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
++            FileStream tocFileStream = streams?.HostTocFileStream;
++            FileStream dataFileStream = streams?.HostDataFileStream;
+ 
+-            if (tocFileStream.Length == 0)
++            try
+             {
++                tocFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
++                dataFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
+                 TocHeader header = new();
+-                CreateToc(tocFileStream, ref header, TochMagic, 0, timestamp);
+-            }
+-
+-            tocFileStream.Seek(0, SeekOrigin.End);
+-            dataFileStream.Seek(0, SeekOrigin.End);
++                tocFileStream.Seek(0, SeekOrigin.Begin);
++                BinarySerializer headerReader = new(tocFileStream);
++                if (!headerReader.TryRead(ref header) || header.Magic != TochMagic ||
++                    header.FormatVersion != FileFormatVersionPacked || header.CodeGenVersion != CodeGenVersion ||
++                    header.Timestamp != timestamp)
++                {
++                    CreateToc(tocFileStream, ref header, TochMagic, CodeGenVersion, timestamp);
++                    dataFileStream.SetLength(0);
++                }
+ 
+-            BinarySerializer tocWriter = new(tocFileStream);
+-            BinarySerializer dataWriter = new(dataFileStream);
++                // Host slots use the shared program index even if earlier programs had no
++                // binary or this host identity did not exist when those programs were added.
++                long tocOffset = checked(Unsafe.SizeOf<TocHeader>() + programIndex * Unsafe.SizeOf<OffsetAndSize>());
++                if (tocFileStream.Length < tocOffset)
++                {
++                    tocFileStream.SetLength(tocOffset);
++                }
++                tocFileStream.Seek(tocOffset, SeekOrigin.Begin);
++                dataFileStream.Seek(0, SeekOrigin.End);
+ 
+-            OffsetAndSize offsetAndSize = new()
+-            {
+-                Offset = (ulong)dataFileStream.Position,
+-                UncompressedSize = (uint)hostCode.Length,
+-            };
++                BinarySerializer tocWriter = new(tocFileStream);
++                BinarySerializer dataWriter = new(dataFileStream);
+ 
+-            long dataStartPosition = dataFileStream.Position;
++                OffsetAndSize offsetAndSize = new()
++                {
++                    Offset = (ulong)dataFileStream.Position,
++                    UncompressedSize = (uint)hostCode.Length,
++                };
+ 
+-            BinarySerializer.WriteCompressed(dataFileStream, hostCode, DiskCacheCommon.GetCompressionAlgorithm());
++                long dataStartPosition = dataFileStream.Position;
+ 
+-            offsetAndSize.CompressedSize = (uint)(dataFileStream.Position - dataStartPosition);
++                BinarySerializer.WriteCompressed(dataFileStream, hostCode, DiskCacheCommon.GetCompressionAlgorithm());
+ 
+-            tocWriter.Write(ref offsetAndSize);
++                offsetAndSize.CompressedSize = (uint)(dataFileStream.Position - dataStartPosition);
+ 
+-            dataWriter.BeginCompression(DiskCacheCommon.GetCompressionAlgorithm());
++                dataWriter.BeginCompression(DiskCacheCommon.GetCompressionAlgorithm());
+ 
+-            for (int index = 0; index < shaders.Length; index++)
+-            {
+-                if (shaders[index] != null)
++                for (int index = 0; index < shaders.Length; index++)
+                 {
+-                    WriteShaderProgramInfo(ref dataWriter, shaders[index].Info);
++                    if (shaders[index] != null)
++                    {
++                        WriteShaderProgramInfo(ref dataWriter, shaders[index].Info);
++                    }
+                 }
+-            }
+ 
+-            dataWriter.EndCompression();
++                dataWriter.EndCompression();
+ 
+-            if (streams == null)
++                // Complete and flush host data before making this slot visible to lazy readers.
++                dataFileStream.Flush();
++                tocWriter.Write(ref offsetAndSize);
++                tocFileStream.Flush();
++            }
++            finally
+             {
+-                tocFileStream.Dispose();
+-                dataFileStream.Dispose();
++                if (streams == null)
++                {
++                    tocFileStream?.Dispose();
++                    dataFileStream?.Dispose();
++                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2425daa430fe4c8556bb08bb60df86682fe96fe
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -0,0 +1,71 @@
++using Ryujinx.Graphics.GAL;
++using System;
++using System.IO;
++using System.Security.Cryptography;
++using System.Text;
++
++namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
++{
++    /// <summary>Stable identity of the effective capabilities consumed by GPU translation.</summary>
++    static class HostCacheCapabilities
++    {
++        // Explicit serialization is NativeAOT-safe. Tests perturb every GAL field; adding a
++        // field without serializing it (or documenting its exclusion) fails coverage. Never hash
++        // struct padding or object identity. VendorName already namespaces the host filename.
++        // Resource backing/format conversion, view sharing, sampler/viewport state, memory
++        // budgets and MME execution choices do not specialize host programs. Their explicit
++        // exclusions and consumer evidence are maintained with the cache admission tests.
++        public static string GetIdentity(in Capabilities capabilities)
++        {
++            using MemoryStream stream = new();
++            using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
++            writer.Write(1u); // Private host identity schema; guest/shared formats are unchanged.
++            writer.Write((int)capabilities.Api);
++            writer.Write(capabilities.HasFrontFacingBug);
++            writer.Write(capabilities.HasVectorIndexingBug);
++            writer.Write(capabilities.NeedsFragmentOutputSpecialization);
++            writer.Write(capabilities.ReduceShaderPrecision);
++            writer.Write(capabilities.SupportsBgraFormat);
++            writer.Write(capabilities.SupportsScaledVertexFormats);
++            writer.Write(capabilities.S2AVertexPull);
++            writer.Write(capabilities.SupportsSnormBufferTextureFormat);
++            writer.Write(capabilities.SupportsBlendEquationAdvanced);
++            writer.Write(capabilities.SupportsFragmentShaderInterlock);
++            writer.Write(capabilities.SupportsFragmentShaderOrderingIntel);
++            writer.Write(capabilities.SupportsGeometryShader);
++            writer.Write(capabilities.SupportsGeometryShaderPassthrough);
++            writer.Write(capabilities.SupportsTransformFeedback);
++            writer.Write(capabilities.SupportsImageLoadFormatted);
++            writer.Write(capabilities.SupportsLayerVertexTessellation);
++            writer.Write(capabilities.SupportsNonConstantTextureOffset);
++            writer.Write(capabilities.SupportsQuads);
++            writer.Write(capabilities.SupportsSeparateSampler);
++            writer.Write(capabilities.SupportsShaderBallot);
++            writer.Write(capabilities.SupportsShaderBarrierDivergence);
++            writer.Write(capabilities.SupportsShaderFloat64);
++            writer.Write(capabilities.SupportsShaderNonUniformIndexing);
++            writer.Write(capabilities.SupportsTextureGatherOffsets);
++            writer.Write(capabilities.SupportsTextureShadowLod);
++            writer.Write(capabilities.SupportsVertexStoreAndAtomics);
++            writer.Write(capabilities.SupportsViewportIndexVertexTessellation);
++            writer.Write(capabilities.SupportsViewportMask);
++            writer.Write(capabilities.SupportsDepthClipControl);
++            writer.Write(capabilities.UniformBufferSetIndex);
++            writer.Write(capabilities.StorageBufferSetIndex);
++            writer.Write(capabilities.TextureSetIndex);
++            writer.Write(capabilities.ImageSetIndex);
++            writer.Write(capabilities.ExtraSetBaseIndex);
++            writer.Write(capabilities.MaximumExtraSets);
++            writer.Write(capabilities.MaximumUniformBuffersPerStage);
++            writer.Write(capabilities.MaximumStorageBuffersPerStage);
++            writer.Write(capabilities.MaximumTexturesPerStage);
++            writer.Write(capabilities.MaximumImagesPerStage);
++            writer.Write(capabilities.MaximumComputeSharedMemorySize);
++            writer.Write(capabilities.ShaderSubgroupSize);
++            writer.Write(capabilities.StorageBufferOffsetAlignment);
++            writer.Write(capabilities.GatherBiasPrecision);
++            writer.Flush();
++            return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
++        }
++    }
++}

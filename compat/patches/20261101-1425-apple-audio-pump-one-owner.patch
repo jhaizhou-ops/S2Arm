@@ -1,0 +1,190 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 41e9a57ee71f993f0227c196d8296c6a76c4e83a..3bffdb8d91dc9cd93caa094ef11e867ec39b54b1 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -304,21 +304,28 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _lastHealTicks = now;
+                 long inFlightFrames = _pump.InFlightBytes / _bytesPerFrame;
+                 bool active = _driver.S2AReactivateSession();
+-                int stopRc = AudioQueueStop(_audioQueue, true);
+-                int reclaimed = _pump.ReclaimAll();
+-
+-                // 收回的真实样本没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），内部补垫不计入完成额度
+-                if (reclaimed > 0)
++                int stopRc = 0, newRc = 0;
++                // 停 / 重建期间泵不交缓冲（审计 P1-27）：同步停队列时缓冲经回调交还，回调和游戏线程的 Pump 此时什么都不交；
++                //   原先它们照交，收回又把队列仍持有的缓冲放回池里、这里再交一次 = 同一块缓冲入队两次。停失败（缓冲可能还在队列里）不收回
++                int reclaimed = _pump.Restart(() =>
+                 {
+-                    ProcessPlayedSamples(reclaimed);
+-                }
++                    stopRc = AudioQueueStop(_audioQueue, true);
+ 
+-                int newRc = 0;
++                    if (!rebuild)
++                    {
++                        return stopRc;
++                    }
+ 
+-                if (rebuild)
+-                {
+                     AudioQueueDispose(_audioQueue, true);
+                     newRc = CreateQueue();
++
++                    return 0;   // 旧队列连同它的缓冲已销毁：在途的槽全部收回
++                });
++
++                // 收回的真实样本没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），内部补垫不计入完成额度
++                if (reclaimed > 0)
++                {
++                    ProcessPlayedSamples(reclaimed);
+                 }
+ 
+                 int startRc = -1;
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index 4b4e3759738ddae35f97b0245ba80b5dca8f3808..a61c939c4f418c0a4c0105bd4ec61fcf7e68183c 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -36,6 +36,14 @@ namespace Ryujinx.Audio.Backends.Common
+         //   延迟不累加（下一次卡顿先吃掉这块垫子）；归零超过 1 秒（游戏自己停了）不补。缺省开（10-23 马车8 测试机1 同包 A/B 后翻缺省），S2A_AUDIO_CUSHION=0 关
+         private static readonly bool _cushionOn = Environment.GetEnvironmentVariable("S2A_AUDIO_CUSHION") != "0";
+         private long _zeroSince;   // 在途归零的时刻（Stopwatch；0 = 没归零 / 已补过）
++        // S2Arm (审计 P1-26): 垫只补给「提前供数」的流——上一段（两次归零之间）有过「在途还有真实样本时又交了新样本」。
++        //   单缓冲客人（视频经 AudioOut 一次交 1024 帧、等这块播完才交下一块）两次归零之间从不提前交，归零是它自己的节奏不是卡顿：
++        //   给它补垫，每块前都插一段静音（21 ms 声音 + 50 ms 空白反复），垫还推迟这块的完成、让它下一次照样归零
++        private long _sampleInFlight;   // 在途字节里真实样本的部分（不含垫）
++        private bool _aheadSinceZero;   // 上次归零以来有过提前供数
++        private bool _cushionAllowed;   // 这次归零之前那一段有过提前供数（归零时取 _aheadSinceZero）
++        // S2Arm (审计 P1-27): 设备停 / 重建期间不交缓冲（Restart）。交缓冲只在本泵锁下，设备仍持有的缓冲不会被再交一次
++        private bool _suspended;
+ 
+         /// <summary>
+         /// Queued samples not yet submitted to the device.
+@@ -102,7 +110,9 @@ namespace Ryujinx.Audio.Backends.Common
+         {
+             lock (_lock)
+             {
+-                while (_freeCount > 0)
++                bool ahead = _sampleInFlight > 0;
++
++                while (_freeCount > 0 && !_suspended)
+                 {
+                     int n = Math.Min(Samples.Length, _slotBytes) / _bytesPerFrame * _bytesPerFrame;
+ 
+@@ -112,7 +122,7 @@ namespace Ryujinx.Audio.Backends.Common
+                     }
+ 
+                     // S2Arm: 欠载后先补一块静音重建缓冲垫（见 _cushionOn）
+-                    if (_cushionOn && _primed != 0 && _zeroSince != 0 && Interlocked.Read(ref _inFlightBytes) == 0 && _freeCount > 1)
++                    if (_cushionOn && _primed != 0 && _zeroSince != 0 && _cushionAllowed && Interlocked.Read(ref _inFlightBytes) == 0 && _freeCount > 1)
+                     {
+                         long zt = Stopwatch.GetTimestamp() - _zeroSince;
+                         _zeroSince = 0;
+@@ -140,6 +150,8 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                     _filled[slot] = read;
+                     _sampleBytes[slot] = read;
++                    _sampleInFlight += read;
++                    _aheadSinceZero |= ahead;
+                     long inFlight = Interlocked.Add(ref _inFlightBytes, read);
+ 
+                     // S2Arm: 在途凑够下限即可起播；闩锁后不再回退（一次欠载不该让后续重新 pre-roll）
+@@ -163,37 +175,64 @@ namespace Ryujinx.Audio.Backends.Common
+         }
+ 
+         /// <summary>
+-        /// S2Arm (10-23 声音停了自愈): the device was stopped and will never hand the in-flight buffers back (system stopped the
+-        /// queue, then we stopped it synchronously): put every in-flight buffer back into the pool.
++        /// S2Arm (10-23 声音停了自愈；审计 P1-27 只留一个交缓冲的): stop (or rebuild) the device with no buffer submitted meanwhile.
++        /// <paramref name="stopDevice"/> stops the device synchronously; buffers it hands back while stopping come through
++        /// <see cref="Returned"/>, and a Pump from the callback or the queueing thread submits nothing until it returns (a buffer
++        /// the device still holds must never be submitted again). It returns 0 when the device holds no buffer any more (stopped,
++        /// or destroyed with its buffers): only then is every buffer still in flight put back into the pool.
+         /// </summary>
+         /// <returns>Queued-sample bytes reclaimed without being played, excluding internal silence.</returns>
+-        public int ReclaimAll()
++        public int Restart(Func<int> stopDevice)
+         {
+             lock (_lock)
+             {
+-                int totalBytes = 0;
+-                int sampleBytes = 0;
++                _suspended = true;
++            }
++
++            int rc = -1, reclaimed = 0;
+ 
+-                for (int slot = 0; slot < _filled.Length; slot++)
++            try
++            {
++                rc = stopDevice();
++            }
++            finally
++            {
++                lock (_lock)
+                 {
+-                    int bytes = _filled[slot];
++                    reclaimed = rc == 0 ? ReclaimAllLocked() : 0;
++                    _suspended = false;
++                }
++            }
+ 
+-                    if (bytes == 0)
+-                    {
+-                        continue;
+-                    }
++            return reclaimed;
++        }
+ 
+-                    _filled[slot] = 0;
+-                    _free[_freeCount++] = slot;
+-                    totalBytes += bytes;
+-                    sampleBytes += _sampleBytes[slot];
+-                    _sampleBytes[slot] = 0;
+-                }
++        // Under _lock
++        private int ReclaimAllLocked()
++        {
++            int totalBytes = 0;
++            int sampleBytes = 0;
+ 
+-                Interlocked.Add(ref _inFlightBytes, -totalBytes);
++            for (int slot = 0; slot < _filled.Length; slot++)
++            {
++                int bytes = _filled[slot];
+ 
+-                return sampleBytes;
++                if (bytes == 0)
++                {
++                    continue;
++                }
++
++                _filled[slot] = 0;
++                _free[_freeCount++] = slot;
++                totalBytes += bytes;
++                sampleBytes += _sampleBytes[slot];
++                _sampleBytes[slot] = 0;
+             }
++
++            Interlocked.Add(ref _inFlightBytes, -totalBytes);
++            _sampleInFlight -= sampleBytes;
++
++            return sampleBytes;
+         }
+ 
+         /// <summary>
+@@ -215,11 +254,14 @@ namespace Ryujinx.Audio.Backends.Common
+                 _sampleBytes[slot] = 0;
+                 _filled[slot] = 0;
+                 _free[_freeCount++] = slot;
++                _sampleInFlight -= sampleBytes;
+                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+ 
+                 if (inFlight == 0 && bytes > 0)
+                 {
+                     _zeroSince = Stopwatch.GetTimestamp();
++                    _cushionAllowed = _aheadSinceZero;
++                    _aheadSinceZero = false;
+                 }
+ 
+                 OnReturned(bytes, inFlight);

@@ -1,0 +1,3 @@
+# 直连实测（tools/census/census.py direct_reg 从普查批次写；键 = 程序号 + 构建号 + 平台，同键以最近一次实测为准）。tools/compatibility_report.py 的 direct 键读它：直连能跑 是 = 已验、否 = 验证失败
+# 直连能跑口径（census.py runs_ok）：没崩，且进了局、或出图 ≥ 1000 帧且局里没有挡进局 / 致崩的红行（满屏判据红不算）
+程序号	构建号	款	平台	直连能跑	进局	依据	日期

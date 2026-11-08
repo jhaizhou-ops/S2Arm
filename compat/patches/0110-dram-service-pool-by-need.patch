@@ -1,0 +1,110 @@
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Common/KernelInit.cs b/src/Ryujinx.HLE/HOS/Kernel/Common/KernelInit.cs
+index 53ceb5b914813318cb899836f09ca8ca61932620..3c386859799fb6aaf1c18355c7d039d93bbb9302 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Common/KernelInit.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Common/KernelInit.cs
+@@ -45,6 +45,19 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+             }
+         }
+ 
++        // S2Arm: end of the service pool. Need (Mac runs of d3 / octopath2 / witcher3 / silksong / acnh, 120 s each, all identical, nothing
++        // allocated after boot): 10 ServerBase processes (Sm Bsd Fs Hid Nv Time Vi:u Vi:m Vi:s Ldn) x (2 MB heap + 1 code page + 1 stack page)
++        // = 20.08 MB. A 2 MB heap needs a 2 MB-aligned block: [0x80C00000, end) holds 14 of them (4 spare, e.g. the lazy "Common" server),
++        // the single pages fit below 0x80C00000. 2 MB-aligned, so the nv pool keeps the 16 KB page alignment Horizon's shared blocks need.
++        // Running out is reported red (KMemoryRegionManager) instead of handing out pages past the backed DRAM.
++        public const ulong S2AServicePoolEnd = DramMemoryMap.DramBase + 0x2800000;
++
++        // S2Arm: DRAM bytes the host must back (MemoryBlock size): kernel reserve + service pool + nv pool. Applet / application pools above are unbacked
++        public static ulong GetBackedDramSize()
++        {
++            return S2AServicePoolEnd + KSystemControl.GetMinimumNonSecureSystemPoolSize() - DramMemoryMap.DramBase;
++        }
++
+         public static KMemoryRegionManager[] GetMemoryRegions(MemorySize size, MemoryArrange arrange)
+         {
+             ulong poolEnd = KSystemControl.GetDramEndAddress(size);
+@@ -59,18 +72,14 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+             ulong nvServicesPoolSize = KSystemControl.GetMinimumNonSecureSystemPoolSize();
+ 
+             applicationPool = new MemoryRegion(poolEnd - applicationPoolSize, applicationPoolSize);
+-
+-            ulong nvServicesPoolEnd = applicationPool.Address - appletPoolSize;
+-
+-            nvServicesPool = new MemoryRegion(nvServicesPoolEnd - nvServicesPoolSize, nvServicesPoolSize);
+-            appletPool = new MemoryRegion(nvServicesPoolEnd, appletPoolSize);
+-
+-            // Note: There is an extra region used by the kernel, however
+-            // since we are doing HLE we are not going to use that memory, so give all
+-            // the remaining memory space to services.
+-            ulong servicePoolSize = nvServicesPool.Address - DramMemoryMap.SlabHeapEnd;
+-
+-            servicePool = new MemoryRegion(DramMemoryMap.SlabHeapEnd, servicePoolSize);
++            appletPool = new MemoryRegion(applicationPool.Address - appletPoolSize, appletPoolSize);
++
++            // S2Arm: the service pool is sized to what the HLE service processes need, instead of "all the remaining memory"
++            // (upstream gave it everything between the slab heap and the nv pool: 251 MB on 4 GiB, of which 20 MB is ever used),
++            // and the nv pool follows it directly. Only the DRAM up to the nv pool end is backed (GetBackedDramSize); applet /
++            // application pools stay at their Horizon addresses but are unbacked (the game runs in the host address window).
++            servicePool = new MemoryRegion(DramMemoryMap.SlabHeapEnd, S2AServicePoolEnd - DramMemoryMap.SlabHeapEnd);
++            nvServicesPool = new MemoryRegion(S2AServicePoolEnd, nvServicesPoolSize);
+ 
+             return
+             [
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Memory/KMemoryRegionManager.cs b/src/Ryujinx.HLE/HOS/Kernel/Memory/KMemoryRegionManager.cs
+index 270c4ff32be33ace214f19c6e41b780ff62c0284..57df486959be889a6deae11e6c3a121a4d83b6a6 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Memory/KMemoryRegionManager.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Memory/KMemoryRegionManager.cs
+@@ -45,6 +45,10 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
+                         IncrementPagesReferenceCount(node.Address, node.PagesCount);
+                     }
+                 }
++                else
++                {
++                    ReportOutOfMemory(pagesCount);
++                }
+ 
+                 return result;
+             }
+@@ -66,11 +70,21 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
+                     IncrementPagesReferenceCount(address, pagesCount);
+                     context.CommitMemory(address - DramMemoryMap.DramBase, pagesCount * KPageTableBase.PageSize);
+                 }
++                else
++                {
++                    ReportOutOfMemory(pagesCount);
++                }
+ 
+                 return address;
+             }
+         }
+ 
++        // S2Arm: the service / nv pools are sized to the measured need (KernelInit.S2AServicePoolEnd); running out is a sizing defect, not a game condition
++        private void ReportOutOfMemory(ulong pagesCount)
++        {
++            S2AHooks.Red?.Invoke($"DRAM 池 0x{Address:X}（{Size >> 20} MB）不够：要 {pagesCount} 页，剩 {_pageHeap.GetFreePagesCount()} 页（池大小见 KernelInit.S2AServicePoolEnd）");
++        }
++
+         private Result AllocatePagesImpl(out KPageList pageList, ulong pagesCount, bool random)
+         {
+             pageList = new KPageList();
+diff --git a/src/Ryujinx.HLE/Switch.cs b/src/Ryujinx.HLE/Switch.cs
+index fef2a0d69e5d3c45d825a9ee6112910d2b5bd1f7..29524dff1e2ecc015e4a8c6fdbb4b51d8a185e4b 100644
+--- a/src/Ryujinx.HLE/Switch.cs
++++ b/src/Ryujinx.HLE/Switch.cs
+@@ -84,13 +84,10 @@ namespace Ryujinx.HLE
+             DirtyHacks        = new DirtyHacks(Configuration.Hacks);
+             AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(Configuration.AudioDeviceDriver);
+             // S2Arm: the application pool (top of DRAM) is the game's memory, and the game runs in the host 64 GB address window, not in this block;
+-            // no applet process is ever created, so the applet pool below it is unused too (Mac vmmap: nothing committed above the nv pool).
+-            // Reserve only kernel / service / nv pools (304 MB on 4 GiB): on iPhone, with a game filling the window, the address space outside it
+-            // is ~1.7 GB of holes shared with host thread stacks and small Metal buffers. Any allocation from the applet / application pools faults loudly.
+-            HOS.Kernel.Common.MemoryArrange arrange = Configuration.MemoryConfiguration.KernelMemoryArrange;
+-            ulong dramBelowAppletPool = Configuration.MemoryConfiguration.DramSize -
+-                HOS.Kernel.Common.KSystemControl.GetApplicationPoolSize(arrange) - HOS.Kernel.Common.KSystemControl.GetAppletPoolSize(arrange);
+-            Memory            = new MemoryBlock(dramBelowAppletPool, memoryAllocationFlags);
++            // no applet process is ever created, so the applet pool is unused too. Back only kernel reserve + service pool (sized to need) + nv pool
++            // (82 MB, was 304 MB): on iPhone, with a game filling the window, the address space outside it is ~2 GB of holes shared with the GC,
++            // host thread stacks and Metal buffers. Any allocation from the applet / application pools faults loudly.
++            Memory            = new MemoryBlock(HOS.Kernel.Common.KernelInit.GetBackedDramSize(), memoryAllocationFlags);
+             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
+             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
+             System            = new HOS.Horizon(this);

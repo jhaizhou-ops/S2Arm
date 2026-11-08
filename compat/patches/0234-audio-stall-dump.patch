@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 7edd5a4c9ec08e8344d726e2cc2260d087ca67a1..7a036a224d2ec3513630ce59b6261178ce593a41 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -254,9 +254,28 @@ namespace Ryujinx.Audio.Backends.Apple
+                 return;
+             }
+ 
++            // S2Arm (#284): 设备整段没回调时画面往往也停（进程级停顿，不是音频会话单独被挂起）：重启队列前打一份全线程宿主栈，看停住时谁在跑、谁在等；每局至多 3 次
++            if (Interlocked.Increment(ref s_stallDumps) <= 3)
++            {
++                try
++                {
++                    s2a_dump_threads($"声音设备 {stall * 1000 / Stopwatch.Frequency} ms 没有回调");
++                }
++                catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
++                {
++                    // 宿主之外（服务层单测直接跑托管代码）没有原生库：现场只是诊断，不影响下面的自愈
++                    Console.Error.WriteLine($"[声] 全线程现场不可用（{e.GetType().Name}）");
++                }
++            }
++
+             S2ARecover($"兜底：设备 {stall * 1000 / Stopwatch.Frequency} ms 没有回调{(S2AAudioNotes.Interrupted ? "（系统中断中）" : "")}，最近系统通知 {S2AAudioNotes.Last}", false, now, true);
+         }
+ 
++        private static int s_stallDumps;
++
++        [DllImport("s2a_native")]
++        private static extern int s2a_dump_threads(string why);   // runtime/src/tdump.c：全线程宿主栈（自动玩家卡住、崩溃时同一份）
++
+         // 恢复输出流：iOS 重新激活会话 → 同步停队列（重置时重建）→ 收回在途 → 重新排进去 → 开播
+         private void S2ARecover(string why, bool rebuild, long now, bool red)
+         {

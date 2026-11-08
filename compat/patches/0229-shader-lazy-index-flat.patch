@@ -1,0 +1,217 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGuestStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGuestStorage.cs
+index 1e2f9146f8030795e93e17ade1c6820613a082cf..63906a8ce7163ab280bebb21a3ab96196954ad39 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGuestStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGuestStorage.cs
+@@ -229,12 +229,18 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             return new GuestCodeAndCbData(guestCode, cb1Data);
+         }
+ 
++        /// <summary>
++        /// S2Arm: the boot-time guest code cache (index = guest code index), shared with lazily indexed programs
++        /// (<see cref="S2ALazyProgram"/> keeps indices into it instead of its own arrays).
++        /// </summary>
++        internal (byte[], byte[])[] S2ACache => System.Threading.Volatile.Read(ref _cache);
++
+         /// <summary>
+         /// Clears guest code memory cache, forcing future loads to be from file.
+         /// </summary>
+         public void ClearMemoryCache()
+         {
+-            _cache = null;
++            System.Threading.Volatile.Write(ref _cache, null);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 9be3aebb5480bc85b24f2cbc79ab6d30e74d0307..ce9f8b7ec1d7fd30960cf56befcdeefac010b066 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -393,6 +393,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     }
+ 
+                     GuestCodeAndCbData?[] guestShaders = new GuestCodeAndCbData?[isCompute ? 1 : Constants.ShaderStages + 1];
++                    S2AStageIndices s2aStages = S2AStageIndices.None;
+ 
+                     DataEntryPerStage stageEntry = new();
+                     System.Text.StringBuilder s2aKey = s2aGroups != null ? new System.Text.StringBuilder(isCompute ? "c " : "g ") : null;
+@@ -408,6 +409,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                             guestDataFileStream,
+                             stageEntry.GuestCodeIndex);
+                         s2aKey?.Append(stageIndex).Append(':').Append(stageEntry.GuestCodeIndex).Append(' ');
++                        s2aStages[stageIndex] = (int)stageEntry.GuestCodeIndex;
+ 
+                         stagesBitMask &= ~(1u << stageIndex);
+                     }
+@@ -417,7 +419,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     if (loadHostCache)
+                     {
+                         dataReader.EndCompression();
+-                        S2ALazyProgram lazy = new(this, context, programIndex, dataOffset, header.Timestamp, isCompute, guestShaders);
++                        S2ALazyProgram lazy = new(this, context, programIndex, dataOffset, header.Timestamp, isCompute, s2aStages);
+                         loader.AddLazy(lazy);
+                         if (warm != null && warm.TryGetValue(programIndex, out int slot)) warmLazy[slot] = lazy;
+                         if (s2aGroups != null)
+@@ -470,6 +472,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+             finally
+             {
++                System.Threading.Volatile.Write(ref _s2aGuest, _guestStorage.S2ACache);   // S2Arm：按需程序按下标共用这份（见 S2ALazyProgram._stages），清掉前接过来
+                 _guestStorage.ClearMemoryCache();
+ 
+                 hostTocFileStream?.Dispose();
+@@ -565,9 +568,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                             (specState, hostCode, shaders) = S2AReadParts(lazy);
+                             if (hostCode == null) { fail++; continue; }
+                             // 读好的部分交给它：实化时不再读缓存 / 解压（S2AMaterializeCore）
+-                            lazy.PreSpec = specState;
+-                            lazy.PreHostCode = hostCode;
+-                            lazy.PreShaders = shaders;
++                            _s2aPre[lazy.ProgramIndex] = (specState, hostCode, shaders);
+                             bytes += hostCode.Length;
+                         }
+                     }
+@@ -595,6 +596,59 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private Stream _lazyHostData;
+         private readonly object _lazyLock = new();
+ 
++        // S2Arm（帧率能耗线 10-24，GC）：启动时载入的客体代码共享表（下标 = 客体代码号），按需程序只存下标；
++        //   提前热读好的部分放旁表（按程序号，持 _lazyLock 读写，实化取用即删），不挂在按需程序对象上
++        private (byte[], byte[])[] _s2aGuest;
++        private readonly System.Collections.Generic.Dictionary<int, (ShaderSpecializationState, byte[], CachedShaderStage[])> _s2aPre = new();
++
++        /// <summary>
++        /// S2Arm (tests): adds guest code to the shared table and returns the stage indices (production indexes guest code at disk cache load).
++        /// </summary>
++        internal S2AStageIndices S2ARegisterGuests(GuestCodeAndCbData?[] guests)
++        {
++            lock (_lazyLock)
++            {
++                S2AStageIndices st = S2AStageIndices.None;
++                (byte[], byte[])[] cur = System.Threading.Volatile.Read(ref _s2aGuest) ?? Array.Empty<(byte[], byte[])>();
++                System.Collections.Generic.List<(byte[], byte[])> t = new(cur);
++
++                for (int i = 0; i < guests.Length; i++)
++                {
++                    if (guests[i] is GuestCodeAndCbData g)
++                    {
++                        st[i] = t.Count;
++                        t.Add((g.Code, g.Cb1Data));
++                    }
++                }
++
++                System.Threading.Volatile.Write(ref _s2aGuest, t.ToArray());
++                return st;
++            }
++        }
++
++        /// <summary>
++        /// S2Arm: builds the guest code array of a lazily indexed program from the shared guest cache (not retained by the caller's owner).
++        /// </summary>
++        internal GuestCodeAndCbData?[] S2AGuestShaders(S2AStageIndices stages, bool isCompute)
++        {
++            // 先看客体存储的（载入中），清掉后看接过来的（载入结束时先写这边再清那边，见 finally）
++            (byte[], byte[])[] cache = _guestStorage.S2ACache ?? System.Threading.Volatile.Read(ref _s2aGuest);
++            GuestCodeAndCbData?[] g = new GuestCodeAndCbData?[isCompute ? 1 : Constants.ShaderStages + 1];
++
++            for (int i = 0; i < g.Length; i++)
++            {
++                int idx = stages[i];
++
++                if (idx >= 0)
++                {
++                    (byte[] code, byte[] cb1) = cache[idx];
++                    g[i] = new GuestCodeAndCbData(code, cb1);
++                }
++            }
++
++            return g;
++        }
++
+         /// <summary>
+         /// S2A：载入宿主程序二进制时传给渲染器的着色器信息——空。本缓存的宿主二进制是 nxgal 程序二进制（每阶段键 + 参数布局），
+         /// 渲染器从二进制自身建程序、不读 ShaderInfo（graphics/metal/cs/NxProgram.cs Load）。原先每次按缓存条目重建资源布局（ShaderInfoBuilder），
+@@ -715,12 +769,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 {
+                     // S2A：提前热已在后台读好就直接用（读缓存 + 解压不上渲染路径），没读到再现读
+                     lazy.Done = true;
+-                    ShaderSpecializationState specState = lazy.PreSpec;
+-                    byte[] hostCode = lazy.PreHostCode;
+-                    CachedShaderStage[] shaders = lazy.PreShaders;
+-                    lazy.PreSpec = null;
+-                    lazy.PreHostCode = null;
+-                    lazy.PreShaders = null;
++                    _s2aPre.Remove(lazy.ProgramIndex, out (ShaderSpecializationState, byte[], CachedShaderStage[]) pre);
++                    (ShaderSpecializationState specState, byte[] hostCode, CachedShaderStage[] shaders) = pre;
+ 
+                     if (hostCode == null)
+                     {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+index 1217816a5e2c4b64b78f209e9e905866e530fcd6..097f749eb564827c72610cbdabd59f8943fa8eac 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+@@ -20,23 +20,26 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         public readonly bool IsCompute;
+ 
+         /// <summary>
+-        /// Guest code of each active stage, indexed like <see cref="CachedShaderProgram.Shaders"/> (0 = vertex A, 1 = vertex,
+-        /// 2 = tessellation control, 3 = tessellation evaluation, 4 = geometry, 5 = fragment; compute uses 0).
++        /// S2Arm: guest code index of each active stage in the boot-time shared guest cache (-1 = stage not present), indexed like
++        /// <see cref="CachedShaderProgram.Shaders"/> (0 = vertex A, 1 = vertex, 2 = tessellation control, 3 = tessellation evaluation,
++        /// 4 = geometry, 5 = fragment; compute uses 0).
+         /// </summary>
+-        public readonly GuestCodeAndCbData?[] GuestShaders;
++        /// <remarks>
++        /// 帧率能耗线 10-24（GC）：原先每个程序常驻一个 6 槽 GuestCodeAndCbData?[]（每槽两个 byte[] 引用，大多只有顶点 + 片元），
++        /// 马车8 2.5 万个数组共 30 万指针槽，加重 gen2 标记与读盘段卡表扫描。改存下标（无引用），要用时由 <see cref="GuestShaders"/> 临时拼出。
++        /// 提前热读好的部分也不再挂在本对象上（DiskCacheHostStorage 的旁表），本对象常驻时只剩 Storage / Context 两个引用
++        /// </remarks>
++        private S2AStageIndices _stages;
+ 
+         /// <summary>
+-        /// S2A：提前热（DiskCacheHostStorage.S2AWarmStart）在后台读好的缓存部分（特化状态 + 宿主二进制 + 各阶段信息）。
+-        /// 实化时直接用、不再读缓存 / 解压；只在持 DiskCacheHostStorage._lazyLock 时读写。
++        /// Guest code of each active stage (built on demand from the shared guest cache; not retained).
+         /// </summary>
+-        internal ShaderSpecializationState PreSpec;
+-        internal byte[] PreHostCode;
+-        internal CachedShaderStage[] PreShaders;
++        public GuestCodeAndCbData?[] GuestShaders => Storage.S2AGuestShaders(_stages, IsCompute);
+ 
+         /// <summary>S2A：已实化（成功与否都算）；之后提前热不再给它读（持 _lazyLock 读写）。</summary>
+         internal bool Done;
+ 
+-        public S2ALazyProgram(DiskCacheHostStorage storage, GpuContext context, int programIndex, ulong dataOffset, ulong timestamp, bool isCompute, GuestCodeAndCbData?[] guestShaders)
++        public S2ALazyProgram(DiskCacheHostStorage storage, GpuContext context, int programIndex, ulong dataOffset, ulong timestamp, bool isCompute, S2AStageIndices stages)
+         {
+             Storage = storage;
+             Context = context;
+@@ -44,7 +47,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             DataOffset = dataOffset;
+             Timestamp = timestamp;
+             IsCompute = isCompute;
+-            GuestShaders = guestShaders;
++            _stages = stages;
+         }
+ 
+         /// <summary>
+@@ -56,4 +59,20 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             return Storage.S2AMaterialize(this);
+         }
+     }
++
++    /// <summary>
++    /// S2Arm: guest code indices of the six stages (-1 = none), stored inline (no references).
++    /// </summary>
++    struct S2AStageIndices
++    {
++        private int _s0, _s1, _s2, _s3, _s4, _s5;
++
++        public static S2AStageIndices None => new() { _s0 = -1, _s1 = -1, _s2 = -1, _s3 = -1, _s4 = -1, _s5 = -1 };
++
++        public int this[int stage]
++        {
++            readonly get => stage switch { 0 => _s0, 1 => _s1, 2 => _s2, 3 => _s3, 4 => _s4, _ => _s5 };
++            set { switch (stage) { case 0: _s0 = value; break; case 1: _s1 = value; break; case 2: _s2 = value; break; case 3: _s3 = value; break; case 4: _s4 = value; break; default: _s5 = value; break; } }
++        }
++    }
+ }

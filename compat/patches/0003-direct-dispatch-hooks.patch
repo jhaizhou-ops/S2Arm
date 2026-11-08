@@ -1,0 +1,181 @@
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Memory/KSharedMemory.cs b/src/Ryujinx.HLE/HOS/Kernel/Memory/KSharedMemory.cs
+index e593a7e13f34e3972c39e7d2b2e7c6d1022636eb..7a980a3a0f2c7af2d82ebc3b17d5ac85fc5a3891 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Memory/KSharedMemory.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Memory/KSharedMemory.cs
+@@ -27,6 +27,9 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
+             _userPermission = userPermission;
+         }
+ 
++        // S2Arm: backing pages, so the dispatcher can hand the same host memory to the game (s2a_shmem_wrap)
++        internal KPageList S2APageList => _pageList;
++
+         public Result MapIntoProcess(
+             KPageTableBase memoryManager,
+             ulong address,
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs b/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
+index 9f64532e76085cbce88bbc277252459b278d76a9..1afad851f46c19f73c2ffd8a6e36bec8b42be384 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
+@@ -61,6 +61,17 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
+             return result;
+         }
+ 
++        // S2Arm: shadow of a transfer memory created by the game in S2Arm's native layer; game address = host address,
++        // so services read it in place (no page borrowing, the native layer owns the game's address space)
++        internal void S2AInitializeForeign(ulong address, ulong size, KMemoryPermission permission)
++        {
++            Permission = permission;
++            Address = address;
++            Size = size;
++            _hasBeenInitialized = true;
++            _isMapped = false;
++        }
++
+         public Result MapIntoProcess(
+             KPageTableBase memoryManager,
+             ulong address,
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Process/KProcess.cs b/src/Ryujinx.HLE/HOS/Kernel/Process/KProcess.cs
+index 20c8b116cd4e13b00f0f51afd82206900c30043c..082a3b7a7aebf80246454b5c6e6dde4b80567bbf 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Process/KProcess.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Process/KProcess.cs
+@@ -118,6 +118,15 @@ namespace Ryujinx.HLE.HOS.Kernel.Process
+             DebugInterface = new DebuggerInterface(this);
+         }
+ 
++        // S2Arm: a process whose code runs natively outside Ryujinx (the game, or the shadow process that owns the handles
++        // services create); only identity and the memory view are set, no page table / threads / resource limit.
++        internal void S2AInitializeForeign(ulong pid, IProcessContext context)
++        {
++            Pid = pid;
++            Context = context;
++            HandleTable.Initialize(1024); // Horizon per-process maximum
++        }
++
+         public Result InitializeKip(
+             ProcessCreationInfo creationInfo,
+             ReadOnlySpan<uint> capabilities,
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
+index 6ed61f5a3c4a0dff2420487f07618b5c9505bf02..112761220a9556f0ae4d85a8432c4243101c739e 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
+@@ -7,12 +7,21 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+     {
+         private bool _signaled;
+ 
++        // S2Arm: native event this object is bound to once handed to the game (0 = not bound); see S2AHooks
++        public ulong S2ANativeEvent;
++
+         public KReadableEvent(KernelContext context) : base(context)
+         {
+         }
+ 
+-        public override void Signal()
++        public override unsafe void Signal()
+         {
++            // S2Arm: forward unconditionally, the game may have cleared the native event without us seeing it
++            if (S2ANativeEvent != 0)
++            {
++                S2AHooks.EventSignal(S2ANativeEvent);
++            }
++
+             KernelContext.CriticalSection.Enter();
+ 
+             if (!_signaled)
+@@ -25,17 +34,27 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+             KernelContext.CriticalSection.Leave();
+         }
+ 
+-        public Result Clear()
++        public unsafe Result Clear()
+         {
++            if (S2ANativeEvent != 0)
++            {
++                S2AHooks.EventClear(S2ANativeEvent);
++            }
++
+             _signaled = false;
+ 
+             return Result.Success;
+         }
+ 
+-        public Result ClearIfSignaled()
++        public unsafe Result ClearIfSignaled()
+         {
+             Result result;
+ 
++            if (S2ANativeEvent != 0)
++            {
++                S2AHooks.EventClear(S2ANativeEvent);
++            }
++
+             KernelContext.CriticalSection.Enter();
+ 
+             if (_signaled)
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KThread.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KThread.cs
+index 4f06752cc32b51845552142e9cead1fa2775045d..0c834a93a02b27d35040e874a188043facf090af 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KThread.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KThread.cs
+@@ -137,6 +137,13 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+ 
+         internal readonly ManualResetEventSlim DebugHalt = new(false);
+ 
++        // S2Arm: shadow thread for a native game thread while it runs service code, so KernelStatic.GetCurrentProcess()
++        // (used by Syscall.* inside services) resolves to the serving process, as on a Ryujinx service thread.
++        internal void S2ASetOwner(KProcess owner)
++        {
++            Owner = owner;
++        }
++
+         public KThread(KernelContext context) : base(context)
+         {
+             WaitSyncObjects = new KSynchronizationObject[MaxWaitSyncObjects];
+diff --git a/src/Ryujinx.HLE/HOS/Services/IpcService.cs b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+index c7dee64fbf9c3001a21a733c237f60261fbf3d9c..e393da997eacb835efed850c3195ba970887c764 100644
+--- a/src/Ryujinx.HLE/HOS/Services/IpcService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+@@ -226,7 +226,7 @@ namespace Ryujinx.HLE.HOS.Services
+             }
+         }
+ 
+-        protected void MakeObject(ServiceCtx context, IpcService obj)
++        protected unsafe void MakeObject(ServiceCtx context, IpcService obj)
+         {
+             obj.TrySetServer(_parent.Server);
+ 
+@@ -236,6 +236,11 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+                 context.Response.ObjectIds.Add(_parent.Add(obj));
+             }
++            else if (S2AHooks.MakeSession != null)
++            {
++                // S2Arm: direct dispatch, the sub-session is served on the caller's thread (see S2AHooks)
++                context.Response.HandleDesc = IpcHandleDesc.MakeMove(S2AHooks.MakeSession(obj));
++            }
+             else
+             {
+                 context.Device.System.KernelContext.Syscall.CreateSession(out int serverSessionHandle, out int clientSessionHandle, false, 0);
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a42292f26f3c15c8d2df8257304908f6a36a46c
+--- /dev/null
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -0,0 +1,19 @@
++using Ryujinx.HLE.HOS.Services;
++
++namespace Ryujinx.HLE
++{
++    // S2Arm: hooks for in-thread direct dispatch (services/S2A.Services sets them; when unset, behaviour is upstream's).
++    // Game requests are served synchronously on the calling game thread instead of Ryujinx's ServerBase threads,
++    // and the game's handle table / events live in S2Arm's native layer (docs/接口_原生层.md §4).
++    static unsafe class S2AHooks
++    {
++        // IpcService.MakeObject (non-domain): register the new sub-session with the S2Arm dispatcher; returns a handle
++        // in the serving process's handle table that the dispatcher turns into a game handle when the reply is written.
++        public static delegate*<IpcService, int> MakeSession;
++
++        // KReadableEvent bound to a native event (KReadableEvent.S2ANativeEvent != 0): mirror Signal / Clear to it,
++        // because the game waits on the native event (WaitSynchronization never enters C#).
++        public static delegate*<ulong, void> EventSignal;
++        public static delegate*<ulong, void> EventClear;
++    }
++}

@@ -1,0 +1,110 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs b/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
+index d51b0ef60dc2574a9b34a6eb9da613e180354b15..d8cca95fed14aef301388ee4eee5420f14a2d1cd 100644
+--- a/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
+@@ -62,6 +62,16 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+             return _syncpoints[id].RegisterCallback(threshold, callback);
+         }
+ 
++        /// <summary>
++        /// S2A：只要回调、不要句柄的登记（句柄走同步点的池，回调跑完放回；见 Syncpoint.RegisterCallbackPooled）。
++        /// </summary>
++        public void RegisterCallbackOnSyncpointPooled(uint id, uint threshold, Action<SyncpointWaiterHandle> callback)
++        {
++            ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(id, (uint)MaxHardwareSyncpoints);
++
++            _syncpoints[id].RegisterCallbackPooled(threshold, callback);
++        }
++
+         /// <summary>
+         /// Unregister a callback on a given syncpoint.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs b/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
+index 61d804ed74b6b006c97106959d5d3cb10ea7ebf6..c5dd2833906790bf06b5244c0ce744f3e11778d1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
++++ b/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
+@@ -59,6 +59,45 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+             }
+         }
+ 
++        // S2A：只要回调、不要句柄的登记（AndroidFence.RegisterCallback：合成线程每帧给没到达的围栏登记帧就绪回调，调用方丢掉返回的句柄）。
++        // 句柄从池里取、回调跑完放回（10-21 动森 MARK 后合成线程每帧 32 B，稳态 gen0 的来源之一）；不返回句柄，所以不会被拿去 UnregisterCallback
++        private readonly Stack<SyncpointWaiterHandle> _s2aPool = new();
++
++        public void RegisterCallbackPooled(uint threshold, Action<SyncpointWaiterHandle> callback)
++        {
++            lock (_waiters)
++            {
++                if (Value >= threshold)
++                {
++                    callback(null);
++
++                    return;
++                }
++
++                SyncpointWaiterHandle waiterInformation = _s2aPool.Count != 0 ? _s2aPool.Pop() : new SyncpointWaiterHandle();
++                waiterInformation.Threshold = threshold;
++                waiterInformation.Callback = callback;
++                waiterInformation.S2APooled = true;
++
++                _waiters.Add(waiterInformation);
++            }
++        }
++
++        private void S2ARecycle(SyncpointWaiterHandle waiterInformation)
++        {
++            if (!waiterInformation.S2APooled)
++            {
++                return;
++            }
++
++            waiterInformation.Callback = null;
++
++            lock (_waiters)
++            {
++                _s2aPool.Push(waiterInformation);
++            }
++        }
++
+         public void UnregisterCallback(SyncpointWaiterHandle waiterInformation)
+         {
+             lock (_waiters)
+@@ -118,12 +157,14 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+             if (expired != null)
+             {
+                 expired.Callback(expired);
++                S2ARecycle(expired);
+ 
+                 if (expiredList != null)
+                 {
+                     for (int i = 0; i < expiredList.Count; i++)
+                     {
+                         expiredList[i].Callback(expiredList[i]);
++                        S2ARecycle(expiredList[i]);
+                     }
+                 }
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Synchronization/SyncpointWaiterHandle.cs b/src/Ryujinx.Graphics.Gpu/Synchronization/SyncpointWaiterHandle.cs
+index e75b1e8959551fcbc846cc0e3ff4a3bf2ea09686..0fa743472daf14c4a3670124633d20239610153d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Synchronization/SyncpointWaiterHandle.cs
++++ b/src/Ryujinx.Graphics.Gpu/Synchronization/SyncpointWaiterHandle.cs
+@@ -6,5 +6,6 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+     {
+         internal uint Threshold;
+         internal Action<SyncpointWaiterHandle> Callback;
++        internal bool S2APooled;   // S2A：来自同步点的句柄池（RegisterCallbackPooled），回调跑完放回池里
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/AndroidFence.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/AndroidFence.cs
+index 42dd4ed26f0d55fe8250e492e177a3c32f18ffbc..92c688141347b3b8d2377a3e07decfe5c98432a9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/AndroidFence.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/AndroidFence.cs
+@@ -72,7 +72,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             if (fence.IsValid())
+             {
+-                gpuContext.Synchronization.RegisterCallbackOnSyncpoint(fence.Id, fence.Value, callback);
++                gpuContext.Synchronization.RegisterCallbackOnSyncpointPooled(fence.Id, fence.Value, callback);   // S2A：不要句柄（下面也不用），走句柄池
+             }
+             else
+             {

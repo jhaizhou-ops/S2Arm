@@ -1,0 +1,78 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs b/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
+index 15f052221a8e8876ae6d2dda3d751c07b81f9ef0..d0510099efb8a70fe49ca1f38b9bbf2cc6a85787 100644
+--- a/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
++++ b/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
+@@ -9,14 +9,20 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public static bool AnySignaled(Vk api, Device device, ReadOnlySpan<Fence> fences, ulong timeout = 0)
+         {
+-            Result result = api.WaitForFences(device, (uint)fences.Length, fences, false, timeout);
++            long started = timeout > 0 ? S2AFrameTrace.Begin() : 0;
++            Result result;
++            try { result = api.WaitForFences(device, (uint)fences.Length, fences, false, timeout); }
++            finally { S2AFrameTrace.EndFence(started); }
+             result.ThrowOnError();
+             return result == Result.Success;
+         }
+ 
+         public static bool AllSignaled(Vk api, Device device, ReadOnlySpan<Fence> fences, ulong timeout = 0)
+         {
+-            Result result = api.WaitForFences(device, (uint)fences.Length, fences, true, timeout);
++            long started = timeout > 0 ? S2AFrameTrace.Begin() : 0;
++            Result result;
++            try { result = api.WaitForFences(device, (uint)fences.Length, fences, true, timeout); }
++            finally { S2AFrameTrace.EndFence(started); }
+             result.ThrowOnError();
+             return result == Result.Success;
+         }
+@@ -24,11 +30,13 @@ namespace Ryujinx.Graphics.Vulkan
+         public static void WaitAllIndefinitely(Vk api, Device device, ReadOnlySpan<Fence> fences)
+         {
+             Result result;
+-            while ((result = api.WaitForFences(device, (uint)fences.Length, fences, true, DefaultTimeout)) == Result.Timeout)
++            do
+             {
+-                // Keep waiting while the fence is not signaled.
++                long started = S2AFrameTrace.Begin();
++                try { result = api.WaitForFences(device, (uint)fences.Length, fences, true, DefaultTimeout); }
++                finally { S2AFrameTrace.EndFence(started); }
+             }
+-
++            while (result == Result.Timeout);
+             result.ThrowOnError();
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs b/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d3164b8509373c65cb6fa46f6cfb4234a49df55
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs
+@@ -0,0 +1,28 @@
++using System;
++using System.Diagnostics;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++using System.Threading;
++
++namespace Ryujinx.Graphics.Vulkan
++{
++    // Android generic only. Disabled sessions never call native code per wait.
++    public static class S2AFrameTrace
++    {
++        [DllImport("s2a_native")] private static extern int nvn_vk_frame_log_on();
++        [DllImport("s2a_native")] private static extern void nvn_vk_frame_log_fence_wait(ulong ns);
++        private static int _enabled;
++
++        public static void InitializeAndroid() => Volatile.Write(ref _enabled, nvn_vk_frame_log_on());
++        public static void Disable() => Volatile.Write(ref _enabled, 0);
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static long Begin() => Volatile.Read(ref _enabled) != 0 ? Stopwatch.GetTimestamp() : 0;
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static ulong ElapsedNs(long started) => started == 0 ? 0 : checked((ulong)Stopwatch.GetElapsedTime(started).Ticks * 100UL);
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        public static void EndFence(long started)
++        {
++            if (started != 0) nvn_vk_frame_log_fence_wait(ElapsedNs(started));
++        }
++    }
++}

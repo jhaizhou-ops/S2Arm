@@ -1,0 +1,260 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs b/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs
+index 3b2e883f027e1bfb0a66283151e4b9ed01b57aa2..87a7e3b96af100691f486d36528a03368d9e3f3b 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs
+@@ -9,11 +9,12 @@ namespace Ryujinx.HLE.FileSystem
+     {
+         // 这个目录所在的卷能不能做本事务：挂载时问一次；false 时走 LibHac 原路。可在该卷建、删自己的探测目录（.s2a_probe_<pid>_<随机>），返回前清干净；任何失败都返回 false
+         bool Supported(string directory);
+-        // 把整棵目录 source 复制或克隆到 destination（destination 必须不存在）。失败时实现负责清理，destination 不存在
++        // 把整棵目录 source 复制或克隆到 destination（destination 必须不存在）。失败时实现负责清理，destination 不存在。
++        //   返回 0 时树里的文件、各级目录与 destination 本身已落盘（destination 在父目录里的目录项由调用方对父目录 SyncDirectory）
+         int CloneTree(string source, string destination);
+         // 原子交换两个目录名：任何时刻被杀，两个名字下都是完整的某一版
+         int Exchange(string a, string b);
+-        // 目录上的小记号（≤ 64 字节）：超长 EINVAL、不写
++        // 目录上的小记号（≤ 64 字节）：超长 EINVAL、不写。返回 0 时记号已落盘
+         int WriteToken(string directory, ReadOnlySpan<byte> value);
+         // 没有记号：返回 0、length = 0；缓冲不够：返回 ERANGE、length = 实际长度（同 getxattr）
+         int ReadToken(string directory, Span<byte> value, out int length);
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+index b222649ab51bc5d6b22ccbf7531e98c286ffcd23..a876ecb2de2abe77ef3d48968552e0aef9273b4a 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -151,9 +151,12 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         private SharedRef<ISaveDataFileSystem> _base;
+         private readonly string _dir;
+-        // 改这棵存档的所有入口（建 / 删 / 改名文件与目录、以写模式打开）和提交、回滚共用这一把锁：提交的「没有开着的写模式文件」检查和整个
+-        //   克隆 + 交换都在锁内，别的线程改不进来（11-01 全量审计 P0-2：原先只有提交 / 回滚持锁，提交克隆到一半时别的线程增删改，换上的是新旧混合，下次挂载照样克隆它）
+-        private readonly object _lock = new();
++        // 改这棵存档的所有入口（建 / 删 / 改名文件与目录、以写模式打开、写附加数据）和提交、回滚共用这一把锁：提交的「没有开着的写模式文件」检查和整个
++        //   克隆 + 交换都在锁内，别的线程改不进来（11-01 全量审计 P0-2：原先只有提交 / 回滚持锁，提交克隆到一半时别的线程增删改，换上的是新旧混合，下次挂载照样克隆它）。
++        //   锁按存档目录取，挂载准备（Mount）和存档点副本（CloneCommitted）也拿它：同一棵存档不论从几条路径挂载、建了几个事务都是同一把
++        //   （11-01 18:00 全量审计 P1-8 / P1-51：原先锁是每个实例一把，两个挂载互不相拦；附加数据写入不进锁）
++        private readonly object _lock;
++        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _dirLocks = new(StringComparer.Ordinal);
+         private static int _commits;
+         private int _openWritable;   // files open for writing: a commit with one open is refused, as LibHac's journaled commit does
+ 
+@@ -161,6 +164,45 @@ namespace Ryujinx.HLE.FileSystem
+         {
+             _base = SharedRef<ISaveDataFileSystem>.CreateMove(ref baseFileSystem);
+             _dir = dir;
++            _lock = LockFor(dir);
++        }
++
++        private static object LockFor(string dir) => _dirLocks.GetOrAdd(System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(dir)), static _ => new object());
++
++        // 先写同目录的临时文件并刷到盘，再改名成 path；改名本身要等调用方对所在目录做一次目录落盘（11-01 18:00 全量审计 P1-50）
++        private static void WriteFileDurable(string tmp, string path, ReadOnlySpan<byte> data)
++        {
++            using (FileStream stream = new(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
++            {
++                stream.Write(data);
++                stream.Flush(flushToDisk: true);
++            }
++
++            File.Move(tmp, path, overwrite: true);
++        }
++
++        // 存档点副本（services Saves.SnapshotFrom）：在这棵存档的锁里把已提交版本 <dir>/0 整树克隆到 destination（不能已存在）。锁里提交 / 回滚 / 挂载都换不掉 0/，
++        //   拿到的一定是某一次成立的提交（11-01 18:00 全量审计 P1-51：原先提交返回、锁放开后逐文件拷，交换前后各解析一次路径，可拼出两次提交）。成功回 null，否则回原因
++        public static string CloneCommitted(string dir, string destination)
++        {
++            IHostDirectoryTransaction txn = Txn;
++
++            if (txn == null)
++            {
++                return "平台没登记宿主目录原语";
++            }
++
++            lock (LockFor(dir))
++            {
++                if (!Directory.Exists(System.IO.Path.Combine(dir, "0")))
++                {
++                    return "没有已提交目录";
++                }
++
++                int e = txn.CloneTree(System.IO.Path.Combine(dir, "0"), destination);
++
++                return e == 0 ? null : Errno("克隆已提交版本", e);
++            }
+         }
+ 
+         internal static void Red(string what)
+@@ -174,6 +216,14 @@ namespace Ryujinx.HLE.FileSystem
+         // Before LibHac opens the save: clear what an interrupted transaction left, then clone the committed version into the working directory.
+         // Returns why it could not (the caller then takes LibHac's own path), or null
+         internal static string Mount(string dir)
++        {
++            lock (LockFor(dir))
++            {
++                return MountLocked(dir);
++            }
++        }
++
++        private static string MountLocked(string dir)
+         {
+             string committed = System.IO.Path.Combine(dir, "0"), working = System.IO.Path.Combine(dir, "1"), fresh = System.IO.Path.Combine(dir, ".s2a_new");
+ 
+@@ -207,6 +257,21 @@ namespace Ryujinx.HLE.FileSystem
+                     }
+                 }
+ 
++                string extra0 = System.IO.Path.Combine(dir, "ExtraData0"), extra1 = System.IO.Path.Combine(dir, "ExtraData1");
++
++                // 没有已提交的附加数据、只有工作份：同上面没提交过的工作目录，把它当成已提交并落盘，回滚才有上一份可回（11-01 18:00 全量审计 P1-8）
++                if (!File.Exists(extra0) && File.Exists(extra1))
++                {
++                    WriteFileDurable(System.IO.Path.Combine(dir, ".s2a_extra"), extra0, File.ReadAllBytes(extra1));
++
++                    int se = Txn.SyncDirectory(dir);
++
++                    if (se != 0)
++                    {
++                        return Errno("已提交附加数据目录项落盘", se);
++                    }
++                }
++
+                 if (Directory.Exists(working))
+                 {
+                     Directory.Delete(working, true);
+@@ -219,8 +284,6 @@ namespace Ryujinx.HLE.FileSystem
+                     return Errno("把已提交版本克隆成工作目录", ce);
+                 }
+ 
+-                string extra0 = System.IO.Path.Combine(dir, "ExtraData0"), extra1 = System.IO.Path.Combine(dir, "ExtraData1");
+-
+                 if (File.Exists(extra0))
+                 {
+                     File.Copy(extra0, extra1, overwrite: true);
+@@ -260,9 +323,15 @@ namespace Ryujinx.HLE.FileSystem
+ 
+                 if (tokenLength == TokenSize && data.AsSpan(0, TokenSize).SequenceEqual(token))
+                 {
+-                    string extraNew = System.IO.Path.Combine(dir, ".s2a_extra");
+-                    File.WriteAllBytes(extraNew, data[TokenSize..]);
+-                    File.Move(extraNew, System.IO.Path.Combine(dir, "ExtraData0"), overwrite: true);
++                    WriteFileDurable(System.IO.Path.Combine(dir, ".s2a_extra"), System.IO.Path.Combine(dir, "ExtraData0"), data.AsSpan(TokenSize));
++
++                    // ExtraData0 落了盘才删待写文件：反过来掉电，新附加数据两头都丢（11-01 18:00 全量审计 P1-50）
++                    int se = Txn.SyncDirectory(dir);
++
++                    if (se != 0)
++                    {
++                        throw new IOException(Errno("附加数据目录项落盘", se));
++                    }
+                 }
+             }
+ 
+@@ -319,8 +388,18 @@ namespace Ryujinx.HLE.FileSystem
+                     byte[] extra = File.ReadAllBytes(extra1), data = new byte[TokenSize + extra.Length];
+                     token.CopyTo(data, 0);
+                     extra.CopyTo(data, TokenSize);
+-                    File.WriteAllBytes(pendingNew, data);
+-                    File.Move(pendingNew, pending, overwrite: true);
++                    WriteFileDurable(pendingNew, pending, data);
++                }
++
++                // 交换前让新版本的目录项与待写附加数据落盘：交换落了盘而它们没落，掉电后已提交的是新树、附加数据却回到旧的（11-01 18:00 全量审计 P1-50）。
++                //   新版本树里的文件、各级目录与提交号由平台原语的克隆 / 写记号自己落盘（IHostDirectoryTransaction 约定）
++                if ((errno = Txn.SyncDirectory(_dir)) != 0)
++                {
++                    Red($"存档事务：提交 {_dir} 时{Errno("交换前目录项落盘", errno)}，已提交版本不动");
++                    Directory.Delete(fresh, true);
++                    File.Delete(pending);
++
++                    return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                 }
+ 
+                 if ((errno = Txn.Exchange(fresh, committed)) != 0)
+@@ -433,7 +512,7 @@ namespace Ryujinx.HLE.FileSystem
+                 }
+ 
+                 string committed = System.IO.Path.Combine(_dir, "0"), working = System.IO.Path.Combine(_dir, "1"), fresh = System.IO.Path.Combine(_dir, ".s2a_new");
+-                string extra0 = System.IO.Path.Combine(_dir, "ExtraData0"), extraNew = System.IO.Path.Combine(_dir, ".s2a_extra1");
++                string extra0 = System.IO.Path.Combine(_dir, "ExtraData0"), extra1 = System.IO.Path.Combine(_dir, "ExtraData1"), extraNew = System.IO.Path.Combine(_dir, ".s2a_extra1");
+ 
+                 try
+                 {
+@@ -442,11 +521,15 @@ namespace Ryujinx.HLE.FileSystem
+                         Directory.Delete(fresh, true);
+                     }
+ 
+-                    bool hasExtra = File.Exists(extra0);
+-
+-                    if (hasExtra)
++                    // 交换前备好回滚后的附加数据，交换后只剩一步改名：有已提交的就是它；没有（挂载时两份都没有，见 Mount）就是挂载时 LibHac 新建的那份全 0
++                    //   （11-01 18:00 全量审计 P1-8：原先没有上一份就不碰，未提交的附加数据留下、下次提交发布出去）
++                    if (File.Exists(extra0))
+                     {
+-                        File.Copy(extra0, extraNew, overwrite: true);   // 先备好，交换后只剩一步改名
++                        File.Copy(extra0, extraNew, overwrite: true);
++                    }
++                    else
++                    {
++                        File.WriteAllBytes(extraNew, new byte[System.Runtime.CompilerServices.Unsafe.SizeOf<SaveDataExtraData>()]);
+                     }
+ 
+                     int e = Txn.CloneTree(committed, fresh);
+@@ -458,16 +541,42 @@ namespace Ryujinx.HLE.FileSystem
+ 
+                         return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                     }
++                }
++                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++                {
++                    Red($"存档事务：回滚 {_dir} 出错：{e.Message}，工作目录保持原样");
+ 
+-                    // 文件树已换回；附加数据改名失败就报回滚失败（游戏再回滚一次即重做，整个过程可重复）
+-                    if (hasExtra)
+-                    {
+-                        File.Move(extraNew, System.IO.Path.Combine(_dir, "ExtraData1"), overwrite: true);
+-                    }
++                    return ResultFs.UnexpectedInLocalFileSystemE.Log();
++                }
++
++                // 文件树已换回；附加数据改名失败就把文件树换回回滚前、报失败：失败不留半步，游戏再回滚一次即重做
++                //   （11-01 18:00 全量审计 P1-8：原先报回滚失败时工作树已是上一版、附加数据仍是未提交的）
++                try
++                {
++                    File.Move(extraNew, extra1, overwrite: true);
+                 }
+                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                 {
+-                    Red($"存档事务：回滚 {_dir} 出错：{e.Message}");
++                    int back = Txn.Exchange(fresh, working);
++
++                    Red(back == 0
++                        ? $"存档事务：回滚 {_dir} 时附加数据改名失败（{e.Message}），文件树已换回回滚前，这次回滚报失败"
++                        : $"存档事务：回滚 {_dir} 时附加数据改名失败（{e.Message}），换回回滚前也{Errno("交换", back)}：工作目录已是上一版、附加数据仍是未提交的，这次回滚报失败");
++
++                    try
++                    {
++                        File.Delete(extraNew);
++
++                        if (back == 0)
++                        {
++                            // 这次克隆出来没用上的已提交版本
++                            Directory.Delete(fresh, true);
++                        }
++                    }
++                    catch (Exception ce) when (ce is IOException or UnauthorizedAccessException)
++                    {
++                        Red($"存档事务：{_dir} 回滚失败后清理没做完（{ce.Message}），下次挂载 / 提交清掉");
++                    }
+ 
+                     return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                 }
+@@ -567,8 +676,8 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         public override bool IsSaveDataFileSystemCacheEnabled() => _base.Get.IsSaveDataFileSystemCacheEnabled();
+         public override Result RollbackOnlyModified() => _base.Get.RollbackOnlyModified();
+-        public override Result WriteExtraData(in SaveDataExtraData extraData) => _base.Get.WriteExtraData(in extraData);
+-        public override Result ReadExtraData(out SaveDataExtraData extraData) => _base.Get.ReadExtraData(out extraData);
++        public override Result WriteExtraData(in SaveDataExtraData extraData) { lock (_lock) return _base.Get.WriteExtraData(in extraData); }
++        public override Result ReadExtraData(out SaveDataExtraData extraData) { lock (_lock) return _base.Get.ReadExtraData(out extraData); }
+         public override void RegisterExtraDataAccessorObserver(ISaveDataExtraDataAccessorObserver observer, SaveDataSpaceId spaceId, ulong saveDataId) => _base.Get.RegisterExtraDataAccessorObserver(observer, spaceId, saveDataId);
+ 
+         public override void Dispose()

@@ -1,0 +1,16 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs b/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
+index ed14b3e1590e8a2f9d405bdace7f6159bb97d5bc..91911575ae9879ab23558281793590a16ddf87ce 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
+@@ -246,7 +246,11 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+ 
+                 string path = MemoryHelper.ReadAsciiString(context.Memory, pathPtr, (long)pathSize);
+ 
++                // S2A（帧率能耗线 10-24，诊断，S2A_ALLOC_TRACE=1 时）：每次打开设备的托管分配按路径打一行——丝之歌加载期「INvDrvServices #0」10 次共 97 MB（平均约 10 MB / 次），
++                //   拆账只到命令号、看不出是哪个设备；关时只多一次静态布尔判断
++                long s2aA0 = Ryujinx.Common.S2AThreadAlloc.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
+                 errorCode = Open(context, path, out fd);
++                if (Ryujinx.Common.S2AThreadAlloc.On) Console.Error.WriteLine($"[分配·nv 打开] {path}：{(GC.GetAllocatedBytesForCurrentThread() - s2aA0) / 1024} KB（fd {fd}，{errorCode}）");
+             }
+ 
+             context.ResponseData.Write(fd);

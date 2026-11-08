@@ -1,0 +1,288 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 3e11df0566773e6d8ac5ea5b85a7d886ebe23df4..a9af741b27aa61eea1e8f1a35cf0af6d86c970ad 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -102,14 +102,19 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             }
+         }
+ 
++        // S2Arm: one session record per slot, reused: Send only happens after the processor cleared the slot
++        // (HasRemainingCommands), so a record is never shared between two frames (was allocated every 5 ms)
++        private readonly RendererSession[] _s2aSessionRecords = new RendererSession[Constants.AudioRendererSessionCountMax];
++
+         public void Send(int sessionId, CommandList commands, int renderingLimit, ulong appletResourceId)
+         {
+-            _sessionCommandList[sessionId] = new RendererSession
+-            {
+-                CommandList = commands,
+-                RenderingLimit = renderingLimit,
+-                AppletResourceId = appletResourceId,
+-            };
++            RendererSession session = _s2aSessionRecords[sessionId] ??= new RendererSession();
++
++            session.CommandList = commands;
++            session.RenderingLimit = renderingLimit;
++            session.AppletResourceId = appletResourceId;
++
++            Volatile.Write(ref _sessionCommandList[sessionId], session);
+         }
+ 
+         public bool HasRemainingCommands(int sessionId)
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/CommandList.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/CommandList.cs
+index f29e8218e593021b159e263b279c06b80ac2c07b..2f522d0ae0cd28bc5468ba6884be719984c8d74b 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/CommandList.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/CommandList.cs
+@@ -150,8 +150,48 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             EndTime = (ulong)PerformanceCounter.ElapsedNanoseconds;
+         }
+ 
++        // S2Arm: lists rented from a render system's pool (see AudioRenderSystem) keep their command list and pinned
++        // mix buffer, and go back to the pool when the processor is done, instead of being recreated every 5 ms
++        private System.Collections.Generic.Stack<CommandList> _s2aPool;
++
++        internal static CommandList S2ARent(AudioRenderSystem renderSystem, System.Collections.Generic.Stack<CommandList> pool)
++        {
++            CommandList list = null;
++
++            lock (pool)
++            {
++                if (pool.Count != 0)
++                {
++                    list = pool.Pop();
++                }
++            }
++
++            if (list == null)
++            {
++                list = new CommandList(renderSystem) { _s2aPool = pool };
++            }
++
++            list.StartTime = 0;
++            list.EndTime = 0;
++            list.OutputDevice = null;
++
++            return list;
++        }
++
+         public void Dispose()
+         {
++            if (_s2aPool != null)
++            {
++                Commands.Clear();
++
++                lock (_s2aPool)
++                {
++                    _s2aPool.Push(this);
++                }
++
++                return;
++            }
++
+             Commands.Clear();
+             CommandsListPool.Release(Commands);
+             GC.SuppressFinalize(this);
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+index c70d186a05ff59a7ae50c59083b28c90a0097f9d..310bc0d0525179c6f0d72e73c57b93fb7c0049c5 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs
+@@ -41,7 +41,11 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             
+             SessionId = sessionId;
+             InputCount = sink.Parameter.InputCount;
+-            InputBufferIndices = new ushort[InputCount];
++            // S2Arm: pooled command, keep the array while the input count is unchanged (was allocated every frame)
++            if (InputBufferIndices == null || InputBufferIndices.Length != InputCount)
++            {
++                InputBufferIndices = new ushort[InputCount];
++            }
+             
+             Span<byte> inputSpan = sink.Parameter.Input.AsSpan();
+ 
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
+index b08a78ee6101701046951d01750ce7a1c31c7322..7932dbb14cd96f284096cffb4be7bbd961b71af8 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/MixRampGroupedCommand.cs
+@@ -42,10 +42,10 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             MixBufferCount = mixBufferCount;
+             NodeId = nodeId;
+ 
+-            InputBufferIndices = new ushort[Constants.MixBufferCountMax];
+-            OutputBufferIndices = new ushort[Constants.MixBufferCountMax];
+-            Volume0 = new float[Constants.MixBufferCountMax];
+-            Volume1 = new float[Constants.MixBufferCountMax];
++            InputBufferIndices ??= new ushort[Constants.MixBufferCountMax]; // S2Arm: pooled command, fixed-size arrays allocated once (was every voice, every frame)
++            OutputBufferIndices ??= new ushort[Constants.MixBufferCountMax]; // S2Arm: pooled command, fixed-size arrays allocated once (was every voice, every frame)
++            Volume0 ??= new float[Constants.MixBufferCountMax]; // S2Arm: pooled command, fixed-size arrays allocated once (was every voice, every frame)
++            Volume1 ??= new float[Constants.MixBufferCountMax]; // S2Arm: pooled command, fixed-size arrays allocated once (was every voice, every frame)
+ 
+             for (int i = 0; i < mixBufferCount; i++)
+             {
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/UpsampleCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/UpsampleCommand.cs
+index f9c17863f098cf4cde1264ee1efbcd3eb7e4bc2c..9e87a14cd93856a492e3e7c6dd9c97a8bdb80976 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/UpsampleCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/UpsampleCommand.cs
+@@ -38,7 +38,11 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             InputSampleCount = sampleCount;
+             InputSampleRate = sampleRate;
+             info.SourceSampleCount = inputCount;
+-            info.InputBufferIndices = new ushort[inputCount];
++            // S2Arm: the upsampler info persists across frames; reallocate only when the input count changes
++            if (info.InputBufferIndices == null || info.InputBufferIndices.Length != inputCount)
++            {
++                info.InputBufferIndices = new ushort[inputCount];
++            }
+ 
+             for (int i = 0; i < inputCount; i++)
+             {
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+index 188af8640857d0d38552ad3227e63e6e8b1e06c7..ff11f544a146afcf30959347825feaa8d7c8f117 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+@@ -614,7 +614,8 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             ulong startTicks = GetSystemTicks();
+ 
+-            commandList = new CommandList(this);
++            // S2Arm: command list / buffer / generator / context reused per render system (zero steady-state allocation)
++            commandList = CommandList.S2ARent(this, _s2aCommandLists);
+ 
+             if (_performanceManager != null)
+             {
+@@ -625,9 +626,20 @@ namespace Ryujinx.Audio.Renderer.Server
+                 _renderingStartTick = 0;
+             }
+ 
+-            CommandBuffer commandBuffer = new(commandList, _commandProcessingTimeEstimator);
++            CommandBuffer commandBuffer = _s2aCommandBuffer ??= new CommandBuffer(commandList, _commandProcessingTimeEstimator);
++            commandBuffer.S2AReset(commandList);
+ 
+-            CommandGenerator commandGenerator = new(commandBuffer, GetContext(), _voiceContext, _mixContext, _effectContext, _sinkContext, _splitterContext, _performanceManager);
++            CommandGenerator commandGenerator;
++
++            if (_s2aCommandGenerator == null)
++            {
++                commandGenerator = _s2aCommandGenerator = new CommandGenerator(commandBuffer, GetContext(), _voiceContext, _mixContext, _effectContext, _sinkContext, _splitterContext, _performanceManager);
++            }
++            else
++            {
++                commandGenerator = _s2aCommandGenerator;
++                commandGenerator.S2AReset(commandBuffer, GetContext());
++            }
+ 
+             _voiceContext.Sort();
+             commandGenerator.GenerateVoices();
+@@ -740,17 +752,24 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+         private RendererSystemContext GetContext()
+         {
+-            return new RendererSystemContext
+-            {
+-                ChannelCount = _manager.Processor.OutputDevices[_sessionId].GetChannelCount(),
+-                BehaviourInfo = _behaviourInfo,
+-                DepopBuffer = _depopBuffer,
+-                MixBufferCount = GetMixBufferCount(),
+-                SessionId = _sessionId,
+-                UpsamplerManager = _upsamplerManager,
+-            };
++            // S2Arm: one context per render system, refreshed every frame (the channel count follows the output device)
++            RendererSystemContext context = _s2aContext ??= new RendererSystemContext();
++
++            context.ChannelCount = _manager.Processor.OutputDevices[_sessionId].GetChannelCount();
++            context.BehaviourInfo = _behaviourInfo;
++            context.DepopBuffer = _depopBuffer;
++            context.MixBufferCount = GetMixBufferCount();
++            context.SessionId = _sessionId;
++            context.UpsamplerManager = _upsamplerManager;
++
++            return context;
+         }
+ 
++        private readonly System.Collections.Generic.Stack<CommandList> _s2aCommandLists = new();
++        private CommandBuffer _s2aCommandBuffer;
++        private CommandGenerator _s2aCommandGenerator;
++        private RendererSystemContext _s2aContext;
++
+         public int GetSessionId()
+         {
+             return _sessionId;
+diff --git a/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs b/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
+index d46222f83003efae23a5dde558fc1ebd8c49cb9a..e7f085aa369b57def8e57f9c3c4e101f1f77ec05 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/CommandBuffer.cs
+@@ -32,7 +32,7 @@ namespace Ryujinx.Audio.Renderer.Server
+         /// <summary>
+         /// The command list that is populated by the <see cref="CommandBuffer"/>.
+         /// </summary>
+-        public CommandList CommandList { get; }
++        public CommandList CommandList { get; private set; }
+ 
+         private readonly static ObjectPool<PcmInt16DataSourceCommandVersion1> _pcmInt16DataSourceCommandVersion1Pool = new(() => new PcmInt16DataSourceCommandVersion1());
+         private readonly static ObjectPool<PcmFloatDataSourceCommandVersion1> _pcmFloatDataSourceCommandVersion1Pool = new(() => new PcmFloatDataSourceCommandVersion1());
+@@ -195,6 +195,13 @@ namespace Ryujinx.Audio.Renderer.Server
+         /// </summary>
+         /// <param name="commandList">The command list that will store the generated commands.</param>
+         /// <param name="commandProcessingTimeEstimator">The command processing time estimator to use.</param>
++        // S2Arm: reuse one buffer per render system (see AudioRenderSystem.GenerateCommandList)
++        internal void S2AReset(CommandList commandList)
++        {
++            CommandList = commandList;
++            EstimatedProcessingTime = 0;
++        }
++
+         public CommandBuffer(CommandList commandList, ICommandProcessingTimeEstimator commandProcessingTimeEstimator)
+         {
+             CommandList = commandList;
+diff --git a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+index 9651d204fc83bde1c534ed4a6cb174c2cc6dc6ce..6f76d48840ac5b1f2a8542a2075f8b20546e5e1e 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+@@ -18,8 +18,8 @@ namespace Ryujinx.Audio.Renderer.Server
+ {
+     public class CommandGenerator
+     {
+-        private readonly CommandBuffer _commandBuffer;
+-        private readonly RendererSystemContext _rendererContext;
++        private CommandBuffer _commandBuffer;
++        private RendererSystemContext _rendererContext;
+         private readonly VoiceContext _voiceContext;
+         private readonly MixContext _mixContext;
+         private readonly EffectContext _effectContext;
+@@ -41,6 +41,15 @@ namespace Ryujinx.Audio.Renderer.Server
+             _commandBuffer.GenerateClearMixBuffer(Constants.InvalidNodeId);
+         }
+ 
++        // S2Arm: reuse one generator per render system; same effect as constructing a new one for this frame
++        internal void S2AReset(CommandBuffer commandBuffer, RendererSystemContext rendererContext)
++        {
++            _commandBuffer = commandBuffer;
++            _rendererContext = rendererContext;
++
++            _commandBuffer.GenerateClearMixBuffer(Constants.InvalidNodeId);
++        }
++
+         private void GenerateDataSource(ref VoiceInfo voiceInfo, Memory<VoiceState> dspState, int channelIndex)
+         {
+             if (voiceInfo.MixId != Constants.UnusedMixId)
+diff --git a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
+index 5cb334ddd0dd3b0cc0531f501eedbe7f50a9265c..8957d8a42417e3c192fd589fa5e8fb393204dab0 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
+@@ -40,6 +40,9 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
+         /// </summary>
+         private uint _voiceCount;
+ 
++        // S2Arm: the comparison captures this; created once instead of every sort (every 5 ms)
++        private Comparison<int> _s2aCompare;
++
+         public void Initialize(Memory<int> sortedVoices, Memory<VoiceInfo> voices, Memory<VoiceChannelResource> voiceChannelResources, Memory<VoiceState> voiceStatesCpu, Memory<VoiceState> voiceStatesDsp, uint voiceCount)
+         {
+             _sortedVoices = sortedVoices;
+@@ -128,7 +131,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
+ 
+             Span<int> sortedVoicesTemp = _sortedVoices[..(int)_voiceCount].Span;
+ 
+-            sortedVoicesTemp.Sort((a, b) =>
++            sortedVoicesTemp.Sort(_s2aCompare ??= (a, b) =>
+             {
+                 ref VoiceInfo aInfo = ref GetState(a);
+                 ref VoiceInfo bInfo = ref GetState(b);

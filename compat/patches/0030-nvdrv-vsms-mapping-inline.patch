@@ -1,0 +1,39 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+index 29ea02b813de95eec5943072610bfd766221d4fa..f226518173e031242e6989f8afd8740fbcda15ba 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+@@ -99,7 +99,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+                         result = CallIoctlMethod<NumVsmsArguments>(_s2aNumVsms1 ??= NumVsms, arguments);
+                         break;
+                     case 0x13:
+-                        result = CallIoctlMethod<VsmsMappingArguments>(_s2aVsmsMapping1 ??= VsmsMapping, arguments);
++                        result = CallIoctlMethod<VsmsMappingArguments, byte>(_s2aVsmsMappingInline ??= VsmsMappingInline, arguments, inlineOutBuffer);
+                         break;
+                 }
+             }
+@@ -107,6 +107,25 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+             return result;
+         }
+ 
++        // S2Arm: the Ioctl3 form also returns the SM map in the inline buffer ({GPC, TPC} per SM, 2 bytes each). The game's NVN
++        // driver pre-fills the last entry with a 0xc0c0 sentinel and fails device creation if it is not overwritten. Upstream
++        // only fills the argument block; on desktop the kernel's pointer-buffer copy-back happens to overwrite the sentinel,
++        // which in-thread direct dispatch does not do.
++        private IoctlProcessorInlineSpan<VsmsMappingArguments, byte> _s2aVsmsMappingInline;
++
++        private NvInternalResult VsmsMappingInline(ref VsmsMappingArguments arguments, Span<byte> inlineData)
++        {
++            NvInternalResult result = VsmsMapping(ref arguments);
++
++            for (int k = 0; k + 2 <= inlineData.Length; k += 2)
++            {
++                inlineData[k] = 0;                   // GPC 0
++                inlineData[k + 1] = (byte)(k / 2);   // TPC k
++            }
++
++            return result;
++        }
++
+         public override NvInternalResult QueryEvent(out int eventHandle, uint eventId)
+         {
+             // TODO: accurately represent and implement those events.

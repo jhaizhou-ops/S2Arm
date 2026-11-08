@@ -1,0 +1,52 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/StreamPlay/IUserService.cs b/src/Ryujinx.HLE/HOS/Services/StreamPlay/IUserService.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..40a7a2a3b96f686a83fabe60628bf7188a24cd28
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/StreamPlay/IUserService.cs
+@@ -0,0 +1,46 @@
++namespace Ryujinx.HLE.HOS.Services.StreamPlay
++{
++    // S2Arm：Switch 2 的 stpl:u（nn::streamplay，GameShare 把画面串流给别的主机）。Pokopia 首帧后经 nn::streamplay::GetRequiredMemorySize 连它，
++    //   没有即 Break 0xe15（2021-0007）。宿主不做串流：库就绪、没有会话、没有客机连进来。命令号与参数形状来自 Eden-NS2 ngc.cpp（GPL，只借事实，代码自写）
++    [Service("stpl:u")]
++    class IUserService : IpcService
++    {
++        public IUserService(ServiceCtx context) { }
++
++        [CommandCmif(0)]
++        // GetUserShimScopedObject(u32 client_version) -> object<nn::streamplay::IUserShimScopedObject>
++        public ResultCode GetUserShimScopedObject(ServiceCtx context)
++        {
++            context.RequestData.ReadUInt32();
++
++            MakeObject(context, new IUserShimScopedObject());
++
++            return ResultCode.Success;
++        }
++    }
++
++    class IUserShimScopedObject : IpcService
++    {
++        [CommandCmif(1)]
++        // GetRequiredMemorySize(u8 type, u8 mode, s32 guest_count) -> u32：SDK 在 Initialize 里按「缓冲长 ÷ 每客机所需」反推客机数，
++        //   所以要与客机数成正比；宿主每客机给一页（不存任何串流状态）
++        public ResultCode GetRequiredMemorySize(ServiceCtx context)
++        {
++            context.RequestData.ReadByte();
++            context.RequestData.ReadByte();
++            context.RequestData.BaseStream.Position = 4;
++            int guests = context.RequestData.ReadInt32();
++
++            context.ResponseData.Write((uint)(guests > 0 ? guests : 0) * 0x1000u);
++
++            return ResultCode.Success;
++        }
++
++        [CommandCmif(2)]
++        // Initialize(u8 type, u8 mode, s32 guest_count, u64 context, pid)：就绪，不开会话
++        public ResultCode Initialize(ServiceCtx context)
++        {
++            return ResultCode.Success;
++        }
++    }
++}

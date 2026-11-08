@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+index e83673e8d436417bcbee4eb288d94470f3528a8a..181f7996f307fa5a40bf3c6f5c3878fd7d99a660 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+@@ -288,6 +288,15 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+             _state.NeedsScheduling = false;
+             Thread.MemoryBarrier();
+             KThread currentThread = KernelStatic.GetCurrentThread();
++
++            // A service/host thread (or a thread without a guest owner) has no guest core to schedule on.
++            // Blocking service calls (e.g. Bsd Poll -> SleepThread) can arrive on such a thread; returning
++            // here makes the sleep a no-op instead of dereferencing an owner-less/partially-initialized thread.
++            if (currentThread == null || currentThread.Owner == null || currentThread.ThreadContext == null)
++            {
++                return;
++            }
++
+             KThread selectedThread = _state.SelectedThread;
+ 
+             if (!currentThread.IsThreadNamed && !string.IsNullOrEmpty(currentThread.GetThreadName()))
+@@ -368,7 +377,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+                     // interrupt so this is not expected to take long.
+                     // The idle thread must also be paused if we are scheduling a thread
+                     // on the core, as the scheduled thread will handle the next switch.
+-                    if (selectedThread.ThreadContext.Lock())
++                    // ThreadContext is assigned in KThread.Initialize, not the constructor, and the KTimeManager
++                    // host thread reads _state.SelectedThread from a foreign thread. If a thread is observed before
++                    // its Initialize completes, treat it as not schedulable this round instead of dereferencing null;
++                    // the thread triggers a reschedule once it becomes runnable.
++                    if (selectedThread.ThreadContext != null && selectedThread.ThreadContext.Lock())
+                     {
+                         SwitchTo(currentThread, selectedThread);
+ 

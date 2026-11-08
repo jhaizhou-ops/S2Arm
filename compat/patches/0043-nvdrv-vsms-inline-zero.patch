@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+index f226518173e031242e6989f8afd8740fbcda15ba..250c20cce722a6ad8a789069304c9561bc614b0d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+@@ -107,21 +107,17 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+             return result;
+         }
+ 
+-        // S2Arm: the Ioctl3 form also returns the SM map in the inline buffer ({GPC, TPC} per SM, 2 bytes each). The game's NVN
+-        // driver pre-fills the last entry with a 0xc0c0 sentinel and fails device creation if it is not overwritten. Upstream
+-        // only fills the argument block; on desktop the kernel's pointer-buffer copy-back happens to overwrite the sentinel,
+-        // which in-thread direct dispatch does not do.
++        // S2Arm: the game's NVN driver pre-fills the inline buffer of the Ioctl3 form with a 0xc0c0 sentinel and fails device
++        // creation if it is not overwritten. Upstream only fills the argument block; on desktop the kernel copies the server's
++        // (zero) pointer buffer back over it, which in-thread direct dispatch does not do. Reproduce that result: all zero
++        // (the reference Ryujinx IPC record shows exactly this).
+         private IoctlProcessorInlineSpan<VsmsMappingArguments, byte> _s2aVsmsMappingInline;
+ 
+         private NvInternalResult VsmsMappingInline(ref VsmsMappingArguments arguments, Span<byte> inlineData)
+         {
+             NvInternalResult result = VsmsMapping(ref arguments);
+ 
+-            for (int k = 0; k + 2 <= inlineData.Length; k += 2)
+-            {
+-                inlineData[k] = 0;                   // GPC 0
+-                inlineData[k + 1] = (byte)(k / 2);   // TPC k
+-            }
++            inlineData.Clear();
+ 
+             return result;
+         }

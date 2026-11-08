@@ -1,0 +1,51 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+index 7b17f6086a36bc1e4b9426d67c365abf738c05e5..6bea866dbe2d92c012af3c92f6b83cc525fcc826 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+@@ -599,7 +599,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                     UpdateMessages(out vlen, message, receiveSize);
+                 }
+ 
+-                return WinSockHelper.ConvertError((WsaError)socketError);
++                return WinSockHelper.ConvertSocketError(socketError);
+             }
+             catch (SocketException exception)
+             {
+@@ -650,7 +650,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                     UpdateMessages(out vlen, message, sendSize);
+                 }
+ 
+-                return WinSockHelper.ConvertError((WsaError)socketError);
++                return WinSockHelper.ConvertSocketError(socketError);
+             }
+             catch (SocketException exception)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+index 5fb223869907be45d684bf80e4abb79ed9e7c74e..61443c8c46f2880b0728484bd7a669819cfc58f5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+@@ -302,6 +302,24 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             return (LinuxError)errorCode;
+         }
+ 
++        /// <summary>
++        /// Converts a managed SocketError value, whose numeric domain is Winsock on every OS.
++        /// </summary>
++        /// <remarks>
++        /// ConvertError receives native SocketException.ErrorCode on Apple platforms instead.
++        /// Passing WouldBlock (10035) through that native errno table leaks the host value to the guest.
++        /// Keep the two domains separate; unmapped values retain the existing fallback behavior.
++        /// </remarks>
++        public static LinuxError ConvertSocketError(SocketError socketError)
++        {
++            if (_errorMap.TryGetValue((WsaError)socketError, out LinuxError errno))
++            {
++                return errno;
++            }
++
++            return (LinuxError)socketError;
++        }
++
+         public static bool TryConvertSocketOption(BsdSocketOption option, SocketOptionLevel level, out SocketOptionName name)
+         {
+             Dictionary<BsdSocketOption, SocketOptionName> table = level switch

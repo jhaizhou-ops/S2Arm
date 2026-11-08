@@ -1,0 +1,40 @@
+# Ryujinx 上游锁定版本（import_upstream.sh 生成，勿手改）
+upstream	Ryubing/Ryujinx（git.ryujinx.app/ryubing/ryujinx）
+commit	475615f0431b4995b03c930c5089d20f6f3570e0
+commit_date	2026-08-26T07:26:56Z
+commit_subject	revert "Add raw copy dependencies for incompatible textures" (#181)
+files	3708
+path	.editorconfig	1059bcdeb1733961bf81b7fdb83e6a71106f03a6	100644
+path	.gitignore	caa75657f0fcbf0a0de3d2276c227521c44fa10d	100644
+path	Directory.Build.props	b80d1a8870effc093f7ba9d614d76879b90892a6	100644
+path	Directory.Packages.props	6bf619dd3071b14e4a0b0c7e5b20f58e5d4a15ea	100644
+path	LICENSE.txt	818ddd76058d49f42eed9c0ecb580777c7f87d7e	100644
+path	global.json	f365c8c0e004d33378aa509308d56e05dcb059e0	100644
+path	nuget.config	6ed8f8d89266845d37fe3d8334d873346549df2b	100644
+path	src/ARMeilleure	57eaec8e7934853db7f04424179b5fec09148286	040000
+path	src/Ryujinx.Audio	042faac3d6b7f15930c897e151f06b235ed007f6	040000
+path	src/Ryujinx.Audio.Backends.Apple	23641ca8c18121430333de06a1eea36b47546a7a	040000
+path	src/Ryujinx.Common	68456c60d814c348f25b94e51ad6eaee21005c25	040000
+path	src/Ryujinx.Cpu	07c4abbcd07f6f7f1d6b78d1b1acb0c5cdc74fc5	040000
+path	src/Ryujinx.Graphics.Device	5981ccab2d225662dda4bc91e2af6a09c1c03460	040000
+path	src/Ryujinx.Graphics.GAL	4e5e6b060cf2f7b7bae2f0b421f39b4bb1984376	040000
+path	src/Ryujinx.Graphics.Gpu	e1d426ea76494add631069819e2bbc1c207552b0	040000
+path	src/Ryujinx.Graphics.Host1x	35a83bfebf6d4735b4059f27f84a6c445b87fe2f	040000
+path	src/Ryujinx.Graphics.Nvdec	2ee486b5d162f58012c25f6c65ec0d8a06cc1389	040000
+path	src/Ryujinx.Graphics.Nvdec.FFmpeg	30c416eca4be479f11640ee08672166117011d52	040000
+path	src/Ryujinx.Graphics.Nvdec.Vp9	0dadb31eec5abeb6d86d7343ab1e593f7bffd7f8	040000
+path	src/Ryujinx.Graphics.Shader	3cdc5c1aeacb4d02f1b70d7959be0f3cdf94a897	040000
+path	src/Ryujinx.Graphics.Texture	32dc11a84d5b583dca8160be670e2f41d24d1a5a	040000
+path	src/Ryujinx.Graphics.Vic	230ac4b54b28c145934d81bb767cef88d128cba1	040000
+path	src/Ryujinx.Graphics.Video	1b9b4a4722f48a4cf4d023ff55d9af60d64322ea	040000
+path	src/Ryujinx.HLE	4f0b8d3e4ec289c86fe9874fcc9a7c8441db07b1	040000
+path	src/Ryujinx.HLE.Generators	5316b08c4931719ee09aa5909b140927a783dfbd	040000
+path	src/Ryujinx.Horizon	6da746dec61d8536d22beddec6ea2c2845382a0f	040000
+path	src/Ryujinx.Horizon.Common	a16da292717c2856e4c89aa31f823e8ca21f54d1	040000
+path	src/Ryujinx.Horizon.Generators	a3c9250c1146e28e6c1997dc16ef6b9744ff3bfe	040000
+path	src/Ryujinx.Horizon.Kernel.Generators	fd194ba7db3469df252762032c38fe634e0a3356	040000
+path	src/Ryujinx.Input	41b03a9377f3423f7c13ced210b28ba974c158b7	040000
+path	src/Ryujinx.Memory	4ffc72ee77cf156ad7b443eab1cadf4dcbe4ccd8	040000
+path	src/Ryujinx.Tests.Memory	825fb033d634352bdf3b4f2f50911a04cd252546	040000
+path	src/Spv.Generator	cdae25d81c7c09423016aa7df28d132577a738fd	040000
+path	src/Ryujinx.Graphics.Vulkan	07f8a61d3a93405561632a2cd04d7a2561308065	040000

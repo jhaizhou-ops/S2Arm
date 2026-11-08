@@ -1,0 +1,38 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceInfo.cs b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceInfo.cs
+index 666e2a9e6adcf4e7b24f13194d31e38727af0fd8..79c7e87f4bcb5239630ca66ed1ff97f9e430989c 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceInfo.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceInfo.cs
+@@ -766,21 +766,26 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
+             {
+                 waveBuffersSpan[(int)waveBufferIndex].IsSendToAudioProcessor = true;
+ 
++                uint nextWaveBufferIndex = (waveBufferIndex + 1) % Constants.VoiceWaveBufferCount;
++
+                 for (int j = 0; j < channelCount; j++)
+                 {
+                     ref VoiceState voiceState = ref voiceStates[j].Span[0];
+-                    
+-                    if (!waveBuffersSpan[(int)waveBufferIndex].IsSendToAudioProcessor || voiceState.IsWaveBufferValid[(int)waveBufferIndex])
++
++                    // S2Arm: same as nn::audio::server::VoiceInfo::FlushWaveBuffers in the SDK: a flushed buffer counts as consumed
++                    // when the DSP is still at its slot, whether or not it was ever sent to the DSP. The previous check
++                    // (!IsSendToAudioProcessor || IsWaveBufferValid) read IsSendToAudioProcessor after setting it, so a buffer
++                    // appended to a stopped or paused voice was never counted and the guest never got it back.
++                    if (voiceState.WaveBufferIndex == waveBufferIndex)
+                     {
+-                        voiceState.WaveBufferIndex = (voiceState.WaveBufferIndex + 1) % Constants.VoiceWaveBufferCount;
++                        voiceState.WaveBufferIndex = nextWaveBufferIndex;
+                         voiceState.WaveBufferConsumed++;
+-                        voiceState.IsWaveBufferValid[(int)waveBufferIndex] = false;
+                     }
++
++                    voiceState.IsWaveBufferValid[(int)waveBufferIndex] = false;
+                 }
+-                
+-                waveBuffersSpan[(int)waveBufferIndex].IsSendToAudioProcessor = true;
+ 
+-                waveBufferIndex = (waveBufferIndex + 1) % Constants.VoiceWaveBufferCount;
++                waveBufferIndex = nextWaveBufferIndex;
+             }
+         }
+ 

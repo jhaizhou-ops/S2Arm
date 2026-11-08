@@ -1,0 +1,138 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 7a036a224d2ec3513630ce59b6261178ce593a41..184694b2d2765a121e82625a92f93640a19f6fe6 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -299,7 +299,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 int stopRc = AudioQueueStop(_audioQueue, true);
+                 int reclaimed = _pump.ReclaimAll();
+ 
+-                // 收回的缓冲没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），不然游戏那侧的队列永远等不到完成
++                // 收回的真实样本没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），内部补垫不计入完成额度
+                 if (reclaimed > 0)
+                 {
+                     ProcessPlayedSamples(reclaimed);
+@@ -427,7 +427,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (bufferIndex < 0)
+                 return;
+ 
+-            // S2Arm: every buffer handed back goes back to the pool (also while stopping), and what it held counts as played
++            // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes.
+             int bytesPlayed = _pump.Returned(bufferIndex);
+             if (bytesPlayed > 0)
+             {
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index 55b41efec7c0579b35155cc076f6e4f1e82c0f5d..4b4e3759738ddae35f97b0245ba80b5dca8f3808 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -6,7 +6,7 @@ using System.Threading;
+ namespace Ryujinx.Audio.Backends.Common
+ {
+     /// <summary>
+-    /// Feeds a device that plays a fixed pool of buffers in submission order and hands each one back once played.
++    /// Feeds a device that consumes a fixed pool of buffers in submission order and hands each one back.
+     /// </summary>
+     // S2Arm: push, not pull. Upstream's Apple session refilled a device buffer only when the device handed one back (3 buffers of 10 ms)
+     // and padded what the queue could not supply with silence. The callback that hands buffers back is managed code: a blocking GC
+@@ -14,8 +14,8 @@ namespace Ryujinx.Audio.Backends.Common
+     // that came short put silence in the middle of the stream (witcher3 on Mac, 170 s: 22 short refills, each after a burst of
+     // hand-backs that followed a 30–470 ms callback gap; 13 of the 22 gaps > 30 ms fell inside a GC pause).
+     // Here whatever is queued goes to the device as soon as a pool buffer is free, from the queueing thread too, so the device holds
+-    // everything the game queued and plays on through a stalled callback; a submitted buffer holds exactly the queued samples (whole
+-    // frames), never padding. Starving (nothing in flight) only happens when nothing is queued.
++    // everything the game queued and plays on through a stalled callback. Data buffers hold exactly the queued samples (whole
++    // frames); an internal cushion uses a separate buffer and never contributes to queued-sample completion.
+     public abstract class DeviceBufferPump
+     {
+         private readonly Lock _lock = new();
+@@ -24,6 +24,7 @@ namespace Ryujinx.Audio.Backends.Common
+         private readonly int[] _free;
+         private int _freeCount;
+         private readonly int[] _filled;
++        private readonly int[] _sampleBytes; // Bytes originating in Samples; _filled also includes internal silence.
+         private long _inFlightBytes;
+         // S2Arm (10-22 杂音): 起播前预充的在途下限（字节）。在途凑够它之前，缓冲已排进设备但不让设备开播（pre-roll），
+         // 这样一开声就有深度，不会每个游戏缓冲边界掐边欠载（输出端每 21.3 ms 插静音 = 宽频噪声）。0 = 不设下限（旧行为）。
+@@ -53,6 +54,7 @@ namespace Ryujinx.Audio.Backends.Common
+             _bytesPerFrame = bytesPerFrame;
+             _free = new int[slots];
+             _filled = new int[slots];
++            _sampleBytes = new int[slots];
+ 
+             for (int i = slots - 1; i >= 0; i--)
+             {
+@@ -124,6 +126,7 @@ namespace Ryujinx.Audio.Backends.Common
+                                 int cs = _free[--_freeCount];
+                                 SlotData(cs)[..z].Clear();
+                                 _filled[cs] = z;
++                                _sampleBytes[cs] = 0;
+                                 Interlocked.Add(ref _inFlightBytes, z);
+                                 OnCushion(z, zt);
+                                 Submit(cs, z);
+@@ -136,6 +139,7 @@ namespace Ryujinx.Audio.Backends.Common
+                     int read = Samples.Read(SlotData(slot)[..n]);
+ 
+                     _filled[slot] = read;
++                    _sampleBytes[slot] = read;
+                     long inFlight = Interlocked.Add(ref _inFlightBytes, read);
+ 
+                     // S2Arm: 在途凑够下限即可起播；闩锁后不再回退（一次欠载不该让后续重新 pre-roll）
+@@ -162,12 +166,13 @@ namespace Ryujinx.Audio.Backends.Common
+         /// S2Arm (10-23 声音停了自愈): the device was stopped and will never hand the in-flight buffers back (system stopped the
+         /// queue, then we stopped it synchronously): put every in-flight buffer back into the pool.
+         /// </summary>
+-        /// <returns>The bytes those buffers held (dropped, never played)</returns>
++        /// <returns>Queued-sample bytes reclaimed without being played, excluding internal silence.</returns>
+         public int ReclaimAll()
+         {
+             lock (_lock)
+             {
+-                int total = 0;
++                int totalBytes = 0;
++                int sampleBytes = 0;
+ 
+                 for (int slot = 0; slot < _filled.Length; slot++)
+                 {
+@@ -180,19 +185,21 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                     _filled[slot] = 0;
+                     _free[_freeCount++] = slot;
+-                    total += bytes;
++                    totalBytes += bytes;
++                    sampleBytes += _sampleBytes[slot];
++                    _sampleBytes[slot] = 0;
+                 }
+ 
+-                Interlocked.Add(ref _inFlightBytes, -total);
++                Interlocked.Add(ref _inFlightBytes, -totalBytes);
+ 
+-                return total;
++                return sampleBytes;
+             }
+         }
+ 
+         /// <summary>
+         /// The device handed pool buffer <paramref name="slot"/> back.
+         /// </summary>
+-        /// <returns>The bytes it played (0 for a slot not in flight)</returns>
++        /// <returns>Queued-sample bytes handed back (0 for internal silence or a slot not in flight).</returns>
+         public int Returned(int slot)
+         {
+             lock (_lock)
+@@ -204,6 +211,8 @@ namespace Ryujinx.Audio.Backends.Common
+                     return 0;
+                 }
+ 
++                int sampleBytes = _sampleBytes[slot];
++                _sampleBytes[slot] = 0;
+                 _filled[slot] = 0;
+                 _free[_freeCount++] = slot;
+                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+@@ -215,7 +224,7 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                 OnReturned(bytes, inFlight);
+ 
+-                return bytes;
++                return sampleBytes;
+             }
+         }
+     }

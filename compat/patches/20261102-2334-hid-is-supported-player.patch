@@ -1,0 +1,14 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index fea903f48d80d4524a5815386d6bb0903cbae5b1..1ded4f517139c2d9085c4942d08f1d067266ea90 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -120,6 +120,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             _supportedPlayers[(int)player] = supported;
+         }
+ 
++        // S2A：输入泵每 250 ms 查游戏收不收掌机格 / Player1（不分配，GetSupportedPlayers 是迭代器）
++        internal bool IsSupportedPlayer(PlayerIndex player) => (uint)player < (uint)_supportedPlayers.Length && _supportedPlayers[(int)player];
++
+         internal IEnumerable<PlayerIndex> GetSupportedPlayers()
+         {
+             for (int i = 0; i < _supportedPlayers.Length; ++i)

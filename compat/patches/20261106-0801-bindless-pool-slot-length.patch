@@ -1,0 +1,45 @@
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 803fcc451c6091e558962be8ab64d2fc04f3ab07..61ecf50fab4f1db05fb35bae889d65a17efc83d1 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -36,6 +36,13 @@ namespace Ryujinx.Graphics.Shader
+         /// </summary>
+         bool QueryBindlessPhiSeeThrough() => false;
+ 
++        /// <summary>
++        /// S2A（直连）：追不到槽的句柄回退数组（BindlessElimination）里，贴图缓冲与图像的数组长度：直连宿主按槽绑它们（nvn_mtl.m TEXD，tex_dyn_slots），
++        /// 采样贴图照池长（宿主按句柄的编号建池表，nvn_mtl.m pool_gpu）。上游参考实现（MIT）BindlessElimination NvnSlotArrayLength 同此分法。
++        /// 0 = 与采样贴图一样按池长（上游 Ryujinx 原样）：只有直连翻译器答 32，通用模式缺省 0，输出不变。
++        /// </summary>
++        int QueryBindlessSlotArrayLength() => 0;
++
+         /// <summary>
+         /// S2A：特化状态运行时化（点大小、DepthMode、alpha 测试、绘制参数来源、贴图坐标归一化改读支持缓冲 s2a_flags / s2a_point）。缺省 = 进程开关
+         /// TranslatorContext.S2ARuntimeState（通用模式，S2A_RUNTIME_STATE=0 关）；直连翻译器答假：直连宿主不填这几个字段，编成运行时判断只会多读多分支。
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+index 10fbb80f9eaa9ce5524d3778c228b2b17fa537c0..8d275957f9944fd8154756f7e61296b460f185af 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+@@ -94,7 +94,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             block.Operations.AddBefore(node, new Operation(Instruction.BitwiseAnd, textureHandle, bindlessHandle, OperandHelper.Const(0xfffff)));
+             block.Operations.AddBefore(node, new Operation(Instruction.ShiftRightU32, samplerHandle, bindlessHandle, OperandHelper.Const(20)));
+ 
+-            int texturePoolLength = Math.Max(BindlessToArray.MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromPool());
++            // S2A（直连）：采样贴图（非贴图缓冲）按整个池长、宿主按编号建池表；贴图缓冲与图像按槽绑，数组长 QueryBindlessSlotArrayLength（0 = 也按池长，上游原样）。
++            //   上游参考实现（MIT）BindlessElimination pooled / NvnSlotArrayLength 同此分法
++            int slotArrayLength = gpuAccessor.QueryBindlessSlotArrayLength();
++            bool pooled = slotArrayLength <= 0 || (!texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer);
++
++            int texturePoolLength = pooled ? Math.Max(BindlessToArray.MinimumArrayLength, gpuAccessor.QueryTextureArrayLengthFromPool()) : slotArrayLength;
+ 
+             block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, textureIndex, textureHandle, OperandHelper.Const(texturePoolLength - 1)));
+ 
+@@ -116,7 +121,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             {
+                 Operand samplerIndex = OperandHelper.Local();
+ 
+-                int samplerPoolLength = Math.Max(BindlessToArray.MinimumArrayLength, gpuAccessor.QuerySamplerArrayLengthFromPool());
++                int samplerPoolLength = pooled ? Math.Max(BindlessToArray.MinimumArrayLength, gpuAccessor.QuerySamplerArrayLengthFromPool()) : slotArrayLength;
+ 
+                 block.Operations.AddBefore(node, new Operation(Instruction.MinimumU32, samplerIndex, samplerHandle, OperandHelper.Const(samplerPoolLength - 1)));
+ 

@@ -1,0 +1,19 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index a6326f996aae90ccd7b615a761b73a030558883d..cd623b594dfbb4c6b07e5fc0a3e5699f82d4d42f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -323,6 +323,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 }
+             }
+ 
++            // S2A（审计 #1534 P1-10）：取这组着色器失败时只跳过这一笔。跟踪器在回调返回后清掉了着色器组的脏位，这里补回，下一笔绘制重取；
++            //   否则着色器寄存器不再变时 UpdateShaderState 不再进、S2AShaderFault 一直真，后续绘制全被跳过。
++            //   同一组地址的失败有负缓存（ShaderCache._s2aFaults）兜着：碰过的页没被写过、映射没挪就直接回上次的失败，重取只是一次查表
++            if (S2AShaderFault)
++            {
++                _updateTracker.ForceDirty(ShaderStateIndex);
++            }
++
+             CommitBindings();
+ 
+             if (tfEnable && !_prevTfEnable)

@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index efae1cb25804d7f08c5296fc77156bcfd4df2cac..f49a1d93e4585175e3a4f9c79976f7c2909bfe7e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -1243,7 +1243,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                             ipAddress = Dns.GetHostEntry(ldnServer).AddressList[0];
+                         }
+ 
+-                        NetworkClient = new LdnMasterProxyClient(ipAddress.ToString(), SharedConstants.LanPlayPort, context.Device.Configuration);
++                        NetworkClient = new LdnMasterProxyClient(ipAddress.ToString(), S2AHooks.LdnPort, context.Device.Configuration);
+                         S2ANetworkClientServer = ldnServer;
+                     }
+                     catch (Exception ex)
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 9194199a003eceff4c354f12f17b337b28962727..2a4877b5a3a799776ab974de9d01a33bfdd3e289 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -59,6 +59,10 @@ namespace Ryujinx.HLE
+         // only games that use local wireless ever touch the network or ask for the local-network permission
+         public static System.Action LdnInitializing;
+ 
++        // TCP port of the RyuLDN server the ldn:u client connects to (S2A hosts its relay on the same port).
++        // Upstream's fixed LanPlayPort; tests point it at a free port so they never meet a real relay on 30456
++        public static int LdnPort = Ryujinx.Common.SharedConstants.LanPlayPort;
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot == null)

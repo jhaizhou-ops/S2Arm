@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+index df8244c24db4309f2ee76de8128982149bb8233a..eb69cce22f1efcf6d190d3fd8e68d4a487db0107 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+@@ -287,5 +287,14 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap
+         {
+             return _maps.Get(handle);
+         }
++
++        // S2A：直连模式下游戏的 NVN 驱动不跑，内存池没有 nvmap 句柄。nvnTextureGetNvRmSurfaceNVX 要把纹理交给 NvRm（视频解码 / VIC）时，
++        // 按池的客体地址开一个已分配的句柄（等同驱动对池做的 Create + Alloc），Host1x 映射这个句柄就写到池里
++        public static int S2AFromGuest(ulong address, uint size)
++        {
++            uint aligned = BitUtils.AlignUp(size, (uint)MemoryManager.PageSize);
++
++            return _maps.Add(new NvMapHandle(aligned) { Allocated = true, Align = (int)MemoryManager.PageSize, Address = address });
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/S2ADirect.cs b/src/Ryujinx.HLE/S2ADirect.cs
+index 88e10f2a550501a85532cef65ca6cd5ba6746060..8ade529fd5e2954fbed5a4a4113b2a1a76fad3b1 100644
+--- a/src/Ryujinx.HLE/S2ADirect.cs
++++ b/src/Ryujinx.HLE/S2ADirect.cs
+@@ -11,6 +11,9 @@ namespace Ryujinx.HLE
+     {
+         public static readonly bool On = Probe();
+ 
++        /// <summary>直连图形层给一段客体内存（NVN 内存池）开 nvmap 句柄，返回句柄号（nvnTextureGetNvRmSurfaceNVX 用）</summary>
++        public static int NvMapFromGuest(ulong address, uint size) => HOS.Services.Nv.NvDrvServices.NvMap.NvMapDeviceFile.S2AFromGuest(address, size);
++
+         private static bool Probe()
+         {
+             if (!NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_gfx_mode", out nint f))

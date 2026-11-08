@@ -1,0 +1,43 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+index 55048c233e68e61a927587c62c3904ec24422a80..9e6365da46cd98374811b55006aa9a20ddaf538f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+@@ -46,7 +46,18 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+         private readonly Host1xContext _host1xContext;
+         private readonly long _contextId;
+ 
+-        public GpuChannel Channel { get; }
++        // S2Arm: GPU 通道用到才建（帧率能耗线 10-24）。nvhost-vic / nvhost-nvdec 也继承本类，但它们走 Host1x 提交、从不用 GPU 通道；
++        //   原先构造里照建一个整套 3D / 计算 / DMA 状态的 GpuChannel，真机马车8 每开一次托管分配 19.3 MB、常驻进 gen2（开 4 次 77 MB），
++        //   老代变大、读盘段 gen1 / gen2 停顿跟着变长。用到的只有 SubmitGpfifo、NvHostAs BindChannel、Close，都在 nv 服务线程上
++        private GpuChannel _channel;
++        public GpuChannel Channel => _channel ??= CreateChannel();
++
++        private GpuChannel CreateChannel()
++        {
++            GpuChannel channel = _device.Gpu.CreateChannel();
++            ChannelInitialization.InitializeState(channel);
++            return channel;
++        }
+ 
+         public enum ResourcePolicy
+         {
+@@ -71,9 +82,6 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+             _timeslice = 0;
+             _host1xContext = GetHost1XContext(context.Device.Gpu, owner);
+             _contextId = _host1xContext.Host1x.CreateContext();
+-            Channel = _device.Gpu.CreateChannel();
+-
+-            ChannelInitialization.InitializeState(Channel);
+ 
+             ChannelSyncpoints = new uint[MaxModuleSyncpoint];
+ 
+@@ -617,7 +625,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+         public override void Close()
+         {
+             _host1xContext.Host1x.DestroyContext(_contextId);
+-            Channel.Dispose();
++            _channel?.Dispose();
+ 
+             for (int i = 0; i < MaxModuleSyncpoint; i++)
+             {

@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 793782b971bf632def2ccb1917e9759d03c63496..deaaf2cf62e0dfa7574e6538dc5862419e51efd9 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -35,6 +35,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+         private readonly string _basePath;
+         private static bool _s2aHostPathLogged;
++        private static int _s2aHostWrites;
+ 
+         public bool CacheEnabled => !string.IsNullOrEmpty(_basePath);
+ 
+@@ -1298,6 +1299,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 dataFileStream.Flush();
+                 tocWriter.Write(ref offsetAndSize);
+                 tocFileStream.Flush();
++                if (_s2aHostWrites++ < 8 || _s2aHostWrites % 128 == 0)
++                {
++                    Console.Error.WriteLine($"[vkpb] 宿主 TOC 写：idx={programIndex} off={tocOffset} " +
++                        $"len={tocFileStream.Length} bytes={hostCode.Length} data={dataFileStream.Length}");
++                }
+             }
+             finally
+             {

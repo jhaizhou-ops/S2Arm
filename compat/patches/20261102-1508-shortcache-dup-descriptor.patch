@@ -1,0 +1,174 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+index 5b781489cd9000f404a140b60ceae38401fc46b1..c5b43504e46179c9fda65629fc513d4c3e0c3e43 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+@@ -286,42 +286,101 @@ namespace Ryujinx.Graphics.Gpu.Image
+         }
+ 
+         /// <summary>
+-        /// Removes a texture from the short duration cache.
++        /// Removes an entry from the short duration cache generations, dropping the reference it holds.
++        /// The caller is responsible for removing the lookup table entry, if any.
+         /// </summary>
+-        /// <param name="texture">Texture to remove from the short cache</param>
+-        public void RemoveShortCache(Texture texture)
++        /// <param name="entry">Entry to remove</param>
++        /// <returns>True if the entry was on a generation set, false otherwise</returns>
++        private bool RemoveShortCacheEntry(ShortTextureCacheEntry entry)
+         {
++            if (entry == null)
++            {
++                return false;
++            }
++
+             bool removed = false;
+ 
+             foreach (HashSet<ShortTextureCacheEntry> gen in _shortCacheGens)
+             {
+-                removed |= gen.Remove(texture.ShortCacheEntry);
++                removed |= gen.Remove(entry);
+             }
+ 
+-            if (removed)
++            if (!removed)
+             {
+-                texture.DecrementReferenceCount();
++                return false;
++            }
+ 
+-                ShortTextureCacheEntry e = texture.ShortCacheEntry;
++            entry.Texture.DecrementReferenceCount();
+ 
+-                if (!e.IsAutoDelete)
+-                {
+-                    _shortCacheLookup.Remove(e.Descriptor);
+-                }
++            if (entry.Texture.ShortCacheEntry == entry)
++            {
++                entry.Texture.ShortCacheEntry = null;
++            }
+ 
+-                texture.ShortCacheEntry = null;
+-                S2AFreeEntry(e); // 已从全部代集合与查找表移除
++            if (!entry.IsAutoDelete)
++            {
++                S2ARemoveLookup(entry);
++            }
++
++            S2AFreeEntry(entry); // 已从全部代集合与查找表移除
++
++            return true;
++        }
++
++        /// <summary>
++        /// Removes the lookup table entry only if it still points at the given entry.
++        /// A stale entry leaving its generation must not evict the newer entry that owns the same descriptor.
++        /// </summary>
++        /// <param name="entry">Entry that is leaving the cache</param>
++        private void S2ARemoveLookup(ShortTextureCacheEntry entry)
++        {
++            if (_shortCacheLookup.TryGetValue(entry.Descriptor, out ShortTextureCacheEntry current) && current == entry)
++            {
++                _shortCacheLookup.Remove(entry.Descriptor);
+             }
+         }
+ 
++        /// <summary>
++        /// Removes a texture from the short duration cache.
++        /// </summary>
++        /// <param name="texture">Texture to remove from the short cache</param>
++        public void RemoveShortCache(Texture texture)
++        {
++            RemoveShortCacheEntry(texture.ShortCacheEntry);
++        }
++
+         /// <summary>
+         /// Adds a texture to the short duration cache.
+         /// It starts in the builder set, and it is moved into the deletion set on next process.
+         /// </summary>
++        /// <remarks>
++        /// The lookup table is keyed by descriptor, so only one entry per descriptor may exist.
++        /// Texture buffer descriptors are reused within the retention window (64 generations by default),
++        /// so the same descriptor can be added again while its previous entry is still alive.
++        /// If the previous entry belongs to the same texture, it is reused and only its generation is
++        /// refreshed — the reference count must not change, otherwise a texture held only by the short
++        /// cache (one reference) would be dropped to zero, removed from the texture cache, and then
++        /// resurrected by the new entry. If it belongs to another texture, the old entry is removed
++        /// (and its reference dropped) before the new one is added, preserving the original
++        /// "one entry per descriptor" semantics instead of failing the session.
++        /// </remarks>
+         /// <param name="texture">Texture to add to the short cache</param>
+         /// <param name="descriptor">Last used texture descriptor</param>
+         public void AddShortCache(Texture texture, ref TextureDescriptor descriptor)
+         {
++            if (_shortCacheLookup.TryGetValue(descriptor, out ShortTextureCacheEntry existing))
++            {
++                if (ReferenceEquals(existing.Texture, texture))
++                {
++                    // 同一纹理带着同一描述符再入：复用旧条目、刷新代位置与失效序号，引用计数不变。
++                    S2AReAddShortCacheEntry(existing, texture);
++                    return;
++                }
++
++                _shortCacheLookup.Remove(descriptor);
++                RemoveShortCacheEntry(existing);
++            }
++
+             ShortTextureCacheEntry entry = S2ANewEntry(descriptor, texture, false);
+ 
+             _shortCacheGens[texture.Target == GAL.Target.TextureBuffer ? _shortCacheBuilder : (_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
+@@ -332,6 +391,26 @@ namespace Ryujinx.Graphics.Gpu.Image
+             texture.IncrementReferenceCount();
+         }
+ 
++        /// <summary>
++        /// Moves an entry that is already on the short duration cache to the current generation,
++        /// refreshing its invalidation sequence. The entry keeps the reference it already holds.
++        /// </summary>
++        /// <param name="entry">Entry to refresh</param>
++        /// <param name="texture">Texture the entry belongs to</param>
++        private void S2AReAddShortCacheEntry(ShortTextureCacheEntry entry, Texture texture)
++        {
++            foreach (HashSet<ShortTextureCacheEntry> gen in _shortCacheGens)
++            {
++                gen.Remove(entry);
++            }
++
++            entry.InvalidatedSequence = texture.InvalidatedSequence;
++
++            _shortCacheGens[texture.Target == GAL.Target.TextureBuffer ? _shortCacheBuilder : (_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
++
++            texture.ShortCacheEntry = entry;
++        }
++
+         /// <summary>
+         /// Adds a texture to the short duration cache without a descriptor. This typically keeps it alive for two ticks.
+         /// On expiry, it will be removed from the AutoDeleteCache.
+@@ -370,10 +449,13 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+                 else
+                 {
+-                    _shortCacheLookup.Remove(entry.Descriptor);
++                    S2ARemoveLookup(entry);
+                 }
+ 
+-                entry.Texture.ShortCacheEntry = null;
++                if (entry.Texture.ShortCacheEntry == entry)
++                {
++                    entry.Texture.ShortCacheEntry = null;
++                }
+             }
+ 
+             foreach (ShortTextureCacheEntry entry in toRemove)
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 715a4d78e6280352696942925889978bf480e040..97be023a3a44d4fe747db0e60b93c4e5cb05a54a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -13,6 +13,7 @@
+     <InternalsVisibleTo Include="S2A.SpecTest" />
+     <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+     <InternalsVisibleTo Include="S2A.SeenTest" /> <!-- S2A：双轨覆盖率 seen 记录单测（graphics/tools/direct/tests/seen） -->
++    <InternalsVisibleTo Include="S2A.GpuShortCacheTest" /> <!-- S2A：贴图短缓存重复描述符单测（tests/gpu_shortcache，#1364） -->
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+   </ItemGroup>
+ 

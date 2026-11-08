@@ -1,0 +1,160 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Pool.cs b/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
+index 2c0c104f3d84400f4468e9561b6fb924d2648d3a..dc8357f6aca7f1bd208420cbb13bc513cd043710 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
+@@ -55,6 +55,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="maximumId">Maximum index of an item on the pool (inclusive)</param>
+         public Pool(GpuContext context, PhysicalMemory physicalMemory, ulong address, int maximumId)
+         {
++            long s2aAlloc = S2AAllocTrace.Mark();
+             Context = context;
+             PhysicalMemory = physicalMemory;
+             MaximumId = maximumId;
+@@ -72,6 +73,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _memoryTracking = physicalMemory.BeginGranularTracking(address, size, ResourceKind.Pool, RegionFlags.None);
+             _memoryTracking.RegisterPreciseAction(address, size, PreciseAction);
+             _modifiedDelegate = RegionModified;
++            S2AAllocTrace.Step(0x70_0001, ref s2aAlloc);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 9b3c0531a1b25b85a26b73a9560ef4b412d6dce5..21c4ae332b14bd159877b5ecf4e93927d15abc14 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -690,7 +690,10 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 return false;
+             }
+ 
++            long s2aStart = S2AAllocTrace.On ? Stopwatch.GetTimestamp() : 0;
++            TimeSpan s2aPause = S2AAllocTrace.On ? GC.GetTotalPauseDuration() : default;
+             long s2aS = S2AAllocTrace.Mark();
++            long s2aAlloc = s2aS;
+ 
+             if (Info.IsLinear)
+             {
+@@ -703,9 +706,12 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     Info.GobBlocksInY, Info.GobBlocksInZ, Info.GobBlocksInTileX, _sizeInfo, data);
+             }
+ 
++            long s2aConverted = S2AAllocTrace.On ? Stopwatch.GetTimestamp() : 0;
++            S2AAllocTrace.Step(0x70_0004, ref s2aAlloc);
+             S2AAllocTrace.Step(0x40_0027, ref s2aS);
+             HostTexture.S2ASetData(lease);
+             S2AAllocTrace.Step(0x40_0028, ref s2aS);
++            S2ATraceSynchronization(s2aStart, s2aConverted, s2aPause, size, "lease");
+             _hasData = true;
+ 
+             return true;
+@@ -768,9 +774,15 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+             }
+ 
++            long s2aStart = S2AAllocTrace.On ? Stopwatch.GetTimestamp() : 0;
++            TimeSpan s2aPause = S2AAllocTrace.On ? GC.GetTotalPauseDuration() : default;
+             long s2aS = S2AAllocTrace.Mark();
++            long s2aAlloc = s2aS;
+             MemoryOwner<byte> result = ConvertToHostCompatibleFormat(data);
++            long s2aConverted = S2AAllocTrace.On ? Stopwatch.GetTimestamp() : 0;
++            S2AAllocTrace.Step(0x70_0004, ref s2aAlloc);
+             S2AAllocTrace.Step(0x40_0027, ref s2aS);
++            int s2aBytes = result.Length;
+ 
+             if (ScaleFactor != 1f && AllowScaledSetData())
+             {
+@@ -787,9 +799,27 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+ 
+             S2AAllocTrace.Step(0x40_0028, ref s2aS);
++            S2ATraceSynchronization(s2aStart, s2aConverted, s2aPause, s2aBytes, "array");
+             _hasData = true;
+         }
+ 
++        private void S2ATraceSynchronization(long start, long converted, TimeSpan pauseBefore, int bytes, string path)
++        {
++            if (!S2AAllocTrace.On)
++            {
++                return;
++            }
++
++            long end = Stopwatch.GetTimestamp();
++            double convertMs = (converted - start) * 1000.0 / Stopwatch.Frequency;
++            double uploadMs = (end - converted) * 1000.0 / Stopwatch.Frequency;
++            if (convertMs >= 8 || uploadMs >= 8)
++            {
++                double pauseMs = (GC.GetTotalPauseDuration() - pauseBefore).TotalMilliseconds;
++                Console.Error.WriteLine($"[资源·贴图同步慢] tick={end} path={path} 转换 {convertMs:F3} ms、上传 {uploadMs:F3} ms、同期 GC 暂停 {pauseMs:F3} ms；{Info.FormatInfo.Format} {Info.Width}x{Info.Height}x{Info.DepthOrLayers} levels={Info.Levels} linear={Info.IsLinear} bytes={bytes}");
++            }
++        }
++
+         /// <summary>
+         /// Uploads new texture data to the host GPU.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 0ed2d0d99897343c8817d718f0cea94db3366524..b38f5820154042c7a07a4ec581ab2ae3522cc2fe 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -149,6 +149,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="hasMipViews">True if the storage will have mip views</param>
+         public void Initialize(ref SizeInfo size, bool hasLayerViews, bool hasMipViews)
+         {
++            long s2aAlloc = S2AAllocTrace.Mark();
+             _allOffsets = size.AllOffsets;
+             _sliceSizes = size.SliceSizes;
+ 
+@@ -177,6 +178,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+ 
+             RecalculateHandleRegions();
++            S2AAllocTrace.Step(0x70_0003, ref s2aAlloc);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 01fb3883e8326dc9e53a89ebb3bc7118949fefbc..9eb786703560afaaa53071e271ce525057bd7e11 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -119,6 +119,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             bool sparseCompatible,
+             Buffer[] baseBuffers)
+         {
++            long s2aAlloc = S2AAllocTrace.Mark();
+             _context = context;
+             _physicalMemory = physicalMemory;
+             Address = address;
+@@ -187,6 +188,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             _syncPreRangeAction = SyncPreRangeAction;
+             _syncRangeAction = SyncRangeAction;
++            S2AAllocTrace.Step(0x70_0002, ref s2aAlloc);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 911d8c796b7fbb464c6fcaa96f54e023da3ea15d..819c1599e662dd819d34f71360acc5e72e5f36fb 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -121,13 +121,21 @@ namespace Ryujinx.Graphics.Gpu
+             4 => (key & 0xff) < _rawNames.Length ? _rawNames[key & 0xff] : $"段 0x{key & 0xff:x}",
+             5 => $"3D 状态更新·组 {key & 0xff} {((key & 0xff) < _stateNames.Length ? _stateNames[key & 0xff] : "?")}",
+             6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
++            7 => (key & 0xff) switch
++            {
++                1 => "资源·描述符池数组与写跟踪",
++                2 => "资源·缓冲构造与写跟踪",
++                3 => "资源·贴图组初始化与写跟踪",
++                4 => "资源·贴图上传布局转换与格式解码",
++                _ => $"资源·{key & 0xff}",
++            },
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
+         };
+ 
+         private static void Dump()
+         {
+-            // 段（0x4x）与 3D 状态更新各组（0x5x）都嵌在分派点里面，不进分派累计
+-            long total = _acc.Where(kv => kv.Key >> 20 != 4 && kv.Key >> 20 != 5).Sum(kv => kv.Value.Bytes);
++            // 段、状态组、宏引擎与资源子项都是包含式计数，不重复进入分派累计。
++            long total = _acc.Where(kv => kv.Key >> 20 < 4).Sum(kv => kv.Value.Bytes);
+             Console.Error.WriteLine($"[分配·渲染] GPFIFO 分派累计 {total} B（前 20，字节 / 有分配的调用次数）：");
+ 
+             // 全打不截断（截断后没出现的键会被读成 0）

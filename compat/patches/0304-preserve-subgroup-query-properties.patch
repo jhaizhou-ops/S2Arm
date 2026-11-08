@@ -1,0 +1,150 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/HardwareCapabilities.cs b/src/Ryujinx.Graphics.Vulkan/HardwareCapabilities.cs
+index bd17867b10437da4da13f245b354bf64e56105c2..738c514aa1dc4c48928c80893210449f29bd8fef 100644
+--- a/src/Ryujinx.Graphics.Vulkan/HardwareCapabilities.cs
++++ b/src/Ryujinx.Graphics.Vulkan/HardwareCapabilities.cs
+@@ -48,7 +48,13 @@ namespace Ryujinx.Graphics.Vulkan
+         public readonly bool SupportsDepthClipControl;
+         public readonly bool SupportsAttachmentFeedbackLoop;
+         public readonly bool SupportsDynamicAttachmentFeedbackLoop;
++        // These are queried physical-device properties, not enabled device features.
++        // The default capabilities value has no query result; zero masks after a
++        // completed query remain known zero masks rather than inferred support.
++        public readonly bool HasSubgroupProperties;
+         public readonly uint SubgroupSize;
++        public readonly ShaderStageFlags SubgroupSupportedStages;
++        public readonly SubgroupFeatureFlags SubgroupSupportedOperations;
+         public readonly SampleCountFlags SupportedSampleCounts;
+         public readonly PortabilitySubsetFlags PortabilitySubset;
+         public readonly uint VertexBufferAlignment;
+@@ -88,7 +94,7 @@ namespace Ryujinx.Graphics.Vulkan
+             bool supportsDepthClipControl,
+             bool supportsAttachmentFeedbackLoop,
+             bool supportsDynamicAttachmentFeedbackLoop,
+-            uint subgroupSize,
++            in PhysicalDeviceSubgroupProperties subgroupProperties,
+             SampleCountFlags supportedSampleCounts,
+             PortabilitySubsetFlags portabilitySubset,
+             uint vertexBufferAlignment,
+@@ -127,7 +133,10 @@ namespace Ryujinx.Graphics.Vulkan
+             SupportsDepthClipControl = supportsDepthClipControl;
+             SupportsAttachmentFeedbackLoop = supportsAttachmentFeedbackLoop;
+             SupportsDynamicAttachmentFeedbackLoop = supportsDynamicAttachmentFeedbackLoop;
+-            SubgroupSize = subgroupSize;
++            HasSubgroupProperties = true;
++            SubgroupSize = subgroupProperties.SubgroupSize;
++            SubgroupSupportedStages = subgroupProperties.SupportedStages;
++            SubgroupSupportedOperations = subgroupProperties.SupportedOperations;
+             SupportedSampleCounts = supportedSampleCounts;
+             PortabilitySubset = portabilitySubset;
+             VertexBufferAlignment = vertexBufferAlignment;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 763447f1dddc193af17d4ca0af67fd899ff8d35e..c70a889b752695a245e44d22c8530a8a029d0f69 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -137,47 +137,8 @@ namespace Ryujinx.Graphics.Vulkan
+             Func<string[]> getRequiredExtensions
+         ) => new(Vk.GetApi(), getSurface, getRequiredExtensions, preferredGpuId);
+ 
+-        private unsafe void LoadFeatures(uint maxQueueCount, uint queueFamilyIndex)
++        private unsafe void LoadHardwareCapabilities()
+         {
+-            FormatCapabilities = new FormatCapabilities(Api, _physicalDevice.PhysicalDevice);
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtConditionalRendering conditionalRenderingApi))
+-            {
+-                ConditionalRenderingApi = conditionalRenderingApi;
+-            }
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtExtendedDynamicState extendedDynamicStateApi))
+-            {
+-                ExtendedDynamicStateApi = extendedDynamicStateApi;
+-            }
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrPushDescriptor pushDescriptorApi))
+-            {
+-                PushDescriptorApi = pushDescriptorApi;
+-            }
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtTransformFeedback transformFeedbackApi))
+-            {
+-                TransformFeedbackApi = transformFeedbackApi;
+-            }
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrDrawIndirectCount drawIndirectCountApi))
+-            {
+-                DrawIndirectCountApi = drawIndirectCountApi;
+-            }
+-
+-            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtAttachmentFeedbackLoopDynamicState dynamicFeedbackLoopApi))
+-            {
+-                DynamicFeedbackLoopApi = dynamicFeedbackLoopApi;
+-            }
+-
+-            if (maxQueueCount >= 2)
+-            {
+-                Api.GetDeviceQueue(_device, queueFamilyIndex, 1, out Queue backgroundQueue);
+-                BackgroundQueue = backgroundQueue;
+-                BackgroundQueueLock = new();
+-            }
+-
+             PhysicalDeviceProperties2 properties2 = new()
+             {
+                 SType = StructureType.PhysicalDeviceProperties2,
+@@ -392,12 +353,56 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsDepthClipControl && _enabledFeatures.DepthClipControl,
+                 supportsAttachmentFeedbackLoop && _enabledFeatures.AttachmentFeedbackLoopLayout,
+                 supportsDynamicAttachmentFeedbackLoop && _enabledFeatures.AttachmentFeedbackLoopDynamicState,
+-                propertiesSubgroup.SubgroupSize,
++                in propertiesSubgroup,
+                 supportedSampleCounts,
+                 portabilityFlags,
+                 vertexBufferAlignment,
+                 properties.Limits.SubTexelPrecisionBits,
+                 minResourceAlignment);
++        }
++
++        private unsafe void LoadFeatures(uint maxQueueCount, uint queueFamilyIndex)
++        {
++            FormatCapabilities = new FormatCapabilities(Api, _physicalDevice.PhysicalDevice);
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtConditionalRendering conditionalRenderingApi))
++            {
++                ConditionalRenderingApi = conditionalRenderingApi;
++            }
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtExtendedDynamicState extendedDynamicStateApi))
++            {
++                ExtendedDynamicStateApi = extendedDynamicStateApi;
++            }
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrPushDescriptor pushDescriptorApi))
++            {
++                PushDescriptorApi = pushDescriptorApi;
++            }
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtTransformFeedback transformFeedbackApi))
++            {
++                TransformFeedbackApi = transformFeedbackApi;
++            }
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrDrawIndirectCount drawIndirectCountApi))
++            {
++                DrawIndirectCountApi = drawIndirectCountApi;
++            }
++
++            if (Api.TryGetDeviceExtension(_instance.Instance, _device, out ExtAttachmentFeedbackLoopDynamicState dynamicFeedbackLoopApi))
++            {
++                DynamicFeedbackLoopApi = dynamicFeedbackLoopApi;
++            }
++
++            if (maxQueueCount >= 2)
++            {
++                Api.GetDeviceQueue(_device, queueFamilyIndex, 1, out Queue backgroundQueue);
++                BackgroundQueue = backgroundQueue;
++                BackgroundQueueLock = new();
++            }
++
++            LoadHardwareCapabilities();
+ 
+             IsSharedMemory = MemoryAllocator.IsDeviceMemoryShared(_physicalDevice);
+ 

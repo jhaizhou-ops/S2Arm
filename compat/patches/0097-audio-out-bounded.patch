@@ -1,0 +1,706 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 7ab848e1486d45b418abd3cf828e676b71cd915b..ea0734d8848e98686b800c939558f911a658537a 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -25,7 +25,9 @@ namespace Ryujinx.Audio.Backends.Apple
+         private int _queuedCount;
+         private ulong _headPlayed;
+         private readonly object _queueLock = new();
+-        private readonly DynamicRingBuffer _ringBuffer = new();
++        // S2Arm: queued samples (guest buffers pulled on demand, renderer output copied into at most 1 s of audio), instead of a
++        // DynamicRingBuffer copy of everything queued; see AudioSampleQueue
++        private readonly AudioSampleQueue _samples;
+         private readonly ManualResetEvent _updateRequiredEvent;
+ 
+         private readonly AudioQueueOutputCallback _callbackDelegate;
+@@ -61,6 +63,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             _updateRequiredEvent = driver.GetUpdateRequiredEvent();
+             _callbackDelegate = OutputCallback;
+             _bytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * (int)requestedChannelCount;
++            _samples = new AudioSampleQueue(_bytesPerFrame * (int)requestedSampleRate);
+ 
+             _gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
+ 
+@@ -113,7 +116,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             int capacityBytes = (int)buffer->AudioDataBytesCapacity;
+             int framesPerBuffer = capacityBytes / _bytesPerFrame;
+ 
+-            int availableFrames = _ringBuffer.Length / _bytesPerFrame;
++            int availableFrames = _samples.Length / _bytesPerFrame;
+             int framesToRead = Math.Min(availableFrames, framesPerBuffer);
+             int bytesToRead = framesToRead * _bytesPerFrame;
+ 
+@@ -123,7 +126,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (bytesToRead > 0)
+             {
+                 Span<byte> audio = dst.Slice(0, bytesToRead);
+-                _ringBuffer.Read(audio, 0, bytesToRead);
++                _samples.Read(audio);
+                 ApplyVolume(buffer->AudioData, bytesToRead);
+             }
+ 
+@@ -225,7 +228,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         public override void QueueBuffer(AudioBuffer buffer)
+         {
+-            _ringBuffer.Write(buffer.Data, 0, buffer.Data.Length);
++            _samples.Enqueue(buffer);
+             ulong sampleCount = GetSampleCount(buffer);
+ 
+             lock (_queueLock)
+@@ -287,7 +290,8 @@ namespace Ryujinx.Audio.Backends.Apple
+         }
+ 
+         public override void PrepareToClose() { }
+-        public override void UnregisterBuffer(AudioBuffer buffer) { }
++        // S2Arm: the buffer goes back to the game (Stop / FlushBuffers / Dispose) possibly before it was played: keep what it held
++        public override void UnregisterBuffer(AudioBuffer buffer) => _samples.Release(buffer);
+ 
+         protected virtual void Dispose(bool disposing)
+         {
+diff --git a/src/Ryujinx.Audio/Backends/Common/AudioSampleQueue.cs b/src/Ryujinx.Audio/Backends/Common/AudioSampleQueue.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..549095f53e59eb5ff97b9939538e103bab0ab306
+--- /dev/null
++++ b/src/Ryujinx.Audio/Backends/Common/AudioSampleQueue.cs
+@@ -0,0 +1,218 @@
++using Ryujinx.Audio.Common;
++using System;
++using System.Threading;
++
++namespace Ryujinx.Audio.Backends.Common
++{
++    /// <summary>
++    /// The byte stream an output session plays: the queued buffers' samples, in queue order.
++    /// </summary>
++    // S2Arm: replaces the session's DynamicRingBuffer, which held a copy of every queued byte (sized by what the game queued, unbounded).
++    // - Registered guest buffers are not copied: their samples are pulled from guest memory (through AudioBuffer.SampleReader, which also
++    //   applies the compat layer's conversion) when the device reads them. The audio system owns them until released, and released means
++    //   played, i.e. already read here.
++    // - Buffers whose samples are in Data (renderer output: one array reused every round) are copied in when queued, into a ring of
++    //   at most maxCopiedBytes; bytes beyond it play as silence, so lengths and timing stay as queued.
++    // - Release (Stop / FlushBuffers / Dispose hand a buffer back to the game before it was played) copies its unread samples in first,
++    //   so what plays is still what the buffer held while it was queued.
++    // Copied bytes sit in the ring in queue order: guest segments always form the tail of the queue (copying one in also copies those
++    // queued before it), so a ring read always belongs to the head segment.
++    public class AudioSampleQueue
++    {
++        // Guest samples are copied in through a stack buffer of this size
++        private const int CopyChunkSize = 4096;
++
++        private struct Segment
++        {
++            // Not null: samples still in guest memory. Null: the first Stored bytes are in the ring, the rest is silence
++            public AudioBuffer Buffer;
++            public long Size;
++            public long Offset;
++            public long Stored;
++        }
++
++        private readonly Lock _lock = new();
++        private readonly DynamicRingBuffer _ring;
++        private Segment[] _segments = new Segment[16];
++        private int _head;
++        private int _count;
++        // Index (from the head) of the first guest segment; _count if there is none
++        private int _firstGuest;
++        private long _length;
++
++        public AudioSampleQueue(int maxCopiedBytes)
++        {
++            _ring = new DynamicRingBuffer(maxCopiedBytes);
++        }
++
++        /// <summary>
++        /// Unread bytes.
++        /// </summary>
++        public int Length
++        {
++            get
++            {
++                lock (_lock)
++                {
++                    return (int)Math.Min(_length, int.MaxValue);
++                }
++            }
++        }
++
++        public void Enqueue(AudioBuffer buffer)
++        {
++            lock (_lock)
++            {
++                if (buffer.Data != null)
++                {
++                    if (buffer.Data.Length == 0)
++                    {
++                        return;
++                    }
++
++                    CopyInLocked(_count - 1);
++
++                    int stored = _ring.Write(buffer.Data, 0, buffer.Data.Length);
++
++                    AddLocked(new Segment { Size = buffer.Data.Length, Stored = stored });
++                    _firstGuest = _count;
++                }
++                else
++                {
++                    if (buffer.DataSize == 0)
++                    {
++                        return;
++                    }
++
++                    AddLocked(new Segment { Buffer = buffer, Size = (long)buffer.DataSize });
++                }
++            }
++        }
++
++        /// <summary>
++        /// Read up to destination.Length bytes from the head of the stream.
++        /// </summary>
++        /// <returns>The number of bytes read</returns>
++        public int Read(Span<byte> destination)
++        {
++            lock (_lock)
++            {
++                int total = 0;
++
++                while (total < destination.Length && _count > 0)
++                {
++                    ref Segment s = ref _segments[_head];
++
++                    int n = (int)Math.Min(s.Size - s.Offset, destination.Length - total);
++                    Span<byte> dst = destination.Slice(total, n);
++
++                    if (s.Buffer != null)
++                    {
++                        s.Buffer.SampleReader.ReadSamples(s.Buffer, (ulong)s.Offset, dst);
++                    }
++                    else
++                    {
++                        int fromRing = (int)Math.Clamp(s.Stored - s.Offset, 0, n);
++
++                        if (fromRing > 0)
++                        {
++                            _ring.Read(dst, 0, fromRing);
++                        }
++
++                        dst[fromRing..].Clear();
++                    }
++
++                    s.Offset += n;
++                    total += n;
++                    _length -= n;
++
++                    if (s.Offset == s.Size)
++                    {
++                        s = default;
++                        _head = (_head + 1) % _segments.Length;
++                        _count--;
++                        _firstGuest = Math.Max(_firstGuest - 1, 0);
++                    }
++                }
++
++                return total;
++            }
++        }
++
++        /// <summary>
++        /// The buffer goes back to its owner: copy in whatever of it has not been read yet.
++        /// </summary>
++        public void Release(AudioBuffer buffer)
++        {
++            lock (_lock)
++            {
++                for (int i = _count - 1; i >= _firstGuest; i--)
++                {
++                    if (_segments[(_head + i) % _segments.Length].Buffer == buffer)
++                    {
++                        CopyInLocked(i);
++
++                        return;
++                    }
++                }
++            }
++        }
++
++        // Copy the unread samples of guest segments [_firstGuest, last] into the ring, in order
++        private void CopyInLocked(int last)
++        {
++            if (_firstGuest > last)
++            {
++                return;
++            }
++
++            Span<byte> chunk = stackalloc byte[CopyChunkSize];
++
++            for (; _firstGuest <= last; _firstGuest++)
++            {
++                ref Segment s = ref _segments[(_head + _firstGuest) % _segments.Length];
++
++                long size = s.Size - s.Offset;
++                long stored = 0;
++
++                while (stored < size)
++                {
++                    int n = (int)Math.Min(CopyChunkSize, size - stored);
++
++                    s.Buffer.SampleReader.ReadSamples(s.Buffer, (ulong)(s.Offset + stored), chunk[..n]);
++
++                    int written = _ring.Write(chunk, 0, n);
++
++                    stored += written;
++
++                    if (written < n)
++                    {
++                        break;
++                    }
++                }
++
++                s = new Segment { Size = size, Stored = stored };
++            }
++        }
++
++        private void AddLocked(Segment segment)
++        {
++            if (_count == _segments.Length)
++            {
++                Segment[] grown = new Segment[_segments.Length * 2];
++
++                for (int i = 0; i < _count; i++)
++                {
++                    grown[i] = _segments[(_head + i) % _segments.Length];
++                }
++
++                _segments = grown;
++                _head = 0;
++            }
++
++            _segments[(_head + _count) % _segments.Length] = segment;
++            _count++;
++            _length += segment.Size;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Audio/Backends/Common/DynamicRingBuffer.cs b/src/Ryujinx.Audio/Backends/Common/DynamicRingBuffer.cs
+index a06ab21a7149c4b0136d7c95b90855d882e992f4..d91412cb5d0ac4afdbef6caea31b61fcd4580447 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DynamicRingBuffer.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DynamicRingBuffer.cs
+@@ -8,11 +8,14 @@ namespace Ryujinx.Audio.Backends.Common
+     /// <summary>
+     /// A ring buffer that grow if data written to it is too big to fit.
+     /// </summary>
++    // S2Arm: growth stops at maxCapacity (writes beyond it store only what fits and report how much), instead of growing by whatever is
++    // written: it held every byte queued but not yet played, so a stalled output or a huge game buffer grew it without bound.
+     public class DynamicRingBuffer
+     {
+         private const int RingBufferAlignment = 2048;
+ 
+         private readonly Lock _lock = new();
++        private readonly int _maxCapacity;
+ 
+         private MemoryOwner<byte> _bufferOwner;
+         private Memory<byte> _buffer;
+@@ -22,9 +25,10 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+         public int Length => _size;
+ 
+-        public DynamicRingBuffer(int initialCapacity = RingBufferAlignment)
++        public DynamicRingBuffer(int maxCapacity, int initialCapacity = RingBufferAlignment)
+         {
+-            _bufferOwner = MemoryOwner<byte>.RentCleared(initialCapacity);
++            _maxCapacity = maxCapacity;
++            _bufferOwner = MemoryOwner<byte>.RentCleared(Math.Min(initialCapacity, maxCapacity));
+             _buffer = _bufferOwner.Memory;
+         }
+ 
+@@ -86,18 +90,21 @@ namespace Ryujinx.Audio.Backends.Common
+             _tailOffset = _size;
+         }
+ 
+-        public void Write(ReadOnlySpan<byte> buffer, int index, int count)
++        /// <returns>The number of bytes stored: count, or what fits below the maximum capacity</returns>
++        public int Write(ReadOnlySpan<byte> buffer, int index, int count)
+         {
+-            if (count == 0)
+-            {
+-                return;
+-            }
+-
+             lock (_lock)
+             {
++                count = Math.Min(count, _maxCapacity - _size);
++
++                if (count == 0)
++                {
++                    return 0;
++                }
++
+                 if ((_size + count) > _buffer.Length)
+                 {
+-                    SetCapacityLocked(BitUtils.AlignUp(_size + count, RingBufferAlignment));
++                    SetCapacityLocked(Math.Min(BitUtils.AlignUp(_size + count, RingBufferAlignment), _maxCapacity));
+                 }
+ 
+                 if (_headOffset < _tailOffset)
+@@ -121,6 +128,8 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                 _size += count;
+                 _tailOffset = (_tailOffset + count) % _buffer.Length;
++
++                return count;
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/HardwareDeviceSessionOutputBase.cs b/src/Ryujinx.Audio/Backends/Common/HardwareDeviceSessionOutputBase.cs
+index 5599c082727b2ba0796195e0e9fa39ced855f3a5..f0ee7e33326c968a7056abe67fbe3ce851dd177f 100644
+--- a/src/Ryujinx.Audio/Backends/Common/HardwareDeviceSessionOutputBase.cs
++++ b/src/Ryujinx.Audio/Backends/Common/HardwareDeviceSessionOutputBase.cs
+@@ -1,6 +1,7 @@
+ using Ryujinx.Audio.Common;
+ using Ryujinx.Audio.Integration;
+ using Ryujinx.Memory;
++using System;
+ using System.Runtime.CompilerServices;
+ 
+ namespace Ryujinx.Audio.Backends.Common
+@@ -20,20 +21,6 @@ namespace Ryujinx.Audio.Backends.Common
+             RequestedChannelCount = requestedChannelCount;
+         }
+ 
+-        private byte[] GetBufferSamples(AudioBuffer buffer)
+-        {
+-            if (buffer.DataPointer == 0)
+-            {
+-                return null;
+-            }
+-
+-            byte[] data = new byte[buffer.DataSize];
+-
+-            MemoryManager.Read(buffer.DataPointer, data);
+-
+-            return data;
+-        }
+-
+         protected ulong GetSampleCount(AudioBuffer buffer)
+         {
+             return GetSampleCount((int)buffer.DataSize);
+@@ -54,23 +41,29 @@ namespace Ryujinx.Audio.Backends.Common
+         public abstract void Stop();
+         public abstract ulong GetPlayedSampleCount();
+         public abstract bool WasBufferFullyConsumed(AudioBuffer buffer);
++        // S2Arm: registering no longer copies the samples into a new byte[DataSize] (a managed array as large as the game asks, on every
++        // append): they stay in guest memory, where they are owned by the audio system until released, and the device pulls them through
++        // ReadSamples in bounded chunks (AudioSampleQueue). A wrapping session (compat layer) sets SampleReader to itself first.
+         public virtual bool RegisterBuffer(AudioBuffer buffer)
+         {
+-            return RegisterBuffer(buffer, GetBufferSamples(buffer));
+-        }
+-
+-        public virtual bool RegisterBuffer(AudioBuffer buffer, byte[] samples)
+-        {
+-            if (samples == null)
++            if (buffer.DataPointer == 0)
+             {
+                 return false;
+             }
+ 
+-            buffer.Data ??= samples;
++            buffer.SampleReader ??= this;
+ 
+             return true;
+         }
+ 
++        /// <summary>
++        /// Copy the samples of a registered buffer, in this session's format, from byte offset into destination.
++        /// </summary>
++        public virtual void ReadSamples(AudioBuffer buffer, ulong offset, Span<byte> destination)
++        {
++            MemoryManager.Read(buffer.DataPointer + offset, destination);
++        }
++
+         public virtual void UnregisterBuffer(AudioBuffer buffer) { }
+     }
+ }
+diff --git a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
+index 0410314c43ad21659ba1480b9c73850f70f78fb2..b124a5ada4fffee39a34ab5a35a2c6bbf06716e3 100644
+--- a/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio/Backends/CompatLayer/CompatLayerHardwareDeviceSession.cs
+@@ -12,11 +12,25 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+         private readonly SampleFormat _userSampleFormat;
+         private readonly uint _userChannelCount;
+ 
++        // S2Arm: guest buffers are converted (downmix, then sample format) in chunks of this many units as the device reads them
++        // (ReadSamples), instead of copying, downmixing and converting each whole buffer into new arrays sized by the game.
++        // A unit is a frame when downmixing (output frame i only depends on input frame i), else one sample.
++        private const int UnitsPerChunk = 256;
++        private readonly bool _downmix;
++        private readonly int _unitInSize;
++        private readonly int _unitOutSize;
++        // Renderer output (samples in Data, PCM16) converted to the real format: reused while the size stays the same
++        private byte[] _convertedData;
++
+         public CompatLayerHardwareDeviceSession(HardwareDeviceSessionOutputBase realSession, SampleFormat userSampleFormat, uint userChannelCount) : base(realSession.MemoryManager, realSession.RequestedSampleFormat, realSession.RequestedSampleRate, userChannelCount)
+         {
+             _realSession = realSession;
+             _userSampleFormat = userSampleFormat;
+             _userChannelCount = userChannelCount;
++
++            _downmix = userChannelCount != realSession.RequestedChannelCount;
++            _unitInSize = BackendHelper.GetSampleSize(userSampleFormat) * (_downmix ? (int)userChannelCount : 1);
++            _unitOutSize = BackendHelper.GetSampleSize(realSession.RequestedSampleFormat) * (_downmix ? (int)realSession.RequestedChannelCount : 1);
+         }
+ 
+         public override void Dispose()
+@@ -50,88 +64,136 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+                     throw new NotImplementedException("Converting formats other than PCM16 is not supported.");
+                 }
+ 
+-                int userSampleCount = buffer.Data.Length / BackendHelper.GetSampleSize(_userSampleFormat);
+-
+-                ReadOnlySpan<short> samples = MemoryMarshal.Cast<byte, short>(buffer.Data);
+-                byte[] convertedSamples = new byte[BackendHelper.GetSampleSize(realSampleFormat) * userSampleCount];
+-
+-                switch (realSampleFormat)
++                if (realSampleFormat is not (SampleFormat.PcmInt8 or SampleFormat.PcmInt24 or SampleFormat.PcmInt32 or SampleFormat.PcmFloat))
+                 {
+-                    case SampleFormat.PcmInt8:
+-                        PcmHelper.ConvertSampleToPcm8(MemoryMarshal.Cast<byte, sbyte>(new Span<byte>(convertedSamples)), samples);
+-                        break;
+-                    case SampleFormat.PcmInt24:
+-                        PcmHelper.ConvertSampleToPcm24(convertedSamples, samples);
+-                        break;
+-                    case SampleFormat.PcmInt32:
+-                        PcmHelper.ConvertSampleToPcm32(MemoryMarshal.Cast<byte, int>(new Span<byte>(convertedSamples)), samples);
+-                        break;
+-                    case SampleFormat.PcmFloat:
+-                        PcmHelper.ConvertSampleToPcmFloat(MemoryMarshal.Cast<byte, float>(new Span<byte>(convertedSamples)), samples);
+-                        break;
+-                    default:
+-                        throw new NotImplementedException($"Sample format conversion from {_userSampleFormat} to {realSampleFormat} not implemented.");
++                    throw new NotImplementedException($"Sample format conversion from {_userSampleFormat} to {realSampleFormat} not implemented.");
+                 }
+ 
+-                buffer.Data = convertedSamples;
++                // Guest buffers are converted as the device reads them (ReadSamples); only samples already in Data are converted here
++                if (buffer.Data != null)
++                {
++                    ReadOnlySpan<short> samples = MemoryMarshal.Cast<byte, short>(buffer.Data);
++                    int convertedSize = BackendHelper.GetSampleSize(realSampleFormat) * samples.Length;
++
++                    if (_convertedData == null || _convertedData.Length != convertedSize)
++                    {
++                        _convertedData = new byte[convertedSize];
++                    }
++
++                    ConvertSamples(samples, _convertedData);
++
++                    buffer.Data = _convertedData;
++                }
+             }
+ 
+             _realSession.QueueBuffer(buffer);
+         }
+ 
+-        public override bool RegisterBuffer(AudioBuffer buffer, byte[] samples)
++        public override bool RegisterBuffer(AudioBuffer buffer)
+         {
+-            if (samples == null)
++            if (buffer.DataPointer == 0)
+             {
+                 return false;
+             }
+ 
+-            if (_userChannelCount != _realSession.RequestedChannelCount)
++            if (_downmix)
+             {
+                 if (_userSampleFormat != SampleFormat.PcmInt16)
+                 {
+                     throw new NotImplementedException("Downmixing formats other than PCM16 is not supported.");
+                 }
+ 
+-                ReadOnlySpan<short> samplesPCM16 = MemoryMarshal.Cast<byte, short>(samples);
++                if (_userChannelCount != 6 && !(_userChannelCount == 2 && _realSession.RequestedChannelCount == 1))
++                {
++                    throw new NotImplementedException($"Downmixing from {_userChannelCount} to {_realSession.RequestedChannelCount} not implemented.");
++                }
++            }
++
++            // Size of the samples as the device will read them (whole units only, as the old whole-buffer downmix / conversion did).
++            // The format conversion is included: it used to be applied to Data at QueueBuffer without updating DataSize, so the device
++            // counted the converted buffer's samples at the user sample size.
++            buffer.DataSize = buffer.DataSize / (ulong)_unitInSize * (ulong)_unitOutSize;
++            buffer.SampleReader = this;
++
++            return _realSession.RegisterBuffer(buffer);
++        }
++
++        public override void ReadSamples(AudioBuffer buffer, ulong offset, Span<byte> destination)
++        {
++            Span<byte> input = stackalloc byte[UnitsPerChunk * 6 * sizeof(short)];
++            Span<short> stereo = stackalloc short[UnitsPerChunk * 2];
++            Span<short> mono = stackalloc short[UnitsPerChunk];
++            Span<byte> output = stackalloc byte[UnitsPerChunk * 2 * sizeof(float)];
++
++            ulong unit = offset / (ulong)_unitOutSize;
++            int skip = (int)(offset % (ulong)_unitOutSize);
++
++            while (!destination.IsEmpty)
++            {
++                int units = Math.Min(UnitsPerChunk, (skip + destination.Length + _unitOutSize - 1) / _unitOutSize);
++                Span<byte> inBytes = input[..(units * _unitInSize)];
+ 
+-                if (_userChannelCount == 6)
++                MemoryManager.Read(buffer.DataPointer + unit * (ulong)_unitInSize, inBytes);
++
++                ReadOnlySpan<short> samples = MemoryMarshal.Cast<byte, short>(inBytes);
++
++                if (_downmix)
+                 {
+-                    samplesPCM16 = Downmixing.DownMixSurroundToStereo(samplesPCM16);
++                    if (_userChannelCount == 6)
++                    {
++                        samples = Downmixing.DownMixSurroundToStereo(samples, stereo);
+ 
+-                    if (_realSession.RequestedChannelCount == 1)
++                        if (_realSession.RequestedChannelCount == 1)
++                        {
++                            samples = Downmixing.DownMixStereoToMono(samples, mono);
++                        }
++                    }
++                    else
+                     {
+-                        samplesPCM16 = Downmixing.DownMixStereoToMono(samplesPCM16);
++                        samples = Downmixing.DownMixStereoToMono(samples, mono);
+                     }
+                 }
+-                else if (_userChannelCount == 2 && _realSession.RequestedChannelCount == 1)
++
++                Span<byte> outBytes = output[..(units * _unitOutSize)];
++
++                if (_userSampleFormat != _realSession.RequestedSampleFormat)
+                 {
+-                    samplesPCM16 = Downmixing.DownMixStereoToMono(samplesPCM16);
++                    ConvertSamples(samples, outBytes);
+                 }
+                 else
+                 {
+-                    throw new NotImplementedException($"Downmixing from {_userChannelCount} to {_realSession.RequestedChannelCount} not implemented.");
++                    MemoryMarshal.AsBytes(samples).CopyTo(outBytes);
+                 }
+ 
+-                samples = MemoryMarshal.Cast<short, byte>(samplesPCM16).ToArray();
+-            }
++                int n = Math.Min(outBytes.Length - skip, destination.Length);
+ 
+-            AudioBuffer fakeBuffer = new()
+-            {
+-                BufferTag = buffer.BufferTag,
+-                DataPointer = buffer.DataPointer,
+-                DataSize = (ulong)samples.Length,
+-            };
++                outBytes.Slice(skip, n).CopyTo(destination);
+ 
+-            bool result = _realSession.RegisterBuffer(fakeBuffer, samples);
++                destination = destination[n..];
++                skip = 0;
++                unit += (ulong)units;
++            }
++        }
+ 
+-            if (result)
++        private void ConvertSamples(ReadOnlySpan<short> samples, Span<byte> convertedSamples)
++        {
++            switch (_realSession.RequestedSampleFormat)
+             {
+-                buffer.Data = fakeBuffer.Data;
+-                buffer.DataSize = fakeBuffer.DataSize;
++                case SampleFormat.PcmInt8:
++                    PcmHelper.ConvertSampleToPcm8(MemoryMarshal.Cast<byte, sbyte>(convertedSamples), samples);
++                    break;
++                case SampleFormat.PcmInt24:
++                    PcmHelper.ConvertSampleToPcm24(convertedSamples, samples);
++                    break;
++                case SampleFormat.PcmInt32:
++                    PcmHelper.ConvertSampleToPcm32(MemoryMarshal.Cast<byte, int>(convertedSamples), samples);
++                    break;
++                case SampleFormat.PcmFloat:
++                    PcmHelper.ConvertSampleToPcmFloat(MemoryMarshal.Cast<byte, float>(convertedSamples), samples);
++                    break;
++                default:
++                    throw new NotImplementedException($"Sample format conversion from {_userSampleFormat} to {_realSession.RequestedSampleFormat} not implemented.");
+             }
+-
+-            return result;
+         }
+ 
+         public override void SetVolume(float volume)
+diff --git a/src/Ryujinx.Audio/Backends/CompatLayer/Downmixing.cs b/src/Ryujinx.Audio/Backends/CompatLayer/Downmixing.cs
+index 32a85cd764b30d96337b7544f4b84a50f6642fe5..de9c8e585f0e4042648d526fa2835dadd7585551 100644
+--- a/src/Ryujinx.Audio/Backends/CompatLayer/Downmixing.cs
++++ b/src/Ryujinx.Audio/Backends/CompatLayer/Downmixing.cs
+@@ -77,12 +77,14 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+                 coefficients[0] * front + RawQ15HalfOne) >> Q15Bits, short.MinValue, short.MaxValue);
+         }
+ 
++        // S2Arm: downmix into a caller-provided span (output.Length >= frames * output channels; returns the written part)
++        // instead of a new short[] per call: the compat layer converts guest buffers in bounded chunks as the device reads them.
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+-        private static short[] DownMixSurroundToStereo(ReadOnlySpan<long> coefficients, ReadOnlySpan<short> data)
++        private static Span<short> DownMixSurroundToStereo(ReadOnlySpan<long> coefficients, ReadOnlySpan<short> data, Span<short> output)
+         {
+             int samplePerChannelCount = data.Length / SurroundChannelCount;
+ 
+-            short[] downmixedBuffer = new short[samplePerChannelCount * StereoChannelCount];
++            Span<short> downmixedBuffer = output[..(samplePerChannelCount * StereoChannelCount)];
+ 
+             ReadOnlySpan<Channel51FormatPCM16> channels = GetSurroundBuffer(data);
+ 
+@@ -98,11 +100,11 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+         }
+ 
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+-        private static short[] DownMixStereoToMono(ReadOnlySpan<long> coefficients, ReadOnlySpan<short> data)
++        private static Span<short> DownMixStereoToMono(ReadOnlySpan<long> coefficients, ReadOnlySpan<short> data, Span<short> output)
+         {
+             int samplePerChannelCount = data.Length / StereoChannelCount;
+ 
+-            short[] downmixedBuffer = new short[samplePerChannelCount * MonoChannelCount];
++            Span<short> downmixedBuffer = output[..(samplePerChannelCount * MonoChannelCount)];
+ 
+             ReadOnlySpan<ChannelStereoFormatPCM16> channels = GetStereoBuffer(data);
+ 
+@@ -116,14 +118,14 @@ namespace Ryujinx.Audio.Backends.CompatLayer
+             return downmixedBuffer;
+         }
+ 
+-        public static short[] DownMixStereoToMono(ReadOnlySpan<short> data)
++        public static Span<short> DownMixStereoToMono(ReadOnlySpan<short> data, Span<short> output)
+         {
+-            return DownMixStereoToMono(_defaultStereoToMonoCoefficients, data);
++            return DownMixStereoToMono(_defaultStereoToMonoCoefficients, data, output);
+         }
+ 
+-        public static short[] DownMixSurroundToStereo(ReadOnlySpan<short> data)
++        public static Span<short> DownMixSurroundToStereo(ReadOnlySpan<short> data, Span<short> output)
+         {
+-            return DownMixSurroundToStereo(_defaultSurroundToStereoCoefficients, data);
++            return DownMixSurroundToStereo(_defaultSurroundToStereoCoefficients, data, output);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Audio/Common/AudioBuffer.cs b/src/Ryujinx.Audio/Common/AudioBuffer.cs
+index 87a7d5f32f0efa220c0e586bc39e94d64325afa9..b4af01e8c9520ead4d8d803f3b4f26b3e090813b 100644
+--- a/src/Ryujinx.Audio/Common/AudioBuffer.cs
++++ b/src/Ryujinx.Audio/Common/AudioBuffer.cs
+@@ -33,5 +33,10 @@ namespace Ryujinx.Audio.Common
+         /// The user samples.
+         /// </summary>
+         public byte[] Data;
++
++        // S2Arm: a registered buffer's samples stay in guest memory (no array sized by the game: DataSize can be anything) and the device
++        // pulls them in bounded chunks through this session, which also applies the compat layer's downmix / format conversion.
++        // Null when Data holds the samples (renderer output).
++        public Backends.Common.HardwareDeviceSessionOutputBase SampleReader;
+     }
+ }

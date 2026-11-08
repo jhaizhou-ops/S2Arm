@@ -1,0 +1,198 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 12fa5f0cc29b9eb942f615b57566abb625554596..fb4c929bf81cfd97a89e841cd50553ee34bff403 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -83,7 +83,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
+-        public static bool IsSupported => OperatingSystem.IsMacOSVersionAtLeast(10, 5);
++        public static bool IsSupported => OperatingSystem.IsMacOSVersionAtLeast(10, 5) || OperatingSystem.IsIOS();
+ 
+         public ManualResetEvent GetUpdateRequiredEvent()
+             => _updateRequiredEvent;
+diff --git a/src/Ryujinx.Memory/MemoryBlock.cs b/src/Ryujinx.Memory/MemoryBlock.cs
+index c2ba51f821763cb00c884654b3253c96b3c1f824..a06b252a76fd57c7cfee1a799639d7f8051832de 100644
+--- a/src/Ryujinx.Memory/MemoryBlock.cs
++++ b/src/Ryujinx.Memory/MemoryBlock.cs
+@@ -426,7 +426,7 @@ namespace Ryujinx.Memory
+                     return OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17134);
+                 }
+ 
+-                return OperatingSystem.IsLinux() || OperatingSystem.IsMacOS();
++                return OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS();
+             }
+ 
+             return true;
+diff --git a/src/Ryujinx.Memory/MemoryManagement.cs b/src/Ryujinx.Memory/MemoryManagement.cs
+index 276cc2a4c50f9c7a6211d21a801f099de34aa2c4..507ee6845429312c05c42773d97b34a2503e64d1 100644
+--- a/src/Ryujinx.Memory/MemoryManagement.cs
++++ b/src/Ryujinx.Memory/MemoryManagement.cs
+@@ -10,7 +10,7 @@ namespace Ryujinx.Memory
+             {
+                 return MemoryManagementWindows.Allocate((nint)size);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 return MemoryManagementUnix.Allocate(size, forJit);
+             }
+@@ -26,7 +26,7 @@ namespace Ryujinx.Memory
+             {
+                 return MemoryManagementWindows.Reserve((nint)size, viewCompatible);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 return MemoryManagementUnix.Reserve(size, forJit);
+             }
+@@ -42,7 +42,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.Commit(address, (nint)size);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.Commit(address, size, forJit);
+             }
+@@ -58,7 +58,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.Decommit(address, (nint)size);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.Decommit(address, size);
+             }
+@@ -74,7 +74,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.MapView(sharedMemory, srcOffset, address, (nint)size, owner);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.MapView(sharedMemory, srcOffset, address, size);
+             }
+@@ -90,7 +90,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.UnmapView(sharedMemory, address, (nint)size, owner);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.UnmapView(address, size);
+             }
+@@ -108,7 +108,7 @@ namespace Ryujinx.Memory
+             {
+                 result = MemoryManagementWindows.Reprotect(address, (nint)size, permission, forView);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 result = MemoryManagementUnix.Reprotect(address, size, permission);
+             }
+@@ -129,7 +129,7 @@ namespace Ryujinx.Memory
+             {
+                 return MemoryManagementWindows.Free(address, (nint)size);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 return MemoryManagementUnix.Free(address);
+             }
+@@ -145,7 +145,7 @@ namespace Ryujinx.Memory
+             {
+                 return MemoryManagementWindows.CreateSharedMemory((nint)size, reserve);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 return MemoryManagementUnix.CreateSharedMemory(size, reserve);
+             }
+@@ -161,7 +161,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.DestroySharedMemory(handle);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.DestroySharedMemory(handle);
+             }
+@@ -177,7 +177,7 @@ namespace Ryujinx.Memory
+             {
+                 return MemoryManagementWindows.MapSharedMemory(handle);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 return MemoryManagementUnix.MapSharedMemory(handle, size);
+             }
+@@ -193,7 +193,7 @@ namespace Ryujinx.Memory
+             {
+                 MemoryManagementWindows.UnmapSharedMemory(address);
+             }
+-            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++            else if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 MemoryManagementUnix.UnmapSharedMemory(address, size);
+             }
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.cs b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+index 76a63a4665004d6123e78a51669128be4624f1ba..8a77a471c066b9803c3fda319f5f380d403d2d22 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+@@ -8,6 +8,7 @@ namespace Ryujinx.Memory
+ {
+     [SupportedOSPlatform("linux")]
+     [SupportedOSPlatform("macos")]
++    [SupportedOSPlatform("ios")]
+     static class MemoryManagementUnix
+     {
+         private static readonly ConcurrentDictionary<nint, ulong> _allocations = new();
+@@ -138,7 +139,7 @@ namespace Ryujinx.Memory
+         {
+             int fd;
+ 
+-            if (OperatingSystem.IsMacOS())
++            if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 byte[] memName = "Ryujinx-XXXXXX"u8.ToArray();
+ 
+diff --git a/src/Ryujinx.Memory/MemoryManagerUnixHelper.cs b/src/Ryujinx.Memory/MemoryManagerUnixHelper.cs
+index e5a0b7a4d965c39453903a38ad76fb3dabc1379f..01294d6f040d5affa82f68a5536eb7af527edbb5 100644
+--- a/src/Ryujinx.Memory/MemoryManagerUnixHelper.cs
++++ b/src/Ryujinx.Memory/MemoryManagerUnixHelper.cs
+@@ -6,6 +6,7 @@ namespace Ryujinx.Memory
+ {
+     [SupportedOSPlatform("linux")]
+     [SupportedOSPlatform("macos")]
++    [SupportedOSPlatform("ios")]
+     public static partial class MemoryManagerUnixHelper
+     {
+         [Flags]
+@@ -114,7 +115,7 @@ namespace Ryujinx.Memory
+                 {
+                     result |= MAP_ANONYMOUS_LINUX_GENERIC;
+                 }
+-                else if (OperatingSystem.IsMacOS())
++                else if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                 {
+                     result |= MAP_ANONYMOUS_DARWIN;
+                 }
+@@ -130,7 +131,7 @@ namespace Ryujinx.Memory
+                 {
+                     result |= MAP_NORESERVE_LINUX_GENERIC;
+                 }
+-                else if (OperatingSystem.IsMacOS())
++                else if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                 {
+                     result |= MAP_NORESERVE_DARWIN;
+                 }
+@@ -146,7 +147,7 @@ namespace Ryujinx.Memory
+                 {
+                     result |= MAP_UNLOCKED_LINUX_GENERIC;
+                 }
+-                else if (OperatingSystem.IsMacOS())
++                else if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                 {
+                     // FIXME: Doesn't exist on Darwin
+                 }

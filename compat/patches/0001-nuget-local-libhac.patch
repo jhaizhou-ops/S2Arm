@@ -1,0 +1,14 @@
+diff --git a/nuget.config b/nuget.config
+index 6ed8f8d89266845d37fe3d8334d873346549df2b..8a11d47f35c791e406235c12e2b3bd208985fa2d 100644
+--- a/nuget.config
++++ b/nuget.config
+@@ -5,7 +5,8 @@
+         <clear />
+         <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+         <!-- Only needed when using pre-release versions of Ryujinx.LibHac. -->
+-        <add key="LibHacAlpha" value="https://git.ryujinx.app/api/packages/projects/nuget/index.json" />
++        <!-- S2Arm: git.ryujinx.app is unreachable from our machines (TLS fails); LibHac comes from the vendored package dir compat/packages. -->
++        <add key="LibHacAlpha" value="../packages" />
+     </packageSources>
+     <packageSourceMapping>
+         <!-- key value for <packageSource> should match key values from <packageSources> element -->

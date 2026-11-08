@@ -1,0 +1,126 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs b/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
+index 91911575ae9879ab23558281793590a16ddf87ce..41689af1bbb63c73c3d70dc1c71edfc7de87138e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/INvDrvServices.cs
+@@ -207,6 +207,15 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+             return NvResult.Success;
+         }
+ 
++        // S2A：设备 switch 里没有的 ioctl 号报红并回 NotSupported（同 nvmap 旧号），不再抛 NvIoctlNotImplementedException——
++        //   那个异常不在服务层 HleTarget 接住的几类里，穿出 HLE 边界会把整局打断
++        internal static NvInternalResult S2AUnimplementedIoctl(NvDeviceFile deviceFile, NvIoctl command)
++        {
++            S2AHooks.Red?.Invoke($"nvdrv ioctl 未实现：{deviceFile.GetType().Name} 0x{command.RawValue:X8}（类型 0x{command.Type:X2} 号 0x{command.Number:X2}）");
++
++            return NvInternalResult.NotSupported;
++        }
++
+         private NvResult ConvertInternalErrorCode(NvInternalResult errorCode)
+         {
+             return errorCode switch
+@@ -282,7 +291,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+ 
+                         if (internalResult == NvInternalResult.NotImplemented)
+                         {
+-                            throw new NvIoctlNotImplementedException(context, deviceFile, ioctlCommand);
++                            internalResult = S2AUnimplementedIoctl(deviceFile, ioctlCommand);
+                         }
+ 
+                         errorCode = ConvertInternalErrorCode(internalResult);
+@@ -514,7 +523,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+ 
+                         if (internalResult == NvInternalResult.NotImplemented)
+                         {
+-                            throw new NvIoctlNotImplementedException(context, deviceFile, ioctlCommand);
++                            internalResult = S2AUnimplementedIoctl(deviceFile, ioctlCommand);
+                         }
+ 
+                         errorCode = ConvertInternalErrorCode(internalResult);
+@@ -568,7 +577,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+ 
+                         if (internalResult == NvInternalResult.NotImplemented)
+                         {
+-                            throw new NvIoctlNotImplementedException(context, deviceFile, ioctlCommand);
++                            internalResult = S2AUnimplementedIoctl(deviceFile, ioctlCommand);
+                         }
+ 
+                         errorCode = ConvertInternalErrorCode(internalResult);
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+index 577d52cbeacaa2871d456b21884c7c8efacf0a7b..af2f4f74b7679469d6855ebc88c8358e25cfd6a8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+@@ -269,7 +269,12 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+                     break;
+                 default:
+-                    throw new NotImplementedException($"Transaction {(TransactionCode)code} not implemented");
++                    // S2A：未知事务号报红并在应答里回 UNKNOWN_TRANSACTION（Android BBinder 缺省同此），不抛异常——
++                    //   抛出去服务层回 IPC 错误，SDK 的 binder 封装多半直接中止整局
++                    S2AHooks.Red?.Invoke($"nvnflinger 未实现事务 {code}");
++                    status = Status.UnknownTransaction;
++                    outputParcel.WriteStatus(status);
++                    break;
+             }
+ 
+             if (status != Status.Success)
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Status.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Status.cs
+index aa3b25ca5ff45d64c9f41022ea642d9373a7a5fc..8eefbc658f557cd12cfc765b2d659fa8b08c4c7a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Status.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Status.cs
+@@ -9,6 +9,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+         NoInit = -19,
+         BadValue = -22,
+         InvalidOperation = -37,
++        UnknownTransaction = -74,
+ 
+         // Producer flags
+         BufferNeedsReallocation = 1,
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index 7a84d93d50bf6fc83a3f7b0d46fc3ce8034a826e..806e780ad38cc45d25096c7df47b8f8b10fdcfbf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -459,7 +459,15 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             ulong frameBufferAddress = map.Address + bufferOffset;
+ 
+-            Format format = ConvertColorFormat(item.GraphicBuffer.Object.Buffer.Surfaces[0].ColorFormat);
++            // S2A：未知像素格式报红、这一帧放回队列不上屏（原先抛异常，合成线程上没人接，整局退出）
++            if (!TryConvertColorFormat(item.GraphicBuffer.Object.Buffer.Surfaces[0].ColorFormat, out Format format))
++            {
++                S2AHooks.Red?.Invoke($"nvnflinger 未实现像素格式 {item.GraphicBuffer.Object.Buffer.Surfaces[0].ColorFormat}");
++                AndroidFence s2aBadFormatFence = AndroidFence.NoFence;
++                layer.Consumer.ReleaseBuffer(item, ref s2aBadFormatFence);
++
++                return;
++            }
+ 
+             byte bytesPerPixel =
+                 format is Format.B5G6R5Unorm or
+@@ -569,17 +577,19 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             information.Item.Fence.WaitForever(_device.Gpu);
+         }
+ 
+-        public static Format ConvertColorFormat(ColorFormat colorFormat)
++        public static bool TryConvertColorFormat(ColorFormat colorFormat, out Format format)
+         {
+-            return colorFormat switch
++            (bool known, format) = colorFormat switch
+             {
+-                ColorFormat.A8B8G8R8 => Format.R8G8B8A8Unorm,
+-                ColorFormat.X8B8G8R8 => Format.R8G8B8A8Unorm,
+-                ColorFormat.R5G6B5 => Format.B5G6R5Unorm,
+-                ColorFormat.A8R8G8B8 => Format.B8G8R8A8Unorm,
+-                ColorFormat.A4B4G4R4 => Format.R4G4B4A4Unorm,
+-                _ => throw new NotImplementedException($"Color Format \"{colorFormat}\" not implemented!"),
++                ColorFormat.A8B8G8R8 => (true, Format.R8G8B8A8Unorm),
++                ColorFormat.X8B8G8R8 => (true, Format.R8G8B8A8Unorm),
++                ColorFormat.R5G6B5 => (true, Format.B5G6R5Unorm),
++                ColorFormat.A8R8G8B8 => (true, Format.B8G8R8A8Unorm),
++                ColorFormat.A4B4G4R4 => (true, Format.R4G4B4A4Unorm),
++                _ => (false, default),
+             };
++
++            return known;
+         }
+ 
+         public void Dispose()

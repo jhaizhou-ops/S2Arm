@@ -1,0 +1,126 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+index 35f099c67e0ecaecc667e7f1b2cdd8efc1019876..02aa992be3c1edf6b8a4efbff047dd4c4f93c019 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             public int InvalidatedSequence;
+             public Texture CachedTexture;
+             public Sampler CachedSampler;
++            public bool S2AUnnorm;   // S2A：这次绑定的贴图描述符是非归一化坐标（写支持缓冲 s2a_flags 位图）
+         }
+ 
+         private TextureState[] _textureState;
+@@ -483,6 +484,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+ 
+                 ref TextureState state = ref _textureState[bindingInfo.Binding];
++                _context.SupportBufferUpdater.SetS2ATexUnnormalized(bindingInfo.Binding, state.S2AUnnorm);   // S2A：缓存分支也写回（上一个程序可能在同号绑定写过别的值）；重新绑定时下面按新描述符再写
+ 
+                 if (!poolModified &&
+                     state.TextureHandle == textureId &&
+@@ -515,6 +517,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 ref readonly TextureDescriptor descriptor = ref texturePool.GetForBinding(textureId, sampler?.IsSrgb ?? true, out Texture texture);
+ 
+                 specStateMatches &= specState.MatchesTexture(stage, index, descriptor);
++                state.S2AUnnorm = !descriptor.UnpackTextureCoordNormalized();
++                _context.SupportBufferUpdater.SetS2ATexUnnormalized(bindingInfo.Binding, state.S2AUnnorm);   // S2A
+ 
+                 ITexture hostTexture = texture?.GetTargetTexture(bindingInfo.Target);
+                 ISampler hostSampler = sampler?.GetHostSampler(texture);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+index 451fd2be1b304bc429012a00e5d7a2969fe5cd45..7090e6e4c31b99c88c38aba417ba52f21f4e9314 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+@@ -194,6 +194,19 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+         }
+ 
++        public void SetS2ATexUnnormalized(int binding, bool unnormalized)   // S2A：贴图坐标归一化运行时化（SupportBuffer.S2AFlags Y/Z/W 位图）
++        {
++            int pos = SupportBuffer.S2ATexUnnormBit(binding);
++            if (pos < 0) return;
++            ref int lane = ref (pos < 32 ? ref _data.S2AFlags.Y : ref (pos < 64 ? ref _data.S2AFlags.Z : ref _data.S2AFlags.W));
++            int m = 1 << (pos & 31), v = unnormalized ? lane | m : lane & ~m;
++            if (v != lane)
++            {
++                lane = v;
++                MarkDirty(SupportBuffer.S2AFlagsOffset, SupportBuffer.FieldSize);
++            }
++        }
++
+         public void SetViewportSize(float viewportWidth, float viewportHeight)
+         {
+             if (_data.ViewportSize.X != viewportWidth || _data.ViewportSize.Y != viewportHeight)
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index ccb20b9a5422d3f384b3d03129077e32ac325d02..b83e90182988657fd40796d06eb152838685c48b 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -102,6 +102,13 @@ namespace Ryujinx.Graphics.Shader
+ 
+         // S2A（着色器全量预编，10-19）：原先编进着色器的特化状态改由这里运行时给，一份客体代码只出一个程序。X 位 0 = DepthMode 为 −1..1（顶点出口 z 变换），位 1 = 绘制参数取内建（宏 HLE 绘制，原 HasConstantBufferDrawParameters）
+         public const int S2AFlagDepthMinusOneToOne = 1, S2AFlagCbDrawParameters = 2;
++        // Y / Z / W：贴图非归一化坐标位图（原 QueryTextureCoordNormalized 特化），Y = 顶点 / 计算、Z = 片元、W = 几何阶段的前 32 个贴图绑定。
++        // Vulkan 口径贴图绑定号 = 阶段组 × 128 + 序号（GpuAccessorBase.GetBindingFromIndex），这里按阶段组 × 32 + 序号排位；映射不了（细分阶段、序号 ≥ 32）返回 −1，退回编译期特化
++        public static int S2ATexUnnormBit(int binding)
++        {
++            int group = binding / 128, index = binding % 128;
++            return binding >= 0 && group < 3 && index < 32 ? group * 32 + index : -1;
++        }
+         public Vector4<int> S2AFlags;
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index 7cf3d64930362102769b699a3883f56340775686..6d71c6f9116fbb0a5a0803b2665cf403ca95d407 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -161,6 +161,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+             bool intCoords = (texOp.Flags & TextureFlags.IntCoords) != 0;
+ 
++            if (TranslatorContext.S2ARuntimeState && !intCoords && SupportBuffer.S2ATexUnnormBit(texOp.Binding) >= 0)
++            {
++                return S2AInsertCoordNormalizationRuntime(hfm, node, resourceManager, stage, texOp);
++            }
++
+             bool isCoordNormalized = gpuAccessor.QueryTextureCoordNormalized(handle, cbufSlot);
+ 
+             if (isCoordNormalized || intCoords)
+@@ -205,6 +210,38 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             return node;
+         }
+ 
++        // S2A：坐标是否归一化运行时化——支持缓冲 s2a_flags.yzw 按贴图绑定号一位（Gpu 层逐次绑定按贴图描述符填，置位 = 非归一化坐标），
++        // 除数 = 置位 ? 贴图尺寸 : 1。不查询 QueryTextureCoordNormalized（不进特化状态、匹配不比），一份客体代码一个程序
++        private static LinkedListNode<INode> S2AInsertCoordNormalizationRuntime(HelperFunctionManager hfm, LinkedListNode<INode> node, ResourceManager resourceManager, ShaderStage stage, TextureOperation texOp)
++        {
++            int pos = SupportBuffer.S2ATexUnnormBit(texOp.Binding);
++            Operand lane = Local(), shifted = Local(), bit = Local(), on = Local();
++            node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.ConstantBuffer, lane, Const(SupportBuffer.Binding), Const((int)SupportBufferField.S2AFlags), Const(1 + pos / 32)));
++            node.List.AddBefore(node, new Operation(Instruction.ShiftRightU32, shifted, lane, Const(pos % 32)));
++            node.List.AddBefore(node, new Operation(Instruction.BitwiseAnd, bit, shifted, Const(1)));
++            node.List.AddBefore(node, new Operation(Instruction.CompareNotEqual, on, bit, Const(0)));
++
++            int coordsCount = texOp.Type.Dimensions;
++            int normCoordsCount = (texOp.Type & SamplerType.Mask) == SamplerType.TextureCube ? 2 : coordsCount;
++
++            for (int index = 0; index < normCoordsCount; index++)
++            {
++                Operand coordSize = Local();
++                LinkedListNode<INode> textureSizeNode = node.List.AddBefore(node, new TextureOperation(
++                    Instruction.TextureQuerySize, texOp.Type, texOp.Format, texOp.Flags, texOp.Set, texOp.Binding, index, [coordSize], [Const(0)]));
++                resourceManager.SetUsageFlagsForTextureQuery(texOp.Binding, texOp.Type);
++
++                Operand divisor = Local(), coordNormalized = Local();
++                node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, divisor, on, GenerateI2f(node, coordSize), ConstF(1.0f)));
++                node.List.AddBefore(node, new Operation(Instruction.FP32 | Instruction.Divide, coordNormalized, texOp.GetSource(index), divisor));
++                texOp.SetSource(index, coordNormalized);
++
++                InsertTextureSizeUnscale(hfm, textureSizeNode, resourceManager, stage);
++            }
++
++            return node;
++        }
++
+         private static LinkedListNode<INode> InsertCoordGatherBias(LinkedListNode<INode> node, ResourceManager resourceManager, IGpuAccessor gpuAccessor)
+         {
+             // The gather behavior when the coordinate sits right in the middle of two texels is not well defined.

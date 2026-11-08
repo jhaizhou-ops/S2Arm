@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.Common/S2ARealtime.cs b/src/Ryujinx.Common/S2ARealtime.cs
+index bb23a61ebf94fbb352e67896e9a877f0f7354692..383583246e5f4e7849f647389da9ca534adc3208 100644
+--- a/src/Ryujinx.Common/S2ARealtime.cs
++++ b/src/Ryujinx.Common/S2ARealtime.cs
+@@ -56,8 +56,10 @@ namespace Ryujinx.Common
+         private static partial int pthread_set_qos_class_self_np(uint qosClass, int relativePriority);
+ 
+         private const uint QosClassUtility = 0x11;
++        private const uint QosClassUserInteractive = 0x21;
+ 
+-        private static readonly bool Utility = Environment.GetEnvironmentVariable("S2A_AUDIO_SCHED") == "utility";
++        // S2A_AUDIO_SCHED=utility / interactive：不设实时调度，只给该档 QoS（10-25 Air 马车8 直连：utility 每 10 秒断供 25–30 次、渲染丢 285 周期，不可用）
++        private static readonly string Sched = Environment.GetEnvironmentVariable("S2A_AUDIO_SCHED");
+ 
+         /// <summary>
+         /// Make the calling thread real-time: every <paramref name="periodNs"/> it needs up to <paramref name="computationNs"/> of CPU,
+@@ -70,11 +72,11 @@ namespace Ryujinx.Common
+                 return -1;
+             }
+ 
+-            if (Utility)
++            if (Sched == "utility" || Sched == "interactive")
+             {
+-                int qrc = pthread_set_qos_class_self_np(QosClassUtility, 0);
++                int qrc = pthread_set_qos_class_self_np(Sched == "utility" ? QosClassUtility : QosClassUserInteractive, 0);
+ 
+-                Console.Error.WriteLine($"[S2A 声音] {who}：QoS utility{(qrc == 0 ? "已设" : $"没设上（rc {qrc}）")}（不设实时调度，S2A_AUDIO_SCHED=utility）");
++                Console.Error.WriteLine($"[S2A 声音] {who}：QoS {Sched}{(qrc == 0 ? "已设" : $"没设上（rc {qrc}）")}（不设实时调度，S2A_AUDIO_SCHED={Sched}）");
+ 
+                 return qrc;
+             }

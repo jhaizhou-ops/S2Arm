@@ -1,0 +1,62 @@
+diff --git a/src/Ryujinx.Common/Memory/MemoryOwner.cs b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+index 384d191db7c7b60119c1d8b25ff1de78b508ee44..433caf86d75713f5cec0e1a89c8bd15aaeeafa35 100644
+--- a/src/Ryujinx.Common/Memory/MemoryOwner.cs
++++ b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+@@ -51,6 +51,10 @@ namespace Ryujinx.Common.Memory
+             private static int _maxCacheCount = 50;
+             
+             private const int MaxSkipCount = 50;
++            // Per-T limits cover cached array element storage; outstanding rentals are not cached.
++            private const long MaxCachedBytes = 64L * 1024 * 1024;
++            private const int MaxArraysPerLength = 32;
++            private static long _cachedBytes;
+         
+             static readonly List<Holder> _pool = new();
+             
+@@ -93,6 +97,7 @@ namespace Ryujinx.Common.Memory
+                         Holder holder = _pool[index];
+                         
+                         _pool.Remove(holder);
++                        _cachedBytes -= (long)holder.Array!.Length * Unsafe.SizeOf<T>();
+                         return holder.Array!;
+                     }
+ 
+@@ -106,13 +111,28 @@ namespace Ryujinx.Common.Memory
+ 
+                 lock (_lock)
+                 {
++                    long bytes = (long)array.Length * Unsafe.SizeOf<T>();
++                    if (bytes > MaxCachedBytes - _cachedBytes)
++                    {
++                        return;
++                    }
++
+                     Holder holder = new(array);
+                     int i = _pool.BinarySearch(holder);
+-                    if (i < 0)
++                    if (i >= 0)
+                     {
+-                        _pool.Insert(~i, holder);
++                        int first = i, last = i;
++                        while (first > 0 && _pool[first - 1].Array!.Length == array.Length) first--;
++                        while (last + 1 < _pool.Count && _pool[last + 1].Array!.Length == array.Length) last++;
++                        if (last - first + 1 >= MaxArraysPerLength)
++                        {
++                            return;
++                        }
+                     }
+ 
++                    _pool.Insert(i < 0 ? ~i : i, holder);
++                    _cachedBytes += bytes;
++
+                     if (_pool.Count >= _maxCacheCount)
+                     {
+                         for (int index = 0; index < _pool.Count; index++)
+@@ -122,6 +142,7 @@ namespace Ryujinx.Common.Memory
+                             if (h.SkipCount >= MaxSkipCount)
+                             {
+                                 _pool.Remove(h);
++                                _cachedBytes -= (long)h.Array!.Length * Unsafe.SizeOf<T>();
+                                 index--;
+                             }
+                         }

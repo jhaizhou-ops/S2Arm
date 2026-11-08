@@ -1,0 +1,164 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index f299007502c1a893f46279209909fca26738853a..407b004f96d0bd57c5692b628acba192d417f5b1 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -18,6 +18,7 @@ namespace Ryujinx.Graphics.Gpu
+     /// </summary>
+     public sealed class GpuContext : IDisposable
+     {
++        public static bool S2ABufferReadScratchEnabled => S2ABufferReadScratch.Enabled;
+         private const int NsToTicksFractionNumerator = 384;
+         private const int NsToTicksFractionDenominator = 625;
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index ee15cd49228c60deb30991788f6889d394a7fec7..9fc4ae947f97fba8a0eece5e329bd192a281cd18 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -23,6 +23,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private readonly GpuContext _context;
+         private readonly IVirtualMemoryManagerTracked _cpuMemory;
+         private int _referenceCount;
++        private S2ABufferReadScratch _s2aBufferReadScratch;
+ 
+         /// <summary>
+         /// In-memory shader cache.
+@@ -255,9 +256,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// 缓冲已按自身 dirty/GPU-modified 区间完成同步后取数；这里不能再次发跟踪事件，避免重入当前 flush。
+         /// 未安装平台复制时保留原 span；副本 owner 必须活到 SetBufferData 消费结束。
+         /// </summary>
+-        internal ReadOnlySpan<byte> S2AGetBufferReadSpan(ulong address, int size, out MemoryOwner<byte> owner)
++        internal ReadOnlySpan<byte> S2AGetBufferReadSpan(ulong address, int size, out S2ABufferReadScratch.Lease owner)
+         {
+-            owner = null;
++            owner = default;
+             Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory;
+             if (copy == null)
+             {
+@@ -271,7 +272,20 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             ArgumentOutOfRangeException.ThrowIfNegative(size);
+             _ = checked(address + (ulong)size);
+-            return S2ACopyReadSpan(new MultiRange(address, (ulong)size), copy, size, out owner);
++            S2ABufferReadScratch.Lease rented = S2ABufferReadScratch.Enabled
++                ? (_s2aBufferReadScratch ??= new S2ABufferReadScratch()).Rent(size)
++                : new S2ABufferReadScratch.Lease(MemoryOwner<byte>.Rent(size));
++            try
++            {
++                if (size != 0) copy(address, rented.Memory);
++                owner = rented;
++                return rented.Span;
++            }
++            catch
++            {
++                rented.Dispose();
++                throw;
++            }
+         }
+ 
+         private static ReadOnlySpan<byte> S2ACopyReadSpan(MultiRange range, Action<ulong, Memory<byte>> copy,
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/S2ABufferReadScratch.cs b/src/Ryujinx.Graphics.Gpu/Memory/S2ABufferReadScratch.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f097babe4e9953ccfdccf980e176eb4737ef58c
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Memory/S2ABufferReadScratch.cs
+@@ -0,0 +1,100 @@
++using Ryujinx.Common.Memory;
++using System;
++
++namespace Ryujinx.Graphics.Gpu.Memory
++{
++    // GPU-owner-thread only. Slots retain at most 1 MiB per PhysicalMemory.
++    // A value lease carries a generation: disposing a copied old lease cannot
++    // release a later rental. No MemoryOwner object is ever recycled.
++    internal sealed class S2ABufferReadScratch
++    {
++        public static readonly bool Enabled = Environment.GetEnvironmentVariable("S2A_BUFFER_READ_SCRATCH") == "1";
++        private readonly Slot[] _slots = new Slot[4];
++        private readonly int _thread = Environment.CurrentManagedThreadId;
++
++        internal sealed class Slot
++        {
++            internal byte[] Data;
++            internal ulong Generation;
++            internal bool Active;
++        }
++
++        internal void CheckThread()
++        {
++            if (_thread != Environment.CurrentManagedThreadId)
++                throw new InvalidOperationException("Buffer read scratch requires its GPU owner thread.");
++        }
++
++        internal Lease Rent(int length)
++        {
++            CheckThread();
++            ArgumentOutOfRangeException.ThrowIfNegative(length);
++            if (length <= 256 * 1024)
++            {
++                int capacity = 256;
++                while (capacity < length) capacity *= 2;
++                int candidate = -1;
++                for (int i = 0; i < _slots.Length; i++)
++                {
++                    Slot slot = _slots[i];
++                    if (slot != null && (slot.Active || slot.Generation == ulong.MaxValue)) continue;
++                    if (candidate < 0) candidate = i;
++                    if (slot?.Data != null && slot.Data.Length >= capacity)
++                    {
++                        candidate = i;
++                        break;
++                    }
++                }
++                if (candidate >= 0)
++                {
++                    Slot slot = _slots[candidate] ??= new Slot();
++                    if (slot.Data == null || slot.Data.Length < capacity) slot.Data = new byte[capacity];
++                    slot.Generation++;
++                    slot.Active = true;
++                    return new Lease(this, slot, slot.Generation, length);
++                }
++            }
++            return new Lease(MemoryOwner<byte>.Rent(length));
++        }
++
++        internal readonly struct Lease : IDisposable
++        {
++            private readonly S2ABufferReadScratch _pool;
++            private readonly Slot _slot;
++            private readonly ulong _generation;
++            private readonly int _length;
++            private readonly MemoryOwner<byte> _fallback;
++
++            internal Lease(MemoryOwner<byte> fallback)
++            {
++                _pool = null; _slot = null; _generation = 0; _length = 0; _fallback = fallback;
++            }
++
++            internal Lease(S2ABufferReadScratch pool, Slot slot, ulong generation, int length)
++            {
++                _pool = pool; _slot = slot; _generation = generation; _length = length; _fallback = null;
++            }
++
++            internal Memory<byte> Memory
++            {
++                get
++                {
++                    if (_fallback != null) return _fallback.Memory;
++                    _pool?.CheckThread();
++                    if (_slot == null || !_slot.Active || _slot.Generation != _generation)
++                        throw new ObjectDisposedException(nameof(Lease));
++                    return _slot.Data.AsMemory(0, _length);
++                }
++            }
++
++            internal Span<byte> Span => Memory.Span;
++
++            public void Dispose()
++            {
++                if (_fallback != null) { _fallback.Dispose(); return; }
++                _pool?.CheckThread();
++                if (_slot != null && _slot.Active && _slot.Generation == _generation) _slot.Active = false;
++            }
++        }
++    }
++}

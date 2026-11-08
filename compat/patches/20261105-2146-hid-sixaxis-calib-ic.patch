@@ -1,0 +1,180 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs b/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
+index 5a8847b9ea2fb0a4645ac53979efd6ba4d7786fb..4be5fc53329d99278994d31493883dd1a9e39012 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
+@@ -33,6 +33,10 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         public DebugMouseDevice DebugMouse;
+         public KeyboardDevice Keyboard;
+         public NpadDevices Npads;
++        // S2Arm 11-05：六轴的「不经修正直通」开关与游戏存的校准参数，按六轴句柄记在设备上（跨 hid 会话不丢；IHidServer 84–87）。
++        //   Switch Sports 的 Joy-Con 校准页按 A 存校准（命令 86），原先没实现 → 报红返回错误，游戏当场 Break
++        public readonly Dictionary<int, bool> SixAxisUnalteredPassthrough = new();
++        public readonly Dictionary<int, byte[]> SixAxisCalibration = new();
+ 
+         private static void CheckTypeSizeOrThrow<T>(int expectedSize)
+         {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 7dcfe8f4068a90b64e9481063ce26e51fe4ed279..79d71fb5a27cc0e5c3f82aec4ae1239b19a35d22 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -25,7 +25,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         private bool _npadAnalogStickCenterClampEnabled;
+         private bool _usbFullKeyControllerEnabled;
+         private readonly bool _isFirmwareUpdateAvailableForSixAxisSensor;
+-        private bool _isSixAxisSensorUnalteredPassthroughEnabled;
+ 
+         private NpadHandheldActivationMode _npadHandheldActivationMode;
+         private GyroscopeZeroDriftMode _gyroscopeZeroDriftMode;
+@@ -647,13 +646,14 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         [CommandCmif(84)] // 13.0.0+
+         // EnableSixAxisSensorUnalteredPassthrough(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle, u8 enabled)
++        //   S2Arm：按六轴句柄记（上游记成整个会话一份、还按桩打日志；Switch Sports 起局后 85 每秒查几百次，桩日志 14780 行）
+         public ResultCode EnableSixAxisSensorUnalteredPassthrough(ServiceCtx context)
+         {
+-            _isSixAxisSensorUnalteredPassthroughEnabled = context.RequestData.ReadUInt32() != 0;
++            bool enabled = context.RequestData.ReadUInt32() != 0;
+             int sixAxisSensorHandle = context.RequestData.ReadInt32();
+-            long appletResourceUserId = context.RequestData.ReadInt64();
++            context.RequestData.ReadInt64();   // appletResourceUserId
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle, _isSixAxisSensorUnalteredPassthroughEnabled });
++            lock (context.Device.Hid.SixAxisUnalteredPassthrough) context.Device.Hid.SixAxisUnalteredPassthrough[sixAxisSensorHandle] = enabled;
+ 
+             return ResultCode.Success;
+         }
+@@ -664,41 +664,72 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         {
+             int sixAxisSensorHandle = context.RequestData.ReadInt32();
+             context.RequestData.BaseStream.Position += 4; // Padding
+-            long appletResourceUserId = context.RequestData.ReadInt64();
++            context.RequestData.ReadInt64();   // appletResourceUserId
+ 
+-            context.ResponseData.Write(_isSixAxisSensorUnalteredPassthroughEnabled);
++            bool enabled;
++            lock (context.Device.Hid.SixAxisUnalteredPassthrough) enabled = context.Device.Hid.SixAxisUnalteredPassthrough.GetValueOrDefault(sixAxisSensorHandle);
++            context.ResponseData.Write(enabled);
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle });
++            return ResultCode.Success;
++        }
++
++        [CommandCmif(86)] // 13.0.0+
++        // StoreSixAxisSensorCalibrationParameter(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle, buffer<SixAxisSensorCalibrationParameter, 0x21>)
++        //   S2Arm 11-05：上游没实现。存游戏给的那段校准参数（按缓冲原样、按句柄记），87 读回同一份。结构大小不写死：按游戏实际给的缓冲长度存
++        public ResultCode StoreSixAxisSensorCalibrationParameter(ServiceCtx context)
++        {
++            int sixAxisSensorHandle = context.RequestData.ReadInt32();
++            context.RequestData.BaseStream.Position += 4; // Padding
++            context.RequestData.ReadInt64();   // appletResourceUserId
++
++            (ulong position, ulong size) = context.Request.GetBufferType0x21();
++            byte[] data = new byte[size];
++            if (size > 0) context.Memory.Read(position, data);
++
++            lock (context.Device.Hid.SixAxisCalibration) context.Device.Hid.SixAxisCalibration[sixAxisSensorHandle] = data;
++            Logger.Info?.Print(LogClass.ServiceHid, $"StoreSixAxisSensorCalibrationParameter: handle {sixAxisSensorHandle}, {size} bytes");
+ 
+             return ResultCode.Success;
+         }
+ 
+         [CommandCmif(87)] // 13.0.0+
+-        // LoadSixAxisSensorCalibrationParameter(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle, u64 unknown)
++        // LoadSixAxisSensorCalibrationParameter(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle) -> buffer<SixAxisSensorCalibrationParameter, 0x22>
++        //   S2Arm 11-05：读回 86 存的那份；没存过 → 全零（没有存过的校准，不修正）。上游是桩、不写缓冲（游戏读到自己缓冲里原有的字节）
+         public ResultCode LoadSixAxisSensorCalibrationParameter(ServiceCtx context)
+         {
+             int sixAxisSensorHandle = context.RequestData.ReadInt32();
+             context.RequestData.BaseStream.Position += 4; // Padding
+-            long appletResourceUserId = context.RequestData.ReadInt64();
+-
+-            // TODO: CalibrationParameter have to be determined.
++            context.RequestData.ReadInt64();   // appletResourceUserId
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle });
++            (ulong position, ulong size) = context.Request.GetBufferType0x22();
++            byte[] stored;
++            lock (context.Device.Hid.SixAxisCalibration) stored = context.Device.Hid.SixAxisCalibration.GetValueOrDefault(sixAxisSensorHandle);
++            if (size > 0)
++            {
++                byte[] outData = new byte[size];
++                if (stored != null) Array.Copy(stored, outData, Math.Min(stored.Length, outData.Length));
++                context.Memory.Write(position, outData);
++            }
+ 
+             return ResultCode.Success;
+         }
+ 
+         [CommandCmif(88)] // 13.0.0+
+-        // GetSixAxisSensorIcInformation(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle) -> u64 unknown
++        // GetSixAxisSensorIcInformation(nn::applet::AppletResourceUserId, nn::hid::SixAxisSensorHandle) -> buffer<SixAxisSensorIcInformation, 0x22>
++        //   S2Arm 11-05：上游是不写缓冲的桩。按我方六轴量程写 SixAxisSensorIcInformation（Types/SixAxisSensorIc.cs，与喂数路径同一份常量）
+         public ResultCode GetSixAxisSensorIcInformation(ServiceCtx context)
+         {
+-            int sixAxisSensorHandle = context.RequestData.ReadInt32();
++            context.RequestData.ReadInt32();   // sixAxisSensorHandle
+             context.RequestData.BaseStream.Position += 4; // Padding
+-            long appletResourceUserId = context.RequestData.ReadInt64();
+-
+-            // TODO: IcInformation have to be determined.
++            context.RequestData.ReadInt64();   // appletResourceUserId
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle });
++            (ulong position, ulong size) = context.Request.GetBufferType0x22();
++            if (size > 0)
++            {
++                byte[] ic = new byte[SixAxisSensorIc.Size];
++                SixAxisSensorIc.Write(ic);
++                context.Memory.Write(position, ic.AsSpan(0, (int)Math.Min(size, (ulong)ic.Length)));
++            }
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/Types/SixAxisSensorIc.cs b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SixAxisSensorIc.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d6044f230cfa13b68632a36caddffcd4499c340d
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SixAxisSensorIc.cs
+@@ -0,0 +1,42 @@
++using System;
++using System.Buffers.Binary;
++
++namespace Ryujinx.HLE.HOS.Services.Hid.Types
++{
++    // S2Arm 11-05：我方六轴的量程与传感器 IC 信息（IHidServer 88 GetSixAxisSensorIcInformation 的 SixAxisSensorIcInformation），只此一处定义：
++    //   喂数路径（S2A.Services ControllerFeedback）按这里的量程饱和，88 按这里的数填，两边不会说两套话。
++    //   单位与喂数一致：加速度 g、角速度 度/秒（交给游戏前 ControllerFeedback 再乘 0.0027 换成转/秒，那是共享内存的单位，不是 IC 信息的单位）。
++    //   结构布局（0xC8 字节、50 个 float）：公开逆向资料中的结构布局，已与真机抓取核对（11-05 测试机2 Switch Sports：游戏给 88 的输出缓冲 200 字节 = 0xC8，存校准 86 的输入 1860 字节 = 0x744）——
++    //     0x00 角速度量程 / 0x04 角速度零点容差 6 个（三轴各 下限、上限）/ 0x1C 角速度灵敏度下限 3×3 / 0x40 角速度灵敏度上限 3×3 /
++    //     0x64 加速度量程 / 0x68 加速度零点容差 6 个 / 0x80 加速度灵敏度下限 3×3 / 0xA4 加速度灵敏度上限 3×3
++    public static class SixAxisSensorIc
++    {
++        public const int Size = 0xC8;
++        // 量程：取任天堂掌机 / Joy-Con 六轴 IC 的标称量程（±2000 度/秒、±8 g）。手机传感器超出的部分按真机同样饱和
++        public const float AngularRateRangeDps = 2000f;
++        public const float AccelerationRangeG = 8f;
++        // 零点容差、灵敏度上下限（对角）与轴间串扰容差：我方虚拟 IC 本身是纯换算（零点 0、灵敏度 1），这几项描述的是「游戏校准时允许的偏差」；
++        //   填 0 / 1 会让任何手机噪声都落在容差外，所以取公开资料中的真机 IC 标称值（零点 ±0.0612、灵敏度 0.95–1.05、串扰 ±0.003），单位同上
++        public const float ZeroPointTolerance = 0.0612f;
++        public const float SensitivityMin = 0.95f, SensitivityMax = 1.05f, CrossAxisTolerance = 0.003f;
++
++        public static float ClampAngularRate(float dps) => Math.Clamp(dps, -AngularRateRangeDps, AngularRateRangeDps);
++        public static float ClampAcceleration(float g) => Math.Clamp(g, -AccelerationRangeG, AccelerationRangeG);
++
++        // 按上面的布局写 Size 字节（小端 float）
++        public static void Write(Span<byte> dst)
++        {
++            if (dst.Length < Size) throw new ArgumentException("SixAxisSensorIcInformation needs 0xC8 bytes", nameof(dst));
++            Span<float> f = stackalloc float[Size / 4];
++            int o = 0;
++            foreach (float range in new[] { AngularRateRangeDps, AccelerationRangeG })
++            {
++                f[o++] = range;
++                for (int a = 0; a < 3; a++) { f[o++] = -ZeroPointTolerance; f[o++] = ZeroPointTolerance; }
++                for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) f[o++] = r == c ? SensitivityMin : -CrossAxisTolerance;
++                for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) f[o++] = r == c ? SensitivityMax : CrossAxisTolerance;
++            }
++            for (int i = 0; i < f.Length; i++) BinaryPrimitives.WriteSingleLittleEndian(dst.Slice(i * 4, 4), f[i]);
++        }
++    }
++}

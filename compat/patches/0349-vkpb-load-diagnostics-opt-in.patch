@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 770e77cf4716e028206850dd736c0ce1702928e5..30eb9c593595838612e8d56d505ee2e43710a2e3 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -203,6 +203,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         internal long S2AProgramBinaryLoads;
+         internal long S2AProgramBinaryRejects;
++        private static readonly bool S2ACacheDiagnostics = Environment.GetEnvironmentVariable("S2A_SHADER_CACHE_DIAG") == "1";
++        private static bool S2AShouldLogProgramBinaryLoad(long loads) =>
++            S2ACacheDiagnostics && (loads <= 8 || (loads & (loads - 1)) == 0);
+ 
+         // Host-cache policy: VKPB records are loaded on demand through this renderer's single
+         // compile lane. The shared GPU cache does not create/drop host programs in the
+@@ -1253,7 +1256,7 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             long loads = Interlocked.Increment(ref S2AProgramBinaryLoads);
+-            if (loads <= 8 || (loads & (loads - 1)) == 0)
++            if (S2AShouldLogProgramBinaryLoad(loads))
+                 Console.Error.WriteLine($"[vkpb] 程序记录载入 #{loads}：{binary.Sources.Length} 段，{binary.Sources.Sum(s => s.BinaryCode?.Length ?? 0)} 字节");
+ 
+             // Compute programs carry a default pipeline state in the current CreateProgram

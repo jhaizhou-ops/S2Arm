@@ -1,0 +1,401 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+index 0c1e337319aec9d192d8e76fe52111eed3f4e563..1c6ccd920aa18c649b00093cf99dbb4aca800ea4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+@@ -321,6 +321,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         /// <param name="value">The new value</param>
+         public void SetHasConstantBufferDrawParameters(bool value)
+         {
++            _context.SupportBufferUpdater.SetS2ACbDrawParameters(value);   // S2A：着色器按支持缓冲选绘制参数来源（逐次绘制）
+             if (value != _graphics.HasConstantBufferDrawParameters)
+             {
+                 _graphics.HasConstantBufferDrawParameters = value;
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 4f2f016063f83eb96d88f4394eb9fc3f9d0dda27..335dd47e204671924fb8956a31ee991d5bf2fd4f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -802,6 +802,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             }
+ 
+             _context.Renderer.Pipeline.SetDepthMode(GetDepthMode());
++            _context.SupportBufferUpdater.SetS2ADepthMode(GetDepthMode() == DepthMode.MinusOneToOne);   // S2A：着色器按支持缓冲选深度变换
+             _context.Renderer.Pipeline.SetViewports(viewports);
+ 
+             _context.SupportBufferUpdater.SetViewportTransformDisable(
+@@ -833,6 +834,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             _pipeline.DepthMode = mode;
+ 
+             _context.Renderer.Pipeline.SetDepthMode(mode);
++            _context.SupportBufferUpdater.SetS2ADepthMode(mode == DepthMode.MinusOneToOne);   // S2A
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+index da19bd064f429881a16d332eaedb7cdd6f512635..451fd2be1b304bc429012a00e5d7a2969fe5cd45 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+@@ -174,6 +174,26 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// </summary>
+         /// <param name="viewportWidth">Value used as viewport width</param>
+         /// <param name="viewportHeight">Value used as viewport height</param>
++        public void SetS2ADepthMode(bool minusOneToOne)   // S2A：DepthMode 运行时化（SupportBuffer.S2AFlags 位 0），翻译器按它选顶点出口 z 变换
++        {
++            int v = (_data.S2AFlags.X & ~SupportBuffer.S2AFlagDepthMinusOneToOne) | (minusOneToOne ? SupportBuffer.S2AFlagDepthMinusOneToOne : 0);
++            if (v != _data.S2AFlags.X)
++            {
++                _data.S2AFlags.X = v;
++                MarkDirty(SupportBuffer.S2AFlagsOffset, SupportBuffer.FieldSize);
++            }
++        }
++
++        public void SetS2ACbDrawParameters(bool builtin)   // S2A：绘制参数来源运行时化（SupportBuffer.S2AFlags 位 1）
++        {
++            int v = (_data.S2AFlags.X & ~SupportBuffer.S2AFlagCbDrawParameters) | (builtin ? SupportBuffer.S2AFlagCbDrawParameters : 0);
++            if (v != _data.S2AFlags.X)
++            {
++                _data.S2AFlags.X = v;
++                MarkDirty(SupportBuffer.S2AFlagsOffset, SupportBuffer.FieldSize);
++            }
++        }
++
+         public void SetViewportSize(float viewportWidth, float viewportHeight)
+         {
+             if (_data.ViewportSize.X != viewportWidth || _data.ViewportSize.Y != viewportHeight)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+index b38589030be363e7ec102f639e9aa644a92e1510..47614f92443b79620e4f90e9d7b63a364e2e922d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+@@ -58,7 +58,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
+-        public void S2AReportStateUse(bool a2cRead, uint attrReadMask) => _newSpecState.S2ARecordUsage(a2cRead, attrReadMask);   // S2A：翻译读过的特化状态记进新状态（缓存匹配只比读过的）
++        public void S2AReportStateUse(uint readFlags, uint attrReadMask) => _newSpecState.S2ARecordUsage(readFlags, attrReadMask);   // S2A：翻译读过的特化状态记进新状态（缓存匹配只比读过的）
+ 
+         /// <inheritdoc/>
+         public uint ConstantBuffer1Read(int offset)
+@@ -118,6 +118,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <inheritdoc/>
+         public bool QueryHasConstantBufferDrawParameters()
+         {
++            _newSpecState.S2ARecordUsage(S2AStateRead.Cbdp, 0);   // S2A：读了才进匹配
+             return _oldSpecState.GraphicsState.HasConstantBufferDrawParameters;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index a705edde333562def2ffa733e97b554961fb1f9e..21a39dbd6219e69bedcbc3f58daf57bba392a762 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const ushort FileFormatVersionMajor = 1;
+         private const ushort FileFormatVersionMinor = 2;
+         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
+-        private const uint CodeGenVersion = 7354;
++        private const uint CodeGenVersion = 7354 + 1;   // S2A +1：特化状态运行时化（DepthMode 改读支持缓冲）后翻译结果变了，旧磁盘缓存整份作废，免得编译期版本被不比 DepthMode 的匹配错配
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index f2c24a94759e4f004f29f7e8eed7175dfe9604d5..5ea469b3b51dee23997d37760384677050729781 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -103,7 +103,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return MemoryMarshal.Cast<byte, ulong>(_channel.MemoryManager.GetSpan(address, size));
+         }
+ 
+-        public void S2AReportStateUse(bool a2cRead, uint attrReadMask) => _state.SpecializationState?.S2ARecordUsage(a2cRead, attrReadMask);   // S2A
++        public void S2AReportStateUse(uint readFlags, uint attrReadMask) => _state.SpecializationState?.S2ARecordUsage(readFlags, attrReadMask);   // S2A
+ 
+         /// <inheritdoc/>
+         public int QueryComputeLocalSizeX() => _state.ComputeState.LocalSizeX;
+@@ -144,6 +144,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <inheritdoc/>
+         public bool QueryHasConstantBufferDrawParameters()
+         {
++            _state.SpecializationState?.S2ARecordUsage(S2AStateRead.Cbdp, 0);   // S2A：读了才进匹配
+             return _state.GraphicsState.HasConstantBufferDrawParameters;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index 8c3308f93a271f97b97a1e90b920c52f5e443e5d..58af1d23c07dfc4fb59a17ddca73601ceeff6543 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -35,16 +35,19 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             TextureArrayFromBuffer = 1 << 4,
+             TextureArrayFromPool = 1 << 5,
+             S2AUsageTracked = 1 << 8,   // S2A：翻译时记了读过哪些状态（S2ARecordUsage）；没有这位的旧条目照原版全比
+-            S2AA2cRead = 1 << 9,
++            S2AA2cRead = 1 << 9,    // S2AStateRead 位 i ↔ 1 << (9 + i)
++            S2ADepthRead = 1 << 10,
++            S2ACbdpRead = 1 << 11,
++            S2AReadMask = S2AA2cRead | S2ADepthRead | S2ACbdpRead,
+         }
+ 
+         private QueriedStateFlags _queriedState;
+         private uint _s2aAttrRead;   // S2A：翻译时读过类型的顶点属性位置
+ 
+         /// <summary>S2A：记下翻译实际读过的状态（访问器在 TranslatorContext.Translate 结尾调）；多阶段累加</summary>
+-        public void S2ARecordUsage(bool a2cRead, uint attrReadMask)
++        public void S2ARecordUsage(uint readFlags, uint attrReadMask)
+         {
+-            _queriedState |= QueriedStateFlags.S2AUsageTracked | (a2cRead ? QueriedStateFlags.S2AA2cRead : 0);
++            _queriedState |= QueriedStateFlags.S2AUsageTracked | ((QueriedStateFlags)(readFlags << 9) & QueriedStateFlags.S2AReadMask);
+             _s2aAttrRead |= attrReadMask;
+         }
+ 
+@@ -57,14 +60,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         public void S2AWriteWithoutUsage(ref BinarySerializer dataWriter)
+         {
+             QueriedStateFlags q = _queriedState; uint m = _s2aAttrRead;
+-            _queriedState &= ~(QueriedStateFlags.S2AUsageTracked | QueriedStateFlags.S2AA2cRead); _s2aAttrRead = 0;
++            _queriedState &= ~(QueriedStateFlags.S2AUsageTracked | QueriedStateFlags.S2AReadMask); _s2aAttrRead = 0;
+             try { Write(ref dataWriter); } finally { _queriedState = q; _s2aAttrRead = m; }
+         }
+ 
+         /// <summary>S2A：把另一份（同一程序再翻时记录的）使用记录并进来（离线批量翻译写盘用继承条目的状态时）</summary>
+         public void S2AMergeUsage(ShaderSpecializationState other)
+         {
+-            if ((other._queriedState & QueriedStateFlags.S2AUsageTracked) != 0) S2ARecordUsage((other._queriedState & QueriedStateFlags.S2AA2cRead) != 0, other._s2aAttrRead);
++            if ((other._queriedState & QueriedStateFlags.S2AUsageTracked) != 0) S2ARecordUsage((uint)(other._queriedState & QueriedStateFlags.S2AReadMask) >> 9, other._s2aAttrRead);
+         }
+         private bool _compute;
+         private byte _constantBufferUsePerStage;
+@@ -592,7 +595,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return false;
+             }
+ 
+-            if (graphicsState.DepthMode != GraphicsState.DepthMode)
++            if ((!s2aTracked || (_queriedState & QueriedStateFlags.S2ADepthRead) != 0) && graphicsState.DepthMode != GraphicsState.DepthMode)   // S2A：运行时化后翻译不读 DepthMode，不比
+             {
+                 return false;
+             }
+@@ -636,7 +639,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 }
+             }
+ 
+-            if (usesDrawParameters && graphicsState.HasConstantBufferDrawParameters != GraphicsState.HasConstantBufferDrawParameters)
++            if (usesDrawParameters && (!s2aTracked || (_queriedState & QueriedStateFlags.S2ACbdpRead) != 0) && graphicsState.HasConstantBufferDrawParameters != GraphicsState.HasConstantBufferDrawParameters)   // S2A：运行时化后不读 cbdp，不比
+             {
+                 return false;
+             }
+@@ -1150,7 +1153,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 sb.Append(';');
+             }
+             sb.Append($"\tarr_buf={_textureArrayFromBufferSpecialization.Count}\tarr_pool={_textureArrayFromPoolSpecialization.Count}");
+-            sb.Append((_queriedState & QueriedStateFlags.S2AUsageTracked) != 0 ? $"\tused=a2c:{((_queriedState & QueriedStateFlags.S2AA2cRead) != 0 ? 1 : 0)},attr:{_s2aAttrRead:X8}" : "\tused=无记录");   // S2A：翻译读过的状态（缓存匹配只比这些）
++            sb.Append((_queriedState & QueriedStateFlags.S2AUsageTracked) != 0 ? $"\tused=a2c:{((_queriedState & QueriedStateFlags.S2AA2cRead) != 0 ? 1 : 0)},depth:{((_queriedState & QueriedStateFlags.S2ADepthRead) != 0 ? 1 : 0)},cbdp:{((_queriedState & QueriedStateFlags.S2ACbdpRead) != 0 ? 1 : 0)},attr:{_s2aAttrRead:X8}" : "\tused=无记录");   // S2A：翻译读过的状态（缓存匹配只比这些）
+             return sb.ToString();
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index a612c4b1bee8caf5deea05ee5b2a115960bc29bf..59f4b6d352e2dffb7d3c8bf16ae0eb046258ace9 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -6,6 +6,12 @@ namespace Ryujinx.Graphics.Shader
+     /// <summary>
+     /// GPU state access interface.
+     /// </summary>
++    /// <summary>S2A：翻译读过的特化状态位（S2AReportStateUse 的 readFlags；特化状态序列化按位存，只增不改位号）</summary>
++    public static class S2AStateRead
++    {
++        public const uint A2c = 1, Depth = 2, Cbdp = 4;
++    }
++
+     public interface IGpuAccessor : ILogger
+     {
+         /// <summary>
+@@ -500,6 +506,6 @@ namespace Ryujinx.Graphics.Shader
+         }
+     
+         /// <summary>S2A：翻译结束时报这次实际读过的特化状态（a2c 抖动、读过类型的顶点属性位置掩码）；缺省不记（匹配退回原版全比）</summary>
+-        void S2AReportStateUse(bool a2cRead, uint attrReadMask) { }
++        void S2AReportStateUse(uint readFlags, uint attrReadMask) { }   // readFlags：S2AStateRead 位
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index fb624d624477fde468b11ece36bc1305f7f7bf11..ccb20b9a5422d3f384b3d03129077e32ac325d02 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -24,6 +24,7 @@ namespace Ryujinx.Graphics.Shader
+         RenderScale,
+         TfeOffset,
+         TfeVertexCount,
++        S2AFlags,   // S2A：运行时化的特化状态（见 SupportBuffer.S2AFlags）
+     }
+ 
+     public struct SupportBuffer
+@@ -42,6 +43,7 @@ namespace Ryujinx.Graphics.Shader
+         public static readonly int ComputeRenderScaleOffset;
+         public static readonly int TfeOffsetOffset;
+         public static readonly int TfeVertexCountOffset;
++        public static readonly int S2AFlagsOffset;
+ 
+         public const int FragmentIsBgraCount = 8;
+         // One for the render target, 64 for the textures, and 8 for the images.
+@@ -68,6 +70,7 @@ namespace Ryujinx.Graphics.Shader
+             ComputeRenderScaleOffset = GraphicsRenderScaleOffset + FieldSize;
+             TfeOffsetOffset = OffsetOf(ref instance, ref instance.TfeOffset);
+             TfeVertexCountOffset = OffsetOf(ref instance, ref instance.TfeVertexCount);
++            S2AFlagsOffset = OffsetOf(ref instance, ref instance.S2AFlags);
+         }
+ 
+         internal static StructureType GetStructureType()
+@@ -80,7 +83,8 @@ namespace Ryujinx.Graphics.Shader
+                 new StructureField(AggregateType.S32, "frag_scale_count"),
+                 new StructureField(AggregateType.Array | AggregateType.FP32, "render_scale", RenderScaleMaxCount),
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "tfe_offset"),
+-                new StructureField(AggregateType.S32, "tfe_vertex_count")
++                new StructureField(AggregateType.S32, "tfe_vertex_count"),
++                new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_flags")
+             ]);
+         }
+ 
+@@ -95,5 +99,9 @@ namespace Ryujinx.Graphics.Shader
+ 
+         public Vector4<int> TfeOffset;
+         public Vector4<int> TfeVertexCount;
++
++        // S2A（着色器全量预编，10-19）：原先编进着色器的特化状态改由这里运行时给，一份客体代码只出一个程序。X 位 0 = DepthMode 为 −1..1（顶点出口 z 变换），位 1 = 绘制参数取内建（宏 HLE 绘制，原 HasConstantBufferDrawParameters）
++        public const int S2AFlagDepthMinusOneToOne = 1, S2AFlagCbDrawParameters = 2;
++        public Vector4<int> S2AFlags;
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+index b93b63dc13a264d5eb2db34961cf476eb0c9aa94..6ccdc76e8f2a14dd23e296e4e66a45e6d81012a5 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -304,7 +304,18 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 this.Store(StorageKind.Output, IoVariable.Position, null, Const(1), this.FPFusedMultiplyAdd(y, yScale, negativeOne));
+             }
+ 
+-            if (TranslatorContext.Definitions.DepthMode && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl())
++            if (S2ADepthRuntime())
++            {
++                // S2A：DepthMode 运行时化——支持缓冲 s2a_flags.x 位 0 置位时做同一变换，否则 z 原样（一次乘加 + 选择 / 顶点）
++                Operand z = this.Load(StorageKind.Output, IoVariable.Position, null, Const(2));
++                Operand w = this.Load(StorageKind.Output, IoVariable.Position, null, Const(3));
++                Operand halfW = this.FPMultiply(w, ConstF(0.5f));
++                Operand flags = this.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.S2AFlags), Const(0));
++                Operand on = this.ICompareNotEqual(this.BitwiseAnd(flags, Const(SupportBuffer.S2AFlagDepthMinusOneToOne)), Const(0));
++
++                this.Store(StorageKind.Output, IoVariable.Position, null, Const(2), this.ConditionalSelect(on, this.FPFusedMultiplyAdd(z, ConstF(0.5f), halfW), z));
++            }
++            else if (TranslatorContext.Definitions.DepthMode && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl())
+             {
+                 Operand z = this.Load(StorageKind.Output, IoVariable.Position, null, Const(2));
+                 Operand w = this.Load(StorageKind.Output, IoVariable.Position, null, Const(3));
+@@ -314,6 +325,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+         }
+ 
++        private bool S2ADepthRuntime() => TranslatorContext.S2ARuntimeState && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl();
++
+         public void PrepareForVertexReturn(out Operand oldXLocal, out Operand oldYLocal, out Operand oldZLocal)
+         {
+             if (TranslatorContext.Definitions.ViewportTransformDisable)
+@@ -329,7 +342,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 oldYLocal = null;
+             }
+ 
+-            if (TranslatorContext.Definitions.DepthMode && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl())
++            if (S2ADepthRuntime() || (TranslatorContext.Definitions.DepthMode && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl()))
+             {
+                 oldZLocal = Local();
+                 this.Copy(oldZLocal, this.Load(StorageKind.Output, IoVariable.Position, null, Const(2)));
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index b5c6ec5445507d096b2f0fa43459c6d6733a4232..5388aa999832ba33af9dca0a76b56d886177beff 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -21,12 +21,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         // S2A（10-19 出包线）：记下这次翻译实际读了哪些特化状态，缓存匹配只比读过的（ShaderSpecializationState.MatchesGraphics）；原版无条件比 a2c 抖动与全部 32 个属性类型，
+         // 同一份翻译结果因没读过的字段不同而未命中、运行时现翻（动森首局现翻 8 支：代码全同，只差 a2c_dither / 未用位置的属性类型）
+-        public bool S2AA2cRead;
++        public bool S2AA2cRead, S2ADepthRead;
+         public uint S2AAttrRead;
+         public bool AlphaToCoverageDitherEnable { get { S2AA2cRead = true; return _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable; } }
+         public bool ViewportTransformDisable => _graphicsState.ViewportTransformDisable;
+ 
+-        public bool DepthMode => _graphicsState.DepthMode;
++        public bool DepthMode { get { S2ADepthRead = true; return _graphicsState.DepthMode; } }   // S2A：运行时化后不再读（EmitterContext），读了才进匹配
+ 
+         public float PointSize => _graphicsState.PointSize;
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
+index 9e73013dbc69a7da993131d08af60346e2de3bd9..f827f0ea11258573b0391d8953b83e2958094407 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
+@@ -16,7 +16,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+         {
+             Operation operation = (Operation)node.Value;
+ 
+-            if (context.GpuAccessor.QueryHasConstantBufferDrawParameters())
++            if (TranslatorContext.S2ARuntimeState)
++            {
++                // S2A：绘制参数来源运行时化——宏 HLE 绘制（cbdp 真）用内建、寄存器绘制用游戏写进 cb0 的值，按支持缓冲 s2a_flags.x 位 1 逐次绘制选，不读 cbdp
++                if (S2ASelectDrawParameters(node, operation))
++                {
++                    context.UsedFeatures |= FeatureFlags.DrawParameters;
++                }
++            }
++            else if (context.GpuAccessor.QueryHasConstantBufferDrawParameters())
+             {
+                 if (ReplaceConstantBufferWithDrawParameters(node, operation))
+                 {
+@@ -69,6 +77,33 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             return modified;
+         }
+ 
++        private static bool S2ASelectDrawParameters(LinkedListNode<INode> node, Operation operation)
++        {
++            bool modified = false;
++            for (int srcIndex = 0; srcIndex < operation.SourcesCount; srcIndex++)
++            {
++                Operand src = operation.GetSource(srcIndex);
++                if (src.Type != OperandType.ConstantBuffer || src.GetCbufSlot() != 0) continue;
++                IoVariable io;
++                switch (src.GetCbufOffset())
++                {
++                    case Constants.NvnBaseVertexByteOffset / 4: io = IoVariable.BaseVertex; break;
++                    case Constants.NvnBaseInstanceByteOffset / 4: io = IoVariable.BaseInstance; break;
++                    case Constants.NvnDrawIndexByteOffset / 4: io = IoVariable.DrawIndex; break;
++                    default: continue;
++                }
++                Operand builtin = Local(), flags = Local(), bit = Local(), on = Local(), value = Local();
++                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.Input, builtin, Const((int)io)));
++                node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.ConstantBuffer, flags, Const(SupportBuffer.Binding), Const((int)SupportBufferField.S2AFlags), Const(0)));
++                node.List.AddBefore(node, new Operation(Instruction.BitwiseAnd, bit, flags, Const(SupportBuffer.S2AFlagCbDrawParameters)));
++                node.List.AddBefore(node, new Operation(Instruction.CompareNotEqual, on, bit, Const(0)));
++                node.List.AddBefore(node, new Operation(Instruction.ConditionalSelect, value, on, builtin, src));
++                operation.SetSource(srcIndex, value);
++                modified = true;
++            }
++            return modified;
++        }
++
+         private static bool HasConstantBufferDrawParameters(Operation operation)
+         {
+             for (int srcIndex = 0; srcIndex < operation.SourcesCount; srcIndex++)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index a1ad66b5fa2bb1a0782b860e5260de91b54e464d..d85b06a989f4d1cb42d731cf02a38a85ddf47776 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -177,6 +177,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+         // S2A：阶段独立翻译（缺省开；S2A_STAGE_INDEP=0 关，A/B 用——烘焙与运行时必须同一取值）
+         public static bool S2AStageIndep = Environment.GetEnvironmentVariable("S2A_STAGE_INDEP") != "0";
+ 
++        // S2A：特化状态运行时化（缺省开；S2A_RUNTIME_STATE=0 关，GPU 代价 A/B 用——烘焙与运行时必须同一取值）。开时 DepthMode 等改读支持缓冲 s2a_flags，翻译结果不随这些状态变
++        public static bool S2ARuntimeState = Environment.GetEnvironmentVariable("S2A_RUNTIME_STATE") != "0";
++
+         /// <summary>S2A：单独翻译顶点阶段（离线批量翻译里没配上片元的顶点）：按「下一阶段是片元、读全部通用输入」处理，结果与配任何片元时相同</summary>
+         public void S2ASetStandaloneNextFragment()
+         {
+@@ -230,7 +233,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         }
+ 
+         // S2A：把这次翻译读过的特化状态报给访问器（写进特化状态，缓存匹配只比读过的）
+-        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse(Definitions.S2AA2cRead, Definitions.S2AAttrRead);
++        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse((Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0), Definitions.S2AAttrRead);
+ 
+         public ShaderProgram Translate(TranslatorContext other, bool asCompute = false)
+         {

@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+index 7f612d216426219f5452fdde9c214a4a3a108156..ec3c5e2113ce298f760d39217e53d5295e5e8c95 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+@@ -41,6 +41,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             Refcount = 1;
+         }
+ 
++        // Horizon's per-call non-blocking flags: DontWait (MSG_DONTWAIT) and Nbio (MSG_NBIO, 0x4000, FreeBSD's per-call non-blocking I/O; the caller turns
++        // the socket non-blocking for this one call). S2Arm 11-06: Mortal Kombat 11 recvfrom()s with Nbio on its loopback UDP socket on the main thread before
++        // its second frame; Nbio was left as an "unsupported flag", the call blocked on the offline socket with no sender, and the game stayed on frame 1
++        private static bool IsNonBlockingCall(BsdSocketFlags flags) => (flags & (BsdSocketFlags.DontWait | BsdSocketFlags.Nbio)) != 0;
++
+         private static SocketFlags ConvertBsdSocketFlags(BsdSocketFlags bsdSocketFlags)
+         {
+             SocketFlags socketFlags = SocketFlags.None;
+@@ -74,6 +79,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 BsdSocketFlags.Peek |
+                 BsdSocketFlags.DontRoute |
+                 BsdSocketFlags.DontWait |
++                BsdSocketFlags.Nbio |
+                 BsdSocketFlags.Trunc |
+                 BsdSocketFlags.CTrunc);
+ 
+@@ -242,7 +248,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+ 
+             try
+             {
+-                if (Blocking && flags.HasFlag(BsdSocketFlags.DontWait))
++                if (Blocking && IsNonBlockingCall(flags))
+                 {
+                     Blocking = false;
+                     shouldBlockAfterOperation = true;
+@@ -290,7 +296,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             {
+                 EndPoint temp = new IPEndPoint(IPAddress.Any, 0);
+ 
+-                if (Blocking && flags.HasFlag(BsdSocketFlags.DontWait))
++                if (Blocking && IsNonBlockingCall(flags))
+                 {
+                     Blocking = false;
+                     shouldBlockAfterOperation = true;

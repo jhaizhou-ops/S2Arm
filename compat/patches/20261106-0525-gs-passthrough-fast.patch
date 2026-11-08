@@ -1,0 +1,165 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+index 5617c64d299e59fda8c3b8aa49cee93cadd69ed2..e7263cc9df889beaa740d7b12ad0deced31e9314 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -448,7 +448,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     this.Store(StorageKind.Output, IoVariable.UserDefined, null, Const(index), Const(3), w);
+                 }
+ 
+-                if (TranslatorContext.Definitions.GpPassthrough && !TranslatorContext.GpuAccessor.QueryHostSupportsGeometryShaderPassthrough())
++                if (TranslatorContext.Definitions.GpPassthrough && !TranslatorContext.GpuAccessor.QueryHostSupportsGeometryShaderPassthrough() && !TranslatorContext.S2APassthroughSideEffectsOnly)
+                 {
+                     int inputStart, inputEnd, inputStep;
+ 
+@@ -621,7 +621,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                         this.Store(StorageKind.StorageBuffer, vertexOutputSbBinding, Const(0), vertexOffset, value);
+                     }
+                 }
+-                else if (TranslatorContext.Stage == ShaderStage.Geometry)
++                else if (TranslatorContext.Stage == ShaderStage.Geometry && !TranslatorContext.S2APassthroughSideEffectsOnly)   // S2A：只算副作用的变体不写下标（见 TranslatorContext）
+                 {
+                     Operand lblLoopHead = Label();
+                     Operand lblExit = Label();
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 9e6c23e8fa60343f0229b226a291269464abfe0a..26503323b35226a7d47ea7e418a44b7988b09a38 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -222,6 +222,18 @@ namespace Ryujinx.Graphics.Shader.Translation
+         /// <summary>S2A：读取变体（GenerateVertexPassthroughForCompute）对记录里没有的通用输出 0–31 输出缺省值 (0, 0, 0, 1)（S2ASetStandaloneGeometryNextFragment）</summary>
+         public bool S2AReaderDefaultsUnwritten { get; private set; }
+ 
++        /// <summary>S2A：几何着色器头标了直通（着色器头第 0 字第 24 位，ShaderDefinitions.GpPassthrough）</summary>
++        public bool S2AGpPassthrough => Definitions.GpPassthrough;
++
++        /// <summary>S2A：直通几何快路的「只算副作用」变体（直连库 _bgs）：宿主不支持直通时 EmitterContext 在每个返回点模拟直通（逐顶点拷位置与直通属性、发射、结束图元），
++        /// 这个开关下不模拟，转计算收尾也不补空下标：几何核不写记录、不写下标，只留几何着色器本体（存储写、原子等副作用）。
++        /// 输出图元就是输入图元、顶点值就是上一阶段的输出，主遍改读抓顶点输出（S2AGeneratePassthroughCaptureReader），不读记录、不压缩下标</summary>
++        public bool S2APassthroughSideEffectsOnly { get; set; }
++
++        /// <summary>S2A：S2APassthroughSideEffectsOnly 翻译后：几何本体自己写了输出或自己发射 / 结束图元（直通模拟之外）。
++        /// 这时记录里有本体算出的值或多出的图元，抓顶点读取器给不出，不能走快路（不出 _bgs / _bgc）</summary>
++        public bool S2APassthroughBodyOutputs { get; private set; }
++
+         public void SetNextStage(TranslatorContext nextStage)
+         {
+             bool linked = AttributeUsage.RequiresLinkedVaryingInterface;
+@@ -305,11 +317,34 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: true, out _);
+ 
++            if (S2APassthroughSideEffectsOnly)
++            {
++                S2APassthroughBodyOutputs = S2AHasOutputOrEmit(code);
++            }
++
+             ShaderProgram s2aProgram = Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);
+             S2AReportStateUse();
+             return s2aProgram;
+         }
+ 
++        // S2A：转计算变换（GeometryToCompute）之前的中间码里有没有写输出 / 发射 / 结束图元（含输出初始化：直通属性不初始化，非直通的初始化也算本体写）
++        private static bool S2AHasOutputOrEmit(FunctionCode[] code)
++        {
++            foreach (FunctionCode function in code)
++            {
++                foreach (Operation operation in function.Code)
++                {
++                    if (operation.Inst is Instruction.EmitVertex or Instruction.EndPrimitive ||
++                        (operation.Inst == Instruction.Store && operation.StorageKind is StorageKind.Output or StorageKind.OutputPerPatch))
++                    {
++                        return true;
++                    }
++                }
++            }
++
++            return false;
++        }
++
+         // S2A：把这次翻译读过的特化状态报给访问器（写进特化状态，缓存匹配只比读过的）
+         private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse(
+             (Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0) | (Definitions.S2AAlphaRead ? S2AStateRead.Alpha : 0) |
+@@ -709,12 +744,45 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return new ResourceReservations(GpuAccessor, IsTransformFeedbackEmulated, vertexAsCompute: true, _vertexOutput, ioUsage);
+         }
+ 
++        // S2A：抓顶点读取器里记录第 ioDefinition 项的值（见 S2AGeneratePassthroughCaptureReader）：直通模拟拷的（位置、直通属性）读抓顶点里同一项输入，其余给记录初值
++        private Operand S2ACaptureValue(EmitterContext context, ResourceReservations reservations, IoDefinition output, Operand baseOffset, int binding)
++        {
++            bool copied = output.IoVariable == IoVariable.Position ||
++                (output.IoVariable == IoVariable.UserDefined && (AttributeUsage.PassthroughAttributes & (1 << output.Location)) != 0);
++
++            if (copied && reservations.TryGetOffset(StorageKind.Input, output.IoVariable, output.Location, output.Component, out int inputOffset))
++            {
++                return context.Load(StorageKind.StorageBuffer, binding, Const(0), inputOffset != 0 ? context.IAdd(baseOffset, Const(inputOffset)) : baseOffset);
++            }
++
++            bool one = (output.IoVariable == IoVariable.Position && output.Component == 3) || output.IoVariable == IoVariable.PointSize ||
++                (output.IoVariable == IoVariable.UserDefined && output.Component == 3);
++
++            return ConstF(one ? 1f : 0f);
++        }
++
+         public void SetVertexOutputMapForGeometryAsCompute(TranslatorContext vertexContext)
+         {
+             _vertexOutput = vertexContext._program.GetIoUsage();
+         }
+ 
+-        public ShaderProgram GenerateVertexPassthroughForCompute()
++        public ShaderProgram GenerateVertexPassthroughForCompute() => GenerateVertexPassthroughForCompute(s2aCapture: false);
++
++        /// <summary>S2A：直通几何快路的抓顶点读取器（直连库 _bgc）：与读记录变体（_bgv）同一份生成，按顶点号读顶点阶段抓下的输出（几何输入固定布局，
++        /// ResourceReservations.FillGeometryInputMap，每顶点 144 字，绑定名 vertex_output = 抓顶点缓冲）而不是几何核写的记录。
++        /// 记录里每个输出的值：位置与直通属性 = 直通模拟从输入拷来的（同一偏移的输入），其余 = 记录初值（转计算的本地顶点数据初始化：位置 w、点大小、通用属性 w 为 1，其余 0）——
++        /// 前提是几何本体不写输出、不自己发射（S2APassthroughBodyOutputs 为假），由调用方保证</summary>
++        public ShaderProgram S2AGeneratePassthroughCaptureReader()
++        {
++            if (!Definitions.GpPassthrough || Definitions.Stage != ShaderStage.Geometry || !GetResourceReservations().GeometryInputFixed)
++            {
++                throw new InvalidOperationException("Capture reader needs a passthrough geometry shader with the fixed geometry input layout.");
++            }
++
++            return GenerateVertexPassthroughForCompute(s2aCapture: true);
++        }
++
++        private ShaderProgram GenerateVertexPassthroughForCompute(bool s2aCapture)
+         {
+             AttributeUsage attributeUsage = new AttributeUsage(GpuAccessor);
+             attributeUsage.InheritLinkedOutputs(AttributeUsage);
+@@ -736,7 +804,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             });
+ 
+             int vertexDataSbBinding = reservations.VertexOutputStorageBufferBinding;
+-            BufferDefinition vertexOutputBuffer = new(BufferLayout.Std430, 1, vertexDataSbBinding, "vb_input", vertexInputStruct, flags: BufferUsageFlags.None);
++            BufferDefinition vertexOutputBuffer = new(BufferLayout.Std430, 1, vertexDataSbBinding, s2aCapture ? "vertex_output" : "vb_input", vertexInputStruct, flags: BufferUsageFlags.None);
+             resourceManager.Properties.AddOrUpdateStorageBuffer(vertexOutputBuffer);
+ 
+             EmitterContext context = new EmitterContext();
+@@ -757,7 +825,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 vertexIndex = context.IAdd(context.IMultiply(instanceId, vertexCount), vertexIndex);
+             }
+ 
+-            Operand baseOffset = context.IMultiply(vertexIndex, Const(reservations.OutputSizePerInvocation));
++            Operand baseOffset = context.IMultiply(vertexIndex, Const(s2aCapture ? reservations.InputSizePerInvocation : reservations.OutputSizePerInvocation));
+ 
+             int userOutputs = 0;   // generic output locations taken from the record (S2AReaderDefaultsUnwritten)
+ 
+@@ -768,8 +836,17 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     continue;
+                 }
+ 
+-                Operand vertexOffset = inputOffset != 0 ? context.IAdd(baseOffset, Const(inputOffset)) : baseOffset;
+-                Operand value = context.Load(StorageKind.StorageBuffer, vertexDataSbBinding, Const(0), vertexOffset);
++                Operand value;
++
++                if (s2aCapture)
++                {
++                    value = S2ACaptureValue(context, reservations, ioDefinition, baseOffset, vertexDataSbBinding);
++                }
++                else
++                {
++                    Operand vertexOffset = inputOffset != 0 ? context.IAdd(baseOffset, Const(inputOffset)) : baseOffset;
++                    value = context.Load(StorageKind.StorageBuffer, vertexDataSbBinding, Const(0), vertexOffset);
++                }
+ 
+                 if (ioDefinition.IoVariable == IoVariable.UserDefined)
+                 {

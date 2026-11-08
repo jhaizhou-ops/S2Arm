@@ -1,0 +1,316 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index 7d9f21a5b58e3443a9c0e39b574d3d949c720b15..ae59f5083cdbd9a45deb4fd907ba2135c9bdb0c3 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -391,6 +391,8 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             if (!_program.IsLinked)
+             {
++                S2APipelineDiagnostics.ReportUnlinkedSkip(
++                    PipelineBindPoint.Compute, "DispatchCompute", _newState.S2AKeyString(), _program.S2AShaderHashes);
+                 return;
+             }
+ 
+@@ -404,6 +406,8 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             if (!_program.IsLinked)
+             {
++                S2APipelineDiagnostics.ReportUnlinkedSkip(
++                    PipelineBindPoint.Compute, "DispatchComputeIndirect", _newState.S2AKeyString(), _program.S2AShaderHashes);
+                 return;
+             }
+ 
+@@ -1680,7 +1684,22 @@ namespace Ryujinx.Graphics.Vulkan
+                     }
+                 }
+ 
+-                return ChangeFeedbackLoop(aspects);
++                S2APipelineDiagnostics.ReportFeedbackLoopHazards(aspects, hazards, _program.S2AShaderHashes);
++
++                // #1360：若现有 ChangeFeedbackLoop 路径实际生效（布局已激活 / 本次切换成功），
++                // 采样看到的是当前附件；否则命中深度 hazard 时结束通道，让 store op 把 tile 存回。
++                bool layoutActive = _feedbackLoop != 0;
++                bool layoutChanged = ChangeFeedbackLoop(aspects);
++
++                if (S2AFeedbackLoopPolicy.ShouldSplitDepthPass(
++                        layoutActive, layoutChanged,
++                        (aspects & FeedbackLoopAspects.Depth) != 0, RenderPassActive))
++                {
++                    EndRenderPass();
++                    S2APipelineDiagnostics.ReportDepthPassSplit(hazards.Count, hazards[0], _program.S2AShaderHashes);
++                }
++
++                return layoutChanged;
+             }
+             else if (_feedbackLoop != 0)
+             {
+@@ -1783,6 +1802,9 @@ namespace Ryujinx.Graphics.Vulkan
+                     // Background compile failed, we likely can't create the pipeline because the shader is broken
+                     // or the driver failed to compile it.
+ 
++                    S2APipelineDiagnostics.ReportUnlinkedSkip(
++                        pbp, "CreatePipeline", _newState.S2AKeyString(), _program.S2AShaderHashes);
++
+                     return false;
+                 }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index 76612aa6ca2126afacd730b92d6e465d1eaa4812..f96864c638162feedb3382ab36c6eb231538999a 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -27,13 +27,16 @@ namespace Ryujinx.Graphics.Vulkan
+             if (now - _s2aPipeReported >= 5000)
+             {
+                 _s2aPipeReported = now;
+-                Console.Error.WriteLine($"[vkpb] 管线创建：{_s2aPipeCount} 条、总 {_s2aPipeMs} ms、max {_s2aPipeMax} ms、>50ms {_s2aPipeSlow}");
++                Console.Error.WriteLine($"[vkpb] 管线创建：{_s2aPipeCount} 条、总 {_s2aPipeMs} ms、max {_s2aPipeMax} ms、>50ms {_s2aPipeSlow}；{S2APipelineDiagnostics.Summary()}");
+                 _s2aPipeCount = _s2aPipeMs = _s2aPipeMax = _s2aPipeSlow = 0;
+             }
+         }
+ 
+         public PipelineUid Internal;
+ 
++        /// <summary>S2A（#1360）：诊断日志用的管线 key（当前状态字的 9 个 64 位值）。</summary>
++        public readonly string S2AKeyString() => Internal.S2AKeyString();
++
+         public float LineWidth
+         {
+             readonly get => BitConverter.Int32BitsToSingle((int)((Internal.Id0 >> 0) & 0xFFFFFFFF));
+@@ -733,6 +736,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 }
+                 else if (result.IsError)
+                 {
++                    S2APipelineDiagnostics.ReportCreateFailure(result, Internal.S2AKeyString(), program.S2AShaderHashes);
+                     program.AddGraphicsPipeline(ref Internal, null);
+ 
+                     return null;
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineUid.cs b/src/Ryujinx.Graphics.Vulkan/PipelineUid.cs
+index da596e23bfef5d7b9195b3971c2bb336a91fa59b..19197e4a210f11c4c1925b44431715c30811eb16 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineUid.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineUid.cs
+@@ -21,6 +21,12 @@ namespace Ryujinx.Graphics.Vulkan
+         public ulong Id7;
+         public ulong Id8;
+ 
++        /// <summary>S2A（#1360）：诊断日志里可复现的管线 key（全部 9 个状态字，不含指针 / 描述符数组）。</summary>
++        public readonly string S2AKeyString()
++        {
++            return $"{Id0:X16}{Id1:X16}{Id2:X16}{Id3:X16}{Id4:X16}{Id5:X16}{Id6:X16}{Id7:X16}{Id8:X16}";
++        }
++
+         private readonly uint VertexAttributeDescriptionsCount => (byte)((Id5 >> 38) & 0xFF);
+         private readonly uint VertexBindingDescriptionsCount => (byte)((Id5 >> 46) & 0xFF);
+         private readonly uint ColorBlendAttachmentStateCount => (byte)((Id6 >> 8) & 0xFF);
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2AFeedbackLoopPolicy.cs b/src/Ryujinx.Graphics.Vulkan/S2AFeedbackLoopPolicy.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..efed04ba8375baa7b2706e10cdb75231771f5ab5
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Vulkan/S2AFeedbackLoopPolicy.cs
+@@ -0,0 +1,23 @@
++namespace Ryujinx.Graphics.Vulkan
++{
++    /// <summary>
++    /// S2A（#1360）：同通道采样当前深度附件时，若后端没有真正启用 attachment feedback loop
++    /// 布局（现有 ChangeFeedbackLoop 路径未生效），只发内存屏障的采样会读到未存回的 tile。
++    /// 策略：命中深度 feedback loop 且渲染通道仍在进行时，先结束当前通道（store op 存回），
++    /// 下一次 Draw 再 BeginRenderPass；颜色 hazard 不在此列。
++    /// </summary>
++    internal static class S2AFeedbackLoopPolicy
++    {
++        public static bool ShouldSplitDepthPass(
++            bool feedbackLoopLayoutActive,
++            bool feedbackLoopLayoutChanged,
++            bool depthHazard,
++            bool renderPassActive)
++        {
++            return !feedbackLoopLayoutActive
++                && !feedbackLoopLayoutChanged
++                && depthHazard
++                && renderPassActive;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..08d6908a7536e4fcbc683c76aefe74e96d8fad7e
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+@@ -0,0 +1,127 @@
++using Silk.NET.Vulkan;
++using System;
++using System.Threading;
++
++namespace Ryujinx.Graphics.Vulkan
++{
++    /// <summary>
++    /// S2A（#1360 候选 3）：建管线失败 / 程序未链接时，绘制或派发会被静默跳过。
++    /// 这里只做计数与首例报红，不改变任何渲染行为；计数进 [vkpb] 管线创建汇总行。
++    /// </summary>
++    internal static class S2APipelineDiagnostics
++    {
++        private const int MaxExamples = 8;
++
++        private static long _createFailures;
++        private static long _unlinkedSkips;
++        private static long _unlinkedGraphics;
++        private static long _unlinkedCompute;
++        private static long _feedbackHazardHits;
++        private static long _feedbackColorHits;
++        private static long _feedbackDepthHits;
++        private static long _depthPassSplits;
++
++        public static void ReportCreateFailure(Result result, string pipelineKey, string shaderHashes)
++        {
++            long n = Interlocked.Increment(ref _createFailures);
++
++            if (n <= MaxExamples)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】建图形管线失败 #{n}：VkResult={result}、管线 key={pipelineKey}、shader={shaderHashes}");
++            }
++            else if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】建图形管线失败累计 {n} 次（前 {MaxExamples} 例已逐行列出，之后只计数）");
++            }
++        }
++
++        public static void ReportUnlinkedSkip(PipelineBindPoint bindPoint, string where, string pipelineKey, string shaderHashes)
++        {
++            long n = Interlocked.Increment(ref _unlinkedSkips);
++
++            if (bindPoint == PipelineBindPoint.Compute)
++            {
++                Interlocked.Increment(ref _unlinkedCompute);
++            }
++            else
++            {
++                Interlocked.Increment(ref _unlinkedGraphics);
++            }
++
++            if (n <= MaxExamples)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】程序未链接跳过 #{n}：{where}（{bindPoint}）、管线 key={pipelineKey}、shader={shaderHashes}");
++            }
++            else if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】程序未链接跳过累计 {n} 次（前 {MaxExamples} 例已逐行列出，之后只计数）");
++            }
++        }
++
++        public static void ReportFeedbackLoopHazards(
++            FeedbackLoopAspects aspects, System.Collections.Generic.List<TextureView> hazards, string shaderHashes)
++        {
++            long n = Interlocked.Increment(ref _feedbackHazardHits);
++
++            if ((aspects & FeedbackLoopAspects.Color) != 0)
++            {
++                Interlocked.Increment(ref _feedbackColorHits);
++            }
++
++            if ((aspects & FeedbackLoopAspects.Depth) != 0)
++            {
++                Interlocked.Increment(ref _feedbackDepthHits);
++            }
++
++            if (n <= MaxExamples)
++            {
++                TextureView first = hazards[0];
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】采样当前附件（feedback loop）#{n}：aspects={aspects}、hazard={hazards.Count}、" +
++                    $"首例 {first.Info.Format}/{first.VkFormat} {first.Width}x{first.Height} " +
++                    $"mode={first.Info.DepthStencilMode}、shader={shaderHashes}");
++            }
++            else if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 【红】采样当前附件（feedback loop）累计 {n} 次（前 {MaxExamples} 例已逐行列出，之后只计数）");
++            }
++        }
++
++        public static void ReportDepthPassSplit(int hazards, TextureView first, string shaderHashes)
++        {
++            long n = Interlocked.Increment(ref _depthPassSplits);
++
++            if (n <= MaxExamples)
++            {
++                Console.Error.WriteLine(
++                    $"[vkpb] 深度反馈环拆通道 #{n}：hazard={hazards}、{first.Info.Format}/{first.VkFormat} " +
++                    $"{first.Width}x{first.Height} mode={first.Info.DepthStencilMode}、shader={shaderHashes}");
++            }
++            else if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine($"[vkpb] 深度反馈环拆通道累计 {n} 次");
++            }
++        }
++
++        public static string Summary()
++        {
++            long create = Interlocked.Read(ref _createFailures);
++            long skips = Interlocked.Read(ref _unlinkedSkips);
++            long graphics = Interlocked.Read(ref _unlinkedGraphics);
++            long compute = Interlocked.Read(ref _unlinkedCompute);
++            long feedback = Interlocked.Read(ref _feedbackHazardHits);
++            long feedbackColor = Interlocked.Read(ref _feedbackColorHits);
++            long feedbackDepth = Interlocked.Read(ref _feedbackDepthHits);
++            long depthSplits = Interlocked.Read(ref _depthPassSplits);
++
++            return $"建管线失败 {create}、未链接跳过 {skips}（图形 {graphics} / 计算 {compute}）、" +
++                   $"反馈环采样附件 {feedback}（颜色 {feedbackColor} / 深度 {feedbackDepth}）、" +
++                   $"深度反馈环拆通道 {depthSplits}";
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index 0a90ab816b82af092c9bada4983d3d7ce32fdd30..e1b7011ddd45711cd22458327831c3aa89265e97 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -55,6 +55,46 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        private string _s2aShaderHashes;
++
++        /// <summary>S2A（#1360）：各阶段 SPIR-V 的前 8 字节 SHA-256，诊断报红时用来对上 AGI / 日志。</summary>
++        public string S2AShaderHashes
++        {
++            get
++            {
++                if (_s2aShaderHashes != null)
++                {
++                    return _s2aShaderHashes;
++                }
++
++                System.Text.StringBuilder sb = new();
++                Span<byte> hash = stackalloc byte[32];
++
++                for (int i = 0; i < _s2aSources.Length; i++)
++                {
++                    if (i != 0)
++                    {
++                        sb.Append(',');
++                    }
++
++                    sb.Append(_s2aSources[i].Stage).Append(':');
++
++                    byte[] code = _s2aSources[i].BinaryCode;
++
++                    if (code == null)
++                    {
++                        sb.Append("null");
++                        continue;
++                    }
++
++                    System.Security.Cryptography.SHA256.HashData(code, hash);
++                    sb.Append(Convert.ToHexString(hash[..8]));
++                }
++
++                return _s2aShaderHashes = sb.ToString();
++            }
++        }
++
+         private HashTableSlim<PipelineUid, Auto<DisposablePipeline>> _graphicsPipelineCache;
+         private HashTableSlim<SpecData, Auto<DisposablePipeline>> _computePipelineCache;
+ 

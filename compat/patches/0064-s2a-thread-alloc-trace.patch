@@ -1,0 +1,140 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 301d13124463ee6ba36aae467b09cdb577d29557..7ab848e1486d45b418abd3cf828e676b71cd915b 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -135,6 +135,8 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private void OutputCallback(nint userData, nint audioQueue, nint bufferPtr)
+         {
++            Ryujinx.Common.S2AThreadAlloc.Tick("CoreAudio 回调"); // S2Arm: per-thread allocation accounting
++
+             if (!_started || bufferPtr == nint.Zero)
+                 return;
+ 
+diff --git a/src/Ryujinx.Audio/AudioManager.cs b/src/Ryujinx.Audio/AudioManager.cs
+index 8c2c0ef6b13201677626d83939f47c7e7a938030..bde4103e0222250e6dd41a591b86c3204891b6c1 100644
+--- a/src/Ryujinx.Audio/AudioManager.cs
++++ b/src/Ryujinx.Audio/AudioManager.cs
+@@ -85,6 +85,8 @@ namespace Ryujinx.Audio
+         {
+             while (_isRunning)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("声音输出 / 输入更新"); // S2Arm: per-thread allocation accounting
++
+                 int index = WaitHandle.WaitAny(_updateRequiredEvents);
+ 
+                 // Last index is here to indicate thread termination.
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index a9af741b27aa61eea1e8f1a35cf0af6d86c970ad..27a4a3223408f38385c152d73c25f6d8c90579e3 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -194,6 +194,8 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             while (true)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("声音 DSP"); // S2Arm: per-thread allocation accounting
++
+                 _pauseEvent?.WaitOne();
+ 
+                 MailboxMessage message = _mailbox.ReceiveMessage();
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+index 6d7db059f07eb198b57a586a4bced37a341bf819..e2a44862e4830314dd5e76c719fdcde362ef6da9 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+@@ -237,6 +237,8 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             while (_isRunning)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("声音渲染调度"); // S2Arm: per-thread allocation accounting
++
+                 lock (_sessionLock)
+                 {
+                     foreach (AudioRenderSystem renderer in _sessions)
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..41ed5cdc658d1f69c606c7f37f709b10678f4a8a
+--- /dev/null
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -0,0 +1,69 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using System.Threading;
++
++namespace Ryujinx.Common
++{
++    /// <summary>
++    /// S2Arm: per-thread managed allocation accounting (S2A_ALLOC_TRACE=1, diagnostics; off = one static bool check).
++    /// Long-lived threads call <see cref="Tick"/> once per loop iteration; bytes allocated on that thread between two ticks
++    /// are added to its slot. <see cref="Summary"/> lists every slot with its total and per-iteration average.
++    /// </summary>
++    public static class S2AThreadAlloc
++    {
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++
++        private sealed class Slot
++        {
++            public string Name;
++            public long Bytes;
++            public long Rounds;
++        }
++
++        private static readonly List<Slot> _slots = new();
++
++        [ThreadStatic]
++        private static Slot _slot;
++
++        [ThreadStatic]
++        private static long _last;
++
++        public static void Tick(string name)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            long now = GC.GetAllocatedBytesForCurrentThread();
++
++            if (_slot == null)
++            {
++                _slot = new Slot { Name = name };
++
++                lock (_slots)
++                {
++                    _slots.Add(_slot);
++                }
++
++                _last = GC.GetAllocatedBytesForCurrentThread();
++
++                return;
++            }
++
++            Interlocked.Add(ref _slot.Bytes, now - _last);
++            Interlocked.Increment(ref _slot.Rounds);
++            _last = now;
++        }
++
++        public static string Summary()
++        {
++            lock (_slots)
++            {
++                return string.Join("\n", _slots.OrderByDescending(s => s.Bytes).Select(s =>
++                    $"[分配·线程]   {s.Name}：{s.Bytes / 1024} KB / {s.Rounds} 圈（{s.Bytes / Math.Max(1, s.Rounds)} B/圈）"));
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index 09d102cfa333ef423f217f48e118e3be6c6b7d83..b651748179bea05169b7a7b81c698ba307339020 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -318,6 +318,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             while (_isRunning)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("合成"); // S2Arm: per-thread allocation accounting
++
+                 long ticks = PerformanceCounter.ElapsedTicks;
+ 
+                 if (_swapInterval == 0)

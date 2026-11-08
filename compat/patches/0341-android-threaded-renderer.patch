@@ -1,0 +1,1848 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/BufferMap.cs b/src/Ryujinx.Graphics.GAL/Multithreading/BufferMap.cs
+index 5e273d420c004d084ef91c89ad1982a21c91a8c2..8c73a2ad62cd282dda057bdffb3e52269bd26f24 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/BufferMap.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/BufferMap.cs
+@@ -18,6 +18,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         private readonly Dictionary<BufferHandle, BufferHandle> _bufferMap = new();
+         private readonly HashSet<BufferHandle> _inFlight = [];
+         private readonly AutoResetEvent _inFlightChanged = new(false);
++        // S2A（Android 拆线程）：宿主自起线程且设了上限时等待有界；渲染线程失败 / 卡住后缓冲永远不会建好，放开所有等它的线程，等待方按失败闩重抛
++        private readonly ThreadedRenderer _renderer;
++        private volatile bool _s2aAbandoned;
++
++        internal BufferMap(ThreadedRenderer renderer)
++        {
++            _renderer = renderer;
++        }
++
++        internal void S2AAbandon()
++        {
++            _s2aAbandoned = true;
++            _inFlightChanged.Set();
++        }
+ 
+         internal BufferHandle CreateBufferHandle()
+         {
+@@ -86,19 +100,32 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+ 
+             bool signal = false;
++            bool s2aBounded = _renderer.S2ABounded;
++            ThreadedRenderer.S2AStallWatch s2aWatch = s2aBounded ? _renderer.S2AWatch() : default;
+ 
+             while (true)
+             {
+                 lock (_inFlight)
+                 {
+-                    if (!_inFlight.Contains(handle))
++                    if (!_inFlight.Contains(handle) || _s2aAbandoned)
+                     {
+                         break;
+                     }
+                 }
+ 
+-                _inFlightChanged.WaitOne();
+-                signal = true;
++                if (!s2aBounded)
++                {
++                    _inFlightChanged.WaitOne();
++                    signal = true;
++                }
++                else if (_inFlightChanged.WaitOne(50))
++                {
++                    signal = true;
++                }
++                else
++                {
++                    _renderer.S2ACheckStall(ref s2aWatch, "缓冲在渲染线程上建好");
++                }
+             }
+ 
+             if (signal)
+@@ -107,6 +134,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                 _inFlightChanged.Set();
+             }
+ 
++            if (s2aBounded)
++            {
++                _renderer.S2AThrowIfBackendFailed(); // S2A：被失败闩放开时缓冲并没有建好，不返回空句柄
++            }
++
+             return MapBuffer(handle);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataCommand.cs
+index 4449566a7e718fec91aa5c10b25f7c5338c75bd2..7438085508072369c47361aaf1647138d9c313a0 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataCommand.cs
+@@ -19,7 +19,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Texture
+         public static void Run(ref TextureSetDataCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+             ThreadedTexture texture = command._texture.Get(threaded);
+-            texture.Base.SetData(command._data.Get(threaded));
++            MemoryOwner<byte> data = command._data.Get(threaded);
++            threaded.S2AReleasePayload(data.Length); // S2A：入队时计入过在途载荷（宿主设了上限时）
++            texture.Base.SetData(data);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceCommand.cs
+index 3619149e9ca7a441f2bac88d6245c66e0be1a244..a0acf0e3913554055198b2b2f766f573b5f5dc13 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceCommand.cs
+@@ -23,7 +23,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Texture
+         public static void Run(ref TextureSetDataSliceCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+             ThreadedTexture texture = command._texture.Get(threaded);
+-            texture.Base.SetData(command._data.Get(threaded), command._layer, command._level);
++            MemoryOwner<byte> data = command._data.Get(threaded);
++            threaded.S2AReleasePayload(data.Length); // S2A：入队时计入过在途载荷（宿主设了上限时）
++            texture.Base.SetData(data, command._layer, command._level);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceRegionCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceRegionCommand.cs
+index 6c6a536360bfd7f902595221a02099f921f02383..e857e8927f4a9192b6cd0d115a11688e35215f8f 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceRegionCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureSetDataSliceRegionCommand.cs
+@@ -25,7 +25,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Texture
+         public static void Run(ref TextureSetDataSliceRegionCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+             ThreadedTexture texture = command._texture.Get(threaded);
+-            texture.Base.SetData(command._data.Get(threaded), command._layer, command._level, command._region);
++            MemoryOwner<byte> data = command._data.Get(threaded);
++            threaded.S2AReleasePayload(data.Length); // S2A：入队时计入过在途载荷（宿主设了上限时）
++            texture.Base.SetData(data, command._layer, command._level, command._region);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Window/WindowPresentCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Window/WindowPresentCommand.cs
+index 4034bc3c67b5fb1ba63322df0fc9fab75263242d..ba11dde3e3e9695e84a3a7852e607c3c38ac91c1 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Window/WindowPresentCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Window/WindowPresentCommand.cs
+@@ -22,6 +22,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Window
+         {
+             threaded.SignalFrame();
+             renderer.Window.Present(command._texture.Get(threaded)?.Base, command._crop, command._swapBuffersCallback.Get(threaded));
++            // S2A（Android 拆线程）：下层 Present 正常返回后在渲染线程上通知宿主（出图计数 / 帧读数归渲染线程）；没登记 = 原样
++            threaded.S2AAfterPresent?.Invoke();
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
+index 6eb1b912159dce3daf4d14c7531d87e3efaafcbd..d48298698264fbe5583c307be28fb4d9f38ba771 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
+@@ -53,6 +53,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Model
+                 // - The producer would catch up to the consumer as a result.
+ 
+                 Ryujinx.Common.Memory.S2APoolStat.Note(2, size);   // S2A：环形池放不下、新分配
++                _renderer.S2AAdmitPayload(size);   // S2A：宿主设了在途载荷上限就先计入（超上限在分配前背压等），渲染线程取走时扣掉（SpanRef.Get）
+                 return new SpanRef<T>(_renderer, data.ToArray());
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Model/SpanRef.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Model/SpanRef.cs
+index faa496f1bb0d2becee69911b949ad107aea16b55..03ea4fcbe4d4643d92acc084eaa8c4edfddca923 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Model/SpanRef.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Model/SpanRef.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Runtime.CompilerServices;
+ 
+ namespace Ryujinx.Graphics.GAL.Multithreading.Model
+ {
+@@ -24,7 +25,10 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Model
+             }
+             else
+             {
+-                return new Span<T>((T[])renderer.RemoveTableRef(-(_packedLengthId + 1)));
++                T[] array = (T[])renderer.RemoveTableRef(-(_packedLengthId + 1));
++                renderer.S2AReleasePayload((long)array.Length * Unsafe.SizeOf<T>()); // S2A：环形池放不下的新分配在入队时计入过在途载荷
++
++                return new Span<T>(array);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedCounterEvent.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedCounterEvent.cs
+index e9b7d8c39443080a701b7bd686a4338c430b3679..3eb03b24b2baacaf9590e1745c90bbae4c695f92 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedCounterEvent.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedCounterEvent.cs
+@@ -70,13 +70,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+                 return;
+             }
+ 
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<CounterEventDisposeCommand>()->Set(Ref(this));
+             _renderer.QueueCommand();
+         }
+ 
+         public void Flush()
+         {
+-            ThreadedHelpers.SpinUntilNonNull(ref Base);
++            ThreadedHelpers.SpinUntilNonNull(ref Base, _renderer, "计数事件在渲染线程上建好");
+ 
+             Base.Flush();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
+index 82c93d37cdb1d78dc4f8c7912607d680ac35e57f..16520db7836a17cad4e0e05ca78a997f9780febd 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
+@@ -23,6 +23,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void Dispose()
+         {
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<ImageArrayDisposeCommand>()->Set(Ref(this));
+             _renderer.QueueCommand();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+index 0377ec136fc768e3a998b3814589d92888a26d5e..1f828d0a3aa21253e936bbd456d9707a74ce452c 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+@@ -44,6 +44,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void Dispose()
+         {
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<ProgramDisposeCommand>()->Set(Ref(this));
+             _renderer.QueueCommand();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedSampler.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedSampler.cs
+index 8dc9647ab865621a86b4e381b821e5a63e27b1aa..b1ef13677d612ad010cd49816e141b61328075bd 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedSampler.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedSampler.cs
+@@ -15,6 +15,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void Dispose()
+         {
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<SamplerDisposeCommand>()->Set(new TableRef<ThreadedSampler>(_renderer, this));
+             _renderer.QueueCommand();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+index 5bcd80e54891e6026db9d832c4888086f0bd84b7..9eb0d77e432caf0aa0774d8659ade22f8029cdad 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+@@ -53,8 +53,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             else
+             {
+                 // Scaled copy can happen on another thread for a res scale flush.
+-                ThreadedHelpers.SpinUntilNonNull(ref Base);
+-                ThreadedHelpers.SpinUntilNonNull(ref dest.Base);
++                ThreadedHelpers.SpinUntilNonNull(ref Base, _renderer, "贴图在渲染线程上建好（缩放拷贝源）");
++                ThreadedHelpers.SpinUntilNonNull(ref dest.Base, _renderer, "贴图在渲染线程上建好（缩放拷贝目标）");
+                 Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
+ 
+                 // S2A：等到对象建好之后持渲染线程锁调下层（见 ThreadedRenderer._s2aBaseLock）
+@@ -92,7 +92,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             }
+             else
+             {
+-                ThreadedHelpers.SpinUntilNonNull(ref Base);
++                ThreadedHelpers.SpinUntilNonNull(ref Base, _renderer, "贴图在渲染线程上建好（读回）");
+                 Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
+ 
+                 _renderer.S2AEnterBase();
+@@ -120,7 +120,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             }
+             else
+             {
+-                ThreadedHelpers.SpinUntilNonNull(ref Base);
++                ThreadedHelpers.SpinUntilNonNull(ref Base, _renderer, "贴图在渲染线程上建好（读回）");
+                 Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
+ 
+                 _renderer.S2AEnterBase();
+@@ -145,6 +145,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+         /// <inheritdoc/>
+         public unsafe void SetData(MemoryOwner<byte> data)
+         {
++            _renderer.S2AAdmitPayload(data.Length); // S2A：宿主设了在途载荷上限就计入（超上限先背压等），渲染线程执行到时扣掉
+             _renderer.New<TextureSetDataCommand>()->Set(Ref(this), Ref(data));
+             _renderer.QueueCommand();
+         }
+@@ -159,6 +160,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+         /// <inheritdoc/>
+         public unsafe void SetData(MemoryOwner<byte> data, int layer, int level)
+         {
++            _renderer.S2AAdmitPayload(data.Length); // S2A：同上
+             _renderer.New<TextureSetDataSliceCommand>()->Set(Ref(this), Ref(data), layer, level);
+             _renderer.QueueCommand();
+         }
+@@ -166,6 +168,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+         /// <inheritdoc/>
+         public unsafe void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
+         {
++            _renderer.S2AAdmitPayload(data.Length); // S2A：同上
+             _renderer.New<TextureSetDataSliceRegionCommand>()->Set(Ref(this), Ref(data), layer, level, region);
+             _renderer.QueueCommand();
+         }
+@@ -178,6 +181,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void Release()
+         {
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<TextureReleaseCommand>()->Set(Ref(this));
+             _renderer.QueueCommand();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+index 24149ced43bec8a39baf4a83da1e7d99e31fe86c..6bbb9e2766d27ba3af62ee93e1748fc1b4b1a553 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+@@ -28,6 +28,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void Dispose()
+         {
++            if (_renderer.S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层对象不逐个释放（ThreadedRenderer.S2ADiscardFrees）
++            }
++
+             _renderer.New<TextureArrayDisposeCommand>()->Set(Ref(this));
+             _renderer.QueueCommand();
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/SyncMap.cs b/src/Ryujinx.Graphics.GAL/Multithreading/SyncMap.cs
+index d777abdb99168ef257ae59eb81a2f6fb149f76dc..ba0ad6a13169099307e999a254cf091c687c3481 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/SyncMap.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/SyncMap.cs
+@@ -8,6 +8,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+     {
+         private readonly HashSet<ulong> _inFlight = [];
+         private readonly AutoResetEvent _inFlightChanged = new(false);
++        // S2A（Android 拆线程）：宿主自起线程且设了上限时等待有界；渲染线程失败 / 卡住后，在途同步号永远不会登记，放开所有等它的线程，由调用方查失败闩重抛
++        private readonly ThreadedRenderer _renderer;
++        private volatile bool _s2aAbandoned;
++
++        internal SyncMap(ThreadedRenderer renderer)
++        {
++            _renderer = renderer;
++        }
++
++        internal void S2AAbandon()
++        {
++            _s2aAbandoned = true;
++            _inFlightChanged.Set();
++        }
+ 
+         internal void CreateSyncHandle(ulong id)
+         {
+@@ -32,19 +46,32 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             // Blocks until the handle is available.
+ 
+             bool signal = false;
++            bool s2aBounded = _renderer.S2ABounded;
++            ThreadedRenderer.S2AStallWatch s2aWatch = s2aBounded ? _renderer.S2AWatch() : default;
+ 
+             while (true)
+             {
+                 lock (_inFlight)
+                 {
+-                    if (!_inFlight.Contains(id))
++                    if (!_inFlight.Contains(id) || _s2aAbandoned)
+                     {
+                         break;
+                     }
+                 }
+ 
+-                _inFlightChanged.WaitOne();
+-                signal = true;
++                if (!s2aBounded)
++                {
++                    _inFlightChanged.WaitOne();
++                    signal = true;
++                }
++                else if (_inFlightChanged.WaitOne(50))
++                {
++                    signal = true;
++                }
++                else
++                {
++                    _renderer.S2ACheckStall(ref s2aWatch, "同步号在渲染线程上登记");
++                }
+             }
+ 
+             if (signal)
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedHelpers.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedHelpers.cs
+index dcd0c5b1180fc4b06b52061c132e6d44fe7a297b..2ab39924f2bf18feab5e4f6e86e0acea17de6333 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedHelpers.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedHelpers.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Diagnostics;
+ using System.Threading;
+ 
+ namespace Ryujinx.Graphics.GAL.Multithreading
+@@ -15,6 +16,36 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+         }
+ 
++        /// <summary>
++        /// S2A：等渲染线程把对象建好。宿主自起线程且设了上限（ThreadedRenderer.S2AConfigureBounds）时有界：约每 50 ms 查一次失败闩与渲染线程有没有前进，
++        /// 渲染线程卡住按失败处理（抛异常）；没设上限同原版
++        /// </summary>
++        public static void SpinUntilNonNull<T>(ref T obj, ThreadedRenderer renderer, string what) where T : class
++        {
++            if (!renderer.S2ABounded)
++            {
++                SpinUntilNonNull(ref obj);
++
++                return;
++            }
++
++            Span<SpinWait> spinWait = stackalloc SpinWait[1];
++            ThreadedRenderer.S2AStallWatch watch = renderer.S2AWatch();
++            long slice = Stopwatch.Frequency / 20;
++            long next = Stopwatch.GetTimestamp() + slice;
++
++            while (obj == null)
++            {
++                spinWait[0].SpinOnce(-1);
++
++                if (Stopwatch.GetTimestamp() >= next)
++                {
++                    renderer.S2ACheckStall(ref watch, what);
++                    next = Stopwatch.GetTimestamp() + slice;
++                }
++            }
++        }
++
+         public static void SpinUntilExchange(ref int target, int value, int comparand)
+         {
+             Span<SpinWait> spinWait = stackalloc SpinWait[1];
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index c459235b45cf76ba286b285c511aadce59ace262..45c2f84e7663b65a73a20751269764b52dbd196c 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -10,6 +10,7 @@ using System;
+ using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.Runtime.CompilerServices;
++using System.Runtime.ExceptionServices;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ 
+@@ -90,8 +91,32 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         internal void S2AEnterBase()
+         {
+             Interlocked.Increment(ref _s2aWaiters);
+-            _s2aBaseLock.Enter();
+-            Interlocked.Decrement(ref _s2aWaiters);
++
++            if (!S2ABounded)
++            {
++                _s2aBaseLock.Enter();
++                Interlocked.Decrement(ref _s2aWaiters);
++
++                return;
++            }
++
++            // S2A（宿主自起线程、设了上限）：渲染线程卡在一条命令里不放锁时有界；失败也要把等待计数还回去，否则渲染线程让锁时会一直等它
++            try
++            {
++                if (!_s2aBaseLock.TryEnter())
++                {
++                    S2AStallWatch watch = S2AWatch();
++
++                    while (!_s2aBaseLock.TryEnter(S2AWaitSliceMs))
++                    {
++                        S2ACheckStall(ref watch, "渲染线程锁（非 GPU 线程直调下层）");
++                    }
++                }
++            }
++            finally
++            {
++                Interlocked.Decrement(ref _s2aWaiters);
++            }
+         }
+ 
+         internal void S2AExitBase() => _s2aBaseLock.Exit();
+@@ -121,6 +146,702 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             _galWorkAvailable.Set();
+         }
+ 
++        // ---- S2A（Android 拆线程）：GPU 模拟线程与渲染线程都由宿主自己起，不经 RunLoop / S2AStartThread ----
++        // GPU 模拟线程调 S2ABindGpuThread 登记自己；渲染线程调 S2ARunBackend 跑 RenderLoop，批与批之间 / 空等超时在渲染线程上回调宿主轮询；
++        // 收局由 GPU 模拟线程经 GpuContext.Dispose → Dispose（S2ADisposeOwnedThreads）。渲染线程执行命令抛错时置失败闩、放开所有等它的线程，
++        // 等待方醒来按原异常重抛，不返回空结果。宿主在 S2ARunBackend 前调 S2AConfigureBounds 后：已入队命令条数与在途载荷字节有上限
++        // （到上限生产线程背压等），等渲染线程的各处有界（渲染线程连续不前进 → 失败闩 + 宿主失败入口 + TimeoutException）。
++        // Apple（RunLoop / S2AStartThread）不调这些入口：钩子为空、S2ACollectStats 关、上限未设、失败闩恒空，与原来相同。
++
++        /// <summary>S2A：渲染线程上每条出图命令的下层 Present 正常返回后调（宿主在渲染线程上取出图计数）；空 = 不调</summary>
++        public Action S2AAfterPresent;
++
++        /// <summary>S2A：开了才记 S2ACounters（同步命令 / 出图节流 / 同步号 / 渲染线程空等 / 队列深度 / 背压 / 载荷 / 上传拷贝）；关着每处只多一次布尔判断</summary>
++        public bool S2ACollectStats;
++
++        /// <summary>S2A：命令环可用槽数（环 QueueCount 槽，生产指针不能追上消费指针，留一槽）。宿主条数上限不能超过它</summary>
++        public const int S2AQueueCapacity = QueueCount - 1;
++
++        /// <summary>S2A：环形池字节数（构造时预分配，SetBufferData 等变长数据先拷进这里）</summary>
++        public const int S2ASpanPoolBytes = SpanPoolBytes;
++
++        /// <summary>S2A：一条命令槽的字节数（命令环构造时预分配 QueueCount 槽，内存口径用）</summary>
++        public int S2ACommandSlotBytes => _elementSize;
++
++        // 有界等待每片等多久再查一次渲染线程有没有前进
++        private const int S2AWaitSliceMs = 50;
++
++        private Action _s2aPoll;
++        private int _s2aPollMs;
++        private long _s2aPollTicks, _s2aLastPoll;
++        private int _s2aSincePoll;
++        private bool _s2aOwned;
++        private ManualResetEventSlim _s2aBackendExited;
++        private Exception _s2aBackendFailure;
++        private S2ACounters _s2aCounters;
++
++        // 上限（S2AConfigureBounds）。_s2aStallTicks == 0 = 没设：等待与原来一样无界、载荷不计
++        private int _s2aMaxQueued = S2AQueueCapacity;
++        private long _s2aMaxPayload;
++        private long _s2aStallTicks, _s2aGraceTicks;
++        private Func<long> _s2aStallClock;
++        private Action<Exception> _s2aOnStall;
++        // 在途载荷字节（贴图 SetData 的数据、环形池放不下改新分配的数组）：生产线程计入，渲染线程开始消费时扣掉
++        private long _s2aPayloadInFlight;
++        // 只在生产线程上读写：正在组装、还没 QueueCommand 的那条命令已经计入的载荷（渲染线程执行不到它，背压不能等它）
++        private long _s2aPayloadUnpublished;
++        // 渲染线程前进的心跳：每执行完一条命令、每轮询一次宿主、每处理一次中断（只渲染线程写）；宿主报活（S2ANoteAlive，任意线程）
++        private long _s2aRenderBeats, _s2aHostBeats;
++        // 渲染线程实际干活的计数：每执行完一条命令（只渲染线程写）。空等轮询不算（见 S2AWorkProgress）
++        private long _s2aCommandBeats;
++        // 生产侧已发布的命令条数（只生产线程写，S2AProducedCommands）
++        private long _s2aProduced;
++        // 渲染线程正在执行的命令类型（诊断用；-1 = 不在命令里）
++        private int _s2aRunning = -1;
++        // 宿主收局开始（S2AShutdownBegun）：卡住判据停用，等待只受宿主自己的停机期限约束（收局释放下层、编译通道 Join 都是合法的长等待）
++        private volatile bool _s2aShutdown;
++        // 诊断：正在等渲染线程、已等满一片（50 ms）的线程（谁、等什么、从何时起、最近一次醒来查的时刻）。每片醒来更新一次（不到一片的等待不碰），
++        // 8 格，满了只计数；收局进度 / 卡住诊断读（S2ADescribe）
++        private sealed class S2AWaiterSlot
++        {
++            public Thread Thread;
++            public string What;
++            public long Start, Seen;
++        }
++
++        private readonly S2AWaiterSlot[] _s2aWaitSlots = [new(), new(), new(), new(), new(), new(), new(), new()];
++        private readonly Lock _s2aWaitSlotLock = new();
++        private long _s2aWaitSlotOverflow;
++
++        /// <summary>S2A：累计读数（S2ACollectStats 开时记）。宿主取差值出每 60 帧一行；*Max 三项是自上次 resetMax 以来的最大值</summary>
++        public struct S2ACounters
++        {
++            // 同步命令（InvokeCommand）：调用线程入队后等渲染线程执行到它，即整条流水排空；按命令类型拆
++            public long InvokeCount, InvokeTicks, InvokeMaxTicks;
++            public long ReadbackBuffer, ReadbackTexture, InvokeAction, InvokeProgram, InvokeOther;
++            // ThreadedWindow.Present 入队前等上一条出图命令开始执行（模拟线程最多领先一帧的节流）；出图入队时队列里还排着几条命令
++            public long FrameWaitCount, FrameWaitTicks, PresentDepthSum, PresentDepthCount;
++            public long QueueDepthMax;
++            // WaitSync 等同步号在渲染线程上登记
++            public long SyncWaitCount, SyncWaitTicks;
++            // 渲染线程等活的时长与醒来处理的批数
++            public long IdleTicks, Batches;
++            // SetBufferData 拷进环形池的字节（Vulkan 没实现上传租约，比单线程多一次拷贝）；环形池放不下改走新分配的次数 / 字节
++            public long UploadBytes, UploadSpills, UploadSpillBytes;
++            // 背压：条数到上限 / 在途载荷到上限时生产线程等的次数与时长
++            public long QueueWaitCount, QueueWaitTicks, PayloadWaitCount, PayloadWaitTicks;
++            // 计入在途的载荷字节（贴图 SetData 数据 + 环形池放不下的新分配）与在途峰值
++            public long PayloadBytes, PayloadInFlightMax;
++        }
++
++        /// <summary>S2A：有界等待的计时状态（每次等待各自一份，值类型不分配）</summary>
++        internal struct S2AStallWatch
++        {
++            // Start = 这次等待开始的时刻（诊断「已等多久」，重新计时不改它）；Since = 卡住判据的计时起点
++            public long Beats, Since, GraceUntil, Epoch, Start;
++        }
++
++        /// <summary>S2A：GPU 模拟线程调，登记为 IsGpuThread 判据的线程（宿主自己起这条线程）</summary>
++        public void S2ABindGpuThread()
++        {
++            _gpuThread = Thread.CurrentThread;
++        }
++
++        /// <summary>
++        /// S2A：宿主自起线程模式的上限，在 S2ARunBackend 之前调（之后再改，载荷计入 / 扣除会不对称，直接拒绝）。
++        /// maxQueuedCommands：已入队未执行完的命令条数上限（1..S2AQueueCapacity），到上限生产线程等渲染线程执行掉。
++        /// maxPayloadBytes：在途载荷字节上限（贴图 SetData 的数据、环形池放不下改新分配的数组；预分配的环形池与命令环不算），
++        ///   计入这块会超上限就等；已发布的在途载荷清零后一律放行，所以单块比上限大、或同一条命令的第二块，都不会永远等。
++        /// stallMilliseconds / graceMilliseconds：等渲染线程的各处（同步命令、出图节流、条数 / 载荷背压、中断、同步号、排空、收局、
++        ///   非 GPU 线程等对象建好 / 等渲染线程锁）计时：stallClock() 是宿主给的生命周期纪元（任意线程可读，不能依赖渲染线程自己更新）：
++        ///   ≥ 0 = 前台、可计时，纪元变了 = 中间切过后台；&lt; 0 = 后台（进程可能被冻结），不计时。同一纪元内渲染线程连续 stall 毫秒没有前进
++        ///   （执行完一条命令、轮询一次宿主、处理一次中断、宿主报活），再宽限 grace 毫秒仍不前进，就置失败闩（放开其他等待方）、
++        ///   调 onStall（宿主失败入口，不阻塞），再抛 TimeoutException。成功语义不变：不返回空结果、不跳过命令。
++        /// </summary>
++        public void S2AConfigureBounds(int maxQueuedCommands, long maxPayloadBytes, int stallMilliseconds, int graceMilliseconds,
++            Func<long> stallClock, Action<Exception> onStall)
++        {
++            ArgumentOutOfRangeException.ThrowIfLessThan(maxQueuedCommands, 1);
++            ArgumentOutOfRangeException.ThrowIfGreaterThan(maxQueuedCommands, S2AQueueCapacity);
++            ArgumentOutOfRangeException.ThrowIfLessThan(maxPayloadBytes, 1L);
++            ArgumentOutOfRangeException.ThrowIfLessThan(stallMilliseconds, 1);
++            ArgumentOutOfRangeException.ThrowIfLessThan(graceMilliseconds, 1);
++            ArgumentNullException.ThrowIfNull(stallClock);
++            ArgumentNullException.ThrowIfNull(onStall);
++
++            if (_backendThread != null)
++            {
++                throw new InvalidOperationException("Threaded renderer bounds must be configured before the backend thread starts.");
++            }
++
++            _s2aMaxQueued = maxQueuedCommands;
++            _s2aMaxPayload = maxPayloadBytes;
++            _s2aGraceTicks = Stopwatch.Frequency * graceMilliseconds / 1000;
++            _s2aStallClock = stallClock;
++            _s2aOnStall = onStall;
++            _s2aStallTicks = Stopwatch.Frequency * stallMilliseconds / 1000;
++        }
++
++        /// <summary>
++        /// S2A：宿主自起线程时，GPU 模拟线程把一段工作交渲染线程同步执行（排在已入队命令之后，即先排空队列）：换页 / 收局 marker、
++        /// WSI 退休、释放下层。动作抛错 = 渲染线程失败：失败闩放开本线程并按原异常重抛
++        /// </summary>
++        public unsafe void S2AOnRenderThread(Action action)
++        {
++            ArgumentNullException.ThrowIfNull(action);
++
++            if (!_s2aOwned || !IsGpuThread())
++            {
++                throw new InvalidOperationException("Only the GPU emulation thread of a host-owned threaded renderer may hand work to its render thread.");
++            }
++
++            New<ActionCommand>()->Set(Ref(action));
++            InvokeCommand();
++        }
++
++        /// <summary>S2A：宿主报活：渲染器在宿主的有界等待里泵着（编译通道等驱动调用，自身有期限），任意线程可调</summary>
++        public void S2ANoteAlive() => Interlocked.Increment(ref _s2aHostBeats);
++
++        [ThreadStatic] private static S2AStallWatch t_s2aTickWatch;
++        [ThreadStatic] private static long t_s2aTickLast, t_s2aTickChecked;
++
++        /// <summary>
++        /// S2A：给下层渲染器里「等别的线程推进」的循环每次醒来调（如 Vulkan 计数队列 FlushTo 每 1 ms 一次）：设了上限时查失败闩，
++        /// 并按约 50 ms 一片查渲染线程有没有前进，卡住按失败处理（抛异常）；与上次调用隔了 200 ms 以上视为新的一次等待、重新计时。没设上限 = 空操作
++        /// </summary>
++        public void S2AWaitTick(string what)
++        {
++            if (!S2ABounded)
++            {
++                return;
++            }
++
++            S2AThrowIfBackendFailed();
++
++            long now = Stopwatch.GetTimestamp();
++            long slice = Stopwatch.Frequency * S2AWaitSliceMs / 1000;
++
++            if (now - t_s2aTickLast > 4 * slice)
++            {
++                t_s2aTickWatch = S2AWatch();
++                t_s2aTickChecked = now;
++            }
++
++            t_s2aTickLast = now;
++
++            if (now - t_s2aTickChecked < slice)
++            {
++                return;
++            }
++
++            t_s2aTickChecked = now;
++            S2ACheckStall(ref t_s2aTickWatch, what);
++        }
++
++        /// <summary>S2A：宿主收局开始：之后不再判渲染线程卡住（失败闩照常），收局只受宿主停机期限约束。任意线程可调</summary>
++        public void S2AShutdownBegun() => _s2aShutdown = true;
++
++        /// <summary>
++        /// S2A：诊断用的一行状态（队列、渲染线程正在执行什么、干活计数、此刻在等渲染线程且已等满 50 ms 的每个线程：等什么、已等多久），
++        /// 任意线程可调（收局进度每 250 ms 一次；会分配）
++        /// </summary>
++        public string S2ADescribe()
++        {
++            int running = Volatile.Read(ref _s2aRunning);
++            long now = Stopwatch.GetTimestamp();
++            long fresh = Stopwatch.Frequency * S2AWaitSliceMs * 3 / 1000;
++            System.Text.StringBuilder waits = new();
++
++            lock (_s2aWaitSlotLock)
++            {
++                foreach (S2AWaiterSlot slot in _s2aWaitSlots)
++                {
++                    if (slot.Thread == null || now - slot.Seen > fresh)
++                    {
++                        continue;
++                    }
++
++                    waits.Append(waits.Length == 0 ? "" : "，")
++                        .Append(slot.Thread.Name ?? $"线程 #{slot.Thread.ManagedThreadId}")
++                        .Append(" 等").Append(slot.What)
++                        .Append(" 已 ").Append((now - slot.Start) * 1000 / Stopwatch.Frequency).Append(" ms");
++                }
++
++                if (_s2aWaitSlotOverflow > 0)
++                {
++                    waits.Append($"（累计 {_s2aWaitSlotOverflow} 次登记没有空格）");
++                }
++            }
++
++            return $"已入队未执行 {Volatile.Read(ref _commandCount)} 条，渲染线程{(running < 0 ? "不在命令里" : $"正在执行 {(CommandType)running}")}，" +
++                $"干活计数 {S2AWorkProgress}；等渲染线程（≥ 50 ms）：{(waits.Length == 0 ? "无" : waits.ToString())}";
++        }
++
++        /// <summary>
++        /// S2A：宿主进程收局、马上退出时设（只在宿主自起线程模式、GPU 模拟线程退出主循环且 GAL 队列排空之后）：之后 GPU 层释放资源
++        /// （缓冲 / 贴图 / 程序 / 采样器 / 数组 / 计数事件）不再排下层释放命令——GPU 层自己的账（写跟踪句柄等）照常释放，下层对象随进程结束回收
++        /// </summary>
++        public volatile bool S2ADiscardFrees;
++
++        /// <summary>
++        /// S2A：设了（宿主进程收局、马上退出）时，收局在渲染线程上执行它代替下层渲染器的 Dispose（宿主在里面做必须的收尾，如补存驱动管线缓存），
++        /// 下层设备与对象不逐个销毁。空 = 原样 Dispose
++        /// </summary>
++        public Action S2AExitRelease;
++
++        /// <summary>S2A：生产侧已发布的命令条数（QueueCommand 每发布一条加一，只由生产线程写）。宿主在同一生产线程上前后两次读数相等 = 中间没有新入队</summary>
++        public long S2AProducedCommands => Volatile.Read(ref _s2aProduced);
++
++        /// <summary>S2A：当前在途载荷字节</summary>
++        public long S2APayloadInFlight => Interlocked.Read(ref _s2aPayloadInFlight);
++
++        /// <summary>
++        /// S2A：渲染侧在干活的计数（执行完一条命令、宿主报活——编译通道等有期限的泵），不含空等轮询。宿主的换页等待用它区分
++        /// 「排空慢但在前进」与「没人在干活」：渲染线程空闲时它不动
++        /// </summary>
++        public long S2AWorkProgress => Volatile.Read(ref _s2aCommandBeats) + Interlocked.Read(ref _s2aHostBeats);
++
++        /// <summary>
++        /// S2A：宿主的渲染线程调，登记本线程为渲染线程，started() 之后跑 RenderLoop，直到 GPU 模拟线程收局（Dispose）放倒。
++        /// poll：渲染线程上的宿主轮询（WSI 租约等），持 _s2aBaseLock 调（与非 GPU 线程直调下层互斥）：空等 pollMilliseconds 超时一次、
++        /// 批末与批内每 64 条命令看一次是否距上次 ≥ pollMilliseconds。poll 或命令抛错：置失败闩、放开等待者，再原样抛给宿主。
++        /// </summary>
++        public void S2ARunBackend(Action started, Action poll, int pollMilliseconds)
++        {
++            ArgumentNullException.ThrowIfNull(started);
++            ArgumentNullException.ThrowIfNull(poll);
++            ArgumentOutOfRangeException.ThrowIfLessThan(pollMilliseconds, 1);
++
++            if (_backendThread != null)
++            {
++                throw new InvalidOperationException("The threaded renderer already has a backend thread.");
++            }
++
++            _backendThread = Thread.CurrentThread;
++            _s2aPollMs = pollMilliseconds;
++            _s2aPollTicks = Stopwatch.Frequency * pollMilliseconds / 1000;
++            _s2aPoll = poll;
++            _s2aOwned = true;
++            _s2aBackendExited = new ManualResetEventSlim(false);
++            _running = true;
++
++            try
++            {
++                started();
++                RenderLoop();
++            }
++            catch (Exception error)
++            {
++                S2AFailBackend(error);
++                throw;
++            }
++            finally
++            {
++                _s2aBackendExited.Set();
++            }
++        }
++
++        /// <summary>S2A：读累计读数；resetMax = 读后把三个最大值清零（只给一个读者用）</summary>
++        public S2ACounters S2AReadCounters(bool resetMax)
++        {
++            S2ACounters c = default;
++            c.InvokeCount = Interlocked.Read(ref _s2aCounters.InvokeCount);
++            c.InvokeTicks = Interlocked.Read(ref _s2aCounters.InvokeTicks);
++            c.InvokeMaxTicks = resetMax ? Interlocked.Exchange(ref _s2aCounters.InvokeMaxTicks, 0) : Interlocked.Read(ref _s2aCounters.InvokeMaxTicks);
++            c.ReadbackBuffer = Interlocked.Read(ref _s2aCounters.ReadbackBuffer);
++            c.ReadbackTexture = Interlocked.Read(ref _s2aCounters.ReadbackTexture);
++            c.InvokeAction = Interlocked.Read(ref _s2aCounters.InvokeAction);
++            c.InvokeProgram = Interlocked.Read(ref _s2aCounters.InvokeProgram);
++            c.InvokeOther = Interlocked.Read(ref _s2aCounters.InvokeOther);
++            c.FrameWaitCount = Interlocked.Read(ref _s2aCounters.FrameWaitCount);
++            c.FrameWaitTicks = Interlocked.Read(ref _s2aCounters.FrameWaitTicks);
++            c.PresentDepthSum = Interlocked.Read(ref _s2aCounters.PresentDepthSum);
++            c.PresentDepthCount = Interlocked.Read(ref _s2aCounters.PresentDepthCount);
++            c.QueueDepthMax = resetMax ? Interlocked.Exchange(ref _s2aCounters.QueueDepthMax, 0) : Interlocked.Read(ref _s2aCounters.QueueDepthMax);
++            c.SyncWaitCount = Interlocked.Read(ref _s2aCounters.SyncWaitCount);
++            c.SyncWaitTicks = Interlocked.Read(ref _s2aCounters.SyncWaitTicks);
++            c.IdleTicks = Interlocked.Read(ref _s2aCounters.IdleTicks);
++            c.Batches = Interlocked.Read(ref _s2aCounters.Batches);
++            c.UploadBytes = Interlocked.Read(ref _s2aCounters.UploadBytes);
++            c.UploadSpills = Interlocked.Read(ref _s2aCounters.UploadSpills);
++            c.UploadSpillBytes = Interlocked.Read(ref _s2aCounters.UploadSpillBytes);
++            c.QueueWaitCount = Interlocked.Read(ref _s2aCounters.QueueWaitCount);
++            c.QueueWaitTicks = Interlocked.Read(ref _s2aCounters.QueueWaitTicks);
++            c.PayloadWaitCount = Interlocked.Read(ref _s2aCounters.PayloadWaitCount);
++            c.PayloadWaitTicks = Interlocked.Read(ref _s2aCounters.PayloadWaitTicks);
++            c.PayloadBytes = Interlocked.Read(ref _s2aCounters.PayloadBytes);
++            c.PayloadInFlightMax = resetMax ? Interlocked.Exchange(ref _s2aCounters.PayloadInFlightMax, 0) : Interlocked.Read(ref _s2aCounters.PayloadInFlightMax);
++
++            return c;
++        }
++
++        // 先发布失败（先到的为准），再放开等渲染线程的各处（等待方醒来查到失败就按失败闩里的异常重抛）
++        private void S2AFailBackend(Exception error)
++        {
++            Interlocked.CompareExchange(ref _s2aBackendFailure, error, null);
++            _invokeRun.Set();
++            _frameComplete.Set();
++            _interruptRun.Set();
++            Sync.S2AAbandon();
++            Buffers.S2AAbandon();
++        }
++
++        internal void S2AThrowIfBackendFailed()
++        {
++            Exception failure = Volatile.Read(ref _s2aBackendFailure);
++
++            if (failure != null)
++            {
++                ExceptionDispatchInfo.Capture(failure).Throw();
++            }
++        }
++
++        /// <summary>S2A：设了上限（宿主自起线程）：等渲染线程的各处分片等、渲染线程卡住按失败处理</summary>
++        internal bool S2ABounded => _s2aStallTicks != 0;
++
++        private long S2ABeats() => Volatile.Read(ref _s2aRenderBeats) + Interlocked.Read(ref _s2aHostBeats);
++
++        // 渲染线程前进一步（只渲染线程调）
++        private void S2ABeat() => Volatile.Write(ref _s2aRenderBeats, _s2aRenderBeats + 1);
++
++        internal S2AStallWatch S2AWatch()
++        {
++            long now = Stopwatch.GetTimestamp();
++
++            return new() { Beats = S2ABeats(), Since = now, Epoch = _s2aStallClock(), Start = now };
++        }
++
++        /// <summary>
++        /// S2A：一片等待过去还没等到时调。先查失败闩；渲染线程有前进、现在不计时（宿主在后台，Android 可能把整个进程冻结）、
++        /// 或生命周期纪元变了（中间切过后台）就重新计时；连续 stall 不前进先宽限一次（解冻后渲染线程要先跑起来），宽限到了仍不前进 → 失败
++        /// </summary>
++        internal void S2ACheckStall(ref S2AStallWatch watch, string what)
++        {
++            S2AThrowIfBackendFailed();
++
++            long now = Stopwatch.GetTimestamp();
++            long beats = S2ABeats();
++            long epoch = _s2aStallClock();
++
++            if (now - watch.Start >= Stopwatch.Frequency * S2AWaitSliceMs / 1000)
++            {
++                S2ANoteWaiter(watch.Start, what, now);
++            }
++
++            if (beats != watch.Beats || epoch < 0 || epoch != watch.Epoch || _s2aShutdown)
++            {
++                watch = new S2AStallWatch { Beats = beats, Since = now, Epoch = epoch, Start = watch.Start };
++
++                return;
++            }
++
++            if (now - watch.Since < _s2aStallTicks)
++            {
++                return;
++            }
++
++            if (watch.GraceUntil == 0)
++            {
++                watch.GraceUntil = now + _s2aGraceTicks;
++
++                return;
++            }
++
++            if (now >= watch.GraceUntil)
++            {
++                S2AStall(what, now - watch.Since);
++            }
++        }
++
++        // 登记 / 更新本线程的等待格（每片一次）。本线程已有格子就更新；否则取空格或 4 片没更新的旧格
++        private void S2ANoteWaiter(long start, string what, long now)
++        {
++            Thread self = Thread.CurrentThread;
++            long stale = Stopwatch.Frequency * S2AWaitSliceMs * 4 / 1000;
++
++            lock (_s2aWaitSlotLock)
++            {
++                S2AWaiterSlot free = null;
++
++                foreach (S2AWaiterSlot slot in _s2aWaitSlots)
++                {
++                    if (slot.Thread == self)
++                    {
++                        free = slot;
++                        break;
++                    }
++
++                    if (free == null && (slot.Thread == null || now - slot.Seen > stale))
++                    {
++                        free = slot;
++                    }
++                }
++
++                if (free == null)
++                {
++                    _s2aWaitSlotOverflow++;
++
++                    return;
++                }
++
++                free.Thread = self;
++                free.What = what;
++                free.Start = start;
++                free.Seen = now;
++            }
++        }
++
++        // 渲染线程卡住：置失败闩、交宿主失败入口（不阻塞），本线程按失败闩里先到的异常抛。不写日志（宿主的失败出口统一写一次）
++        private void S2AStall(string what, long ticks)
++        {
++            int running = Volatile.Read(ref _s2aRunning);
++            string state = running < 0 ? "不在命令里" : $"正在执行 {(CommandType)running}";
++            TimeoutException error = new(
++                $"【红】拆线程：渲染线程连续 {ticks * 1000 / Stopwatch.Frequency} ms 没有前进（{Thread.CurrentThread.Name ?? "无名线程"} 在等{what}）；" +
++                $"已入队未执行 {Volatile.Read(ref _commandCount)} 条，渲染线程{state}，在途载荷 {Interlocked.Read(ref _s2aPayloadInFlight)} B；" +
++                "按失败处理，GPU / 租约对象保留到宿主结束进程");
++
++            S2AFailBackend(error);
++
++            Exception first = Volatile.Read(ref _s2aBackendFailure);
++            _s2aOnStall(first);
++            ExceptionDispatchInfo.Capture(first).Throw();
++        }
++
++        // 已入队条数到上限（环满也算）
++        private bool S2AQueueFull() =>
++            _producerPtr == (Volatile.Read(ref _consumerPtr) + QueueCount - 1) % QueueCount || Volatile.Read(ref _commandCount) >= _s2aMaxQueued;
++
++        // 生产线程背压：等渲染线程执行掉命令腾出位置（前面的命令都已发布，渲染线程不等本线程，所以总能等到；渲染线程卡住按失败处理）
++        private void S2AWaitQueueRoom()
++        {
++            if (!S2AQueueFull())
++            {
++                return;
++            }
++
++            long start = Stopwatch.GetTimestamp();
++            S2AStallWatch watch = S2AWatch();
++
++            do
++            {
++                Thread.Sleep(1);
++                S2ACheckStall(ref watch, "命令队列背压（已入队条数到上限）");
++            }
++            while (S2AQueueFull());
++
++            if (S2ACollectStats)
++            {
++                Interlocked.Increment(ref _s2aCounters.QueueWaitCount);
++                Interlocked.Add(ref _s2aCounters.QueueWaitTicks, Stopwatch.GetTimestamp() - start);
++            }
++        }
++
++        // 已发布（渲染线程能执行掉）的在途载荷 > 0，且计入这块会超上限
++        private bool S2APayloadOver(long bytes)
++        {
++            long inFlight = Interlocked.Read(ref _s2aPayloadInFlight);
++
++            return inFlight - _s2aPayloadUnpublished > 0 && inFlight + bytes > _s2aMaxPayload;
++        }
++
++        /// <summary>S2A：生产线程计入一块在途载荷（贴图 SetData 数据 / 环形池放不下的新分配），会超上限就先背压等。没设上限 = 不计</summary>
++        internal void S2AAdmitPayload(long bytes)
++        {
++            if (_s2aMaxPayload == 0 || bytes <= 0)
++            {
++                return;
++            }
++
++            if (S2APayloadOver(bytes))
++            {
++                long start = Stopwatch.GetTimestamp();
++                S2AStallWatch watch = S2AWatch();
++
++                do
++                {
++                    Thread.Sleep(1);
++                    S2ACheckStall(ref watch, "在途载荷背压（字节到上限）");
++                }
++                while (S2APayloadOver(bytes));
++
++                if (S2ACollectStats)
++                {
++                    Interlocked.Increment(ref _s2aCounters.PayloadWaitCount);
++                    Interlocked.Add(ref _s2aCounters.PayloadWaitTicks, Stopwatch.GetTimestamp() - start);
++                }
++            }
++
++            _s2aPayloadUnpublished += bytes;
++            long inFlight = Interlocked.Add(ref _s2aPayloadInFlight, bytes);
++
++            if (S2ACollectStats)
++            {
++                Interlocked.Add(ref _s2aCounters.PayloadBytes, bytes);
++                S2AMax(ref _s2aCounters.PayloadInFlightMax, inFlight);
++            }
++        }
++
++        /// <summary>S2A：渲染线程开始消费一块计入过的载荷时扣掉（与 S2AAdmitPayload 同条件）</summary>
++        internal void S2AReleasePayload(long bytes)
++        {
++            if (_s2aMaxPayload != 0 && bytes > 0)
++            {
++                Interlocked.Add(ref _s2aPayloadInFlight, -bytes);
++            }
++        }
++
++        private static void S2AMax(ref long target, long value)
++        {
++            long current;
++
++            while (value > (current = Volatile.Read(ref target)) && Interlocked.CompareExchange(ref target, value, current) != current)
++            {
++            }
++        }
++
++        private void S2ANoteInvoke(CommandType type, long ticks)
++        {
++            Interlocked.Increment(ref _s2aCounters.InvokeCount);
++            Interlocked.Add(ref _s2aCounters.InvokeTicks, ticks);
++            S2AMax(ref _s2aCounters.InvokeMaxTicks, ticks);
++
++            switch (type)
++            {
++                case CommandType.BufferGetData:
++                    Interlocked.Increment(ref _s2aCounters.ReadbackBuffer);
++                    break;
++                case CommandType.TextureGetData or CommandType.TextureGetDataSlice:
++                    Interlocked.Increment(ref _s2aCounters.ReadbackTexture);
++                    break;
++                case CommandType.Action:
++                    Interlocked.Increment(ref _s2aCounters.InvokeAction);
++                    break;
++                case CommandType.ProgramCheckLink or CommandType.ProgramGetBinary:
++                    Interlocked.Increment(ref _s2aCounters.InvokeProgram);
++                    break;
++                default:
++                    Interlocked.Increment(ref _s2aCounters.InvokeOther);
++                    break;
++            }
++        }
++
++        // 渲染线程等活（S2ARunBackend 模式）：有超时，超时在渲染线程上轮询一次宿主。返回是否有活
++        private bool S2AWaitWork()
++        {
++            long start = S2ACollectStats ? Stopwatch.GetTimestamp() : 0;
++            bool work = _galWorkAvailable.Wait(_s2aPollMs);
++
++            if (S2ACollectStats)
++            {
++                Interlocked.Add(ref _s2aCounters.IdleTicks, Stopwatch.GetTimestamp() - start);
++
++                if (work)
++                {
++                    Interlocked.Increment(ref _s2aCounters.Batches);
++                }
++            }
++
++            if (!work)
++            {
++                lock (_s2aBaseLock)
++                {
++                    S2APollNow(Stopwatch.GetTimestamp());
++                }
++            }
++
++            return work;
++        }
++
++        // 持 _s2aBaseLock（渲染线程批内）调
++        private void S2APollIfDue()
++        {
++            long now = Stopwatch.GetTimestamp();
++
++            if (now - _s2aLastPoll >= _s2aPollTicks)
++            {
++                S2APollNow(now);
++            }
++        }
++
++        private void S2APollNow(long now)
++        {
++            _s2aLastPoll = now;
++            _s2aPoll?.Invoke();
++            S2ABeat();
++        }
++
++        // 有界地等一个事件（设了上限才分片；没设 = 原样无界）
++        private void S2AWait(ManualResetEventSlim signal, string what)
++        {
++            if (!S2ABounded)
++            {
++                signal.Wait();
++
++                return;
++            }
++
++            S2AStallWatch watch = S2AWatch();
++
++            while (!signal.Wait(S2AWaitSliceMs))
++            {
++                S2ACheckStall(ref watch, what);
++            }
++        }
++
++        private void S2AWait(WaitHandle signal, string what)
++        {
++            if (!S2ABounded)
++            {
++                signal.WaitOne();
++
++                return;
++            }
++
++            S2AStallWatch watch = S2AWatch();
++
++            while (!signal.WaitOne(S2AWaitSliceMs))
++            {
++                S2ACheckStall(ref watch, what);
++            }
++        }
++
++        // S2A：宿主自起两条线程时的收局，GPU 模拟线程上经 GpuContext.Dispose → Dispose 调：一条同步命令在渲染线程上释放下层
++        // （前面已入队的命令先全部执行完；Vulkan 与 WSI 只在渲染线程上碰，释放后不再轮询宿主），再放倒渲染线程、有界地等它退出 RenderLoop。
++        // 不 Join 自己。下层释放抛错 = 渲染线程失败：经失败闩在本线程按原异常重抛（事件不释放，留给进程收尾）。
++        private void S2ADisposeOwnedThreads()
++        {
++            if (!IsGpuThread())
++            {
++                throw new InvalidOperationException("A host-owned threaded renderer must be disposed on its GPU thread.");
++            }
++
++            Action exitRelease = S2AExitRelease;
++            S2AOnRenderThread(() =>
++            {
++                _s2aPoll = null;
++                if (exitRelease != null)
++                {
++                    exitRelease();
++                }
++                else
++                {
++                    _baseRenderer.Dispose();
++                }
++            });
++
++            _running = false;
++            _galWorkAvailable.Set();
++            S2AWait(_s2aBackendExited, "渲染线程退出（收局）");
++
++            _frameComplete.Dispose();
++            _galWorkAvailable.Dispose();
++            _invokeRun.Dispose();
++            _interruptRun.Dispose();
++
++            Sync.Dispose();
++        }
++
+         public bool PreferThreading => _baseRenderer.PreferThreading;
+ 
+         public ThreadedRenderer(IRenderer renderer)
+@@ -132,8 +853,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+             Pipeline = new ThreadedPipeline(this);
+             Window = new ThreadedWindow(this, renderer);
+-            Buffers = new BufferMap();
+-            Sync = new SyncMap();
++            Buffers = new BufferMap(this);
++            Sync = new SyncMap(this);
+             Programs = new ProgramQueue(renderer);
+ 
+             // S2A：两个等待事件不自旋（SpinCount 0，直接睡）。.NET 缺省阻塞前先自旋约 35 轮（Thread.Yield / Sleep(0)）：渲染线程每排空一次队列就空转一阵，
+@@ -240,7 +961,14 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             while (_running)
+             {
+                 Ryujinx.Common.S2AThreadAlloc.Tick("渲染·编码"); // S2Arm: per-thread allocation accounting (Metal encoding thread, S2A.GPU)
+-                _galWorkAvailable.Wait();
++                if (_s2aPoll == null)
++                {
++                    _galWorkAvailable.Wait();
++                }
++                else if (!S2AWaitWork())
++                {
++                    continue; // S2A：空等超时，S2AWaitWork 已在渲染线程上轮询过宿主
++                }
+                 _galWorkAvailable.Reset();
+ 
+                 // S2A：一批命令持一次锁，命令之间有线程在等就让出（见 _s2aBaseLock、S2AEnterBase）
+@@ -252,6 +980,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                         _interruptRun.Set();
+ 
+                         Interlocked.Exchange(ref _interruptAction, null);
++
++                        if (_s2aOwned)
++                        {
++                            S2ABeat();
++                        }
+                     }
+ 
+                     // The other thread can only increase the command count.
+@@ -265,6 +998,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+                         // Run the command.
+ 
++                        if (_s2aOwned)
++                        {
++                            Volatile.Write(ref _s2aRunning, command[^1]); // S2A：诊断用，卡住时报正在执行哪类命令
++                        }
++
+                         if (S2AAllocOn)
+                         {
+                             int s2aType = command[^1];
+@@ -280,6 +1018,13 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                             CommandHelper.RunCommand(command, this, _baseRenderer);
+                         }
+ 
++                        if (_s2aOwned)
++                        {
++                            Volatile.Write(ref _s2aRunning, -1);
++                            S2ABeat();
++                            Volatile.Write(ref _s2aCommandBeats, _s2aCommandBeats + 1);
++                        }
++
+                         if (Interlocked.CompareExchange(ref _invokePtr, -1, commandPtr) == commandPtr)
+                         {
+                             _invokeRun.Set();
+@@ -293,6 +1038,17 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                         {
+                             S2AYieldBase();
+                         }
++
++                        // S2A：模拟线程持续供活时内层循环可以一直不退出，批内也要按时轮询宿主（每 64 条看一次钟）
++                        if (_s2aPoll != null && (++_s2aSincePoll & 63) == 0)
++                        {
++                            S2APollIfDue();
++                        }
++                    }
++
++                    if (_s2aPoll != null)
++                    {
++                        S2APollIfDue();
+                     }
+                 }
+             }
+@@ -310,12 +1066,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         internal unsafe T* New<T>() where T : unmanaged, IGALCommand
+         {
+-            while (_producerPtr == (Volatile.Read(ref _consumerPtr) + QueueCount - 1) % QueueCount)
++            if (S2ABounded)
++            {
++                S2AWaitQueueRoom(); // S2A：环满或已入队条数到宿主上限都背压等，有界
++            }
++            else
+             {
+-                // If incrementing the producer pointer would overflow, we need to wait.
+-                // _consumerPtr can only move forward, so there's no race to worry about here.
++                while (_producerPtr == (Volatile.Read(ref _consumerPtr) + QueueCount - 1) % QueueCount)
++                {
++                    // If incrementing the producer pointer would overflow, we need to wait.
++                    // _consumerPtr can only move forward, so there's no race to worry about here.
+ 
+-                Thread.Sleep(1);
++                    S2AThrowIfBackendFailed(); // S2A：渲染线程已失败退出，队列不会再前进
++                    Thread.Sleep(1);
++                }
+             }
+ 
+             int taken = _producerPtr;
+@@ -362,8 +1126,15 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         internal void QueueCommand()
+         {
++            _s2aPayloadUnpublished = 0; // S2A：本条命令发布了，它计入的载荷渲染线程能消费掉
++            Volatile.Write(ref _s2aProduced, _s2aProduced + 1);
+             int result = Interlocked.Increment(ref _commandCount);
+ 
++            if (S2ACollectStats)
++            {
++                S2AMax(ref _s2aCounters.QueueDepthMax, result);
++            }
++
+             if (result == 1)
+             {
+                 _galWorkAvailable.Set();
+@@ -372,18 +1143,41 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         internal void InvokeCommand()
+         {
++            long s2aStart = S2ACollectStats ? Stopwatch.GetTimestamp() : 0;
++            CommandType s2aType = S2ACollectStats ? (CommandType)_commandQueue[_lastProducedPtr * _elementSize + _elementSize - 1] : default;
++
+             _invokeRun.Reset();
+             _invokePtr = _lastProducedPtr;
+ 
+             QueueCommand();
+ 
+             // Wait for the command to complete.
+-            _invokeRun.Wait();
++            // S2A：Reset 之后查失败闩（渲染线程先发布失败再 Set，Set 若早于本次 Reset，这里一定看得到失败）；设了上限就有界
++            S2AThrowIfBackendFailed();
++            S2AWait(_invokeRun, "同步命令（入队后等渲染线程执行到它）");
++            S2AThrowIfBackendFailed();
++
++            if (S2ACollectStats)
++            {
++                S2ANoteInvoke(s2aType, Stopwatch.GetTimestamp() - s2aStart);
++            }
+         }
+ 
+         internal void WaitForFrame()
+         {
+-            _frameComplete.WaitOne();
++            long s2aStart = S2ACollectStats ? Stopwatch.GetTimestamp() : 0;
++
++            S2AThrowIfBackendFailed();
++            S2AWait(_frameComplete, "出图节流（上一条出图命令还没开始执行）");
++            S2AThrowIfBackendFailed();
++
++            if (S2ACollectStats)
++            {
++                Interlocked.Increment(ref _s2aCounters.FrameWaitCount);
++                Interlocked.Add(ref _s2aCounters.FrameWaitTicks, Stopwatch.GetTimestamp() - s2aStart);
++                Interlocked.Add(ref _s2aCounters.PresentDepthSum, Volatile.Read(ref _commandCount));
++                Interlocked.Increment(ref _s2aCounters.PresentDepthCount);
++            }
+         }
+ 
+         internal void SignalFrame()
+@@ -400,6 +1194,16 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         {
+             if (IsGpuThread() && !alwaysBackground)
+             {
++                if (_s2aOwned)
++                {
++                    // S2A（宿主自起线程，Vulkan）：GPU 层的后台动作（TextureGroup 回写等）就在 GPU 模拟线程上执行——Vulkan 没有 GL 那种上下文线程绑定，
++                    // 单线程时它本来就在这条线程上跑；动作里对 Threaded* 的读回照常排队成同步命令。这样渲染线程不进 GPU 层锁、不写 guest 内存、
++                    // 不进写跟踪原生层（等待图里没有「渲染线程 → GPU 层 / 写跟踪」这条边）。宿主要在渲染线程上执行的工作走 S2AOnRenderThread
++                    action();
++
++                    return;
++                }
++
+                 // The action must be performed on the render thread.
+                 New<ActionCommand>()->Set(Ref(action));
+                 InvokeCommand();
+@@ -523,6 +1327,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public unsafe void DeleteBuffer(BufferHandle buffer)
+         {
++            if (S2ADiscardFrees)
++            {
++                return; // S2A：进程即将退出，下层缓冲不逐个释放
++            }
++
+             New<BufferDisposeCommand>()->Set(buffer);
+             QueueCommand();
+         }
+@@ -707,6 +1516,11 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public unsafe void SetBufferData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data)
+         {
++            if (S2ACollectStats)
++            {
++                Interlocked.Add(ref _s2aCounters.UploadBytes, data.Length);
++            }
++
+             // S2A（帧率能耗线 10-22，方案 B）：环形池（8 MB）放不下时原版走 ToArray 新分配（巫师3 换场景缓冲首次上传几十 MB），改租渲染器上传内存拷进去
+             if (!_spanPool.S2ATryInsert(data, out SpanRef<byte> spanRef))
+             {
+@@ -718,6 +1532,12 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                     return;
+                 }
+ 
++                if (S2ACollectStats)
++                {
++                    Interlocked.Increment(ref _s2aCounters.UploadSpills);
++                    Interlocked.Add(ref _s2aCounters.UploadSpillBytes, data.Length);
++                }
++
+                 spanRef = CopySpan(data);
+             }
+ 
+@@ -746,7 +1566,16 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public void WaitSync(ulong id)
+         {
++            long s2aStart = S2ACollectStats ? Stopwatch.GetTimestamp() : 0;
++
+             Sync.WaitSyncAvailability(id);
++            S2AThrowIfBackendFailed(); // S2A：渲染线程失败时 SyncMap 放开等待，同步号并未登记
++
++            if (S2ACollectStats)
++            {
++                Interlocked.Increment(ref _s2aCounters.SyncWaitCount);
++                Interlocked.Add(ref _s2aCounters.SyncWaitTicks, Stopwatch.GetTimestamp() - s2aStart);
++            }
+ 
+             _baseRenderer.WaitSync(id);
+         }
+@@ -766,11 +1595,14 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                 {
+                     while (Interlocked.CompareExchange(ref _interruptAction, action, null) != null)
+                     {
++                        S2AThrowIfBackendFailed(); // S2A：渲染线程已失败退出，上一个中断动作永远不会被取走
+                     }
+ 
+                     _galWorkAvailable.Set();
+ 
+-                    _interruptRun.WaitOne();
++                    S2AThrowIfBackendFailed();
++                    S2AWait(_interruptRun, "中断（渲染线程在命令间隙执行插入的动作）");
++                    S2AThrowIfBackendFailed();
+                 }
+             }
+         }
+@@ -788,10 +1620,21 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         public void FlushThreadedCommands()
+         {
+             SpinWait wait = new();
++            bool s2aBounded = S2ABounded;
++            S2AStallWatch s2aWatch = s2aBounded ? S2AWatch() : default;
++            long s2aNext = s2aBounded ? Stopwatch.GetTimestamp() + Stopwatch.Frequency * S2AWaitSliceMs / 1000 : 0;
+ 
+             while (Volatile.Read(ref _commandCount) > 0)
+             {
++                S2AThrowIfBackendFailed(); // S2A：渲染线程已失败退出，计数不会再降
+                 wait.SpinOnce();
++
++                // S2A：设了上限就每片查一次渲染线程有没有前进
++                if (s2aBounded && Stopwatch.GetTimestamp() >= s2aNext)
++                {
++                    S2ACheckStall(ref s2aWatch, "排空命令队列");
++                    s2aNext = Stopwatch.GetTimestamp() + Stopwatch.Frequency * S2AWaitSliceMs / 1000;
++                }
+             }
+         }
+ 
+@@ -799,6 +1642,13 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         {
+             GC.SuppressFinalize(this);
+ 
++            if (_s2aBackendExited != null)
++            {
++                S2ADisposeOwnedThreads();
++
++                return;
++            }
++
+             // Dispose must happen from the render thread, after all commands have completed.
+ 
+             // Stop the GPU thread.
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index ba87d638de361b47b8553d21e25abb5bcd70dac2..47aeacd8bb32c0e68038318ef9d146fb6840fb84 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -21,6 +21,44 @@ using Viewport = Ryujinx.Graphics.GAL.Viewport;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
++    /// <summary>
++    /// S2A：驱动管线缓存落盘的先后（拆线程收局请求时提前落盘的后台写，可能与 Dispose 时的再存并发，复审第 2 轮 P2-C）：快照按取的先后编号；
++    /// 写盘串行（两次 TryWriteAtomic 不并发 rename）；不新于已写成版本的快照跳过，旧快照不覆盖新快照。
++    /// </summary>
++    public sealed class S2AVersionedSave
++    {
++        private readonly object _gate = new();
++        private long _taken, _written = -1;
++
++        /// <summary>取快照时调：返回这份快照的版本（单调递增）</summary>
++        public long Take() => System.Threading.Interlocked.Increment(ref _taken);
++
++        /// <summary>已写成的最新版本（-1 = 还没写成过）</summary>
++        public long Written => System.Threading.Interlocked.Read(ref _written);
++
++        /// <summary>串行写盘：version 不新于已写成的就不写（skipped，返回 true——盘上已是同样新或更新的快照）；否则调 write，成功记下版本</summary>
++        public bool Write(long version, Func<bool> write, out bool skipped)
++        {
++            lock (_gate)
++            {
++                skipped = version <= _written;
++                if (skipped)
++                {
++                    return true;
++                }
++
++                if (!write())
++                {
++                    return false;
++                }
++
++                System.Threading.Interlocked.Exchange(ref _written, version);
++
++                return true;
++            }
++        }
++    }
++
+     class PipelineBase : IDisposable
+     {
+         public const int DescriptorSetLayouts = 4;
+@@ -1853,17 +1891,36 @@ namespace Ryujinx.Graphics.Vulkan
+                 properties.ApiVersion, uuid, PipelineCacheFile.Schema, PipelineCacheFile.Backend);
+         }
+ 
+-        private unsafe void S2ASavePipelineCache()
++        /// <summary>
++        /// S2A（Android 拆线程收局）：收到宿主收局请求时在编译通道上提前落盘一次（与管线创建同一条通道，不与驱动调用并发）。
++        /// 宿主收尾兜底期限很短（原生 1.5 s），收局后面的步骤来不及时缓存也不丢；释放时照常再存一次（含这之后新编的管线）。返回是否写成
++        /// </summary>
++        internal bool S2ASavePipelineCacheEarly() => S2ASavePipelineCache("收局请求时提前");
++        internal bool S2ASavePipelineCacheForExit() => S2ASavePipelineCache("收局补存");
++
++        /// <summary>S2A：最近一次写成的落盘之后没有新管线（盘上的驱动管线缓存是最新的）</summary>
++        internal bool S2APipelineCacheCurrent =>
++            System.Threading.Volatile.Read(ref _s2aSavedAtPipelines) == System.Threading.Interlocked.Read(ref PipelineState.S2APipelinesCreated);
++
++        // 最近一次写成的落盘对应的管线数（PipelineState.S2APipelinesCreated）；-1 = 本进程还没写成过
++        private long _s2aSavedAtPipelines = -1;
++        // 落盘的版本序与最近一次后台写（Dispose 再存前先有界等它）
++        private readonly S2AVersionedSave _s2aSaves = new();
++        private Task<bool> _s2aPendingSave;
++
++        private unsafe bool S2ASavePipelineCache(string when = null)
+         {
+             if (!_s2aOwnsPipelineCache || _s2aPipelineCachePath == null)
+-                return;
++                return false;
++
++            long pipelines = System.Threading.Interlocked.Read(ref PipelineState.S2APipelinesCreated);
+ 
+             nuint size = 0;
+             Result result = Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref size, null);
+             if (result.IsError || size == 0 || size > PipelineCacheFile.MaximumBytes)
+             {
+                 Console.Error.WriteLine($"[vkpipe] 驱动缓存大小查询失败：{result} size={size}");
+-                return;
++                return false;
+             }
+ 
+             byte[] data = new byte[(int)size];
+@@ -1876,12 +1933,12 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 // Bounded retry: do not persist bytes whose receipt was not verified.
+                 Console.Error.WriteLine("[vkpipe] 驱动缓存读取不完整（VK_INCOMPLETE），本次不保存");
+-                return;
++                return false;
+             }
+             if (result.IsError || size > (nuint)data.Length)
+             {
+                 Console.Error.WriteLine($"[vkpipe] 驱动缓存读取失败：{result} size={size}");
+-                return;
++                return false;
+             }
+ 
+             // Snapshotting uses the driver cache (owner only, after the compile lane stopped);
+@@ -1889,24 +1946,43 @@ namespace Ryujinx.Graphics.Vulkan
+             // shutdown deadline still applies; a late write leaves the previous file intact
+             // because the writer uses temp + atomic rename.
+             byte[] snapshot = data.AsSpan(0, (int)size).ToArray();
++            long version = _s2aSaves.Take();
+             PipelineCacheIdentity identity = _s2aPipelineCacheIdentity;
+             string path = _s2aPipelineCachePath;
+-            Task save = Task.Run(() =>
++            string label = when == null ? string.Empty : "（" + when + "）";
++            Task<bool> save = Task.Run(() =>
+             {
+-                if (PipelineCacheFile.TryWriteAtomic(path, identity, snapshot, out string error))
+-                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存已保存 {snapshot.Length} 字节");
+-                else
+-                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存保存失败：{error}");
++                string error = null;
++                bool written = _s2aSaves.Write(version, () => PipelineCacheFile.TryWriteAtomic(path, identity, snapshot, out error), out bool skipped);
++                if (skipped)
++                {
++                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存这份快照{label}不写：盘上已是更新的快照");
++                    return true;
++                }
++                if (written)
++                {
++                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存已保存{label} {snapshot.Length} 字节");
++                    return true;
++                }
++                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存保存失败{label}：{error}");
++                return false;
+             });
++            _s2aPendingSave = save;
+ 
+             try
+             {
+                 if (!save.Wait(1000))
+-                    Console.Error.WriteLine("[vkpipe] 驱动缓存写盘仍在后台（退出期限已到，旧文件保留）");
++                {
++                    Console.Error.WriteLine($"[vkpipe] 驱动缓存写盘仍在后台{label}（退出期限已到，旧文件保留）");
++                    return false;
++                }
++                if (save.Result) System.Threading.Volatile.Write(ref _s2aSavedAtPipelines, pipelines);
++                return save.Result;
+             }
+             catch (AggregateException e)
+             {
+-                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存写盘异常：{e.GetBaseException().Message}");
++                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存写盘异常{label}：{e.GetBaseException().Message}");
++                return false;
+             }
+         }
+ 
+@@ -1916,7 +1992,13 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 _s2aDisposed = true;
+ 
+-                if (_s2aOwnsPipelineCache)
++                // S2A：提前落盘的后台写还没完就先有界等它（≤ 1 s），再判断要不要重存；两次写盘由 _s2aSaves 串行、旧不覆盖新
++                if (_s2aPendingSave is { IsCompleted: false } pending)
++                    pending.Wait(1000);
++                // S2A：收局请求时已提前写成、之后没有新管线 → 不再重存（缓存内容相同，省一次几 MB 的同步落盘；单线程没有提前落盘，照常存）
++                if (_s2aOwnsPipelineCache && System.Threading.Volatile.Read(ref _s2aSavedAtPipelines) == System.Threading.Interlocked.Read(ref PipelineState.S2APipelinesCreated))
++                    Console.Error.WriteLine("[vkpipe] 驱动管线缓存与收局请求时提前落盘的一致（之后没有新管线），释放时不再重存");
++                else if (_s2aOwnsPipelineCache)
+                     S2ASavePipelineCache();
+ 
+                 _nullRenderPass?.Dispose();
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index cccc45fc41abe7a8e3db82c0973a833a34f02be7..76612aa6ca2126afacd730b92d6e465d1eaa4812 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -12,8 +12,12 @@ namespace Ryujinx.Graphics.Vulkan
+         private static long _s2aPipeCount, _s2aPipeMs, _s2aPipeMax, _s2aPipeSlow, _s2aPipeReported;
+ 
+         // S2A：Android 启动期 GPU 线程连续满载，区分是驱动管线编译还是别的工作。
++        /// <summary>S2A：本进程建过的管线数（计算 + 图形，含失败的尝试），驱动管线缓存落盘用它判断「落盘之后有没有新管线」</summary>
++        internal static long S2APipelinesCreated;
++
+         private static void S2AReportPipelineTime(long start)
+         {
++            System.Threading.Interlocked.Increment(ref S2APipelinesCreated);
+             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+             _s2aPipeCount++;
+             _s2aPipeMs += (long)ms;
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+index 84e75bec036028bb237d84fc77eb4b68ba2f2346..0998d7a5b6ba494444a17691d440cdce51faae1a 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+@@ -31,6 +31,28 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         private readonly AutoResetEvent _eventConsumed = new(false);
+ 
+         private readonly Thread _consumerThread;
++        private readonly object _s2aCallbackGate = new();
++        private volatile bool _s2aStopped;
++
++        // Android 进程快退：先关回调再有界等消费线程，不释放查询/事件/设备（尚在 AwaitResult 的线程仍持有它们）。
++        public bool S2AStopForExit(int milliseconds)
++        {
++            long deadline = Environment.TickCount64 + milliseconds;
++            if (!Monitor.TryEnter(_s2aCallbackGate, milliseconds))
++                throw new TimeoutException("Counter callback did not quiesce; retain GPU tracking until process exit.");
++            try { _s2aStopped = true; }
++            finally { Monitor.Exit(_s2aCallbackGate); }
++            _queuedEvent.Set();
++            _wakeSignal.Set();
++            return _consumerThread.Join((int)Math.Max(0, deadline - Environment.TickCount64));
++        }
++
++        internal void S2ADeliverResult(EventHandler<ulong> handler, object sender, ulong result)
++        {
++            if (!_gd.S2ACounterLifetime) { handler?.Invoke(sender, result); return; }
++            lock (_s2aCallbackGate)
++                if (!_s2aStopped) handler?.Invoke(sender, result);
++        }
+ 
+         public int ResetSequence { get; private set; }
+ 
+@@ -84,7 +106,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+         private void EventConsumer()
+         {
+-            while (!Disposed)
++            while (!Disposed && !_s2aStopped)
+             {
+                 CounterQueueEvent evt = null;
+                 lock (_lock)
+@@ -209,14 +231,22 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             // Flush the counter queue on the main thread.
+             Interlocked.Increment(ref _waiterCount);
+ 
+-            _wakeSignal.Set();
++            // S2A：等的是计数消费线程拿到 GPU 结果，而结果所在的命令缓冲要靠渲染线程提交；宿主（Android 拆线程）经 S2AWaitCheck
++            // 做有界与失败闩检查（渲染线程卡住 / 失败时抛错）。没登记 = 原样；抛错时也要把等待计数还回去
++            try
++            {
++                _wakeSignal.Set();
+ 
+-            while (!evt.Disposed)
++                while (!evt.Disposed)
++                {
++                    _eventConsumed.WaitOne(1);
++                    _gd.S2AWaitCheck?.Invoke();
++                }
++            }
++            finally
+             {
+-                _eventConsumed.WaitOne(1);
++                Interlocked.Decrement(ref _waiterCount);
+             }
+-
+-            Interlocked.Decrement(ref _waiterCount);
+         }
+ 
+         public void Dispose()
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+index 0bac3be121a414377d08d854b5f3c9df82f21f44..8c7aa983de137cee6aee32e495e10d8f840c0111 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+@@ -92,7 +92,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+                 _result = result;
+ 
+-                OnResult?.Invoke(this, result);
++                _queue.S2ADeliverResult(OnResult, this, result);
+ 
+                 Dispose(); // Return the our resources to the pool.
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/Counters.cs b/src/Ryujinx.Graphics.Vulkan/Queries/Counters.cs
+index c0e848f03d5f022c8b01d1c07e37541318097415..29a51d5bf3c5424a374fbde5750449daf73bfb63 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/Counters.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/Counters.cs
+@@ -60,6 +60,15 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _counterQueues[(int)type].Flush(true);
+         }
+ 
++        public bool S2AStopForExit(int milliseconds)
++        {
++            long deadline = Environment.TickCount64 + milliseconds;
++            bool joined = true;
++            foreach (CounterQueue queue in _counterQueues)
++                joined &= queue.S2AStopForExit((int)Math.Max(0, deadline - Environment.TickCount64));
++            return joined;
++        }
++
+         public void Dispose()
+         {
+             foreach (CounterQueue queue in _counterQueues)
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index adb2667738bd82a22f060a12160f95da71b9efe8..610b4ef393764071f5ed29854322ecc0f5d530e7 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -96,6 +96,41 @@ namespace Ryujinx.Graphics.Vulkan
+         // worker executes a driver call; the host sets the pump to the WSI lease poll.
+         internal CompileWorker S2ACompileWorker { get; set; }
+         internal Action S2AWaitPump { get; set; }
++
++        /// <summary>
++        /// S2A：本渲染器里「等别的线程推进」的循环（计数队列 FlushTo）每次醒来调一次，可抛异常结束等待；宿主（Android 拆线程）
++        /// 用它做有界与失败闩检查。空 = 原样
++        /// </summary>
++        public Action S2AWaitCheck { get; set; }
++        public bool S2ACounterLifetime { get; set; }
++        public bool S2AStopCountersForExit(int milliseconds) => _counters.S2AStopForExit(milliseconds);
++
++        /// <summary>
++        /// S2A（Android 拆线程收局）：把一次驱动管线缓存落盘排到编译通道（高优先级，与管线创建串行），不等它；返回该次落盘是否写成的任务，
++        /// 没有编译通道 / 管线 / 通道已在停 = null。释放时照常再存一次
++        /// </summary>
++        public Task<bool> S2ASavePipelineCacheEarly()
++        {
++            CompileWorker worker = S2ACompileWorker;
++            PipelineFull pipeline = _pipeline;
++            if (worker == null || pipeline == null || worker.IsStopping) return null;
++
++            return worker.Run(pipeline.S2ASavePipelineCacheEarly, highPriority: true);
++        }
++
++        /// <summary>
++        /// S2A（Android 拆线程收局、进程马上退出）：提前落盘之后又建了管线才再排一次落盘到编译通道（不等）；没有新管线 = 已完成的 true，
++        /// 没有编译通道 / 管线 = null。代替释放时的落盘（这时下层不逐个释放）
++        /// </summary>
++        public Task<bool> S2ASavePipelineCacheForExit()
++        {
++            CompileWorker worker = S2ACompileWorker;
++            PipelineFull pipeline = _pipeline;
++            if (worker == null || pipeline == null || worker.IsStopping) return null;
++            if (pipeline.S2APipelineCacheCurrent) return Task.FromResult(true);
++
++            return worker.Run(pipeline.S2ASavePipelineCacheForExit, highPriority: true);
++        }
+         internal string S2APipelineCachePath { get; set; }
+         private readonly object _s2aProgramIdentityGate = new();
+         private ProgramBinaryIdentity _s2aProgramBinaryIdentity;
+diff --git a/src/Ryujinx.Horizon/Audio/AudioManagers.cs b/src/Ryujinx.Horizon/Audio/AudioManagers.cs
+index 493a6f9b582e7f4875e3add9a4aafdc7b4f08e5c..3587f8f3565836e3439773cbaf8e6a30a32a6483 100644
+--- a/src/Ryujinx.Horizon/Audio/AudioManagers.cs
++++ b/src/Ryujinx.Horizon/Audio/AudioManagers.cs
+@@ -7,6 +7,7 @@ using Ryujinx.Audio.Renderer.Server;
+ using Ryujinx.Cpu;
+ using Ryujinx.Horizon.Sdk.Audio;
+ using System;
++using System.Threading;
+ 
+ namespace Ryujinx.Horizon.Audio
+ {
+@@ -56,11 +57,13 @@ namespace Ryujinx.Horizon.Audio
+             AudioRendererManager.Initialize(systemEvents, audioDeviceDriver);
+ 
+             AudioManager.Start();
++            S2AHorizonHooks.AudioCreated?.Invoke(this);
+         }
+ 
++        private int _disposed;
+         protected virtual void Dispose(bool disposing)
+         {
+-            if (disposing)
++            if (disposing && Interlocked.Exchange(ref _disposed, 1) == 0)
+             {
+                 AudioManager.Dispose();
+                 AudioOutputManager.Dispose();
+diff --git a/src/Ryujinx.Horizon/S2AHorizonHooks.cs b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+index 246bead6588de454f0213ddcaf835e1f9cb1f96f..efb329236688fbebebbff89eaa4c2335083853f6 100644
+--- a/src/Ryujinx.Horizon/S2AHorizonHooks.cs
++++ b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+@@ -8,6 +8,9 @@ namespace Ryujinx.Horizon
+     // ServerManager (ProcessRequest), instead of the service thread's receive loop.
+     static class S2AHorizonHooks
+     {
++        // Android 的显式进程收局 owner；未设置时音频服务仍由上游 Shutdown 释放。
++        public static Action<IDisposable> AudioCreated;
++
+         // A server port was registered with a manager (sm RegisterService / ManageNamedPort succeeded)
+         public static Action<ServerManagerBase, Server> PortRegistered;
+ 

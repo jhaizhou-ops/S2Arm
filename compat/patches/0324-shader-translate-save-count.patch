@@ -1,0 +1,38 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 181cb37acaf42ebaaad5724e27dc3c4c4717b7a0..969d2991f62af5a13504c9d5034a4072feabc228 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -173,14 +173,15 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 (_s2aSaveEnqueued | _s2aSaveWritten | _s2aSaveEmpty | _s2aSaveFailed) != 0)
+             {
+                 _s2aSaveReported = now;
+-                Console.Error.WriteLine($"[vkpb] 存缓存计数：入队 {_s2aSaveEnqueued}、已写 {_s2aSaveWritten}、" +
++                Console.Error.WriteLine($"[vkpb] 存缓存计数：翻译 {_s2aTranslated}、入队 {_s2aSaveEnqueued}、已写 {_s2aSaveWritten}、" +
+                     $"空二进制 {_s2aSaveEmpty}、失败 {_s2aSaveFailed}、队列 {_s2aSaveIncomplete}");
+-                _s2aSaveEnqueued = _s2aSaveWritten = _s2aSaveEmpty = _s2aSaveFailed = 0;
++                _s2aTranslated = _s2aSaveEnqueued = _s2aSaveWritten = _s2aSaveEmpty = _s2aSaveFailed = 0;
+             }
+         }
+ 
+         private long _s2aSaveReported;
+         private int _s2aSaveEnqueued, _s2aSaveWritten, _s2aSaveEmpty, _s2aSaveFailed, _s2aSaveIncomplete;
++        private int _s2aTranslated;
+ 
+         private void S2AForget(CachedShaderProgram program)
+         {
+@@ -334,6 +335,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             cpShader = new CachedShaderProgram(hostProgram, specState, translatedShader.Shader);
+ 
+             _computeShaderCache.Add(cpShader);
++            _s2aTranslated++;
+             EnqueueProgramToSave(cpShader, hostProgram, shaderSourcesArray);
+             _cpPrograms[gpuVa] = cpShader;
+             S2ASeen.Note(cpShader);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
+@@ -701,6 +703,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _graphicsShaderCache.Add(gpShaders);
+ 
+             // S2A：转计算的程序也进磁盘缓存（复合宿主二进制，S2AVtg；上游不缓存，每局首遇现翻）
++            _s2aTranslated++;
+             EnqueueProgramToSave(gpShaders, hostProgram, shaderSourcesArray);
+ 
+             if (vertexAsCompute != null)

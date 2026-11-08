@@ -1,0 +1,227 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IBinder.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IBinder.cs
+index 54aac48ae341d42a6bf37147ea200ebdc7021a5f..e3c5ea7106ceb49edb33a6e23840f66a0dd04eb1 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IBinder.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IBinder.cs
+@@ -13,14 +13,13 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         ResultCode OnTransact(uint code, uint flags, ReadOnlySpan<byte> inputParcel, Span<byte> outputParcel)
+         {
+-            using Parcel inputParcelReader = new(inputParcel);
++            // S2Arm: per-thread parcels and an in-place token compare (was two parcels + a token string per transaction)
++            Parcel inputParcelReader = Parcel.ReuseForRead(inputParcel);
+ 
+             // TODO: support objects?
+-            using Parcel outputParcelWriter = new((uint)(outputParcel.Length - Unsafe.SizeOf<ParcelHeader>()), 0);
++            Parcel outputParcelWriter = Parcel.ReuseForWrite((uint)(outputParcel.Length - Unsafe.SizeOf<ParcelHeader>()), 0);
+ 
+-            string inputInterfaceToken = inputParcelReader.ReadInterfaceToken();
+-
+-            if (!InterfaceToken.Equals(inputInterfaceToken))
++            if (!inputParcelReader.ReadInterfaceToken(InterfaceToken, out string inputInterfaceToken))
+             {
+                 Logger.Error?.Print(LogClass.SurfaceFlinger, $"Invalid interface token {inputInterfaceToken} (expected: {InterfaceToken}");
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+index 3c01b92fbc2ede05f7de63f37883f8f0ebd23a19..8038f1b562cc489f0899eba5a02527f051c8dcc1 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+@@ -10,7 +10,6 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+     abstract class IGraphicBufferProducer : IBinder
+     {
+         public string InterfaceToken => "android.gui.IGraphicBufferProducer";
+-
+         enum TransactionCode : uint
+         {
+             RequestBuffer = 1,
+@@ -146,10 +145,12 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                     uint usage = inputParcel.ReadUInt32();
+ 
+                     status = DequeueBuffer(out int dequeueSlot, out fence, async, width, height, format, usage);
+-                    strongFence = new AndroidStrongPointer<AndroidFence>(fence);
+ 
+                     outputParcel.WriteInt32(dequeueSlot);
+-                    outputParcel.WriteStrongPointer(ref strongFence);
++
++                    // S2Arm: same bytes as WriteStrongPointer of a non-null pointer, without allocating the wrapper per frame
++                    outputParcel.WriteBoolean(true);
++                    outputParcel.WriteFlattenable(ref fence);
+ 
+                     outputParcel.WriteStatus(status);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IHOSBinderDriver.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IHOSBinderDriver.cs
+index e23e6fa3f16da7b5213fbce8c94c7e35ce0c02a3..a6856f0cd84a7e0d27120841669155c1e25dfafc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IHOSBinderDriver.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IHOSBinderDriver.cs
+@@ -27,7 +27,10 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             ReadOnlySpan<byte> inputParcel = context.Memory.GetSpan(dataPos, (int)dataSize);
+ 
+-            Span<byte> outputParcel = new(new byte[replySize]);
++            // S2Arm: pooled like TransactParcelAuto (was a new array per transaction; games transact twice a frame)
++            using SpanOwner<byte> outputParcelOwner = SpanOwner<byte>.RentCleared(checked((int)replySize));
++
++            Span<byte> outputParcel = outputParcelOwner.Span;
+ 
+             ResultCode result = OnTransact(binderId, code, flags, inputParcel, outputParcel);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Parcel.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Parcel.cs
+index 25c89baece1b4c58863b21632af47dade8e31634..a7c6901e68fb335bde3ea52e8ef3196cafa91a0a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Parcel.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Parcel.cs
+@@ -3,6 +3,7 @@ using Ryujinx.Common.Memory;
+ using Ryujinx.Common.Utilities;
+ using Ryujinx.HLE.HOS.Services.SurfaceFlinger.Types;
+ using System;
++using System.Buffers;
+ using System.Diagnostics;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+@@ -12,9 +13,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ {
+     sealed class Parcel : IDisposable
+     {
+-        private readonly MemoryOwner<byte> _rawDataOwner;
++        // S2Arm: pooled array + length instead of a MemoryOwner object, so per-thread parcels can be re-initialised per transaction
++        private byte[] _raw;
++        private int _rawLength;
+ 
+-        private Span<byte> Raw => _rawDataOwner.Span;
++        private Span<byte> Raw => _raw.AsSpan(0, _rawLength);
+ 
+         private ref ParcelHeader Header => ref MemoryMarshal.Cast<byte, ParcelHeader>(Raw)[0];
+ 
+@@ -27,19 +30,83 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private bool _isDisposed;
+ 
++        [ThreadStatic]
++        private static Parcel _threadReader;
++
++        [ThreadStatic]
++        private static Parcel _threadWriter;
++
++        private Parcel()
++        {
++        }
++
+         public Parcel(ReadOnlySpan<byte> data)
+         {
+-            _rawDataOwner = MemoryOwner<byte>.RentCopy(data);
++            InitRead(data);
++        }
++
++        public Parcel(uint payloadSize, uint objectsSize)
++        {
++            InitWrite(payloadSize, objectsSize);
++        }
++
++        /// <summary>
++        /// S2Arm: per-thread input parcel re-initialised from <paramref name="data"/> (binder transactions run twice a frame);
++        /// valid until the next call on the same thread, must not be disposed.
++        /// </summary>
++        public static Parcel ReuseForRead(ReadOnlySpan<byte> data)
++        {
++            Parcel parcel = _threadReader ??= new Parcel();
++
++            parcel.InitRead(data);
++
++            return parcel;
++        }
++
++        /// <summary>
++        /// S2Arm: per-thread output parcel, see <see cref="ReuseForRead"/>.
++        /// </summary>
++        public static Parcel ReuseForWrite(uint payloadSize, uint objectsSize)
++        {
++            Parcel parcel = _threadWriter ??= new Parcel();
++
++            parcel.InitWrite(payloadSize, objectsSize);
++
++            return parcel;
++        }
++
++        private void Rent(int length)
++        {
++            if (_raw == null || _raw.Length < length)
++            {
++                if (_raw != null)
++                {
++                    ArrayPool<byte>.Shared.Return(_raw);
++                }
++
++                _raw = ArrayPool<byte>.Shared.Rent(length);
++            }
+ 
++            _rawLength = length;
+             _payloadPosition = 0;
+             _objectPosition = 0;
++            _isDisposed = false;
+         }
+ 
+-        public Parcel(uint payloadSize, uint objectsSize)
++        private void InitRead(ReadOnlySpan<byte> data)
++        {
++            Rent(data.Length);
++
++            data.CopyTo(Raw);
++        }
++
++        private void InitWrite(uint payloadSize, uint objectsSize)
+         {
+             uint headerSize = (uint)Unsafe.SizeOf<ParcelHeader>();
+ 
+-            _rawDataOwner = MemoryOwner<byte>.RentCleared(checked((int)BitUtils.AlignUp<uint>(headerSize + payloadSize + objectsSize, 4)));
++            Rent(checked((int)BitUtils.AlignUp<uint>(headerSize + payloadSize + objectsSize, 4)));
++
++            Raw.Clear();
+ 
+             Header.PayloadSize = payloadSize;
+             Header.ObjectsSize = objectsSize;
+@@ -57,6 +124,36 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             return ReadString16();
+         }
+ 
++        /// <summary>
++        /// S2Arm: <see cref="ReadInterfaceToken"/> compared in place; the token string is only built on mismatch (for the log).
++        /// </summary>
++        public bool ReadInterfaceToken(string expected, out string actual)
++        {
++            ReadInt32(); // Ignore the policy flags
++
++            int size = ReadInt32();
++
++            if (size < 0)
++            {
++                actual = string.Empty;
++
++                return expected.Length == 0;
++            }
++
++            ReadOnlySpan<byte> data = ReadInPlace((size + 1) * 2)[..(size * 2)];
++
++            if (MemoryMarshal.Cast<byte, char>(data).SequenceEqual(expected))
++            {
++                actual = expected;
++
++                return true;
++            }
++
++            actual = Encoding.Unicode.GetString(data);
++
++            return false;
++        }
++
+         public string ReadString16()
+         {
+             int size = ReadInt32();
+@@ -231,7 +328,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             {
+                 _isDisposed = true;
+ 
+-                _rawDataOwner.Dispose();
++                ArrayPool<byte>.Shared.Return(_raw);
++
++                _raw = null;
+             }
+         }
+     }

@@ -1,0 +1,112 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+index 5cfa135b07b3336266c4257c8682de78980f96d3..7ddfc548be12245cc604dfdc7d60768dc913fc4e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+@@ -11,10 +11,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+     /// </summary>
+     class ShortTextureCacheEntry
+     {
++        // S2A：字段可写，条目由 AutoDeleteCache 复用（见 _s2aEntryPool）
+         public bool IsAutoDelete;
+-        public readonly TextureDescriptor Descriptor;
+-        public readonly int InvalidatedSequence;
+-        public readonly Texture Texture;
++        public TextureDescriptor Descriptor;
++        public int InvalidatedSequence;
++        public Texture Texture;
+ 
+         /// <summary>
+         /// Create a new entry on the short duration texture cache.
+@@ -38,6 +39,16 @@ namespace Ryujinx.Graphics.Gpu.Image
+             InvalidatedSequence = texture.InvalidatedSequence;
+             Texture = texture;
+         }
++
++        // S2A：复用时重新填（同两个构造函数）
++        public ShortTextureCacheEntry S2AReset(in TextureDescriptor descriptor, Texture texture, bool autoDelete)
++        {
++            IsAutoDelete = autoDelete;
++            Descriptor = autoDelete ? default : descriptor;
++            InvalidatedSequence = texture.InvalidatedSequence;
++            Texture = texture;
++            return this;
++        }
+     }
+ 
+     /// <summary>
+@@ -73,6 +84,27 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private readonly Dictionary<TextureDescriptor, ShortTextureCacheEntry> _shortCacheLookup;
+ 
++        // S2A（测试出包线 10-23）：短缓存条目复用。真机八方2 稳态每分钟约 5.5 万次 AddShortCache（每次 new 64 B 条目），条目按代留到 64 代（约 2 秒），
++        //   正好活过 gen0、被晋升后在 gen1 / gen2 里变垃圾：gen0 8 MB 存活 5–6 MB、gen1 压缩一次搬 13–17 MB、单次停顿 15–30 ms（八方2 / 马车8）。
++        //   条目只在已从全部代集合与查找表移除后回收（ProcessShortCache 到期、RemoveShortCache 命中挂回池）；FindShortCache 的失效分支只移出查找表、
++        //   条目还在某代里，不回收，等那代到期再收。全部在 GPU 线程上（同上游短缓存），不加锁
++        //   缺省关（S2A_SHORT_POOL=1 开）：按「缺省关合入 → iPhone 同包 A/B 达标 → 翻缺省」（10-23 总指挥）；关时与上游一样每次 new
++        private static readonly bool _s2aPoolOn = System.Environment.GetEnvironmentVariable("S2A_SHORT_POOL") == "1";
++        private readonly Stack<ShortTextureCacheEntry> _s2aEntryPool = new();
++
++        private ShortTextureCacheEntry S2ANewEntry(in TextureDescriptor descriptor, Texture texture, bool autoDelete)
++        {
++            return _s2aPoolOn && _s2aEntryPool.TryPop(out ShortTextureCacheEntry e) ? e.S2AReset(descriptor, texture, autoDelete)
++                : autoDelete ? new ShortTextureCacheEntry(texture) : new ShortTextureCacheEntry(descriptor, texture);
++        }
++
++        private void S2AFreeEntry(ShortTextureCacheEntry e)
++        {
++            if (!_s2aPoolOn) return;
++            e.Texture = null; // 不攥着贴图
++            _s2aEntryPool.Push(e);
++        }
++
+         /// <summary>
+         /// Initializes the cache, setting the maximum texture capacity for the specified GPU context.
+         /// </summary>
+@@ -269,12 +301,15 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+                 texture.DecrementReferenceCount();
+ 
+-                if (!texture.ShortCacheEntry.IsAutoDelete)
++                ShortTextureCacheEntry e = texture.ShortCacheEntry;
++
++                if (!e.IsAutoDelete)
+                 {
+-                    _shortCacheLookup.Remove(texture.ShortCacheEntry.Descriptor);
++                    _shortCacheLookup.Remove(e.Descriptor);
+                 }
+ 
+                 texture.ShortCacheEntry = null;
++                S2AFreeEntry(e); // 已从全部代集合与查找表移除
+             }
+         }
+ 
+@@ -286,7 +321,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="descriptor">Last used texture descriptor</param>
+         public void AddShortCache(Texture texture, ref TextureDescriptor descriptor)
+         {
+-            ShortTextureCacheEntry entry = new(descriptor, texture);
++            ShortTextureCacheEntry entry = S2ANewEntry(descriptor, texture, false);
+ 
+             _shortCacheGens[texture.Target == GAL.Target.TextureBuffer ? _shortCacheBuilder : (_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
+             _shortCacheLookup.Add(entry.Descriptor, entry);
+@@ -305,7 +340,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             if (texture.ShortCacheEntry != null)
+             {
+-                ShortTextureCacheEntry entry = new(texture);
++                ShortTextureCacheEntry entry = S2ANewEntry(default, texture, true);
+ 
+                 _shortCacheGens[(_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
+ 
+@@ -340,6 +375,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 entry.Texture.ShortCacheEntry = null;
+             }
+ 
++            foreach (ShortTextureCacheEntry entry in toRemove)
++            {
++                S2AFreeEntry(entry); // 这一代到期：已移出查找表、马上整代清空
++            }
++
+             toRemove.Clear();
+             _shortCacheBuilder = oldest;
+         }

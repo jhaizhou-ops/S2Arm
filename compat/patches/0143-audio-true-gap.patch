@@ -1,0 +1,166 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 280a1813732bea9856ecd32823885d63ebb3cb31..b5ad8f8266b39d2e39ee3a00df19245b91dbf40e 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -113,13 +113,6 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 _pump = new Pump(this, (int)bufferSize);
+                 _samples = _pump.Samples;
+-
+-                // S2Arm diag: S2A_AUDIO_TAP=1 puts a processing tap on the queue output (runtime/src/audiotap.c) that counts the device
+-                // cycles the queue could not fill = real gaps (the hand-back based 断供 count cannot see them, see S2AOutputDiag)
+-                if (Environment.GetEnvironmentVariable("S2A_AUDIO_TAP") == "1")
+-                {
+-                    _diag.AttachTap(_audioQueue);
+-                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 389877afc2f986dc192a0c94da5cc1dcef1c68f9..d8e7ed585791d4a2f1eb394609920d8c1347f717 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -12,13 +12,18 @@ namespace Ryujinx.Audio.Backends.Apple
+     //   buffers handed back (callbacks), frames submitted / played, starvations (the device played its last buffer and the next one came
+     //   later: that stretch is silence; < 1 s counts as 断供 = a gap in the middle of the stream, longer as 停流 = the stream paused),
+     //   longest starvation, smallest in-flight after a hand-back, longest gap between hand-backs, plus the renderer's dropped periods
+-    //   NOTE (10-21): 断供 counts hand-backs that left nothing in flight. AudioQueue takes everything queued at each device IO cycle,
+-    //   so with a producer one period ahead that is about once per IO cycle and says nothing about real gaps (acnh on Mac: ~116
+-    //   per 10 s with the tap reading 0 short cycles). Real gaps = the tap's "取不够" (S2A_AUDIO_TAP=1, runtime/src/audiotap.c).
+     //   (AudioProcessor skip) and worst period lateness.
++    //   NOTE (10-21): 断供 counts hand-backs that left nothing in flight. AudioQueue takes everything queued at each device IO cycle,
++    //   so with a producer one period ahead that is about once per IO cycle and says nothing about real gaps.
++    //   Real gaps = 真缺口: since the session started the device plays rate frames per wall-clock second; whenever the frames submitted
++    //   fall behind that, the device played silence for the difference (only the growth beyond the largest shortfall so far counts, so
++    //   the constant output latency is not counted). 10-22: acnh on Mac / iPhone delivered 41.8–47.8 万 of 48 万 frames per 10 s, the
++    //   shortfall matching the renderer's dropped periods × 240. (A processing tap on the queue output, tried 10-21, never sees this:
++    //   it read 0 short cycles while half the frames were missing, so it was removed.)
+     // - S2A_AUDIO_WAV=<path>: every byte submitted to CoreAudio is copied into a preallocated ring and written by a writer thread to
+-    //   <path>.<session>.wav (16-bit PCM header, sizes rewritten after each write so a crashed run still reads); a 断供 stretch is
+-    //   written as that many frames of silence, so the file follows what the device played. Beside it <path>.<session>.tsv: one line
++    //   <path>.<session>.wav (16-bit PCM header, sizes rewritten after each write so a crashed run still reads); every 真缺口 is
++    //   written as that many frames of silence before the next buffer, so the file follows what the device played (holes = gaps,
++    //   steps at their edges = pops). Beside it <path>.<session>.tsv: one line
+     //   per hand-back (c: µs, frames, frames in flight after, GC count code, GC pause µs) and per submit (q: same columns).
+     // Called by the pump under its lock (one writer at a time).
+     internal sealed class S2AOutputDiag
+@@ -67,6 +72,8 @@ namespace Ryujinx.Audio.Backends.Apple
+         // Hand-back that left nothing in flight (0: not starving)
+         private long _starveSince;
+         private bool _started;
++        // 真缺口: wall clock and submitted frames at the first submit after start, largest shortfall so far, gap frames total
++        private long _clockStart, _clockFrames, _maxShort, _gapFrames, _repGapFrames;
+ 
+         // Reporter's snapshot of the previous line (deltas per 10 s)
+         private long _repCallbacks, _repSubmitted, _repPlayed, _repUnderruns, _repPauses;
+@@ -121,38 +128,12 @@ namespace Ryujinx.Audio.Backends.Apple
+             return d;
+         }
+ 
+-        // Processing tap counters (runtime/src/audiotap.c): device cycles, cycles the queue could not fill, frames wanted / got
+-        private static readonly nint _tapAttach = TapExport("s2a_audio_tap_attach");
+-        private static readonly nint _tapStats = TapExport("s2a_audio_tap_stats");
+-        private bool _tapOn;
+-        private ulong _repTapCalls, _repTapShort, _repTapWant, _repTapGot;
+-
+-        private static nint TapExport(string name) => NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), name, out nint e) ? e : 0;
+-
+-        public unsafe void AttachTap(nint queue)
+-        {
+-            _tapOn = _tapAttach != 0 && ((delegate* unmanaged<nint, int, int>)_tapAttach)(queue, Index) == 0;
+-        }
+-
+-        private unsafe string TapLine()
+-        {
+-            if (!_tapOn || _tapStats == 0)
+-            {
+-                return "";
+-            }
+-
+-            ulong* t = stackalloc ulong[4];
+-            ((delegate* unmanaged<int, ulong*, void>)_tapStats)(Index, t);
+-            ulong calls = t[0] - _repTapCalls, shortCalls = t[1] - _repTapShort, missing = t[2] - t[3] - (_repTapWant - _repTapGot);
+-            _repTapCalls = t[0]; _repTapShort = t[1]; _repTapWant = t[2]; _repTapGot = t[3];
+-
+-            return $"；抽头：周期 {calls} 个、取不够 {shortCalls} 个、缺 {missing} 帧（{missing * 1000.0 / _rate:F1} ms）";
+-        }
+-
+         public void SetStarted(bool started)
+         {
+             _started = started;
+             _starveSince = 0;
++            _clockStart = 0;
++            _maxShort = 0;
+         }
+ 
+         /// <summary>
+@@ -175,11 +156,6 @@ namespace Ryujinx.Audio.Backends.Apple
+                     {
+                         _maxStarveTicks = starved;
+                     }
+-
+-                    if (_ring != null)
+-                    {
+-                        WriteSilence((int)(starved * _rate / Stopwatch.Frequency));
+-                    }
+                 }
+                 else
+                 {
+@@ -188,6 +164,32 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+ 
+             _starveSince = 0;
++
++            if (_started)
++            {
++                if (_clockStart == 0)
++                {
++                    _clockStart = now;
++                    _clockFrames = _framesSubmitted;
++                }
++                else
++                {
++                    long shortfall = (now - _clockStart) * _rate / Stopwatch.Frequency - (_framesSubmitted - _clockFrames);
++
++                    if (shortfall > _maxShort)
++                    {
++                        _gapFrames += shortfall - _maxShort;
++
++                        if (_ring != null)
++                        {
++                            WriteSilence((int)(shortfall - _maxShort));
++                        }
++
++                        _maxShort = shortfall;
++                    }
++                }
++            }
++
+             _framesSubmitted += frames;
+ 
+             if (_ring != null)
+@@ -380,7 +382,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                         continue;
+                     }
+ 
+-                    long cb = d._callbacks, sub = d._framesSubmitted, pl = d._framesPlayed, und = d._underruns, pau = d._pauses;
++                    long cb = d._callbacks, sub = d._framesSubmitted, pl = d._framesPlayed, und = d._underruns, pau = d._pauses, gap = d._gapFrames;
+ 
+                     if (cb == d._repCallbacks && sub == d._repSubmitted)
+                     {
+@@ -398,13 +400,14 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+                         $"断供 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}{d.TapLine()}");
++                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     d._repCallbacks = cb;
+                     d._repSubmitted = sub;
+                     d._repPlayed = pl;
+                     d._repUnderruns = und;
+                     d._repPauses = pau;
++                    d._repGapFrames = gap;
+                 }
+             }
+         }

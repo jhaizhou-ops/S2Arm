@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+index e81e3f497f9a49c9cf01e834c297ed3f782feb52..4e8294b7816ff74247705b87f2c20e97abc0c0e0 100644
+--- a/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
++++ b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+@@ -14,6 +14,9 @@ namespace Ryujinx.Horizon.Psc.Ipc
+     //   不阻塞宿主：游戏不确认也照常进后台 / 回来（iOS 后台本来整体冻结，回来后游戏依次读到休眠、唤醒）
+     partial class PmModule : IPmModule, IDisposable
+     {
++        // 队列空时 GetRequest 报的状态；确认这个状态成功、不出队（审计 #1534 P1-76：读到什么就能确认什么）
++        private const PmState IdleState = PmState.FullAwake;
++
+         private static readonly Lock _registryLock = new();
+         private static readonly List<PmModule> _modules = [];
+ 
+@@ -45,7 +48,7 @@ namespace Ryujinx.Horizon.Psc.Ipc
+         {
+             lock (_lock)
+             {
+-                state = _requests.Count > 0 ? _requests.Peek() : PmState.FullAwake;
++                state = _requests.Count > 0 ? _requests.Peek() : IdleState;
+                 flags = 0;
+             }
+ 
+@@ -72,8 +75,9 @@ namespace Ryujinx.Horizon.Psc.Ipc
+             return Dequeue(state);
+         }
+ 
+-        // 确认 = 出队首（审计 P2-38）：没初始化回 psc NotInitialized；队列空、或带状态确认与队首不符回失败且不出队。
+-        //   主机对后两种的真实失败码未公开（switchbrew / Atmosphère 只登记了 psc 2 / 3），用通用 InvalidState
++        // 确认 = 出队首（审计 P2-38）：没初始化回 psc NotInitialized；带状态确认与队首不符回失败且不出队。
++        //   队列空时（审计 #1534 P1-76）：GetRequest 回 IdleState 且成功，确认它（不带状态或带 IdleState）成功、不出队；确认别的状态回失败。
++        //   主机对失败一支的真实失败码未公开（switchbrew / Atmosphère 只登记了 psc 2 / 3），用通用 InvalidState
+         private Result Dequeue(PmState? state)
+         {
+             lock (_lock)
+@@ -83,7 +87,12 @@ namespace Ryujinx.Horizon.Psc.Ipc
+                     return PscResult.NotInitialized;
+                 }
+ 
+-                if (_requests.Count == 0 || (state.HasValue && _requests.Peek() != state.Value))
++                if (_requests.Count == 0)
++                {
++                    return !state.HasValue || state.Value == IdleState ? Result.Success : KernelResult.InvalidState;
++                }
++
++                if (state.HasValue && _requests.Peek() != state.Value)
+                 {
+                     return KernelResult.InvalidState;
+                 }

@@ -1,0 +1,147 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs b/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
+index d8cca95fed14aef301388ee4eee5420f14a2d1cd..c2fe3cf59bdceb2f0036c41ef668730b8f7ad9bc 100644
+--- a/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Synchronization/SynchronizationManager.cs
+@@ -97,23 +97,51 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+             }
+ 
+             using ManualResetEvent waitEvent = new(false);
+-            SyncpointWaiterHandle info = _syncpoints[id].RegisterCallback(threshold, _ => waitEvent.Set());
++            object callbackLock = new();
++            bool waitFinished = false;
++            SyncpointWaiterHandle info = null;
+ 
+-            if (info == null)
++            try
+             {
+-                return false;
++                info = _syncpoints[id].RegisterCallback(threshold, _ =>
++                {
++                    lock (callbackLock)
++                    {
++                        if (!waitFinished)
++                        {
++                            waitEvent.Set();
++                        }
++                    }
++                });
++
++                if (info == null)
++                {
++                    return false;
++                }
++
++                bool signaled = waitEvent.WaitOne(timeout);
++
++                if (!signaled)
++                {
++                    Logger.Error?.Print(LogClass.Gpu, $"Wait on syncpoint {id} for threshold {threshold} took more than {timeout.TotalMilliseconds}ms, resuming execution...");
++                }
++
++                return !signaled;
+             }
+-
+-            bool signaled = waitEvent.WaitOne(timeout);
+-
+-            if (!signaled)
++            finally
+             {
+-                Logger.Error?.Print(LogClass.Gpu, $"Wait on syncpoint {id} for threshold {threshold} took more than {timeout.TotalMilliseconds}ms, resuming execution...");
+-
+-                _syncpoints[id].UnregisterCallback(info);
++                // Increment may already have removed the waiter before invoking its callback.
++                // Close the callback's access before disposing the wait handle, even in that case.
++                lock (callbackLock)
++                {
++                    waitFinished = true;
++                }
++
++                if (info != null)
++                {
++                    _syncpoints[id].UnregisterCallback(info);
++                }
+             }
+-
+-            return !signaled;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+index 6fafb4aeff00dad45805d8037740b3290fdcc542..a2ee8d6861a08d7cdadc0fa11d603b5e696c19d3 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+@@ -411,9 +411,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+                             NvHostEventState.Signaled or
+                             NvHostEventState.Cancelled)
+                         {
+-                            bool timedOut = hostEvent.Wait(_device.Gpu, fence);
++                            bool waitPending = hostEvent.Wait(_device.Gpu, fence);
+ 
+-                            if (timedOut)
++                            if (waitPending)
+                             {
+                                 if (isWaitEventCmd)
+                                 {
+@@ -523,8 +523,6 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+                         {
+                             if (evnt.State == NvHostEventState.Waiting)
+                             {
+-                                evnt.State = NvHostEventState.Cancelling;
+-
+                                 evnt.Cancel(_device.Gpu);
+                             }
+                             else if (evnt.State == NvHostEventState.Signaling)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+index 82bcff840aa892794fe94dd61867570cbf5fff61..d88a6c41b1cbdfd2011260c516b5b91e201db2bf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+@@ -133,32 +133,30 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+         {
+             lock (Lock)
+             {
+-                // NOTE: nvservices code should always wait on the GPU side.
+-                //       If we do this, we may get an abort or undefined behaviour when the GPU processing thread is blocked for a long period (for example, during shader compilation).
+-                //       The reason for this is that the NVN code will try to wait until giving up.
+-                //       This is done by trying to wait and signal multiple times until aborting after you are past the timeout.
+-                //       As such, if it fails too many time, we enforce a wait on the CPU side indefinitely.
+-                //       This allows to keep GPU and CPU in sync when we are slow.
+-                if (_failingCount == FailingCountMax)
++                Fence = fence;
++
++                // Repeated guest cancellations may need a bounded CPU wait while the GPU is busy.
++                // A timeout is still pending, so it must arm the event instead of reporting completion.
++                if (_failingCount >= FailingCountMax)
+                 {
+                     Logger.Warning?.Print(LogClass.ServiceNv, "GPU processing thread is too slow, waiting on CPU...");
+ 
+-                    Fence.Wait(gpuContext, Timeout.InfiniteTimeSpan);
+-
+-                    ResetFailingState();
++                    if (!Fence.Wait(gpuContext, TimeSpan.FromSeconds(1)))
++                    {
++                        ResetFailingState();
+ 
+-                    return false;
++                        return false;
++                    }
+                 }
+-                else
+-                {
+-                    Fence = fence;
+-                    State = NvHostEventState.Waiting;
+ 
+-                    // S2Arm: the method group made a new delegate on every wait (nvhost-ctrl EventWaitAsync, every game every frame)
+-                    _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, _gpuSignaled ??= GpuSignaled);
++                // The event may have been signaled for a previous fence.
++                Event.WritableEvent.Clear();
++                State = NvHostEventState.Waiting;
++
++                // S2Arm: reuse the delegate for the pending fence callback.
++                _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, _gpuSignaled ??= GpuSignaled);
+ 
+-                    return true;
+-                }
++                return true;
+             }
+         }
+ 

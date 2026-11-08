@@ -1,0 +1,195 @@
+using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using Ryujinx.Graphics.Shader.Translation;
+using System.Collections.Generic;
+using System.Diagnostics;
+
+using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
+
+namespace Ryujinx.Graphics.Shader.StructuredIr
+{
+    // S2A：尾嵌套选择链拉平。
+    // 客体里「多个条件跳转跳到同一出口」（switch / 匹配即跳出）经结构化（LookForIfStatements 的 if(!c){…} 与 GotoElimination 抬升 goto 包出的 if(!flag){…}
+    // / else）后成为尾嵌套链：每一节的最后一句又是一个 if（或 if-else / else-if），N 个分支嵌套 N 层。动森 Park_UBER 片元 8 条 × 42 层，
+    // Apple 着色器后端对「深尾嵌套 + 分支内全是 uniform 计算」超线性，单个管线编 10 分钟以上。
+    // 这里把整条链同语义改成同一层的平铺块：
+    //   if (g) { S1; if (c) { S2; … } }            →  j = g; if (j) { S1; j = c; } if (j) { S2; … }
+    //   if (g) { S1; if (c) { A } else { S2; … } }  →  j = g; if (j) { S1; j = !c; if (!j) { A } } if (j) { S2; … }
+    //   else-if 组按 else { if … } 处理。
+    // 每个条件在原来的位置求值一次，A 不写 j（新临时变量），块外控制转移（break / continue / return / discard）跳过后面各块与原来跳过内层相同：逐位等价。
+    // 运行时每个像素仍只走命中的那一支，只多「链长 − 命中位置」次布尔判断。只拉平够长的链：浅嵌套本来就快，字节不动、缓存键不变。
+    static class TailChainFlattening
+    {
+        /// <summary>尾嵌套链（含链头）达到这个节数才拉平。</summary>
+        public const int MinChainLength = 8;
+
+        public static void Flatten(StructuredProgramContext context)
+        {
+            Queue<AstBlock> pending = new();
+
+            pending.Enqueue(context.CurrentFunction.MainBlock);
+
+            while (pending.TryDequeue(out AstBlock block))
+            {
+                for (IAstNode node = block.First; node != null; node = Next(node))
+                {
+                    if (node is not AstBlock child)
+                    {
+                        continue;
+                    }
+
+                    // 链头：没有 else 跟随的 if（有 else 时链头条件在 then 臂执行后已不可再求值）。拉平后新块都插在 child 之后，本循环接着访问并入队。
+                    if (child.Type == AstBlockType.If && !HasElse(child) && 1 + ContinuationLength(child) >= MinChainLength)
+                    {
+                        FlattenChain(context, child);
+                    }
+
+                    pending.Enqueue(child);
+                }
+            }
+        }
+
+        private static bool HasElse(AstBlock block)
+        {
+            return Next(block) is AstBlock next && (next.Type == AstBlockType.Else || next.Type == AstBlockType.ElseIf);
+        }
+
+        // 末尾若是 else / else-if 组，返回组头的 if，否则 null。
+        private static AstBlock ElseGroupHead(AstBlock last)
+        {
+            if (last.Type != AstBlockType.Else && last.Type != AstBlockType.ElseIf)
+            {
+                return null;
+            }
+
+            IAstNode node = last.Type == AstBlockType.Else ? Previous(last) : last;
+
+            while (node is AstBlock b && b.Type == AstBlockType.ElseIf)
+            {
+                node = Previous(b);
+            }
+
+            AstBlock head = node as AstBlock;
+
+            Debug.Assert(head != null && head.Type == AstBlockType.If);
+
+            return head;
+        }
+
+        // 不改树：数链头之后还能接几节。
+        private static int ContinuationLength(AstBlock container)
+        {
+            int count = 0;
+            IAstNode last = container.Last;
+
+            while (last is AstBlock lb)
+            {
+                if (lb.Type == AstBlockType.If)
+                {
+                    count++;
+                    last = lb.Last;
+                    continue;
+                }
+
+                AstBlock head = ElseGroupHead(lb);
+
+                if (head == null)
+                {
+                    break;
+                }
+
+                // 组：if、else-if × k、[else]：每个 else-if 一节，else 一节且其末尾继续。
+                for (IAstNode n = Next(head); n != null; n = Next(n))
+                {
+                    count++;
+                }
+
+                if (lb.Type != AstBlockType.Else)
+                {
+                    break;
+                }
+
+                last = lb.Last;
+            }
+
+            return count;
+        }
+
+        private static void FlattenChain(StructuredProgramContext context, AstBlock first)
+        {
+            AstBlock parent = first.Parent;
+            AstOperand j = context.NewTemp(AggregateType.Bool);
+
+            IAstNode cond = first.Condition;
+            first.Condition = j;
+            parent.AddBefore(first, Assign(j, cond));
+
+            AstBlock current = first;
+
+            while (current.Last is AstBlock last)
+            {
+                AstBlock head = last.Type == AstBlockType.If ? null : ElseGroupHead(last);
+
+                if (last.Type != AstBlockType.If && head == null)
+                {
+                    break;
+                }
+
+                AstBlock next = new(AstBlockType.If, j);
+
+                if (head == null)
+                {
+                    cond = last.Condition;
+                    last.Condition = null;
+                    current.Remove(last);
+                    current.Add(Assign(j, cond));
+
+                    MoveChildren(last, next);
+                }
+                else
+                {
+                    cond = head.Condition;
+                    head.Condition = InverseCond(j);
+                    current.AddBefore(head, Assign(j, InverseCond(cond)));
+
+                    List<AstBlock> group = [];
+
+                    for (IAstNode n = Next(head); n != null; n = Next(n))
+                    {
+                        group.Add((AstBlock)n);
+                    }
+
+                    foreach (AstBlock g in group)
+                    {
+                        current.Remove(g);
+                    }
+
+                    if (group[0].Type == AstBlockType.Else)
+                    {
+                        MoveChildren(group[0], next);
+                    }
+                    else
+                    {
+                        group[0].TurnIntoIf(group[0].Condition);
+
+                        foreach (AstBlock g in group)
+                        {
+                            next.Add(g);
+                        }
+                    }
+                }
+
+                parent.AddAfter(current, next);
+                current = next;
+            }
+        }
+
+        private static void MoveChildren(AstBlock from, AstBlock to)
+        {
+            while (from.First is IAstNode node)
+            {
+                from.Remove(node);
+                to.Add(node);
+            }
+        }
+    }
+}

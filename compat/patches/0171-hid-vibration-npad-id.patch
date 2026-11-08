@@ -1,0 +1,45 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 1b982222730ca6c87588524badef31aaf356457c..641d6c80a9949a2b41b0421b09f0c8ab23523fab 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -1246,7 +1246,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ #pragma warning restore IDE0059
+ 
+-            context.Device.Hid.Npads.UpdateRumbleQueue((PlayerIndex)deviceHandle.PlayerId, deviceHandle.Position, vibrationValue);   // S2Arm: no per-call dictionary
++            NpadIdType npadId = (NpadIdType)deviceHandle.PlayerId;
++            if (!HidUtils.IsValidNpadIdType(npadId)) return ResultCode.InvalidNpadIdType;
++            context.Device.Hid.Npads.UpdateRumbleQueue(HidUtils.GetIndexFromNpadIdType(npadId), deviceHandle.Position, vibrationValue);   // S2Arm: no per-call dictionary
+ 
+             return ResultCode.Success;
+         }
+@@ -1267,7 +1269,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ #pragma warning restore IDE0059
+ 
+-            VibrationValue vibrationValue = context.Device.Hid.Npads.GetLastVibrationValue((PlayerIndex)deviceHandle.PlayerId, deviceHandle.Position);
++            NpadIdType npadId = (NpadIdType)deviceHandle.PlayerId;
++            if (!HidUtils.IsValidNpadIdType(npadId)) return ResultCode.InvalidNpadIdType;
++            VibrationValue vibrationValue = context.Device.Hid.Npads.GetLastVibrationValue(HidUtils.GetIndexFromNpadIdType(npadId), deviceHandle.Position);
+ 
+             context.ResponseData.Write(vibrationValue.AmplitudeLow);
+             context.ResponseData.Write(vibrationValue.FrequencyLow);
+@@ -1329,14 +1333,16 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+             if (!deviceHandles.IsEmpty && vibrationValues.Length == deviceHandles.Length)
+             {
+-                PlayerIndex currentIndex = (PlayerIndex)deviceHandles[0].PlayerId;
++                foreach (VibrationDeviceHandle handle in deviceHandles)
++                    if (!HidUtils.IsValidNpadIdType((NpadIdType)handle.PlayerId)) return ResultCode.InvalidNpadIdType;
++                PlayerIndex currentIndex = HidUtils.GetIndexFromNpadIdType((NpadIdType)deviceHandles[0].PlayerId);
+                 // The group's distinct positions: a dictionary keyed by position counted distinct keys and kept the last value per key
+                 bool has0 = false, has1 = false, hasOther = false;
+                 VibrationValue v0 = default, v1 = default;
+ 
+                 for (int deviceCounter = 0; deviceCounter < deviceHandles.Length; deviceCounter++)
+                 {
+-                    PlayerIndex index = (PlayerIndex)deviceHandles[deviceCounter].PlayerId;
++                    PlayerIndex index = HidUtils.GetIndexFromNpadIdType((NpadIdType)deviceHandles[deviceCounter].PlayerId);
+                     byte position = deviceHandles[deviceCounter].Position;
+                     int count = (has0 ? 1 : 0) + (has1 ? 1 : 0) + (hasOther ? 1 : 0);
+ 

@@ -1,0 +1,77 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+index 159e5c295bf52498467a67d3d9226738ea402cde..498e20be2c4aa9763febf172e93e094cf8af4c13 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+@@ -355,7 +355,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+             if (_isCompute)
+             {
+                 specStateMatches &= CommitTextureBindings(texturePool, samplerPool, ShaderStage.Compute, 0, poolModified, specState);
++                long s2aI = S2AAllocTrace.Mark();
+                 specStateMatches &= CommitImageBindings(texturePool, ShaderStage.Compute, 0, poolModified, specState);
++                S2AAllocTrace.Step(0x40_003d, ref s2aI);
+             }
+             else
+             {
+@@ -364,7 +366,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     int stageIndex = (int)stage - 1;
+ 
+                     specStateMatches &= CommitTextureBindings(texturePool, samplerPool, stage, stageIndex, poolModified, specState);
++                    long s2aI = S2AAllocTrace.Mark();
+                     specStateMatches &= CommitImageBindings(texturePool, stage, stageIndex, poolModified, specState);
++                    S2AAllocTrace.Step(0x40_003d, ref s2aI);
+                 }
+             }
+ 
+@@ -461,14 +465,18 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                 if (bindingInfo.ArrayLength > 1)
+                 {
++                    long s2aA = S2AAllocTrace.Mark();
+                     _bindingsArrayCache.UpdateTextureArray(texturePool, samplerPool, stage, stageIndex, _textureBufferIndex, _samplerIndex, bindingInfo);
++                    S2AAllocTrace.Step(0x40_003a, ref s2aA);   // S2A 拆账：贴图绑定第二轮（10-23 塞尔达 MARK 后 CommitGraphicsBindings 每次约 184 B 落在第一轮子步之外）
+ 
+                     continue;
+                 }
+ 
+                 (int textureBufferIndex, int samplerBufferIndex) = TextureHandle.UnpackSlots(bindingInfo.CbufSlot, _textureBufferIndex);
+ 
++                long s2aU = S2AAllocTrace.Mark();
+                 UpdateCachedBuffer(stageIndex, ref cachedTextureBufferIndex, ref cachedSamplerBufferIndex, ref cachedTextureBuffer, ref cachedSamplerBuffer, textureBufferIndex, samplerBufferIndex);
++                S2AAllocTrace.Step(0x40_003c, ref s2aU);
+ 
+                 int packedId = TextureHandle.ReadPackedId(bindingInfo.Handle, cachedTextureBuffer, cachedSamplerBuffer);
+                 int textureId = TextureHandle.UnpackTextureId(packedId);
+@@ -611,7 +619,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                 if (bindingInfo.ArrayLength > 1)
+                 {
++                    long s2aA = S2AAllocTrace.Mark();
+                     _bindingsArrayCache.UpdateImageArray(pool, stage, stageIndex, _textureBufferIndex, bindingInfo);
++                    S2AAllocTrace.Step(0x40_003b, ref s2aA);
+ 
+                     continue;
+                 }
+@@ -620,7 +630,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                 (int textureBufferIndex, int samplerBufferIndex) = TextureHandle.UnpackSlots(bindingInfo.CbufSlot, _textureBufferIndex);
+ 
++                long s2aU = S2AAllocTrace.Mark();
+                 UpdateCachedBuffer(stageIndex, ref cachedTextureBufferIndex, ref cachedSamplerBufferIndex, ref cachedTextureBuffer, ref cachedSamplerBuffer, textureBufferIndex, samplerBufferIndex);
++                S2AAllocTrace.Step(0x40_003c, ref s2aU);
+ 
+                 int packedId = TextureHandle.ReadPackedId(bindingInfo.Handle, cachedTextureBuffer, cachedSamplerBuffer);
+                 int textureId = TextureHandle.UnpackTextureId(packedId);
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index c6972a121646b8de73d4fc3139b34d90e6d8cf50..1021d4c45508b22971a8991ccbb61c8ec215b0a2 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -152,7 +152,8 @@ namespace Ryujinx.Graphics.Gpu
+             "新建缓冲·new Buffer", "新建缓冲·拷旧缓冲 + 继承修改范围", "新建缓冲·SynchronizeMemory", "新建缓冲·重建多段缓冲 + 通知",
+             "DMA·目标区暂存（原 ToArray，现 ArrayPool）", "DMA·布局拷贝 + 写回客体内存",
+             "贴图池·同步内存（描述符改写移出 + 短缓存登记）", "贴图池·取贴图未命中整段（含新建贴图）", "贴图池·短缓存命中后挂回池", "诊断·描述符重现统计",
+-            "贴图绑定·缓存命中 SynchronizeMemory", "贴图绑定·取采样器 samplerPool.Get", "贴图绑定·GetForBinding", "贴图绑定·贴图缓冲 CreateBuffer", "贴图绑定·贴图缓冲登记", "贴图绑定·取宿主贴图 / 采样器", "贴图绑定·SetTextureAndSampler" };
++            "贴图绑定·缓存命中 SynchronizeMemory", "贴图绑定·取采样器 samplerPool.Get", "贴图绑定·GetForBinding", "贴图绑定·贴图缓冲 CreateBuffer", "贴图绑定·贴图缓冲登记", "贴图绑定·取宿主贴图 / 采样器", "贴图绑定·SetTextureAndSampler",
++            "贴图绑定·贴图数组 UpdateTextureArray", "贴图绑定·图像数组 UpdateImageArray", "贴图绑定·读句柄常量缓冲 UpdateCachedBuffer", "绘制·提交绑定·图像 CommitImageBindings 整段" };
+ 
+         // 3D 状态更新各组（StateUpdateTracker 按 StateUpdater 构造时的登记顺序编组号；改登记顺序要同步这张表，只影响拆账名字）
+         private static readonly string[] _stateNames = { "VertexBufferState", "VertexAttribState", "BlendState", "FaceState", "StencilTestState", "DepthTestState", "TessellationState",

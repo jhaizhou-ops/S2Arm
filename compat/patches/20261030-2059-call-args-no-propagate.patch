@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index 3f2e4991f3b87482e8000c0679701b2c439b6aa9..e2fca6ed75457f8f6b1358f64296325ae4626370 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -22,7 +22,12 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                 {
+                     if (node is AstAssignment assignment && assignment.Destination is AstOperand propVar)
+                     {
+-                        bool isWorthPropagating = propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source);
++                        // S2Arm: preserve addressable locals used as SPIR-V call arguments.
++                        // StructuredProgram creates these temporaries for GetLocalPointer;
++                        // propagating even a constant would remove that pointer boundary.
++                        bool isCallArgument = propVar.Uses.Any(use => use is AstOperation { Inst: Instruction.Call });
++                        bool isWorthPropagating = !isCallArgument &&
++                            (propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source));
+ 
+                         if (propVar.Defs.Count == 1 && isWorthPropagating)
+                         {

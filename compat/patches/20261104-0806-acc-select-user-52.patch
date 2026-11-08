@@ -1,0 +1,14 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAccountServiceForApplication.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAccountServiceForApplication.cs
+index dc61422bb659238fb12db2e7336488018e478faa..a52c1ebc27d27cbb8c24d471b45a9de76465bb5a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAccountServiceForApplication.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAccountServiceForApplication.cs
+@@ -71,7 +71,8 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+             return _applicationServiceServer.IsUserRegistrationRequestPermitted(context);
+         }
+ 
+-        [CommandCmif(51)]
++        [CommandCmif(51)] // 1.0.0-18.1.0 (TrySelectUserWithoutInteractionDeprecated)
++        [CommandCmif(52)] // 19.0.0+ (S2Arm: same name and signature as 51 per switchbrew; 51 was renamed Deprecated)
+         // TrySelectUserWithoutInteraction(bool) -> nn::account::Uid
+         public ResultCode TrySelectUserWithoutInteraction(ServiceCtx context)
+         {

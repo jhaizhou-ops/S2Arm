@@ -1,0 +1,201 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index f6e48d5766fa5bd6f2103953963e4caf806ac03a..06adf18a8f9cb0f8b2b32ffe2c86b9c7b05d4df1 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -43,6 +43,9 @@ namespace Ryujinx.Audio.Backends.Apple
+         // S2Arm (11-02 Pokopia iPhone 断续): queued samples count as played for the game one device pull ahead of the hand-backs
+         //   (see PlaybackCredit); bursts of hand-backs ≤ 2 ms apart are one pull; the lead is at most 100 ms
+         private PlaybackCredit _credit;
++        // S2Arm (11-02 Pokopia iPhone 杂音): releases each queued buffer when the credit's play head reaches its end, one per buffer
++        //   like a Switch (see PlaybackCredit), instead of a whole device pull at each hand-back. Woken by hand-backs and new buffers
++        private readonly AutoResetEvent _paceEvent = new(false);
+         private const int CreditBurstGapMicroseconds = 2000;
+         private const int CreditMaxLeadMilliseconds = 100;
+         private readonly ManualResetEvent _updateRequiredEvent;
+@@ -121,6 +124,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             SetupAudioQueue();
+             S2AWatch(this, true);
++            new Thread(PaceLoop) { IsBackground = true, Name = "S2A.AudioPace" }.Start();
+         }
+ 
+         // S2Arm: 登记 / 注销看门狗（固定 8 槽，看门狗线程扫数组不分配）
+@@ -372,7 +376,8 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 _pump = new Pump(this, (int)BufferBytes);
+                 _samples = _pump.Samples;
+-                _credit = new PlaybackCredit(_bytesPerFrame, (long)_bytesPerFrame * RequestedSampleRate * CreditMaxLeadMilliseconds / 1000,
++                _credit = new PlaybackCredit(_bytesPerFrame, (long)_bytesPerFrame * RequestedSampleRate,
++                                             (long)_bytesPerFrame * RequestedSampleRate * CreditMaxLeadMilliseconds / 1000,
+                                              Stopwatch.Frequency * CreditBurstGapMicroseconds / 1_000_000);
+             }
+         }
+@@ -481,12 +486,13 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+ 
+             S2ACredit();
++            _paceEvent.Set();
+         }
+ 
+-        // S2Arm (11-02): release what now counts as played (handed back, or submitted and within one device pull of the hand-backs)
++        // S2Arm (11-02): release what now counts as played (handed back, or submitted and passed by the credit's play head)
+         private void S2ACredit()
+         {
+-            int bytes = _credit.Take(_pump.SubmittedSampleBytes);
++            int bytes = _credit.Take(_pump.SubmittedSampleBytes, Stopwatch.GetTimestamp());
+ 
+             if (bytes > 0)
+             {
+@@ -494,6 +500,33 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
++        // S2Arm (11-02 Pokopia iPhone 杂音): sleep until the head buffer is due (its unplayed rest passed by the play head), release it,
++        //   repeat; with nothing queued, or the head beyond the cap, wait for a hand-back or a new buffer
++        private void PaceLoop()
++        {
++            while (!Volatile.Read(ref _disposed))
++            {
++                S2ACredit();
++
++                long rest;
++                lock (_queueLock)
++                {
++                    rest = _queuedCount == 0 ? -1 : (long)(_queued[_queuedHead].SampleCount - _headPlayed) * _bytesPerFrame;
++                }
++
++                long ticks = rest < 0 ? long.MaxValue : _credit.TicksUntil(rest, _pump.SubmittedSampleBytes, Stopwatch.GetTimestamp());
++
++                if (ticks == long.MaxValue)
++                {
++                    _paceEvent.WaitOne();
++                }
++                else if (ticks > 0)
++                {
++                    _paceEvent.WaitOne((int)Math.Min(1000, (ticks * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency));
++                }
++            }
++        }
++
+         private void ProcessPlayedSamples(int bytesPlayed)
+         {
+             ulong samplesPlayed = GetSampleCount(bytesPlayed);
+@@ -602,6 +635,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             {
+                 _pump.Pump();
+                 S2ACredit();
++                _paceEvent.Set();
+                 // S2Arm (10-22 杂音): 预充期排进设备但未启播——凑够下限的这一笔到了就开播
+                 if (!_queueRunning)
+                 {
+@@ -722,7 +756,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                     if (_gcHandle.IsAllocated) _gcHandle.Free();
+                     _diag.Dispose();
+                     _driver.Unregister(this);
+-                    _disposed = true;
++                    Volatile.Write(ref _disposed, true);
++                    _paceEvent.Set();
+                 }
+             }
+         }
+diff --git a/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs b/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs
+index 1334d27e48f66d64c69173347f2ef17458a3a47d..6bcf673670f4764b4c14d13984c43ea833b1d395 100644
+--- a/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs
++++ b/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Diagnostics;
+ using System.Threading;
+ 
+ namespace Ryujinx.Audio.Backends.Common
+@@ -18,6 +19,11 @@ namespace Ryujinx.Audio.Backends.Common
+     //   queued-sample bytes handed back with gaps ≤ burstGapTicks, and the lead is the median of the last Window bursts (a stalled callback that
+     //   returns many pulls at once does not move the median). With a short supply a burst is the supply, so the lead starts there and
+     //   grows to a full pull after a few periods.
++    // S2Arm (11-02 Pokopia iPhone 杂音): the credit is a play head that moves at the sample rate, between the hand-backs (floor) and
++    //   hand-backs + lead (cap), not a step of a whole pull at each hand-back. A Switch releases one 240-frame buffer every 5 ms; released
++    //   four at once every 21.3 ms, Pokopia's mixer (paced by its own 5 ms clock) had the fourth one ready only 81% of the time and
++    //   appended it silent: 7.3 holes of 5 ms per second (iPhone wav: holes at burst position 0/1/2/3 = 0 / 0 / 1.6% / 18.8%).
++    //   The session asks TicksUntil when the next buffer will be due and releases it then (one wakeup per buffer).
+     public sealed class PlaybackCredit
+     {
+         private const int Window = 32;
+@@ -28,11 +34,16 @@ namespace Ryujinx.Audio.Backends.Common
+         private readonly long[] _bursts = new long[Window];
+         private int _burstN, _burstW;
+         private long _burstBytes, _lastReturnTicks;
++        private readonly long _bytesPerSecond;
+         private long _leadBytes, _handedBack, _credited;
++        // Play head (bytes, may hold a fraction of a frame) and when it was last moved (0: not yet)
++        private double _head;
++        private long _headTicks;
+ 
+-        public PlaybackCredit(int bytesPerFrame, long maxLeadBytes, long burstGapTicks)
++        public PlaybackCredit(int bytesPerFrame, long bytesPerSecond, long maxLeadBytes, long burstGapTicks)
+         {
+             _bytesPerFrame = bytesPerFrame;
++            _bytesPerSecond = bytesPerSecond;
+             _maxLeadBytes = maxLeadBytes / bytesPerFrame * bytesPerFrame;
+             _burstGapTicks = burstGapTicks;
+         }
+@@ -74,14 +85,15 @@ namespace Ryujinx.Audio.Backends.Common
+         }
+ 
+         /// <summary>
+-        /// Bytes of queued samples that count as played now and did not before, given <paramref name="submittedSampleBytes"/> of queued
+-        /// samples submitted to the device so far.
++        /// Bytes of queued samples that count as played at <paramref name="ticks"/> (Stopwatch) and did not before, given
++        /// <paramref name="submittedSampleBytes"/> of queued samples submitted to the device so far.
+         /// </summary>
+-        public int Take(long submittedSampleBytes)
++        public int Take(long submittedSampleBytes, long ticks)
+         {
+             lock (_lock)
+             {
+-                long target = Math.Min(submittedSampleBytes, _handedBack + _leadBytes);
++                MoveHeadLocked(ticks);
++                long target = Math.Min(submittedSampleBytes, (long)_head / _bytesPerFrame * _bytesPerFrame);
+ 
+                 if (target <= _credited)
+                 {
+@@ -95,6 +107,40 @@ namespace Ryujinx.Audio.Backends.Common
+             }
+         }
+ 
++        /// <summary>
++        /// Stopwatch ticks from <paramref name="ticks"/> until <paramref name="moreBytes"/> more than credited so far count as played;
++        /// long.MaxValue when that lies beyond the cap (it waits for the next hand-back) or beyond what was submitted (it waits for that).
++        /// </summary>
++        public long TicksUntil(long moreBytes, long submittedSampleBytes, long ticks)
++        {
++            lock (_lock)
++            {
++                MoveHeadLocked(ticks);
++                long want = _credited + moreBytes;
++
++                if (want > _handedBack + _leadBytes || want > submittedSampleBytes)
++                {
++                    return long.MaxValue;
++                }
++
++                double ahead = want - _head;
++
++                return ahead <= 0 ? 0 : (long)Math.Ceiling(ahead * Stopwatch.Frequency / _bytesPerSecond);
++            }
++        }
++
++        // Under _lock: the head moves at the sample rate since the last move, never past hand-backs + lead nor behind the hand-backs
++        private void MoveHeadLocked(long ticks)
++        {
++            if (_headTicks != 0 && ticks > _headTicks)
++            {
++                _head += (double)(ticks - _headTicks) * _bytesPerSecond / Stopwatch.Frequency;
++            }
++
++            _headTicks = ticks;
++            _head = Math.Max(Math.Min(_head, _handedBack + _leadBytes), _handedBack);
++        }
++
+         // Under _lock: a burst closed; the lead is the median of the last Window bursts (allocation-free: the callback thread is real time)
+         private void PushBurstLocked(long bytes)
+         {

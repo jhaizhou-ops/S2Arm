@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+index 125935a2b4b28c31dbce01f3084888148ca8cc8b..9139883fb0715f8eb51d368943eb515a091c126a 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+@@ -215,7 +215,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             // Splatoon Raiders' upscaler network (agl_ndsr.pck) takes powers of its packed halves with LOG2 and EXP2, then joins the results with PRMT 0x5410
+             bool half = x.Bit(73);
+             ASrc s = AOne(context, x);
+-            Operand res = half ? AHalfLanes(context, s, x.Bits(60, 62))[0] : AFloat(context, s);
++            // S2Arm: 60..61 is a half select here (1 / 3 the high half), as F2F's, not the half-pair ops' swizzle (where 1 is a 32-bit float): 2fd572c87 read 1 as F32 through
++            // AHalfLanes, and MUFU.F16.RSQ R, R.H1 took the whole register as a float (Pokopia foliage 5ef30495592ee81e +0x280: its normal came out wrong, the plants black)
++            Operand res;
++
++            if (half)
++            {
++                Operand v = AGet(context, s);
++                res = context.FPAbsNeg(x.Bits(60, 62) is 1 or 3 ? context.UnpackHalf2x16High(v) : context.UnpackHalf2x16Low(v), s.Abs, s.Neg);
++            }
++            else
++            {
++                res = AFloat(context, s);
++            }
+ 
+             if (half && x.Bits(74, 80) is 6 or 7)
+             {

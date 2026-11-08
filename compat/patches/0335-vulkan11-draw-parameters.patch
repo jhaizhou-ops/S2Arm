@@ -1,0 +1,68 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index c7fe124c663ac4f4f142db48f7274f93a6b90dd9..26c8d576bd528348f30aef1102b7a0d6abdd385c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -305,13 +305,15 @@ namespace Ryujinx.Graphics.Vulkan
+                 SType = StructureType.PhysicalDeviceFeatures2,
+             };
+ 
+-            PhysicalDeviceVulkan11Features supportedFeaturesVk11 = new()
++            // The Vulkan11 aggregate was introduced in Vulkan 1.2. The standalone
++            // draw-parameters structure is legal on every supported device (1.1+).
++            PhysicalDeviceShaderDrawParametersFeatures supportedDrawParameters = new()
+             {
+-                SType = StructureType.PhysicalDeviceVulkan11Features,
++                SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                 PNext = features2.PNext,
+             };
+ 
+-            features2.PNext = &supportedFeaturesVk11;
++            features2.PNext = &supportedDrawParameters;
+ 
+             PhysicalDeviceCustomBorderColorFeaturesEXT supportedFeaturesCustomBorderColor = new()
+             {
+@@ -505,6 +507,13 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             api.GetPhysicalDeviceFeatures2(physicalDevice.PhysicalDevice, &features2);
+ 
++            // The SPIR-V vertex emitter always declares DrawParameters. Do not
++            // create a device that cannot legally consume its shader modules.
++            if (!supportedDrawParameters.ShaderDrawParameters)
++            {
++                throw new VulkanException("Required Vulkan feature shaderDrawParameters is not supported.");
++            }
++
+             PhysicalDeviceFeatures supportedFeatures = features2.Features;
+ 
+             PhysicalDeviceFeatures features = new()
+@@ -604,14 +613,14 @@ namespace Ryujinx.Graphics.Vulkan
+                 pExtendedFeatures = &featuresConditional;
+             }
+ 
+-            PhysicalDeviceVulkan11Features featuresVk11 = new()
++            PhysicalDeviceShaderDrawParametersFeatures drawParameters = new()
+             {
+-                SType = StructureType.PhysicalDeviceVulkan11Features,
++                SType = StructureType.PhysicalDeviceShaderDrawParametersFeatures,
+                 PNext = pExtendedFeatures,
+-                ShaderDrawParameters = supportedFeaturesVk11.ShaderDrawParameters,
++                ShaderDrawParameters = supportedDrawParameters.ShaderDrawParameters,
+             };
+ 
+-            pExtendedFeatures = &featuresVk11;
++            pExtendedFeatures = &drawParameters;
+ 
+             PhysicalDeviceVulkan12Features featuresVk12 = new()
+             {
+@@ -812,6 +821,11 @@ namespace Ryujinx.Graphics.Vulkan
+                 DeviceFeatureSnapshot requestedFeatures = DeviceFeatureSnapshot.Capture(in deviceCreateInfo);
+                 api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out Device device).ThrowOnError();
+                 enabledFeatures = requestedFeatures;
++                Logger.Info?.Print(LogClass.Gpu,
++                    $"Vulkan device features: apiVersion={(Version)(Version32)physicalDevice.PhysicalDeviceProperties.ApiVersion}, " +
++                    $"structure={nameof(PhysicalDeviceShaderDrawParametersFeatures)}, " +
++                    $"shaderDrawParameters queried={(bool)supportedDrawParameters.ShaderDrawParameters}, " +
++                    $"requested={(bool)drawParameters.ShaderDrawParameters}, enabled={enabledFeatures.ShaderDrawParameters}");
+                 return device;
+             }
+             finally

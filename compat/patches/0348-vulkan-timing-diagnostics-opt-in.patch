@@ -1,0 +1,65 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index 76612aa6ca2126afacd730b92d6e465d1eaa4812..87b48dca455c084b9d12a0d36d3c48255f079ccf 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -9,6 +9,7 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private const int RequiredSubgroupSize = 32;
+         private const int MaxDynamicStatesCount = 9;
++        private static readonly bool S2ATimingDiagnostics = Environment.GetEnvironmentVariable("S2A_SHADER_CACHE_DIAG") == "1";
+         private static long _s2aPipeCount, _s2aPipeMs, _s2aPipeMax, _s2aPipeSlow, _s2aPipeReported;
+ 
+         // S2A：Android 启动期 GPU 线程连续满载，区分是驱动管线编译还是别的工作。
+@@ -18,6 +19,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private static void S2AReportPipelineTime(long start)
+         {
+             System.Threading.Interlocked.Increment(ref S2APipelinesCreated);
++            if (!S2ATimingDiagnostics) return;
+             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+             _s2aPipeCount++;
+             _s2aPipeMs += (long)ms;
+@@ -417,7 +419,7 @@ namespace Ryujinx.Graphics.Vulkan
+                     pipelineCreateInfo.Stage.PSpecializationInfo = info;
+                 }
+ 
+-                long s2aComputeStart = System.Diagnostics.Stopwatch.GetTimestamp();
++                long s2aComputeStart = S2ATimingDiagnostics ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                 gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();
+                 S2AReportPipelineTime(s2aComputeStart);
+             }
+@@ -723,7 +725,7 @@ namespace Ryujinx.Graphics.Vulkan
+                     RenderPass = renderPass,
+                 };
+ 
+-                long s2aGraphicsStart = System.Diagnostics.Stopwatch.GetTimestamp();
++                long s2aGraphicsStart = S2ATimingDiagnostics ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                 Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+                 S2AReportPipelineTime(s2aGraphicsStart);
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shader.cs b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+index 13c50c893a26be079bd34cbaf5f41e1650d6474f..89be1d804a536b99d3dffefc6e3535ff12f30a6d 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Shader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+@@ -14,11 +14,13 @@ namespace Ryujinx.Graphics.Vulkan
+     class Shader : IDisposable
+     {
+         private static readonly nint _ptrMainEntryPointName = Marshal.StringToHGlobalAnsi("main");
++        private static readonly bool S2ATimingDiagnostics = Environment.GetEnvironmentVariable("S2A_SHADER_CACHE_DIAG") == "1";
+         private static long _s2aModCount, _s2aModMs, _s2aModMax, _s2aModSlow, _s2aModReported;
+ 
+         // S2A：启动期 GPU 线程纯用户态 CPU；统计 vkCreateShaderModule 实际耗时（驱动编译）。
+         private static void S2AReportModuleTime(long start)
+         {
++            if (!S2ATimingDiagnostics) return;
+             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+             _s2aModCount++;
+             _s2aModMs += (long)ms;
+@@ -91,7 +93,7 @@ namespace Ryujinx.Graphics.Vulkan
+                     PCode = (uint*)pCode,
+                 };
+ 
+-                long s2aModuleStart = System.Diagnostics.Stopwatch.GetTimestamp();
++                long s2aModuleStart = S2ATimingDiagnostics ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                 _api.CreateShaderModule(_device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
+                 S2AReportModuleTime(s2aModuleStart);
+             }

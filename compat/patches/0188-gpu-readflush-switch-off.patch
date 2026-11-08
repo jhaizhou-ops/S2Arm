@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index c5a28f5ad5e95c9851dd8d7ed24903ef6f72bbb3..4ff5ea35b907c9e48f1343388059687526a7d67d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -787,7 +787,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private void S2AMarkReadFlushOnce()
+         {
+-            if (_s2aReadFlushMarked)
++            // 缺省关（开关与读数见 Buffer.S2AGpuReadFlush）
++            if (!Ryujinx.Graphics.Gpu.Memory.Buffer.S2AGpuReadFlush || _s2aReadFlushMarked)
+             {
+                 return;
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 5f7f93043242af230e31b1ac1dfbab6e4df7552f..f32fa451b7f9817ba6088d1f1f6853cfe5426f34 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -367,9 +367,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="stage">Buffer stage that triggered the modification</param>
+         private bool _s2aReadFlushMarked;
+ 
++        // 缺省关、S2A_GPU_READFLUSH=1 开（10-23 真机同口径：开后巫师3 读回 0 → 44 s / 60 s、帧 1801 → 1229，塞尔达帧 1718 → 994；
++        // 部分回写 + 真机九款读数达标后再开）。关时与 15b989dc7 之前相同：GPU 写过的缓冲 / 贴图不拦读（塞尔达站立陷地复现）
++        internal static readonly bool S2AGpuReadFlush = Environment.GetEnvironmentVariable("S2A_GPU_READFLUSH") == "1";
++
+         private void S2AMarkReadFlushOnce()
+         {
+-            if (!_s2aReadFlushMarked)
++            if (S2AGpuReadFlush && !_s2aReadFlushMarked)
+             {
+                 _s2aReadFlushMarked = true;
+                 MemoryManager.S2AMarkReadFlush(Address, Size);

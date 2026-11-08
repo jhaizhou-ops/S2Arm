@@ -1,0 +1,70 @@
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs
+index 1e48b4706bfce3a0ac386d55c2ccb571570a1939..095dfb5bc3645b427e4219b697f9e9564f0dfa26 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs
+@@ -202,9 +202,53 @@ namespace Ryujinx.HLE.HOS.Ipc
+ 
+     partial class IpcHandleDesc
+     {
+-        // S2Arm: handle arrays cached per count (0..15), reused by the per-thread request message
+-        private readonly int[][] _s2aCopy = new int[16][];
+-        private readonly int[][] _s2aMove = new int[16][];
++        // S2Arm: handle arrays cached per count (0..15), reused by the per-thread request message. Created on first parse only:
++        // as field initializers they cost every IpcHandleDesc (each response's MakeCopy / MakeMove too) two 16-slot arrays, ~300 B
++        private int[][] _s2aCopy;
++        private int[][] _s2aMove;
++
++        // S2Arm: responses with one or two handles (every MakeCopy / MakeMove call site) reuse a per-thread descriptor instead of a new
++        // descriptor + params array per request (~80 B; d3 asks aoc:u for its event handle ~30 times a second). A response descriptor
++        // only lives until that response is written back on the same thread (translated in place, then the message is reset).
++        [ThreadStatic] private static IpcHandleDesc t_copy1, t_copy2, t_move1, t_move2;
++
++        private static IpcHandleDesc Reused(ref IpcHandleDesc slot, bool copy, int count)
++        {
++            slot ??= copy ? new IpcHandleDesc(new int[count], []) : new IpcHandleDesc([], new int[count]);
++            slot.HasPId = false;
++            slot.PId = 0;
++            return slot;
++        }
++
++        public static IpcHandleDesc MakeCopy(int handle)
++        {
++            IpcHandleDesc d = Reused(ref t_copy1, copy: true, 1);
++            d.ToCopy[0] = handle;
++            return d;
++        }
++
++        public static IpcHandleDesc MakeCopy(int handle0, int handle1)
++        {
++            IpcHandleDesc d = Reused(ref t_copy2, copy: true, 2);
++            d.ToCopy[0] = handle0;
++            d.ToCopy[1] = handle1;
++            return d;
++        }
++
++        public static IpcHandleDesc MakeMove(int handle)
++        {
++            IpcHandleDesc d = Reused(ref t_move1, copy: false, 1);
++            d.ToMove[0] = handle;
++            return d;
++        }
++
++        public static IpcHandleDesc MakeMove(int handle0, int handle1)
++        {
++            IpcHandleDesc d = Reused(ref t_move2, copy: false, 2);
++            d.ToMove[0] = handle0;
++            d.ToMove[1] = handle1;
++            return d;
++        }
+ 
+         internal int S2ASize => 4 + (HasPId ? 8 : 0) + 4 * (ToCopy.Length + ToMove.Length);
+ 
+@@ -223,6 +267,8 @@ namespace Ryujinx.HLE.HOS.Ipc
+             }
+ 
+             int copyCount = (word >> 1) & 0xf;
++            _s2aCopy ??= new int[16][];
++            _s2aMove ??= new int[16][];
+             int[] copy = _s2aCopy[copyCount] ??= new int[copyCount];
+ 
+             for (int i = 0; i < copyCount; i++, pos += 4)

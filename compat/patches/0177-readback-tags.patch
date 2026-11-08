@@ -1,0 +1,82 @@
+diff --git a/src/Ryujinx.Graphics.GAL/S2AReadTag.cs b/src/Ryujinx.Graphics.GAL/S2AReadTag.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..661c0c7d84767bdd310360dadd18089302d106be
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/S2AReadTag.cs
+@@ -0,0 +1,11 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// S2A 诊断（帧率能耗线 10-23，马车8 进赛道首帧读回 68 ms）：Gpu 层触发贴图回写前设「读回来源」，后端读回统计（NxGal S2A_GETDATA_BT）拼进键。
++    /// 不用线程局部：线程化渲染器里真正读的是渲染线程，GPU 线程同步等它。只作诊断，关着时不读
++    /// </summary>
++    public static class S2AReadTag
++    {
++        public static volatile string Current;
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+index 4db07c791d4a2900002fa8bf012ba4d039d073c8..5cfa135b07b3336266c4257c8682de78980f96d3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.GAL;
+ using System;
+ using System.Collections;
+ using System.Collections.Generic;
+@@ -187,7 +188,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 // as it is expected that other overlapping textures exist that have more up-to-date contents.
+ 
+                 oldestTexture.Group.SynchronizeDependents(oldestTexture);
++                S2AReadTag.Current = "淘汰回写";
+                 oldestTexture.FlushModified(false);
++                S2AReadTag.Current = null;
+             }
+ 
+             _textures.RemoveFirst();
+@@ -212,7 +215,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+             // Remove our reference to this texture.
+             if (flush)
+             {
++                S2AReadTag.Current = "移出缓存回写";
+                 texture.FlushModified(false);
++                S2AReadTag.Current = null;
+             }
+ 
+             _textures.Remove(texture.CacheNode);
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 3d99ffc26920306cb7788a24f1c9e008e4bb97ff..f6cf04e03e594dd22d47cba22c0eead40192be62 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -247,7 +247,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                 foreach (TextureIncompatibleOverlap overlap in _incompatibleOverlaps)
+                 {
++                    S2AReadTag.Current = "不兼容重叠回写";
+                     flushed |= overlap.Group.Storage.FlushModified(true);
++                    S2AReadTag.Current = null;
+                 }
+ 
+                 _incompatibleOverlapsDirty = false;
+@@ -1734,6 +1736,20 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="address">The address of the flushing memory access</param>
+         /// <param name="size">The size of the flushing memory access</param>
+         public void FlushAction(TextureGroupHandle handle, ulong address, ulong size)
++        {
++            S2AReadTag.Current = "跟踪触发回写";   // S2A 诊断：读回来源（CPU 碰到 GPU 改过的贴图内存）
++
++            try
++            {
++                S2AFlushActionImpl(handle, address, size);
++            }
++            finally
++            {
++                S2AReadTag.Current = null;
++            }
++        }
++
++        private void S2AFlushActionImpl(TextureGroupHandle handle, ulong address, ulong size)
+         {
+             // There is a small gap here where the action is removed but _actionRegistered is still 1.
+             // In this case it will skip registering the action, but here we are already handling it,

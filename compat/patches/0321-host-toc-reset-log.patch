@@ -1,0 +1,15 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index fd0ad11c9a90b319a7ed0153235551d9192a97d8..2696f331e90434025965c235dd5f503224f00767 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -1243,6 +1243,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     header.FormatVersion != FileFormatVersionPacked || header.CodeGenVersion != CodeGenVersion ||
+                     header.Timestamp != timestamp)
+                 {
++                    // S2A 诊断：宿主 TOC 身份不符会清空整份宿主缓存；统计旧/新时间戳与长度。
++                    Console.Error.WriteLine($"[vkpb] 宿主 TOC 重置：{Path.GetFileName(tocFileStream.Name)} " +
++                        $"旧 ts={header.Timestamp:x} 新 ts={timestamp:x} toc={tocFileStream.Length} data={dataFileStream.Length} " +
++                        $"程序 {programIndex}");
+                     CreateToc(tocFileStream, ref header, TochMagic, CodeGenVersion, timestamp);
+                     dataFileStream.SetLength(0);
+                 }

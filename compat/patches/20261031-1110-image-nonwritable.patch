@@ -1,0 +1,19 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 8a97e73c1fbdb3a41d90db5b2e86ff2ecc270776..78e86233e6c8bcc9e7f2960de9a01377e01805a7 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -279,6 +279,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                     context.Decorate(imageVariable, Decoration.Coherent);
+                 }
+ 
++                // S2Arm（#1165 安卓直连门槛）：没被写过的存储图像 / 存储 texel buffer 打只读标记，同存储缓冲（BufferUsageFlags.Write）。
++                //   ImageStore 由 ResourceManager.GetTextureOrImageBinding 按 IsImageStore()（ImageStore 与 ImageAtomic）置位，三条绑定路径（直接、无绑定消除、无绑定转数组）都经它，
++                //   同一图像多处使用时用途标志取并集：没有这一位 = 程序里没有写它的指令。Mali 顶点阶段走直连要求全部存储变量 NonWritable
++                if (!image.Flags.HasFlag(TextureUsageFlags.ImageStore))
++                {
++                    context.Decorate(imageVariable, Decoration.NonWritable);
++                }
++
+                 context.AddGlobalVariable(imageVariable);
+             }
+         }

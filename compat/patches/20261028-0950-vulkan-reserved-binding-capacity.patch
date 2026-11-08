@@ -1,0 +1,36 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Constants.cs b/src/Ryujinx.Graphics.Vulkan/Constants.cs
+index 20ce658184f8f1e3f137a39724eda21126e28bb1..fe09270a7e2d85a8ca7f3b85db6f62ff4378782b 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Constants.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Constants.cs
+@@ -12,8 +12,13 @@ namespace Ryujinx.Graphics.Vulkan
+         public const int MaxStorageBuffersPerStage = 16;
+         public const int MaxTexturesPerStage = 64;
+         public const int MaxImagesPerStage = 16;
+-        public const int MaxUniformBufferBindings = MaxUniformBuffersPerStage * MaxShaderStages;
+-        public const int MaxStorageBufferBindings = MaxStorageBuffersPerStage * MaxShaderStages;
++        // ResourceReservations shifts every stage by these emulator-owned bindings.
++        // Include support/vertex state, emulated transform feedback and vertex-as-compute resources.
++        public const int ReservedUniformBufferBindings = 2;
++        public const int ReservedStorageBufferBindings = 4 + 3;
++        public const int ReservedTextureBindings = 2 + 32;
++        public const int MaxUniformBufferBindings = MaxUniformBuffersPerStage * MaxShaderStages + ReservedUniformBufferBindings;
++        public const int MaxStorageBufferBindings = MaxStorageBuffersPerStage * MaxShaderStages + ReservedStorageBufferBindings;
+         public const int MaxTextureBindings = MaxTexturesPerStage * MaxShaderStages;
+         public const int MaxImageBindings = MaxImagesPerStage * MaxShaderStages;
+         public const int MaxPushDescriptorBinding = 64;
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index d8cc43f5744219daaf71eebcf7fabb4b8a66d921..594a5fa9fc865c98eeef8ebd3ff06ce5a3363669 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -139,9 +139,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             _uniformBufferRefs = new BufferRef[Constants.MaxUniformBufferBindings];
+             _storageBufferRefs = new BufferRef[StorageBufferBindings];
+-            _textureRefs = new TextureRef[Constants.MaxTextureBindings * 2];
++            _textureRefs = new TextureRef[Constants.MaxTextureBindings * 2 + Constants.ReservedTextureBindings];
+             _imageRefs = new ImageRef[Constants.MaxImageBindings * 2];
+-            _bufferTextureRefs = new TextureBuffer[Constants.MaxTextureBindings * 2];
++            _bufferTextureRefs = new TextureBuffer[Constants.MaxTextureBindings * 2 + Constants.ReservedTextureBindings];
+             _bufferImageRefs = new TextureBuffer[Constants.MaxImageBindings * 2];
+ 
+             _textureArrayRefs = [];

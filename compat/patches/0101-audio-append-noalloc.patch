@@ -1,0 +1,144 @@
+diff --git a/src/Ryujinx.Audio/Common/AudioDeviceSession.cs b/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
+index 6ba001e8056b21a4df09fff8f59ab88df708e256..72863748fafad8db2ded381de7ac00810cf279cb 100644
+--- a/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
++++ b/src/Ryujinx.Audio/Common/AudioDeviceSession.cs
+@@ -25,6 +25,12 @@ namespace Ryujinx.Audio.Common
+         /// </summary>
+         private readonly AudioBuffer[] _buffers;
+ 
++        /// <summary>
++        /// S2Arm: one <see cref="AudioBuffer"/> per ring slot, reused by every append landing on that slot (was a new one per append).
++        /// A slot is only reused after its previous buffer left the ring (total count &lt; max).
++        /// </summary>
++        private readonly AudioBuffer[] _slots;
++
+         /// <summary>
+         /// The server index inside <see cref="_buffers"/> (appended but not queued to device driver).
+         /// </summary>
+@@ -83,6 +89,13 @@ namespace Ryujinx.Audio.Common
+             _bufferRegisteredLimit = bufferRegisteredLimit;
+ 
+             _buffers = new AudioBuffer[Constants.AudioDeviceBufferCountMax];
++            _slots = new AudioBuffer[Constants.AudioDeviceBufferCountMax];
++
++            for (int i = 0; i < _slots.Length; i++)
++            {
++                _slots[i] = new AudioBuffer();
++            }
++
+             _serverBufferIndex = 0;
+             _hardwareBufferIndex = 0;
+             _releasedBufferIndex = 0;
+@@ -153,25 +166,17 @@ namespace Ryujinx.Audio.Common
+         {
+             uint bufferToFlushCount = Math.Min(Math.Min(_bufferAppendedCount, 4), _bufferRegisteredLimit - _bufferRegisteredCount);
+ 
+-            AudioBuffer[] buffersToFlush = new AudioBuffer[bufferToFlushCount];
+-
+-            uint hardwareBufferIndex = _hardwareBufferIndex;
+-
+-            for (int i = 0; i < buffersToFlush.Length; i++)
+-            {
+-                buffersToFlush[i] = _buffers[hardwareBufferIndex];
+-
+-                _bufferAppendedCount--;
+-                _bufferRegisteredCount++;
+-
+-                hardwareBufferIndex = (hardwareBufferIndex + 1) % Constants.AudioDeviceBufferCountMax;
+-            }
++            // S2Arm: the buffers to flush are the ring slots [first, first + count) — queue them straight from the ring
++            // after the bookkeeping, same order as before (was a temporary AudioBuffer[] per flush)
++            uint firstBufferIndex = _hardwareBufferIndex;
+ 
+-            _hardwareBufferIndex = hardwareBufferIndex;
++            _bufferAppendedCount -= bufferToFlushCount;
++            _bufferRegisteredCount += bufferToFlushCount;
++            _hardwareBufferIndex = (firstBufferIndex + bufferToFlushCount) % Constants.AudioDeviceBufferCountMax;
+ 
+-            for (int i = 0; i < buffersToFlush.Length; i++)
++            for (uint i = 0; i < bufferToFlushCount; i++)
+             {
+-                _hardwareDeviceSession.QueueBuffer(buffersToFlush[i]);
++                _hardwareDeviceSession.QueueBuffer(_buffers[(firstBufferIndex + i) % Constants.AudioDeviceBufferCountMax]);
+             }
+         }
+ 
+@@ -290,12 +295,33 @@ namespace Ryujinx.Audio.Common
+         }
+ 
+         /// <summary>
+-        /// Append a new <see cref="AudioBuffer"/>.
++        /// Append a new audio buffer.
+         /// </summary>
+-        /// <param name="buffer">The <see cref="AudioBuffer"/> to append</param>
++        /// <param name="bufferTag">The unique tag of this buffer</param>
++        /// <param name="dataPointer">Pointer to the user samples</param>
++        /// <param name="dataSize">Size of the user samples region</param>
+         /// <returns>True if the buffer was appended</returns>
+-        public bool AppendBuffer(AudioBuffer buffer)
++        public bool AppendBuffer(ulong bufferTag, ulong dataPointer, ulong dataSize)
+         {
++            // S2Arm: the buffer object is the ring slot's own, reset here to a fresh buffer's state (was a new AudioBuffer from the
++            // caller per append). Safe to reuse: every way out of the ring (release after playback, or the unregister done by
++            // Stop / FlushBuffers / Dispose) leaves the driver with no reference to it (AudioSampleQueue copies unread samples in).
++            // Ring full: the slot at the server index still holds a buffer in flight — refuse before touching it
++            // (same result as before: driver registration undone, false)
++            if (GetTotalBufferCount() == Constants.AudioDeviceBufferCountMax)
++            {
++                return false;
++            }
++
++            AudioBuffer buffer = _slots[_serverBufferIndex];
++
++            buffer.BufferTag = bufferTag;
++            buffer.DataPointer = dataPointer;
++            buffer.DataSize = dataSize;
++            buffer.PlayedTimestamp = 0;
++            buffer.Data = null;
++            buffer.SampleReader = null;
++
+             if (_hardwareDeviceSession.RegisterBuffer(buffer))
+             {
+                 if (RegisterBuffer(buffer))
+diff --git a/src/Ryujinx.Audio/Input/AudioInputSystem.cs b/src/Ryujinx.Audio/Input/AudioInputSystem.cs
+index d1d4b0381b86a951f462db100c4f3272b3fd0d38..e366e11b62c1e0e0950e57734ff0760f011eeff9 100644
+--- a/src/Ryujinx.Audio/Input/AudioInputSystem.cs
++++ b/src/Ryujinx.Audio/Input/AudioInputSystem.cs
+@@ -187,14 +187,8 @@ namespace Ryujinx.Audio.Input
+         {
+             lock (_parentLock)
+             {
+-                AudioBuffer buffer = new()
+-                {
+-                    BufferTag = bufferTag,
+-                    DataPointer = userBuffer.Data,
+-                    DataSize = userBuffer.DataSize,
+-                };
+-
+-                if (_session.AppendBuffer(buffer))
++                // S2Arm: the session fills its own ring-slot buffer (was a new AudioBuffer per append)
++                if (_session.AppendBuffer(bufferTag, userBuffer.Data, userBuffer.DataSize))
+                 {
+                     return ResultCode.Success;
+                 }
+diff --git a/src/Ryujinx.Audio/Output/AudioOutputSystem.cs b/src/Ryujinx.Audio/Output/AudioOutputSystem.cs
+index 3cf6e07223147a67fec07dfd19cf78086461dbf8..247bf9b638b91e46771653b1c0ffaad3146c6b19 100644
+--- a/src/Ryujinx.Audio/Output/AudioOutputSystem.cs
++++ b/src/Ryujinx.Audio/Output/AudioOutputSystem.cs
+@@ -187,14 +187,8 @@ namespace Ryujinx.Audio.Output
+         {
+             lock (_parentLock)
+             {
+-                AudioBuffer buffer = new()
+-                {
+-                    BufferTag = bufferTag,
+-                    DataPointer = userBuffer.Data,
+-                    DataSize = userBuffer.DataSize,
+-                };
+-
+-                if (_session.AppendBuffer(buffer))
++                // S2Arm: the session fills its own ring-slot buffer (was a new AudioBuffer per append)
++                if (_session.AppendBuffer(bufferTag, userBuffer.Data, userBuffer.DataSize))
+                 {
+                     return ResultCode.Success;
+                 }

@@ -1,0 +1,71 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index 4f0b2bc135cd132e077b614de3cdeffdeb83b1b6..d58941fa28f682e9ad36b90508e282ce526a8c71 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -67,7 +67,9 @@ namespace Ryujinx.HLE.HOS.Applets
+         private bool _headless;
+         private KeyboardCalcFlags _lastCalcFlags;
+         private int _headlessAnswer;
+-        private const int HeadlessAnswerDelayMs = 500;
++
++        // S2Arm: how long after the keyboard is shown the host's answer is handed over (both the foreground applet and the inline keyboard)
++        private const int AnswerDelayMs = 500;
+         private NpadReader _npads = null;
+         private bool _canAcceptController = false;
+         private KeyboardInputMode _inputMode = KeyboardInputMode.ControllerAndKeyboard;
+@@ -233,22 +235,22 @@ namespace Ryujinx.HLE.HOS.Applets
+                 _textValue ??= initialText ?? DefaultInputText;
+             }
+ 
+-            // If the game requests a string with a minimum length less
+-            // than our default text, repeat our default text until we meet
+-            // the minimum length requirement.
+-            // This should always be done before the text truncation step.
+-            while (_textValue.Length < _keyboardForegroundConfig.StringLengthMin)
+-            {
+-                _textValue = String.Join(" ", _textValue, _textValue);
+-            }
++            // S2Arm: same rule as the inline keyboard (FitLength). Upstream joined repeats with a space, which no numeric field accepts
++            // (Let's Get Fit weight, 2–3 digits: "0" became "0 0")
++            _textValue = FitLength(_textValue, _keyboardForegroundConfig.StringLengthMin, _keyboardForegroundConfig.StringLengthMax);
+ 
+-            // If our default text is longer than the allowed length,
+-            // we truncate it.
+-            if (_textValue.Length > _keyboardForegroundConfig.StringLengthMax)
++            // S2Arm: a player's input always comes after the keyboard has been shown, never inside the game's Start call
++            _ = Task.Delay(AnswerDelayMs).ContinueWith(_ =>
+             {
+-                _textValue = _textValue[.._keyboardForegroundConfig.StringLengthMax];
+-            }
++                lock (_lock)
++                {
++                    SubmitForeground();
++                }
++            }, TaskScheduler.Default);
++        }
+ 
++        private void SubmitForeground()
++        {
+             // Does the application want to validate the text itself?
+             if (_keyboardForegroundConfig.CheckText)
+             {
+@@ -502,7 +504,7 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                         // A real keyboard's input arrives frames after the game has seen it Shown, never in the same batch as the
+                         // Appear reply: hand the answer over once the appear has settled, unless the game moved on meanwhile
+-                        _ = Task.Delay(HeadlessAnswerDelayMs).ContinueWith(_ =>
++                        _ = Task.Delay(AnswerDelayMs).ContinueWith(_ =>
+                         {
+                             lock (_lock)
+                             {
+@@ -531,8 +533,8 @@ namespace Ryujinx.HLE.HOS.Applets
+             }
+         }
+ 
+-        // S2Arm: the inline keyboard's answer must fit the game's Appear limits: repeat the text up to the minimum (no separator,
+-        // so the result stays in the text's own character set: a numeric field stays digits), cut at the maximum
++        // S2Arm: the host's answer must fit the game's limits (foreground config / inline Appear): repeat the text up to the minimum
++        // (no separator, so the result stays in the text's own character set: a numeric field stays digits), cut at the maximum
+         internal static string FitLength(string text, int min, int max)
+         {
+             if (text.Length > 0)

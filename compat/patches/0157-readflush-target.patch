@@ -1,0 +1,83 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 6dec949333c921282511f9fcec93974dff263b21..a5f70f7515615349fe712074e5fd413ef94bde8c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -852,6 +852,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             buffer.SignalModified(address, size, BufferStage.Copy);
+             buffer.CopyToDependantVirtualBuffers(address, size);
+ 
++            // 信号量精确写开时，游戏拿这份 GPU 读回结果不再靠信号量写顺带整页回写：登记成定向读时回写页，游戏读时先回写
++            if (MemoryManager.S2ASemPrecise)
++            {
++                MemoryManager.S2AMarkReadFlush(address, size);
++            }
++
+             return true;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index 049fe4fcb2804fd9dba624bc6831326f7befabac..ba34a00fdf8e297740274c0e4c41fcff52510629 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -300,13 +300,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <summary>
+         /// S2A（帧率能耗线 10-22）：GPU 引擎（信号量 / 计数器报告）写一个值，按精确写跟踪（同 InlineToMemory）：写到 GPU 改过的缓冲上只在改过范围里打洞，
+         /// 不整页等 GPU 回写。前提：客体读 GPU 改过的页也触发回写（写跟踪 S2A_TRACK_READFLUSH=1），否则客体拿不到同页的 GPU 结果（只开本项实测八方2 自动曝光全白）。
+-        /// 缺省关：S2A_SEM_PRECISE=1 开，须与 S2A_TRACK_READFLUSH=1 同开
++        /// 缺省关：S2A_SEM_PRECISE=1 开。写完把这页登记成定向读时回写页（MemoryTracking.S2AMarkReadFlush），不再需要全局 S2A_TRACK_READFLUSH
+         /// </summary>
+         public void S2AEngineWrite<T>(ulong va, T value) where T : unmanaged
+         {
+             if (_s2aSemPrecise)
+             {
+                 WriteTrackedResource(va, MemoryMarshal.Cast<T, byte>(MemoryMarshal.CreateSpan(ref value, 1)));
++                S2AMarkReadFlush(Translate(va), (ulong)Unsafe.SizeOf<T>());
+             }
+             else
+             {
+@@ -315,6 +316,28 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         }
+ 
+         private static readonly bool _s2aSemPrecise = Environment.GetEnvironmentVariable("S2A_SEM_PRECISE") == "1";
++        internal static bool S2ASemPrecise => _s2aSemPrecise;
++
++        // 同一页只登记一次（原生层也会去重，这里省掉每次信号量写的跨语言调用与加锁）
++        private static ulong _s2aLastMarkedPage = ulong.MaxValue;
++
++        internal static void S2AMarkReadFlush(ulong address, ulong size)
++        {
++            if (address == PteUnmapped || size == 0 || Ryujinx.Memory.Tracking.MemoryTracking.S2AMarkReadFlush is not { } mark)
++            {
++                return;
++            }
++
++            ulong page = address >> 14;
++
++            if (page == _s2aLastMarkedPage && (address + size - 1) >> 14 == page)
++            {
++                return;
++            }
++
++            _s2aLastMarkedPage = page;
++            mark(address, size);
++        }
+ 
+         /// <summary>
+         /// Writes data to GPU mapped memory without write tracking.
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index fbfd11b207c292310aa51c8ed587cb9a975d61df..bc43fc25af45cd43e19689df3e3c0678ac3c40f8 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -10,6 +10,12 @@ namespace Ryujinx.Memory.Tracking
+     /// </summary>
+     public class MemoryTracking
+     {
++        /// <summary>
++        /// S2A（帧率能耗线 10-22）：定向读时回写登记钩子（宿主写跟踪 NxTrack.Init 设）。GPU 层在信号量精确写 / DMA 在 GPU 上读回贴图之后，
++        /// 用游戏地址范围调它：这些页里 GPU 改过、还没回写的数据，游戏读时也先回写（只对登记页，不全局开 READFLUSH）
++        /// </summary>
++        public static Action<ulong, ulong> S2AMarkReadFlush;
++
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 

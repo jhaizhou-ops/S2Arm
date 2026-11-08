@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index 740f7a54185aa7d959c24a7b450b589367f8c93e..30cfea31ca69dfa3402aff8586a0ef8106320447 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -364,25 +364,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                         parent.Remove(block);
+                     }
+                 }
+-                else if (isIf && parent.Type == AstBlockType.Else && parent.Count == (hasElse ? 2 : 1))
+-                {
+-                    AstBlock parentOfParent = parent.Parent;
+-
+-                    parent.Remove(block);
+-
+-                    parentOfParent.AddAfter(parent, block);
+-
+-                    if (hasElse)
+-                    {
+-                        parent.Remove(nextBlock);
+-
+-                        parentOfParent.AddAfter(block, nextBlock);
+-                    }
+-
+-                    parentOfParent.Remove(parent);
+-
+-                    block.TurnIntoElseIf();
+-                }
++                // S2Arm 11-07: upstream turned "else { if (c) {...} [else {...}] }" into an ElseIf block here. The SPIR-V generator
++                // (SpirvGenerator BlockEntered) only takes an immediately following Else as the false target of an If and emits no branch
++                // into an ElseIf block, so the else-if arm became unreachable and was dropped. With DebugMode on every Else holds comment
++                // nodes and never got rewritten; with it off, propagation empties the Else and the arm vanished (BotW skinning vertex shader
++                // 0068dfb7db3baf9a kept bone 0 of 4). ElseIf only prettifies GLSL; the nested else { if } has the same meaning, so keep it.
+             }
+         }
+     }

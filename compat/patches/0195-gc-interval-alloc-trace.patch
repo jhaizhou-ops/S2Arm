@@ -1,0 +1,54 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index de80e4c0e7bf4eec0134bd2c4e7fca6d4e2c0974..5bd8af465ddedd970fb6f3b1c4aecbaf05061de2 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -185,6 +185,49 @@ namespace Ryujinx.Graphics.Gpu
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
+         };
+ 
++        // 按 GC 间隔拆账（S2A_ALLOC_TRACE=1；NxFrames 每打一行 [gc] 由 Compose 接线调一次）：本次与上次 GC 之间渲染线程各分派项的分配增量，≥ 64 KB 的全列
++        private static readonly Dictionary<int, long> _gcSnap = new();
++
++        public static string SinceLastGc()
++        {
++            if (!AllocOn)
++            {
++                return null;
++            }
++
++            lock (_acc)
++            {
++                List<(int Key, long D)> items = new();
++                long total = 0;
++                foreach (KeyValuePair<int, (long Bytes, long Calls)> kv in _acc)
++                {
++                    long d = kv.Value.Bytes - (_gcSnap.TryGetValue(kv.Key, out long s) ? s : 0);
++                    _gcSnap[kv.Key] = kv.Value.Bytes;
++                    if (d > 0)
++                    {
++                        items.Add((kv.Key, d));
++                        if (kv.Key >> 20 < 4)
++                        {
++                            total += d;
++                        }
++                    }
++                }
++
++                System.Text.StringBuilder sb = new($"[分配·GC间隔·渲染] GPFIFO 分派 {total / 1024} KB");
++                foreach ((int k, long d) in items.OrderByDescending(x => x.D))
++                {
++                    if (d < 65536)
++                    {
++                        break;
++                    }
++
++                    sb.Append($"\n[分配·GC间隔·渲染]   {Name(k)}：{d / 1024} KB");
++                }
++
++                return sb.ToString();
++            }
++        }
++
+         private static void Dump()
+         {
+             // 段、状态组、宏引擎与资源子项都是包含式计数，不重复进入分派累计。

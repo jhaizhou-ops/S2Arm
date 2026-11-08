@@ -1,0 +1,48 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index b290c671138a391d51c0f0ed6707205587daf212..18122423dffc74850d62dcc179006f156e39614d 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -28,6 +28,26 @@ namespace Ryujinx.Audio.Backends.Apple
+     // Called by the pump under its lock (one writer at a time).
+     internal sealed class S2AOutputDiag
+     {
++        // S2Arm (10-25 开发浮层)：每 10 秒把本会话累计真缺口（ms）与本窗渲染丢周期交给宿主（runtime/src/hud.c）。没有宿主库（单测 / 别的宿主）就不报
++        [System.Runtime.InteropServices.DllImport("s2a_native")] private static extern void s2a_hud_audio(int session, long gapMsTotal, long skipped);
++        private static bool _hudGone;
++        private static void HudAudio(int session, long gapMsTotal, long skipped)
++        {
++            if (_hudGone)
++            {
++                return;
++            }
++
++            try
++            {
++                s2a_hud_audio(session, gapMsTotal, skipped);
++            }
++            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException)
++            {
++                _hudGone = true;
++            }
++        }
++
+         private const int MaxSessions = 8;
+         private static readonly S2AOutputDiag[] _all = new S2AOutputDiag[MaxSessions];
+         private static int _nextIndex = -1;
+@@ -408,6 +428,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
+                 long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
++                HudAudio(-1, 0, skipped);   // 渲染丢周期是整个渲染器的，不分会话：单报一次
+ 
+                 for (int i = 0; i < MaxSessions; i++)
+                 {
+@@ -448,6 +469,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                         $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+                         $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
++                    HudAudio(d.Index, gap * 1000 / d._rate, 0);
++
+                     int cu = Volatile.Read(ref d._cushions);
+                     if (cu != d._repCushions)
+                     {

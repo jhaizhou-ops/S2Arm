@@ -1,0 +1,122 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index 5388aa999832ba33af9dca0a76b56d886177beff..a78c08642ecbea3694019ce1e12ef936a22da2a3 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -22,6 +22,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         // S2A（10-19 出包线）：记下这次翻译实际读了哪些特化状态，缓存匹配只比读过的（ShaderSpecializationState.MatchesGraphics）；原版无条件比 a2c 抖动与全部 32 个属性类型，
+         // 同一份翻译结果因没读过的字段不同而未命中、运行时现翻（动森首局现翻 8 支：代码全同，只差 a2c_dither / 未用位置的属性类型）
+         public bool S2AA2cRead, S2ADepthRead;
++        public uint S2AAttrIntUse, S2AAttrSintUse;   // S2A：顶点属性读出值进了整数运算的位置 / 其中有带符号用法的（Transforms/S2AAttrIntUse，离线烘焙器出整数类别变体用）
+         public uint S2AAttrRead;
+         public bool AlphaToCoverageDitherEnable { get { S2AA2cRead = true; return _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable; } }
+         public bool ViewportTransformDisable => _graphicsState.ViewportTransformDisable;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f88977b0a7fef728ebf67fa83e63c8429d12cc3
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs
+@@ -0,0 +1,77 @@
++using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Shader.Translation.Transforms
++{
++    /// <summary>
++    /// S2A（着色器全量预编，10-20）：只分析不改写——找出顶点阶段里「属性读出值直接进整数运算」的位置（整数转浮点、整数加减乘移位比较极值、
++    /// 当常量 / 存储缓冲下标），记进 ShaderDefinitions.S2AAttrIntUse / S2AAttrSintUse。离线烘焙器据此给这些位置额外出整数类别的特化状态变体
++    /// （顶点输入声明类型须与顶点格式类别一致，不能运行时化；推断不准时变体只是多一个永不命中的条目，不影响正确性）
++    /// </summary>
++    class S2AAttrIntUse : ITransformPass
++    {
++        public static bool IsEnabled(IGpuAccessor gpuAccessor, ShaderStage stage, TargetLanguage targetLanguage, FeatureFlags usedFeatures)
++        {
++            return stage == ShaderStage.Vertex;
++        }
++
++        public static LinkedListNode<INode> RunPass(TransformContext context, LinkedListNode<INode> node)
++        {
++            Operation operation = (Operation)node.Value;
++            Instruction inst = operation.Inst;
++            if ((inst & (Instruction.FP32 | Instruction.FP64)) != 0)
++            {
++                return node;
++            }
++
++            bool signed = false;
++            int first = 0;
++            switch (inst & Instruction.Mask)
++            {
++                case Instruction.ConvertS32ToFP32: case Instruction.ConvertS32ToFP64: case Instruction.ShiftRightS32: signed = true; break;
++                case Instruction.ConvertU32ToFP32: case Instruction.ConvertU32ToFP64: case Instruction.ShiftRightU32: case Instruction.ShiftLeft:
++                case Instruction.Add: case Instruction.Subtract: case Instruction.Multiply: case Instruction.Divide:
++                case Instruction.Minimum: case Instruction.Maximum: case Instruction.MinimumU32: case Instruction.MaximumU32:
++                case Instruction.CompareEqual: case Instruction.CompareNotEqual: case Instruction.CompareLessU32: case Instruction.CompareGreaterU32:
++                case Instruction.CompareLessOrEqualU32: case Instruction.CompareGreaterOrEqualU32:
++                    break;
++                case Instruction.CompareLess: case Instruction.CompareGreater: case Instruction.CompareLessOrEqual: case Instruction.CompareGreaterOrEqual:
++                    signed = true; break;
++                case Instruction.Load:
++                    if (operation.StorageKind != StorageKind.ConstantBuffer && operation.StorageKind != StorageKind.StorageBuffer) return node;
++                    first = 1;   // 第 0 个源是绑定号，之后是下标
++                    break;
++                default:
++                    return node;
++            }
++
++            for (int i = first; i < operation.SourcesCount; i++)
++            {
++                if (AttrLocation(operation.GetSource(i)) is int loc)
++                {
++                    context.Definitions.S2AAttrIntUse |= 1u << loc;
++                    if (signed) context.Definitions.S2AAttrSintUse |= 1u << loc;
++                }
++            }
++
++            return node;
++        }
++
++        private static int? AttrLocation(Operand src)
++        {
++            for (int hop = 0; hop < 4 && src != null && src.Type == OperandType.LocalVariable; hop++)
++            {
++                if (src.AsgOp is not Operation def) return null;
++                if (def.Inst == Instruction.Copy) { src = def.GetSource(0); continue; }
++                if (def.Inst == Instruction.Load && def.StorageKind == StorageKind.Input && def.SourcesCount >= 2 &&
++                    def.GetSource(0).Type == OperandType.Constant && def.GetSource(0).Value == (int)IoVariable.UserDefined &&
++                    def.GetSource(1).Type == OperandType.Constant)
++                {
++                    return def.GetSource(1).Value;
++                }
++                return null;
++            }
++            return null;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TransformPasses.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TransformPasses.cs
+index 7ff3b8bf134de3ae283733ee6395730168e2e65c..d3512edf8115c85929fa536d1f549ee209060df7 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TransformPasses.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TransformPasses.cs
+@@ -7,6 +7,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+     {
+         public static void RunPass(TransformContext context)
+         {
++            RunPass<S2AAttrIntUse>(context);   // S2A：只分析（属性当整数用的位置），须在改写属性读取的 VertexToCompute 之前
+             RunPass<DrawParametersReplace>(context);
+             RunPass<ForcePreciseEnable>(context);
+             RunPass<VectorComponentSelect>(context);
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index d85b06a989f4d1cb42d731cf02a38a85ddf47776..1bb73331b0e5a29cf09c1c76481a2924ed83b905 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -178,6 +178,10 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public static bool S2AStageIndep = Environment.GetEnvironmentVariable("S2A_STAGE_INDEP") != "0";
+ 
+         // S2A：特化状态运行时化（缺省开；S2A_RUNTIME_STATE=0 关，GPU 代价 A/B 用——烘焙与运行时必须同一取值）。开时 DepthMode 等改读支持缓冲 s2a_flags，翻译结果不随这些状态变
++        /// <summary>S2A：顶点属性当整数用的位置掩码 / 其中带符号的（翻译后有效，离线烘焙器用）</summary>
++        public uint S2AAttrIntMask => Definitions.S2AAttrIntUse;
++        public uint S2AAttrSintMask => Definitions.S2AAttrSintUse;
++
+         public static bool S2ARuntimeState = Environment.GetEnvironmentVariable("S2A_RUNTIME_STATE") != "0";
+ 
+         /// <summary>S2A：单独翻译顶点阶段（离线批量翻译里没配上片元的顶点）：按「下一阶段是片元、读全部通用输入」处理，结果与配任何片元时相同</summary>

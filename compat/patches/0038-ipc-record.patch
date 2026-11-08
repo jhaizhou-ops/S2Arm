@@ -1,0 +1,260 @@
+diff --git a/src/Ryujinx.Common/S2ARecord.cs b/src/Ryujinx.Common/S2ARecord.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4af0bed684ba86b6439e4209d36372a69acd4e93
+--- /dev/null
++++ b/src/Ryujinx.Common/S2ARecord.cs
+@@ -0,0 +1,87 @@
++using System;
++using System.IO;
++using System.Text;
++
++namespace Ryujinx.Common
++{
++    // S2Arm differential IPC record: when S2A_IPC_RECORD=<file> is set, every service request handled by the HLE (IpcService)
++    // and Horizon (ServiceDispatchTableBase) frameworks appends one text line. The same files are applied to S2Arm and to the
++    // reference desktop Ryujinx, so the two records can be compared line by line (sequence of (service, command), raw data /
++    // buffer content hashes, result codes, handle counts). Handle values and buffer addresses are never recorded: they differ
++    // between the two hosts by construction.
++    public static class S2ARecord
++    {
++        public static readonly bool Enabled = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_IPC_RECORD"));
++
++        private static readonly object _lock = new();
++        private static StreamWriter _writer;
++        private static long _seq;
++
++        public static void Line(StringBuilder body)
++        {
++            lock (_lock)
++            {
++                _writer ??= new StreamWriter(Environment.GetEnvironmentVariable("S2A_IPC_RECORD"), append: false, new UTF8Encoding(false)) { AutoFlush = true };
++                _writer.Write(++_seq);
++                _writer.Write('\t');
++                _writer.WriteLine(body);
++            }
++        }
++
++        // FNV-1a 64
++        public static ulong Hash(ReadOnlySpan<byte> data)
++        {
++            ulong h = 0xcbf29ce484222325UL;
++
++            foreach (byte b in data)
++            {
++                h = (h ^ b) * 0x100000001b3UL;
++            }
++
++            return h;
++        }
++
++        public static void AppendHash(StringBuilder sb, string key, ReadOnlySpan<byte> data)
++        {
++            sb.Append('\t').Append(key).Append('=').Append(data.Length).Append(':').Append(Hash(data).ToString("x16"));
++        }
++
++        // Several buffers of one kind: key=size:hash,size:hash (omitted when there are none)
++        public static void AppendBuffers(StringBuilder sb, string key, int count, Func<int, (ulong Address, ulong Size)> get, Action<ulong, Span<byte>> read)
++        {
++            if (count == 0)
++            {
++                return;
++            }
++
++            sb.Append('\t').Append(key).Append('=');
++
++            for (int i = 0; i < count; i++)
++            {
++                (ulong address, ulong size) = get(i);
++
++                if (i != 0)
++                {
++                    sb.Append(',');
++                }
++
++                sb.Append(size);
++
++                if (address != 0 && size != 0 && size <= 64UL << 20)
++                {
++                    byte[] buf = new byte[size];
++
++                    try
++                    {
++                        read(address, buf);
++                        sb.Append(':').Append(Hash(buf).ToString("x16"));
++                    }
++                    catch (Exception)
++                    {
++                        sb.Append(":unreadable");
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/IpcService.cs b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+index 718312026147b6db78f5bca36a405fcdc9534800..2dd39fe89abb938a9dc9b90371d476e6d59296b3 100644
+--- a/src/Ryujinx.HLE/HOS/Services/IpcService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+@@ -193,6 +193,8 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+                 context.ResponseData.Write(IpcMagic.Sfco);
+                 context.ResponseData.Write((long)result);
++
++                S2AIpcRecord.Command(service, commandId, context, (long)result, tipc: false);
+             }
+             else
+             {
+@@ -245,6 +247,8 @@ namespace Ryujinx.HLE.HOS.Services
+                 context.ResponseData.BaseStream.Seek(0, SeekOrigin.Begin);
+ 
+                 context.ResponseData.Write((uint)result);
++
++                S2AIpcRecord.Command(this, commandId, context, (long)result, tipc: true);
+             }
+             else
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs b/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a654b4056b3c6f6d2eb68a5ddd6994c04525fd73
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs
+@@ -0,0 +1,63 @@
++using Ryujinx.Common;
++using Ryujinx.HLE.HOS.Ipc;
++using System;
++using System.IO;
++using System.Text;
++
++namespace Ryujinx.HLE.HOS.Services
++{
++    // S2Arm differential IPC record, HLE framework side (see Ryujinx.Common.S2ARecord). Called once per handled command,
++    // after the result has been written to the response.
++    static class S2AIpcRecord
++    {
++        // The check stays in its own method: the record body captures parameters in lambdas, and the compiler allocates that
++        // closure at method entry — it must not run (allocate) on the hot path when recording is off
++        public static void Command(IpcService service, int commandId, ServiceCtx context, long result, bool tipc)
++        {
++            if (S2ARecord.Enabled)
++            {
++                Write(service, commandId, context, result, tipc);
++            }
++        }
++
++        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
++        private static void Write(IpcService service, int commandId, ServiceCtx context, long result, bool tipc)
++        {
++            IpcMessage req = context.Request;
++            IpcMessage resp = context.Response;
++            StringBuilder sb = new();
++
++            sb.Append(tipc ? "HLE-TIPC" : "HLE").Append('\t');
++            sb.Append(service is DummyService dummy ? dummy.ServiceName : service.GetType().FullName).Append('\t').Append(commandId);
++
++            S2ARecord.AppendHash(sb, "in", ReadAll(context.RequestData.BaseStream));
++            S2ARecord.AppendBuffers(sb, "x", req.PtrBuff.Count, i => (req.PtrBuff[i].Position, req.PtrBuff[i].Size), Read(context));
++            S2ARecord.AppendBuffers(sb, "a", req.SendBuff.Count, i => (req.SendBuff[i].Position, req.SendBuff[i].Size), Read(context));
++            sb.Append("\th=").Append(req.HandleDesc?.ToCopy.Length ?? 0).Append('/').Append(req.HandleDesc?.ToMove.Length ?? 0);
++            sb.Append(req.HandleDesc?.HasPId == true ? "+pid" : "");
++
++            sb.Append("\trc=").Append(result.ToString("x"));
++            S2ARecord.AppendHash(sb, "out", ReadAll(context.ResponseData.BaseStream));
++            S2ARecord.AppendBuffers(sb, "b", req.ReceiveBuff.Count, i => (req.ReceiveBuff[i].Position, req.ReceiveBuff[i].Size), Read(context));
++            S2ARecord.AppendBuffers(sb, "w", req.ExchangeBuff.Count, i => (req.ExchangeBuff[i].Position, req.ExchangeBuff[i].Size), Read(context));
++            S2ARecord.AppendBuffers(sb, "c", req.RecvListBuff.Count, i => (req.RecvListBuff[i].Position, req.RecvListBuff[i].Size), Read(context));
++            sb.Append("\toh=").Append(resp.HandleDesc?.ToCopy.Length ?? 0).Append('/').Append(resp.HandleDesc?.ToMove.Length ?? 0);
++            sb.Append("\tobj=").Append(resp.ObjectIds.Count);
++
++            S2ARecord.Line(sb);
++        }
++
++        private static Action<ulong, Span<byte>> Read(ServiceCtx context) => (address, dest) => context.Memory.Read(address, dest);
++
++        private static byte[] ReadAll(Stream s)
++        {
++            long pos = s.Position;
++            byte[] data = new byte[s.Length];
++            s.Position = 0;
++            s.ReadExactly(data);
++            s.Position = pos;
++
++            return data;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/S2AIpcRecord.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/S2AIpcRecord.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3baf7d089039d00adc26f63579ebb747be701d14
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/S2AIpcRecord.cs
+@@ -0,0 +1,57 @@
++using Ryujinx.Common;
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.Sf.Hipc;
++using System;
++using System.Runtime.InteropServices;
++using System.Text;
++
++namespace Ryujinx.Horizon.Sdk.Sf.Cmif
++{
++    // S2Arm differential IPC record, Horizon framework side (see Ryujinx.Common.S2ARecord). Called once per handled command,
++    // after the CMIF out header has been written.
++    static class S2AIpcRecord
++    {
++        // The check stays in its own method (the body's lambdas allocate a closure at method entry)
++        public static void Command(scoped ref ServiceDispatchContext context, string objectName, uint commandId, ReadOnlySpan<byte> inRawData, Result result)
++        {
++            if (S2ARecord.Enabled)
++            {
++                Write(ref context, objectName, commandId, inRawData, result);
++            }
++        }
++
++        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
++        private static void Write(scoped ref ServiceDispatchContext context, string objectName, uint commandId, ReadOnlySpan<byte> inRawData, Result result)
++        {
++            HipcMessageData req = context.Request.Data;
++            StringBuilder sb = new();
++
++            sb.Append("HZN\t").Append(objectName).Append('\t').Append(commandId);
++
++            S2ARecord.AppendHash(sb, "in", inRawData);
++
++            HipcStaticDescriptor[] statics = req.SendStatics.ToArray();
++            HipcBufferDescriptor[] send = req.SendBuffers.ToArray();
++            HipcBufferDescriptor[] recv = req.ReceiveBuffers.ToArray();
++            HipcBufferDescriptor[] exch = req.ExchangeBuffers.ToArray();
++
++            S2ARecord.AppendBuffers(sb, "x", statics.Length, i => (statics[i].Address, statics[i].Size), Read);
++            S2ARecord.AppendBuffers(sb, "a", send.Length, i => (send[i].Address, send[i].Size), Read);
++            sb.Append("\th=").Append(req.CopyHandles.Length).Append('/').Append(req.MoveHandles.Length);
++            sb.Append(context.Request.Meta.SendPid ? "+pid" : "");
++
++            sb.Append("\trc=").Append(((long)result.ErrorCode).ToString("x"));
++
++            HipcMessage resp = new(context.OutMessageBuffer);
++            S2ARecord.AppendHash(sb, "out", MemoryMarshal.AsBytes(resp.Data.DataWords));
++            S2ARecord.AppendBuffers(sb, "b", recv.Length, i => (recv[i].Address, recv[i].Size), Read);
++            S2ARecord.AppendBuffers(sb, "w", exch.Length, i => (exch[i].Address, exch[i].Size), Read);
++            sb.Append("\tc=").Append(req.ReceiveList.Length);
++            sb.Append("\toh=").Append(resp.Data.CopyHandles.Length).Append('/').Append(resp.Data.MoveHandles.Length);
++
++            S2ARecord.Line(sb);
++        }
++
++        private static void Read(ulong address, Span<byte> dest) => HorizonStatic.AddressSpace.Read(address, dest);
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServiceDispatchTableBase.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServiceDispatchTableBase.cs
+index df147256099aea96d4b995c3c60613fb381b0ef9..82d20652fca5b98de0d958572f3b04d7206a4abd 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServiceDispatchTableBase.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServiceDispatchTableBase.cs
+@@ -82,6 +82,8 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+ 
+             outHeader[0] = new CmifOutHeader { Magic = CmifMessage.CmifOutHeaderMagic, Result = commandResult };
+ 
++            S2AIpcRecord.Command(ref context, objectName, commandId, inMessageRawData, commandResult);
++
+             return Result.Success;
+         }
+ 

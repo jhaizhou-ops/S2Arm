@@ -1,0 +1,125 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+index df6468ba84dd026b95c68a9da1fdb64ec97eec3c..73cb6483b3a22a1ee083705e585eb21dac8516df 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+@@ -89,6 +89,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+         /// Performs the compute dispatch operation.
+         /// </summary>
+         /// <param name="argument">Method call argument</param>
++        private static readonly HashSet<ulong> _s2aFaultReported = [];   // S2A：取码越界已报红的计算着色器地址（同一地址只报一次）
++
+         private void SendSignalingPcasB(int argument)
+         {
+             MemoryManager memoryManager = _channel.MemoryManager;
+@@ -144,7 +146,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+                 _channel.BufferManager.HasUnalignedStorageBuffers);
+ 
+             S2AAllocTrace.Step(0x40_0014, ref s2aA);
+-            CachedShaderProgram cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
++            CachedShaderProgram cs;
++            try
++            {
++                cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
++            }
++            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀（0012）报红时这次派发跳过，不带走 GPU 线程（同 StateUpdater.S2AShaderFault）
++            {
++                lock (_s2aFaultReported)
++                {
++                    if (_s2aFaultReported.Count < 64 && _s2aFaultReported.Add(shaderGpuVa)) System.Console.Error.WriteLine($"[gpu] 【红】计算着色器取码越界，这次派发跳过：{e.Message}；程序地址 0x{shaderGpuVa:X}");
++                }
++                return;
++            }
+ 
+             _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
+             S2AAllocTrace.Step(0x40_0015, ref s2aA);
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
+index d9218e52458f2e54f32b6612d5416d5b74a7952e..a8114518a1e61f8b9360ebc9a3ea22dbe568af1d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs
+@@ -585,6 +585,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             int firstInstance,
+             bool indexed)
+         {
++            if (engine.S2AShaderFault) return;   // S2A：着色器取码越界的那组着色器不画（StateUpdater 已报红）
++
+             if (instanceCount > 1)
+             {
+                 _channel.BufferManager.SetInstancedDrawVertexCount(count);
+@@ -682,7 +684,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+             engine.UpdateState();
+ 
+-            if (hasCount)
++            if (engine.S2AShaderFault)
++            {
++                // S2A：着色器取码越界的那组着色器不画（StateUpdater 已报红）
++            }
++            else if (hasCount)
+             {
+                 BufferRange indirectBuffer = memory.BufferCache.GetBufferRange(indirectBufferRange, BufferStage.Indirect);
+                 BufferRange parameterBuffer = memory.BufferCache.GetBufferRange(parameterBufferRange, BufferStage.Indirect);
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 1a6ca7fe1fb0c660d83d6dd640563ee4d00df604..1a722cf994fc701da4c9759f843783410fedcbda 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -8,6 +8,7 @@ using Ryujinx.Graphics.Gpu.Shader;
+ using Ryujinx.Graphics.Shader;
+ using Ryujinx.Graphics.Texture;
+ using System;
++using System.Collections.Generic;
+ using System.Runtime.CompilerServices;
+ 
+ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+@@ -38,6 +39,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         private bool _s2aAdvBlendReported;
+         private bool _s2aTfbReported;
+ 
++        // S2A：着色器取码安全阀（0012）报红后，这组着色器不能用——绘制出口（DrawManager）见此跳过，直到着色器状态再变、解码成功。
++        // 原先这里补完现场就重抛，GPU 模拟线程退出、进程 abort（10-28 双人成行通用模式联机闪退，片元代码区被一张只由 GPU 写过的贴图盖住）
++        internal bool S2AShaderFault;
++        private static readonly HashSet<ShaderAddresses> _s2aFaultReported = [];
++
+         private readonly StateUpdateTracker<ThreedClassState> _updateTracker;
+ 
+         private readonly ShaderProgramInfo[] _currentProgramInfo;
+@@ -1495,8 +1501,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     ref _currentSpecState.GetGraphicsState(),
+                     addresses);
+             }
+-            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀报红时补现场（程序区基址 + 各阶段开关 / 偏移 / 地址）
++            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀报红时补现场（程序区基址 + 各阶段开关 / 偏移 / 地址），本组着色器的绘制跳过
+             {
++                S2AShaderFault = true;
++                lock (_s2aFaultReported)
++                {
++                    if (_s2aFaultReported.Count >= 64 || !_s2aFaultReported.Add(addresses)) return;   // 同一组地址只报一次（补现场要读 1 MB 物理区间）
++                }
+                 var sb = new System.Text.StringBuilder($"{e.Message}；程序区基址 0x{baseAddress:X}；");
+                 for (int index = 0; index < 6; index++)
+                 {
+@@ -1516,8 +1527,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     }
+                     catch (Exception re) { sb.Append($"阶段 {index} 读不出：{re.Message}；"); }
+                 }
+-                throw new InvalidOperationException(sb.ToString(), e);
++                System.Console.Error.WriteLine($"[gpu] 【红】着色器取码越界，本组着色器的绘制跳过：{sb}");
++                return;
+             }
++            S2AShaderFault = false;
+ 
+             if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000c, S2AAllocTrace.Now() - s2aGs);
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+index 285b822cc6f7de077346783bc2f958ad554c3858..a2d6fc61ca594a3e4af772c276209b890fe49566 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+@@ -29,6 +29,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         private readonly ConstantBufferUpdater _cbUpdater;
+         private readonly StateUpdater _stateUpdater;
+ 
++        /// <summary>S2A：当前着色器组取码越界、绘制要跳过（StateUpdater.S2AShaderFault）</summary>
++        internal bool S2AShaderFault => _stateUpdater.S2AShaderFault;
++
+         private SetMmeShadowRamControlMode ShadowMode => _state.State.SetMmeShadowRamControlMode;
+ 
+         /// <summary>

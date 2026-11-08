@@ -1,0 +1,94 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 11506ea1317581af7e6672d46804be2d08d5bb31..4bea46a4807b77288ffa18ce739be804983d9ff4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -466,37 +466,37 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+             for (int i = 0; i < regionCount; i++)
+             {
+-                    if (_loadNeeded[baseHandle + i])
++                if (_loadNeeded[baseHandle + i])
++                {
++                    (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) info = GetHandleInformation(baseHandle + i);
++
++                    // Ensure the data for this handle is loaded in the span.
++                    if (spanEndIndex <= i - 1)
+                     {
+-                        (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) info = GetHandleInformation(baseHandle + i);
++                        spanEndIndex = i;
+ 
+-                        // Ensure the data for this handle is loaded in the span.
+-                        if (spanEndIndex <= i - 1)
++                        if (_is3D)
+                         {
+-                            spanEndIndex = i;
+-
+-                            if (_is3D)
++                            // Look ahead to see how many handles need to be loaded.
++                            for (int j = i + 1; j < regionCount; j++)
+                             {
+-                                // Look ahead to see how many handles need to be loaded.
+-                                for (int j = i + 1; j < regionCount; j++)
++                                if (_loadNeeded[baseHandle + j])
+                                 {
+-                                    if (_loadNeeded[baseHandle + j])
+-                                    {
+-                                        spanEndIndex = j;
+-                                    }
+-                                    else
+-                                    {
+-                                        break;
+-                                    }
++                                    spanEndIndex = j;
++                                }
++                                else
++                                {
++                                    break;
+                                 }
+                             }
++                        }
+ 
+-                            (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) endInfo = spanEndIndex == i ? info : GetHandleInformation(baseHandle + spanEndIndex);
++                        (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) endInfo = spanEndIndex == i ? info : GetHandleInformation(baseHandle + spanEndIndex);
+ 
+-                            spanBase = _allOffsets[info.Index];
+-                            int spanLast = _allOffsets[endInfo.Index + endInfo.Layers * endInfo.Levels - 1];
+-                            int endOffset = Math.Min(spanLast + _sliceSizes[endInfo.BaseLevel + endInfo.Levels - 1], (int)Storage.Size);
+-                            int size = endOffset - spanBase;
++                        spanBase = _allOffsets[info.Index];
++                        int spanLast = _allOffsets[endInfo.Index + endInfo.Layers * endInfo.Levels - 1];
++                        int endOffset = Math.Min(spanLast + _sliceSizes[endInfo.BaseLevel + endInfo.Levels - 1], (int)Storage.Size);
++                        int size = endOffset - spanBase;
+ 
+                         MultiRange s2aSlice = Storage.Range.Slice((ulong)spanBase, (ulong)size);
+                         _physicalMemory.S2ASignalReadForTexture(s2aSlice);
+@@ -504,20 +504,19 @@ namespace Ryujinx.Graphics.Gpu.Image
+                         dataSpan = _physicalMemory.S2AGetSpanScratch(s2aSlice, out s2aScratch);
+                     }
+ 
+-                        // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
+-                        for (int layer = 0; layer < info.Layers; layer++)
++                    // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
++                    for (int layer = 0; layer < info.Layers; layer++)
++                    {
++                        for (int level = 0; level < info.Levels; level++)
+                         {
+-                            for (int level = 0; level < info.Levels; level++)
+-                            {
+-                                int offsetIndex = GetOffsetIndex(info.BaseLayer + layer, info.BaseLevel + level);
+-                                int offset = _allOffsets[offsetIndex];
++                            int offsetIndex = GetOffsetIndex(info.BaseLayer + layer, info.BaseLevel + level);
++                            int offset = _allOffsets[offsetIndex];
+ 
+-                                ReadOnlySpan<byte> data = dataSpan[(offset - spanBase)..];
++                            ReadOnlySpan<byte> data = dataSpan[(offset - spanBase)..];
+ 
+-                                MemoryOwner<byte> result = Storage.ConvertToHostCompatibleFormat(data, info.BaseLevel + level, true);
++                            MemoryOwner<byte> result = Storage.ConvertToHostCompatibleFormat(data, info.BaseLevel + level, true);
+ 
+-                                Storage.SetData(result, info.BaseLayer + layer, info.BaseLevel + level);
+-                            }
++                            Storage.SetData(result, info.BaseLayer + layer, info.BaseLevel + level);
+                         }
+                     }
+                 }

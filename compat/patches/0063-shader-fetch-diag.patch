@@ -1,0 +1,85 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index a8c571a43ecf9011e174ca74c3f1f39395a077fd..9f5d69ef364a657eba93d98d2312e0987bb82bbe 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -1466,14 +1466,41 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 ? _state.State.TexturePoolState.MaximumId
+                 : _state.State.SamplerPoolState.MaximumId;
+ 
+-            CachedShaderProgram gs = shaderCache.GetGraphicsShader(
+-                ref _state.State,
+-                ref _pipeline,
+-                _channel,
+-                samplerPoolMaximumId,
+-                ref _currentSpecState.GetPoolState(),
+-                ref _currentSpecState.GetGraphicsState(),
+-                addresses);
++            CachedShaderProgram gs;
++            try
++            {
++                gs = shaderCache.GetGraphicsShader(
++                    ref _state.State,
++                    ref _pipeline,
++                    _channel,
++                    samplerPoolMaximumId,
++                    ref _currentSpecState.GetPoolState(),
++                    ref _currentSpecState.GetGraphicsState(),
++                    addresses);
++            }
++            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀报红时补现场（程序区基址 + 各阶段开关 / 偏移 / 地址）
++            {
++                var sb = new System.Text.StringBuilder($"{e.Message}；程序区基址 0x{baseAddress:X}；");
++                for (int index = 0; index < 6; index++)
++                {
++                    ShaderState sh = shaderStateSpan[index];
++                    sb.Append($"阶段 {index}：开 {sh.UnpackEnable()} 控制 0x{sh.Control:X} 类型 {sh.Type} 偏移 0x{sh.Offset:X} 地址 0x{addressesSpan[index]:X}；");
++                }
++                for (int index = 1; index < 6; index++)   // 各开着的阶段：头 0x50 字节 + 代码前 4 KB 里全零 8 字节字所占比例（判「真大」还是「那段不是代码」）
++                {
++                    ulong va = addressesSpan[index]; if (va == 0) continue;
++                    try
++                    {
++                        ReadOnlySpan<byte> hd = _channel.MemoryManager.GetSpan(va, 0x50);
++                        ReadOnlySpan<ulong> code = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(_channel.MemoryManager.GetSpan(va + 0x50, 0x1000));
++                        int zero = 0; foreach (ulong w in code) if (w == 0) zero++;
++                        sb.Append($"阶段 {index} 头 {Convert.ToHexString(hd)}；代码前 4 KB 全零字 {zero}/{code.Length}；");
++                        sb.Append(_channel.MemoryManager.Physical.TextureCache.S2ADescribeOverlaps(_channel.MemoryManager.GetPhysicalRegions(va, 0x100000))).Append('；');
++                    }
++                    catch (Exception re) { sb.Append($"阶段 {index} 读不出：{re.Message}；"); }
++                }
++                throw new InvalidOperationException(sb.ToString(), e);
++            }
+ 
+             // Consume the modified flag for spec state so that it isn't checked again.
+             _currentSpecState.SetShader(gs);
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index 6e1bd6c7540e865cbd2f0eb178ca5a02879ea04b..dd4708cc0d9de6278da02fdae83c758d31dc0e28 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -1170,6 +1170,26 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         /// <param name="descriptor">The texture descriptor</param>
+         /// <returns>The texture if found, null otherwise</returns>
++        /// <summary>S2A 诊断：与物理区间重叠的贴图（GPU 地址、宽高、格式、跟踪层是否报过 CPU 写），着色器取码报红时用</summary>
++        public string S2ADescribeOverlaps(MultiRange range)
++        {
++            Texture[] o = new Texture[16];
++            int n;
++            lock (_textures)
++            {
++                n = _textures.FindOverlaps(range, ref o);
++            }
++
++            var sb = new System.Text.StringBuilder($"重叠贴图 {n} 张");
++            for (int i = 0; i < Math.Min(n, 6); i++)
++            {
++                Texture t = o[i];
++                sb.Append($"｜GPU 0x{t.Info.GpuAddress:X} {t.Width}×{t.Height} {t.Format} 大小 0x{t.Size:X} CPU 写过 {t.CheckModified(false)}");
++            }
++
++            return sb.ToString();
++        }
++
+         public Texture FindShortCache(in TextureDescriptor descriptor)
+         {
+             return _cache.FindShortCache(descriptor);

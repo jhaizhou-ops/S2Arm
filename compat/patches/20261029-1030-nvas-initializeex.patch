@@ -1,0 +1,176 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+index 599b552945c0a3e4ccae3b89146449d89dbc943e..8d889a2726132caafd82c96740d71f2dafe6cf6a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+@@ -26,12 +26,10 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+         private const uint SmallPageSize = 0x1000;
+         private const uint BigPageSize = 0x10000;
+ 
+-        private static readonly uint[] _pageSizes = [SmallPageSize, BigPageSize];
+-
+         private const ulong SmallRegionLimit = 0x400000000UL; // 16 GiB
+         private const ulong DefaultUserSize = 1UL << 37;
+ 
+-        private readonly struct VmRegion
++        internal readonly struct VmRegion
+         {
+             public ulong Start { get; }
+             public ulong Limit { get; }
+@@ -43,12 +41,66 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+             }
+         }
+ 
+-        private static readonly VmRegion[] _vmRegions =
++        // S2Arm: the regions GetVaRegions reports start as these defaults and follow the guest's InitializeEx (nvservices AllocAsEx):
++        //   a guest that sizes its own GPU address space (10-29 脑锻炼 010062200D392000 links CUDA, wants a far larger range) read the
++        //   fixed 12 GiB small / 112 GiB big regions back and crashed on a null right after, direct and generic mode alike
++        private VmRegion[] _vmRegions =
+         [
+             new((ulong)BigPageSize << 16, SmallRegionLimit),
+             new(SmallRegionLimit, DefaultUserSize)
+         ];
+ 
++        private readonly uint[] _regionPageSizes = [SmallPageSize, BigPageSize];
++        private bool _initializedEx;
++
++        // nvservices AllocAsEx bounds (yuzu nvhost_as_gpu VM): big pages 64 / 128 KiB; a big page size alone moves the start to
++        // big << 10 with the 16 GiB split and 128 GiB end; explicit ranges replace all three. The GPU memory manager and the
++        // allocator cover 40 bits, so a range past 1 TiB cannot be honoured.
++        private const uint SupportedBigPageSizes = 0x30000;
++        private const int VaStartShift = 10;
++        private const ulong DefaultVaSplit = 1UL << 34;
++        private const ulong DefaultVaRange = 1UL << 37;
++        private const ulong GpuVaLimit = 1UL << 40;
++
++        internal static NvInternalResult S2AAddressSpace(in InitializeExArguments arguments, out VmRegion small, out VmRegion big, out uint bigPageSize)
++        {
++            small = new((ulong)BigPageSize << 16, SmallRegionLimit);
++            big = new(SmallRegionLimit, DefaultUserSize);
++            bigPageSize = BigPageSize;
++
++            ulong start = small.Start, split = SmallRegionLimit, end = DefaultUserSize;
++
++            if (arguments.BigPageSize != 0)
++            {
++                if (!ulong.IsPow2(arguments.BigPageSize) || (arguments.BigPageSize & SupportedBigPageSizes) == 0)
++                {
++                    return NvInternalResult.InvalidInput;
++                }
++
++                bigPageSize = arguments.BigPageSize;
++                start = (ulong)arguments.BigPageSize << VaStartShift;
++                split = DefaultVaSplit;
++                end = DefaultVaRange;
++            }
++
++            if (arguments.VaRangeStart != 0)
++            {
++                start = arguments.VaRangeStart;
++                split = arguments.VaRangeSplit;
++                end = arguments.VaRangeEnd;
++            }
++
++            if (start >= split || split > end || end > GpuVaLimit || start % SmallPageSize != 0 || split % bigPageSize != 0 || end % bigPageSize != 0)
++            {
++                return NvInternalResult.InvalidInput;
++            }
++
++            small = new(start, split);
++            big = new(split, end);
++
++            return NvInternalResult.Success;
++        }
++
+         private readonly AddressSpaceContext _asContext;
+         private readonly NvMemoryAllocator _memoryAllocator;
+ 
+@@ -341,12 +393,12 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+             int vaRegionStructSize = Unsafe.SizeOf<VaRegion>();
+ 
+             Debug.Assert(vaRegionStructSize == 0x18);
+-            Debug.Assert(_pageSizes.Length == 2);
++            Debug.Assert(_regionPageSizes.Length == 2);
+ 
+             uint writeEntries = (uint)(arguments.BufferSize / vaRegionStructSize);
+-            if (writeEntries > _pageSizes.Length)
++            if (writeEntries > _regionPageSizes.Length)
+             {
+-                writeEntries = (uint)_pageSizes.Length;
++                writeEntries = (uint)_regionPageSizes.Length;
+             }
+ 
+             Span<VaRegion> regionsSpan = arguments.Regions.AsSpan();
+@@ -356,7 +408,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+                 ref VaRegion region = ref regionsSpan[(int)i];
+ 
+                 VmRegion vmRegion = _vmRegions[i];
+-                uint pageSize = _pageSizes[i];
++                uint pageSize = _regionPageSizes[i];
+ 
+                 region.PageSize = pageSize;
+                 region.Offset = vmRegion.Start;
+@@ -364,7 +416,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+                 region.Padding = 0;
+             }
+ 
+-            arguments.BufferSize = (uint)(_pageSizes.Length * vaRegionStructSize);
++            arguments.BufferSize = (uint)(_regionPageSizes.Length * vaRegionStructSize);
+ 
+             return NvInternalResult.Success;
+         }
+@@ -372,7 +424,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+         private NvInternalResult GetVaRegions3(ref GetVaRegionsArguments arguments, Span<VaRegion> inlineRegions)
+         {
+             // Same count GetVaRegions writes: what the caller's buffer size holds, at most the two regions
+-            int count = Math.Min(Math.Min(inlineRegions.Length, (int)(arguments.BufferSize / (uint)Unsafe.SizeOf<VaRegion>())), _pageSizes.Length);
++            int count = Math.Min(Math.Min(inlineRegions.Length, (int)(arguments.BufferSize / (uint)Unsafe.SizeOf<VaRegion>())), _regionPageSizes.Length);
+             NvInternalResult result = GetVaRegions(ref arguments);
+ 
+             Span<VaRegion> regions = arguments.Regions.AsSpan();
+@@ -384,7 +436,28 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+ 
+         private NvInternalResult InitializeEx(ref InitializeExArguments arguments)
+         {
+-            Logger.Stub?.PrintStub(LogClass.ServiceNv);
++            // S2Arm: nvservices AllocAsEx — once per address space (InvalidState after), bounds validated, then GetVaRegions reports them
++            lock (_asContext)
++            {
++                if (_initializedEx)
++                {
++                    return NvInternalResult.InvalidState;
++                }
++
++                NvInternalResult result = S2AAddressSpace(arguments, out VmRegion small, out VmRegion big, out uint bigPageSize);
++
++                Logger.Info?.Print(LogClass.ServiceNv, $"InitializeEx: big page 0x{arguments.BigPageSize:x}, range 0x{arguments.VaRangeStart:x} / 0x{arguments.VaRangeSplit:x} / 0x{arguments.VaRangeEnd:x} → {result}" +
++                    (result == NvInternalResult.Success ? $", regions 0x{small.Start:x}-0x{small.Limit:x} (4 KiB) 0x{big.Start:x}-0x{big.Limit:x} (0x{bigPageSize:x})" : ""));
++
++                if (result != NvInternalResult.Success)
++                {
++                    return result;
++                }
++
++                _vmRegions = [small, big];
++                _regionPageSizes[1] = bigPageSize;
++                _initializedEx = true;
++            }
+ 
+             return NvInternalResult.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/InitializeExArguments.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/InitializeExArguments.cs
+index e86932bb0af96df1377ff28621da448d2555c9a5..b20dfac03a3646831127ba848db57eb1449b83f8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/InitializeExArguments.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/InitializeExArguments.cs
+@@ -9,8 +9,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu.Types
+         public int AsFd;
+         public uint BigPageSize;
+         public uint Reserved;
+-        public ulong Unknown0;
+-        public ulong Unknown1;
+-        public ulong Unknown2;
++        // S2Arm: nvservices AllocAsEx names (yuzu IoctlAllocAsEx): the guest's GPU address space bounds, all 0 = defaults
++        public ulong VaRangeStart;
++        public ulong VaRangeEnd;
++        public ulong VaRangeSplit;
+     }
+ }

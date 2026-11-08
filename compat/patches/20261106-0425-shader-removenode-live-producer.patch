@@ -1,0 +1,21 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
+index 3e55d5cb6325a4b2b2e8d7827a05514c712ef327..e0045f7bf8fadb36adbc354c7de2c775300b8030 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
+@@ -384,7 +384,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     if (src.UseOps.Remove(node) && src.UseOps.Count == 0)
+                     {
+                         Debug.Assert(src.AsgOp != null);
+-                        nodes.Enqueue(src.AsgOp);
++
++                        // S2Arm 11-06 (as the upstream reference implementation, MIT): follow only into a producer that will itself be removed. One with side effects
++                        // (an atomic, a call) stays in the block when its result is unused, and so does one with another destination still in use (an image read whose
++                        // .x is dead but whose .y is not). Its sources are still live: dropping their uses here let the next dead-code pass delete the chain that feeds
++                        // it, and it read an undefined value (Ocarina of Time's wind solver 04942f42cae10d0f read its y coordinate from undef; tests/ampere_isa)
++                        if (!HasSideEffects(src.AsgOp) && DestHasNoUses(src.AsgOp))
++                        {
++                            nodes.Enqueue(src.AsgOp);
++                        }
+                     }
+                 }
+             }

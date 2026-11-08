@@ -1,0 +1,44 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index ab9685a6c5e2964b7689b188c7cfc7c2d32e28fd..dd8a6f1a0e2d91a91811a66a85c0a2a8704709a0 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1738,8 +1738,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+         }
+ 
+         // S2Arm: Metal vertex functions have SIMD-group functions but no lane-id input, and SPIRV-Cross refuses the SubgroupLocalInvocationId
+-        // builtin there. In the vertex stage the lane id is replaced by the exclusive prefix count of active lanes (simd_prefix_exclusive_sum(1)),
+-        // which equals the hardware lane id whenever the whole SIMD group is active.
++        // builtin there. In the vertex stage the lane id is computed: the lane's rank among active lanes r = simd_prefix_exclusive_sum(1), then the
++        // position of the r-th set bit of the hardware ballot(true) mask (5 steps of popcount bisection, straight-line). That is the hardware lane id
++        // whether or not the whole SIMD group is active, so ballots and shuffles keep the hardware lane space. The rank alone was the lane id only
++        // with a full group: Tears of the Kingdom's visibility counter returns early before its ballot, its "highest set bit == my lane id" lane never
++        // matched and that group added nothing. Apple SIMD groups are 32 wide: the mask is the ballot's first word.
+         internal static bool LaneIdEmulated(CodeGenContext context, IoVariable ioVariable)
+         {
+             return ioVariable == IoVariable.SubgroupLaneId && context.Definitions.Stage == ShaderStage.Vertex;
+@@ -1747,8 +1750,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         private static SpvInstruction EmulatedLaneId(CodeGenContext context)
+         {
+-            SpvInstruction execution = context.Constant(context.TypeU32(), Scope.Subgroup);
+-            return context.GroupNonUniformIAdd(context.TypeU32(), execution, GroupOperation.ExclusiveScan, context.Constant(context.TypeU32(), 1));
++            SpvInstruction u32 = context.TypeU32();
++            SpvInstruction execution = context.Constant(u32, Scope.Subgroup);
++            SpvInstruction rank = context.GroupNonUniformIAdd(u32, execution, GroupOperation.ExclusiveScan, context.Constant(u32, 1));
++            SpvInstruction ballot = context.GroupNonUniformBallot(context.TypeVector(u32, 4), execution, context.ConstantTrue(context.TypeBool()));
++            SpvInstruction mask = context.CompositeExtract(u32, ballot, (SpvLiteralInteger)0);
++            SpvInstruction pos = context.Constant(u32, 0);
++
++            // pos = the largest p with popcount(mask & ((1 << p) - 1)) <= rank: the lane's own bit
++            foreach (int step in new[] { 16, 8, 4, 2, 1 })
++            {
++                SpvInstruction next = context.IAdd(u32, pos, context.Constant(u32, step));
++                SpvInstruction below = context.ISub(u32, context.ShiftLeftLogical(u32, context.Constant(u32, 1), next), context.Constant(u32, 1));
++                SpvInstruction count = context.BitCount(u32, context.BitwiseAnd(u32, mask, below));
++                pos = context.Select(u32, context.ULessThanEqual(context.TypeBool(), count, rank), next, pos);
++            }
++
++            return pos;
+         }
+ 
+         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)

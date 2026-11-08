@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IRequest.cs b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IRequest.cs
+index 577d038225459345556939fd5be2254b20940a5f..6ddf603168c217cbae74cdaf97424fa74a9ccf61 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IRequest.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IRequest.cs
+@@ -54,12 +54,14 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+         {
+             Logger.Stub?.PrintStub(LogClass.ServiceNifm);
+ 
+-            return GetResultImpl();
++            return GetResultImpl(context);
+         }
+ 
+-        private ResultCode GetResultImpl()
++        // S2Arm: consistent with GetRequestState — without internet access the request failed, so GetResult reports the
++        // documented IRequest::GetResult error (Unknown112) instead of Success (a real console offline does the same)
++        private static ResultCode GetResultImpl(ServiceCtx context)
+         {
+-            return ResultCode.Success;
++            return context.Device.Configuration.EnableInternetAccess ? ResultCode.Success : ResultCode.Unknown112;
+         }
+ 
+         [CommandCmif(2)]
+@@ -124,7 +126,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceNifm);
+ 
+-            ResultCode result = GetResultImpl();
++            ResultCode result = GetResultImpl(context);
+ 
+             if (result == ResultCode.Success || (ResultCode)((int)result & 0x3fffff) == ResultCode.Unknown112)
+             {

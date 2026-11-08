@@ -1,0 +1,259 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index 390d7c5c74fc65c6c3169523ba2b5e1e2e4d01b3..6e1bd6c7540e865cbd2f0eb178ca5a02879ea04b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -83,9 +83,14 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         /// <param name="sender">Sender object</param>
+         /// <param name="e">Event arguments</param>
++        // S2Arm: per-thread overlap buffer and count, read by the remap action that the same Map / Unmap call runs right after
++        // the handler on the same thread (no closure, no per-call array)
++        [ThreadStatic] private static Texture[] t_unmapOverlaps;
++        [ThreadStatic] private static int t_unmapOverlapCount;
++
+         public void MemoryUnmappedHandler(object sender, UnmapEventArgs e)
+         {
+-            Texture[] overlaps = new Texture[10];
++            Texture[] overlaps = t_unmapOverlaps ??= new Texture[10];
+             int overlapCount;
+ 
+             MultiRange unmapped = ((MemoryManager)sender).GetPhysicalRegions(e.Address, e.Size);
+@@ -101,6 +106,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 _texturesLock.ExitReadLock();
+             }
+ 
++            t_unmapOverlaps = overlaps;
++
+             if (overlapCount > 0)
+             {
+                 for (int i = 0; i < overlapCount; i++)
+@@ -113,27 +120,33 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+                 if (overlapCount > 0 || _partiallyMappedTextures.Count > 0)
+                 {
+-                    e.AddRemapAction(() =>
++                    t_unmapOverlapCount = overlapCount;
++                    e.AddRemapAction(static (state, _, _) => ((TextureCache)state).AfterRemap(), this);
++                }
++            }
++        }
++
++        private void AfterRemap()
++        {
++            Texture[] overlaps = t_unmapOverlaps;
++            int overlapCount = t_unmapOverlapCount;
++
++            lock (_partiallyMappedTextures)
++            {
++                if (overlapCount > 0)
++                {
++                    for (int i = 0; i < overlapCount; i++)
+                     {
+-                        lock (_partiallyMappedTextures)
+-                        {
+-                            if (overlapCount > 0)
+-                            {
+-                                for (int i = 0; i < overlapCount; i++)
+-                                {
+-                                    _partiallyMappedTextures.Add(overlaps[i]);
+-                                }
+-                            }
++                        _partiallyMappedTextures.Add(overlaps[i]);
++                    }
++                }
+ 
+-                            // Any texture that has been unmapped at any point or is partially unmapped
+-                            // should update their pool references after the remap completes.
++                // Any texture that has been unmapped at any point or is partially unmapped
++                // should update their pool references after the remap completes.
+ 
+-                            foreach (Texture texture in _partiallyMappedTextures)
+-                            {
+-                                texture.UpdatePoolMappings();
+-                            }
+-                        }
+-                    });
++                foreach (Texture texture in _partiallyMappedTextures)
++                {
++                    texture.UpdatePoolMappings();
+                 }
+             }
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index d9eb867311cec2112d934597a845c8fdc3345554..f7e392c98acdd4f6ab4f16a9b631cf75a6e84b02 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -352,15 +352,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="e">Event with remap actions</param>
+         private static void RunRemapActions(UnmapEventArgs e)
+         {
+-            if (e.RemapActions != null)
+-            {
+-                foreach (Action action in e.RemapActions)
+-                {
+-                    action();
+-                }
+-            }
++            e.RunRemapActions();
+         }
+ 
++        // S2Arm: reused for every map / unmap (always under the page table lock)
++        private readonly UnmapEventArgs _unmapArgs = new(0, 0);
++
+         /// <summary>
+         /// Maps a given range of pages to the specified CPU virtual address.
+         /// </summary>
+@@ -375,7 +372,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             lock (_pageTable)
+             {
+-                UnmapEventArgs e = new(va, size);
++                UnmapEventArgs e = _unmapArgs;
++                e.Reset(va, size);
+                 MemoryUnmapped?.Invoke(this, e);
+ 
+                 for (ulong offset = 0; offset < size; offset += PageSize)
+@@ -399,7 +397,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             lock (_pageTable)
+             {
+                 // Event handlers are not expected to be thread safe.
+-                UnmapEventArgs e = new(va, size);
++                UnmapEventArgs e = _unmapArgs;
++                e.Reset(va, size);
+                 MemoryUnmapped?.Invoke(this, e);
+ 
+                 for (ulong offset = 0; offset < size; offset += PageSize)
+@@ -474,7 +473,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             int pages = (int)((endVaRounded - va) / PageSize);
+ 
+-            List<MemoryRange> regions = [];
++            // S2Arm: created on first split only (an all-unmapped range, as on every map, never splits)
++            List<MemoryRange> regions = null;
+ 
+             for (int page = 0; page < pages - 1; page++)
+             {
+@@ -483,7 +483,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+                 if ((currPa != PteUnmapped || newPa != PteUnmapped) && currPa + PageSize != newPa)
+                 {
+-                    regions.Add(new MemoryRange(regionStart, regionSize));
++                    (regions ??= []).Add(new MemoryRange(regionStart, regionSize));
+                     regionStart = newPa;
+                     regionSize = 0;
+                 }
+@@ -492,7 +492,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 regionSize += Math.Min(endVa - va, PageSize);
+             }
+ 
+-            if (regions.Count == 0)
++            if (regions == null)
+             {
+                 return new MultiRange(regionStart, regionSize);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/UnmapEventArgs.cs b/src/Ryujinx.Graphics.Gpu/Memory/UnmapEventArgs.cs
+index 3e2782da619f31795c20a36336f0d9727ba6f539..5c67b35707a13820a94721bf62180e05e81462a6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/UnmapEventArgs.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/UnmapEventArgs.cs
+@@ -3,11 +3,15 @@ using System.Collections.Generic;
+ 
+ namespace Ryujinx.Graphics.Gpu.Memory
+ {
++    // S2Arm: one instance per MemoryManager is reused for every map / unmap (under the page table lock), and remap actions
++    // are registered as a static callback plus a state object instead of capturing closures, so the per-frame map / unmap
++    // pattern of games (nvhost-as MapBufferEx / UnmapBuffer) does not allocate.
+     public class UnmapEventArgs
+     {
+-        public ulong Address { get; }
+-        public ulong Size { get; }
+-        public List<Action> RemapActions { get; private set; }
++        public ulong Address { get; private set; }
++        public ulong Size { get; private set; }
++
++        private readonly List<(Action<object, ulong, ulong> Action, object State)> _remapActions = [];
+ 
+         public UnmapEventArgs(ulong address, ulong size)
+         {
+@@ -15,10 +19,27 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             Size = size;
+         }
+ 
+-        public void AddRemapAction(Action action)
++        internal void Reset(ulong address, ulong size)
++        {
++            Address = address;
++            Size = size;
++            _remapActions.Clear();
++        }
++
++        /// <summary>
++        /// Registers an action to run after the mapping completes; it receives <paramref name="state"/>, the address and the size.
++        /// </summary>
++        public void AddRemapAction(Action<object, ulong, ulong> action, object state)
++        {
++            _remapActions.Add((action, state));
++        }
++
++        internal void RunRemapActions()
+         {
+-            RemapActions ??= [];
+-            RemapActions.Add(action);
++            foreach ((Action<object, ulong, ulong> action, object state) in _remapActions)
++            {
++                action(state, Address, Size);
++            }
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
+index 0339d8617eb828d0773e37d1790adf8f6bfd502d..bb6733623a4da1073e52fc9d1cfc63f0d3c91c28 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
+@@ -71,7 +71,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         }
+ 
+         private readonly NonOverlappingRangeList<VirtualRange> _virtualRanges;
+-        private readonly ConcurrentQueue<VirtualRange> _deferredUnmaps;
++        private readonly ConcurrentQueue<(ulong Address, ulong Size)> _deferredUnmaps;
+         private int _hasDeferredUnmaps;
+ 
+         /// <summary>
+@@ -82,7 +82,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             _memoryManager = memoryManager;
+             _virtualRanges = [];
+-            _deferredUnmaps = new ConcurrentQueue<VirtualRange>();
++            _deferredUnmaps = new ConcurrentQueue<(ulong Address, ulong Size)>();
+         }
+ 
+         /// <summary>
+@@ -92,14 +92,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="e">Event arguments</param>
+         public void MemoryUnmappedHandler(object sender, UnmapEventArgs e)
+         {
+-            void EnqueueUnmap()
+-            {
+-                _deferredUnmaps.Enqueue(new VirtualRange(e.Address, e.Size, default));
++            e.AddRemapAction(static (state, address, size) => ((VirtualRangeCache)state).EnqueueUnmap(address, size), this);
++        }
+ 
+-                Interlocked.Exchange(ref _hasDeferredUnmaps, 1);
+-            }
++        private void EnqueueUnmap(ulong address, ulong size)
++        {
++            _deferredUnmaps.Enqueue((address, size));
+ 
+-            e.AddRemapAction(EnqueueUnmap);
++            Interlocked.Exchange(ref _hasDeferredUnmaps, 1);
+         }
+ 
+         /// <summary>
+@@ -114,7 +114,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             if (Interlocked.Exchange(ref _hasDeferredUnmaps, 0) != 0)
+             {
+-                while (_deferredUnmaps.TryDequeue(out VirtualRange unmappedRange))
++                while (_deferredUnmaps.TryDequeue(out (ulong Address, ulong Size) unmappedRange))
+                 {
+                     _virtualRanges.RemoveRange(unmappedRange.Address, unmappedRange.Size);
+                 }

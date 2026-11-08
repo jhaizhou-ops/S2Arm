@@ -1,0 +1,79 @@
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.cs b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+index 8a77a471c066b9803c3fda319f5f380d403d2d22..9f53b6ac84edf895eb4451204975ab94284ff654 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+@@ -13,6 +13,29 @@ namespace Ryujinx.Memory
+     {
+         private static readonly ConcurrentDictionary<nint, ulong> _allocations = new();
+ 
++        // S2A：私有匿名内存块放宿主窗口尾部（原生层 s2a_tail_map，10-24 异度神剑3 低区耗尽：GC 只能用低区，没有簿记表的大户挪尾部）。
++        // 尾部放不下时原生层自己退回普通映射；主程序没有这个导出（Ryujinx 自己的测试 / 别的宿主）就照原样 mmap。JIT 与共享内存不走这里
++        private static unsafe class S2ATail
++        {
++            public static readonly delegate* unmanaged<ulong, int, int, nint> Map;
++            public static readonly delegate* unmanaged<nint, ulong, int, void> Unmap;
++            public static readonly delegate* unmanaged<nint, int> Has;
++            public const int UserRyujinx = 1;   // S2A_TAIL_RYU
++
++            static S2ATail()
++            {
++                nint h = NativeLibrary.GetMainProgramHandle();
++                if (NativeLibrary.TryGetExport(h, "s2a_tail_map", out nint m) && NativeLibrary.TryGetExport(h, "s2a_tail_unmap", out nint u) && NativeLibrary.TryGetExport(h, "s2a_tail_has", out nint x))
++                {
++                    Map = (delegate* unmanaged<ulong, int, int, nint>)m;
++                    Unmap = (delegate* unmanaged<nint, ulong, int, void>)u;
++                    Has = (delegate* unmanaged<nint, int>)x;
++                }
++            }
++
++            public static bool InTail(nint p) => Has != null && Has(p) != 0;
++        }
++
+         public static nint Allocate(ulong size, bool forJit)
+         {
+             return AllocateInternal(size, MmapProts.PROT_READ | MmapProts.PROT_WRITE, forJit);
+@@ -51,7 +74,17 @@ namespace Ryujinx.Memory
+                 }
+             }
+ 
+-            nint ptr = Mmap(nint.Zero, size, prot, flags, -1, 0);
++            nint ptr;
++
++            unsafe
++            {
++                ptr = !forJit && !shared && S2ATail.Map != null ? S2ATail.Map(size, S2ATail.UserRyujinx, (int)prot) : Mmap(nint.Zero, size, prot, flags, -1, 0);
++            }
++
++            if (ptr == nint.Zero)
++            {
++                ptr = MAP_FAILED;
++            }
+ 
+             if (ptr == MAP_FAILED)
+             {
+@@ -124,7 +157,7 @@ namespace Ryujinx.Memory
+         {
+             if (_allocations.TryRemove(address, out ulong size))
+             {
+-                return munmap(address, size) == 0;
++                return Unmap(address, size);
+             }
+ 
+             return false;
+@@ -132,6 +165,16 @@ namespace Ryujinx.Memory
+ 
+         public static bool Unmap(nint address, ulong size)
+         {
++            if (S2ATail.InTail(address))
++            {
++                unsafe
++                {
++                    S2ATail.Unmap(address, size, S2ATail.UserRyujinx);
++                }
++
++                return true;
++            }
++
+             return munmap(address, size) == 0;
+         }
+ 

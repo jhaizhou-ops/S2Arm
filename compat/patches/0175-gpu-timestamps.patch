@@ -1,0 +1,209 @@
+diff --git a/src/Ryujinx.Graphics.GAL/CounterType.cs b/src/Ryujinx.Graphics.GAL/CounterType.cs
+index 58a4254ba0ef62526151a3bd1162be2b2599d8c7..9c14890c8b1772158dd3b212c9289565cf56de53 100644
+--- a/src/Ryujinx.Graphics.GAL/CounterType.cs
++++ b/src/Ryujinx.Graphics.GAL/CounterType.cs
+@@ -5,5 +5,7 @@ namespace Ryujinx.Graphics.GAL
+         SamplesPassed,
+         PrimitivesGenerated,
+         TransformFeedbackPrimitivesWritten,
++        // S2A（帧率能耗线 10-23，S2A_GPU_TS）：结果 = 报告所在命令段在 GPU 上的结束时刻（主机单调时钟纳秒）；后端不支持时不应收到这一类
++        S2ATimestamp,
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+index 3d06aaee9ff59d3aab99508dcf77b5783206ee66..3cab5ef7fceb4c76b33d329c146a56a1970e2d1e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+@@ -159,6 +159,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             {
+                 // "Unbind" render targets since a syncpoint increment might indicate future CPU access for the textures.
+                 _parent.TextureManager.RefreshModifiedTextures();
++                _context.S2ATsBarrier();   // S2A_GPU_TS：同步点前登记的时间戳出结果后整批回写
+ 
+                 // S2A：强制建严格主机同步号，同步点等它做完再推进（GpuContext.S2AIncrementSyncpointAfterHostSync）
+                 _context.CreateHostSyncIfNeeded(GpuContext.S2ASyncptImmediate ? HostSyncFlags.StrictSyncpoint : HostSyncFlags.StrictSyncpoint | HostSyncFlags.Force);
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+index 0179d84aabf579c3d381d2781b85f82c0cecbdf3..ad931d883bc94a8329ca9dbbd3ec041f159fca47 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+@@ -166,6 +166,27 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+                 _channel.MemoryManager.S2AEngineWrite(va, data);
+                 _channel.MemoryManager.CounterCache.AddOrUpdate(va, null);
++
++                // S2A_GPU_TS：载荷照旧当场写（信号量语义不变），时间戳字段另由渲染器在 GPU 做完这段后给出真实 GPU 时刻，攒到下一次同步点推进整批回写（GpuContext.S2ATs*）
++                if (GpuContext.S2AGpuTs)
++                {
++                    CounterReport ts;
++
++                    lock (_reports)
++                    {
++                        ts = _reports.Count != 0 ? _reports.Pop() : new CounterReport(this);
++                    }
++
++                    ts.GpuVa = va;
++                    ts.Ticks = data.Counter;   // 时间戳报告里借 Ticks 存载荷
++                    ts.Counter = null;
++                    ts.Pending = true;
++                    ts.IsTs = true;
++                    _context.S2ATsBegin();
++                    ICounterEvent tsEvt = _context.Renderer.ReportCounter(CounterType.S2ATimestamp, ts.Handler, 1f, false);
++                    _context.S2ATsTrack(tsEvt);   // 事件对象只在 GPU 线程上释放（同计数缓存替换时的做法）；回调里释放会让线程化渲染器的包装与底层对象错配
++                }
++
+                 return;
+             }
+ 
+@@ -182,6 +203,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             public ulong Ticks;
+             public ICounterEvent Counter;
+             public bool Pending;
++            public bool IsTs;
+ 
+             public CounterReport(SemaphoreUpdater owner)
+             {
+@@ -191,6 +213,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+             private void OnResult(object evt, ulong result)
+             {
++                if (IsTs)
++                {
++                    // 计数线程：真实 GPU 时刻换成客体时钟，进待写批（同步点推进时整批写，免得游戏读到「帧头新、帧尾旧」的一对）
++                    _owner._context.S2ATsResult(_owner._channel.MemoryManager, GpuVa, Ticks, result);
++                    IsTs = false;
++                    Counter = null;
++                    Pending = false;
++                    _owner.ReturnReport(this);
++                    return;
++                }
++
+                 CounterData counterData = new()
+                 {
+                     Counter = result,
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+index fa607c607ce25f8e52fc771c7f8e31f137f77f56..285b822cc6f7de077346783bc2f958ad554c3858 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+@@ -470,6 +470,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             uint syncpointId = (uint)argument & 0xFFFF;
+ 
+             _context.AdvanceSequence();
++            _context.S2ATsBarrier();   // S2A_GPU_TS：同步点前登记的时间戳出结果后整批回写
+             // S2A：强制建严格主机同步号，同步点等它做完再推进（同 GPFifoClass，见 GpuContext.S2AIncrementSyncpointAfterHostSync）
+             _context.CreateHostSyncIfNeeded(GpuContext.S2ASyncptImmediate ? HostSyncFlags.StrictSyncpoint : HostSyncFlags.StrictSyncpoint | HostSyncFlags.Force);
+             _context.Renderer.UpdateCounters(); // Poll the query counters, the game may want an updated result.
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 00fbf3f39f7396f9f46988262a91b109285579c5..747b524d99daa451afa4c0f815434c23dfb3100f 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -190,6 +190,12 @@ namespace Ryujinx.Graphics.Gpu
+             DirtyHacks = hacks;
+ 
+             _firstTimestamp = ConvertNanosecondsToTicks((ulong)PerformanceCounter.ElapsedNanoseconds);
++            _s2aTsBarrierHandler = S2ATsBarrierResult;
++
++            if (S2AGpuTs)
++            {
++                GraphicsConfig.FastGpuTime = false;   // 时间戳要真实：不再除 256
++            }
+         }
+ 
+         /// <summary>
+@@ -302,6 +308,97 @@ namespace Ryujinx.Graphics.Gpu
+         /// Gets the value of the GPU timer.
+         /// </summary>
+         /// <returns>The current GPU timestamp</returns>
++        // S2A_GPU_TS=1（帧率能耗线 10-23，上游塞尔达动态分辨率 / 帧节拍）：游戏读到的 GPU 时间戳 = 报告所在命令段的真实 GPU 结束时刻，
++        // 原版 = GPU 线程处理到这条命令时的 CPU 时刻、且 FastGpuTime 再除 256（让游戏以为 GPU 很闲、不降分辨率）。开时 FastGpuTime 一并关
++        internal static readonly bool S2AGpuTs = Environment.GetEnvironmentVariable("S2A_GPU_TS") == "1";
++        private readonly object _s2aTsLock = new();
++        private readonly List<(MemoryManager Mm, ulong Va, ulong Payload, ulong Ticks)> _s2aTsReady = new();
++        private int _s2aTsOutstanding;
++        private bool _s2aTsLogged;
++        private readonly EventHandler<ulong> _s2aTsBarrierHandler;
++        private readonly Queue<ICounterEvent> _s2aTsEvents = new();   // 在途 / 已出的时间戳事件，GPU 线程按序释放已出结果的
++
++        private long _s2aTsDone, _s2aTsDisposed;   // 已回调个数（计数线程递增）/ 已释放个数（GPU 线程）
++
++        /// <summary>GPU 线程：记下一个时间戳事件，顺带释放排在前面、已出结果的。时间戳报告与屏障同一条计数队列、按登记序出结果，
++        /// 所以已回调 N 个 = 最早登记的 N 个已出结果。ICounterEvent 只在 GPU 线程上 Dispose（同计数缓存替换时的做法）</summary>
++        internal void S2ATsTrack(ICounterEvent evt)
++        {
++            long done = Volatile.Read(ref _s2aTsDone);
++
++            while (_s2aTsDisposed < done && _s2aTsEvents.Count != 0)
++            {
++                _s2aTsEvents.Dequeue().Dispose();
++                _s2aTsDisposed++;
++            }
++
++            if (evt != null)
++            {
++                _s2aTsEvents.Enqueue(evt);
++            }
++        }
++
++        /// <summary>GPU 线程：登记了一个时间戳报告（计数在途）</summary>
++        internal void S2ATsBegin() => Interlocked.Increment(ref _s2aTsOutstanding);
++
++        /// <summary>计数线程：一个时间戳报告出结果（主机纳秒）</summary>
++        internal void S2ATsResult(MemoryManager mm, ulong va, ulong payload, ulong hostNs)
++        {
++            ulong ticks = ConvertNanosecondsToTicks(hostNs) - _firstTimestamp;
++
++            if (!_s2aTsLogged)
++            {
++                _s2aTsLogged = true;
++                long cpuNs = PerformanceCounter.ElapsedNanoseconds;
++                Console.Error.WriteLine($"[gpu] 时间戳（S2A_GPU_TS）首个结果：GPU 结束时刻比此刻 CPU 时钟早 {(cpuNs - (long)hostNs) / 1e6:F2} ms（应为小正数，证明两边同一时基）");
++            }
++
++            Interlocked.Increment(ref _s2aTsDone);
++
++            lock (_s2aTsLock)
++            {
++                _s2aTsReady.Add((mm, va, payload, ticks));
++                Interlocked.Decrement(ref _s2aTsOutstanding);
++
++                if (_s2aTsReady.Count >= 256)
++                {
++                    S2ATsWriteLocked();   // 长时间没有同步点：别无限攒
++                }
++            }
++        }
++
++        /// <summary>GPU 线程：同步点推进前调——之前登记的时间戳都出结果后整批写回</summary>
++        internal void S2ATsBarrier()
++        {
++            if (!S2AGpuTs || Volatile.Read(ref _s2aTsOutstanding) == 0 && _s2aTsReady.Count == 0)
++            {
++                return;
++            }
++
++            // 同一计数队列按序出结果：这个屏障出结果时，排在它前面的时间戳都已进待写批
++            S2ATsTrack(Renderer.ReportCounter(CounterType.S2ATimestamp, _s2aTsBarrierHandler, 1f, false));
++        }
++
++        private void S2ATsBarrierResult(object evt, ulong _)
++        {
++            Interlocked.Increment(ref _s2aTsDone);
++
++            lock (_s2aTsLock)
++            {
++                S2ATsWriteLocked();
++            }
++        }
++
++        private void S2ATsWriteLocked()
++        {
++            foreach ((MemoryManager mm, ulong va, ulong payload, ulong ticks) in _s2aTsReady)
++            {
++                mm.Write(va + 8, ticks);   // 只改时间戳字段（载荷已在报告当时写好）
++            }
++
++            _s2aTsReady.Clear();
++        }
++
+         internal ulong GetTimestamp()
+         {
+             // Guest timestamp will start at 0, instead of host value.

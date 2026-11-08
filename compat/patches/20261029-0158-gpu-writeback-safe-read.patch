@@ -1,0 +1,289 @@
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+index f1f3b27276d9125816993d5aeecb485cefb3cbb0..2cee6c3474c1e6ebbc0ea182f164860b3f3b8121 100644
+--- a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -67,6 +67,56 @@ namespace Ryujinx.Cpu
+         public static WritableRegion Rent(IVirtualMemoryManagerTracked target, ulong va, ReadOnlySpan<byte> current)
+         {
+             int size = current.Length;
++            Slot slot = Acquire(size);
++
++            try
++            {
++                // 原样拷出目标段：经不走页保护的读（读时回写把这些页设成不可读，直接读会缺页、改两次保护；字节相同）
++                if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked != null)
++                {
++                    Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked(va, slot.Buf, size);
++                }
++                else
++                {
++                    current.CopyTo(new Span<byte>(slot.Buf, size));
++                }
++            }
++            catch
++            {
++                Return(slot);
++                throw;
++            }
++
++            return Bind(slot, target, va, size);
++        }
++
++        /// <summary>
++        /// Rents a writable copy of the guest bytes at <paramref name="va"/> that is written back to
++        /// <paramref name="target"/> with WriteUntracked when the region is disposed. The bytes are
++        /// copied by <paramref name="read"/>, which must not borrow a possibly protected page.
++        /// </summary>
++        public static WritableRegion Rent(IVirtualMemoryManagerTracked target, ulong va, int size, Action<ulong, Memory<byte>> read)
++        {
++            ArgumentNullException.ThrowIfNull(read);
++
++            Slot slot = Acquire(size);
++
++            try
++            {
++                slot.Mem.Reset(slot.Buf, size);
++                read(va, slot.Mem.Memory);
++            }
++            catch
++            {
++                Return(slot);
++                throw;
++            }
++
++            return Bind(slot, target, va, size);
++        }
++
++        private static Slot Acquire(int size)
++        {
+             Slot slot = null;
+ 
+             lock (_lock)
+@@ -109,15 +159,11 @@ namespace Ryujinx.Cpu
+                 }
+             }
+ 
+-            // 原样拷出目标段：经不走页保护的读（读时回写把这些页设成不可读，直接读会缺页、改两次保护；字节相同）
+-            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked != null)
+-            {
+-                Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked(va, slot.Buf, size);
+-            }
+-            else
+-            {
+-                current.CopyTo(new Span<byte>(slot.Buf, size));
+-            }
++            return slot;
++        }
++
++        private static WritableRegion Bind(Slot slot, IVirtualMemoryManagerTracked target, ulong va, int size)
++        {
+             slot.Target = target;
+             slot.Mem.Reset(slot.Buf, size);
+             slot.Region.S2AReuse(slot, va, slot.Mem.Memory);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index e184383620df5a5ccb71f4b2c09ffea709b697d5..a5a0ef7bc7aa1582b48306480720fd9ab557ab40 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -24,6 +24,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private readonly IVirtualMemoryManagerTracked _cpuMemory;
+         private int _referenceCount;
+         private S2ABufferReadScratch _s2aBufferReadScratch;
++        // 复用委托：稳态回写不因方法组转换每次分配
++        private readonly Action<ulong, Memory<byte>> _s2aReadForWriteback;
++        // 仅供主机负控：老的借页直读。目标页受保护时必缺页（AV），生产不得选到。
++        private static readonly bool S2AWritebackBorrowedReadOn = Environment.GetEnvironmentVariable("S2A_WRITEBACK_BORROWED_READ") == "1";
++        // 没装无跟踪读提供者时：安卓明确失败（NativeAOT 直读 PROT_NONE 不可恢复）；
++        // 其余平台保留原来的借页直读并打印一次红，避免苹果既有 0 崩路径因新抛出退役。
++        // 只给主机夹具改这一项来分别覆盖两端。
++        internal static bool S2AWritebackRequireProvider { get; set; } = OperatingSystem.IsAndroid();
++        private static int _s2aWritebackBorrowedRed;
+ 
+         /// <summary>
+         /// In-memory shader cache.
+@@ -49,6 +58,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             _context = context;
+             _cpuMemory = cpuMemory;
++            _s2aReadForWriteback = S2AReadForWriteback;
+             ShaderCache = new ShaderCache(context);
+             BufferCache = new BufferCache(context, this);
+             TextureCache = new TextureCache(context, this);
+@@ -356,14 +366,32 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="size">Size in bytes to be range</param>
+         /// <param name="tracked">True if write tracking is triggered on the span</param>
+         /// <returns>A writable region with the data at the specified memory location</returns>
+-        public WritableRegion GetWritableRegion(ulong address, int size, bool tracked = false)
++        public unsafe WritableRegion GetWritableRegion(ulong address, int size, bool tracked = false)
+         {
+             // S2Arm: an untracked region here is the GPU writing its own data to guest memory (texture flush, buffer clear fill; every caller disposes it).
+             // Hand out a copy written back through WriteUntracked on Dispose, like Buffer.FlushImpl, so the guest write tracker keeps the bytes as GPU data
+             // instead of reporting them later as a CPU write (which re-uploaded them over newer GPU writes and forced a GPU wait whenever the page had a flush action)
+             if (!tracked && size > 0)
+             {
+-                return S2AUntrackedRegionPool.Rent(_cpuMemory, address, _cpuMemory.GetSpan(address, size));
++                ReadOnlySpan<byte> current = _cpuMemory.GetSpan(address, size);
++                bool hasProvider = S2AWritebackHasProvider;
++
++                if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AWritebackRequireProvider))
++                {
++                    if (!hasProvider)
++                    {
++                        S2AWritebackBorrowedWarning();
++                    }
++
++                    return S2AUntrackedRegionPool.Rent(_cpuMemory, address, current);
++                }
++
++                if (!hasProvider)
++                {
++                    throw new NotSupportedException("GPU writeback requires a platform readonly-copy or untracked-read provider.");
++                }
++
++                return S2AUntrackedRegionPool.Rent(_cpuMemory, address, size, _s2aReadForWriteback);
+             }
+ 
+             return _cpuMemory.GetWritableRegion(address, size, tracked);
+@@ -375,7 +403,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="range">Range</param>
+         /// <param name="tracked">True if write tracking is triggered on the span</param>
+         /// <returns>A writable region with the data at the specified memory location</returns>
+-        public WritableRegion GetWritableRegion(MultiRange range, bool tracked = false)
++        public unsafe WritableRegion GetWritableRegion(MultiRange range, bool tracked = false)
+         {
+             if (range.Count == 1)
+             {
+@@ -387,25 +415,124 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             {
+                 MemoryOwner<byte> memoryOwner = MemoryOwner<byte>.Rent(checked((int)range.GetSize()));
+ 
+-                Span<byte> memorySpan = memoryOwner.Span;
+-
+-                int offset = 0;
+-                for (int i = 0; i < range.Count; i++)
++                try
+                 {
+-                    MemoryRange currentRange = range.GetSubRange(i);
+-                    int size = (int)currentRange.Size;
+-                    if (currentRange.Address != MemoryManager.PteUnmapped)
++                    bool hasProvider = S2AWritebackHasProvider;
++
++                    if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AWritebackRequireProvider))
+                     {
+-                        GetSpan(currentRange.Address, size).CopyTo(memorySpan.Slice(offset, size));
++                        if (!hasProvider)
++                        {
++                            S2AWritebackBorrowedWarning();
++                        }
++
++                        Span<byte> memorySpan = memoryOwner.Span;
++
++                        int offset = 0;
++                        for (int i = 0; i < range.Count; i++)
++                        {
++                            MemoryRange currentRange = range.GetSubRange(i);
++                            int size = (int)currentRange.Size;
++                            if (currentRange.Address != MemoryManager.PteUnmapped)
++                            {
++                                GetSpan(currentRange.Address, size).CopyTo(memorySpan.Slice(offset, size));
++                            }
++
++                            offset += size;
++                        }
++                    }
++                    else if (!hasProvider)
++                    {
++                        throw new NotSupportedException("GPU writeback requires a platform readonly-copy or untracked-read provider.");
++                    }
++                    else
++                    {
++                        // 多段回写同样先拷出旧字节。不能按段借页直读：目标页可能被写跟踪
++                        // 设成 PROT_NONE（读时回写 / GPU 改过），托管直读会缺页。与单段
++                        // Rent 走同一条无跟踪读。
++                        S2AReadForWriteback(range, memoryOwner.Memory);
+                     }
+-
+-                    offset += size;
++                }
++                catch
++                {
++                    memoryOwner.Dispose();
++                    throw;
+                 }
+ 
+                 return new WritableRegion(new MultiRangeWritableBlock(range, this), 0, memoryOwner, tracked);
+             }
+         }
+ 
++        // 有任意一条安全读提供者就可用：跟踪器的无跟踪读（与 S2AUntrackedRegionPool 单段
++        // Rent 同一条）或平台只读拷贝提供者（Android）。
++        private unsafe bool S2AWritebackHasProvider =>
++            MemoryTracking.S2AReadUntracked != null || _context.S2AReadGuestMemory != null;
++
++        // 非安卓没有提供者时沿用原来的借页直读；只报一次红，避免每帧刷日志。
++        private static void S2AWritebackBorrowedWarning()
++        {
++            if (Interlocked.Exchange(ref _s2aWritebackBorrowedRed, 1) == 0)
++            {
++                Console.Error.WriteLine("[gal] 【红】GPU 回写没有无跟踪读提供者：退回借页直读（非安卓；受保护页可能缺页）");
++            }
++        }
++
++        // 本类回写先拷出的旧字节只能经无跟踪读取：目标页可能被读时回写 / GPU 改过设成
++        // PROT_NONE，借页直读在宿主上下文里会缺页（安全读钩子未装时 NativeAOT 无法把它
++        // 变成一次正确读回）。优先用跟踪器的无跟踪读（与 S2AUntrackedRegionPool 单段
++        // Rent 同一条），其次用平台只读拷贝提供者（Android）。
++        private unsafe void S2AReadForWriteback(ulong address, Memory<byte> target)
++        {
++            if (target.Length == 0)
++            {
++                return;
++            }
++
++            delegate*<ulong, byte*, int, void> read = MemoryTracking.S2AReadUntracked;
++
++            if (read != null)
++            {
++                fixed (byte* dst = target.Span)
++                {
++                    read(address, dst, target.Length);
++                }
++
++                return;
++            }
++
++            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory;
++
++            if (copy != null)
++            {
++                copy(address, target);
++                return;
++            }
++
++            throw new NotSupportedException("GPU writeback requires a platform readonly-copy or untracked-read provider.");
++        }
++
++        private void S2AReadForWriteback(MultiRange range, Memory<byte> target)
++        {
++            int offset = 0;
++
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange part = range.GetSubRange(i);
++                int size = (int)part.Size;
++
++                if (part.Address == MemoryManager.PteUnmapped)
++                {
++                    target.Span.Slice(offset, size).Clear(); // 原 GetSpan 对显式 PTE 空洞给 0
++                }
++                else if (size != 0)
++                {
++                    S2AReadForWriteback(part.Address, target.Slice(offset, size));
++                }
++
++                offset += size;
++            }
++        }
++
+         /// <summary>
+         /// Reads data from the application process.
+         /// </summary>

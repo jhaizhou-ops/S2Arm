@@ -1,0 +1,131 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs b/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
+index 66b5a5cbafb306d2c42ddf32870cd184956f3ae1..5a8847b9ea2fb0a4645ac53979efd6ba4d7786fb 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/Hid.cs
+@@ -7,6 +7,7 @@ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Common;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.DebugMouse;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.DebugPad;
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Gesture;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Keyboard;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Mouse;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
+@@ -45,6 +46,8 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         {
+             CheckTypeSizeOrThrow<RingLifo<DebugPadState>>(0x2c8);
+             CheckTypeSizeOrThrow<RingLifo<TouchScreenState>>(0x2C38);
++            CheckTypeSizeOrThrow<GestureState>(0x60);
++            CheckTypeSizeOrThrow<RingLifo<GestureState>>(0x708);
+             CheckTypeSizeOrThrow<RingLifo<MouseState>>(0x350);
+             CheckTypeSizeOrThrow<RingLifo<DebugMouseState>>(0x350);
+             CheckTypeSizeOrThrow<RingLifo<KeyboardState>>(0x3D8);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/GestureDevice.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/GestureDevice.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..26955275e05a5541f441e06d900d9931475054c0
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/GestureDevice.cs
+@@ -0,0 +1,34 @@
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Common;
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Gesture;
++using System;
++
++namespace Ryujinx.HLE.HOS.Services.Hid
++{
++    // Explicitly constructed by an opt-in platform provider. The default HID
++    // initialization does not write the previously reserved gesture region.
++    public sealed class GestureDevice
++    {
++        private readonly Switch _device;
++        private ulong _samplingNumber;
++
++        public GestureDevice(Switch device)
++        {
++            _device = device;
++            _device.Hid.SharedMemory.Gesture = RingLifo<GestureState>.Create();
++        }
++
++        internal static void Write(ref RingLifo<GestureState> ring, ref ulong samplingNumber, in GestureInput input)
++        {
++            if (input.PointCount < 0 || input.PointCount > 4 || (uint)input.Type > (uint)GestureType.Rotate ||
++                (uint)input.Direction > (uint)GestureDirection.Down || !float.IsFinite(input.Scale) ||
++                !float.IsFinite(input.RotationAngle) || !float.IsFinite(input.VelocityX) ||
++                !float.IsFinite(input.VelocityY) || samplingNumber == ulong.MaxValue)
++                throw new ArgumentException("Invalid gesture HID state.");
++            GestureState state = new() { SamplingNumber = ++samplingNumber, Input = input };
++            ring.Write(ref state);
++        }
++
++        public void Update(GestureInput input) => Write(ref _device.Hid.SharedMemory.Gesture, ref _samplingNumber, in input);
++        public void Clear() => _device.Hid.SharedMemory.Gesture.Clear();
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/Types/GestureInput.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/Types/GestureInput.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..735a5c474f7b076faff777e0416cad2bb5f76c1c
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/Types/GestureInput.cs
+@@ -0,0 +1,24 @@
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.HLE.HOS.Services.Hid
++{
++    // Horizon ABI, also documented by switchbrew/libnx services/hid.h.
++    public enum GestureType : uint { Idle, Complete, Cancel, Touch, Press, Tap, Pan, Swipe, Pinch, Rotate }
++    public enum GestureDirection : uint { None, Left, Up, Right, Down }
++    [StructLayout(LayoutKind.Sequential, Pack = 8)]
++    public struct GesturePoint { public uint X, Y; }
++    [StructLayout(LayoutKind.Sequential, Pack = 8)]
++    public struct GestureInput
++    {
++        public ulong ContextNumber;
++        public GestureType Type;
++        public GestureDirection Direction;
++        public uint X, Y;
++        public int DeltaX, DeltaY;
++        public float VelocityX, VelocityY;
++        public uint Attributes;
++        public float Scale, RotationAngle;
++        public int PointCount;
++        public GesturePoint Point0, Point1, Point2, Point3;
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/Gesture/GestureState.cs b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/Gesture/GestureState.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1149db84c7ddb79dc44abefd5779868d8d23ee95
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/Gesture/GestureState.cs
+@@ -0,0 +1,12 @@
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Common;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Gesture
++{
++    [StructLayout(LayoutKind.Sequential, Pack = 8)]
++    struct GestureState : ISampledDataStruct
++    {
++        public ulong SamplingNumber;
++        public GestureInput Input;
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/SharedMemory.cs b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/SharedMemory.cs
+index 1ac796407ac158dace9b5f4ac2a8e7b6b47f1e14..a1448b2bb7cc0ce5f6d2e3362d4485712e75ab7a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/SharedMemory.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/Types/SharedMemory/SharedMemory.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common.Memory;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Common;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.DebugMouse;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.DebugPad;
++using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Gesture;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Keyboard;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Mouse;
+ using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.Npad;
+@@ -47,6 +48,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory
+         [FieldOffset(0x9A00)]
+         public Array10<NpadState> Npads;
+ 
++        [FieldOffset(0x3BA00)]
++        public RingLifo<GestureState> Gesture;
++
+         /// <summary>
+         /// Debug mouse.
+         /// </summary>

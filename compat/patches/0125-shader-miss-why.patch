@@ -1,0 +1,254 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs b/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
+index d9d039b17e841602d88fd3f4d20044995e7d5263..9ac177ead988ba214aeb73e453589a7f7df59a6d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
+@@ -66,7 +66,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             ShaderCodeAccessor codeAccessor = new(channel.MemoryManager, gpuVa);
+             bool hasSpecList = _cache.TryFindItem(codeAccessor, out ShaderSpecializationList specList, out cachedGuestCode);
+ 
+-            return hasSpecList && specList.TryFindForCompute(channel, poolState, computeState, out program);
++            // S2A（10-21）：不中分类（首遇重翻诊断，见 ShaderCache.S2ALogMiss）
++            if (!hasSpecList) { ShaderSpecializationState.S2AMiss = "缺客体代码（计算）"; return false; }
++            ShaderSpecializationState.S2AMissWhy = null;
++            bool hit = specList.TryFindForCompute(channel, poolState, computeState, out program);
++            if (!hit) ShaderSpecializationState.S2AMiss = "特化不符（" + (ShaderSpecializationState.S2AMissWhy ?? "未记字段") + "）";
++            return hit;
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 809aca29eb30ef78581585d918222775c9fd7770..ee22731f38131c9ead3cc2c9d7caea5491c0fcd8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -226,6 +226,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return cpShader;
+             }
+ 
++            S2ALogMiss(isCompute: true);
+             ShaderSpecializationState specState = new(ref computeState);
+             GpuAccessorState gpuAccessorState = new(samplerPoolMaximumId, poolState, computeState, default, specState);
+             GpuAccessor gpuAccessor = new(_context, channel, gpuAccessorState);
+@@ -313,6 +314,18 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <param name="graphicsState">3D engine state</param>
+         /// <param name="addresses">Addresses of the shaders for each stage</param>
+         /// <returns>Compiled graphics shader code</returns>
++        // S2A（10-21）：首遇重翻诊断——缓存（含包内条目）查找不中、即将翻译时记一行拒因：缺哪个阶段的客体代码 / 阶段组合没配进缓存 / 特化不符（哪个字段）。
++        //   同一拒因第 1、2、4、8… 次打一行（host.log），按拒因统计「包里漏了什么」，作第二层通用版兜底的输入（画面·着色器线缩键测算）
++        private static readonly Dictionary<string, int> _s2aMissCounts = new();
++        private static void S2ALogMiss(bool isCompute)
++        {
++            string why = (isCompute ? "计算：" : "图形：") + (ShaderSpecializationState.S2AMiss ?? "缓存里没有（未分类）");
++            ShaderSpecializationState.S2AMiss = null;
++            int n;
++            lock (_s2aMissCounts) { _s2aMissCounts.TryGetValue(why, out n); _s2aMissCounts[why] = ++n; }
++            if ((n & (n - 1)) == 0) Console.Error.WriteLine($"[gal] 首遇重翻拒因：{why}（第 {n} 次）");
++        }
++
+         public CachedShaderProgram GetGraphicsShader(
+             ref ThreedClassState state,
+             ref ProgramPipelineState pipeline,
+@@ -342,6 +355,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return gpShaders;
+             }
+ 
++            S2ALogMiss(isCompute: false);
+             TransformFeedbackDescriptor[] transformFeedbackDescriptors = GetTransformFeedbackDescriptors(ref state);
+ 
+             UpdatePipelineInfo(ref state, ref pipeline, graphicsState, channel);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
+index b1afc3598a2b57ce0409df6e4b567fb673d47c9c..7fe24c0e0ca950a338dd3406ea36f32728baf32a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
+@@ -262,18 +262,30 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             program = null;
+ 
+-            bool found = TryGetId(_vertexACache, memoryManager, addresses.VertexA, out idTable.VertexAId, out guestCode.VertexACode);
+-            found &= TryGetId(_vertexBCache, memoryManager, addresses.VertexB, out idTable.VertexBId, out guestCode.VertexBCode);
+-            found &= TryGetId(_tessControlCache, memoryManager, addresses.TessControl, out idTable.TessControlId, out guestCode.TessControlCode);
+-            found &= TryGetId(_tessEvaluationCache, memoryManager, addresses.TessEvaluation, out idTable.TessEvaluationId, out guestCode.TessEvaluationCode);
+-            found &= TryGetId(_geometryCache, memoryManager, addresses.Geometry, out idTable.GeometryId, out guestCode.GeometryCode);
+-            found &= TryGetId(_fragmentCache, memoryManager, addresses.Fragment, out idTable.FragmentId, out guestCode.FragmentCode);
+-
+-            if (found && _shaderPrograms.TryGetValue(idTable, out ShaderSpecializationList specList))
++            // S2A（10-21）：逐阶段记有没有这段客体代码，不中时给出分类（首遇重翻诊断，见 ShaderCache.S2ALogMiss）
++            bool va = TryGetId(_vertexACache, memoryManager, addresses.VertexA, out idTable.VertexAId, out guestCode.VertexACode);
++            bool vb = TryGetId(_vertexBCache, memoryManager, addresses.VertexB, out idTable.VertexBId, out guestCode.VertexBCode);
++            bool tc = TryGetId(_tessControlCache, memoryManager, addresses.TessControl, out idTable.TessControlId, out guestCode.TessControlCode);
++            bool te = TryGetId(_tessEvaluationCache, memoryManager, addresses.TessEvaluation, out idTable.TessEvaluationId, out guestCode.TessEvaluationCode);
++            bool gs = TryGetId(_geometryCache, memoryManager, addresses.Geometry, out idTable.GeometryId, out guestCode.GeometryCode);
++            bool fs = TryGetId(_fragmentCache, memoryManager, addresses.Fragment, out idTable.FragmentId, out guestCode.FragmentCode);
++            bool found = va && vb && tc && te && gs && fs;
++
++            if (!found)
+             {
+-                return specList.TryFindForGraphics(channel, ref poolState, ref graphicsState, out program);
++                ShaderSpecializationState.S2AMiss = "缺客体代码（" + (va ? "" : "顶点A ") + (vb ? "" : "顶点 ") + (tc ? "" : "曲面控制 ") + (te ? "" : "曲面求值 ") + (gs ? "" : "几何 ") + (fs ? "" : "片元 ") + "不在缓存）";
++                return false;
+             }
+ 
++            if (_shaderPrograms.TryGetValue(idTable, out ShaderSpecializationList specList))
++            {
++                ShaderSpecializationState.S2AMissWhy = null;
++                bool hit = specList.TryFindForGraphics(channel, ref poolState, ref graphicsState, out program);
++                if (!hit) ShaderSpecializationState.S2AMiss = "特化不符（" + (ShaderSpecializationState.S2AMissWhy ?? "未记字段") + "）";
++                return hit;
++            }
++
++            ShaderSpecializationState.S2AMiss = "各阶段代码都在、这个阶段组合没配进缓存";
+             return false;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index ae70a19897b30d523faff762961b75f0ce629663..c8f64a47620c3637ab729a24f17071beb1bc96ac 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -589,6 +589,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <param name="usesDrawParameters">Indicates whether the vertex shader accesses draw parameters</param>
+         /// <param name="checkTextures">Indicates whether texture descriptors should be checked</param>
+         /// <returns>True if the state matches, false otherwise</returns>
++        // S2A（10-21）：最近一次 Matches* 判不符的字段（首遇重翻诊断：ShaderCacheHashTable.TryFind 不中时取它记拒因，见 ShaderCache.S2ALogMiss）；只写不读时零开销
++        [ThreadStatic] internal static string S2AMissWhy;
++        // S2A（10-21）：最近一次缓存查找不中的分类（ShaderCacheHashTable / ComputeShaderCacheHashTable.TryFind 写，ShaderCache 翻译前读）
++        [ThreadStatic] internal static string S2AMiss;
++
+         public bool MatchesGraphics(
+             GpuChannel channel,
+             ref GpuChannelPoolState poolState,
+@@ -599,14 +604,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             if (graphicsState.ViewportTransformDisable != GraphicsState.ViewportTransformDisable)
+             {
+-                return false;
++                S2AMissWhy = "ViewportTransformDisable"; return false;
+             }
+ 
+             // S2A：翻译读了图元拓扑（几何着色器按输入拓扑定输入图元；转计算时几何计算核按它取顶点）→ 输入拓扑类不同就不是同一个程序。
+             // 上游这里不比（拓扑变化只触发重新查找、查到的还是旧程序）：首遇按三角形翻的几何程序画点 / 线时照用，出包按缺省拓扑烘的更会错配
+             if (IsPrimitiveTopologyQueried() && graphicsState.S2AInputTopology != GraphicsState.S2AInputTopology)
+             {
+-                return false;
++                S2AMissWhy = "图元拓扑"; return false;
+             }
+ 
+             bool thisA2cDitherEnable = GraphicsState.AlphaToCoverageEnable && GraphicsState.AlphaToCoverageDitherEnable;
+@@ -616,24 +621,24 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             if ((!s2aTracked || (_queriedState & QueriedStateFlags.S2AA2cRead) != 0) && otherA2cDitherEnable != thisA2cDitherEnable)
+             {
+-                return false;
++                S2AMissWhy = "A2C 抖动"; return false;
+             }
+ 
+             if ((!s2aTracked || (_queriedState & QueriedStateFlags.S2ADepthRead) != 0) && graphicsState.DepthMode != GraphicsState.DepthMode)   // S2A：运行时化后翻译不读 DepthMode，不比
+             {
+-                return false;
++                S2AMissWhy = "DepthMode"; return false;
+             }
+ 
+             if (graphicsState.AlphaTestEnable != GraphicsState.AlphaTestEnable)
+             {
+-                return false;
++                S2AMissWhy = "透明测试开关"; return false;
+             }
+ 
+             if (graphicsState.AlphaTestEnable && (!s2aTracked || (_queriedState & QueriedStateFlags.S2AAlphaRead) != 0) &&   // S2A：运行时化后不读比较方式 / 参考值，不比
+                 (graphicsState.AlphaTestCompare != GraphicsState.AlphaTestCompare ||
+                 graphicsState.AlphaTestReference != GraphicsState.AlphaTestReference))
+             {
+-                return false;
++                S2AMissWhy = "透明测试比较 / 参考值"; return false;
+             }
+ 
+             if (ShaderCache.MayConvertVtgToCompute(ref channel.Capabilities) && !vertexAsCompute)
+@@ -649,7 +654,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     if (lType != rType)
+                     {
+-                        return false;
++                        S2AMissWhy = "顶点属性类型"; return false;
+                     }
+                 }
+             }
+@@ -659,38 +664,38 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 for (int index = 0; index < s2aL.Length; index++)
+                 {
+                     if (s2aTracked && (_s2aAttrRead & (1u << index)) == 0) continue;   // S2A：翻译没读过这个位置的类型
+-                    if (s2aL[index] != s2aR[index]) return false;
++                    if (s2aL[index] != s2aR[index]) { S2AMissWhy = "顶点属性类型（S2A 记录）"; return false; }
+                 }
+             }
+ 
+             if (usesDrawParameters && (!s2aTracked || (_queriedState & QueriedStateFlags.S2ACbdpRead) != 0) && graphicsState.HasConstantBufferDrawParameters != GraphicsState.HasConstantBufferDrawParameters)   // S2A：运行时化后不读 cbdp，不比
+             {
+-                return false;
++                S2AMissWhy = "常量缓冲绘制参数"; return false;
+             }
+ 
+             if (graphicsState.HasUnalignedStorageBuffer != GraphicsState.HasUnalignedStorageBuffer)
+             {
+-                return false;
++                S2AMissWhy = "存储缓冲未对齐"; return false;
+             }
+ 
+             if (s2aTracked && (_queriedState & QueriedStateFlags.S2ATessRead) != 0 && graphicsState.TessellationMode.Packed != GraphicsState.TessellationMode.Packed)   // S2A：曲面程序按翻译时的域 / 分区 / 绕序匹配
+             {
+-                return false;
++                S2AMissWhy = "曲面模式"; return false;
+             }
+ 
+             if (channel.Capabilities.NeedsFragmentOutputSpecialization && !graphicsState.FragmentOutputTypes.AsSpan().SequenceEqual(GraphicsState.FragmentOutputTypes.AsSpan()))
+             {
+-                return false;
++                S2AMissWhy = "片元输出类型"; return false;
+             }
+ 
+             if (graphicsState.DualSourceBlendEnable != GraphicsState.DualSourceBlendEnable)
+             {
+-                return false;
++                S2AMissWhy = "双源混合"; return false;
+             }
+ 
+             if (graphicsState.YNegateEnabled != GraphicsState.YNegateEnabled)
+             {
+-                return false;
++                S2AMissWhy = "YNegate"; return false;
+             }
+ 
+             return Matches(channel, ref poolState, checkTextures, isCompute: false);
+@@ -727,7 +732,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             if (computeState.HasUnalignedStorageBuffer != ComputeState.HasUnalignedStorageBuffer)
+             {
+-                return false;
++                S2AMissWhy = "存储缓冲未对齐（计算）"; return false;
+             }
+ 
+             return Matches(channel, ref poolState, checkTextures, isCompute: true);
+@@ -810,7 +815,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                 if (constantBufferUseSpan[index] != useMask)
+                 {
+-                    return false;
++                    S2AMissWhy = "常量缓冲使用"; return false;
+                 }
+ 
+                 constantBufferUsePerStageMask &= ~(1 << index);
+@@ -875,7 +880,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 if ((specializationState.Value.QueriedFlags & QueriedTextureStateFlags.CoordNormalized) == QueriedTextureStateFlags.CoordNormalized &&
+                     specializationState.Value.CoordNormalized != descriptor.UnpackTextureCoordNormalized())
+                 {
+-                    return false;
++                    S2AMissWhy = "贴图坐标归一化"; return false;
+                 }
+ 
+                 // S2A：翻译时查询过采样器类型（QuerySamplerType）的，类型不同就不能复用。上游不比：上游缓存条目都由同一游戏运行时翻译，类型天然一致；
+@@ -883,7 +888,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 if ((specializationState.Value.QueriedFlags & QueriedTextureStateFlags.SamplerType) == QueriedTextureStateFlags.SamplerType &&
+                     specializationState.Value.TextureTarget.ConvertSamplerType() != descriptor.UnpackTextureTarget().ConvertSamplerType())
+                 {
+-                    return false;
++                    S2AMissWhy = "贴图类型"; return false;
+                 }
+             }
+ 

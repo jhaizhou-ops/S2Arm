@@ -1,0 +1,91 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+index 69bff74a506896b23e6fd12c17554e56209bb94a..5bfb69c9a2e2d2f3bc739a4633ef8e71ee3d7fc7 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/PlayerSelect/PlayerSelectApplet.cs
+@@ -1,9 +1,12 @@
+ using Microsoft.IO;
++using Ryujinx.Common;
++using Ryujinx.Common.Logging;
+ using Ryujinx.Common.Memory;
+ using Ryujinx.HLE.HOS.Services.Account.Acc;
+ using Ryujinx.HLE.HOS.Services.Am.AppletAE;
+ using System;
+ using System.IO;
++using System.Linq;
+ 
+ namespace Ryujinx.HLE.HOS.Applets
+ {
+@@ -28,6 +31,29 @@ namespace Ryujinx.HLE.HOS.Applets
+             _normalSession = normalSession;
+             _interactiveSession = interactiveSession;
+ 
++            // S2Arm: the second input storage is nn::account::UiSettings, mode first; mode 1 is UserCreator (ShowUserCreator).
++            // On the console this applet creates a new user and answers success; the SDK hands the first word of the reply back
++            // as ShowUserCreator's result and the game then lists users again. The host has no nickname / icon UI, so create the
++            // user the console would end up with: the system default icon and an unused nickname. Answering "cancelled" instead
++            // left "add new user" doing nothing (11-06 Brain Training); upstream opens the user selector and reports the
++            // existing user as newly created, which adds no user either.
++            _normalSession.TryPop(out _);
++            if (_normalSession.TryPop(out byte[] uiSettings) && uiSettings.Length >= 4 && BitConverter.ToUInt32(uiSettings, 0) == UiModeUserCreator)
++            {
++                AccountManager accounts = _system.AccountManager;
++                // count + 1 candidates against count existing names: one is always free
++                string name = Enumerable.Range(accounts.GetUserCount() + 1, accounts.GetUserCount() + 1)
++                    .Select(n => $"Player{n}").First(n => accounts.GetAllUsers().All(u => u.Name != n));
++                UserId created = new(Guid.NewGuid().ToString("N"));
++                accounts.AddUser(name, EmbeddedResources.Read("Ryujinx.HLE/HOS/Services/Account/Acc/DefaultUserImage.jpg"), created);
++                Logger.Info?.Print(LogClass.ServiceAm, $"User creator applet created user {created} \"{name}\" (no nickname / icon UI on the host)");
++                _normalSession.Push(BuildResponse(created));
++                AppletStateChanged?.Invoke(this, null);
++                _system.ReturnFocus();
++
++                return ResultCode.Success;
++            }
++
+             UserProfile selected = _system.Device.UIHandler.ShowPlayerSelectDialog();
+             if (selected == null)
+             {
+@@ -61,6 +87,18 @@ namespace Ryujinx.HLE.HOS.Applets
+             return stream.ToArray();
+         }
+ 
++        private static byte[] BuildResponse(UserId createdUser)
++        {
++            using RecyclableMemoryStream stream = MemoryStreamManager.Shared.GetStream();
++            using BinaryWriter writer = new(stream);
++
++            writer.Write((ulong)PlayerSelectResult.Success);
++
++            createdUser.Write(writer);
++
++            return stream.ToArray();
++        }
++
+         private static byte[] BuildGuestResponse()
+         {
+             using RecyclableMemoryStream stream = MemoryStreamManager.Shared.GetStream();
+@@ -71,6 +109,8 @@ namespace Ryujinx.HLE.HOS.Applets
+             return stream.ToArray();
+         }
+ 
++        private const uint UiModeUserCreator = 1;
++
+         private static byte[] BuildResponse()
+         {
+             using RecyclableMemoryStream stream = MemoryStreamManager.Shared.GetStream();
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/ApplicationServiceServer.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/ApplicationServiceServer.cs
+index ec4684658262ffff0289bbe72bec1e84be62c267..ac45472abf7c4599ac79e8e0ec8485d8a176bba0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/ApplicationServiceServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/ApplicationServiceServer.cs
+@@ -121,7 +121,10 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+ 
+         public ResultCode IsUserRegistrationRequestPermitted(ServiceCtx context)
+         {
+-            context.ResponseData.Write(_serviceFlag != AccountServiceFlag.Application);
++            // S2Arm: permitted for applications too. The retail SDK's nn::account::ShowUserCreator aborts unless this is true
++            // and retail games call ShowUserCreator without asking first (11-05 Brain Training "add new user": Break at
++            // ShowUserCreator+0x90), so the console permits it; upstream answers false to acc:u0.
++            context.ResponseData.Write(true);
+ 
+             return ResultCode.Success;
+         }

@@ -1,0 +1,63 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index 3e19aa8865410e6a1d45d5ab0829f68a020e7a3c..60028b741bb40081dcbd1777bb42e883645a94cc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -655,14 +655,27 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+                                     AddressList addressList = MemoryMarshal.Cast<byte, AddressList>(addressListBytes)[0];
+ 
+-                                    _accessPoint.CreateNetworkPrivate(securityConfig, securityParameter, userConfig, networkConfig, addressList);
++                                    // S2Arm: the backend's result goes back to the game (upstream dropped it and always answered Success)
++                                    ResultCode created = _accessPoint.CreateNetworkPrivate(securityConfig, securityParameter, userConfig, networkConfig, addressList);
++
++                                    if (created != ResultCode.Success)
++                                    {
++                                        return created;
++                                    }
++
+                                     Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"CreateNetworkImpl: Created private network! " +
+                                         $"| securityConfig = {securityConfig} | securityParameter = {securityParameter} " +
+                                         $"| userConfig = {userConfig} | networkConfig = {networkConfig} | addressList = {addressList}");
+                                 }
+                                 else
+                                 {
+-                                    _accessPoint.CreateNetwork(securityConfig, userConfig, networkConfig);
++                                    ResultCode created = _accessPoint.CreateNetwork(securityConfig, userConfig, networkConfig);
++
++                                    if (created != ResultCode.Success)
++                                    {
++                                        return created;
++                                    }
++
+                                     Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"CreateNetworkImpl: Created network! " +
+                                         $"| securityConfig = {securityConfig} | userConfig = {userConfig} | networkConfig = {networkConfig}");
+                                 }
+@@ -1196,6 +1209,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                                 catch (Exception ex)
+                                 {
+                                     Logger.Error?.Print(LogClass.ServiceLdn, "Could not locate RyuLDN server. Defaulting to stubbed wireless.");
++                                    S2AHooks.Red?.Invoke($"ldn: RyuLDN server {context.Device.Configuration.MultiplayerLdnServer} not resolvable, multiplayer falls back to nobody nearby");
+                                     Logger.Error?.Print(LogClass.ServiceLdn, ex.Message);
+                                     NetworkClient = new LdnDisabledClient();
+                                 }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/LdnMasterProxyClient.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/LdnMasterProxyClient.cs
+index 37fa722b7043591483707b1f518a936b87e71328..512be48cd1fc00d9af71c3519c8c8946a4b8abec 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/LdnMasterProxyClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/LdnMasterProxyClient.cs
+@@ -116,7 +116,15 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu
+                 SendAsync(_protocol.Encode(PacketId.Initialize, InitializeMemory));
+             }
+ 
+-            return index == 0 && IsConnected;
++            bool ok = index == 0 && IsConnected;
++
++            // S2Arm: an unreachable server otherwise only shows as an empty scan / failed create — make it visible
++            if (!ok)
++            {
++                S2AHooks.Red?.Invoke($"ldn: RyuLDN server {Address}:{Port} unreachable");
++            }
++
++            return ok;
+         }
+ 
+         private void UpdatePassphraseIfNeeded()

@@ -1,0 +1,15 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs b/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
+index 6b11f2cddade5182379ebae2f4fa4fda1d7fc8f0..fb632e6e26c328a2eb3bd5487c41a0148ebba500 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
+@@ -41,6 +41,10 @@ namespace Ryujinx.HLE.HOS.Applets
+                 _normalSession.Push(BuildResponse()); // Dummy response for other modes
+                 AppletStateChanged?.Invoke(this, null);
+ 
++                // S2Arm：其余模式（腕带说明 / 手柄固件更新等）结束时同样把焦点还给游戏，同本文件 ShowControllerSupport 与其余小程序。
++                //   真机小程序结束游戏会收到回到焦点的消息；Let's Get Fit 7 分钟处 ShowControllerStrapGuide 后等这条，原先不发 → 卡在「安全区」页、任何键都没反应
++                _system.ReturnFocus();
++
+                 return ResultCode.Success;
+             }
+ 

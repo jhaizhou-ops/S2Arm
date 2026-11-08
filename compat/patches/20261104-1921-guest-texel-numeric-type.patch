@@ -1,0 +1,108 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 59d8044076fa53deb7163e3c618ddb0f32b98a14..fbcec3ad7ea55dd12c823a6dac691bab621a490a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -37,7 +37,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // +10: SPIR-V output changes (gl_PerVertex no longer declares gl_CullDistance) and
+         // the support-buffer descriptor stage mask now covers VTG. Old host caches must be
+         // re-translated; offline shader packages baked with the old codegen must be re-baked.
+-        internal const uint CodeGenVersion = 7354 + 10;
++        // +11: Guest texel-buffer declarations and reads follow the bound view's
++        // numeric type rather than float (VUID-07753); float-declared caches must
++        // be re-translated.
++        internal const uint CodeGenVersion = 7354 + 11;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitSurface.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitSurface.cs
+index ee8c598aa0ec2eed099034794dfdfc0dc46e2a92..462476e143ea214667ca93c385af0e85dceba48c 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitSurface.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitSurface.cs
+@@ -388,7 +388,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     Array.Resize(ref dests, outputIndex);
+                 }
+ 
+-                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle);
++                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle, isTexelBuffer: type == SamplerType.TextureBuffer);
+ 
+                 SetBindingPair setAndBinding = isBindless ? default : context.ResourceManager.GetTextureOrImageBinding(
+                     Instruction.ImageLoad,
+@@ -648,7 +648,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+                 if (!isBindless)
+                 {
+-                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm);
++                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm, isTexelBuffer: type == SamplerType.TextureBuffer);
+                 }
+             }
+             else
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+index 3249da15f02e95632b56e78ef666eef98abb0c62..f4aa0b09ecb94ba576b6e04ab18bd5c10d598522 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+@@ -77,11 +77,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+             return id;
+         }
+ 
+-        public static TextureFormat GetTextureFormat(IGpuAccessor gpuAccessor, int handle, int cbufSlot = -1)
++        public static TextureFormat GetTextureFormat(IGpuAccessor gpuAccessor, int handle, int cbufSlot = -1, bool isTexelBuffer = false)
+         {
+             // When the formatted load extension is supported, we don't need to
+             // specify a format, we can just declare it without a format and the GPU will handle it.
+-            if (gpuAccessor.QueryHostSupportsImageLoadFormatted())
++            // Texel buffer 除外：OpTypeImage 的 Sampled Type 必须与绑定视图数值型一致（VUID-07753），
++            // 只有拿到描述符格式才知道该声明 uint / sint / float，所以总是查询。
++            if (gpuAccessor.QueryHostSupportsImageLoadFormatted() && !isTexelBuffer)
+             {
+                 return TextureFormat.Unknown;
+             }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+index 47f677b21147fb88e0aa2061ce963fcb345906a1..f0e22cfcd88bca47da1914fec128ec934483e049 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+@@ -540,6 +540,15 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 }
+             }
+ 
++            // S2A：texel buffer 图像操作的声明数值型必须与绑定视图一致（VUID-07753）。无绑定路径拿不到
++            // 描述符格式，转有绑定后按描述符补齐——Unknown 时保持原样（与直接路径的未知格式行为一致）。
++            if (isImage &&
++                (texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer &&
++                texOp.Format == TextureFormat.Unknown)
++            {
++                texOp.Format = gpuAccessor.QueryTextureFormat(cbufOffset, cbufSlot);
++            }
++
+             SetBindingPair setAndBinding = resourceManager.GetTextureOrImageBinding(
+                 texOp.Inst,
+                 texOp.Type,
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index 79a3253c2bb063eed22da6a6aff4447ee548394d..70d367810b74144ebc4213000cd5dc202efece25 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -431,6 +431,15 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 nameSuffix = cbufSlot < 0 ? $"{prefix}_tcb_{handle:X}" : $"{prefix}_cb{cbufSlot}_{handle:X}";
+             }
+ 
++            // S2A：客体 texel buffer 的采样声明数值型必须与绑定视图一致（VUID-07753）。采样路径不记格式，
++            // 按描述符视图查询；其余路径 format 即声明格式（未知 / 非缓冲 = FP32，与旧行为一致）。
++            AggregateType sampledType = info.Format.GetComponentType();
++
++            if (!isImage && (type & SamplerType.Mask) == SamplerType.TextureBuffer)
++            {
++                sampledType = _gpuAccessor.QueryTextureFormat(handle, cbufSlot).GetComponentType();
++            }
++
+             TextureDefinition definition = new TextureDefinition(
+                 setIndex,
+                 binding,
+@@ -439,7 +448,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 $"{_stagePrefix}_{nameSuffix}",
+                 meta.Type,
+                 info.Format,
+-                meta.UsageFlags);
++                meta.UsageFlags,
++                sampledType);
+ 
+             if (isImage)
+             {

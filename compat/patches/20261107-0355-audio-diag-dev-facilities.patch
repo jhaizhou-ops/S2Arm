@@ -1,0 +1,14 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index ebb3c3d8bb9fb1707faeac4d7b23f0f4976ce5d9..11b8601af5a471ca5c2989b20964d624244dfa04 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -229,7 +229,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                     }
+             }
+ 
+-            if (Interlocked.Exchange(ref _reporterStarted, 1) == 0)
++            // S2Arm 11-07: player builds (S2A_DEV_FACILITIES=0, exported by the native host from Info.plist S2ADevFacilities) do not start the 10 s reporter thread
++            if (Environment.GetEnvironmentVariable("S2A_DEV_FACILITIES") != "0" && Interlocked.Exchange(ref _reporterStarted, 1) == 0)
+             {
+                 new Thread(ReporterLoop) { IsBackground = true, Name = "S2A.AudioDiag" }.Start();
+             }

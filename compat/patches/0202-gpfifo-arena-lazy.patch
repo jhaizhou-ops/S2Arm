@@ -1,0 +1,45 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+index a410e0ab925091a17d62a7dcd7b6399d55f47d0a..df4fe5209e1191d2097231d2ef0241ec1a2062f6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+@@ -83,13 +83,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         // 零分配（10-20 帧率能耗线：动森岛上稳态渲染线程分配的 96% 是录段时 new S2ASeg + ToArray，约每帧 14 段、每段 930 B）：
+         // 段是值类型、字典按上限一次分配好；操作序列追加进一块预分配的环形区，区满或段数到上限整表清空（与原上限清空同义，旧区里的记录随之作废）。
+         private const int S2ASegMinLen = 8, S2ASegCap = 32768, S2AArenaOps = 1 << 20; // 区 1M 条操作 ≈ 20 MB（原 ToArray 存满上限约 30 MB）
+-        private readonly Dictionary<ulong, S2ASeg> _s2aSegs = new(S2ASegCap);
+-        private readonly S2AOp[] _s2aArena = new S2AOp[S2AArenaOps];
++        // 按需增长（10-24 异度神剑3 真机 OOM）：原先每个 GPU 通道构造时一次分配整块区 + 32768 项字典，约 23 MB 进大对象堆；
++        // 游戏开 10 个通道大对象堆即 190 MB，第 11 次开通道在构造函数里撞 OutOfMemoryException。改为用到才分配、翻倍增长到上限，
++        // 只在热身期分配，到顶后与原来一样零分配；没用过的通道只占空表。
++        private const int S2AArenaInitOps = 2048;
++        private readonly Dictionary<ulong, S2ASeg> _s2aSegs = new();
++        private S2AOp[] _s2aArena = Array.Empty<S2AOp>();
+         private int _s2aArenaPos;
+         // S2A：两次准入——段第一次未命中只把键记进这张直接映射表（哈希高 16 位定位，64K 项、只分配一次），照常解读、不记录不入缓存；
+         // 同一键再次未命中才记录入缓存。只出现一次的段（内联常量数据等）若每次都入缓存，旧库实测动森岛上 60 秒托管分配 468 MB（稳态的 97%）。
+         private const int S2ASeenBits = 16;
+-        private readonly ulong[] _s2aSeen = new ulong[1 << S2ASeenBits];
++        private ulong[] _s2aSeen;
+         private List<S2AOp> _s2aRec;
+         private readonly List<S2AOp> _s2aRecBuf = new(); // S2A：记录用的表复用；存进缓存时 ToArray
+ 
+@@ -296,6 +300,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 return;
+             }
+ 
++            _s2aSeen ??= new ulong[1 << S2ASeenBits];
+             ref ulong seen = ref _s2aSeen[(int)(key >> (64 - S2ASeenBits))];
+             if (seen != key)
+             {
+@@ -329,6 +334,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 _s2aSegs.Clear();
+             }
+ 
++            if (_s2aArenaPos + nOps > _s2aArena.Length)
++            {
++                Array.Resize(ref _s2aArena, Math.Min(S2AArenaOps, Math.Max(_s2aArenaPos + nOps, Math.Max(S2AArenaInitOps, _s2aArena.Length * 2))));
++            }
++
+             if (S2AAllocTrace.On) S2AAllocTrace.Raw(_s2aSegs.ContainsKey(key) ? 0x40_0005 : 0x40_0007, 1); // S2A：拆账诊断（覆盖已有键 / 新键）
+ 
+             long s2aR0 = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0; // S2A：渲染线程分配拆账（段）

@@ -1,0 +1,34 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index bd11878b16cf413f414f7137d89d922701fd4ce5..96e90994cf4648bdd39c55b5cdc4f225ad180674 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -94,7 +94,15 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         internal ref KEvent GetStyleSetUpdateEvent(PlayerIndex player)
+         {
+-            return ref _styleSetUpdateEvents[(int)player];
++            // S2Arm: 手柄号越界（Unknown = 9 / Auto = 10 / 乱值）钳到掌机号，不再越界抛 IndexOutOfRangeException 带走整局
++            int i = (int)player;
++
++            if ((uint)i >= (uint)_styleSetUpdateEvents.Length)
++            {
++                i = (int)PlayerIndex.Handheld;
++            }
++
++            return ref _styleSetUpdateEvents[i];
+         }
+ 
+         internal void ClearSupportedPlayers()
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/HidUtils.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/HidUtils.cs
+index d314d056707e3bc48ead663fcdc4870df115ca4d..f11b1c560f235b9303679a82b5bdb06e03cc8bbf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/HidUtils.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/HidUtils.cs
+@@ -18,7 +18,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid.HidServer
+             NpadIdType.Player8  => PlayerIndex.Player8,
+             NpadIdType.Handheld => PlayerIndex.Handheld,
+             NpadIdType.Unknown  => PlayerIndex.Unknown,
+-            _                   => throw new ArgumentOutOfRangeException(nameof(npadIdType)),
++            _                   => PlayerIndex.Unknown,   // S2Arm: 不抛（IPC 命令里抛异常会带走整局），越界由各命令自己判
+ #pragma warning restore IDE0055
+         };
+ 

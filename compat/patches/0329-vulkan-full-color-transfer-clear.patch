@@ -1,0 +1,123 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index b948f8f0b3f8b23848e5aab1f4581ee10ab9004f..86ddc079088b87070b0a83732e04b5899977fd24 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -17,6 +17,9 @@ namespace Ryujinx.Graphics.Vulkan
+         private readonly List<BufferHolder> _activeBufferMirrors;
+ 
+         private ulong _byteWeight;
++        private int _transferClearsSinceFlush;
++        private const int MaxTransferClears = 64;
++        private HashSet<(Silk.NET.Vulkan.Format, uint)> _transferClearFallbacks;
+ 
+         private readonly List<BufferHolder> _backingSwaps;
+ 
+@@ -49,6 +52,12 @@ namespace Ryujinx.Graphics.Vulkan
+                 return;
+             }
+ 
++            if (Gd.TransferFullClears && TryClearColorByTransfer(index, layer, layerCount, componentMask, color))
++            {
++                return;
++            }
++            if (Gd.TransferFullClears) LogTransferClearFallback(index, componentMask);
++
+             if (componentMask != 0xf || Gd.IsQualcommProprietary)
+             {
+                 // We can't use CmdClearAttachments if not writing all components,
+@@ -83,6 +92,73 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        private void LogTransferClearFallback(int index, uint mask)
++        {
++            _transferClearFallbacks ??= new();
++            if (_transferClearFallbacks.Count >= 8) return;
++            TextureView dst = FramebufferParams.GetColorView(index);
++            if (dst == null || !_transferClearFallbacks.Add((dst.VkFormat, mask))) return;
++            Console.Error.WriteLine($"[s2a] transfer clear fallback: {dst.VkFormat}, mask={mask:x}, " +
++                $"view={dst.Width}x{dst.Height}, framebuffer={FramebufferParams.Width}x{FramebufferParams.Height}, " +
++                $"scissor={ClearScissor.X},{ClearScissor.Y},{ClearScissor.Width},{ClearScissor.Height}, " +
++                $"target={dst.Info.Target}, samples={dst.Info.Samples}, level={dst.FirstLevel}, layer={dst.FirstLayer}");
++        }
++
++        private bool TryClearColorByTransfer(int index, int layer, int layerCount, uint componentMask, ColorF color)
++        {
++            if (!Gd.IsQualcommProprietary || componentMask != 0xf || layer != 0 || layerCount != 1 ||
++                _activeConditionalRender != null || !FramebufferParams.IsValidColorAttachment(index))
++            {
++                return false;
++            }
++
++            TextureView dst = FramebufferParams.GetColorView(index);
++            // ClearColorImage acts on storage, not a view/scissored rectangle. Start with
++            // the real-device-tested formats and exact base-level 2D storage coverage.
++            if (dst == null || !dst.Valid || dst.Storage == null ||
++                dst.VkFormat is not (Silk.NET.Vulkan.Format.R8G8B8A8Unorm or Silk.NET.Vulkan.Format.B8G8R8A8Unorm or
++                    Silk.NET.Vulkan.Format.R8G8B8A8Srgb or Silk.NET.Vulkan.Format.R16G16B16A16Sfloat or
++                    Silk.NET.Vulkan.Format.B10G11R11UfloatPack32 or Silk.NET.Vulkan.Format.R8Unorm or
++                    Silk.NET.Vulkan.Format.R16G16SNorm or Silk.NET.Vulkan.Format.R8Uint) ||
++                dst.VkFormat != dst.Storage.VkFormat || dst.FirstLayer != 0 || dst.FirstLevel != 0 ||
++                dst.Info.Target != Target.Texture2D || dst.Storage.Info.Target != Target.Texture2D ||
++                dst.Info.Samples != 1 || dst.Storage.Info.Samples != 1 ||
++                dst.Width != dst.Storage.Info.Width || dst.Height != dst.Storage.Info.Height ||
++                FramebufferParams.Width != dst.Width || FramebufferParams.Height != dst.Height ||
++                ClearScissor.X != 0 || ClearScissor.Y != 0 ||
++                ClearScissor.Width < dst.Width || ClearScissor.Height < dst.Height ||
++                (dst.Storage.UsageFlags & ImageUsageFlags.TransferDstBit) == 0 ||
++                !Gd.FormatCapabilities.OptimalFormatSupports(FormatFeatureFlags.TransferDstBit, dst.Info.Format))
++            {
++                return false;
++            }
++
++            if (AutoFlush.ShouldFlushQuery() || _transferClearsSinceFlush >= MaxTransferClears)
++            {
++                FlushCommandsImpl();
++            }
++            EndRenderPass();
++            Gd.Barriers.Flush(Cbs, false, null, null);
++            Image image = dst.GetImage().Get(Cbs).Value; // Retain storage until this CB completes.
++            TextureView.InsertImageBarrier(Gd.Api, CommandBuffer, image,
++                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.TransferWriteBit,
++                PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit,
++                ImageAspectFlags.ColorBit, 0, 0, 1, 1);
++            ClearColorValue value = new(color.Red, color.Green, color.Blue, color.Alpha);
++            ImageSubresourceRange range = new(ImageAspectFlags.ColorBit, 0, 1, 0, 1);
++            Gd.Api.CmdClearColorImage(CommandBuffer, image, ImageLayout.General, in value, 1, in range);
++            TextureView.InsertImageBarrier(Gd.Api, CommandBuffer, image,
++                AccessFlags.TransferWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
++                PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit,
++                ImageAspectFlags.ColorBit, 0, 0, 1, 1);
++            _transferClearsSinceFlush++;
++            if (++Gd.TransferFullClearCount == 1)
++            {
++                Console.Error.WriteLine($"[s2a] Vulkan full-color transfer clear used: {dst.VkFormat} {dst.Width}x{dst.Height}");
++            }
++            return true;
++        }
++
+         public void ClearRenderTargetDepthStencil(int layer, int layerCount, float depthValue, bool depthMask, int stencilValue, int stencilMask)
+         {
+             if (FramebufferParams == null)
+@@ -243,6 +319,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public void FlushCommandsImpl()
+         {
++            _transferClearsSinceFlush = 0;
+             AutoFlush.RegisterFlush(DrawCount);
+             EndRenderPass();
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 292c19d6cc73ff0c7a6af2d41651ea50e14e5b93..98ccba46992fdbf9c6f30072fb7071ccc051674e 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -42,6 +42,9 @@ namespace Ryujinx.Graphics.Vulkan
+         // Instance policy: a host that replaces guest backing must not retain imported pointers.
+         internal bool AllowHostMemoryImport { get; set; } = true;
+         internal bool UseSingleQueue { get; set; }
++        // Android opt-in; keep proprietary-driver attachment clears on the existing path.
++        internal bool TransferFullClears { get; set; }
++        internal long TransferFullClearCount { get; set; }
+         internal DeviceFeatureSnapshot EnabledDeviceFeatures => _enabledFeatures;
+ 
+         private bool _initialized;

@@ -1,0 +1,76 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index efae1cb25804d7f08c5296fc77156bcfd4df2cac..1a28275d88b924e85fcec5416d5d2fda3e6159cf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -449,6 +449,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                                     scanFilter.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
+                                 }
+ 
++                                RefreshOpenNetworkClient(context);
++
+                                 resultCode = ScanInternal(context.Memory, channel, scanFilter, bufferPosition, bufferSize, out ulong counter);
+ 
+                                 context.ResponseData.Write(counter);
+@@ -651,6 +653,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                         {
+                             if (_state == NetworkState.AccessPoint)
+                             {
++                                RefreshOpenNetworkClient(context);
++
+                                 if (isPrivate)
+                                 {
+                                     ulong bufferPosition = context.Request.PtrBuff[0].Position;
+@@ -1008,6 +1012,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                             }
+                             else
+                             {
++                                RefreshOpenNetworkClient(context);
++
+                                 if (isPrivate)
+                                 {
+                                     resultCode = _station.ConnectPrivate(securityConfig, securityParameter, userConfig, localCommunicationVersion, optionUnknown, networkConfig);
+@@ -1270,6 +1276,44 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         // S2Arm: the host can re-point the RyuLDN server while the game is initialized but idle (LAN relay election, Host.SetLdnServer).
+         // Applied at the next OpenAccessPoint / OpenStation, i.e. right before the game creates or looks for a network: the client is only
+         // swapped in state Initialized (nothing created or joined), and before AccessPoint / Station subscribe to its NetworkChange event
++        // S2Arm: same, for a scan / create / connect issued while a station or access point is already open but nothing is joined or created yet
++        // (audit #723 P1: LAN discovery starts at the first Initialize, so the game can open its station / access point on the local relay before
++        // the Bonjour election resolves; a station scans many times inside one OpenStation, so waiting for the next Open* never re-points it).
++        // The open Station / AccessPoint is rebuilt on the new client: it subscribed to the old client's NetworkChange.
++        private void RefreshOpenNetworkClient(ServiceCtx context)
++        {
++            if (context.Device.Configuration.MultiplayerMode != MultiplayerMode.LdnRyu)
++            {
++                return;
++            }
++
++            string server = context.Device.Configuration.MultiplayerLdnServer;
++
++            if (string.IsNullOrEmpty(server) || server == S2ANetworkClientServer)
++            {
++                return;
++            }
++
++            switch (_state)
++            {
++                case NetworkState.Initialized:
++                    RefreshNetworkClient(context);
++                    break;
++                case NetworkState.Station:
++                    _station?.Dispose();
++                    _station = null;
++                    RefreshNetworkClient(context);
++                    _station = new Station(this);
++                    break;
++                case NetworkState.AccessPoint:
++                    _accessPoint?.Dispose();
++                    _accessPoint = null;
++                    RefreshNetworkClient(context);
++                    _accessPoint = new AccessPoint(this);
++                    break;
++            }
++        }
++
+         private void RefreshNetworkClient(ServiceCtx context)
+         {
+             if (context.Device.Configuration.MultiplayerMode != MultiplayerMode.LdnRyu)

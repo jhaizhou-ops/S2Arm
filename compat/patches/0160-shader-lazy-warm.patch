@@ -1,0 +1,133 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 2fe72de1bd992e76ca2dd079375b6924d9721976..b35c0afc46c175951f5c24e137034147b80fd551 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -302,6 +302,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             Stream hostTocFileStream = null;
+             Stream hostDataFileStream = null;
+             bool discardAll = false;
++            System.Collections.Generic.Dictionary<int, int> warm = null;   // S2A：提前热程序号 → 表内次序
++            S2ALazyProgram[] warmLazy = null;
+ 
+             try
+             {
+@@ -338,6 +340,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+                 int programIndex = 0;
+ 
++                // S2A：提前热程序表（S2AShaderCacheGuard.WarmList）里的包内程序，登记时记下，载完后后台先载一次（S2AWarmStart）
++                if (loadHostCache && S2AShaderCacheGuard.WarmList != null)
++                {
++                    warm = S2AWarmRead(S2AShaderCacheGuard.WarmList);
++                    warmLazy = warm == null ? null : new S2ALazyProgram[warm.Count];
++                }
++
+                 DataEntry entry = new();
+ 
+                 while (!discardAll && tocFileStream.Position < tocFileStream.Length && loader.Active)
+@@ -390,7 +399,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     if (loadHostCache)
+                     {
+                         dataReader.EndCompression();
+-                        loader.AddLazy(new S2ALazyProgram(this, context, programIndex, dataOffset, header.Timestamp, isCompute, guestShaders));
++                        S2ALazyProgram lazy = new(this, context, programIndex, dataOffset, header.Timestamp, isCompute, guestShaders);
++                        loader.AddLazy(lazy);
++                        if (warm != null && warm.TryGetValue(programIndex, out int slot)) warmLazy[slot] = lazy;
+                         programIndex++;
+                         continue;
+                     }
+@@ -447,6 +458,76 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 ClearGuestCache();
+                 ClearHostCache(context);
+             }
++            else if (warmLazy != null)
++            {
++                S2AWarmStart(context, warmLazy);
++            }
++        }
++
++        // S2A：读提前热程序表（每行「程序号\t首用帧\t函数名串」，# 注释；只收包内条目：序号 < S2AShaderCacheGuard.PackPrograms，之后的是运行时追加的、和出包对不上）。
++        //   返回 程序号 → 表内次序（去重，保持首用帧升序）；读不了 = null（打一行，照旧按需）
++        private static System.Collections.Generic.Dictionary<int, int> S2AWarmRead(string path)
++        {
++            try
++            {
++                System.Collections.Generic.Dictionary<int, int> d = new();
++                foreach (string line in File.ReadLines(path))
++                {
++                    if (line.Length == 0 || line[0] == '#') continue;
++                    int tab = line.IndexOf('\t');
++                    if (int.TryParse(tab < 0 ? line : line[..tab], out int idx) && idx >= 0 && idx < S2AShaderCacheGuard.PackPrograms) d.TryAdd(idx, d.Count);
++                }
++                return d.Count == 0 ? null : d;
++            }
++            catch (IOException e)
++            {
++                Console.Error.WriteLine($"[gal] 【红】提前热程序表读不了（{e.Message}）：照旧按需实化");
++                return null;
++            }
++        }
++
++        // S2A：提前热程序（10-23 画面·着色器线，马车8 进赛道那帧 338 条管线首用、预取只取到约 100 条）：缓存只登记、程序到第一次查到才实化（补丁 shader-cache-lazy），
++        //   渲染器的管线预取要等程序建成才排（graphics/metal/gal_state.m gal_pso_pf_prog），换场景那帧的程序当帧才实化，预取没有提前量。
++        //   这里按表（首用帧升序）在后台线程把这些程序的宿主二进制交底层渲染器载入一次再放掉：渲染器程序一建成就把它在首用表里的管线排进后台预取，进预取池；
++        //   之后游戏真正查到时照常按需实化（同一份二进制，渲染器程序哈希相同），渲染线程首遇从池里取。不改按需实化、不碰查找路径、不留托管对象。
++        //   直接调底层渲染器（ThreadedRenderer.BaseRenderer）：多线程渲染器的命令队列只认 GPU 模拟线程一个生产者；底层载入 / 释放走渲染器自己的 API 锁（nxgal_prog_load_binary / release）。
++        //   转计算复合二进制（S2AVtg）跳过：拆三段载入的路子不同，数量少
++        private void S2AWarmStart(GpuContext context, S2ALazyProgram[] list)
++        {
++            IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
++            System.Threading.Thread th = new(() =>
++            {
++                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
++                int ok = 0, fail = 0, none = 0, vtg = 0;
++                foreach (S2ALazyProgram lazy in list)
++                {
++                    if (lazy == null) { none++; continue; }
++                    byte[] hostCode;
++                    CachedShaderStage[] shaders;
++                    try
++                    {
++                        lock (_lazyLock)
++                        {
++                            (hostCode, shaders) = ReadHostCode(lazy.Context, ref _lazyHostToc, ref _lazyHostData, lazy.GuestShaders, lazy.ProgramIndex, lazy.Timestamp);
++                        }
++                    }
++                    catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
++                    {
++                        fail++;
++                        continue;
++                    }
++                    if (hostCode == null) { fail++; continue; }
++                    if (!lazy.IsCompute && S2AVtg.IsPacked(hostCode)) { vtg++; continue; }
++                    bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
++                    IProgram p = renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
++                    if (p.CheckProgramLink(true) == ProgramLinkStatus.Success) ok++; else fail++;
++                    p.Dispose();
++                }
++                double ms = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
++                Console.Error.WriteLine($"[gal] 提前热程序：表 {list.Length} 个，载入 {ok}、失败 {fail}、缓存里没有 {none}、转计算跳过 {vtg}，后台用时 {ms:0} ms");
++            })
++            { IsBackground = true, Name = "S2A.ShaderWarm", Priority = System.Threading.ThreadPriority.BelowNormal };
++            th.Start();
+         }
+ 
+         // S2Arm: read-only handles kept for materializing lazily indexed programs (opened on first use, live for the session)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+index 19b4e7ef46a1064f5630c24e17fdc49bdf2c1168..0faeb0cd5ad9b8933f3da110758de47361417aae 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -20,6 +20,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// </summary>
+         public static int PackPrograms;
+ 
++        /// <summary>
++        /// S2A：提前热程序表路径（包里 shaders/pso_warm.tsv，出包 psowarm.py 写；graphics/loop/ShaderPack 确认缓存是本包种的之后设）。
++        /// 每行「程序号\t首用帧\t函数名串」，按首用帧升序。磁盘缓存载完后后台线程按表把这些程序先交底层渲染器载入一次再放掉：
++        /// 渲染器程序一建成就按管线首用表后台预取管线（graphics/metal/gal_state.m），换场景那帧不再在渲染线程上开片 / 取管线。没有表 = null
++        /// </summary>
++        public static string WarmList;
++
+         internal static void Report(int count, string reason)
+         {
+             System.Threading.Interlocked.Add(ref _discarded, count);

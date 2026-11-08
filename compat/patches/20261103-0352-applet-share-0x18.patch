@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/AppletManager.cs b/src/Ryujinx.HLE/HOS/Applets/AppletManager.cs
+index 89c87b915ef96f42111e9cef9f6f2045c79891b8..013f6734db522f563d61ee72d6111b7ca5a98f26 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/AppletManager.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/AppletManager.cs
+@@ -25,6 +25,12 @@ namespace Ryujinx.HLE.HOS.Applets
+                 case AppletId.LibAppletWeb:
+                 case AppletId.LibAppletShop:
+                 case AppletId.LibAppletOff:
++                // S2Arm (11-03 Zumba 分享截图 Break): 0x18 is the share / login / lobby web applet (switchbrew: ShareApplet and LoginApplet are 0x18; libnx webShareCreate / webLobbyCreate use
++                //   AppletId_LibraryAppletLoginShare = 0x18 with WebShimKind Share / Lobby). nn::web::ShowSharePage joins it and reads exactly 0x2000
++                //   bytes of output (CommonApi::JoinAndFinishLibraryApplet aborts on any other size); the dummy applet pushed 8, so the game Broke.
++                //   The browser applet answers by shim kind like hardware: Share at version >= 0x30000 gets the 0x2000-byte TLV reply with only
++                //   ExitReason (SharePostResult is left out; the SDK then reports its own fallback 1), Login / Lobby get WebCommonReturnValue.
++                case AppletId.LibAppletWhitelisted:
+                     return new BrowserApplet();
+                 case AppletId.MiiEdit:
+                     return new MiiEditApplet(system);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+index 604f6e80f11c31bde51f5cab5af690e179f079be..727b8004fff61db6ffda3f6672c280d7a946b15f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+@@ -65,7 +65,9 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             ulong titleId,
+             out ApplicationAlbumEntry applicationAlbumEntry)
+         {
+-            Logger.Stub?.PrintStub(LogClass.ServiceCaps, new
++            // S2Arm: this is a full implementation (JPEG into the SD album, ApplicationAlbumEntry back), not a stub; logged as one it was counted
++            //   in the census stub tally and read as the cause of the Zumba share Break (11-03)
++            Logger.Info?.Print(LogClass.ServiceCaps, "SaveScreenShot", new
+             {
+                 appletResourceUserId,
+                 titleId,

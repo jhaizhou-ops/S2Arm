@@ -1,0 +1,182 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index d58941fa28f682e9ad36b90508e282ce526a8c71..dbdf6966d0998c17bee388c76badd26792f4a4ee 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -70,6 +70,11 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         // S2Arm: how long after the keyboard is shown the host's answer is handed over (both the foreground applet and the inline keyboard)
+         private const int AnswerDelayMs = 500;
++
++        // S2Arm: the system text input the host is showing for this keyboard (IAsyncTextInput), null when none;
++        // its answer is matched by _headlessAnswer (inline) / _foregroundAnswer, a dismissed or superseded input's late answer is dropped
++        private IDisposable _hostInput;
++        private int _foregroundAnswer;
+         private NpadReader _npads = null;
+         private bool _canAcceptController = false;
+         private KeyboardInputMode _inputMode = KeyboardInputMode.ControllerAndKeyboard;
+@@ -231,6 +236,12 @@ namespace Ryujinx.HLE.HOS.Applets
+                     InitialText = initialText,
+                 };
+ 
++                // S2Arm: a host with its own text input shows it and answers later; the game keeps running meanwhile
++                if (_device.UIHandler is IAsyncTextInput input && BeginForegroundInput(input, args, initialText))
++                {
++                    return;
++                }
++
+                 _lastResult = _device.UIHandler.DisplayInputDialog(args, out _textValue) ? KeyboardResult.Accept : KeyboardResult.Cancel;
+                 _textValue ??= initialText ?? DefaultInputText;
+             }
+@@ -249,6 +260,56 @@ namespace Ryujinx.HLE.HOS.Applets
+             }, TaskScheduler.Default);
+         }
+ 
++        // S2Arm: foreground applet answered by the host's system text input (IAsyncTextInput). Called with _lock held (Start)
++        private bool BeginForegroundInput(IAsyncTextInput input, SoftwareKeyboardUIArgs args, string initialText)
++        {
++            int answer = ++_foregroundAnswer;
++            long shown = Stopwatch.GetTimestamp();
++            IDisposable handle = input.BeginTextInput(args, (ok, text) =>
++            {
++                Task.Delay(RemainingDelay(shown)).ContinueWith(_ =>
++                {
++                    lock (_lock)
++                    {
++                        if (answer != _foregroundAnswer || _foregroundState != SoftwareKeyboardState.Ready)
++                        {
++                            return;
++                        }
++
++                        _hostInput = null;
++                        _lastResult = ok ? KeyboardResult.Accept : KeyboardResult.Cancel;
++                        _textValue = FitLength((ok ? text : null) ?? initialText ?? DefaultInputText, _keyboardForegroundConfig.StringLengthMin, _keyboardForegroundConfig.StringLengthMax);
++                        SubmitForeground();
++                    }
++                }, TaskScheduler.Default);
++            });
++
++            if (handle == null)
++            {
++                return false;
++            }
++
++            _hostInput = handle;
++            return true;
++        }
++
++        // S2Arm: a player's input always comes after the keyboard has been shown (AnswerDelayMs), however fast the host answers
++        private static TimeSpan RemainingDelay(long shown)
++        {
++            TimeSpan left = TimeSpan.FromMilliseconds(AnswerDelayMs) - Stopwatch.GetElapsedTime(shown);
++            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
++        }
++
++        // S2Arm: dismiss the host's system text input (game finalized / hid the keyboard); its late answer is dropped
++        private void DismissHostInput()
++        {
++            ++_headlessAnswer;
++            ++_foregroundAnswer;
++            IDisposable handle = _hostInput;
++            _hostInput = null;
++            handle?.Dispose();
++        }
++
+         private void SubmitForeground()
+         {
+             // Does the application want to validate the text itself?
+@@ -498,6 +559,18 @@ namespace Ryujinx.HLE.HOS.Applets
+                         SoftwareKeyboardAppearEx a = newCalc.Appear;
+                         int max = a.TextMaxLength > 0 ? Math.Min(a.TextMaxLength, MaxUiTextSize) : MaxUiTextSize;
+                         SoftwareKeyboardUIArgs args = new() { KeyboardMode = a.KeyboardMode, InitialText = _textValue, StringLengthMin = a.TextMinLength, StringLengthMax = max };
++
++                        // S2Arm: a host with its own text input shows it once per appearance (later Calcs while it is open keep it)
++                        //   and the answer is handed over when the player confirms; the game keeps running and polling meanwhile
++                        if (_hostInput != null)
++                        {
++                            break;
++                        }
++
++                        if (_device.UIHandler is IAsyncTextInput input && BeginInlineInput(input, args, a.TextMinLength, max))
++                        {
++                            break;
++                        }
+                         bool ok = _device.UIHandler.DisplayInputDialog(args, out string text);
+                         text = FitLength(text ?? _textValue ?? string.Empty, a.TextMinLength, max);
+                         int answer = ++_headlessAnswer;
+@@ -519,6 +592,8 @@ namespace Ryujinx.HLE.HOS.Applets
+                     }
+                     break;
+                 case InlineKeyboardRequest.Finalize:
++                    // S2Arm: the game closes the keyboard: the host's text input goes away with it
++                    DismissHostInput();
+                     // Destroy the frontend.
+                     DestroyFrontend();
+                     // The calling application wants to close the keyboard applet and will wait for a state change.
+@@ -533,6 +608,39 @@ namespace Ryujinx.HLE.HOS.Applets
+             }
+         }
+ 
++        // S2Arm: inline keyboard answered by the host's system text input (IAsyncTextInput). Called with _lock held (Calc)
++        private bool BeginInlineInput(IAsyncTextInput input, SoftwareKeyboardUIArgs args, int min, int max)
++        {
++            int answer = ++_headlessAnswer;
++            long shown = Stopwatch.GetTimestamp();
++            string initial = _textValue ?? string.Empty;
++            IDisposable handle = input.BeginTextInput(args, (ok, text) =>
++            {
++                Task.Delay(RemainingDelay(shown)).ContinueWith(_ =>
++                {
++                    lock (_lock)
++                    {
++                        if (answer != _headlessAnswer || _backgroundState != InlineKeyboardState.Shown)
++                        {
++                            return;
++                        }
++
++                        _hostInput = null;
++                        string value = FitLength((ok ? text : null) ?? initial, min, max);
++                        PushUpdatedState(value, value.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                    }
++                }, TaskScheduler.Default);
++            });
++
++            if (handle == null)
++            {
++                return false;
++            }
++
++            _hostInput = handle;
++            return true;
++        }
++
+         // S2Arm: the host's answer must fit the game's limits (foreground config / inline Appear): repeat the text up to the minimum
+         // (no separator, so the result stays in the text's own character set: a numeric field stays digits), cut at the maximum
+         internal static string FitLength(string text, int min, int max)
+diff --git a/src/Ryujinx.HLE/UI/IAsyncTextInput.cs b/src/Ryujinx.HLE/UI/IAsyncTextInput.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..faf9801cbc925422b58796ebd8495ed27bdb0f53
+--- /dev/null
++++ b/src/Ryujinx.HLE/UI/IAsyncTextInput.cs
+@@ -0,0 +1,22 @@
++using Ryujinx.HLE.HOS.Applets;
++using System;
++
++namespace Ryujinx.HLE.UI
++{
++    /// <summary>
++    /// S2Arm: the host shows the platform's own text input (system keyboard) without blocking the caller.
++    /// The software keyboard applet uses it for both the foreground applet and the inline keyboard;
++    /// the service / game threads never wait for the player.
++    /// </summary>
++    public interface IAsyncTextInput
++    {
++        /// <summary>
++        /// Shows a text input. <paramref name="done"/> is called at most once, later and on any thread except the caller's:
++        /// (true, text) when the player confirms, (false, null) when the player or the host cancels.
++        /// Returns null when the host has no interactive input right now (unattended run); the caller then answers
++        /// through <see cref="IHostUIHandler.DisplayInputDialog"/>. Disposing the handle dismisses the input; a late
++        /// <paramref name="done"/> may still arrive and must be ignored by the caller.
++        /// </summary>
++        IDisposable BeginTextInput(SoftwareKeyboardUIArgs args, Action<bool, string> done);
++    }
++}

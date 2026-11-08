@@ -1,0 +1,194 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index b5ad8f8266b39d2e39ee3a00df19245b91dbf40e..398b1d16d537f2d2c999f1f8ba4975933e824f20 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -3,6 +3,7 @@ using Ryujinx.Audio.Common;
+ using Ryujinx.Memory;
+ using System;
+ using System.Collections.Concurrent;
++using System.Diagnostics;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using System.Runtime.Versioning;
+@@ -19,6 +20,10 @@ namespace Ryujinx.Audio.Backends.Apple
+         // 21.3 ms; at 20 ms each one went out as 960 + 64 frames, two hand-backs per buffer)
+         private const int NumBuffers = 32;
+         private const int BufferMilliseconds = 50;
++        // S2Arm (10-22 杂音): 起播前预充的在途下限（毫秒，约 3 个游戏缓冲 21.3 ms）。凑够才让设备开播，一开声就有深度；
++        // 安静游戏凑不够时 StartFallbackMilliseconds 后照常开播。
++        private const int PrimeMilliseconds = 64;
++        private const long StartFallbackMilliseconds = 100;
+ 
+         private readonly AppleHardwareDeviceDriver _driver;
+         // S2Arm: queued buffers as (identifier, sample count) in a ring under _queueLock, instead of ConcurrentQueue<AppleAudioBuffer>:
+@@ -45,6 +50,9 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private ulong _playedSampleCount;
+         private bool _started;
++        // S2Arm (10-22 杂音): AudioQueue 是否已 AudioQueueStart（预充满足或兜底后才启播）；_startTicks = Start 时刻
++        private bool _queueRunning;
++        private long _startTicks;
+         private float _volume = 1f;
+ 
+         private readonly object _lock = new();
+@@ -122,7 +130,9 @@ namespace Ryujinx.Audio.Backends.Apple
+             private readonly AppleHardwareDeviceSession _s;
+ 
+             public Pump(AppleHardwareDeviceSession s, int bufferBytes)
+-                : base(NumBuffers, bufferBytes, s._bytesPerFrame, s._bytesPerFrame * (int)s.RequestedSampleRate)
++                // S2Arm (10-22 杂音): 起播前预充 PrimeMilliseconds 的在途下限（约 3 个游戏缓冲），凑够才让设备开播
++                : base(NumBuffers, bufferBytes, s._bytesPerFrame, s._bytesPerFrame * (int)s.RequestedSampleRate,
++                       (long)s._bytesPerFrame * s.RequestedSampleRate * PrimeMilliseconds / 1000)
+             {
+                 _s = s;
+             }
+@@ -270,6 +280,14 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (_started)
+             {
+                 _pump.Pump();
++                // S2Arm (10-22 杂音): 预充期排进设备但未启播——凑够下限的这一笔到了就开播
++                if (!_queueRunning)
++                {
++                    lock (_lock)
++                    {
++                        MaybeStartQueue();
++                    }
++                }
+             }
+         }
+ 
+@@ -282,7 +300,39 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 _started = true;
+                 _diag.SetStarted(true);
++                _startTicks = Stopwatch.GetTimestamp();
+                 _pump.Pump();
++
++                if (_queueRunning)
++                {
++                    // 从 Stop 的暂停恢复：队列已预充过，直接续播
++                    AudioQueueStart(_audioQueue, nint.Zero);
++                }
++                else
++                {
++                    // 首次启播：先 pre-roll，在途凑够下限（或兜底超时）再 AudioQueueStart
++                    MaybeStartQueue();
++                }
++            }
++        }
++
++        // S2Arm (10-22 杂音): 在途达预充下限（或 Start 后超过兜底时限）才让设备开播，起播有深度不掐边欠载。_lock 内调。
++        private void MaybeStartQueue()
++        {
++            if (_queueRunning || !_started)
++            {
++                return;
++            }
++
++            if (!_pump.PrimedForStart &&
++                (Stopwatch.GetTimestamp() - _startTicks) * 1000 / Stopwatch.Frequency >= StartFallbackMilliseconds)
++            {
++                _pump.ForcePrimed();
++            }
++
++            if (_pump.PrimedForStart)
++            {
++                _queueRunning = true;
+                 AudioQueueStart(_audioQueue, nint.Zero);
+             }
+         }
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index b8a67644f68e8b20dbcd1653717c3713b12ae8b2..919e42d8e93603064c60b1909f5893c882841898 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -217,13 +217,18 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             if (_started && bytes > 0)
+             {
+-                if (inFlightAfter == 0)
++                // S2Arm (10-22 杂音): 最少在途含 0——原先只记非零的最小值，在途每个游戏缓冲归零一次（输出端欠载）被漏掉，
++                // 「最少在途 240」是假象（见 10-22 acnh/mk8d 掐边喂）。判据要靠它看在途下限，必须把归零算进去。
++                long framesAfter = inFlightAfter / _bytesPerFrame;
++
++                if (framesAfter < _minInFlight)
+                 {
+-                    _starveSince = now;
++                    _minInFlight = framesAfter;
+                 }
+-                else if (inFlightAfter / _bytesPerFrame < _minInFlight)
++
++                if (inFlightAfter == 0)
+                 {
+-                    _minInFlight = inFlightAfter / _bytesPerFrame;
++                    _starveSince = now;
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index d7e506cfb039f8358aff14c101fadfd81cd6f8c0..fd61a3991cec22b0853abd813fca4f5e523dbdc3 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -24,13 +24,23 @@ namespace Ryujinx.Audio.Backends.Common
+         private int _freeCount;
+         private readonly int[] _filled;
+         private long _inFlightBytes;
++        // S2Arm (10-22 杂音): 起播前预充的在途下限（字节）。在途凑够它之前，缓冲已排进设备但不让设备开播（pre-roll），
++        // 这样一开声就有深度，不会每个游戏缓冲边界掐边欠载（输出端每 21.3 ms 插静音 = 宽频噪声）。0 = 不设下限（旧行为）。
++        private readonly long _primeFloorBytes;
++        private int _primed;   // 0/1，Volatile：在途首次达下限后置 1，之后一直 1（PrimedForStart）
+ 
+         /// <summary>
+         /// Queued samples not yet submitted to the device.
+         /// </summary>
+         public AudioSampleQueue Samples { get; }
+ 
+-        protected DeviceBufferPump(int slots, int slotBytes, int bytesPerFrame, int maxCopiedBytes)
++        /// <summary>
++        /// S2Arm: true once in-flight first reached the prime floor. The device must not start playing before this
++        /// (pre-roll); with floor 0 it is true from the first submit. Latches: stays true after a later drain.
++        /// </summary>
++        public bool PrimedForStart => Volatile.Read(ref _primed) != 0;
++
++        protected DeviceBufferPump(int slots, int slotBytes, int bytesPerFrame, int maxCopiedBytes, long primeFloorBytes = 0)
+         {
+             _slotBytes = slotBytes / bytesPerFrame * bytesPerFrame;
+             _bytesPerFrame = bytesPerFrame;
+@@ -42,6 +52,8 @@ namespace Ryujinx.Audio.Backends.Common
+                 _free[_freeCount++] = i;
+             }
+ 
++            _primeFloorBytes = primeFloorBytes / bytesPerFrame * bytesPerFrame;
++
+             Samples = new AudioSampleQueue(maxCopiedBytes);
+         }
+ 
+@@ -87,12 +99,28 @@ namespace Ryujinx.Audio.Backends.Common
+                     int read = Samples.Read(SlotData(slot)[..n]);
+ 
+                     _filled[slot] = read;
+-                    Interlocked.Add(ref _inFlightBytes, read);
++                    long inFlight = Interlocked.Add(ref _inFlightBytes, read);
++
++                    // S2Arm: 在途凑够下限即可起播；闩锁后不再回退（一次欠载不该让后续重新 pre-roll）
++                    if (_primed == 0 && inFlight >= _primeFloorBytes)
++                    {
++                        Volatile.Write(ref _primed, 1);
++                    }
++
+                     Submit(slot, read);
+                 }
+             }
+         }
+ 
++        /// <summary>
++        /// S2Arm: start the device anyway (prime floor could not be reached, e.g. a quiet game): latch primed so the
++        /// caller's start gate opens. Only raises; never lowers.
++        /// </summary>
++        public void ForcePrimed()
++        {
++            Volatile.Write(ref _primed, 1);
++        }
++
+         /// <summary>
+         /// The device handed pool buffer <paramref name="slot"/> back.
+         /// </summary>

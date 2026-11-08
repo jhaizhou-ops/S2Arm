@@ -1,0 +1,59 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+index 5f644f5460dbcf7410e6a9606b915b90af2f79a4..943b304d59592fcead51035effb98380c98f94ec 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+@@ -163,23 +163,17 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+                 if (Core.S2ASinkMode)
+                 {
+-                    // 排空期：永远回一个真实槽号、永远不阻塞、状态恒 0
+-                    slot = S2AReclaimFreeSlotLocked(async);
+-
+-                    Core.Slots[slot].BufferState = BufferState.Dequeued;
+-                    Core.Slots[slot].QueueTime = TimeSpanType.Zero;
+-                    Core.Slots[slot].PresentationTime = TimeSpanType.Zero;
+-                    Core.Slots[slot].Fence = AndroidFence.NoFence;
+-                    Core.UpdateMaxBufferCountCachedLocked(slot);
+-                    Core.CheckSystemEventsLocked(Core.GetMaxBufferCountLocked(async));
+-
+-                    fence = AndroidFence.NoFence;
+-
+-                    return Status.Success;
++                    return S2ADequeueSinkLocked(async, out slot, out fence);
+                 }
+ 
+                 Status status = WaitForFreeSlotThenRelock(async, out slot, out returnFlags);
+ 
++                // 已堵在等空槽里时收局：等待被唤醒后死态成立、回 NoInit，同入口一样走排空取真实槽（#1508 P1-109）
++                if (status == Status.NoInit && Core.S2ASinkMode)
++                {
++                    return S2ADequeueSinkLocked(async, out slot, out fence);
++                }
++
+                 if (status != Status.Success)
+                 {
+                     slot = BufferSlotArray.InvalidBufferSlot;
+@@ -255,6 +249,23 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             return returnFlags;
+         }
+ 
++        // 排空期出队：永远回一个真实槽号、永远不阻塞、状态恒 0（调用方持 Core.Lock）
++        private Status S2ADequeueSinkLocked(bool async, out int slot, out AndroidFence fence)
++        {
++            slot = S2AReclaimFreeSlotLocked(async);
++
++            Core.Slots[slot].BufferState = BufferState.Dequeued;
++            Core.Slots[slot].QueueTime = TimeSpanType.Zero;
++            Core.Slots[slot].PresentationTime = TimeSpanType.Zero;
++            Core.Slots[slot].Fence = AndroidFence.NoFence;
++            Core.UpdateMaxBufferCountCachedLocked(slot);
++            Core.CheckSystemEventsLocked(Core.GetMaxBufferCountLocked(async));
++
++            fence = AndroidFence.NoFence;
++
++            return Status.Success;
++        }
++
+         // S2Arm 排空取槽：必回 ≥0 的真实槽号，绝不阻塞。取槽顺序——
+         //   空闲槽（最老帧号，同正常路径）→ 丢已入队未消费帧腾槽（帧反正不上屏）→
+         //   回收消费者手里的 Acquired 槽（NeedsCleanupOnRelease，迟到的归还按 StaleBufferSlot 走）→

@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+index 8018d847198e8a8a783c2a659aeb994640906190..604f6e80f11c31bde51f5cab5af690e179f079be 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+@@ -125,8 +125,18 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+ 
+             _ = Directory.CreateDirectory(folderPath);
+ 
++            // S2Arm: UniqueId is one byte. Once every id of this second is taken it wrapped back to 0 and this loop never ended (the game thread hung
++            // in SaveScreenShot). Try each id once; with none free the album cannot hold another capture for this second.
++            // AlbumFileCountLimit is capsrv's nearest result (ResultNames 0x32CE); the code hardware returns in this exact case is not verified.
++            int tries = 1;
++
+             while (File.Exists(filePath))
+             {
++                if (tries++ > byte.MaxValue)
++                {
++                    return ResultCode.AlbumFileCountLimit;
++                }
++
+                 applicationAlbumEntry.AlbumFileDateTime.UniqueId++;
+                 filePath = GenerateFilePath(folderPath, applicationAlbumEntry, currentDateTime, hash);
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/ResultCode.cs b/src/Ryujinx.HLE/HOS/Services/Caps/ResultCode.cs
+index 7617ae9d3564dff2dda925297409dba2733688a2..96eef489b929e3667f3e8dd8f1809c6e73a82a3f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/ResultCode.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/ResultCode.cs
+@@ -11,6 +11,7 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+         ShimLibraryVersionAlreadySet = (7 << ErrorCodeShift) | ModuleId,
+         OutOfRange = (8 << ErrorCodeShift) | ModuleId,
+         InvalidContentType = (14 << ErrorCodeShift) | ModuleId,
++        AlbumFileCountLimit = (25 << ErrorCodeShift) | ModuleId,
+         NullOutputBuffer = (141 << ErrorCodeShift) | ModuleId,
+         NullInputBuffer = (142 << ErrorCodeShift) | ModuleId,
+         BlacklistedPid = (822 << ErrorCodeShift) | ModuleId,

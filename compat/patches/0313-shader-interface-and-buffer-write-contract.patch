@@ -1,0 +1,721 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index 2b58c3fea8a4479b5cd3bfbe6da1dd17a342e08f..8a83a1220274bb2e1b5ec394511d7824a2900118 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -26,6 +26,10 @@ namespace Ryujinx.Graphics.GAL
+         // S2A：渲染器顶点自取（graphics/metal/gal_vpull.m）——顶点着色器自己按格式解码属性，产出 Maxwell 寄存器原始位。
+         // 为真时 Gpu 层把缩放整数格式原样交给渲染器（不改成整数格式），翻译器可把顶点输入声明为原始位（ShaderDefinitions.S2AVertexRaw）
+         public readonly bool S2AVertexPull;
++        // 实际渲染器的接口合同。Metal 也接收 Vulkan SPIR-V，不能用 Api 区分。
++        public readonly bool RequiresLinkedVaryingInterface;
++        public readonly int MaximumVertexOutputComponents;
++        public readonly int MaximumFragmentInputComponents;
+         public readonly bool SupportsSnormBufferTextureFormat;
+         public readonly bool SupportsSparseBuffer;
+         public readonly bool Supports5BitComponentFormat;
+@@ -140,9 +144,15 @@ namespace Ryujinx.Graphics.GAL
+             int textureBufferOffsetAlignment,
+             int gatherBiasPrecision,
+             ulong maximumGpuMemory,
+-            bool s2aVertexPull = false)
++            bool s2aVertexPull = false,
++            bool requiresLinkedVaryingInterface = false,
++            int maximumVertexOutputComponents = 0,
++            int maximumFragmentInputComponents = 0)
+         {
+             S2AVertexPull = s2aVertexPull;
++            RequiresLinkedVaryingInterface = requiresLinkedVaryingInterface;
++            MaximumVertexOutputComponents = maximumVertexOutputComponents;
++            MaximumFragmentInputComponents = maximumFragmentInputComponents;
+             Api = api;
+             VendorName = vendorName;
+             MemoryType = memoryType;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 999571b2d46590afd499cbfe6202282f39604aca..ab6c846e250e4e7fe5e29f869d3c664ebeeb8768 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -26,7 +26,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen，
+         //   +4（10-21 画面着色器线合批一次升）：点大小运行时化（支持缓冲在 s2a_widen 前加 s2a_point）+ 转计算程序进缓存（阶段掩码口径改、复合宿主二进制））
+         //   +5（10-21 画面·着色器线）：顶点输入按原始位读（宿主顶点自取，翻译结果不随属性类型变，补丁 vattr-raw）
+-        internal const uint CodeGenVersion = 7354 + 6; // S2A：片元双轴分辨率倍率，支持缓冲追加 render_scale_y
++        // Invalidate host programs emitted before explicit SSBO permissions and linked Vulkan interfaces.
++        // This is compiler identity, independent of package source keys and device capability identity.
++        internal const uint CodeGenVersion = 7354 + 7;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index b2425daa430fe4c8556bb08bb60df86682fe96fe..1eb6b936a55a37c6509df80b33d2bc42f72639eb 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.Shader.Translation;
+ using System;
+ using System.IO;
+ using System.Security.Cryptography;
+@@ -28,6 +29,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             writer.Write(capabilities.SupportsBgraFormat);
+             writer.Write(capabilities.SupportsScaledVertexFormats);
+             writer.Write(capabilities.S2AVertexPull);
++            // Same language selection as ShaderCache.CreateTranslationOptions; no renderer -> GPU dependency.
++            bool usesSpirv = GraphicsConfig.EnableSpirvCompilationOnVulkan && capabilities.Api == TargetApi.Vulkan;
++            writer.Write(usesSpirv);
++            writer.Write(usesSpirv && capabilities.RequiresLinkedVaryingInterface);
++            writer.Write(capabilities.RequiresLinkedVaryingInterface);
++            writer.Write(capabilities.MaximumVertexOutputComponents);
++            writer.Write(capabilities.MaximumFragmentInputComponents);
+             writer.Write(capabilities.SupportsSnormBufferTextureFormat);
+             writer.Write(capabilities.SupportsBlendEquationAdvanced);
+             writer.Write(capabilities.SupportsFragmentShaderInterlock);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index a490c005f81da40cc7196b3a883e861363268d8a..fbc95c616cc7bd3cf7e4d5aabfe35a23cb227b84 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -225,6 +225,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         public bool QueryHostS2AVertexPull() => _context.Capabilities.S2AVertexPull;
+ 
++        public bool QueryHostRequiresLinkedVaryingInterface() => _context.Capabilities.RequiresLinkedVaryingInterface;
++
++        public int QueryHostMaximumVertexOutputComponents() => _context.Capabilities.MaximumVertexOutputComponents;
++
++        public int QueryHostMaximumFragmentInputComponents() => _context.Capabilities.MaximumFragmentInputComponents;
++
+         public bool QueryHostSupportsSeparateSampler() => _context.Capabilities.SupportsSeparateSampler;
+ 
+         public bool QueryHostSupportsShaderBallot() => _context.Capabilities.SupportsShaderBallot;
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+index a7b82e742b37d343a407fa1e47a0f677885d1faf..dad1fdd61cf87cd021500f5bec298daff7c892cc 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+@@ -275,7 +275,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
+                     set = $"set = {buffer.Set}, ";
+                 }
+ 
+-                context.AppendLine($"layout ({set}binding = {buffer.Binding}, {layout}) {declType} _{buffer.Name}");
++                string access = declType == "buffer" && !buffer.Flags.HasFlag(BufferUsageFlags.Write) ? "readonly " : string.Empty;
++                context.AppendLine($"layout ({set}binding = {buffer.Binding}, {layout}) {access}{declType} _{buffer.Name}");
+                 context.EnterScope();
+ 
+                 foreach (StructureField field in buffer.Type.Fields)
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 97b9dd8d658356b32681e16a258a2ef9f96d7d01..ef307bcd910f2d3538b4383e95a3514641f0b8d8 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -145,6 +145,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                 if (isBuffer)
+                 {
++                    if (!buffer.Flags.HasFlag(BufferUsageFlags.Write))
++                    {
++                        context.Decorate(variable, Decoration.NonWritable);
++                    }
+                     context.StorageBuffers.Add(buffer.Binding, variable);
+                 }
+                 else
+@@ -335,6 +339,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+         private static void DeclareInputsAndOutputs(CodeGenContext context, StructuredProgramInfo info)
+         {
+             int firstLocation = int.MaxValue;
++            var budget = new AttributeUsage.InterfaceBudget(context.AttributeUsage, context.Definitions.Stage);
+ 
+             if (context.Definitions.Stage == ShaderStage.Fragment && context.Definitions.DualSourceBlend)
+             {
+@@ -382,19 +387,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 bool isOutput = ioDefinition.StorageKind.IsOutput();
+                 bool isPerPatch = ioDefinition.StorageKind.IsPerPatch();
+ 
+-                DeclareInputOrOutput(context, ioDefinition, isOutput, isPerPatch, iq, firstLocation);
++                DeclareInputOrOutput(context, ioDefinition, isOutput, isPerPatch, budget, iq, firstLocation);
+             }
+ 
+-            DeclarePerVertexBlock(context);
++            DeclarePerVertexBlock(context, budget);
++            budget.Validate();
+         }
+ 
+-        private static void DeclarePerVertexBlock(CodeGenContext context)
++        private static void DeclarePerVertexBlock(CodeGenContext context, AttributeUsage.InterfaceBudget budget)
+         {
+             if (context.Definitions.Stage.IsVtg)
+             {
+                 if (context.Definitions.Stage != ShaderStage.Vertex)
+                 {
+-                    SpvInstruction perVertexInputStructType = CreatePerVertexStructType(context);
++                    SpvInstruction perVertexInputStructType = CreatePerVertexStructType(context, out _);
+                     int arraySize = context.Definitions.Stage == ShaderStage.Geometry ? context.Definitions.InputTopology.InputVertexCount : 32;
+                     SpvInstruction perVertexInputArrayType = context.TypeArray(perVertexInputStructType, context.Constant(context.TypeU32(), arraySize));
+                     SpvInstruction perVertexInputPointerType = context.TypePointer(StorageClass.Input, perVertexInputArrayType);
+@@ -416,7 +422,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                     }
+                 }
+ 
+-                SpvInstruction perVertexOutputStructType = CreatePerVertexStructType(context);
++                SpvInstruction perVertexOutputStructType = CreatePerVertexStructType(context, out int components);
++                budget.Record(true, 0, 0, components, builtIn: true);
+ 
+                 void DecorateTfo(IoVariable ioVariable, int fieldIndex)
+                 {
+@@ -452,12 +459,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             }
+         }
+ 
+-        private static SpvInstruction CreatePerVertexStructType(CodeGenContext context)
++        private static SpvInstruction CreatePerVertexStructType(CodeGenContext context, out int components)
+         {
+-            SpvInstruction vec4FloatType = context.TypeVector(context.TypeFP32(), 4);
++            const int positionLength = 4, clipLength = 8, cullLength = 1;
++            components = positionLength + 1 + clipLength + cullLength;
++            SpvInstruction vec4FloatType = context.TypeVector(context.TypeFP32(), positionLength);
+             SpvInstruction floatType = context.TypeFP32();
+-            SpvInstruction array8FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 8));
+-            SpvInstruction array1FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), 1));
++            SpvInstruction array8FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), clipLength));
++            SpvInstruction array1FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), cullLength));
+ 
+             SpvInstruction perVertexStructType = context.TypeStruct(true, vec4FloatType, floatType, array8FloatType, array1FloatType);
+ 
+@@ -488,6 +497,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             IoDefinition ioDefinition,
+             bool isOutput,
+             bool isPerPatch,
++            AttributeUsage.InterfaceBudget budget,
+             PixelImap iq = PixelImap.Unused,
+             int firstLocation = 0)
+         {
+@@ -537,7 +547,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 };
+             }
+ 
+-            SpvInstruction spvType = context.GetType(varType, IoMap.GetSpirvBuiltInArrayLength(ioVariable));
++            int arrayLength = IoMap.GetSpirvBuiltInArrayLength(ioVariable);
++            int hostLocation = ioVariable == IoVariable.UserDefined && !isPerPatch
++                ? context.AttributeUsage.GetVaryingLocation(ioDefinition.Location, isOutput) : ioDefinition.Location;
++            budget.Record(isOutput, hostLocation, hasComponent ? ioDefinition.Component : 0,
++                AttributeUsage.InterfaceBudget.Components(varType, arrayLength), isBuiltIn);
++            SpvInstruction spvType = context.GetType(varType, arrayLength);
+             bool builtInPassthrough = false;
+ 
+             if (!isPerPatch && IoMap.IsPerVertex(ioVariable, context.Definitions.Stage, isOutput))
+@@ -591,7 +606,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             }
+             else if (ioVariable == IoVariable.UserDefined)
+             {
+-                context.Decorate(spvVar, Decoration.Location, (LiteralInteger)ioDefinition.Location);
++                context.Decorate(spvVar, Decoration.Location, (LiteralInteger)hostLocation);
+ 
+                 // S2A：原始位顶点输入带名字标记，渲染器据此用原始位解码（graphics/metal/gal_vpull.m：成员名 s2a_raw<位置> → s2a_vr，且必须走顶点自取）
+                 if (context.Definitions.S2AIsRawInput(ioDefinition.Location, isOutput))
+@@ -606,6 +621,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                 if (!isOutput &&
+                     !isPerPatch &&
++                    !builtInPassthrough &&
+                     (context.AttributeUsage.PassthroughAttributes & (1 << ioDefinition.Location)) != 0 &&
+                     context.HostCapabilities.SupportsGeometryShaderPassthrough)
+                 {
+diff --git a/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs b/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs
+index 45250a46313c25f9d3051da48e68e2b7424cc666..4b979923a0c7fb928b6d0cfa3dbb3612e100d03b 100644
+--- a/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/Decoder.cs
+@@ -290,7 +290,7 @@ namespace Ryujinx.Graphics.Shader.Decoders
+                     case InstName.Ald:
+                     case InstName.Ast:
+                     case InstName.Ipa:
+-                        SetUserAttributeUses(definitions, context, op.Name, opCode);
++                        SetUserAttributeUses(definitions, context, op);
+                         break;
+                     case InstName.Pbk:
+                     case InstName.Pcnt:
+@@ -338,8 +338,18 @@ namespace Ryujinx.Graphics.Shader.Decoders
+             block.EndAddress = address;
+         }
+ 
+-        private static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, InstName name, ulong opCode)
++        private static void SetUserAttributeUses(ShaderDefinitions definitions, Context context, InstOp instruction)
+         {
++            // 与 Translator.EmitOps 的恒假判据一致；只抑制无效 IO 需求，不删除指令或改变 CFG。
++            InstConditional conditional = new(instruction.RawOpCode);
++            if (!instruction.Props.HasFlag(InstProps.NoPred) &&
++                conditional.Pred == RegisterConsts.PredicateTrueIndex && conditional.PredInv)
++            {
++                return;
++            }
++
++            InstName name = instruction.Name;
++            ulong opCode = instruction.RawOpCode;
+             int offset;
+             int count = 1;
+             bool isStore = false;
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 32e6447ba38057abdc10bb16929044d482f685ed..0e3ccf13d780c0e2fee1958bebec4fecb00a18c4 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -17,6 +17,15 @@ namespace Ryujinx.Graphics.Shader
+ 
+     public interface IGpuAccessor : ILogger
+     {
++        /// <summary>实际宿主要求按配对阶段建立紧凑接口；不是 TargetApi 的别名。</summary>
++        bool QueryHostRequiresLinkedVaryingInterface() => false;
++
++        /// <summary>linked 接口的真实顶点输出上限；未采用该合同的宿主返回 0。</summary>
++        int QueryHostMaximumVertexOutputComponents() => 0;
++
++        /// <summary>linked 接口的真实片元输入上限；未采用该合同的宿主返回 0。</summary>
++        int QueryHostMaximumFragmentInputComponents() => 0;
++
+         /// <summary>
+         /// Reads data from the constant buffer 1.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/BufferDefinition.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/BufferDefinition.cs
+index e2759480464193803745fd834f1204ab6cad6559..ae123616b89b529ee7856abb32f5c881027a4834 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/BufferDefinition.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/BufferDefinition.cs
+@@ -7,14 +7,19 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+         public int Binding { get; }
+         public string Name { get; }
+         public StructureType Type { get; }
++        public BufferUsageFlags Flags { get; }
+ 
+-        public BufferDefinition(BufferLayout layout, int set, int binding, string name, StructureType type)
++        public BufferDefinition(BufferLayout layout, int set, int binding, string name, StructureType type,
++            BufferUsageFlags flags = BufferUsageFlags.Write)
+         {
+             Layout = layout;
+             Set = set;
+             Binding = binding;
+             Name = name;
+             Type = type;
++            Flags = flags;
+         }
++
++        public BufferDefinition WithFlags(BufferUsageFlags flags) => new(Layout, Set, Binding, Name, Type, flags);
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+index f0f22c056309583f94c0797156bc36f726f88a4d..9f3d8129053e6bc2e3d517d78ebb5d9f79538161 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+@@ -35,9 +35,19 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+ 
+         public void AddOrUpdateStorageBuffer(BufferDefinition definition)
+         {
++            if (_storageBuffers.TryGetValue(definition.Binding, out BufferDefinition previous))
++            {
++                definition = definition.WithFlags(definition.Flags | previous.Flags);
++            }
+             _storageBuffers[definition.Binding] = definition;
+         }
+ 
++        public void SetStorageBufferWritten(int binding)
++        {
++            BufferDefinition definition = _storageBuffers[binding];
++            _storageBuffers[binding] = definition.WithFlags(definition.Flags | BufferUsageFlags.Write);
++        }
++
+         public void AddOrUpdateTexture(TextureDefinition definition)
+         {
+             _textures[new(definition.Set, definition.Binding)] = definition;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs b/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
+index 346112a972e7a0578b1c73c0f8cb6aefbdfb5e66..77e0f7beaf4f51a30e8efb725dec393f5ddde2ea 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
+@@ -1,3 +1,5 @@
++using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using Ryujinx.Graphics.Shader.StructuredIr;
+ using System;
+ using System.Collections.Generic;
+ using System.Numerics;
+@@ -17,6 +19,119 @@ namespace Ryujinx.Graphics.Shader.Translation
+         private int _thisUsedInputAttributes;
+         private Dictionary<int, int> _perPatchAttributeLocations;
+         private readonly IGpuAccessor _gpuAccessor;
++        private LinkedLocations _linkedInputs;
++        private LinkedLocations _linkedOutputs;
++
++        // 配对两端共用逻辑位置集合；IR / 插值 / XFB 仍使用客体位置，只重编号宿主 Location。
++        // 解码只提供消费需求；生产者以最终 IR 声明收口，不把恒假写等解码提示当成实际输出。
++        // 压缩编号第一次发射后不可改变；保留逻辑编号时新增声明不会改变已经发射的位置。
++        private sealed class LinkedLocations
++        {
++            private uint _mask;
++            private bool _emitted;
++            private int _locationCount = 32;
++            private string _identityOnlyReason;
++
++            public LinkedLocations(int mask, string identityOnlyReason, int locationCount)
++            {
++                _mask = (uint)mask;
++                _locationCount = locationCount;
++                _identityOnlyReason = identityOnlyReason;
++            }
++
++            public void Include(int mask)
++            {
++                uint added = (uint)mask & ~_mask;
++                if (_emitted && _identityOnlyReason == null && added != 0)
++                {
++                    throw new InvalidOperationException("Varying interface changed after shader emission.");
++                }
++
++                _mask |= (uint)mask;
++            }
++
++            public void LimitLocations(int count) => _locationCount = Math.Min(_locationCount, count);
++
++            public void RequireIdentity(string reason)
++            {
++                if (reason != null && _identityOnlyReason == null)
++                {
++                    if (_emitted)
++                    {
++                        throw new InvalidOperationException("Varying interface requires logical locations after compact shader emission.");
++                    }
++
++                    _identityOnlyReason = reason;
++                }
++            }
++
++            public int GetLocation(int logicalLocation)
++            {
++                if ((uint)logicalLocation >= 32 || (_mask & (1u << logicalLocation)) == 0)
++                {
++                    throw new InvalidOperationException($"Unlinked varying location {logicalLocation}.");
++                }
++
++                if (logicalLocation >= _locationCount)
++                {
++                    throw new NotSupportedException($"Varying location {logicalLocation} exceeds indexed interface domain {_locationCount}.");
++                }
++
++                _emitted = true;
++                if (_identityOnlyReason != null) return logicalLocation;
++                return BitOperations.PopCount(_mask & ((1u << logicalLocation) - 1));
++            }
++        }
++
++        public bool RequiresLinkedVaryingInterface { get; private set; }
++        public int FinalOutputAttributes { get; private set; }
++
++        public void SetTargetLanguage(TargetLanguage language)
++        {
++            RequiresLinkedVaryingInterface = language == TargetLanguage.Spirv && _gpuAccessor.QueryHostRequiresLinkedVaryingInterface();
++        }
++
++        public int MaximumVertexOutputComponents => _gpuAccessor.QueryHostMaximumVertexOutputComponents();
++        public int MaximumFragmentInputComponents => _gpuAccessor.QueryHostMaximumFragmentInputComponents();
++
++        // 每次代码生成独立记账，不能存入 AttributeUsage：VTG 会共用它先发射计算再发射顶点。
++        public sealed class InterfaceBudget
++        {
++            private readonly bool _enabled;
++            private readonly bool _output;
++            private readonly int _limit;
++            private int _userEnd;
++            private int _builtIns;
++
++            public InterfaceBudget(AttributeUsage usage, ShaderStage stage)
++            {
++                _enabled = usage.RequiresLinkedVaryingInterface && (stage == ShaderStage.Vertex || stage == ShaderStage.Fragment);
++                _output = stage == ShaderStage.Vertex;
++                _limit = _output ? usage.MaximumVertexOutputComponents : usage.MaximumFragmentInputComponents;
++            }
++
++            public void Record(bool output, int location, int component, int count, bool builtIn = false)
++            {
++                if (!_enabled || output != _output) return;
++                if (builtIn) _builtIns = checked(_builtIns + count);
++                else _userEnd = Math.Max(_userEnd, checked(location * 4 + component + count));
++            }
++
++            public void Validate()
++            {
++                if (_enabled && (_limit <= 0 || _userEnd + _builtIns > _limit))
++                {
++                    throw new NotSupportedException($"{(_output ? "Vertex output" : "Fragment input")} interface requires {_userEnd} user endpoint + {_builtIns} built-in components; host limit {_limit}.");
++                }
++            }
++
++            public static int Components(AggregateType type, int arrayLength = 1)
++            {
++                int count = type.GetSizeInBytes() / 4;
++                if (count == 0) throw new InvalidOperationException($"Unknown interface type {type}.");
++                return checked(count * ((type & AggregateType.Array) != 0 ? arrayLength : 1));
++            }
++        }
+ 
+         public UInt128 NextInputAttributesComponents { get; private set; }
+         public UInt128 ThisInputAttributesComponents { get; private set; }
+@@ -53,6 +168,55 @@ namespace Ryujinx.Graphics.Shader.Translation
+             UsedOutputAttributesPerPatch.Add(index);
+         }
+ 
++        public void LinkVaryingLocations(AttributeUsage nextStage, string identityOnlyReason, int locationCount)
++        {
++            _linkedOutputs = new LinkedLocations(nextStage.UsedInputAttributes, identityOnlyReason, locationCount);
++            nextStage._linkedInputs = _linkedOutputs;
++        }
++
++        public void LinkPassthroughInputs(AttributeUsage previousStage, string identityOnlyReason, int locationCount)
++        {
++            if (_linkedOutputs != null)
++            {
++                _linkedOutputs.RequireIdentity(identityOnlyReason);
++                _linkedOutputs.LimitLocations(locationCount);
++                // 原生 GS passthrough 的输入也直接成为输出；前一阶段必须共用同一编号。
++                _linkedInputs = _linkedOutputs;
++                previousStage._linkedOutputs = _linkedOutputs;
++            }
++        }
++
++        public void InheritLinkedOutputs(AttributeUsage source, bool passthroughInputs = false)
++        {
++            RequiresLinkedVaryingInterface = source.RequiresLinkedVaryingInterface;
++            _linkedOutputs = source._linkedOutputs;
++            if (passthroughInputs) _linkedInputs = _linkedOutputs;
++        }
++
++        public void ObserveFinalInterface(IEnumerable<IoDefinition> definitions, ShaderStage stage)
++        {
++            if (!RequiresLinkedVaryingInterface || stage == ShaderStage.Compute) return;
++
++            int inputMask = 0;
++            int outputMask = 0;
++            foreach (IoDefinition definition in definitions)
++            {
++                if (definition.IoVariable != IoVariable.UserDefined) continue;
++                if (definition.StorageKind == StorageKind.Input) inputMask |= 1 << definition.Location;
++                if (definition.StorageKind == StorageKind.Output) outputMask |= 1 << definition.Location;
++            }
++
++            _linkedInputs?.Include(inputMask);
++            _linkedOutputs?.Include(outputMask);
++            FinalOutputAttributes = outputMask;
++        }
++
++        public int GetVaryingLocation(int logicalLocation, bool isOutput)
++        {
++            LinkedLocations locations = isOutput ? _linkedOutputs : _linkedInputs;
++            return locations?.GetLocation(logicalLocation) ?? logicalLocation;
++        }
++
+         public void MergeFromtNextStage(bool gpPassthrough, bool nextUsesFixedFunctionAttributes, AttributeUsage nextStage)
+         {
+             NextInputAttributesComponents = nextStage.ThisInputAttributesComponents;
+@@ -161,6 +325,13 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 index--;
+             }
+ 
++            if (bit >= 0)
++            {
++                // 固定功能与 Layer 共用此分配器；合成属性与客体用户属性保持同一逻辑编号域。
++                LinkedLocations locations = isOutput ? _linkedOutputs : _linkedInputs;
++                locations?.RequireIdentity("synthesized user attributes");
++            }
++
+             return bit;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index ba3ec6687ffd3b821c176e5a6475a50e29300ee3..442b8b8691260b082f9e06bc0e1e295f5170d8dd 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -22,7 +22,6 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         private readonly SetBindingPair[] _cbSlotToBindingMap;
+         private readonly SetBindingPair[] _sbSlotToBindingMap;
+-        private uint _sbSlotWritten;
+ 
+         private readonly Dictionary<int, int> _sbSlots;
+         private readonly Dictionary<int, int> _sbSlotsReverse;
+@@ -179,7 +178,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             if (write)
+             {
+-                _sbSlotWritten |= 1u << slot;
++                Properties.SetStorageBufferWritten(setAndBinding.Binding);
+             }
+ 
+             binding = setAndBinding.Binding;
+@@ -489,7 +488,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 if (setAndBinding.Binding >= 0)
+                 {
+                     (int sbCbSlot, int sbCbOffset) = UnpackSbCbInfo(key);
+-                    BufferUsageFlags flags = (_sbSlotWritten & (1u << slot)) != 0 ? BufferUsageFlags.Write : BufferUsageFlags.None;
++                    BufferUsageFlags flags = Properties.StorageBuffers[setAndBinding.Binding].Flags;
+                     descriptors[descriptorIndex++] = new BufferDescriptor(setAndBinding.SetIndex, setAndBinding.Binding, slot, sbCbSlot, sbCbOffset, flags);
+                 }
+             }
+@@ -626,7 +625,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 new StructureField(AggregateType.Array | AggregateType.U32, "data", 0),
+             });
+ 
+-            Properties.AddOrUpdateStorageBuffer(new(BufferLayout.Std430, setIndex, binding, name, type));
++            Properties.AddOrUpdateStorageBuffer(new(BufferLayout.Std430, setIndex, binding, name, type, BufferUsageFlags.None));
+         }
+ 
+         public static string GetShaderStagePrefix(ShaderStage stage)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 2f6384cfd7e6910146d30436cbaa390ee79519d5..d512a12fb3f88576f98d5b2cbea5565faad231c1 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         private readonly DecodedProgram _program;
+         private readonly int _localMemorySize;
+         private IoUsage _vertexOutput;
++        private AttributeUsage _vertexPassthroughAttributeUsage;
+ 
+         public ulong Address { get; }
+         public int Size { get; }
+@@ -57,6 +58,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             Definitions = definitions;
+             GpuAccessor = gpuAccessor;
+             Options = options;
++            AttributeUsage.SetTargetLanguage(options.TargetLanguage);
+         }
+ 
+         private static bool IsLoadUserDefined(Operation operation)
+@@ -192,12 +194,23 @@ namespace Ryujinx.Graphics.Shader.Translation
+         /// <summary>S2A：单独翻译顶点阶段（离线批量翻译里没配上片元的顶点）：按「下一阶段是片元、读全部通用输入」处理，结果与配任何片元时相同</summary>
+         public void S2ASetStandaloneNextFragment()
+         {
++            if (AttributeUsage.RequiresLinkedVaryingInterface)
++            {
++                throw new NotSupportedException("Linked varying translation requires the actual next shader stage.");
++            }
++
+             if (S2AStageIndep && Definitions.Stage == ShaderStage.Vertex) AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);
+         }
+ 
+         public void SetNextStage(TranslatorContext nextStage)
+         {
+-            if (S2AStageIndep && nextStage.Definitions.Stage == ShaderStage.Fragment && !nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
++            bool linked = AttributeUsage.RequiresLinkedVaryingInterface;
++            if (linked != nextStage.AttributeUsage.RequiresLinkedVaryingInterface)
++            {
++                throw new InvalidOperationException("Linked shader stages must use the same effective varying policy.");
++            }
++
++            if (!linked && S2AStageIndep && nextStage.Definitions.Stage == ShaderStage.Fragment && !nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
+             {
+                 AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);   // S2A：顶点输出接口不看片元实际读哪些（见 AttributeUsage）
+             }
+@@ -209,6 +222,37 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     nextStage.AttributeUsage);
+             }
+ 
++            if (linked && nextStage.Stage == ShaderStage.Fragment)
++            {
++                string identityOnlyReason = null;
++                bool indexed = Definitions.OaIndexing || (Definitions.GpPassthrough && Definitions.IaIndexing) || nextStage.Definitions.IaIndexing;
++                if (indexed)
++                {
++                    identityOnlyReason = "dynamically indexed attributes";
++                }
++                else if (AttributeUsage.UsedOutputAttributesPerPatch.Count != 0 || nextStage.AttributeUsage.UsedInputAttributesPerPatch.Count != 0)
++                {
++                    identityOnlyReason = "per-patch attributes";
++                }
++                else if (_program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr) || nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
++                {
++                    identityOnlyReason = "fixed-function attributes";
++                }
++                else if (GpuAccessor.QueryTransformFeedbackEnabled())
++                {
++                    identityOnlyReason = "transform feedback";
++                }
++
++                AttributeUsage.LinkVaryingLocations(nextStage.AttributeUsage, identityOnlyReason, indexed ? Constants.MaxAttributes : 32);
++            }
++
++            if (linked && nextStage.Definitions.GpPassthrough)
++            {
++                string identityOnlyReason = Definitions.OaIndexing ? "dynamically indexed attributes"
++                    : _program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr) ? "fixed-function attributes" : null;
++                nextStage.AttributeUsage.LinkPassthroughInputs(AttributeUsage, identityOnlyReason, Definitions.OaIndexing ? Constants.MaxAttributes : 32);
++            }
++
+             // We don't consider geometry shaders using the geometry shader passthrough feature
+             // as being the last because when this feature is used, it can't actually modify any of the outputs,
+             // so the stage that comes before it is the last one that can do modifications.
+@@ -383,6 +427,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 Options.TargetLanguage,
+                 Options.Flags.HasFlag(TranslationFlags.DebugMode));
+ 
++            attributeUsage.ObserveFinalInterface(sInfo.IoDefinitions, definitions.Stage);
++
+             int geometryVerticesPerPrimitive = Definitions.OutputTopology switch
+             {
+                 OutputTopology.LineStrip => 2,
+@@ -542,6 +588,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public ShaderProgram GenerateVertexPassthroughForCompute()
+         {
+             AttributeUsage attributeUsage = new AttributeUsage(GpuAccessor);
++            attributeUsage.InheritLinkedOutputs(AttributeUsage);
+             ResourceManager resourceManager = new ResourceManager(ShaderStage.Vertex, GpuAccessor);
+ 
+             ResourceReservations reservations = GetResourceReservations();
+@@ -560,7 +607,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             });
+ 
+             int vertexDataSbBinding = reservations.VertexOutputStorageBufferBinding;
+-            BufferDefinition vertexOutputBuffer = new(BufferLayout.Std430, 1, vertexDataSbBinding, "vb_input", vertexInputStruct);
++            BufferDefinition vertexOutputBuffer = new(BufferLayout.Std430, 1, vertexDataSbBinding, "vb_input", vertexInputStruct, flags: BufferUsageFlags.None);
+             resourceManager.Properties.AddOrUpdateStorageBuffer(vertexOutputBuffer);
+ 
+             EmitterContext context = new EmitterContext();
+@@ -619,7 +666,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 LastInVertexPipeline = true
+             };
+ 
+-            return Generate(
++            ShaderProgram program = Generate(
+                 new[] { function },
+                 attributeUsage,
+                 definitions,
+@@ -627,11 +674,18 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 resourceManager,
+                 FeatureFlags.None,
+                 0);
++
++            // 只有成功发射的宿主 VS 才是后补 GS 的真实生产者；Compute 本身没有图形输出接口。
++            _vertexPassthroughAttributeUsage = attributeUsage;
++            return program;
+         }
+ 
+         public ShaderProgram GenerateGeometryPassthrough()
+         {
+-            int outputAttributesMask = AttributeUsage.UsedOutputAttributes;
++            AttributeUsage producerUsage = AttributeUsage.RequiresLinkedVaryingInterface
++                ? _vertexPassthroughAttributeUsage ?? AttributeUsage : AttributeUsage;
++            int outputAttributesMask = producerUsage.RequiresLinkedVaryingInterface
++                ? producerUsage.FinalOutputAttributes : producerUsage.UsedOutputAttributes;
+             int layerOutputAttr = LayerOutputAttribute;
+ 
+             if (LayerOutputWritten)
+@@ -660,6 +714,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+ 
+             AttributeUsage attributeUsage = new AttributeUsage(GpuAccessor);
++            attributeUsage.InheritLinkedOutputs(producerUsage, passthroughInputs: true);
+             ResourceManager resourceManager = new ResourceManager(ShaderStage.Geometry, GpuAccessor);
+ 
+             EmitterContext context = new EmitterContext();
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 85586d67be91888d62d65bf8b266479ecedc1379..0fbab27190956fb22d62d3db6979be9ac3200deb 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -775,7 +775,10 @@ namespace Ryujinx.Graphics.Vulkan
+                 storageBufferOffsetAlignment: (int)limits.MinStorageBufferOffsetAlignment,
+                 textureBufferOffsetAlignment: (int)limits.MinTexelBufferOffsetAlignment,
+                 gatherBiasPrecision: IsIntelWindows || IsAmdWindows ? (int)Capabilities.SubTexelPrecisionBits : 0,
+-                maximumGpuMemory: GetTotalGPUMemory());
++                maximumGpuMemory: GetTotalGPUMemory(),
++                requiresLinkedVaryingInterface: true,
++                maximumVertexOutputComponents: checked((int)limits.MaxVertexOutputComponents),
++                maximumFragmentInputComponents: checked((int)limits.MaxFragmentInputComponents));
+         }
+ 
+         private ulong GetTotalGPUMemory()

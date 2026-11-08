@@ -1,0 +1,182 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 567f4e12002415c9d5624714192e3bb2969a09a4..c635de4af21f9daa246c2ed4ebb66c88a65b926f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -486,19 +486,23 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
+-        // S2A：提前热程序（10-23 画面·着色器线，马车8 进赛道那帧 338 条管线首用、预取只取到约 100 条）：缓存只登记、程序到第一次查到才实化（补丁 shader-cache-lazy），
+-        //   渲染器的管线预取要等程序建成才排（graphics/metal/gal_state.m gal_pso_pf_prog），换场景那帧的程序当帧才实化，预取没有提前量。
+-        //   这里按表（首用帧升序）在后台线程把这些程序的宿主二进制交底层渲染器载入一次再放掉：渲染器程序一建成就把它在首用表里的管线排进后台预取，进预取池；
+-        //   之后游戏真正查到时照常按需实化（同一份二进制，渲染器程序哈希相同），渲染线程首遇从池里取。不改按需实化、不碰查找路径、不留托管对象。
+-        //   直接调底层渲染器（ThreadedRenderer.BaseRenderer）：多线程渲染器的命令队列只认 GPU 模拟线程一个生产者；底层载入 / 释放走渲染器自己的 API 锁（nxgal_prog_load_binary / release）。
+-        //   转计算复合二进制（S2AVtg）跳过：拆三段载入的路子不同，数量少
++        // S2A：提前热程序（10-23 画面·着色器线）：缓存只登记、程序到第一次查到才实化（补丁 shader-cache-lazy），换场景那帧的程序当帧才实化。
++        //   这里按表（首用帧升序）在后台线程做两件事：
++        //   1) 把实化要读的缓存部分（共享数据记录解压 + 特化状态 + 宿主二进制 + 各阶段信息）读好挂到程序上（S2ALazyProgram.Pre*），
++        //      游戏真正查到时实化直接用，读缓存 + 解压不上渲染路径（马车8 进赛道首帧按需实化 324 次 128.9 ms，其中建宿主程序只占 0.24 ms）；
++        //   2) 把宿主二进制交底层渲染器载入一次再放掉：渲染器程序一建成就把它在首用表里的管线排进后台预取（graphics/metal/gal_state.m gal_pso_pf_prog）。
++        //   宿主程序本身仍由实化在 GPU 模拟线程上经多线程渲染器建（命令队列只认这一个生产者）；底层载入 / 释放走渲染器自己的 API 锁。
++        //   与实化共用 _lazyLock：已先被实化（Done）的不读。转计算复合二进制（S2AVtg）只做 1)
+         private void S2AWarmStart(GpuContext context, S2ALazyProgram[] list)
+         {
+             IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
+             System.Threading.Thread th = new(() =>
+             {
+                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+-                int ok = 0, fail = 0, none = 0, vtg = 0;
++                // 本线程托管分配（含解压临时缓冲）：预读挂在程序上的常驻量的上界
++                long a0 = GC.GetAllocatedBytesForCurrentThread();
++                int ok = 0, fail = 0, none = 0, vtg = 0, late = 0;
++                long bytes = 0;
+                 foreach (S2ALazyProgram lazy in list)
+                 {
+                     if (lazy == null) { none++; continue; }
+@@ -508,7 +512,16 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     {
+                         lock (_lazyLock)
+                         {
+-                            (hostCode, shaders) = ReadHostCode(lazy.Context, ref _lazyHostToc, ref _lazyHostData, lazy.GuestShaders, lazy.ProgramIndex, lazy.Timestamp);
++                            // 渲染路径已经先实化了它：不再读（读了也没人用）
++                            if (lazy.Done) { late++; continue; }
++                            ShaderSpecializationState specState;
++                            (specState, hostCode, shaders) = S2AReadParts(lazy);
++                            if (hostCode == null) { fail++; continue; }
++                            // 读好的部分交给它：实化时不再读缓存 / 解压（S2AMaterializeCore）
++                            lazy.PreSpec = specState;
++                            lazy.PreHostCode = hostCode;
++                            lazy.PreShaders = shaders;
++                            bytes += hostCode.Length;
+                         }
+                     }
+                     catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
+@@ -516,7 +529,6 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         fail++;
+                         continue;
+                     }
+-                    if (hostCode == null) { fail++; continue; }
+                     if (!lazy.IsCompute && S2AVtg.IsPacked(hostCode)) { vtg++; continue; }
+                     bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+                     IProgram p = renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+@@ -524,7 +536,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     p.Dispose();
+                 }
+                 double ms = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+-                Console.Error.WriteLine($"[gal] 提前热程序：表 {list.Length} 个，载入 {ok}、失败 {fail}、缓存里没有 {none}、转计算跳过 {vtg}，后台用时 {ms:0} ms");
++                Console.Error.WriteLine($"[gal] 提前热程序：表 {list.Length} 个，预读缓存并载入宿主 {ok}、转计算只预读 {vtg}、失败 {fail}、缓存里没有 {none}、已先被实化 {late}，宿主二进制 {bytes >> 10} KB，本线程托管分配 {(GC.GetAllocatedBytesForCurrentThread() - a0) >> 10} KB，后台用时 {ms:0} ms");
+             })
+             { IsBackground = true, Name = "S2A.ShaderWarm", Priority = System.Threading.ThreadPriority.BelowNormal };
+             th.Start();
+@@ -561,41 +573,64 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
++        /// <summary>
++        /// S2A：读一个按需程序的缓存部分（特化状态 + 宿主二进制 + 各阶段信息）：读共享数据记录 + 解压 + 读宿主目录 / 数据。
++        /// 调用方须持 _lazyLock（共用读句柄）。缓存坏了抛 DiskCacheLoadException / IOException / InvalidDataException；没有宿主二进制时 hostCode 为 null
++        /// </summary>
++        private (ShaderSpecializationState specState, byte[] hostCode, CachedShaderStage[] shaders) S2AReadParts(S2ALazyProgram lazy)
++        {
++            _lazySharedData ??= DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: false);
++            _lazySharedData.Seek((long)lazy.DataOffset, SeekOrigin.Begin);
++
++            BinarySerializer dataReader = new(_lazySharedData);
++            DataEntry entry = new();
++
++            dataReader.BeginCompression();
++            dataReader.Read(ref entry);
++
++            uint stagesBitMask = lazy.IsCompute ? 1u : entry.StagesBitMask;
++            DataEntryPerStage stageEntry = new();
++
++            while (stagesBitMask != 0)
++            {
++                dataReader.Read(ref stageEntry);
++                stagesBitMask &= stagesBitMask - 1;
++            }
++
++            ShaderSpecializationState specState = ShaderSpecializationState.Read(ref dataReader);
++            dataReader.EndCompression();
++
++            (byte[] hostCode, CachedShaderStage[] shaders) = ReadHostCode(
++                lazy.Context,
++                ref _lazyHostToc,
++                ref _lazyHostData,
++                lazy.GuestShaders,
++                lazy.ProgramIndex,
++                lazy.Timestamp);
++
++            return (specState, hostCode, shaders);
++        }
++
+         private CachedShaderProgram S2AMaterializeCore(S2ALazyProgram lazy)
+         {
+             lock (_lazyLock)
+             {
+                 try
+                 {
+-                    _lazySharedData ??= DiskCacheCommon.OpenFile(_basePath, SharedDataFileName, writable: false);
+-                    _lazySharedData.Seek((long)lazy.DataOffset, SeekOrigin.Begin);
+-
+-                    BinarySerializer dataReader = new(_lazySharedData);
+-                    DataEntry entry = new();
+-
+-                    dataReader.BeginCompression();
+-                    dataReader.Read(ref entry);
+-
+-                    uint stagesBitMask = lazy.IsCompute ? 1u : entry.StagesBitMask;
+-                    DataEntryPerStage stageEntry = new();
++                    // S2A：提前热已在后台读好就直接用（读缓存 + 解压不上渲染路径），没读到再现读
++                    lazy.Done = true;
++                    ShaderSpecializationState specState = lazy.PreSpec;
++                    byte[] hostCode = lazy.PreHostCode;
++                    CachedShaderStage[] shaders = lazy.PreShaders;
++                    lazy.PreSpec = null;
++                    lazy.PreHostCode = null;
++                    lazy.PreShaders = null;
+ 
+-                    while (stagesBitMask != 0)
++                    if (hostCode == null)
+                     {
+-                        dataReader.Read(ref stageEntry);
+-                        stagesBitMask &= stagesBitMask - 1;
++                        (specState, hostCode, shaders) = S2AReadParts(lazy);
+                     }
+ 
+-                    ShaderSpecializationState specState = ShaderSpecializationState.Read(ref dataReader);
+-                    dataReader.EndCompression();
+-
+-                    (byte[] hostCode, CachedShaderStage[] shaders) = ReadHostCode(
+-                        lazy.Context,
+-                        ref _lazyHostToc,
+-                        ref _lazyHostData,
+-                        lazy.GuestShaders,
+-                        lazy.ProgramIndex,
+-                        lazy.Timestamp);
+-
+                     if (hostCode == null)
+                     {
+                         S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 缺主机代码（按需实化）");
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+index 6ef65250c6a0fd848781c223d230381e301cc6b4..1217816a5e2c4b64b78f209e9e905866e530fcd6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+@@ -25,6 +25,17 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// </summary>
+         public readonly GuestCodeAndCbData?[] GuestShaders;
+ 
++        /// <summary>
++        /// S2A：提前热（DiskCacheHostStorage.S2AWarmStart）在后台读好的缓存部分（特化状态 + 宿主二进制 + 各阶段信息）。
++        /// 实化时直接用、不再读缓存 / 解压；只在持 DiskCacheHostStorage._lazyLock 时读写。
++        /// </summary>
++        internal ShaderSpecializationState PreSpec;
++        internal byte[] PreHostCode;
++        internal CachedShaderStage[] PreShaders;
++
++        /// <summary>S2A：已实化（成功与否都算）；之后提前热不再给它读（持 _lazyLock 读写）。</summary>
++        internal bool Done;
++
+         public S2ALazyProgram(DiskCacheHostStorage storage, GpuContext context, int programIndex, ulong dataOffset, ulong timestamp, bool isCompute, GuestCodeAndCbData?[] guestShaders)
+         {
+             Storage = storage;

@@ -1,0 +1,83 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index c635de4af21f9daa246c2ed4ebb66c88a65b926f..e7f096ea3fb76db5d2796447af5fa69b9a552b93 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -304,6 +304,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             bool discardAll = false;
+             System.Collections.Generic.Dictionary<int, int> warm = null;   // S2A：提前热程序号 → 表内次序
+             S2ALazyProgram[] warmLazy = null;
++            System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<S2ALazyProgram>> s2aGroups = null;   // S2A：客体代码组（各阶段客体代码号）→ 组内程序，提前热整组预读用
++            System.Collections.Generic.Dictionary<S2ALazyProgram, string> s2aGroupOf = null;
+ 
+             try
+             {
+@@ -345,6 +347,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 {
+                     warm = S2AWarmRead(S2AShaderCacheGuard.WarmList);
+                     warmLazy = warm == null ? null : new S2ALazyProgram[warm.Count];
++                    if (warm != null) { s2aGroups = new(); s2aGroupOf = new(); }
+                 }
+ 
+                 DataEntry entry = new();
+@@ -379,6 +382,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     GuestCodeAndCbData?[] guestShaders = new GuestCodeAndCbData?[isCompute ? 1 : Constants.ShaderStages + 1];
+ 
+                     DataEntryPerStage stageEntry = new();
++                    System.Text.StringBuilder s2aKey = s2aGroups != null ? new System.Text.StringBuilder(isCompute ? "c " : "g ") : null;
+ 
+                     while (stagesBitMask != 0)
+                     {
+@@ -390,6 +394,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                             guestTocFileStream,
+                             guestDataFileStream,
+                             stageEntry.GuestCodeIndex);
++                        s2aKey?.Append(stageIndex).Append(':').Append(stageEntry.GuestCodeIndex).Append(' ');
+ 
+                         stagesBitMask &= ~(1u << stageIndex);
+                     }
+@@ -402,6 +407,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         S2ALazyProgram lazy = new(this, context, programIndex, dataOffset, header.Timestamp, isCompute, guestShaders);
+                         loader.AddLazy(lazy);
+                         if (warm != null && warm.TryGetValue(programIndex, out int slot)) warmLazy[slot] = lazy;
++                        if (s2aGroups != null)
++                        {
++                            string gk = s2aKey.ToString();
++                            if (!s2aGroups.TryGetValue(gk, out var gl)) s2aGroups.Add(gk, gl = new());
++                            gl.Add(lazy); s2aGroupOf[lazy] = gk;
++                        }
+                         programIndex++;
+                         continue;
+                     }
+@@ -460,8 +471,31 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+             else if (warmLazy != null)
+             {
+-                S2AWarmStart(context, warmLazy);
++                S2AWarmStart(context, S2AWarmWholeGroups(warmLazy, s2aGroups, s2aGroupOf));
++            }
++        }
++
++        // S2A：提前热按整组预读（10-23 马车8 进赛道首帧：热表 498 个程序所在组共 1046 个，组内兄弟 548 个没预读；
++        //   按需实化是整组一起实化（ShaderSpecializationList.Materialize），没预读的兄弟照样在渲染路径上读缓存 + 解压，首帧仍 104.7 ms / 312 次）。
++        //   组 = 各阶段客体代码号完全相同的程序（同一份客体代码、特化不同的变体）。按热表次序：每个程序后面紧跟它的组内兄弟，去重
++        private static S2ALazyProgram[] S2AWarmWholeGroups(S2ALazyProgram[] list,
++            System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<S2ALazyProgram>> groups,
++            System.Collections.Generic.Dictionary<S2ALazyProgram, string> groupOf)
++        {
++            if (groups == null) return list;
++            System.Collections.Generic.List<S2ALazyProgram> outp = new(list.Length * 2);
++            System.Collections.Generic.HashSet<S2ALazyProgram> seen = new();
++            foreach (S2ALazyProgram lazy in list)
++            {
++                if (lazy == null) { outp.Add(null); continue; }   // 「缓存里没有」照旧计数
++                if (groupOf.TryGetValue(lazy, out string gk))
++                {
++                    foreach (S2ALazyProgram s in groups[gk]) if (seen.Add(s)) outp.Add(s);
++                }
++                else if (seen.Add(lazy)) outp.Add(lazy);
+             }
++            Console.Error.WriteLine($"[gal] 提前热按客体代码组整组预读：热表 {list.Length} 个程序 → 连组内兄弟 {outp.Count} 个");
++            return outp.ToArray();
+         }
+ 
+         // S2A：读提前热程序表（每行「程序号\t首用帧\t函数名串」，# 注释；只收包内条目：序号 < S2AShaderCacheGuard.PackPrograms，之后的是运行时追加的、和出包对不上）。

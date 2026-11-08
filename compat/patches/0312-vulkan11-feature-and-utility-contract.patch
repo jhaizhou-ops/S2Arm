@@ -1,0 +1,220 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ChangeBufferStride.spv b/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ChangeBufferStride.spv
+index 1e0d8810fbc2a6513b0edb32ce596c3aa68bb6ce..041b9819271b37a4e25f120d54a9f8c540efdd7c 100644
+GIT binary patch
+delta 241
+zcmca3w?vMcnMs+Qftitkn}K5@x1<yo13N=-Kv=xDM^L;)Qf5hfaY=qrVtOhA!$c(w
+zadrk)1_lNeAkIz9%mY#k>OgEZG1q<LA0H-3cLrt#E}#Gt5PJZXg4iISJh_lrnw1C0
+zQkvYzY_17Xmk;E@)PdL_pbViH+<{gU0@;d_FEUHJmH=67K+FilAf2T^8m1G(1_5N9
+V<v_k75JS|nFo5_<n;luCxd8!V9g_e6
+
+delta 268
+zcmZ1?cSnw!nMs+Qft8Vgn}K&Cx8y_zHDxXaRt5$J79h?|%*+E)3_L)r4#Z|aTnNPF
+z6KmbwSs1t&+<oHR{r%m2T;r1q3gU}PDsxifb29T%<5Mz=Qj<$E%ThrGaUiM7%uCKG
+zO+iwy@vtwGtOw9aE}+36pbViH+!>g`VoZ~5nZ+lYFbhl$Vb+lZsmzC}KvtPQc_p*-
+m<R#1knk7J4HXvpMVvy=mEUH0bOq2ft&HchGuvvsffExfi0Wb^z
+
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ColorCopyShorteningCompute.spv b/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ColorCopyShorteningCompute.spv
+index d5e50b954083becb4ced18bdb0b7678dd20c045c..74ba7572ba3642a056994ff1a45c9411520322d0 100644
+GIT binary patch
+literal 2868
+zcmZvc>2e!Y5QWE*Wg85MLpDMn$T53@*^&?l*#okJ!2z?FEtV`fj=`}&QVd1$gU8_?
+z??CZN6iXFVeBaFNWNM15I@R6h_U+Sm8P#iZlUaQ%o6e@P@3Ug;%WByeuJ+Yr&tj*u
+ziJWgOtt`zCN4@z|r(br(o~*9P=k}7*z#j*9I$JyP4}lqYxqYCSphlfv4f`8GgN*Vz
+z;|G}Q_WOh0(D|vn*5>wFYrDVR*<Re)?RPt)t^Us9HS!w#9>I<_ei+>yY^?m4bM@>H
+zb~xxVJCVJHU({Q<y>)A}(aUoh*%|D>Qfo!e?n2Iy^VkNxdJYb?&SQJS(bc>?PD1WV
+znR}(+7Rnq4YTk00qbc{g3OCqX?_h}QSsP3Jti_yXI1L^L#_nkrI3hld?^(83Yw!9C
+zREmAf5j)IxALaGNu6MY;jXje4<GEkXb<W&+n%~9RoB8`uRd<$I=k*VwH-T*e$6?}0
+zteo>r;wh}0aQ;E8^VV?Q`eQ);T#7vtIqUDmHdE~S8GN~@@4K_M{1IN&eysIfUmg)3
+zMfm^|=Ba-$CCRC8>>W5xB>hK=kae}}XyVoI&K%Zx0vmfbo=vg6TF3n7fPEaJ2k)-f
+z+j#amzWb502V?Io_V`Bf%eAg2E^2>3?3sE-pJ3JVo3ocsvGykK8QsMG-x;araLrob
+z=DGG{+)i9*-X(5=lT`Emc7dF5uV;9p*0c|Y{rv^w|A;kx8~zX2o3VH4cOJ24>USNn
+z`F@+__(~;SsKm>q*mGD-@p<&@`C;IDTc)aY_asi<;eB18bNh78b-tCu;1K8$`<DDh
+z<TlxzZ}G9j`F33IzT_@5@4k)!Yx;()>3uv2<bNVA-bTT>W)}W9uuiNoXD;!-lH=Qa
+z3N(TIFVvBH8p!`iAJ1YP|1c;243P6)^rOG$@$JuhjQ(E0myiBV;LAmSC-Lns*4W>R
+zKtB4L$9J9l-)M%m_785reqRFi>pL;uzU-a9-F(=)Is7%}oW1M+%WdhK7yCGcUp?p3
+zaPsE(ZM_Nn-n=XKYTxI8{O{y=H*W#g$$Ou^OSw3k3;1%OdlA2SewX0nZ%}g*dl|Uy
+zQf}+iD!8b5mDrj;ryj21%Xz+`^EQ4}=N&lt&}rejR^HzIX5>O=5x=bSF0tHo5IRfv
+zRh{?X<U{9ueAmjW<F_amIydmkIv*0t`QH^fEBIBNkKp7(=VN@=%B!=Cl~d;c_A}tO
+zY3w<F4y@_Boxy&QxcGLzBzDaj+5Sg<1?0@Df%t}3@tw2oO>76WQ>@N<?%&tx-s6h@
+z<Q}m#mgz>F4In3~ql<?1tzlkh-okIESj|n~ea7ByC(e8|wm@0)>%_^ARiLKztzlkh
+zeuLjmv6|b!yA91di3`mg;<9F+SWbAJWvFR=YnT_B-{QAZtmb#Xdk)P(;zDysT-F>B
+S%ZYjgYFghK=J~&I7W@Z_^SG)2
+
+literal 2040
+zcmZ9M+fGzL5Je9&45+9;5D+ywh_{I1C5m`UhQtIxBBIe3FARbr3XB0nO?>ckeDfcS
+zzhu0{#I@#h#S@$Cbk**vUDb7ZD3^xXvr0?Wk!{P~XZh;RN?8l0`}wqwv3F!`O@3nf
+z-t@@E=HkeOi)YQ)ot531XPw#htb*MNR_B-3<adHTphg{Zq2qZss3usi%wLK93r>ZI
+zqDF=O)LB}Yn^<W)onM(;+iEP#Z!S01CU3x3$hF4C`T}+(8^vDtcrNduEpgB}&u)%A
+zxwPx-iyNES1eLAT0S*9twGRXP3x5#Xb+e#7lvBi%n>|Flb<B5}uOIpPb$rjuApC#l
+zd2a*hY>VCA^n2*Y8iQn-tKExU8+#SF`tjS@<viElk$iKi`0BL)`K!ry26F0kvR9LD
+zeiyc!dINm(9(MJOFRt+S)7>5pjI&;E3X-#)zB6_Wr+RyHm%LK8Kk?S^o4AbAKLM<B
+zkQ#pXyw}$361M%xSwr8s%h|)_WE&q^Q;7?I7T+0p=LhW8^Idx9C&`aH;x?E1E^Ex?
+zW;50v^y`U>8gKBc;1uf4e+$S7?>5T&Qq#IF`}qOm@9aC?TS?Y$Y-jThc<z3kEH!rl
+zzvm1u!MCtGaq=$jV65MxAM}Ame7~3POm2yae)oNe^ZU%gIg>*mv_6m*??v7i{UKnk
+z>oc6+^a!W|&pweScNEBbx8v-tU!2Jw19IL^JL;drw!Zg>`oq}rQU5fy^^J-8BiP1y
+z_7ly}cK^nt?B@)yALnVjb?xmOyUX5;@t>iby=klGx6zj$=gz*lD_{&bKWFZ2t^)b5
+zX`a`xot=E#v4$OYyhB_&{x~qU20o_T8;SGnMBD_nd<{h0Eo^hAK*Zg~mal<`yNhj{
+zzlDgqk1byV&f9nK5csa*-8{nf-OSOczn#ZG&bU(b-~Ig^&4W4!tp#lFHpB1C+-Jai
+z@&EEazWL@DmsRt*s{0(&LFm4~b{3)g5<7HTu!~UFd~=K|>b}CQgV0^Yc6OoLzz*FK
+tb`k2DZ;o+A-PgEv5W4Hw&N_5Au|v0vU4**kn`4~1#W(0%{KE~$z+db4eChxI
+
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ColorCopyWideningCompute.spv b/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ColorCopyWideningCompute.spv
+index a1439ca655375837d9723e2c22d8c721b729091c..b6694b1bfc34f2a1bc900edcd572137638a362f0 100644
+GIT binary patch
+literal 2616
+zcmZvcX-`yH5QZ-_C?oF6xN9S>BSYN99dT(;R1|le!KPag1=;}dgYgIX&HrHhOU4-!
+z6QAeaQ^^hSke8}@Pi^;{I$de+U7l6ivhJ)adzTe!UDlqpp(>9hIe_fWmgRhHbbPdb
+zVX@hN;^Yw{R%aDOzPARSPV^2iTc4hjUkTR2%dG>|1Z!0IYe#;;=)|KOr~L<ejaF;E
+zx!`_Ro@;7mqBhf-tj~<hy>B(@i_@*Sk*oOWzaBX~Tc3J4{sFs^ZNhFYETVU2HoGw2
+zxRTQ4+;O;hQ%n@S+P$1B=aJ?)nKOlc(Y?eEA<3Eh+(e&B{C(tP(*Hr$L5==Ai*B$Z
+zw~PL^ragP@0WN*D_W)0~#((?rtcFWH_F}vAx5sk4w(&0ahmhrcZTH*LehX=D_Ok(2
+zzK6QjSKmaAWymUUZN^@Xlykp|-G!7B?yo?)Zw~j(-v;E*CEGKRGyfW7HQC0mMVE{G
+z&X2j}w=x|YkmfhOy!3Zjb7P_AzSh+CY+W14yajm}-aLN0%eZaG_&)7j$+n;H--mAP
+zUFm*`{yVZ0aQ5JxSyS8lkTX`lQ@~~J(@6K^{jN*M-+h<0T-&KPh}6&c%ShKCu%7l1
+zaP=`Sp4W9?P2t%NBdy_^i=OVFTO(q|(B+H?pU3F-8a_|Z<;p&FZ0|gLCeh`>$GZMF
+zR6!qII1eo#Cp_0v^lcscbD8fy7=K^<MrY062k%JR+3@{`?f#LH?S1-oV_(}hTej~n
+zv3<MlUm(9dt^&^M9a#C*iIaDEb{FZ?zT7j;8T}JDbFZ<zi_MAC*PgX6^JVt59T@K{
+z8t+;8dm;Z3+ZoxJIAfg4-M~B%qfZscf5yid?*YbD!6)*_?E&)N>0>X_^@Bb6ULfb0
+zt4DwP(e2MWivA9u%SV3)(dDAQL+JJwG4}TtkdOWjqZ=pxKQ*Ja@*AgZzkR@dodNyr
+z%ijBuE_>JKZy;yy>OZ*|b-DPCqv%V|`52tMKEBBT;JbBh{Z{)v1LVKr<K3JE#>q$S
+zbLdOY=scYK7;(i+6|wTpfwOucM@Ke@yaI-jt^ZY^k7w)*T}xaO+uwm2FlK_6F^n8Z
+zoPN%(-*6q=O?}@$*T-dj--evuIfxtu<@&d<%k^(#%SHXW=*C3-d+2idMg6gyE6!~k
+zT_2bAeT#BY{{ecr{zL3?{YThxQU58rF;V{+x}1Jd{|S10|8sPGT-NvP%SHWv(aZHG
+zu*>ydV9Q1Q2D&j(zlkpQ0z~~u^r-(5T_2bA{jHI+zP}l-fWH~q-v1PErsDozC(eE6
+sa2j}rVZTB5Ov8SQ?l*=#gKo_+vO6!cz#PWu>wbgW_F*meeMbY}7mdo7TmS$7
+
+delta 613
+zcmYk2!Ab&A6o&7eaU3U`959igw8@C1MJ_~AC?Z9S+9+)zToh_lU^LpYMLoiBe2ysE
+z6twXXdW5#VK!pYUXJFC`ALrcvod4c)@5}sS%v6;XU1(B7MMU&Gv$|vmO$ZSJ-P4OJ
+z1ThN|pa9BVr{q02hUzQr{*5;-?UqsK_gbO`8#hP6BH%q6GeDi%FC*twgUWTAo}?XD
+zMIO20>mmQL3=QQ1{YcB;8+;dON{yOIo!*q@b5XsMsZShojWVw>avRYFUpUI8RV_y+
+znp0@tRbi++mI-*>V!Rk)3b4*Symvqn2>Q?t{+(+O*eOBa%pzw!aIPa~r=<JvrgZ5w
+zoHM^M2hYdzY*0ea+k96E1T$?R_fIBQPtriQOg`U&S_RuQ)U(o|k)Af&(06>N5EW`f
+z;$iNXap*EKDIP<r(EFq~nku&ZV#Am?jWi7m>nOPL91U}zE_AVn*aiFG5HvvtwD3`9
+Th}_F{{;}z2@^gRjQAO|vhn!6c
+
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ConvertD32S8ToD24S8.spv b/src/Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries/ConvertD32S8ToD24S8.spv
+index d8e19ff689bbf0526182ba57552bd0ba642469cb..7ec2dfbbfd69499d441ccdda089d2e21ce11c5b8 100644
+GIT binary patch
+delta 137
+zcmbOubwZMxnMs+Qftitkn}K5@x4Aew11kdq0}Bx6CT8XVDF$93R-BmXzVV9$6Q?@^
+zGlM8lfN3%(v+m>|W}(S0%mR~Bm}S5+L139$X35E$fHF&%1w=D}B5XhmG7zLU3#{TS
+SPz4i<(Bv=70-HrxI5+{G1r{^_
+
+delta 326
+zcmX>hIY)|{nMs+Qft8Vgn}K&Cx4AMG11kdq0}Bx6CT8XVDF$9376)QQAPxcIoQaX{
+z?ko&k4DLSh?*9JnKCbb}1qJcNC6zg;@j01!sqrb9MXAXpnPsUUgE)}XW#%R4l%^ml
+z*f?L3Y4Q;!EoEi~QJ~RGK<p0G1F}vDh(Q3xSDehstX}T{bY2idf<YNdyE8C@#bCNY
+zjs)pu1Y(eG5Fg}t7(WxpW&>i7Cqd?A0cj9GHV-5QGcO0ohMLC*HV`BLGLUKWPG){i
+E0PLA8H~;_u
+
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 0c48b2c8fb8a2d5d1f1261ff9c8045d0729ce3f5..c7fe124c663ac4f4f142db48f7274f93a6b90dd9 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -416,28 +416,40 @@ namespace Ryujinx.Graphics.Vulkan
+             PhysicalDeviceDescriptorIndexingFeaturesEXT supportedDescriptorIndexing = new()
+             {
+                 SType = StructureType.PhysicalDeviceDescriptorIndexingFeaturesExt,
+-                PNext = features2.PNext,
+             };
+             PhysicalDeviceUniformBufferStandardLayoutFeatures supportedUniformBufferStandardLayout = new()
+             {
+                 SType = StructureType.PhysicalDeviceUniformBufferStandardLayoutFeatures,
+-                PNext = features2.PNext,
+             };
+             PhysicalDevice8BitStorageFeatures supported8BitStorage = new()
+             {
+                 SType = StructureType.PhysicalDevice8BitStorageFeatures,
+-                PNext = features2.PNext,
+             };
+             PhysicalDeviceShaderFloat16Int8Features supportedFloat16Int8 = new()
+             {
+                 SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+-                PNext = features2.PNext,
+             };
+ 
+-            if (hasFloat16Int8) features2.PNext = &supportedFloat16Int8;
+-            if (has8BitStorage) features2.PNext = &supported8BitStorage;
+-            if (hasUniformBufferStandardLayout) features2.PNext = &supportedUniformBufferStandardLayout;
+-            if (hasDescriptorIndexing) features2.PNext = &supportedDescriptorIndexing;
++            if (hasFloat16Int8)
++            {
++                supportedFloat16Int8.PNext = features2.PNext;
++                features2.PNext = &supportedFloat16Int8;
++            }
++            if (has8BitStorage)
++            {
++                supported8BitStorage.PNext = features2.PNext;
++                features2.PNext = &supported8BitStorage;
++            }
++            if (hasUniformBufferStandardLayout)
++            {
++                supportedUniformBufferStandardLayout.PNext = features2.PNext;
++                features2.PNext = &supportedUniformBufferStandardLayout;
++            }
++            if (hasDescriptorIndexing)
++            {
++                supportedDescriptorIndexing.PNext = features2.PNext;
++                features2.PNext = &supportedDescriptorIndexing;
++            }
+ 
+             PhysicalDeviceExtendedDynamicStateFeaturesEXT supportedDynamicState = new()
+             {
+@@ -624,7 +636,6 @@ namespace Ryujinx.Graphics.Vulkan
+             PhysicalDeviceDescriptorIndexingFeaturesEXT featuresDescriptorIndexing = new()
+             {
+                 SType = StructureType.PhysicalDeviceDescriptorIndexingFeaturesExt,
+-                PNext = pExtendedFeatures,
+                 ShaderSampledImageArrayNonUniformIndexing = supportedDescriptorIndexing.ShaderSampledImageArrayNonUniformIndexing,
+                 ShaderStorageImageArrayNonUniformIndexing = supportedDescriptorIndexing.ShaderStorageImageArrayNonUniformIndexing,
+                 RuntimeDescriptorArray = supportedDescriptorIndexing.RuntimeDescriptorArray,
+@@ -632,28 +643,41 @@ namespace Ryujinx.Graphics.Vulkan
+             PhysicalDeviceUniformBufferStandardLayoutFeatures featuresUniformBufferStandardLayout = new()
+             {
+                 SType = StructureType.PhysicalDeviceUniformBufferStandardLayoutFeatures,
+-                PNext = pExtendedFeatures,
+                 UniformBufferStandardLayout = supportedUniformBufferStandardLayout.UniformBufferStandardLayout,
+             };
+             PhysicalDevice8BitStorageFeatures features8BitStorage = new()
+             {
+                 SType = StructureType.PhysicalDevice8BitStorageFeatures,
+-                PNext = pExtendedFeatures,
+                 StorageBuffer8BitAccess = supported8BitStorage.StorageBuffer8BitAccess,
+                 UniformAndStorageBuffer8BitAccess = supported8BitStorage.UniformAndStorageBuffer8BitAccess,
+             };
+             PhysicalDeviceShaderFloat16Int8Features featuresFloat16Int8 = new()
+             {
+                 SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+-                PNext = pExtendedFeatures,
+                 ShaderFloat16 = supportedFloat16Int8.ShaderFloat16,
+                 ShaderInt8 = supportedFloat16Int8.ShaderInt8,
+             };
+ 
+-            if (hasFloat16Int8) pExtendedFeatures = &featuresFloat16Int8;
+-            if (has8BitStorage) pExtendedFeatures = &features8BitStorage;
+-            if (hasUniformBufferStandardLayout) pExtendedFeatures = &featuresUniformBufferStandardLayout;
+-            if (hasDescriptorIndexing) pExtendedFeatures = &featuresDescriptorIndexing;
++            if (hasFloat16Int8)
++            {
++                featuresFloat16Int8.PNext = pExtendedFeatures;
++                pExtendedFeatures = &featuresFloat16Int8;
++            }
++            if (has8BitStorage)
++            {
++                features8BitStorage.PNext = pExtendedFeatures;
++                pExtendedFeatures = &features8BitStorage;
++            }
++            if (hasUniformBufferStandardLayout)
++            {
++                featuresUniformBufferStandardLayout.PNext = pExtendedFeatures;
++                pExtendedFeatures = &featuresUniformBufferStandardLayout;
++            }
++            if (hasDescriptorIndexing)
++            {
++                featuresDescriptorIndexing.PNext = pExtendedFeatures;
++                pExtendedFeatures = &featuresDescriptorIndexing;
++            }
+ 
+             PhysicalDeviceIndexTypeUint8FeaturesEXT featuresIndexU8;
+ 

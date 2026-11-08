@@ -1,0 +1,47 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index e179300c32938a26b514cbdcba66e26218a8bd13..181cb37acaf42ebaaad5724e27dc3c4c4717b7a0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -155,11 +155,33 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                 if (result == ProgramLinkStatus.Success)
+                 {
+-                    _cacheWriter.AddShader(programToSave.CachedProgram, programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram));
++                    byte[] binary = programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram);
++                    if (binary == null || binary.Length == 0) _s2aSaveEmpty++;
++                    else _s2aSaveWritten++;
++                    _cacheWriter.AddShader(programToSave.CachedProgram, binary);
++                }
++                else
++                {
++                    _s2aSaveFailed++;
+                 }
+             }
++
++            // S2A 诊断：每 5 s 一行，判断宿主记录不落盘是“没入队 / 永远 Incomplete / 二进制为空”。
++            _s2aSaveIncomplete = _programsToSaveQueue.Count;
++            long now = Environment.TickCount64;
++            if (now - _s2aSaveReported >= 5000 &&
++                (_s2aSaveEnqueued | _s2aSaveWritten | _s2aSaveEmpty | _s2aSaveFailed) != 0)
++            {
++                _s2aSaveReported = now;
++                Console.Error.WriteLine($"[vkpb] 存缓存计数：入队 {_s2aSaveEnqueued}、已写 {_s2aSaveWritten}、" +
++                    $"空二进制 {_s2aSaveEmpty}、失败 {_s2aSaveFailed}、队列 {_s2aSaveIncomplete}");
++                _s2aSaveEnqueued = _s2aSaveWritten = _s2aSaveEmpty = _s2aSaveFailed = 0;
++            }
+         }
+ 
++        private long _s2aSaveReported;
++        private int _s2aSaveEnqueued, _s2aSaveWritten, _s2aSaveEmpty, _s2aSaveFailed, _s2aSaveIncomplete;
++
+         private void S2AForget(CachedShaderProgram program)
+         {
+             foreach (KeyValuePair<ShaderAddresses, CachedShaderProgram> kv in _gpPrograms.Where(kv => kv.Value == program).ToList())
+@@ -784,6 +806,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2AWantBinary(program.GeometryAsCompute?.HostProgram);
+ 
+                 _programsToSaveQueue.Enqueue(programToSave);
++                _s2aSaveEnqueued++;
+             }
+         }
+ 

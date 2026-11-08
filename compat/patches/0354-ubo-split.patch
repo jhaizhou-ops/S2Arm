@@ -1,0 +1,47 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
+index 6fc49fc8dfd0b30004011d6e3518592d518eebca..67d9f31067646c8811220da5a341fffd74036d0b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Graphics.Gpu.Memory;
++using Ryujinx.Memory.Range;
+ using System;
+ using System.Runtime.InteropServices;
+ 
+@@ -116,9 +117,34 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+                 Span<byte> data = MemoryMarshal.Cast<int, byte>(_ubData.AsSpan(0, (int)(_ubByteCount / 4)));
+ 
+-                if (memoryManager.Physical.WriteWithRedundancyCheck(_ubBeginCpuAddress, data))
++                ulong gpuVa = _ubFollowUpAddress - _ubByteCount;
++                MultiRange range = memoryManager.GetPhysicalRegions(gpuVa, _ubByteCount);
++
++                if (range.Count == 1)
++                {
++                    if (memoryManager.Physical.WriteWithRedundancyCheck(_ubBeginCpuAddress, data))
++                    {
++                        memoryManager.Physical.BufferCache.ForceDirty(memoryManager, gpuVa, _ubByteCount);
++                    }
++                }
++                else
+                 {
+-                    memoryManager.Physical.BufferCache.ForceDirty(memoryManager, _ubFollowUpAddress - _ubByteCount, _ubByteCount);
++                    // S2A（原生层 10-28，银河2 压段根修的同类排查）：上游从首个 GPU 地址翻译一次就线性写满整批（最多 2 KB），
++                    // 整批跨进另一个映射的页时，后半截写进第一段之后的游戏内存（我们的物理地址就是游戏真实内存）。按真实分段逐段写
++                    int offset = 0;
++
++                    for (int i = 0; i < range.Count; i++)
++                    {
++                        MemoryRange subRange = range.GetSubRange(i);
++
++                        if (subRange.Address != MemoryManager.PteUnmapped &&
++                            memoryManager.Physical.WriteWithRedundancyCheck(subRange.Address, data.Slice(offset, (int)subRange.Size)))
++                        {
++                            memoryManager.Physical.BufferCache.ForceDirty(memoryManager, gpuVa + (ulong)offset, subRange.Size);
++                        }
++
++                        offset += (int)subRange.Size;
++                    }
+                 }
+ 
+                 _ubFollowUpAddress = 0;

@@ -1,0 +1,93 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 7321003e991539982943723b0d03baa859572955..8654368b86cc7402024d8d8561ff7aa3df429c00 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -1918,5 +1918,88 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+             return ResultCode.Success;
+         }
++    
++
++        // ---------- S2Arm：Switch 2 SDK 的 hid 新命令（Pokopia 首帧后起用；HD 振动 2、Joy-Con 2 鼠标 / Jcms 传感器、原生输入）----------
++        // 宿主没有这些设备：输入一律收下（不改任何状态）、回成功；有输出的回「没有 / 0」——220 旗标 false、1003 不需要更新固件、3133 状态 0。
++        //   命令号与输出形状来自 Eden-NS2 hid_server.cpp（GPL，只借事实，代码自写）；手柄 / 振动的真实现仍走原有命令
++
++        [CommandCmif(89)]
++        public ResultCode ResetIsSixAxisSensorDeviceNewlyAssigned(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(135)]
++        public ResultCode SetNpadCaptureButtonAssignment(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(136)]
++        public ResultCode ClearNpadCaptureButtonAssignment(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(138)]
++        public ResultCode SetNativeInputValue138(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(212)]
++        public ResultCode SendVibrationValueInBool(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(213)]
++        public ResultCode SendNativeVibrationValue213(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(214)]
++        public ResultCode SendNativeVibrationValues(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(220)]
++        public ResultCode GetNativeInputFlag220(ServiceCtx context) { context.ResponseData.Write(false); return ResultCode.Success; }
++
++        [CommandCmif(1003)]
++        public ResultCode IsFirmwareUpdateNeededForNotification(ServiceCtx context) { context.ResponseData.Write(false); return ResultCode.Success; }
++
++        [CommandCmif(3110)]
++        public ResultCode RegisterJcmsMemory(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3111)]
++        public ResultCode NativeInputCommand3111(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3112)]
++        public ResultCode SetNativeInputFlags3112(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3113)]
++        public ResultCode SetNativeInputFlags3113(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3131)]
++        public ResultCode NativeInputCommand3131(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3132)]
++        public ResultCode SetNativeInputParameters(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3133)]
++        public ResultCode GetNativeInputState3133(ServiceCtx context) { context.ResponseData.Write(0UL); return ResultCode.Success; }
++
++        [CommandCmif(3135)]
++        public ResultCode SetNativeInputEnabled3135(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3136)]
++        public ResultCode SetNmouseButtonConfigJoyLeftJcms(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3137)]
++        public ResultCode SetNmouseButtonConfigJoyRightJcms(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3138)]
++        public ResultCode SetMergedNmouseSourceTypes(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3139)]
++        public ResultCode RegisterNativeInputMemory(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3140)]
++        public ResultCode SetNativeInputValues3140(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3141)]
++        public ResultCode SetNativeInputValues3141(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3142)]
++        public ResultCode SetNativeInputFloats3142(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3143)]
++        public ResultCode SetNativeInputValue3143(ServiceCtx context) => ResultCode.Success;
++
++        [CommandCmif(3150)]
++        public ResultCode SetMouseLibraryVersion(ServiceCtx context) => ResultCode.Success;
+     }
+ }

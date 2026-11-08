@@ -1,0 +1,106 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/Clock/StandardSteadyClockCore.cs b/src/Ryujinx.HLE/HOS/Services/Time/Clock/StandardSteadyClockCore.cs
+index bc785ca7b978c05366c0c5f1100ac896d1471e52..6314285f32576ea043ea8b6dd37e416db8c45f5b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/Clock/StandardSteadyClockCore.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/Clock/StandardSteadyClockCore.cs
+@@ -68,5 +68,11 @@ namespace Ryujinx.HLE.HOS.Services.Time.Clock
+         {
+             _setupValue = setupValue;
+         }
++
++        // S2Arm: host time the tick source did not see (see TimeManager.S2ASteadyClockCatchUp)
++        public void S2AAdvance(long nanoSeconds)
++        {
++            _setupValue = new TimeSpanType(_setupValue.NanoSeconds + nanoSeconds);
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
+index f8e36bcd721da46d745d0c96cc5fad765a8d26ca..2f51e0b667698ed13e77a242ba05f7b7ed2188f6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
+@@ -66,15 +66,44 @@ namespace Ryujinx.HLE.HOS.Services.Time
+ 
+         public void SetupStandardSteadyClock(ITickSource tickSource, UInt128 clockSourceId, TimeSpanType setupValue, TimeSpanType internalOffset, TimeSpanType testOffset, bool isRtcResetDetected)
+         {
+-            SetupInternalStandardSteadyClock(clockSourceId, setupValue, internalOffset, testOffset, isRtcResetDetected);
++            lock (_s2aCatchUpLock)
++            {
++                SetupInternalStandardSteadyClock(clockSourceId, setupValue, internalOffset, testOffset, isRtcResetDetected);
+ 
+-            TimeSpanType currentTimePoint = StandardSteadyClock.GetCurrentRawTimePoint(tickSource);
++                TimeSpanType currentTimePoint = StandardSteadyClock.GetCurrentRawTimePoint(tickSource);
+ 
+-            SharedMemory.SetupStandardSteadyClock(tickSource, clockSourceId, currentTimePoint);
++                SharedMemory.SetupStandardSteadyClock(tickSource, clockSourceId, currentTimePoint);
++
++                _s2aTickSource = tickSource;
++                _s2aUnseen = S2AHooks.TickUnseenNs?.Invoke() ?? 0;
++            }
+ 
+             // TODO: propagate IPC late binding of "time:s" and "time:p"
+         }
+ 
++        // S2Arm: the shared tick source stops while the game clock is frozen in background and while the host sleeps (#495: games must not see
++        // that time on the counter). A real Switch's steady clock is RTC based and keeps running through sleep, so the calendar (system clock =
++        // offset + steady clock) would otherwise lag by the whole background / sleep time. Add the increase of the unseen time to the steady
++        // clock and rebase the shared memory, which games read directly with their own counter. Idempotent; never moves the clock backwards.
++        private readonly object _s2aCatchUpLock = new();
++        private ITickSource _s2aTickSource;
++        private long _s2aUnseen;
++
++        public void S2ASteadyClockCatchUp(long unseenNs)
++        {
++            lock (_s2aCatchUpLock)
++            {
++                if (_s2aTickSource == null || unseenNs <= _s2aUnseen)
++                {
++                    return;
++                }
++
++                StandardSteadyClock.S2AAdvance(unseenNs - _s2aUnseen);
++                _s2aUnseen = unseenNs;
++                SharedMemory.SetSteadyClockRawTimePoint(_s2aTickSource, StandardSteadyClock.GetCurrentRawTimePoint(_s2aTickSource));
++            }
++        }
++
+         private void SetupInternalStandardSteadyClock(UInt128 clockSourceId, TimeSpanType setupValue, TimeSpanType internalOffset, TimeSpanType testOffset, bool isRtcResetDetected)
+         {
+             StandardSteadyClock.SetClockSourceId(clockSourceId);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeSharedMemory.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeSharedMemory.cs
+index 34648703057a61d3804d207104a8639d3f6dad6b..81d15eb96670b1242c5d928b60727d81dc15ede6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeSharedMemory.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeSharedMemory.cs
+@@ -115,7 +115,8 @@ namespace Ryujinx.HLE.HOS.Services.Time
+ 
+                 Thread.MemoryBarrier();
+ 
+-                possiblyNewIndex = _device.Memory.Read<uint>(offset);
++                // S2Arm: re-read the index from the same storage (upstream read device DRAM at the raw offset: wrong address, faults here)
++                possiblyNewIndex = _timeSharedMemoryStorage.GetRef<uint>(offset);
+             } while (index != possiblyNewIndex);
+ 
+             return result;
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index d907ed5c6fdb284690644e41a7c6dd66a568f157..db1efd54f1bf2e178d608e88b89be7fe3b249417 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -35,6 +35,19 @@ namespace Ryujinx.HLE
+         // Tick source shared with the natively running game (null = Ryujinx's own Stopwatch-based TickSource)
+         public static Ryujinx.Cpu.ITickSource TickSource;
+ 
++        // Host time the shared tick source did not see, in ns with an arbitrary zero (game clock frozen in background, host asleep); null = none.
++        // The steady clock adds its increase, like a real Switch whose RTC-based steady clock keeps running while the system tick stops in sleep
++        public static System.Func<long> TickUnseenNs;
++
++        // Called by the app shell on resume / wake (through native s2a_clock_catchup): the steady clock catches up the unseen time
++        public static void SteadyClockCatchUp()
++        {
++            if (TickUnseenNs != null)
++            {
++                HOS.Services.Time.TimeManager.Instance.S2ASteadyClockCatchUp(TickUnseenNs());
++            }
++        }
++
+         // Time zone system data (010000000000080E) as a directory: zoneinfo/<name> TZif files + binaryList.txt
+         public static string TimeZoneDataDir;
+ 

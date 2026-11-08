@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index 35a79218afe5003fb305e556d566ddfb6fb36d96..235523151383fc756e112d158a5a865f59c72481 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -384,10 +384,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             return stride == 0 ? ra : context.ShiftLeft(ra, Const(stride + 1));
+         }
+ 
+-        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91)
+-        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo)
++        // The 32-bit address of a local / shared access: Ra by its stride, plus the uniform register (at urLo in the uniform form, bit 91). LDSM keeps its mode in the stride's bits, so it passes
++        // stride: false: scaled by that mode, Donkey Kong Bananza's upscaler read its transposed matrices (LDSM.MT88) four times too far along and the picture came out as an 8 x 8 lattice of garbage
++        private static Operand ALocalAddress(EmitterContext context, AmpereOp x, int urLo, bool stride = true)
+         {
+-            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
++            Operand ra = Register(x.Ra, RegisterType.Gpr);
++            Operand addr = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : stride ? AStride(context, x, ra) : ra;
+ 
+             if (x.Bit(91) && x.Bits(urLo, urLo + 6) != RegisterConsts.UniformZeroIndex)
+             {
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
+index 3ebee7d28b6af6be28682cd26111a9bc78a72645..997e49c70025be880ece3fcf823bd936f9b0955a 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
+@@ -256,7 +256,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 throw AFail(context, $"LDSM mode {mode} count {count}");
+             }
+ 
+-            Operand addr = context.IAdd(ALocalAddress(context, x, 32), Const((int)x.SignedField(40, 64)));
++            Operand addr = context.IAdd(ALocalAddress(context, x, 32, stride: false), Const((int)x.SignedField(40, 64)));
+             Operand lane = ALaneId(context);
+             Operand g = context.ShiftRightU32(lane, Const(2));
+             Operand t = context.BitwiseAnd(lane, Const(3));

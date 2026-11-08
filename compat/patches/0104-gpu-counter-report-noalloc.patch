@@ -1,0 +1,157 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+index e25247f4bdd7be380544b6c0b1efb5005a8664d2..94390d1f45290ef23b5088232e8998d6309010fd 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+@@ -1,4 +1,6 @@
+ using Ryujinx.Graphics.GAL;
++using System;
++using System.Collections.Generic;
+ 
+ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ {
+@@ -170,44 +172,98 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             ReportCounterQuery(type);
+         }
+ 
+-        private void ReportCounterQuery(ReportCounterType type)
++        // S2Arm: per-report state (address, timestamp, event) lives in a pooled object whose result callback is bound once, back in the
++        // pool when the result arrives (was a closure + a delegate per report: 112 B, d3 reports SamplesPassed ~18 times per frame).
++        private sealed class CounterReport
+         {
+-            ulong gpuVa = _state.State.SemaphoreAddress.Pack();
+-
+-            ulong ticks = _context.GetTimestamp();
++            public readonly EventHandler<ulong> Handler;
++            private readonly SemaphoreUpdater _owner;
++            public ulong GpuVa;
++            public ulong Ticks;
++            public ICounterEvent Counter;
++            public bool Pending;
+ 
+-            ICounterEvent counter = null;
++            public CounterReport(SemaphoreUpdater owner)
++            {
++                _owner = owner;
++                Handler = OnResult;
++            }
+ 
+-            void resultHandler(object evt, ulong result)
++            private void OnResult(object evt, ulong result)
+             {
+                 CounterData counterData = new()
+                 {
+                     Counter = result,
+-                    Timestamp = ticks,
++                    Timestamp = Ticks,
+                 };
+ 
+-                if (counter?.Invalid != true)
++                if (Counter?.Invalid != true)
+                 {
+-                    _channel.MemoryManager.Write(gpuVa, counterData);
++                    _owner._channel.MemoryManager.Write(GpuVa, counterData);
+                 }
++
++                Counter = null;
++                Pending = false;
++                _owner.ReturnReport(this);
++            }
++        }
++
++        private readonly Stack<CounterReport> _reports = new();
++
++        private void ReturnReport(CounterReport report)
++        {
++            lock (_reports)
++            {
++                _reports.Push(report);
+             }
++        }
++
++        private void ReportCounterQuery(ReportCounterType type)
++        {
++            ulong gpuVa = _state.State.SemaphoreAddress.Pack();
++
++            ulong ticks = _context.GetTimestamp();
++
++            CounterType counterType;
++            float divisor = 1f;
+ 
+             switch (type)
+             {
+-                case ReportCounterType.Payload:
+-                    resultHandler(null, (ulong)_state.State.SemaphorePayload);
+-                    break;
+                 case ReportCounterType.SamplesPassed:
+                     float scale = _channel.TextureManager.RenderTargetScale;
+-                    float divisor = scale * scale;
+-                    counter = _context.Renderer.ReportCounter(CounterType.SamplesPassed, resultHandler, divisor, false);
++                    divisor = scale * scale;
++                    counterType = CounterType.SamplesPassed;
+                     break;
+                 case ReportCounterType.PrimitivesGenerated:
+-                    counter = _context.Renderer.ReportCounter(CounterType.PrimitivesGenerated, resultHandler, 1f, false);
++                    counterType = CounterType.PrimitivesGenerated;
+                     break;
+                 case ReportCounterType.TransformFeedbackPrimitivesWritten:
+-                    counter = _context.Renderer.ReportCounter(CounterType.TransformFeedbackPrimitivesWritten, resultHandler, 1f, false);
++                    counterType = CounterType.TransformFeedbackPrimitivesWritten;
+                     break;
++                default:
++                    // Unsupported counter: nothing is written, the cache forgets any older counter at this address (as before)
++                    _channel.MemoryManager.CounterCache.AddOrUpdate(gpuVa, null);
++                    return;
++            }
++
++            CounterReport report;
++
++            lock (_reports)
++            {
++                report = _reports.Count != 0 ? _reports.Pop() : new CounterReport(this);
++            }
++
++            report.GpuVa = gpuVa;
++            report.Ticks = ticks;
++            report.Counter = null;
++            report.Pending = true;
++
++            ICounterEvent counter = _context.Renderer.ReportCounter(counterType, report.Handler, divisor, false);
++
++            // A result delivered inside ReportCounter saw no event yet (same as the original local function)
++            if (report.Pending)
++            {
++                report.Counter = counter;
+             }
+ 
+             _channel.MemoryManager.CounterCache.AddOrUpdate(gpuVa, counter);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/CounterCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/CounterCache.cs
+index 33381dd55813b96db155251bc764653148b97156..69c64a81de781616444b3d1368e9f3dcc73cf260 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/CounterCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/CounterCache.cs
+@@ -47,7 +47,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+             else
+             {
++                ICounterEvent replaced = _items[index].Event;
++
+                 _items[index] = entry;
++
++                // S2Arm: the cache is the long-term holder of counter events; tell the backend when it lets go of one, so the backend can
++                // reuse the event object once its result is also delivered (the pending result is still written, as before)
++                if (replaced != null && replaced != evt)
++                {
++                    replaced.Dispose();
++                }
+             }
+         }
+ 
+@@ -85,6 +94,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             {
+                 ICounterEvent evt = _items[index + i].Event;
+                 evt?.Invalid = true;
++
++                // S2Arm: no longer held by the cache (see AddOrUpdate)
++                evt?.Dispose();
+             }
+ 
+             _items.RemoveRange(index, count);

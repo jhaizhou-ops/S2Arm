@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
+index 573acc942d8e1c2a2eabee8a8cd277517848cc92..547204be55018268d5b5e23d10fc8b4bdb752fed 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
+@@ -61,6 +61,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                                 case IoVariable.PrimitiveId:
+                                     newNode = GeneratePrimitiveId(context.ResourceManager, node, operation.Dest);
+                                     break;
++                                case IoVariable.UserDefined:
++                                    // S2A：读上一阶段没写的自定义属性（不在顶点输出表里，如直通几何直通了顶点没写的位置）：硬件上是未定义值，
++                                    // 按翻译器给没写的输出补的缺省值（InitializeOutputComponent：xyz 0、w 1）给常量，不留 Input 变量（留了计算核编不过）
++                                    int component = operation.GetSource(operation.SourcesCount - 1).Value;
++                                    newNode = node.List.AddBefore(node, new Operation(Instruction.Copy, operation.Dest, ConstF(component == 3 ? 1f : 0f)));
++                                    break;
+                                 case IoVariable.GlobalId:
+                                 case IoVariable.SubgroupEqMask:
+                                 case IoVariable.SubgroupGeMask:
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index c2ccf56ae363dec7f1ed1a41446d08430746375f..2f6384cfd7e6910146d30436cbaa390ee79519d5 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -525,6 +525,10 @@ namespace Ryujinx.Graphics.Shader.Translation
+             if (Definitions.GpPassthrough)
+             {
+                 ioUsage = ioUsage.Combine(_vertexOutput);
++
++                // S2A：直通几何转计算时直通的属性（PassthroughAttributes）也要在输出表里。上游拿顶点输出代替，前提是直通的 ⊆ 顶点写的；
++                // 阶段独立翻译（MergeAllGenericInputsForFragment）下直通 = 全部 32 个位置，顶点没写的在输出表里查不到，几何转计算核留下 Output 变量编不过（异度神剑3 10-23）
++                ioUsage = ioUsage.Combine(new IoUsage(FeatureFlags.None, 0, AttributeUsage.PassthroughAttributes));
+             }
+ 
+             return new ResourceReservations(GpuAccessor, IsTransformFeedbackEmulated, vertexAsCompute: true, _vertexOutput, ioUsage);

@@ -1,0 +1,148 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/AddressSpaceContext.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/AddressSpaceContext.cs
+index 9dd52e6da275cde825cc0700264c687523703164..80f866423e5e2d1cf66fc8617413772b4120beef 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/AddressSpaceContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/Types/AddressSpaceContext.cs
+@@ -7,8 +7,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu.Types
+     {
+         private class Range
+         {
+-            public ulong Start { get; }
+-            public ulong End { get; }
++            public ulong Start { get; protected set; }
++            public ulong End { get; protected set; }
+ 
+             public Range(ulong address, ulong size)
+             {
+@@ -19,16 +19,27 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu.Types
+ 
+         private class MappedMemory : Range
+         {
+-            public ulong PhysicalAddress { get; }
+-            public bool VaAllocated { get; }
++            public ulong PhysicalAddress { get; private set; }
++            public bool VaAllocated { get; private set; }
+ 
+             public MappedMemory(ulong address, ulong size, ulong physicalAddress, bool vaAllocated) : base(address, size)
+             {
+                 PhysicalAddress = physicalAddress;
+                 VaAllocated = vaAllocated;
+             }
++
++            public void Reset(ulong address, ulong size, ulong physicalAddress, bool vaAllocated)
++            {
++                Start = address;
++                End = size + address;
++                PhysicalAddress = physicalAddress;
++                VaAllocated = vaAllocated;
++            }
+         }
+ 
++        // S2Arm: unmapped entries are reused by later maps (games map / unmap buffers every frame)
++        private readonly Stack<MappedMemory> _freeMaps = new();
++
+         public MemoryManager Gmm { get; }
+ 
+         private readonly SortedList<ulong, Range> _maps;
+@@ -77,7 +88,16 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu.Types
+ 
+         public void AddMap(ulong gpuVa, ulong size, ulong physicalAddress, bool vaAllocated)
+         {
+-            _maps.Add(gpuVa, new MappedMemory(gpuVa, size, physicalAddress, vaAllocated));
++            if (_freeMaps.TryPop(out MappedMemory map))
++            {
++                map.Reset(gpuVa, size, physicalAddress, vaAllocated);
++            }
++            else
++            {
++                map = new MappedMemory(gpuVa, size, physicalAddress, vaAllocated);
++            }
++
++            _maps.Add(gpuVa, map);
+         }
+ 
+         public bool RemoveMap(ulong gpuVa, out ulong size)
+@@ -93,6 +113,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu.Types
+                     size = (map.End - map.Start);
+                 }
+ 
++                _freeMaps.Push(map);
++
+                 return true;
+             }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
+index a5b218b3f6ffb5d78c82f67b9a056ae1ebdce9fc..147fe19d983514de4c2c03e158a7b2c686b10232 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
+@@ -25,6 +25,28 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+         private readonly Dictionary<ulong, LinkedListNode<ulong>> _dictionary = new();
+         private readonly LinkedList<ulong> _list = [];
+ 
++        // S2Arm: list nodes are recycled (map/unmap every frame must not allocate)
++        private readonly Stack<LinkedListNode<ulong>> _freeNodes = new();
++
++        private LinkedListNode<ulong> ListAddAfter(LinkedListNode<ulong> node, ulong value)
++        {
++            if (!_freeNodes.TryPop(out LinkedListNode<ulong> newNode))
++            {
++                return _list.AddAfter(node, value);
++            }
++
++            newNode.Value = value;
++            _list.AddAfter(node, newNode);
++
++            return newNode;
++        }
++
++        private void ListRemove(LinkedListNode<ulong> node)
++        {
++            _list.Remove(node);
++            _freeNodes.Push(node);
++        }
++
+         public NvMemoryAllocator()
+         {
+             _tree.Add(PageSize, AddressSpaceSize);
+@@ -73,13 +95,13 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+                             Logger.Debug?.Print(LogClass.ServiceNv, $"Created smaller address range from 0x{endAddress:X} to 0x{referenceEndAddress:X}.");
+                             _tree.Add(endAddress, referenceEndAddress);
+ 
+-                            LinkedListNode<ulong> node = _list.AddAfter(_dictionary[referenceAddress], endAddress);
++                            LinkedListNode<ulong> node = ListAddAfter(_dictionary[referenceAddress], endAddress);
+                             _dictionary[endAddress] = node;
+                         }
+ 
+                         if (va == referenceAddress)
+                         {
+-                            _list.Remove(_dictionary[referenceAddress]);
++                            ListRemove(_dictionary[referenceAddress]);
+                             _dictionary.Remove(referenceAddress);
+                         }
+                     }
+@@ -127,7 +149,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+ 
+                             node = node.Previous;
+                             _tree.Remove(prevAddress);
+-                            _list.Remove(_dictionary[prevAddress]);
++                            ListRemove(_dictionary[prevAddress]);
+                             _dictionary.Remove(prevAddress);
+                         }
+                         else
+@@ -154,7 +176,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+                             }
+ 
+                             _tree.Remove(nextAddress);
+-                            _list.Remove(_dictionary[nextAddress]);
++                            ListRemove(_dictionary[nextAddress]);
+                             _dictionary.Remove(nextAddress);
+                         }
+                         else
+@@ -166,7 +188,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+                     Logger.Debug?.Print(LogClass.ServiceNv, $"Deallocation resulted in new free range from 0x{expandedStart:X} to 0x{expandedEnd:X}.");
+ 
+                     _tree.Add(expandedStart, expandedEnd);
+-                    LinkedListNode<ulong> nodePtr = _list.AddAfter(node, expandedStart);
++                    LinkedListNode<ulong> nodePtr = ListAddAfter(node, expandedStart);
+                     _dictionary[expandedStart] = nodePtr;
+                 }
+             }

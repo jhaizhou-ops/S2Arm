@@ -1,0 +1,92 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+index e0d5cc73db653d95653e14f9a8dd9dba495332fd..df6468ba84dd026b95c68a9da1fdb64ec97eec3c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+@@ -197,14 +197,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+                 S2AAllocTrace.Step(0x40_0015, ref s2aA);
+             }
+ 
++            long s2aB = s2aA;   // S2A：「设绑定 + 提交绑定」再分四步（0x40_001d–0x40_0020），0x40_0017 仍记四步合计
+             _channel.BufferManager.SetComputeBufferBindings(cs.Bindings);
++            S2AAllocTrace.Step(0x40_001d, ref s2aB);
+ 
+             _channel.TextureManager.SetComputeBindings(cs.Bindings);
++            S2AAllocTrace.Step(0x40_001e, ref s2aB);
+ 
+             // Should never return false for mismatching spec state, since the shader was fetched above.
+             _channel.TextureManager.CommitComputeBindings(cs.SpecializationState);
++            S2AAllocTrace.Step(0x40_001f, ref s2aB);
+ 
+             _channel.BufferManager.CommitComputeBindings();
++            S2AAllocTrace.Step(0x40_0020, ref s2aB);
+             S2AAllocTrace.Step(0x40_0017, ref s2aA);
+ 
+             _context.Renderer.Pipeline.DispatchCompute(qmd.CtaRasterWidth, qmd.CtaRasterHeight, qmd.CtaRasterDepth);
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Twod/TwodClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Twod/TwodClass.cs
+index 5deddbadf7a54a52d7debd5c824e4745b095644e..539df292247316ca2e75125905d4afe7bd6a62db 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Twod/TwodClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Twod/TwodClass.cs
+@@ -305,6 +305,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
+             // are the same, as we can't blit between different depth formats.
+             bool srcDepthAlias = srcCopyTexture.Format == dstCopyTexture.Format;
+ 
++            long s2aA = S2AAllocTrace.Mark();   // S2A：渲染线程分配拆账（2D 拷贝分段 0x40_0019–0x40_001c）
+             Image.Texture srcTexture = memoryManager.Physical.TextureCache.FindOrCreateTexture(
+                 memoryManager,
+                 srcCopyTexture,
+@@ -314,6 +315,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
+                 !canDirectCopy,
+                 false,
+                 srcHint);
++            S2AAllocTrace.Step(0x40_0019, ref s2aA);
+ 
+             if (srcTexture == null)
+             {
+@@ -327,6 +329,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
+             }
+ 
+             memoryManager.Physical.TextureCache.Lift(srcTexture);
++            S2AAllocTrace.Step(0x40_001a, ref s2aA);
+ 
+             // When the source texture that was found has a depth format,
+             // we must enforce the target texture also has a depth format,
+@@ -351,6 +354,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
+                 shouldCreate: true,
+                 srcTexture.ScaleMode == TextureScaleMode.Scaled,
+                 dstHint);
++            S2AAllocTrace.Step(0x40_001b, ref s2aA);
+ 
+             if (dstTexture == null)
+             {
+@@ -382,6 +386,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Twod
+             srcTexture.HostTexture.CopyTo(dstTexture.HostTexture, srcRegion, dstRegion, linearFilter);
+ 
+             dstTexture.SignalModified();
++            S2AAllocTrace.Step(0x40_001c, ref s2aA);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index e95c37042e44dd2317a0ac3a596aef1fe3213df7..bd1581ff5313a5799ef931e7d0f1a7d886bce8b1 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -98,7 +98,9 @@ namespace Ryujinx.Graphics.Gpu
+ 
+         private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调", "着色器·取图形程序合计（快路径 + 查缓存 + 现翻）", "着色器·查缓存 + 按需实化", "着色器·首次命中核对", "着色器·按需实化整段（读缓存 + 解压 + 建宿主程序）", "着色器·按需实化里建宿主程序（渲染器 LoadProgramBinary：着色器包 / 离线库查找）",
+             "绘制·提交绑定·存储缓冲 UpdateStorageBuffers", "绘制·提交绑定·贴图 TextureManager.CommitGraphicsBindings", "绘制·提交绑定·缓冲 BufferManager.CommitGraphicsBindings",
+-            "计算派发·前置（延迟绘制 + 刷常量缓冲 + 设常量缓冲）", "计算派发·取计算程序 + SetProgram", "计算派发·贴图池 + 存储缓冲描述", "计算派发·设绑定 + 提交绑定", "计算派发·下发 DispatchCompute" };
++            "计算派发·前置（延迟绘制 + 刷常量缓冲 + 设常量缓冲）", "计算派发·取计算程序 + SetProgram", "计算派发·贴图池 + 存储缓冲描述", "计算派发·设绑定 + 提交绑定", "计算派发·下发 DispatchCompute",
++            "2D 拷贝·找源贴图 FindOrCreateTexture", "2D 拷贝·Lift", "2D 拷贝·找目标贴图 FindOrCreateTexture", "2D 拷贝·CopyTo + SignalModified",
++            "计算派发·其中 缓冲设绑定", "计算派发·其中 贴图设绑定", "计算派发·其中 贴图提交", "计算派发·其中 缓冲提交" };
+ 
+         // 3D 状态更新各组（StateUpdateTracker 按 StateUpdater 构造时的登记顺序编组号；改登记顺序要同步这张表，只影响拆账名字）
+         private static readonly string[] _stateNames = { "VertexBufferState", "VertexAttribState", "BlendState", "FaceState", "StencilTestState", "DepthTestState", "TessellationState",
+@@ -111,7 +113,7 @@ namespace Ryujinx.Graphics.Gpu
+             0 => $"方法 子通道 {key >> 16} 偏移 0x{key & 0xffff:x}",
+             1 => $"宏 {key & 0xffff}",
+             2 => $"内联数据 子通道 {key & 0xffff}",
+-            4 => (key & 0x1f) < _rawNames.Length ? _rawNames[key & 0x1f] : $"段 0x{key & 0x1f:x}",
++            4 => (key & 0xff) < _rawNames.Length ? _rawNames[key & 0xff] : $"段 0x{key & 0xff:x}",
+             5 => $"3D 状态更新·组 {key & 0xff} {((key & 0xff) < _stateNames.Length ? _stateNames[key & 0xff] : "?")}",
+             6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",

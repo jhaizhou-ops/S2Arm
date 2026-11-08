@@ -1,0 +1,115 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+index ff11f544a146afcf30959347825feaa8d7c8f117..cc64eaff3b5b141726eebc4121920869f20db86e 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+@@ -422,7 +422,7 @@ namespace Ryujinx.Audio.Renderer.Server
+                     return result;
+                 }
+ 
+-                result = stateUpdater.UpdateMemoryPools(_memoryPools.Span);
++                result = stateUpdater.UpdateMemoryPools(_memoryPools.Span, GetMemoryPoolStateMapper());
+ 
+                 if (result != ResultCode.Success)
+                 {
+@@ -436,7 +436,7 @@ namespace Ryujinx.Audio.Renderer.Server
+                     return result;
+                 }
+ 
+-                PoolMapper poolMapper = new(_processHandle, _memoryPools, _behaviourInfo.IsMemoryPoolForceMappingEnabled());
++                PoolMapper poolMapper = GetUpdatePoolMapper();
+ 
+                 if (_behaviourInfo.IsBiquadFilterParameterFloatSupported())
+                 {
+@@ -767,6 +767,46 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+         private readonly System.Collections.Generic.Stack<CommandList> _s2aCommandLists = new();
+         private CommandBuffer _s2aCommandBuffer;
++
++        // S2Arm: PoolMapper is immutable; reuse it while its inputs are unchanged (was a new one per RequestUpdate, several per frame)
++        private PoolMapper _s2aUpdateMapper;
++        private uint _s2aUpdateMapperHandle;
++        private Memory<MemoryPoolInfo> _s2aUpdateMapperPools;
++        private bool _s2aUpdateMapperForce;
++
++        private PoolMapper _s2aPoolStateMapper;
++        private uint _s2aPoolStateMapperHandle;
++        private bool _s2aPoolStateMapperForce;
++
++        // Same as StateUpdater's former new PoolMapper(processHandle, force) (no memory pool list)
++        private PoolMapper GetMemoryPoolStateMapper()
++        {
++            bool force = _behaviourInfo.IsMemoryPoolForceMappingEnabled();
++
++            if (_s2aPoolStateMapper == null || _s2aPoolStateMapperHandle != _processHandle || _s2aPoolStateMapperForce != force)
++            {
++                _s2aPoolStateMapper = new PoolMapper(_processHandle, force);
++                _s2aPoolStateMapperHandle = _processHandle;
++                _s2aPoolStateMapperForce = force;
++            }
++
++            return _s2aPoolStateMapper;
++        }
++
++        private PoolMapper GetUpdatePoolMapper()
++        {
++            bool force = _behaviourInfo.IsMemoryPoolForceMappingEnabled();
++
++            if (_s2aUpdateMapper == null || _s2aUpdateMapperHandle != _processHandle || !_s2aUpdateMapperPools.Equals(_memoryPools) || _s2aUpdateMapperForce != force)
++            {
++                _s2aUpdateMapper = new PoolMapper(_processHandle, _memoryPools, force);
++                _s2aUpdateMapperHandle = _processHandle;
++                _s2aUpdateMapperPools = _memoryPools;
++                _s2aUpdateMapperForce = force;
++            }
++
++            return _s2aUpdateMapper;
++        }
+         private CommandGenerator _s2aCommandGenerator;
+         private RendererSystemContext _s2aContext;
+ 
+diff --git a/src/Ryujinx.Audio/Renderer/Server/StateUpdater.cs b/src/Ryujinx.Audio/Renderer/Server/StateUpdater.cs
+index cf5004eae5b22721645cd00a76397d367ef5fd46..c0328dd351fafd7ccd66b74d31cb4b53b44b7760 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/StateUpdater.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/StateUpdater.cs
+@@ -15,6 +15,7 @@ using System;
+ using System.Buffers;
+ using System.Diagnostics;
+ using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
+ using static Ryujinx.Audio.Renderer.Common.BehaviourParameter;
+ 
+ namespace Ryujinx.Audio.Renderer.Server
+@@ -30,9 +31,10 @@ namespace Ryujinx.Audio.Renderer.Server
+         private BehaviourInfo _behaviourInfo;
+ 
+         private readonly ref readonly UpdateDataHeader _inputHeader;
+-        private readonly Memory<UpdateDataHeader> _outputHeader;
++        // S2Arm: ref field instead of a SpanMemoryManager<UpdateDataHeader>.Cast wrapper object per update (output is pinned by the caller)
++        private readonly ref UpdateDataHeader _outputHeader;
+ 
+-        private readonly ref UpdateDataHeader OutputHeader => ref _outputHeader.Span[0];
++        private readonly ref UpdateDataHeader OutputHeader => ref _outputHeader;
+ 
+         public StateUpdater(ReadOnlySequence<byte> input, Memory<byte> output, uint processHandle, BehaviourInfo behaviourInfo)
+         {
+@@ -44,7 +46,7 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             _inputHeader = ref _inputReader.GetRefOrRefToCopy<UpdateDataHeader>(out _);
+ 
+-            _outputHeader = SpanMemoryManager<UpdateDataHeader>.Cast(_output[..Unsafe.SizeOf<UpdateDataHeader>()]);
++            _outputHeader = ref MemoryMarshal.Cast<byte, UpdateDataHeader>(_output.Span[..Unsafe.SizeOf<UpdateDataHeader>()])[0];
+             OutputHeader.Initialize(_behaviourInfo.UserRevision);
+             _output = _output[Unsafe.SizeOf<UpdateDataHeader>()..];
+         }
+@@ -69,9 +71,9 @@ namespace Ryujinx.Audio.Renderer.Server
+             return ResultCode.Success;
+         }
+ 
+-        public ResultCode UpdateMemoryPools(Span<MemoryPoolInfo> memoryPools)
++        // S2Arm: the caller passes a cached mapper (was new PoolMapper(_processHandle, IsMemoryPoolForceMappingEnabled()) per update)
++        public ResultCode UpdateMemoryPools(Span<MemoryPoolInfo> memoryPools, PoolMapper mapper)
+         {
+-            PoolMapper mapper = new(_processHandle, _behaviourInfo.IsMemoryPoolForceMappingEnabled());
+ 
+             if (memoryPools.Length * Unsafe.SizeOf<MemoryPoolInParameter>() != _inputHeader.MemoryPoolsSize)
+             {

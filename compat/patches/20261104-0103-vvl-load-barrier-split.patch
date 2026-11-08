@@ -1,0 +1,359 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index fc2f6e3a30bcae04f8a1c01648b8d5c920198f60..869106f7b2b4f7ce0903f77a2d40de31ace08ec1 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -154,6 +154,7 @@ namespace Ryujinx.Graphics.Vulkan
+             ClearColorValue value = new(color.Red, color.Green, color.Blue, color.Alpha);
+             ImageSubresourceRange range = new(ImageAspectFlags.ColorBit, 0, 1, 0, 1);
+             Gd.Api.CmdClearColorImage(CommandBuffer, image, ImageLayout.General, in value, 1, in range);
++            dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+             TextureView.InsertImageBarrier(Gd.Api, CommandBuffer, image,
+                 AccessFlags.TransferWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                 PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit,
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 3ff0acf8ba2b78f02ecf97ac0e583567f30d1fff..ec3a2ecdedadb08d21d4d883b0667354487350d1 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -76,4 +76,8 @@
+     <ProjectReference Include="..\Ryujinx.Graphics.GAL\Ryujinx.Graphics.GAL.csproj" />
+   </ItemGroup>
+ 
++  <ItemGroup>
++    <InternalsVisibleTo Include="S2A.VvlSyncTest" /> <!-- 附件访问状态的独立宿主回归 -->
++  </ItemGroup>
++
+ </Project>
+diff --git a/src/Ryujinx.Graphics.Vulkan/TextureStorage.cs b/src/Ryujinx.Graphics.Vulkan/TextureStorage.cs
+index b102efaf2a72260dfac9c3cfb7c64baf083f6241..bd0582392cc2a891f577353dd68200ffe471717c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/TextureStorage.cs
++++ b/src/Ryujinx.Graphics.Vulkan/TextureStorage.cs
+@@ -54,10 +54,54 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private Dictionary<Format, TextureStorage> _aliasedStorages;
+ 
+-        private AccessFlags _lastModificationAccess;
+-        private PipelineStageFlags _lastModificationStage;
+-        private AccessFlags _lastReadAccess;
+-        private PipelineStageFlags _lastReadStage;
++        // S2A（SYNC-RAW）：最近一次对图内访问的记录。附件 loadOp=LOAD 前按它判断要不要发写→读屏障
++        //   （dstAccess 必须含 *_READ，否则 SyncVal 报 READ-AFTER-WRITE）。写路径（布局迁移 / 上传拷贝 /
++        //   blit / 辅助绘制 / 传输清图）都经 RecordModification 记上，loadOp 才看得见。
++        internal struct LastAccessState
++        {
++            public AccessFlags WriteAccess;
++            public PipelineStageFlags WriteStage;
++            public AccessFlags ReadAccess;
++            public PipelineStageFlags ReadStage;
++
++            public readonly bool NeedsLoadOpBarrier => (WriteAccess | ReadAccess) != AccessFlags.None;
++
++            public static AccessFlags LoadOpDstAccess(bool depthStencil) => depthStencil
++                ? AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit
++                : AccessFlags.ColorAttachmentWriteBit | AccessFlags.ColorAttachmentReadBit;
++
++            public void RecordWrite(AccessFlags access, PipelineStageFlags stage)
++            {
++                WriteAccess |= access;
++                WriteStage |= stage;
++            }
++
++            public void RecordRead(AccessFlags access, PipelineStageFlags stage)
++            {
++                ReadAccess |= access;
++                ReadStage |= stage;
++            }
++
++            // 附件一次写（storeOp 或 loadOp 屏障消费后）：写态改为附件写；
++            //   loadOp 屏障消费时 clearReads=true（旧读已并进屏障源），storeOp 时 false（旧读保留，与上游语义一致）
++            public void MarkAttachmentWrite(bool depthStencil, bool clearReads)
++            {
++                if (clearReads)
++                {
++                    ReadAccess = AccessFlags.None;
++                    ReadStage = PipelineStageFlags.None;
++                }
++
++                WriteStage = depthStencil
++                    ? PipelineStageFlags.LateFragmentTestsBit
++                    : PipelineStageFlags.ColorAttachmentOutputBit;
++                WriteAccess = depthStencil
++                    ? AccessFlags.DepthStencilAttachmentWriteBit
++                    : AccessFlags.ColorAttachmentWriteBit;
++            }
++        }
++
++        private LastAccessState _last;
+ 
+         private int _viewsCount;
+         private readonly ulong _size;
+@@ -304,6 +348,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 1,
+                 in barrier);
+ 
++            // S2A（SYNC-RAW）：布局迁移本身也是一次写 —— 之后首次当附件 load 时屏障要看得见
++            _last.RecordWrite(DefaultAccessMask, PipelineStageFlags.AllCommandsBit);
++
+             if (useTempCbs)
+             {
+                 cbs.Dispose();
+@@ -426,10 +473,12 @@ namespace Ryujinx.Graphics.Vulkan
+                 if (to)
+                 {
+                     _gd.Api.CmdCopyImageToBuffer(commandBuffer, image, ImageLayout.General, buffer, 1, in region);
++                    _last.RecordRead(AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit);
+                 }
+                 else
+                 {
+                     _gd.Api.CmdCopyBufferToImage(commandBuffer, buffer, image, ImageLayout.General, 1, in region);
++                    _last.RecordWrite(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+                 }
+ 
+                 offset += mipSize;
+@@ -459,28 +508,25 @@ namespace Ryujinx.Graphics.Vulkan
+             return FormatCapabilities.IsD24S8(Info.Format) && VkFormat == VkFormat.D32SfloatS8Uint;
+         }
+ 
++        // S2A（SYNC-RAW）：记录一次对本图的写入 / 读取（写态与读态分开累加，loadOp 屏障按组合源发）
++        internal void RecordModification(AccessFlags access, PipelineStageFlags stage) => _last.RecordWrite(access, stage);
++
++        internal void RecordRead(AccessFlags access, PipelineStageFlags stage) => _last.RecordRead(access, stage);
++
+         public void AddStoreOpUsage(bool depthStencil)
+         {
+-            _lastModificationStage = depthStencil ?
+-                PipelineStageFlags.LateFragmentTestsBit :
+-                PipelineStageFlags.ColorAttachmentOutputBit;
+-
+-            _lastModificationAccess = depthStencil ?
+-                AccessFlags.DepthStencilAttachmentWriteBit :
+-                AccessFlags.ColorAttachmentWriteBit;
++            _last.MarkAttachmentWrite(depthStencil, clearReads: false);
+         }
+ 
+         public void QueueLoadOpBarrier(CommandBufferScoped cbs, bool depthStencil)
+         {
+-            PipelineStageFlags srcStageFlags = _lastReadStage | _lastModificationStage;
++            PipelineStageFlags srcStageFlags = _last.ReadStage | _last.WriteStage;
+             PipelineStageFlags dstStageFlags = depthStencil ?
+                 PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.LateFragmentTestsBit :
+                 PipelineStageFlags.ColorAttachmentOutputBit;
+ 
+-            AccessFlags srcAccessFlags = _lastModificationAccess | _lastReadAccess;
+-            AccessFlags dstAccessFlags = depthStencil ?
+-                AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit :
+-                AccessFlags.ColorAttachmentWriteBit | AccessFlags.ColorAttachmentReadBit;
++            AccessFlags srcAccessFlags = _last.WriteAccess | _last.ReadAccess;
++            AccessFlags dstAccessFlags = LastAccessState.LoadOpDstAccess(depthStencil);
+ 
+             if (srcAccessFlags != AccessFlags.None)
+             {
+@@ -496,31 +542,21 @@ namespace Ryujinx.Graphics.Vulkan
+                     _info.Levels);
+ 
+                 _gd.Barriers.QueueBarrier(barrier, this, srcStageFlags, dstStageFlags);
+-
+-                _lastReadStage = PipelineStageFlags.None;
+-                _lastReadAccess = AccessFlags.None;
+             }
+ 
+-            _lastModificationStage = depthStencil ?
+-                PipelineStageFlags.LateFragmentTestsBit :
+-                PipelineStageFlags.ColorAttachmentOutputBit;
+-
+-            _lastModificationAccess = depthStencil ?
+-                AccessFlags.DepthStencilAttachmentWriteBit :
+-                AccessFlags.ColorAttachmentWriteBit;
++            _last.MarkAttachmentWrite(depthStencil, clearReads: true);
+         }
+ 
+         public void QueueWriteToReadBarrier(CommandBufferScoped cbs, AccessFlags dstAccessFlags, PipelineStageFlags dstStageFlags)
+         {
+-            _lastReadAccess |= dstAccessFlags;
+-            _lastReadStage |= dstStageFlags;
++            _last.RecordRead(dstAccessFlags, dstStageFlags);
+ 
+-            if (_lastModificationAccess != AccessFlags.None)
++            if (_last.WriteAccess != AccessFlags.None)
+             {
+                 ImageAspectFlags aspectFlags = Info.Format.ConvertAspectFlags();
+                 ImageMemoryBarrier barrier = TextureView.GetImageBarrier(
+                     _imageAuto.Get(cbs).Value,
+-                    _lastModificationAccess,
++                    _last.WriteAccess,
+                     dstAccessFlags,
+                     aspectFlags,
+                     0,
+@@ -528,9 +564,9 @@ namespace Ryujinx.Graphics.Vulkan
+                     _info.GetLayers(),
+                     _info.Levels);
+ 
+-                _gd.Barriers.QueueBarrier(barrier, this, _lastModificationStage, dstStageFlags);
++                _gd.Barriers.QueueBarrier(barrier, this, _last.WriteStage, dstStageFlags);
+ 
+-                _lastModificationAccess = AccessFlags.None;
++                _last.WriteAccess = AccessFlags.None;
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/TextureView.cs b/src/Ryujinx.Graphics.Vulkan/TextureView.cs
+index 99d1ff64e6a7172ea1534df3bd7deaabd3018a7e..8c872ad4e463f1eb654804141d04211de94f6dd9 100644
+--- a/src/Ryujinx.Graphics.Vulkan/TextureView.cs
++++ b/src/Ryujinx.Graphics.Vulkan/TextureView.cs
+@@ -231,17 +231,26 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
+                 _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, 0, firstLayer, layers);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
+             {
+                 int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
+                 _gd.HelperShader.CopyNonMSToMS(_gd, cbs, src, dst, 0, firstLayer, layers);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (dst.Info.BytesPerPixel != Info.BytesPerPixel)
+             {
+                 int layers = Math.Min(Info.GetLayers(), dst.Info.GetLayers() - firstLayer);
+                 int levels = Math.Min(Info.Levels, dst.Info.Levels - firstLevel);
+                 _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, 0, firstLayer, 0, firstLevel, layers, levels);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
+             {
+@@ -249,6 +258,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 int levels = Math.Min(Info.Levels, dst.Info.Levels - firstLevel);
+ 
+                 _gd.HelperShader.CopyColor(_gd, cbs, src, dst, 0, firstLayer, 0, FirstLevel, layers, levels);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else
+             {
+@@ -269,6 +281,8 @@ namespace Ryujinx.Graphics.Vulkan
+                     firstLayer,
+                     0,
+                     firstLevel);
++
++                dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+             }
+         }
+ 
+@@ -292,18 +306,30 @@ namespace Ryujinx.Graphics.Vulkan
+             if (!dst.Info.Target.IsMultisample && Info.Target.IsMultisample)
+             {
+                 _gd.HelperShader.CopyMSToNonMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (dst.Info.Target.IsMultisample && !Info.Target.IsMultisample)
+             {
+                 _gd.HelperShader.CopyNonMSToMS(_gd, cbs, src, dst, srcLayer, dstLayer, 1);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (dst.Info.BytesPerPixel != Info.BytesPerPixel)
+             {
+                 _gd.HelperShader.CopyIncompatibleFormats(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else if (src.Info.Format.IsDepthOrStencil != dst.Info.Format.IsDepthOrStencil)
+             {
+                 _gd.HelperShader.CopyColor(_gd, cbs, src, dst, srcLayer, dstLayer, srcLevel, dstLevel, 1, 1);
++                dst.Storage.RecordModification(
++                    dst.Info.Format.IsDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    dst.Info.Format.IsDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
+             }
+             else
+             {
+@@ -326,6 +352,8 @@ namespace Ryujinx.Graphics.Vulkan
+                     dstLevel,
+                     1,
+                     1);
++
++                dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+             }
+         }
+ 
+@@ -381,6 +409,7 @@ namespace Ryujinx.Graphics.Vulkan
+                         // CmdResolveImage does not support depth-stencil resolve, so we need to use an alternative path
+                         // for those textures.
+                         TextureCopy.ResolveDepthStencil(_gd, _device, cbs, src, dst);
++                        dst.Storage.RecordModification(AccessFlags.DepthStencilAttachmentWriteBit, PipelineStageFlags.LateFragmentTestsBit);
+                     }
+                     else
+                     {
+@@ -403,6 +432,8 @@ namespace Ryujinx.Graphics.Vulkan
+                             0,
+                             layers,
+                             levels);
++
++                        dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+                     }
+ 
+                     return;
+@@ -430,6 +461,8 @@ namespace Ryujinx.Graphics.Vulkan
+                         levels,
+                         linearFilter);
+ 
++                    dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
++
+                     return;
+                 }
+             }
+@@ -449,6 +482,10 @@ namespace Ryujinx.Graphics.Vulkan
+                     isDepthOrStencil,
+                     linearFilter);
+ 
++                dst.Storage.RecordModification(
++                    isDepthOrStencil ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
++                    isDepthOrStencil ? PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit);
++
+                 return;
+             }
+ 
+@@ -486,6 +523,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 linearFilter,
+                 ImageAspectFlags.ColorBit,
+                 ImageAspectFlags.ColorBit);
++
++            dst.Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+         }
+ 
+         public static unsafe void InsertMemoryBarrier(
+@@ -972,10 +1011,12 @@ namespace Ryujinx.Graphics.Vulkan
+                 if (to)
+                 {
+                     _gd.Api.CmdCopyImageToBuffer(commandBuffer, image, ImageLayout.General, buffer, 1, in region);
++                    Storage.RecordRead(AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit);
+                 }
+                 else
+                 {
+                     _gd.Api.CmdCopyBufferToImage(commandBuffer, buffer, image, ImageLayout.General, 1, in region);
++                    Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+                 }
+ 
+                 offset += mipSize;
+@@ -1033,10 +1074,12 @@ namespace Ryujinx.Graphics.Vulkan
+             if (to)
+             {
+                 _gd.Api.CmdCopyImageToBuffer(commandBuffer, image, ImageLayout.General, buffer, 1, in region);
++                Storage.RecordRead(AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit);
+             }
+             else
+             {
+                 _gd.Api.CmdCopyBufferToImage(commandBuffer, buffer, image, ImageLayout.General, 1, in region);
++                Storage.RecordModification(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit);
+             }
+         }
+ 

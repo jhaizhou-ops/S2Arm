@@ -1,0 +1,22 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index 1115c54ed25674a57f390c59269a7a48f000fdf4..a9cf4b4472f0228954fa491fbd5314fe230e6e1a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -81,6 +81,17 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 writer.Write(capabilities.S2AStorageWindowClamp);
+                 writer.Write(capabilities.S2AStorageOobRecord);
+             }
++            // S2A：空集不追加——全支持的宿主身份字节与改前相同；非空时集合影响生成的
++            //   解码码流，必须把格式值写进身份，否则跨设备缓存会错配。
++            if (capabilities.UnsupportedUniformTexelBufferFormats is { Length: > 0 } unsupportedTexel)
++            {
++                writer.Write("s2a-texel-view-fallback");
++                writer.Write(unsupportedTexel.Length);
++                foreach (Format format in unsupportedTexel)
++                {
++                    writer.Write((int)format);
++                }
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }

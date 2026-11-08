@@ -1,0 +1,162 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index 19b90c59a4226f286dd75bd7a8189706e882eade..bbb599293aff524a9afbfb5eb9615a7011ef33e5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -138,6 +138,88 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+         /// <param name="xCount">Number of pixels to be copied</param>
+         /// <param name="yCount">Number of lines to be copied</param>
+         /// <returns></returns>
++        private static readonly bool _s2aTexToBuf = Environment.GetEnvironmentVariable("S2A_DMA_TEX2BUF") != "0";
++        private static readonly bool _s2aDmaTrace = Environment.GetEnvironmentVariable("S2A_DMA_TRACE") == "1";
++        private int _s2aTexToBufN, _s2aTexToBufMiss;
++
++        /// <summary>
++        /// S2A：块线性源整张贴图 → 线性目标，源贴图在 GPU 上时在 GPU 上拷进目标缓冲（不回写源）。条件不满足返回 false，调用方走原路径：
++        /// 源是缓存里单层单级、非压缩、可回写（格式无转换）、未缩放的贴图且拷贝区就是整张；目标行跨度正、容得下一行、一行字节 4 对齐；目标区间上没有贴图、物理连续。
++        /// S2A_DMA_TEX2BUF=0 关；S2A_DMA_TRACE=1 打前 8 次没走成的原因
++        /// </summary>
++        private bool S2ATexToLinearOnGpu(MemoryManager memoryManager, DmaTexture src, ulong srcGpuVa, int srcBpp, int dstBpp, int srcStride, int xCount, int yCount, ulong dstVa, int dstStride)
++        {
++            if (!_s2aTexToBuf)
++            {
++                return false;
++            }
++
++            string why = null;
++            Image.Texture source = null;
++            int rowBytes = xCount * srcBpp;
++
++            if (srcBpp != dstBpp || src.RegionX != 0 || src.RegionY != 0 || src.RegionZ != 0 || yCount <= 0 || dstStride < rowBytes || (rowBytes & 3) != 0)
++            {
++                why = "拷贝参数";
++            }
++            else
++            {
++                source = memoryManager.Physical.TextureCache.FindTexture(
++                    memoryManager,
++                    srcGpuVa,
++                    srcBpp,
++                    srcStride,
++                    src.Height,
++                    xCount,
++                    yCount,
++                    false,
++                    src.MemoryLayout.UnpackGobBlocksInY(),
++                    src.MemoryLayout.UnpackGobBlocksInZ());
++
++                if (source == null)
++                {
++                    why = "源不在贴图缓存";
++                }
++                else if (source.Info.Height != yCount || source.Info.Width * source.Info.FormatInfo.BytesPerPixel != rowBytes || source.ScaleFactor != 1f ||
++                         !Image.TextureCompatibility.CanTextureFlush(source.Info, _context.Capabilities))
++                {
++                    why = "源贴图不是整张 / 已缩放 / 不可回写";
++                }
++            }
++
++            ulong size = (ulong)dstStride * (ulong)(yCount - 1) + (ulong)rowBytes;
++
++            if (why == null && memoryManager.Physical.TextureCache.S2AHasAnyOverlap(memoryManager.GetPhysicalRegions(dstVa, size)))
++            {
++                why = "目标上有贴图";
++            }
++
++            if (why == null)
++            {
++                source.SynchronizeMemory();
++
++                if (memoryManager.Physical.BufferCache.S2ACopyTextureToBuffer(memoryManager, source.HostTexture, dstVa, size, dstStride))
++                {
++                    if (++_s2aTexToBufN <= 4)
++                    {
++                        Console.Error.WriteLine($"[gpu] DMA 贴图 → 线性目标走 GPU 拷进缓冲（第 {_s2aTexToBufN} 次）：{source.Info.Width}x{source.Info.Height} {source.Info.FormatInfo.Format} → 0x{dstVa:X} 跨度 {dstStride} 共 {size} 字节");
++                    }
++
++                    return true;
++                }
++
++                why = "目标物理不连续";
++            }
++
++            if (_s2aDmaTrace && ++_s2aTexToBufMiss <= 8)
++            {
++                Console.Error.WriteLine($"[gpu] DMA 贴图 → 线性目标没走 GPU 拷贝（第 {_s2aTexToBufMiss} 次）：{why}｜源 {src.Width}x{src.Height} 区域 {src.RegionX},{src.RegionY},{src.RegionZ} bpp {srcBpp}/{dstBpp} 拷 {xCount}x{yCount} 目标跨度 {dstStride}" +
++                    (source != null ? $"｜源贴图 {source.Info.Width}x{source.Info.Height} {source.Info.FormatInfo.Format} 缩放 {source.ScaleFactor}" : ""));
++            }
++
++            return false;
++        }
++
+         private static bool IsTextureCopyComplete(DmaTexture tex, bool linear, int bpp, int stride, int xCount, int yCount)
+         {
+             if (linear)
+@@ -331,6 +413,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                     }
+                 }
+ 
++                // S2A（帧率能耗线 10-22）：块线性贴图整张 → 线性目标（游戏读回 GPU 结果的典型写法，八方2 每帧一次 1x1 RGBA32F）。
++                // 原路径在这里按 tracked 读源内存 = GPU 线程上整张贴图回写、等 GPU 跑完；改成 GPU 上拷进目标缓冲、目标标 GPU 改过，CPU 真读到才回写
++                if (!srcLinear && dstLinear && isIdentityRemap && S2ATexToLinearOnGpu(memoryManager, src, srcGpuVa, srcBpp, dstBpp, srcStride, xCount, yCount, dstGpuVa + (ulong)dstBaseOffset, dstStride))
++                {
++                    return;
++                }
++
+                 ReadOnlySpan<byte> srcSpan = memoryManager.GetSpan(srcGpuVa + (ulong)srcBaseOffset, srcSize, true);
+ 
+                 // Try to set the texture data directly,
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index 55a89728db04c84eef4b3841d2e51dfc1c007c92..117e0def4bfc165e4818d47b0438ec5a61f14aef 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -1211,6 +1211,15 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private Texture[] _s2aOverlaps = new Texture[16];
+ 
++        /// <summary>S2A：物理区间上有没有任何贴图（DMA 贴图 → 线性目标走 GPU 拷进缓冲前判：目标上有贴图就退回原路径，免得贴图看不到 GPU 写）。只在 GPU 线程调、零分配</summary>
++        public bool S2AHasAnyOverlap(MultiRange range)
++        {
++            lock (_textures)
++            {
++                return _textures.FindOverlaps(range, ref _s2aOverlaps) > 0;
++            }
++        }
++
+         public Texture FindShortCache(in TextureDescriptor descriptor)
+         {
+             return _cache.FindShortCache(descriptor);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 58840b3c4848d2a3739d26e7d26ffb137103f728..3e5aaa46d777b055725075ac70b9452753d592c0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -826,6 +826,30 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             dstBuffer.CopyToDependantVirtualBuffers(dstAddress, size);
+         }
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-22）：把贴图第 0 层第 0 级在 GPU 上拷进 dstVa 起 size 字节的缓冲（行跨度 stride），目标缓冲标成 GPU 改过——
++        /// CPU 真读到时才按缓冲回写（与 CopyBufferSingleRange 同一套记账）。目标跨多段物理区间时返回 false，调用方走原路径
++        /// </summary>
++        public bool S2ACopyTextureToBuffer(MemoryManager memoryManager, ITexture texture, ulong dstVa, ulong size, int stride)
++        {
++            MultiRange range = TranslateAndCreateMultiBuffersPhysicalOnly(memoryManager, dstVa, size, BufferStage.Copy);
++
++            if (range.Count != 1 || range.GetSubRange(0).Address == MemoryManager.PteUnmapped)
++            {
++                return false;
++            }
++
++            ulong address = range.GetSubRange(0).Address;
++            Buffer buffer = GetBuffer(address, size, BufferStage.Copy);
++
++            texture.CopyTo(new BufferRange(buffer.Handle, (int)(address - buffer.Address), (int)size, true), 0, 0, stride);
++
++            buffer.SignalModified(address, size, BufferStage.Copy);
++            buffer.CopyToDependantVirtualBuffers(address, size);
++
++            return true;
++        }
++
+         /// <summary>
+         /// Clears a buffer at a given address with the specified value.
+         /// </summary>

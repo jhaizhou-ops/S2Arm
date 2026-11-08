@@ -1,0 +1,26 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index ef307bcd910f2d3538b4383e95a3514641f0b8d8..8a97e73c1fbdb3a41d90db5b2e86ff2ecc270776 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -160,6 +160,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         private static void DeclareSamplers(CodeGenContext context, IEnumerable<TextureDefinition> samplers)
+         {
++            bool cubeArrayDeclared = false;
++
+             foreach (TextureDefinition sampler in samplers)
+             {
+                 int setIndex = context.TargetApi == TargetApi.Vulkan ? sampler.Set : 0;
+@@ -179,6 +181,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                         _ => throw new InvalidOperationException($"Invalid sampler type \"{sampler.Type & SamplerType.Mask}\"."),
+                     };
+ 
++                    if (!cubeArrayDeclared && dim == Dim.Cube && sampler.Type.HasFlag(SamplerType.Array))
++                    {
++                        context.AddCapability(Capability.SampledCubeArray);
++                        cubeArrayDeclared = true;
++                    }
++
+                     imageType = context.TypeImage(
+                         context.TypeFP32(),
+                         dim,

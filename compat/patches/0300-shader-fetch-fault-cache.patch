@@ -1,0 +1,669 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index abe1108efb095e1cd29f61a40eb12799704294ec..9516eb4c8c0939d8421f5e0e500e8350d6326625 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -84,22 +84,30 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         private const int S2AMaxShaderCodePages = 256;
+         private System.Collections.Generic.HashSet<ulong> _s2aCodePages;
+ 
++        /// <summary>S2A：取码失败负缓存（#723 P1）的页集探针，解码前由 ShaderCache 挂上；GetCode 每碰一页记一笔。</summary>
++        internal S2AFaultProbe S2AProbe;
++
+         /// <inheritdoc/>
+         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
+         {
+-            if (!_channel.MemoryManager.IsMapped(address))
+-            {
+-                throw new InvalidOperationException($"S2A: shader code fetch from unmapped GPU VA 0x{address:X}");
+-            }
++            // S2A：本页先记进页集（未映射的也记：负缓存要按它判失效），再读。
++            ulong page = address & ~Ryujinx.Graphics.Gpu.Memory.MemoryManager.PageMask;
+ 
+             _s2aCodePages ??= new System.Collections.Generic.HashSet<ulong>();
+-            if (_s2aCodePages.Add(address >> 12) && _s2aCodePages.Count > S2AMaxShaderCodePages)
++            if (_s2aCodePages.Add(page) && _s2aCodePages.Count > S2AMaxShaderCodePages)
+             {
+                 throw new InvalidOperationException($"S2A: shader code fetch exceeded {S2AMaxShaderCodePages} pages (at GPU VA 0x{address:X})");
+             }
+ 
+             int size = Math.Max(minimumSize, 0x1000 - (int)(address & 0xfff));
+ 
++            S2AProbe?.Note(address, size);   // 这次读到的字节区间（负缓存只比这些字节的内容）
++
++            if (!_channel.MemoryManager.IsMapped(address))
++            {
++                throw new InvalidOperationException($"S2A: shader code fetch from unmapped GPU VA 0x{address:X}");
++            }
++
+             return MemoryMarshal.Cast<byte, ulong>(_channel.MemoryManager.GetSpan(address, size));
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa15c8925d773ce54fc1e94edf50c2813c21e0ab
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs
+@@ -0,0 +1,292 @@
++using System;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Gpu.Shader
++{
++    /// <summary>
++    /// S2A（#723 P1）：取码失败负缓存对外部世界（MemoryManager）的提问面。
++    /// 运行时由 S2AFaultHostOf 实现，单测用假实现——本文件不引用 Ryujinx 其它类型，可以单文件编译测试（照 tests/multirange 的写法）。
++    /// </summary>
++    internal interface IS2AFaultHost
++    {
++        /// <summary>映射代数号（MemoryManager.S2AMapGen）：变了说明页表改过，页的物理地址可能变了。</summary>
++        int MapGen { get; }
++
++        /// <summary>页对齐 GPU VA → 物理地址；未映射返回 ulong.MaxValue。</summary>
++        ulong TranslatePage(ulong page);
++
++        /// <summary>给这一页的物理内存武装写跟踪，并记下解码器在这页读过的字节区间 [lo, hi) 的内容（之后任何写都会让 Dirty 为真）。未映射返回 null。</summary>
++        IS2AFaultWatch Arm(ulong page, int lo, int hi);
++    }
++
++    /// <summary>S2A：一页的写跟踪 + 解码器读过的字节区间的内容快照。Arm 时 Reprotect 一次清掉新建即有的脏位并武装。</summary>
++    internal interface IS2AFaultWatch : IDisposable
++    {
++        /// <summary>自上次武装起页被写过。</summary>
++        bool Dirty { get; }
++
++        /// <summary>页被写过时调：先重新武装（清脏），再比读过区间的内容——与武装时相同返回 true（条目仍有效），变了返回 false。</summary>
++        bool Rearm();
++    }
++
++    /// <summary>
++    /// S2A：图形着色器负缓存的键——六个阶段的 GPU 地址。
++    /// 不直接用 ShaderAddresses，是为了让本文件可以单文件编译（单测不引整个 Gpu 工程）。
++    /// </summary>
++    internal readonly struct S2AFaultKey : IEquatable<S2AFaultKey>
++    {
++        private readonly ulong _v0, _v1, _v2, _v3, _v4, _v5;
++
++        public S2AFaultKey(ulong v0, ulong v1, ulong v2, ulong v3, ulong v4, ulong v5)
++        {
++            _v0 = v0; _v1 = v1; _v2 = v2; _v3 = v3; _v4 = v4; _v5 = v5;
++        }
++
++        public bool Equals(S2AFaultKey other) =>
++            _v0 == other._v0 && _v1 == other._v1 && _v2 == other._v2 &&
++            _v3 == other._v3 && _v4 == other._v4 && _v5 == other._v5;
++
++        public override bool Equals(object obj) => obj is S2AFaultKey other && Equals(other);
++
++        public override int GetHashCode() => HashCode.Combine(_v0, _v1, _v2, _v3, _v4, _v5);
++    }
++
++    /// <summary>S2A：一页里解码器读过的字节区间 [Lo, Hi)。</summary>
++    internal readonly struct S2AFaultPage
++    {
++        public readonly ulong Page;
++        public readonly int Lo, Hi;
++
++        public S2AFaultPage(ulong page, int lo, int hi)
++        {
++            Page = page; Lo = lo; Hi = hi;
++        }
++    }
++
++    /// <summary>
++    /// S2A：一次解码碰过的页与每页读过的字节区间。GpuAccessor.GetCode 每取一段调 Note（未映射那页也记），
++    /// 解码失败时由 ShaderCache 取走，交给负缓存的 Arm 序列。区间只用来比内容：别的数据与本页共页、它那部分被改写不算本条目失效。
++    /// </summary>
++    internal sealed class S2AFaultProbe
++    {
++        public const int PageSize = 0x1000;
++
++        private readonly Dictionary<ulong, (int lo, int hi)> _ranges = new();
++        private readonly List<ulong> _order = new();
++
++        /// <summary>整页。</summary>
++        public void Note(ulong page) => Note(page, PageSize);
++
++        /// <summary>[address, address + size) 覆盖的每一页记下读到的区间（同页多次取并成一段）。</summary>
++        public void Note(ulong address, int size)
++        {
++            ulong end = address + (ulong)size;
++            for (ulong page = address & ~(ulong)(PageSize - 1); page < end; page += PageSize)
++            {
++                int lo = (int)(Math.Max(address, page) - page);
++                int hi = (int)(Math.Min(end, page + PageSize) - page);
++                if (_ranges.TryGetValue(page, out (int lo, int hi) r)) _ranges[page] = (Math.Min(r.lo, lo), Math.Max(r.hi, hi));
++                else { _ranges[page] = (lo, hi); _order.Add(page); }
++            }
++        }
++
++        /// <summary>取走（取走即空，随后可以接着用于下一轮解码）。</summary>
++        public S2AFaultPage[] Take()
++        {
++            S2AFaultPage[] pages = new S2AFaultPage[_order.Count];
++            for (int i = 0; i < pages.Length; i++)
++            {
++                (int lo, int hi) = _ranges[_order[i]];
++                pages[i] = new S2AFaultPage(_order[i], lo, hi);
++            }
++            _ranges.Clear();
++            _order.Clear();
++            return pages;
++        }
++
++        public static ulong[] PagesOf(S2AFaultPage[] pages)
++        {
++            ulong[] v = new ulong[pages.Length];
++            for (int i = 0; i < v.Length; i++) v[i] = pages[i].Page;
++            return v;
++        }
++    }
++
++    /// <summary>
++    /// S2A（#723 P1）：着色器取码失败的负缓存。同一地址再派发时直接交出上次的报错，不再解码。
++    ///
++    /// 失效三条件（任一成立即重试）：
++    ///   ① 任一页被写过（写跟踪句柄 Dirty）且解码器读过的字节内容变了——精确到实际碰过的每一页，游戏只改第 N 页也认得出；
++    ///      写了但读过的内容没变（同值重写、共页的别处被改）只重新武装、不失效（10-28 冷缓存实测这类占页脏失效的 53%）；
++    ///   ② 映射代数号变了且逐页重翻译后物理地址与记录时不同（页被挪走）；
++    ///   ③ 条目被淘汰（上限 4096，按最旧淘汰，句柄随之 Dispose）。
++    /// 映射代数号变了但每页物理地址没变 → 不失效（别的 VA 改了映射，与这段代码无关）。
++    ///
++    /// 报红去重仍由两个调用方各自的集合（上限 64 组）负责，与此处无关。
++    /// </summary>
++    internal sealed class S2AShaderFaultCache
++    {
++        /// <summary>负缓存条目上限（报红仍限 64 组）。</summary>
++        public const int Capacity = 4096;
++
++        private sealed class Entry
++        {
++            public ulong[] Pages;    // 页对齐 GPU VA（含未映射页）
++            public ulong[] Pas;      // 记录时各页的物理地址（未映射为 ulong.MaxValue）
++            public IS2AFaultWatch[] Watches;
++            public int Gen;
++            public string Message;
++            public long Seq;
++        }
++
++        private readonly Dictionary<ulong, Entry> _compute = new();
++        private readonly Dictionary<S2AFaultKey, Entry> _graphics = new();
++        private readonly object _lock = new();
++        private long _seq;
++
++        /// <summary>计算着色器：命中（仍然有效）返回要抛的消息，否则 null。</summary>
++        public string Check(ulong gpuVa, IS2AFaultHost host)
++        {
++            lock (_lock)
++            {
++                if (!_compute.TryGetValue(gpuVa, out Entry e)) return null;
++                if (Valid(e, host)) return e.Message;
++                _compute.Remove(gpuVa);   // 失效即摘：Rearm 已消费了脏位，留着会在下一次 Check 被当成有效
++                DisposeAll(e);
++                return null;
++            }
++        }
++
++        /// <summary>图形着色器：同上。</summary>
++        public string Check(S2AFaultKey key, IS2AFaultHost host)
++        {
++            lock (_lock)
++            {
++                if (!_graphics.TryGetValue(key, out Entry e)) return null;
++                if (Valid(e, host)) return e.Message;
++                _graphics.Remove(key);   // 失效即摘（同上）
++                DisposeAll(e);
++                return null;
++            }
++        }
++
++        /// <summary>失败时记入（同键已有的旧条目连同其句柄一起作废）。</summary>
++        public void Record(ulong gpuVa, IS2AFaultHost host, ulong[] pages, IS2AFaultWatch[] watches, string message)
++        {
++            lock (_lock)
++            {
++                if (_compute.Remove(gpuVa, out Entry old)) DisposeAll(old);
++                if (RefuseIfDirty(watches)) return;
++                EvictIfFull(_compute);
++                _compute[gpuVa] = Make(host, pages, watches, message);
++            }
++        }
++
++        /// <summary>失败时记入（图形）。</summary>
++        public void Record(S2AFaultKey key, IS2AFaultHost host, ulong[] pages, IS2AFaultWatch[] watches, string message)
++        {
++            lock (_lock)
++            {
++                if (_graphics.Remove(key, out Entry old)) DisposeAll(old);
++                if (RefuseIfDirty(watches)) return;
++                EvictIfFull(_graphics);
++                _graphics[key] = Make(host, pages, watches, message);
++            }
++        }
++
++        /// <summary>解码成功：同一键的旧失败条目作废（游戏换了代码，这段现在解得开了）。</summary>
++        public void Forget(ulong gpuVa)
++        {
++            lock (_lock)
++            {
++                if (_compute.Remove(gpuVa, out Entry e)) DisposeAll(e);
++            }
++        }
++
++        /// <summary>解码成功：同上（图形）。</summary>
++        public void Forget(S2AFaultKey key)
++        {
++            lock (_lock)
++            {
++                if (_graphics.Remove(key, out Entry e)) DisposeAll(e);
++            }
++        }
++
++        /// <summary>条目数（单测用）。</summary>
++        public int CountOf(ulong gpuVa) { lock (_lock) { return _compute.Count; } }
++        public int CountOfGraphics() { lock (_lock) { return _graphics.Count; } }
++
++        private bool Valid(Entry e, IS2AFaultHost host)
++        {
++            foreach (IS2AFaultWatch w in e.Watches)
++            {
++                if (w.Dirty && !w.Rearm()) return false;   // ① 页被写过且读过的内容变了（没变：Rearm 已重新武装）
++            }
++
++            int gen = host.MapGen;
++            if (e.Gen == gen) return true;   // ② 代数号没变 ⇒ 翻译结果不变
++
++            for (int i = 0; i < e.Pages.Length; i++)
++            {
++                if (host.TranslatePage(e.Pages[i]) != e.Pas[i]) return false;
++            }
++
++            e.Gen = gen;   // 页一个没挪：记下新代数号，免得之后每次命中都重翻一遍
++            return true;
++        }
++
++        private Entry Make(IS2AFaultHost host, ulong[] pages, IS2AFaultWatch[] watches, string message)
++        {
++            ulong[] pas = new ulong[pages.Length];
++            for (int i = 0; i < pages.Length; i++) pas[i] = host.TranslatePage(pages[i]);
++
++            return new Entry
++            {
++                Pages = pages,
++                Pas = pas,
++                Watches = watches,
++                Gen = host.MapGen,
++                Message = message,
++                Seq = ++_seq,
++            };
++        }
++
++        private static void EvictIfFull<TKey>(Dictionary<TKey, Entry> map)
++        {
++            if (map.Count < Capacity) return;
++
++            TKey oldest = default;
++            long min = long.MaxValue;
++            bool found = false;
++
++            foreach (KeyValuePair<TKey, Entry> kv in map)
++            {
++                if (kv.Value.Seq < min)
++                {
++                    min = kv.Value.Seq;
++                    oldest = kv.Key;
++                    found = true;
++                }
++            }
++
++            if (found && map.Remove(oldest, out Entry e)) DisposeAll(e);
++        }
++
++        private static void DisposeAll(Entry e)
++        {
++            foreach (IS2AFaultWatch w in e.Watches) w.Dispose();
++        }
++
++        /// <summary>武装到确认之间有页被写过：确认那次看到的内容未必是武装时记下的，不记（句柄释放，下次派发重来）。</summary>
++        private static bool RefuseIfDirty(IS2AFaultWatch[] watches)
++        {
++            foreach (IS2AFaultWatch w in watches)
++            {
++                if (!w.Dirty) continue;
++                foreach (IS2AFaultWatch x in watches) x.Dispose();
++                return true;
++            }
++            return false;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultHost.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultHost.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c34e3593a08a2e34854cf101f2e6b0cbd82c0581
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultHost.cs
+@@ -0,0 +1,86 @@
++using Ryujinx.Graphics.Gpu.Memory;
++using Ryujinx.Memory.Range;
++using System;
++using System.Threading;
++
++namespace Ryujinx.Graphics.Gpu.Shader
++{
++    /// <summary>
++    /// S2A（#723 P1）：负缓存提问面的运行时实现——把 MemoryManager / GpuRegionHandle 接到 S2AShaderFaultCache 的接口上。
++    /// 缓存本身不引用 Ryujinx 类型（可单文件编译测试），这一层才引用。
++    /// </summary>
++    internal sealed class S2AFaultHostOf : IS2AFaultHost
++    {
++        private readonly MemoryManager _memoryManager;
++
++        public S2AFaultHostOf(MemoryManager memoryManager)
++        {
++            _memoryManager = memoryManager;
++        }
++
++        /// <summary>先读代数号再翻译：读到的代数号不变 ⇒ 翻译结果不变（同 0008 的用法）。</summary>
++        public int MapGen => Volatile.Read(ref _memoryManager.S2AMapGen);
++
++        public ulong TranslatePage(ulong page) => _memoryManager.Translate(page);
++
++        public IS2AFaultWatch Arm(ulong page, int lo, int hi)
++        {
++            ulong pa = _memoryManager.Translate(page);
++
++            // 未映射页没有物理地址可跟踪：条目靠映射代数号 + 重翻译判失效（页一旦被映射，物理地址必与记录时的 MaxValue 不同）
++            if (pa == MemoryManager.PteUnmapped || !_memoryManager.Physical.IsMapped(pa)) return null;
++
++            GpuRegionHandle handle = _memoryManager.Physical.BeginTracking(new MultiRange(pa, MemoryManager.PageSize), ResourceKind.None);
++            // Ryujinx 的 RegionHandle 新建即脏（RegionHandle.cs「Dirty = mapped」）：这里 Reprotect 一次清掉初始脏位并把页保护成只读，之后一写才标脏。
++            // 不清的话条目一记进去就按「页被写过」作废（10-28 冷缓存真局：命中 0、每次派发解两遍）。同 ShaderCache.S2AVerify 的用法。
++            // 顺序：先 Reprotect 再记内容——Reprotect 之后的写会再把句柄标脏，记下的内容就是「没被写过时」的内容。
++            handle.Reprotect();
++            return new S2AFaultWatchOf(handle, _memoryManager.Physical, pa + (ulong)lo, hi - lo);
++        }
++    }
++
++    /// <summary>
++    /// S2A：GpuRegionHandle 的薄包装 + 解码器读过的字节区间的内容哈希。
++    /// 页脏时 Rearm：先 Reprotect（清脏、重新武装）再重算哈希，与武装时相同 ⇒ 同值重写或共页别处被改，条目仍有效。
++    /// </summary>
++    internal sealed class S2AFaultWatchOf : IS2AFaultWatch
++    {
++        private readonly GpuRegionHandle _handle;
++        private readonly PhysicalMemory _physical;
++        private readonly ulong _address;
++        private readonly int _size;
++        private readonly ulong _hash;
++
++        public S2AFaultWatchOf(GpuRegionHandle handle, PhysicalMemory physical, ulong address, int size)
++        {
++            _handle = handle;
++            _physical = physical;
++            _address = address;
++            _size = size;
++            _hash = Hash();
++        }
++
++        public bool Dirty => _handle.Dirty;
++
++        public bool Rearm()
++        {
++            _handle.Reprotect();
++            return Hash() == _hash;
++        }
++
++        public void Dispose() => _handle.Dispose();
++
++        /// <summary>FNV-1a 64（区间最多一页，取码失败的页不超过 256 个）。</summary>
++        private ulong Hash()
++        {
++            ReadOnlySpan<byte> bytes = _physical.GetSpan(_address, _size);
++            ulong h = 14695981039346656037UL;
++            foreach (byte b in bytes)
++            {
++                h ^= b;
++                h *= 1099511628211UL;
++            }
++            return h;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 94dce0a0e4956f534917b2f7175cf576f76714b5..a6644112d74c1487943bcaf8a22c73baa07ccfa5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -231,6 +231,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return cpShader;
+             }
+ 
++            // S2A（#723 P1）：同一地址上次取码失败、碰过的页此后没被写过、映射也没挪 → 直接抛上次的消息，不再解码。
++            S2AFaultHostOf s2aHost = new(channel.MemoryManager);
++            string s2aFault = _s2aFaults.Check(gpuVa, s2aHost);
++            if (s2aFault != null) throw new InvalidOperationException(s2aFault);
++
+             byte[] cachedGuestCode;
+ 
+             // S2A：磁盘缓存（包内）条目首次命中先核对运行时真值，不符就作废、接着找下一个（作废的查找时跳过，循环必然结束）
+@@ -252,7 +257,49 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             GpuAccessor gpuAccessor = new(_context, channel, gpuAccessorState);
+             gpuAccessor.InitializeReservedCounts(tfEnabled: false, vertexAsCompute: false);
+ 
+-            TranslatorContext translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, gpuVa);
++            // S2A（#723 P1）：解码时记下碰过的每一页。失败后先武装这些页的写跟踪、再用一次性状态重解一遍确认：
++            //   确认仍失败且碰的页都在武装范围内 → 其间没有写，记入负缓存（之后写任意一页、或页被挪走即作废）；
++            //   确认成功 → 第一次失败是并发写造成的瞬时现象，用确认那次的上下文与状态继续，不记。
++            S2AFaultProbe s2aProbe = new();
++            gpuAccessor.S2AProbe = s2aProbe;
++
++            TranslatorContext translatorContext;
++            try
++            {
++                translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, gpuVa);
++                _s2aFaults.Forget(gpuVa);
++            }
++            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch"))
++            {
++                S2AFaultPage[] s2aPages = s2aProbe.Take();
++                IS2AFaultWatch[] s2aWatches = S2AArmFaultPages(s2aHost, s2aPages);
++
++                ShaderSpecializationState s2aSpec2 = new(ref computeState);
++                GpuAccessorState s2aAccState2 = new(samplerPoolMaximumId, poolState, computeState, default, s2aSpec2);
++                GpuAccessor s2aAccessor2 = new(_context, channel, s2aAccState2);
++                s2aAccessor2.InitializeReservedCounts(tfEnabled: false, vertexAsCompute: false);
++                S2AFaultProbe s2aProbe2 = new();
++                s2aAccessor2.S2AProbe = s2aProbe2;
++
++                try
++                {
++                    translatorContext = DecodeComputeShader(s2aAccessor2, _context.Capabilities.Api, gpuVa);
++                    specState = s2aSpec2;
++                    S2ADisposeWatches(s2aWatches);
++                    _s2aFaults.Forget(gpuVa);
++                }
++                catch (InvalidOperationException e2) when (e2.Message.StartsWith("S2A: shader code fetch"))
++                {
++                    if (S2APagesCovered(s2aProbe2.Take(), s2aPages)) _s2aFaults.Record(gpuVa, s2aHost, S2AFaultProbe.PagesOf(s2aPages), s2aWatches, e.Message);
++                    else S2ADisposeWatches(s2aWatches);   // 确认那次碰了范围外的页：判不了有没有写过，不记
++                    throw;
++                }
++                catch
++                {
++                    S2ADisposeWatches(s2aWatches);
++                    throw;
++                }
++            }
+             TranslatedShader translatedShader = TranslateShader(_dumper, channel, translatorContext, cachedGuestCode, asCompute: false);
+ 
+             ShaderSource[] shaderSourcesArray = new ShaderSource[] { CreateShaderSource(translatedShader.Program) };
+@@ -338,6 +385,89 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         // S2A（10-21）：首遇重翻诊断——缓存（含包内条目）查找不中、即将翻译时记一行拒因：缺哪个阶段的客体代码 / 阶段组合没配进缓存 / 特化不符（哪个字段）。
+         //   同一拒因第 1、2、4、8… 次打一行（host.log），按拒因统计「包里漏了什么」，作第二层通用版兜底的输入（画面·着色器线缩键测算）
+         private static readonly Dictionary<string, int> _s2aMissCounts = new();
++
++        // S2A（#723 P1）：取码失败负缓存。命中时抛的消息前缀与安全阀同一条，两个调用方的 catch 不用改。
++        private readonly S2AShaderFaultCache _s2aFaults = new();
++
++        /// <summary>S2A：给这些页武装写跟踪并记下读过区间的内容（未映射页返回 null，不武装）。</summary>
++        private static IS2AFaultWatch[] S2AArmFaultPages(S2AFaultHostOf host, S2AFaultPage[] pages)
++        {
++            List<IS2AFaultWatch> watches = new(pages.Length);
++            foreach (S2AFaultPage page in pages)
++            {
++                IS2AFaultWatch watch = host.Arm(page.Page, page.Lo, page.Hi);
++                if (watch != null) watches.Add(watch);
++            }
++            return watches.ToArray();
++        }
++
++        private static void S2ADisposeWatches(IS2AFaultWatch[] watches)
++        {
++            foreach (IS2AFaultWatch watch in watches) watch.Dispose();
++        }
++
++        /// <summary>S2A：确认那次解码碰的页是否都在已武装的页里（都在 ⇒ 其间没有写过，可以记入）。</summary>
++        private static bool S2APagesCovered(S2AFaultPage[] pages, S2AFaultPage[] armed)
++        {
++            HashSet<ulong> set = new(S2AFaultProbe.PagesOf(armed));
++            foreach (S2AFaultPage page in pages)
++            {
++                if (!set.Contains(page.Page)) return false;
++            }
++            return true;
++        }
++
++        /// <summary>S2A：图形着色器的负缓存键（六个阶段的 GPU 地址）。</summary>
++        private static S2AFaultKey S2AFaultKeyOf(ShaderAddresses addresses)
++        {
++            Span<ulong> v = addresses.AsSpan();
++            return new S2AFaultKey(v[0], v[1], v[2], v[3], v[4], v[5]);
++        }
++        /// <summary>S2A（#723 P1）：图形着色器各阶段解码（原 GetGraphicsShader 内联循环，抽出来供确认解码复用同一套顺序）。</summary>
++        private TranslatorContext[] S2ADecodeStages(
++            GpuContext context,
++            GpuChannel channel,
++            GpuAccessorState gpuAccessorState,
++            ReadOnlySpan<ulong> addressesSpan,
++            ShaderAddresses addresses,
++            S2AFaultProbe probe,
++            out GpuAccessor[] gpuAccessors)
++        {
++            gpuAccessors = new GpuAccessor[Constants.ShaderStages];
++            TranslatorContext[] translatorContexts = new TranslatorContext[Constants.ShaderStages + 1];
++            TranslatorContext nextStage = null;
++
++            TargetApi api = context.Capabilities.Api;
++
++            for (int stageIndex = Constants.ShaderStages - 1; stageIndex >= 0; stageIndex--)
++            {
++                ulong gpuVa = addressesSpan[stageIndex + 1];
++
++                if (gpuVa != 0)
++                {
++                    GpuAccessor gpuAccessor = new(context, channel, gpuAccessorState, stageIndex, addresses.Geometry != 0);
++                    gpuAccessor.S2AProbe = probe;
++                    TranslatorContext currentStage = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags, gpuVa);
++
++                    if (nextStage != null)
++                    {
++                        currentStage.SetNextStage(nextStage);
++                    }
++
++                    if (stageIndex == 0 && addresses.VertexA != 0)
++                    {
++                        translatorContexts[0] = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags | TranslationFlags.VertexA, addresses.VertexA);
++                    }
++
++                    gpuAccessors[stageIndex] = gpuAccessor;
++                    translatorContexts[stageIndex + 1] = currentStage;
++                    nextStage = currentStage;
++                }
++            }
++
++            return translatorContexts;
++        }
++
+         private static void S2ALogMiss(bool isCompute)
+         {
+             string why = (isCompute ? "计算：" : "图形：") + (ShaderSpecializationState.S2AMiss ?? "缓存里没有（未分类）");
+@@ -361,6 +491,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return gpShaders;
+             }
+ 
++            // S2A（#723 P1）：这组地址上次取码失败、碰过的页此后没被写过、映射也没挪 → 直接抛上次的消息，不再解码（计算路径同）。
++            S2AFaultHostOf s2aHost = new(channel.MemoryManager);
++            S2AFaultKey s2aKey = S2AFaultKeyOf(addresses);
++            string s2aFault = _s2aFaults.Check(s2aKey, s2aHost);
++            if (s2aFault != null) throw new InvalidOperationException(s2aFault);
++
+             CachedGraphicsGuestCode cachedGuestCode;
+ 
+             // S2A：同上（计算着色器那段）。拆账（S2A_ALLOC_TRACE）：查缓存 + 按需实化 / 首次命中核对分开记
+@@ -393,34 +529,43 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             ReadOnlySpan<ulong> addressesSpan = addresses.AsSpan();
+ 
+-            GpuAccessor[] gpuAccessors = new GpuAccessor[Constants.ShaderStages];
+-            TranslatorContext[] translatorContexts = new TranslatorContext[Constants.ShaderStages + 1];
+-            TranslatorContext nextStage = null;
+-
+-            TargetApi api = _context.Capabilities.Api;
+-
+-            for (int stageIndex = Constants.ShaderStages - 1; stageIndex >= 0; stageIndex--)
++            // S2A（#723 P1）：解码时记下碰过的每一页。失败后武装这些页的写跟踪、用一次性状态再解一遍确认：
++            //   确认仍失败且碰的页都在武装范围内 → 其间没写过，记入负缓存；确认成功 → 第一次失败是并发写造成的瞬时现象，照确认那次的上下文与状态继续，不记。
++            //   图形是多阶段循环，任一阶段抛即整体失败，所以探针整个循环共用一个。
++            S2AFaultProbe s2aProbe = new();
++            TranslatorContext[] translatorContexts;
++            GpuAccessor[] gpuAccessors;
++            try
+             {
+-                ulong gpuVa = addressesSpan[stageIndex + 1];
+-
+-                if (gpuVa != 0)
+-                {
+-                    GpuAccessor gpuAccessor = new(_context, channel, gpuAccessorState, stageIndex, addresses.Geometry != 0);
+-                    TranslatorContext currentStage = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags, gpuVa);
++                translatorContexts = S2ADecodeStages(_context, channel, gpuAccessorState, addressesSpan, addresses, s2aProbe, out gpuAccessors);
++                _s2aFaults.Forget(s2aKey);
++            }
++            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch"))
++            {
++                S2AFaultPage[] s2aPages = s2aProbe.Take();
++                IS2AFaultWatch[] s2aWatches = S2AArmFaultPages(s2aHost, s2aPages);
+ 
+-                    if (nextStage != null)
+-                    {
+-                        currentStage.SetNextStage(nextStage);
+-                    }
++                ShaderSpecializationState s2aSpec2 = new(ref graphicsState, ref pipeline, transformFeedbackDescriptors);
++                GpuAccessorState s2aAccState2 = new(samplerPoolMaximumId, poolState, default, graphicsState, s2aSpec2, transformFeedbackDescriptors);
++                S2AFaultProbe s2aProbe2 = new();
+ 
+-                    if (stageIndex == 0 && addresses.VertexA != 0)
+-                    {
+-                        translatorContexts[0] = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags | TranslationFlags.VertexA, addresses.VertexA);
+-                    }
+-
+-                    gpuAccessors[stageIndex] = gpuAccessor;
+-                    translatorContexts[stageIndex + 1] = currentStage;
+-                    nextStage = currentStage;
++                try
++                {
++                    translatorContexts = S2ADecodeStages(_context, channel, s2aAccState2, addressesSpan, addresses, s2aProbe2, out gpuAccessors);
++                    specState = s2aSpec2;
++                    S2ADisposeWatches(s2aWatches);
++                    _s2aFaults.Forget(s2aKey);
++                }
++                catch (InvalidOperationException e2) when (e2.Message.StartsWith("S2A: shader code fetch"))
++                {
++                    if (S2APagesCovered(s2aProbe2.Take(), s2aPages)) _s2aFaults.Record(s2aKey, s2aHost, S2AFaultProbe.PagesOf(s2aPages), s2aWatches, e.Message);
++                    else S2ADisposeWatches(s2aWatches);   // 确认那次碰了范围外的页：判不了有没有写过，不记
++                    throw;
++                }
++                catch
++                {
++                    S2ADisposeWatches(s2aWatches);
++                    throw;
+                 }
+             }
+ 

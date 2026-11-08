@@ -1,0 +1,21 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 933492653142e4c7366bed1afdb4533291752446..b9502d2f1b8d8b8cf6720c0b69ea0d4d511ae435 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -111,6 +111,7 @@ namespace Ryujinx.Graphics.Vulkan
+         // worker executes a driver call; the host sets the pump to the WSI lease poll.
+         internal CompileWorker S2ACompileWorker { get; set; }
+         internal Action S2AWaitPump { get; set; }
++        internal Action S2ADeviceCleanup { get; set; }
+ 
+         /// <summary>
+         /// S2A：本渲染器里「等别的线程推进」的循环（计数队列 FlushTo）每次醒来调一次，可抛异常结束等待；宿主（Android 拆线程）
+@@ -1459,6 +1460,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 SurfaceApi.DestroySurface(_instance.Instance, _surface, null);
+             }
+ 
++            S2ADeviceCleanup?.Invoke();
++            S2ADeviceCleanup = null;
+             Api.DestroyDevice(_device, null);
+ 
+             _debugMessenger.Dispose();

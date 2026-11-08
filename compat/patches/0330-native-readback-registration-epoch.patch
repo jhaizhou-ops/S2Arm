@@ -1,0 +1,95 @@
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index a48c3df781548a3431c4e50f154d61bdc4ead97a..9fbbabdc52f7420e297bb28ceeac5450e2d8f0e4 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -58,6 +58,14 @@ namespace Ryujinx.Memory.Tracking
+         /// </summary>
+         public Action<ulong, ulong> BeforeTracking { get; set; }
+ 
++        /// <summary>
++        /// Notify guest protection again when a new read action is registered, even if
++        /// the region is already inaccessible. Native readback hosts use this notification
++        /// to distinguish a new action from an old action that failed to finish.
++        /// Configure before guest execution. Other hosts retain permission-only coalescing.
++        /// </summary>
++        public bool ReprotectOnActionRegistration { get; set; }
++
+         // Only use these from within the lock.
+         private readonly NonOverlappingRangeList<VirtualRegion> _virtualRegions;
+         // Guest virtual regions are a subset of the normal virtual regions, with potentially different protection
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index 98c43855a39781e51babc20477e6d5b0768c6080..65dcaba3e6b3c0e4990d2df2a8709fb11ea24112 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -431,21 +431,42 @@ namespace Ryujinx.Memory.Tracking
+ 
+             lock (PreActionLock)
+             {
+-                RegionSignal lastAction = Interlocked.Exchange(ref _preAction, action);
+-
+-                if (lastAction == null && action != lastAction)
++                if (_tracking.ReprotectOnActionRegistration)
+                 {
++                    // Publish the action and its native generation under the same lock
++                    // used by Signal's final protection update. Publishing the action
++                    // before acquiring this lock leaves a second unnotified-action race.
+                     lock (_tracking.TrackingLock)
+                     {
+-                        foreach (VirtualRegion region in _regions)
+-                        {
+-                            region.UpdateProtection();
+-                        }
++                        RegisterActionImpl(action);
++                    }
++                }
++                else
++                {
++                    RegisterActionImpl(action);
++                }
++            }
++        }
+ 
+-                        foreach (VirtualRegion region in _guestRegions)
+-                        {
+-                            region.UpdateProtection();
+-                        }
++        private void RegisterActionImpl(RegionSignal action)
++        {
++            RegionSignal lastAction = Interlocked.Exchange(ref _preAction, action);
++
++            if (lastAction == null && action != lastAction)
++            {
++                lock (_tracking.TrackingLock)
++                {
++                    foreach (VirtualRegion region in _regions)
++                    {
++                        region.UpdateProtection();
++                    }
++
++                    foreach (VirtualRegion region in _guestRegions)
++                    {
++                        // Signal releases TrackingLock while invoking the previous action.
++                        // A new registration can win the lock before Signal updates None
++                        // back to Read/RW. Publish this new action even if None is unchanged.
++                        region.UpdateProtection(_tracking.ReprotectOnActionRegistration);
+                     }
+                 }
+             }
+diff --git a/src/Ryujinx.Memory/Tracking/VirtualRegion.cs b/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
+index dbfe168b05c8e582b94c7dcd535eaf0ab58eeb40..ec36d35354eb0c5bc7e50415dc9d4d66b8f087ae 100644
+--- a/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
++++ b/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
+@@ -106,11 +106,11 @@ namespace Ryujinx.Memory.Tracking
+         /// <summary>
+         /// Updates the protection for this virtual region.
+         /// </summary>
+-        public bool UpdateProtection()
++        public bool UpdateProtection(bool actionRegistered = false)
+         {
+             MemoryPermission permission = GetRequiredPermission();
+ 
+-            if (_lastPermission != permission)
++            if (_lastPermission != permission || (actionRegistered && permission == MemoryPermission.None))
+             {
+                 _tracking.ProtectVirtualRegion(this, permission, Guest);
+                 _lastPermission = permission;

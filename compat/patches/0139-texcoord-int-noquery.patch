@@ -1,0 +1,22 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index 6d71c6f9116fbb0a5a0803b2665cf403ca95d407..bba87b902a756c99bb7e1ee117e2db00b133cbdd 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -166,9 +166,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 return S2AInsertCoordNormalizationRuntime(hfm, node, resourceManager, stage, texOp);
+             }
+ 
++            // S2A：整数坐标（texelFetch 一类）不做归一化换算，不用查——原版先查后返回，查询白白进特化状态，核对时按这张贴图的归一化位判不符重翻
++            //   （10-21 晚真机首遇重翻拒因：暗黑2「贴图坐标归一化」90 次、八方2 54 次，含计算着色器）。翻出的代码不变
++            if (intCoords)
++            {
++                return node;
++            }
++
+             bool isCoordNormalized = gpuAccessor.QueryTextureCoordNormalized(handle, cbufSlot);
+ 
+-            if (isCoordNormalized || intCoords)
++            if (isCoordNormalized)
+             {
+                 return node;
+             }

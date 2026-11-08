@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/Types/NvFence.cs b/src/Ryujinx.HLE/HOS/Services/Nv/Types/NvFence.cs
+index 214987e96bac6548a54b823e766c3338310e93dc..dffab86d8f42a468d7395a6a2f54abe935f46de6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/Types/NvFence.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/Types/NvFence.cs
+@@ -32,6 +32,13 @@ namespace Ryujinx.HLE.HOS.Services.Nv.Types
+         {
+             if (IsValid())
+             {
++                // S2Arm: already reached (same comparison as Syncpoint.RegisterCallback) -> no wait. WaitOnSyncpoint creates a
++                // ManualResetEvent and a closure (~192 B) before finding that out; the compositor waits on every presented frame
++                if (gpuContext.Synchronization.GetSyncpointValue(Id) >= Value)
++                {
++                    return false;
++                }
++
+                 return gpuContext.Synchronization.WaitOnSyncpoint(Id, Value, timeout);
+             }
+ 

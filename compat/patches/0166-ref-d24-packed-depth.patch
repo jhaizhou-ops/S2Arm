@@ -1,0 +1,100 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/FormatConverter.cs b/src/Ryujinx.Graphics.Vulkan/FormatConverter.cs
+index 33472ae4a5cc941b8bd2b9fed96d3da9a47dfd4c..bc556632e9a34b42517edbe26776e0ecee5826e8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/FormatConverter.cs
++++ b/src/Ryujinx.Graphics.Vulkan/FormatConverter.cs
+@@ -5,26 +5,24 @@ namespace Ryujinx.Graphics.Vulkan
+ {
+     class FormatConverter
+     {
++        // S2Arm：D24S8 在没有 D24 的设备（MoltenVK）上换成 D32FloatS8Uint 时，缓冲 ↔ 图像拷贝只拷深度面（TextureView.CopyFromOrToBuffer 的
++        // 深度 / 模板图只取 DepthBit），Vulkan 深度面是紧排 float（4 字节 / 像素），与客体 D24S8 打包数据一一对应、逐像素同位置。
++        // 原实现按「float 深度 + 模板」交错 8 字节转：上传把交错数据当紧排拷进深度面（隔点是模板），读回又两两配对，深度错位、后半张全 0。
++        // 模板不经这条路（深度面拷贝不带模板）：上传丢模板、读回模板记 0。换算用 double：float 在 [0.5, 1) 的间距 2^-24 略小于 D24 一级 1/0xffffff，
++        // 双精度除、就近取 float，再双精度乘回取整，误差 ≤ 2^-25 × 0xffffff < 0.5，往返逐值不变（单精度乘会差 1 级）。
+         public static void ConvertD24S8ToD32FS8(Span<byte> output, ReadOnlySpan<byte> input)
+         {
+-            const float UnormToFloat = 1f / 0xffffff;
+-
+             Span<uint> outputUint = MemoryMarshal.Cast<byte, uint>(output);
+             ReadOnlySpan<uint> inputUint = MemoryMarshal.Cast<byte, uint>(input);
+ 
+-            int i = 0;
++            int n = Math.Min(inputUint.Length, outputUint.Length);
+ 
+-            for (; i < inputUint.Length; i++)
++            for (int i = 0; i < n; i++)
+             {
+-                uint depthStencil = inputUint[i];
+-                uint depth = depthStencil >> 8;
+-                uint stencil = depthStencil & 0xff;
+-
+-                int j = i * 2;
+-
+-                outputUint[j] = (uint)BitConverter.SingleToInt32Bits(depth * UnormToFloat);
+-                outputUint[j + 1] = stencil;
++                outputUint[i] = (uint)BitConverter.SingleToInt32Bits((float)((inputUint[i] >> 8) / (double)0xffffff));
+             }
++
++            outputUint[n..].Clear();
+         }
+ 
+         public static void ConvertD32FS8ToD24S8(Span<byte> output, ReadOnlySpan<byte> input)
+@@ -32,17 +30,12 @@ namespace Ryujinx.Graphics.Vulkan
+             Span<uint> outputUint = MemoryMarshal.Cast<byte, uint>(output);
+             ReadOnlySpan<uint> inputUint = MemoryMarshal.Cast<byte, uint>(input);
+ 
+-            int i = 0;
++            int n = Math.Min(inputUint.Length, outputUint.Length);
+ 
+-            for (; i < inputUint.Length; i += 2)
++            for (int i = 0; i < n; i++)
+             {
+                 float depth = BitConverter.Int32BitsToSingle((int)inputUint[i]);
+-                uint stencil = inputUint[i + 1];
+-                uint depthStencil = (Math.Clamp((uint)(depth * 0xffffff), 0, 0xffffff) << 8) | (stencil & 0xff);
+-
+-                int j = i >> 1;
+-
+-                outputUint[j] = depthStencil;
++                outputUint[i] = (uint)Math.Clamp(Math.Round(depth * (double)0xffffff), 0.0, 0xffffff) << 8;
+             }
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.Vulkan/TextureView.cs b/src/Ryujinx.Graphics.Vulkan/TextureView.cs
+index b6c0b8369a35c01c9378697af9d457df35fab007..99d1ff64e6a7172ea1534df3bd7deaabd3018a7e 100644
+--- a/src/Ryujinx.Graphics.Vulkan/TextureView.cs
++++ b/src/Ryujinx.Graphics.Vulkan/TextureView.cs
+@@ -861,13 +861,16 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             if (NeedsD24S8Conversion())
+             {
++                // S2Arm：size 是加倍后的缓冲长度，客体数据（D24S8，4 字节 / 像素）是前一半；深度面紧排在缓冲开头，逐像素原位转
++                int guestSize = size / 2;
++
+                 if (output.IsEmpty)
+                 {
+-                    output = new byte[GetBufferDataLength(size)];
++                    output = new byte[guestSize];
+                 }
+ 
+-                FormatConverter.ConvertD32FS8ToD24S8(output, storage);
+-                return output;
++                FormatConverter.ConvertD32FS8ToD24S8(output[..guestSize], storage[..guestSize]);
++                return output[..guestSize];
+             }
+ 
+             return storage;
+@@ -926,9 +929,11 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             for (int level = 0; level < levels; level++)
+             {
+-                int mipSize = GetBufferDataLength(is3D && !singleSlice
++                // S2Arm：D24S8 换 D32FloatS8Uint 时只拷深度面（紧排 4 字节 / 像素），各级在缓冲里按客体尺寸连续排，与客体数据同布局（见 FormatConverter）
++                int guestMip = is3D && !singleSlice
+                     ? Info.GetMipSize(dstLevel + level)
+-                    : Info.GetMipSize2D(dstLevel + level) * dstLayers);
++                    : Info.GetMipSize2D(dstLevel + level) * dstLayers;
++                int mipSize = NeedsD24S8Conversion() ? guestMip : GetBufferDataLength(guestMip);
+ 
+                 int endOffset = offset + mipSize;
+ 

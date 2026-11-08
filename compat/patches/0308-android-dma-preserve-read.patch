@@ -1,0 +1,87 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index c9e5a013d06eabe7a90ff3f192cd7af1f37d984e..ee5f2d5bbd5ee1cd42351484b7fc200b9b191acf 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -18,6 +18,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+     class DmaClass : IDeviceState
+     {
+         private static readonly bool S2ADmaBufOn = System.Environment.GetEnvironmentVariable("S2A_DMA_BUF") == "1";
++        private static readonly bool S2ADmaPreserveReadOn = System.Environment.GetEnvironmentVariable("S2A_DMA_PRESERVE_READ") == "1";
+         private byte[] _s2aDstBuf;
+ 
+         private readonly GpuContext _context;
+@@ -538,7 +539,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 bool s2aOwn = S2ADmaBufOn && dstSize <= (32 << 20);
+                 byte[] s2aDst = s2aOwn ? (_s2aDstBuf != null && _s2aDstBuf.Length >= dstSize ? _s2aDstBuf : (_s2aDstBuf = new byte[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)dstSize)])) : System.Buffers.ArrayPool<byte>.Shared.Rent(dstSize);
+                 Span<byte> dstSpan = s2aDst.AsSpan(0, dstSize);
+-                memoryManager.GetSpan(dstGpuVa + (ulong)dstBaseOffset, dstSize).CopyTo(dstSpan);
++                if (S2ADmaPreserveReadOn)
++                    memoryManager.S2ACopyUntrackedForDma(dstGpuVa + (ulong)dstBaseOffset, s2aDst.AsMemory(0, dstSize));
++                else
++                    memoryManager.GetSpan(dstGpuVa + (ulong)dstBaseOffset, dstSize).CopyTo(dstSpan);
+                 S2AAllocTrace.Step(0x40_002d, ref s2aA);
+ 
+                 TextureParams srcParams = new(srcRegionX, srcRegionY, srcBaseOffset, srcBpp, srcLinear, srcCalculator);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index 153e2779ca2a4e3dfb8ab76ed2734bcc891bba1c..19edb80d71fe025ce0a7bd29cfe12ef951ebdb83 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -117,6 +117,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+         }
+ 
++        // DMA destination preservation is an untracked read: do not trigger a
++        // GPU readback or read protected guest pages through a borrowed span.
++        internal void S2ACopyUntrackedForDma(ulong va, Memory<byte> target)
++        {
++            if (target.Length == 0) return;
++            ulong end = checked(va + (ulong)target.Length);
++            if (!ValidateAddress(va) || end > (1UL << AddressSpaceBits))
++                throw new ArgumentOutOfRangeException(nameof(va));
++            Physical.S2ACopyUntrackedForDma(GetPhysicalRegions(va, (ulong)target.Length), target);
++        }
++
+         /// <summary>
+         /// Gets a read-only span of data from GPU mapped memory.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 478574e50f0140e7e25470055a61594f2b0e9919..ee15cd49228c60deb30991788f6889d394a7fec7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -185,6 +185,36 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             return data;
+         }
+ 
++        // Reuse the platform readonly-copy provider without the tracked-read
++        // signaling performed by the texture helper. This method never writes
++        // guest memory, changes its protection, or recursively flushes the GPU.
++        internal void S2ACopyUntrackedForDma(MultiRange range, Memory<byte> target)
++        {
++            if (target.Length == 0) return;
++            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory
++                ?? throw new NotSupportedException("DMA preserve-read requires a platform readonly-copy provider.");
++            if (!_context.IsGpuThread())
++                throw new InvalidOperationException("DMA preserve-read requires the GPU owner thread.");
++            int total = 0;
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange part = range.GetSubRange(i);
++                if (part.Address == MemoryManager.PteUnmapped)
++                    throw new InvalidOperationException("DMA preserve-read touches unmapped GPU memory.");
++                _ = checked(part.Address + part.Size);
++                total = checked(total + checked((int)part.Size));
++            }
++            if (total != target.Length) throw new ArgumentException("DMA preserve-read range length mismatch.");
++            int offset = 0;
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange part = range.GetSubRange(i);
++                int size = (int)part.Size;
++                if (size != 0) copy(part.Address, target.Slice(offset, size));
++                offset += size;
++            }
++        }
++
+         /// <summary>
+         /// 纹理上传的正常读取。精确 GPU 读同步仍先执行；平台副本只解决源页保护，不代替读回。
+         /// 返回的 owner 由调用者在转换和上传取数结束后归还；归还不会写入 guest。

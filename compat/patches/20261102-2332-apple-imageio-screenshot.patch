@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs
+index 6616dcb3b99b9ecdc638771c1fd20efb605d9615..70a342efdfbfa9823a35c64f978903968d54b6f1 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs
+@@ -13,6 +13,9 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+             // AndroidHostUi already rejects theme/input requests. Preserve that explicit
+             // unsupported boundary; never confirm text or pretend a renderer produced pixels.
+             throw new NotSupportedException("Android host UI is not connected: inline keyboard renderer");
++#elif S2A_APPLE_HOST
++            // Apple hosts give no UI theme, so the inline keyboard is headless and never builds a renderer.
++            throw new NotSupportedException("Apple host has no inline keyboard renderer");
+ #else
+             return new SoftwareKeyboardRendererBase(theme);
+ #endif
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs b/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs
+index d6cc3bd6bdd3ef40b2e50c932cc21d28f8f5fcf3..de69bc54b49f35b2364db76882022c57aedbad09 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs
+@@ -19,6 +19,8 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             else
+ #if S2A_ANDROID_HOST
+                 throw new NotSupportedException("Android screenshot encoder is not connected");
++#elif S2A_APPLE_HOST
++                throw new NotSupportedException("Apple screenshot encoder is not connected");
+ #else
+                 jpeg = SkiaScreenshotEncoder.Encode(rgba, width, height, quality);
+ #endif
+diff --git a/src/Ryujinx.HLE/Ryujinx.HLE.csproj b/src/Ryujinx.HLE/Ryujinx.HLE.csproj
+index 87690931c644413418d4cd0843cf7edecd3588aa..9a3d2ce14c4c318763419aa56c69e3e36506e57e 100644
+--- a/src/Ryujinx.HLE/Ryujinx.HLE.csproj
++++ b/src/Ryujinx.HLE/Ryujinx.HLE.csproj
+@@ -36,11 +36,16 @@
+ 
+   <!-- linux-bionic is the Android host. Its platform codec is mandatory; other
+        hosts retain their existing Skia implementation and package selection. -->
++  <!-- Apple hosts (macOS / iOS NativeAOT, statically linked, no libSkiaSharp.dylib) register an ImageIO
++       encoder (platform/apple/cs/capture) and never theme the inline keyboard (headless), so Skia is
++       unreachable there: removed like Android. A RID-less build on macOS (the services unit tests) is an Apple host. -->
+   <PropertyGroup>
+     <S2AAndroidHost Condition="'$(S2AAndroidHost)' == '' and $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-bionic-'))">true</S2AAndroidHost>
+     <DefineConstants Condition="'$(S2AAndroidHost)' == 'true'">$(DefineConstants);S2A_ANDROID_HOST</DefineConstants>
++    <S2AAppleHost Condition="'$(S2AAppleHost)' == '' and ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')) or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('ios-')) or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('iossimulator-')) or ('$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('OSX'))))">true</S2AAppleHost>
++    <DefineConstants Condition="'$(S2AAppleHost)' == 'true'">$(DefineConstants);S2A_APPLE_HOST</DefineConstants>
+   </PropertyGroup>
+-  <ItemGroup Condition="'$(S2AAndroidHost)' == 'true'">
++  <ItemGroup Condition="'$(S2AAndroidHost)' == 'true' or '$(S2AAppleHost)' == 'true'">
+     <Compile Remove="HOS/Services/Caps/SkiaScreenshotEncoder.cs" />
+     <Compile Remove="HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs" />
+     <PackageReference Remove="SkiaSharp;SkiaSharp.NativeAssets.Win32;SkiaSharp.NativeAssets.macOS;SkiaSharp.NativeAssets.Linux.NoDependencies" />

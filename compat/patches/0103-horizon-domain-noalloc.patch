@@ -1,0 +1,143 @@
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectDispatchTable.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectDispatchTable.cs
+index 2e7879f2de8642990b7c2d444420c22f9d79a955..58ed2018650d1f8724d86b2cb01b53b2f34eb895 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectDispatchTable.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectDispatchTable.cs
+@@ -28,7 +28,7 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+             switch (inHeader.Type)
+             {
+                 case CmifDomainRequestType.SendMessage:
+-                    ServiceObjectHolder targetObject = domain.GetObject(targetObjectId);
++                    ServiceObjectHolder targetObject = domain.GetObjectForDispatch(targetObjectId);
+                     if (targetObject == null)
+                     {
+                         return SfResult.TargetNotFound;
+@@ -46,9 +46,10 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+                         return SfResult.InvalidInObjectsCount;
+                     }
+ 
+-                    int[] inObjectIds = new int[inHeader.ObjectsCount];
+-
+-                    DomainServiceObjectProcessor domainProcessor = new(domain, inObjectIds);
++                    // S2Arm: the processor only lives for this message — take the thread's spare one (was a new processor + two id
++                    // arrays per domain message, 176 B; d3 polls a domain object ~85 times a second). A nested dispatch on the same
++                    // thread finds no spare and gets its own, as before
++                    DomainServiceObjectProcessor domainProcessor = DomainServiceObjectProcessor.Rent(domain, inHeader.ObjectsCount);
+ 
+                     if (context.Processor == null)
+                     {
+@@ -61,7 +62,14 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+ 
+                     context.ServiceObject = targetObject.ServiceObject;
+ 
+-                    return targetObject.ProcessMessage(ref context, inMessageRawData);
++                    try
++                    {
++                        return targetObject.ProcessMessage(ref context, inMessageRawData);
++                    }
++                    finally
++                    {
++                        DomainServiceObjectProcessor.Return(domainProcessor);
++                    }
+ 
+                 case CmifDomainRequestType.Close:
+                     domain.UnregisterObject(targetObjectId);
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectProcessor.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectProcessor.cs
+index f9958461082262a52a491d8014fb7b6821a81631..3aa90f8df4716c0926c2348df54f5b1cad343877 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectProcessor.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/DomainServiceObjectProcessor.cs
+@@ -11,22 +11,49 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+         public const int MaximumObjects = 8;
+ 
+         private ServerMessageProcessor _implProcessor;
+-        private readonly ServerDomainBase _domain;
++        private ServerDomainBase _domain;
+         private int _outObjectIdsOffset;
+         private readonly int[] _inObjectIds;
++        private int _inObjectsCount;
+         private readonly int[] _reservedObjectIds;
+         private ServerMessageRuntimeMetadata _implMetadata;
+ 
+-        private int InObjectsCount => _inObjectIds.Length;
+-        private int OutObjectsCount => _implMetadata.OutObjectsCount;
+-        private int ImplOutDataTotalSize => _implMetadata.OutDataSize + _implMetadata.OutHeadersSize;
++        private int InObjectsCount => _inObjectsCount;
++
++        // S2Arm: one spare processor per thread, reset per message (see DomainServiceObjectDispatchTable)
++        [ThreadStatic]
++        private static DomainServiceObjectProcessor _spare;
++
++        public static DomainServiceObjectProcessor Rent(ServerDomainBase domain, int inObjectsCount)
++        {
++            DomainServiceObjectProcessor processor = _spare ?? new DomainServiceObjectProcessor();
++            _spare = null;
++
++            processor._implProcessor = null;
++            processor._domain = domain;
++            processor._outObjectIdsOffset = 0;
++            processor._inObjectsCount = inObjectsCount;
++            processor._implMetadata = default;
++            processor._inObjectIds.AsSpan().Clear();
++            processor._reservedObjectIds.AsSpan().Clear();
++
++            return processor;
++        }
+ 
+-        public DomainServiceObjectProcessor(ServerDomainBase domain, int[] inObjectIds)
++        public static void Return(DomainServiceObjectProcessor processor)
+         {
+-            _domain = domain;
+-            _inObjectIds = inObjectIds;
++            processor._implProcessor = null;
++            processor._domain = null;
++            _spare = processor;
++        }
++
++        private DomainServiceObjectProcessor()
++        {
++            _inObjectIds = new int[MaximumObjects];
+             _reservedObjectIds = new int[MaximumObjects];
+         }
++        private int OutObjectsCount => _implMetadata.OutObjectsCount;
++        private int ImplOutDataTotalSize => _implMetadata.OutDataSize + _implMetadata.OutHeadersSize;
+ 
+         public override void SetImplementationProcessor(ServerMessageProcessor impl)
+         {
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainBase.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainBase.cs
+index fc6350f76fe499051aedf3511de4d15014c559fd..fd2e41233da8fa4872d78e1057975f870ef6d309 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainBase.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainBase.cs
+@@ -11,5 +11,9 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+ 
+         public abstract ServiceObjectHolder UnregisterObject(int id);
+         public abstract ServiceObjectHolder GetObject(int id);
++
++        // S2Arm: the registered holder itself, for dispatching one message to it (holders are immutable; GetObject's clone is for
++        // callers that keep it, e.g. a new session). Was a clone per domain message
++        public abstract ServiceObjectHolder GetObjectForDispatch(int id);
+     }
+ }
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
+index cdb493a0e62a83bff66bd2fd1832dd2bf83cb46d..8612ec37de6ba385924b6250bf0a3a9f086f57ef 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Cmif/ServerDomainManager.cs
+@@ -109,6 +109,20 @@ namespace Ryujinx.Horizon.Sdk.Sf.Cmif
+                 return entry.Obj.Clone();
+             }
+ 
++            public override ServiceObjectHolder GetObjectForDispatch(int id)
++            {
++                EntryManager.Entry entry = _manager._entryManager.GetEntry(id);
++                if (entry == null)
++                {
++                    return null;
++                }
++
++                lock (_manager._entryOwnerLock)
++                {
++                    return entry.Owner == this ? entry.Obj : null;
++                }
++            }
++
+             public override ServerDomainBase GetServerDomain()
+             {
+                 return this;

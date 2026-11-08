@@ -1,0 +1,629 @@
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 08041e430de91afa97dc54830f674af27f08ae6a..803fcc451c6091e558962be8ab64d2fc04f3ab07 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -30,7 +30,8 @@ namespace Ryujinx.Graphics.Shader
+         bool QueryTexelFetch1DWrap() => false;
+ 
+         /// <summary>
+-        /// S2A（直连）：BindlessElimination 认句柄时穿过嵌套 phi（循环变量里存的句柄），并把「或上同一常量采样器」当作同一句柄。
++        /// S2A（直连）：BindlessElimination 认句柄时穿过嵌套 phi（循环变量里存的句柄），并把「或上同一常量采样器」当作同一句柄；
++        /// 合成句柄的两个字按 c[2] 分离采样器表（0x568 起）认出哪个是采样器（编译器两种先后都出）；守卫下拼成的句柄（字 W 与 W | 采样器字经 phi 汇合）取拼好的那个。
+         /// 只有直连翻译器答真（直连出库已长期用它）；通用模式缺省假，输出与上游一致。
+         /// </summary>
+         bool QueryBindlessPhiSeeThrough() => false;
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
+index 9391934058829685833af3c23d5b8330ed9f8e64..d475b50e7858ccd295854f71a09ce8fa8ca730f4 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
+@@ -260,10 +260,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         }
+ 
+         // NVN2 compute shaders lay out their driver constants in c[0] per shader (the control section counts them, QueryAmpereComputeC0Layout): from 0x10, the push
+-        // constants, then a 0x10-byte entry per uniform buffer slot, then one per storage buffer slot, then an 8-byte handle per texture slot, then per image slot (all
+-        // 205 compute shaders of Donkey Kong Bananza read their c[0] that way). They are mapped to the places the build's reflection and the host know: the push
+-        // constants to c[24] (where the graphics stages read theirs), uniform slot r to c[0] + 0x210 + 0x10 r and storage slot s to c[0] + 0x310 + 0x10 s (NVN's
+-        // compute tables), texture slot t to c[2] + 0x20 + 8 t and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
++        // constants, then a 0x10-byte entry per uniform buffer slot, then one per storage buffer slot, then 8-byte handles: per texture slot, separate texture slot,
++        // separate sampler slot and image slot, in that order (all 205 compute shaders of Donkey Kong Bananza read their c[0] that way; Star Fox's 1002069a331ceded has
++        // 32 separate textures and 13 separate samplers before its 5 images, its sampler words at 0x258 and 0x260, its image at 0x288, and those counts make its size, 0x290).
++        // They are mapped to the places the build's reflection and the host know: the push constants to c[24] (where the graphics stages read theirs), uniform slot r to
++        // c[0] + 0x210 + 0x10 r and storage slot s to c[0] + 0x310 + 0x10 s (NVN's compute tables), texture slot t to c[2] + 0x20 + 8 t, separate texture r to
++        // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
+         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
+         {
+             int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
+@@ -277,7 +279,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             int ub = 0x10 + push;
+             int sb = ub + 0x10 * ubos;
+             int hb = sb + 0x10 * ssbos;
+-            int ib = hb + 8 * textures;
++            int sepTextures = hb + 8 * textures;
++            int sepSamplers = sepTextures + 8 * (layout.Length > 5 ? layout[5] : 0);
++            int ib = sepSamplers + 8 * (layout.Length > 6 ? layout[6] : 0);
+ 
+             if (offset >= 0x10 && offset < ub)
+             {
+@@ -294,11 +298,21 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 return (0, 0x310 + (offset - sb));
+             }
+ 
+-            if (offset >= hb && offset < ib)
++            if (offset >= hb && offset < sepTextures)
+             {
+                 return (2, 0x20 + (offset - hb));
+             }
+ 
++            if (offset >= sepTextures && offset < sepSamplers)
++            {
++                return (2, 0x168 + (offset - sepTextures));
++            }
++
++            if (offset >= sepSamplers && offset < ib)
++            {
++                return (2, 0x568 + (offset - sepSamplers));
++            }
++
+             if (offset >= ib && offset < size)
+             {
+                 return (2, 0x120 + (offset - ib));
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+index 186222e32477229303a1e7dc02eab007c3e57673..d3e5c37b04c447f16d6b625cbb8e382b2e8336e1 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+@@ -91,6 +91,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             x(0xc82, InstName.Mov, AUMov, N, uniform: true);
+             x(0x805, InstName.Cs2r, ACs2r, N);
+             x(0x919, InstName.S2r, AS2r, N);
++            x(0x925, InstName.Pixld, APixelCovered, N);
+             x(0x9c3, InstName.S2r, AS2r, N, uniform: true);
+             x(0x3c2, InstName.Mov, AR2ur, N);
+             x(0xab9, InstName.Ldc, AUldc, N, uniform: true);
+@@ -1587,6 +1588,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             ASet(context, x, res, u);
+         }
+ 
++        // 0x925 Rd（78..80 = 1，无谓词结果）：覆盖到的像素读 1，辅助调用（helper invocation）读 0（上游参考实现（MIT）7bccfc88a 按两支四元组效率视图着色器反推：
++        // 它们经 SHFL / FSWZADD 把这个值在四元组里求和，一支拿和 - 1 当 4 项调色板的下标，一支画 0.03125 + 0.15625·和）。手头没有表给出名字；别的形式照旧拒。
++        // 读辅助调用用 Ryujinx 已有的 IoVariable.ThreadKill（S2R SR_THREAD_KILL 同一内建量：SPIR-V HelperInvocation，MSL simd_is_helper_thread()），不另加枚举
++        public static void APixelCovered(EmitterContext context)
++        {
++            AmpereOp x = new(context.CurrOp);
++
++            if (x.Bits(78, 81) != 1 || x.Bits(81, 84) != 7 || x.Bits(24, 32) != 0 || x.Bits(32, 48) != 0 || context.TranslatorContext.Definitions.Stage != ShaderStage.Fragment)
++            {
++                throw AFail(context, $"0x925 form {x.Bits(78, 81)} outside a covered pixel's read in a pixel shader");
++            }
++
++            Operand helper = context.Load(StorageKind.Input, IoVariable.ThreadKill);
++
++            ASet(context, x, context.ConditionalSelect(helper, Const(0), Const(1)), false);
++        }
++
+         // ---- predicates ----
+ 
+         // R2P PR, Ra, mask: predicates from one byte of Ra (76..78), the mask an immediate (0x804) or a register (0x204)
+@@ -1695,7 +1713,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             return res;
+         }
+ 
+-        // VOTE / VOTEU Rd, Pd, P: Pd = the vote (72..74: all, any, equal) of P (87..90); Rd (a uniform register for VOTEU) the ballot
++        // VOTE Rd, Pd, P / VOTEU URd, UPd, P: Pd (81..84) = the vote (72..74: all, any, equal) of P (87..90), Rd the ballot; VOTEU writes the uniform register and the
++        // uniform predicate. P and the guard are lane predicates in both.
+         public static void AVote(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+@@ -1706,7 +1725,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             if (vote != null)
+             {
+-                ASetPred(context, x.Bits(81, 84), vote);
++                ASetPred(context, x.Bits(81, 84), vote, toUniform);
+             }
+ 
+             int rd = ARd(x, toUniform);
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index 4c1ca3693e6f6f52ba4306922a4c3a6d6cc1da10..b8a395521078a26695fec4a07f9ce677b6ff69ba 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -45,7 +45,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             x(0xb60, InstName.Tex, ATex, InstProps.Tex);
+             x(0x361, InstName.Tex, ATex, InstProps.Tex);
++            x(0x364, InstName.Tld4, ATex, InstProps.Tex);
++            x(0x367, InstName.Tld, ATex, InstProps.Tex);
+             x(0xf60, InstName.Tex, ATex, InstProps.Tex);
++            x(0xf63, InstName.Tld4, ATex, InstProps.Tex);
++            x(0xf6c, InstName.Txd, ATex, InstProps.Tex);
+             x(0xb66, InstName.Tld, ATex, InstProps.Tex);
+             x(0xb63, InstName.Tld4, ATex, InstProps.Tex);
+             x(0xb69, InstName.Tmml, ATex, InstProps.Tex);
+@@ -282,6 +286,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 }
+             }
+ 
++            // The address is read once, before any result is written, the zeros of a false predicate too: the destination may be the address register (LDG.128 R0, [R0.64]).
++            // S2Arm（上游参考实现（MIT）9507c221c）：原先谓词为假先写 0、再算地址，LDG.P R5, [R5 + UR4]（虚幻 5.4 带界检查读场景数据）就从表头读，所有实例都拿到第一个的变换。
++            // 地址挪到写 0 之前；只有地址就是寄存器本身（偏移 0、无统一寄存器）时才抄一份（加了偏移的已是算好的局部量），不给地址链多插复制，GlobalToStorage 照旧认得出基址
++            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
++
++            for (int index = 0; index < count; index++)
++            {
++                (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 32, index * 4);
++                (los[index], his[index]) = (pred != null && lo.Type == OperandType.Register ? context.Copy(lo) : lo, pred != null && hi.Type == OperandType.Register ? context.Copy(hi) : hi);
++            }
++
+             Operand lblSkip = null;
+ 
+             if (pred != null)
+@@ -295,14 +310,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 context.BranchIfFalse(lblSkip, pred);
+             }
+ 
+-            // The address is read once, before any result is written (the destination may be the address register: LDG.128 R0, [R0.64])
+-            (Operand[] los, Operand[] his) = (new Operand[count], new Operand[count]);
+-
+-            for (int index = 0; index < count; index++)
+-            {
+-                (los[index], his[index]) = AGlobalAddress(context, x, 90, 32, index * 4);
+-            }
+-
+             for (int index = 0; index < count; index++)
+             {
+                 if (x.Rd + index >= RegisterConsts.RegisterZeroIndex)
+@@ -509,12 +516,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+         // SURED [Ra], Rb (0x59f): an image reduction through a handle, laid out as SUATOM with no result: the coordinates from Ra, the value in Rb, the handle at 40..59, the dimension
+         // at 61..64, the size at 73..76 and the operation at 87..91 (Eglantine's lowering to Maxwell names the fields). Mario Kart World's compute shader adds 1 at (R4, R5) of a 2D
+-        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result. Only that form has been seen, so another is refused
++        // image; its word 2 is SUATOM's in Donkey Kong Bananza's encoding less the predicate result.
++        // S2Arm（上游参考实现（MIT）9507c221c）：操作取 87..91 的 SUATOM 同序字段（ADD / MIN / MAX / INC / DEC / AND / OR / XOR，耀西与神秘图鉴的计算着色器用了 MAX、OR、MIN），
++        // 其余位仍须是那一式（32 位、无钳位位）；大小非 32 位（其 Nanite 着色器的 MAX.U64）或操作号越过 XOR 照旧拒。句柄在游戏自己的 uniform 缓冲（非 c[2]）的仍拒：宿主没有按 uniform 里的句柄绑图像的那条路
+         public static void ASured(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+ 
+-            if (x.Bits(64, 96) != 0x0010e000 || x.Bits(59, 61) != 0)
++            if ((x.Bits(64, 96) & ~(0xf << 23)) != 0x0010e000 || x.Bits(59, 61) != 0 || x.Bits(87, 91) > (int)RedOp.Xor)
+             {
+                 throw AFail(context, $"SURED form {x.Bits(64, 96):x8}");
+             }
+@@ -527,7 +536,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             }
+ 
+             // S2Arm: no clamp argument (upstream's EmitSured takes one; ours has none, as EmitSuatom above)
+-            EmitSured(context, (SuDim)x.Bits(61, 64), RedOp.Add, SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
++            EmitSured(context, (SuDim)x.Bits(61, 64), (RedOp)x.Bits(87, 91), SuatomSize.U32, handle, x.Ra, x.Rb, 0, false, isBindless: false);
+         }
+ 
+         // SUATOM Rd, [Ra], Rb (0x593): an atomic on an image through a handle, laid out as SUST's (handle 40..59, dimension 61..64) and as ATOMG's (operation
+@@ -678,13 +687,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             int opcode = x.Opcode;
+ 
+             // TEX through a handle in a register, not named by its offset: the compiler's form for a handle it read itself, usually from a table at a computed offset. BindlessElimination takes the
+-            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60: a uniform register at 40..46. 0x361 (bit 59 set): a register, the first of the second source block,
++            // handle from there, as for Maxwell's TEX.B. The other fields are 0xb60's. 0xf60, 0xf63 and 0xf6c (TEX, TLD4 and TXD, whose other fields are 0xb60's, 0xb63's and 0xb6c's): a uniform register at
++            // 40..46. 0x361, 0x364 and 0x367 (TEX, TLD4 and TLD, bit 59 set): a register, the first of the second source block,
+             // before the LOD (a census of Fire Emblem Fortune's Weave's 3,327: of the sources that an LDC just wrote, always that place, with and without .SCR). Rc stays the second destination in both
+             Operand boundHandle = null;
+-            bool handleInB = opcode == 0x361;
+-            bool bindless = handleInB || opcode == 0xf60;
++            bool handleInB = opcode is 0x361 or 0x364 or 0x367;
++            bool bindless = handleInB || opcode is 0xf60 or 0xf63 or 0xf6c;
+ 
+-            if (opcode == 0xf60)
++            if (opcode is 0xf60 or 0xf63 or 0xf6c)
+             {
+                 int ur = x.Bits(40, 46);
+ 
+@@ -693,7 +703,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             if (bindless)
+             {
+-                opcode = 0xb60;
++                opcode = opcode is 0xf63 or 0xf6c ? opcode - 0x400 : opcode is 0x364 or 0x367 ? opcode + 0x7ff : 0xb60;
+             }
+ 
+             TexDim dim = ATexDim(context, x.Bits(61, 64));
+@@ -773,6 +783,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 int n0 = coords + (isArray || offset ? 1 : 0);
+                 (List<Operand> a, List<Operand> b) = ATexBlocks(context, x, n0, 2 * coords);
+ 
++                if (bindless)
++                {
++                    sources.Add(boundHandle);
++                }
++
+                 sources.AddRange(a.GetRange(0, coords));
+ 
+                 if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+index f0e22cfcd88bca47da1914fec128ec934483e049..10fbb80f9eaa9ce5524d3778c228b2b17fa537c0 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+@@ -178,7 +178,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     bindlessHandle = shuffleOp.GetSource(0);
+                 }
+ 
+-                bindlessHandle = Utils.FindLastOperation(bindlessHandle, block);
++                bindlessHandle = Utils.FindLastOperation(bindlessHandle, block, undefTopOnly: gpuAccessor.QueryBindlessPhiSeeThrough());
+ 
+                 // Some instructions do not encode an accurate sampler type:
+                 // - Most instructions uses the same type for 1D and Buffer.
+@@ -226,6 +226,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     (src0, src1) = (src1, src0);
+                 }
+ 
++                // S2A（直连，上游参考实现（MIT）67f1d0055）：编译器两个字的先后都出（星际火狐 62 支片元着色器采样器字在前，把采样器字当纹理、绑定落到没有的槽）。
++                // c[2] 分离采样器表（0x568 起 128 项，nvn_mtl.m C2_SAMP）里的字是采样器，另一个是纹理
++                if (gpuAccessor.QueryBindlessPhiSeeThrough() && IsSeparateSamplerWord(src0) && !IsSeparateSamplerWord(src1))
++                {
++                    (src0, src1) = (src1, src0);
++                }
++
+                 TextureHandleType handleType = TextureHandleType.SeparateSamplerHandle;
+ 
+                 // Try to match the following patterns:
+@@ -379,7 +386,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 // S2A（直连，原 graphics/nvn/third_party/ryujinx 的改动；IGpuAccessor.QueryBindlessPhiSeeThrough 为真时）：the inputs are gathered through the phis they come from, as a loop makes (a handle kept in a loop variable
+                 // reaches the phi from the loop's own phi). Upstream compared the phi's direct inputs only and gave up on such handles.
+ 
+-                Operand firstSrc = null;
++                List<Operand> leaves = new();
+                 HashSet<PhiNode> visited = new();
+                 Stack<PhiNode> pending = new();
+                 pending.Push(phi);
+@@ -401,20 +408,31 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                         {
+                             pending.Push(srcPhi);
+                         }
+-                        else if (firstSrc == null)
+-                        {
+-                            firstSrc = src;
+-                        }
+-                        else if (!IsSameOperand(firstSrc, src, seeThrough: true))
++                        else
+                         {
+-                            outOperation = null;
+-
+-                            return false;
++                            leaves.Add(src);
+                         }
+                     }
+                 }
+ 
+-                if (firstSrc == null)
++                // S2A（上游参考实现（MIT）4a0551e4b 的语义）：守卫下拼成的句柄（R = c[b][a]; @P R |= c[b][s]），读处的守卫又对不上拼的守卫：phi 里还有句柄的第一个字本身和
++                // 寄存器原先的值（未定义）。未定义的输入是读不执行的路径；单独一个字、又正是某个 OR 的一个源，是半路的句柄而不是另一个句柄。其余输入照旧须相同
++                List<Operation> ors = leaves.ConvertAll(l => l.AsgOp as Operation).FindAll(o => o != null && o.Inst == Instruction.BitwiseOr);
++
++                List<Operand> orWords = new();
++
++                foreach (Operation o in ors)
++                {
++                    CollectLeaves(o.GetSource(0), orWords);
++                    CollectLeaves(o.GetSource(1), orWords);
++                }
++
++                leaves.RemoveAll(l => l.Type == OperandType.Undefined ||
++                    (l.Type == OperandType.ConstantBuffer && orWords.Exists(w => AreBothEqualConstantBuffers(w, l))));
++
++                Operand firstSrc = leaves.Count != 0 ? leaves[0] : null;
++
++                if (firstSrc == null || !leaves.TrueForAll(l => IsSameOperand(firstSrc, l, seeThrough: true)))
+                 {
+                     outOperation = null;
+ 
+@@ -457,6 +475,41 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return false;
+         }
+ 
++        // The values an operand can take through the phis it comes from (each phi visited once)
++        private static void CollectLeaves(Operand operand, List<Operand> leaves)
++        {
++            HashSet<PhiNode> visited = new();
++            Stack<Operand> pending = new();
++            pending.Push(operand);
++
++            while (pending.Count > 0)
++            {
++                Operand o = pending.Pop();
++
++                if (o.AsgOp is PhiNode phi)
++                {
++                    if (visited.Add(phi))
++                    {
++                        for (int i = 0; i < phi.SourcesCount; i++)
++                        {
++                            pending.Push(phi.GetSource(i));
++                        }
++                    }
++                }
++                else
++                {
++                    leaves.Add(o);
++                }
++            }
++        }
++
++        private static bool IsSeparateSamplerWord(Operand operand)
++        {
++            const int Base = 0x568, End = Base + 8 * 128;   // c[2] 分离采样器表（nvn_mtl.m C2_SAMP），8 字节一项
++
++            return operand.Type == OperandType.ConstantBuffer && operand.GetCbufSlot() == 2 && operand.GetCbufOffset() * 4 is >= Base and < End;
++        }
++
+         private static bool AreBothEqualConstantBuffers(Operand x, Operand y)
+         {
+             return x.Type == y.Type && x.Value == y.Value && x.Type == OperandType.ConstantBuffer;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Utils.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Utils.cs
+index 449886e11ae307fc60d06c7a961577248e1f0893..b4305f59efcb27b4ef59cd7be1846467d9aaced2 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Utils.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Utils.cs
+@@ -130,7 +130,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                    IsSameCondition(currentCondition, queryCondition);
+         }
+ 
+-        public static Operand FindLastOperation(Operand source, BasicBlock block, bool recurse = true)
++        // S2A（直连句柄，上游参考实现（MIT）4a0551e4b）：undefTopOnly 为真时「其余输入都未定义就取那一个」只用于本 phi、不用于被它并进来的 phi，取到的那个再接着往下找：
++        // phi(phi(未定义, 纹理字), 纹理字 | 采样器字)（守卫下在没有旧值的寄存器里拼句柄）原先给出单独的纹理字、丢了采样器。缺省假，其他调用点与上游一致
++        public static Operand FindLastOperation(Operand source, BasicBlock block, bool recurse = true, bool undefTopOnly = false)
+         {
+             if (source.AsgOp is PhiNode phiNode)
+             {
+@@ -154,7 +156,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                         // Phi source is another phi.
+                         // Let's check if that phi has a block that matches our condition.
+ 
+-                        Operand match = FindLastOperation(phiSource, block, false);
++                        Operand match = FindLastOperation(phiSource, block, false, undefTopOnly);
+ 
+                         if (match != phiSource)
+                         {
+@@ -170,7 +172,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 // If all sources but one are undefined, we can assume that the one
+                 // that is not undefined is the right one.
+ 
+-                if (undefCount == phiNode.SourcesCount - 1)
++                if (undefCount == phiNode.SourcesCount - 1 && (recurse || !undefTopOnly))
+                 {
+                     for (int i = phiNode.SourcesCount - 1; i >= 0; i--)
+                     {
+@@ -178,7 +180,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ 
+                         if (phiSource.Type != OperandType.Undefined)
+                         {
+-                            return phiSource;
++                            return undefTopOnly ? FindLastOperation(phiSource, block, true, true) : phiSource;
+                         }
+                     }
+                 }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Translator.cs b/src/Ryujinx.Graphics.Shader/Translation/Translator.cs
+index 574a667a8c62a5785513365a2d0859de2e1c163d..c4fceabe9a2927ecc1653fb446375341cfb616a0 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Translator.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Translator.cs
+@@ -332,20 +332,112 @@ namespace Ryujinx.Graphics.Shader.Translation
+         // arrives, and the compiler lets later instructions that do not wait on that barrier (wait mask, bits 116..122) read the registers' old values (LDG R2,
+         // [R2.64] then LDG R4, [R2.64 + 4] reads the address twice). Such an instruction's writes go to locals that start as the registers' values; they are
+         // copied to the registers before the first instruction that waits on the barrier, at DEPBAR, and at the end of the block.
++        // S2Arm（上游参考实现（MIT）9507c221c 的语义，做法另定）：带守卫的这种指令，守卫在发出时为假就什么都不写；落地时照抄局部量会把这期间别的指令写进同一寄存器的值
++        // 冲掉（上游记耀西与神秘图鉴的局部光源：@P4 EXP2 R17 发出后、等待前 @!P4 自己写 R17，旧值的抄回把场景过曝）。上游给每个这样写的寄存器各存一份发出时的守卫
++        // （一次选择）、落地时各判一次；这里落地时才看：发出到落地之间（同一块内的直线代码）没有别的运算写这个寄存器，照抄就对（守卫假时局部量就是原值），一条不加；
++        // 有写才按守卫跳过抄回，守卫的谓词寄存器这期间没被写就直接判它，被写了才在发出处补一份快照（一个局部量，同一条指令的寄存器共用）
++        private sealed class AmpereGuard
++        {
++            public Operand Pred;
++            public bool Inv;
++            public int At;            // the issue's first operation (kept current when an operation is inserted before it)
++            public Operand Snapshot;  // the guard at issue, once a commit needed one
++        }
++
+         private static void EmitOpsAmpere(EmitterContext context, Block block)
+         {
+-            List<(Register Reg, Operand Value)>[] pending = new List<(Register, Operand)>[7];
+-            int shadows = 0;
++            List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)>[] pending = new List<(Register, Operand, AmpereGuard, int)>[7];
++            int shadows = 0, seq = 0;
+             Stack<int> freeShadows = new();
+ 
++            bool WrittenSince(int from, Register reg)
++            {
++                for (int i = from; i < context.OperationsCount; i++)
++                {
++                    Operation operation = context.GetOperation(i);
++
++                    for (int d = 0; d < operation.DestsCount; d++)
++                    {
++                        Operand dest = operation.GetDest(d);
++
++                        if (dest != null && dest.Type == OperandType.Register && dest.GetRegister().Equals(reg))
++                        {
++                            return true;
++                        }
++                    }
++                }
++
++                return false;
++            }
++
++            void CommitGuarded(Register reg, Operand value, AmpereGuard g)
++            {
++                Operand cond = g.Snapshot ?? g.Pred;
++
++                if (g.Snapshot == null && WrittenSince(g.At, g.Pred.GetRegister()))
++                {
++                    g.Snapshot = cond = Local();
++                    context.InsertOperation(g.At, new Operation(Instruction.Copy, g.Snapshot, g.Pred));
++
++                    foreach (List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)> list in pending)
++                    {
++                        foreach ((_, _, AmpereGuard other, _) in list ?? [])
++                        {
++                            if (other != null && other != g && other.At >= g.At)
++                            {
++                                other.At++;
++                            }
++                        }
++                    }
++                }
++
++                Operand skip = Label();
++
++                if (g.Inv)
++                {
++                    context.BranchIfTrue(skip, cond);
++                }
++                else
++                {
++                    context.BranchIfFalse(skip, cond);
++                }
++
++                context.Copy(Register(reg), value);
++                context.MarkLabel(skip);
++            }
++
+             void Commit(int barrier)
+             {
+                 if (pending[barrier] != null)
+                 {
+-                    foreach ((Register reg, Operand value) in pending[barrier])
++                    foreach ((Register reg, Operand value, AmpereGuard guard, int s) in pending[barrier])
+                     {
+-                        context.Copy(Register(reg), value);
++                        if (guard != null && WrittenSince(guard.At, reg))
++                        {
++                            CommitGuarded(reg, value, guard);
++                        }
++                        else
++                        {
++                            context.Copy(Register(reg), value);
++                        }
++
+                         freeShadows.Push(value.GetRegister().Index);
++
++                        // Writes to the same register issued before this one and still pending are in its value already (DeferAmpereWrites starts it from them): landing later they would undo it
++                        for (int b = 0; b < pending.Length; b++)
++                        {
++                            if (b == barrier || pending[b] == null)
++                            {
++                                continue;
++                            }
++
++                            foreach ((_, Operand v, _, _) in pending[b].FindAll(p => p.Reg.Equals(reg) && p.Seq < s))
++                            {
++                                freeShadows.Push(v.GetRegister().Index);
++                            }
++
++                            pending[b].RemoveAll(p => p.Reg.Equals(reg) && p.Seq < s);
++                        }
+                     }
+ 
+                     pending[barrier] = null;
+@@ -393,12 +485,14 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 int opStart = context.OperationsCount;
+ 
+                 Operand predSkipLbl = null;
++                AmpereGuard guard = null;
+ 
+                 if (a.Pred != RegisterConsts.PredicateTrueIndex && a.Opcode != Instructions.AmpereOpcodes.Bra)
+                 {
+                     Operand label;
+ 
+-                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext())
++                    // Straight to the next block only when nothing waits for this block's end to be committed (upstream (MIT) 9507c221c: the jump skipped the commits)
++                    if (opIndex == block.OpCodes.Count - 1 && block.HasNext() && writeBarrier >= 6 && Array.TrueForAll(pending, list => list == null || list.Count == 0))
+                     {
+                         label = context.GetLabel(block.Successors[0].Address);
+                     }
+@@ -412,6 +506,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     RegisterType predType = Instructions.AmpereTable.HasUniformGuard(a.Opcode) ? RegisterType.UniformPredicate : RegisterType.Predicate;
+                     Operand pred = Register(a.Pred, predType);
+ 
++                    guard = new AmpereGuard { Pred = pred, Inv = a.PredInv, At = opStart };
++
+                     if (a.PredInv)
+                     {
+                         context.BranchIfTrue(label, pred);
+@@ -433,7 +529,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                 if (writeBarrier < 6 && !op.Props.HasFlag(InstProps.Bra))
+                 {
+-                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows);
++                    DeferAmpereWrites(context, opStart, pending, writeBarrier, ref shadows, freeShadows, guard, seq++);
+                 }
+             }
+ 
+@@ -444,12 +540,14 @@ namespace Ryujinx.Graphics.Shader.Translation
+         private static void DeferAmpereWrites(
+             EmitterContext context,
+             int opStart,
+-            List<(Register Reg, Operand Value)>[] pendingAll,
++            List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)>[] pendingAll,
+             int barrier,
+             ref int shadows,
+-            Stack<int> freeShadows)
++            Stack<int> freeShadows,
++            AmpereGuard guard,
++            int seq)
+         {
+-            List<(Register Reg, Operand Value)> pending = pendingAll[barrier] ??= [];
++            List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)> pending = pendingAll[barrier] ??= [];
+ 
+             int end = context.OperationsCount;
+             Dictionary<Register, Operand> locals = new();
+@@ -508,25 +606,45 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             foreach ((Register reg, Operand local) in locals)
+             {
+-                context.InsertOperation(at++, new Operation(Instruction.Copy, local, Register(reg)));
++                // The local starts as the value the register has once the writes still pending to it land, the latest issued of them, else the register: what a guarded or partial write
++                // leaves alone. The Legend of Zelda: Ocarina of Time's e1c9adbcf6bd2996: IPA R10 ← attribute 4 (barrier 3), then @P0 IPA R10 ← attribute 5 (barrier 0) before either is waited on,
++                // so R10 = P0 ? attribute 5 : attribute 4. Started from the register, the guarded write dropped attribute 4 (or, the earlier write kept, landed after it and undid the guard)
++                Operand init = Register(reg);
++                int latest = -1;
+ 
+-                // A register written again before its earlier deferred write landed: the later write wins, the earlier shadow is free
+-                foreach (List<(Register Reg, Operand Value)> list in pendingAll)
++                foreach (List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)> list in pendingAll)
+                 {
+-                    if (list == null)
++                    foreach ((Register r, Operand v, _, int s) in list ?? [])
+                     {
+-                        continue;
++                        if (r.Equals(reg) && s > latest)
++                        {
++                            (init, latest) = (v, s);
++                        }
+                     }
++                }
++
++                context.InsertOperation(at++, new Operation(Instruction.Copy, local, init));
+ 
+-                    foreach ((Register r, Operand v) in list.FindAll(p => p.Reg.Equals(reg)))
++                // A register written again before its earlier deferred write landed: the later write wins, the earlier shadow is free. A guarded later write may not happen, so the earlier one stays
++                if (guard == null)
++                {
++                    foreach (List<(Register Reg, Operand Value, AmpereGuard Guard, int Seq)> list in pendingAll)
+                     {
+-                        freeShadows.Push(v.GetRegister().Index);
+-                    }
++                        if (list == null)
++                        {
++                            continue;
++                        }
+ 
+-                    list.RemoveAll(p => p.Reg.Equals(reg));
++                        foreach ((Register r, Operand v, AmpereGuard g, int s) in list.FindAll(p => p.Reg.Equals(reg)))
++                        {
++                            freeShadows.Push(v.GetRegister().Index);
++                        }
++
++                        list.RemoveAll(p => p.Reg.Equals(reg));
++                    }
+                 }
+ 
+-                pending.Add((reg, local));
++                pending.Add((reg, local, guard, seq));
+             }
+         }
+ 

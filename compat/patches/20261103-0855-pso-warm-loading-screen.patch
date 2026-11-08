@@ -1,0 +1,500 @@
+diff --git a/src/Ryujinx.Graphics.GAL/IS2APipelineWarm.cs b/src/Ryujinx.Graphics.GAL/IS2APipelineWarm.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ad80dea17bc813d2cbf48579a780a28a4874ccf
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/IS2APipelineWarm.cs
+@@ -0,0 +1,15 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// S2A: optional program capability used by the loading-screen pipeline warm.
++    /// The GPU layer checks this without depending on the Vulkan backend type.
++    /// </summary>
++    public interface IS2APipelineWarm
++    {
++        /// <summary>
++        /// Waits for this program's background pipeline prebuild to finish.
++        /// Returns false on timeout/failure instead of blocking the loading screen forever.
++        /// </summary>
++        bool S2AWaitForBackgroundPipeline(int timeoutMs);
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+index 1f828d0a3aa21253e936bbd456d9707a74ce452c..75f8a57c9cc4f2d543e8d740827f6a5211d97e69 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+@@ -3,7 +3,7 @@ using Ryujinx.Graphics.GAL.Multithreading.Model;
+ 
+ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ {
+-    class ThreadedProgram : IProgram, IProgramBinaryLoadFailure
++    class ThreadedProgram : IProgram, IProgramBinaryLoadFailure, IS2APipelineWarm
+     {
+         private readonly ThreadedRenderer _renderer;
+ 
+@@ -62,6 +62,29 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             return box.Result;
+         }
+ 
++        /// <summary>
++        /// S2A：加载屏预热。GPU 线程上不能直接碰下层 Vulkan 程序，交给渲染线程：
++        /// 先让 ProgramQueue 建好 / 链接 Base（ShaderCollection），再等它的后台管线预建。
++        /// </summary>
++        public bool S2AWaitForBackgroundPipeline(int timeoutMs)
++        {
++            if (!_renderer.IsGpuThread())
++            {
++                return false;
++            }
++
++            bool waited = false;
++            _renderer.S2AOnRenderThread(() =>
++            {
++                _renderer.Programs.WaitForProgram(this);
++                if (Base is IS2APipelineWarm warmable)
++                {
++                    waited = warmable.S2AWaitForBackgroundPipeline(timeoutMs);
++                }
++            });
++            return waited;
++        }
++
+         public unsafe ProgramLinkStatus CheckProgramLink(bool blocking)
+         {
+             ResultBox<ProgramLinkStatus> box = new();
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 97be023a3a44d4fe747db0e60b93c4e5cb05a54a..7975a1dae7963569f8e2e9744530ff9c82c06dc2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -14,6 +14,7 @@
+     <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+     <InternalsVisibleTo Include="S2A.SeenTest" /> <!-- S2A：双轨覆盖率 seen 记录单测（graphics/tools/direct/tests/seen） -->
+     <InternalsVisibleTo Include="S2A.GpuShortCacheTest" /> <!-- S2A：贴图短缓存重复描述符单测（tests/gpu_shortcache，#1364） -->
++    <InternalsVisibleTo Include="S2A.PsoWarmGateTest" /> <!-- S2A：加载屏预热后端门控 / 总预算单测（tests/pso_warm_gate） -->
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+   </ItemGroup>
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs b/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
+index 9ac177ead988ba214aeb73e453589a7f7df59a6d..160718ee36576a8575dc85442f396d1e569b52e9 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ComputeShaderCacheHashTable.cs
+@@ -74,6 +74,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return hit;
+         }
+ 
++        /// <summary>S2A：加载屏预热遍历带 lazy 程序的计算分组。</summary>
++        internal IEnumerable<ShaderSpecializationList> S2ALazyGroups => _lazyLists;
++
+         /// <summary>
+         /// Gets all programs that have been added to the table.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 4f076e7b9c42cea3fe625d8c26d1a119d88d9826..e87ff2ac6182508e00ad0e8514845c371350ef84 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -411,6 +411,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     warm = S2AWarmRead(S2AShaderCacheGuard.WarmList);
+                     warmLazy = warm == null ? null : new S2ALazyProgram[warm.Count];
+                     if (warm != null) { s2aGroups = new(); s2aGroupOf = new(); }
++                    S2AWarmIndices = warm == null ? null : new HashSet<int>(warm.Keys);
++                }
++                else
++                {
++                    S2AWarmIndices = null;
+                 }
+ 
+                 DataEntry entry = new();
+@@ -596,7 +601,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private void S2AWarmStart(GpuContext context, S2ALazyProgram[] list)
+         {
+             IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
+-            if (renderer is IHostProgramCachePolicy { DisableHostProgramPrefetch: true })
++            if (S2APipelineWarm.S2AEnabled(S2APipelineWarm.S2APolicy(context.Renderer)))
+             {
+                 // S1: this backend loads versioned program records on demand through its single
+                 // compile lane. The old "load, wait, dispose" prefetch would create and drop
+@@ -660,6 +665,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // S2Arm（帧率能耗线 10-24，GC）：启动时载入的客体代码共享表（下标 = 客体代码号），按需程序只存下标；
+         //   提前热读好的部分放旁表（按程序号，持 _lazyLock 读写，实化取用即删），不挂在按需程序对象上
+         private (byte[], byte[])[] _s2aGuest;
++
++        /// <summary>S2A：本包热表里的程序号（加载屏预热用）；没有表/读不了 = null。</summary>
++        internal HashSet<int> S2AWarmIndices { get; private set; }
+         private readonly System.Collections.Generic.Dictionary<int, (ShaderSpecializationState, byte[], CachedShaderStage[])> _s2aPre = new();
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2APipelineWarm.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2APipelineWarm.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..655955fd8cdc65905fd1a66bdd51c1797a2f4de7
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2APipelineWarm.cs
+@@ -0,0 +1,156 @@
++using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.GAL.Multithreading;
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++
++namespace Ryujinx.Graphics.Gpu.Shader
++{
++    /// <summary>
++    /// S2A: one shader cache group the loading-screen warm may materialize.
++    /// </summary>
++    internal interface IS2APipelineWarmGroup
++    {
++        /// <summary>
++        /// True when the group still has a lazy program listed in the pack warm table.
++        /// </summary>
++        bool S2AContainsWarm(HashSet<int> warm);
++
++        /// <summary>
++        /// Materializes the group and returns the host programs whose background pipeline
++        /// prebuild the warm waits for.
++        /// </summary>
++        IEnumerable<IProgram> S2AMaterializeHostPrograms();
++    }
++
++    /// <summary>
++    /// S2A (loading-screen pipeline warm): materializes the route programs listed in the pack
++    /// warm table and waits for their background pipelines before the first draw.
++    /// It runs only on backends that disabled host program prefetch (Android Vulkan); the
++    /// Apple generic path keeps its own warm start untouched and must not enter this path.
++    /// The whole batch shares one wait budget, so a slow driver cannot turn the loading screen
++    /// into "programs × per-program timeout".
++    /// </summary>
++    internal static class S2APipelineWarm
++    {
++        /// <summary>Per-program wait bound.</summary>
++        internal const int PerProgramTimeoutMs = 10_000;
++
++        /// <summary>
++        /// Whole-batch wait bound. The measured 8E route warm was ~2 s for 200 programs; the
++        /// budget leaves an order of magnitude of headroom and still stops a stuck driver.
++        /// </summary>
++        internal const int TotalBudgetMs = 30_000;
++
++        internal sealed class Result
++        {
++            public bool Ran;
++            public bool SkippedByBackend;
++            public int Groups;
++            public int Programs;
++            public int Waited;
++            public int Failed;
++            public bool BudgetExhausted;
++            public double Milliseconds;
++        }
++
++        /// <summary>
++        /// Backend policy behind the threaded renderer wrapper; null when the backend has no policy.
++        /// </summary>
++        internal static IHostProgramCachePolicy S2APolicy(IRenderer renderer) =>
++            (renderer is ThreadedRenderer threaded ? threaded.BaseRenderer : renderer) as IHostProgramCachePolicy;
++
++        /// <summary>
++        /// True only for backends that disabled host program prefetch (Android Vulkan). Apple's
++        /// renderer has no policy and keeps the historical prefetch plus its own warm start.
++        /// </summary>
++        internal static bool S2AEnabled(IHostProgramCachePolicy policy) =>
++            policy is { DisableHostProgramPrefetch: true };
++
++        /// <summary>
++        /// Runs the warm. The caller logs the returned counters; nothing here reports success for
++        /// programs that were skipped, timed out or cut off by the budget.
++        /// </summary>
++        internal static Result Run(
++            IHostProgramCachePolicy policy,
++            HashSet<int> warm,
++            IEnumerable<IS2APipelineWarmGroup> groups,
++            int totalBudgetMs = TotalBudgetMs,
++            int perProgramTimeoutMs = PerProgramTimeoutMs)
++        {
++            ArgumentNullException.ThrowIfNull(groups);
++            ArgumentOutOfRangeException.ThrowIfLessThan(totalBudgetMs, 1);
++            ArgumentOutOfRangeException.ThrowIfLessThan(perProgramTimeoutMs, 1);
++
++            Result result = new();
++
++            if (!S2AEnabled(policy))
++            {
++                result.SkippedByBackend = true;
++                return result;
++            }
++
++            if (warm == null || warm.Count == 0)
++            {
++                return result;
++            }
++
++            result.Ran = true;
++
++            long started = Stopwatch.GetTimestamp();
++            long deadline = Environment.TickCount64 + totalBudgetMs;
++
++            foreach (IS2APipelineWarmGroup group in groups)
++            {
++                if (Environment.TickCount64 >= deadline)
++                {
++                    result.BudgetExhausted = true;
++                    break;
++                }
++
++                if (!group.S2AContainsWarm(warm))
++                {
++                    continue;
++                }
++
++                result.Groups++;
++
++                foreach (IProgram program in group.S2AMaterializeHostPrograms())
++                {
++                    result.Programs++;
++
++                    if (program is not IS2APipelineWarm warmable)
++                    {
++                        continue;
++                    }
++
++                    long remaining = deadline - Environment.TickCount64;
++                    if (remaining <= 0)
++                    {
++                        result.BudgetExhausted = true;
++                        break;
++                    }
++
++                    int timeout = (int)Math.Min(perProgramTimeoutMs, remaining);
++
++                    if (warmable.S2AWaitForBackgroundPipeline(timeout))
++                    {
++                        result.Waited++;
++                    }
++                    else
++                    {
++                        result.Failed++;
++                    }
++                }
++
++                if (result.BudgetExhausted)
++                {
++                    break;
++                }
++            }
++
++            result.Milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
++            return result;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 94b2a9194a73516af815226792b13e1194ba325e..e10541613735b4957ead227bfc3a94a980d556ea 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -235,7 +235,45 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     Console.Error.WriteLine($"[gal] 【红】着色器离线包：种入 {S2AShaderCacheGuard.PackPrograms} 支，" +
+                         "但运行时从磁盘缓存读到 0 支（检查包文件是否落在 cache root 而不是 shcache/<title>/）");
+                 }
++
++                // S2A：加载屏预热。包内 pso_warm.tsv 给出路线程序号；在 GPU 线程上同步实化这些组
++                // 并等待 BackgroundCompilation 完成，把首启的驱动管线编译移到加载屏。清单缺失/为空
++                // 只报一行、不假装成功。
++                S2APreloadWarm();
++            }
++        }
++
++        /// <summary>
++        /// S2A（加载屏预热）：按包内热表实化路线程序组并等待后台管线预建。
++        /// 在 ShaderCache.Initialize 的载入线程（GPU 线程）上同步执行；整批共用总等待预算，
++        /// 超时 / 预算用尽只记失败并停止等待。只在关闭宿主程序预读的后端（安卓 Vulkan）执行，
++        /// 苹果通用路径保持原来的后台预读，不进入这里。
++        /// </summary>
++        private void S2APreloadWarm()
++        {
++            HashSet<int> warm = _diskCacheHostStorage.S2AWarmIndices;
++
++            S2APipelineWarm.Result result = S2APipelineWarm.Run(
++                S2APipelineWarm.S2APolicy(_context.Renderer),
++                warm,
++                _graphicsShaderCache.S2AGroups.Concat(_computeShaderCache.S2ALazyGroups),
++                S2APipelineWarm.TotalBudgetMs,
++                S2APipelineWarm.PerProgramTimeoutMs);
++
++            if (result.SkippedByBackend)
++            {
++                Console.Error.WriteLine("[s2a] 加载屏预热：后端未关闭宿主程序预读（苹果路径），跳过");
++                return;
+             }
++
++            if (!result.Ran)
++            {
++                Console.Error.WriteLine("[s2a] 加载屏预热：清单缺失/为空，跳过");
++                return;
++            }
++
++            Console.Error.WriteLine($"[s2a] 加载屏预热：清单 {warm.Count}、命中组 {result.Groups}、程序 {result.Programs}、" +
++                $"管线等待 {result.Waited}、超时/失败 {result.Failed}、总预算用尽 {(result.BudgetExhausted ? "是" : "否")}、用时 {result.Milliseconds:0} ms");
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
+index 7fe24c0e0ca950a338dd3406ea36f32728baf32a..35361aa91e6ffd7ac16a2cfd15ae5e01a49f0d7a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCacheHashTable.cs
+@@ -311,6 +311,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return idCache.TryFind(codeAccessor, out id, out data);
+         }
+ 
++        /// <summary>S2A：加载屏预热遍历全部分组（未实化的 lazy 程序也按组在 Values 里）。</summary>
++        internal IEnumerable<ShaderSpecializationList> S2AGroups => _shaderPrograms.Values;
++
+         /// <summary>
+         /// Gets all programs that have been added to the table.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+index eef36a8c39ce998d5a80fc20af77ba5c13907f40..f69122233ad6d93d5463314248a21f3e9c78d5ee 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Gpu.Shader.DiskCache;
+ using System;
+ using System.Collections;
+@@ -9,7 +10,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+     /// <summary>
+     /// List of cached shader programs that differs only by specialization state.
+     /// </summary>
+-    class ShaderSpecializationList : IEnumerable<CachedShaderProgram>
++    class ShaderSpecializationList : IEnumerable<CachedShaderProgram>, IS2APipelineWarmGroup
+     {
+         private readonly List<CachedShaderProgram> _entries = [];
+ 
+@@ -27,6 +28,36 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             (_lazy ??= []).Add(program);
+         }
+ 
++        /// <summary>S2A：该组是否含热表里的程序号（加载屏预热用，未实化时才可能命中）。</summary>
++        public bool S2AContainsWarm(HashSet<int> warm)
++        {
++            if (_lazy == null || warm == null || warm.Count == 0)
++            {
++                return false;
++            }
++
++            foreach (S2ALazyProgram lazy in _lazy)
++            {
++                if (lazy != null && warm.Contains(lazy.ProgramIndex))
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
++        /// <summary>S2A：加载屏预热的同步实化入口（与首次查找走同一条 Materialize）。</summary>
++        public IEnumerable<IProgram> S2AMaterializeHostPrograms()
++        {
++            Materialize();
++
++            foreach (CachedShaderProgram program in _entries)
++            {
++                yield return program.HostProgram;
++            }
++        }
++
+         private void Materialize()
+         {
+             if (_lazy == null)
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index 27b36a21544844641990f08130a3b3ffafc1e7f5..a825d9b70f818c01babca641e373642be0408a8c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -10,7 +10,7 @@ using System.Threading.Tasks;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
+-    class ShaderCollection : IProgram
++    class ShaderCollection : IProgram, IS2APipelineWarm
+     {
+         private readonly PipelineShaderStageCreateInfo[] _infos;
+         private readonly Shader[] _shaders;
+@@ -823,6 +823,20 @@ namespace Ryujinx.Graphics.Vulkan
+             return false;
+         }
+ 
++        /// <summary>
++        /// S2A：加载屏预热用。等待本程序的 BackgroundCompilation 完成（管线已进 _graphicsPipelineCache）；
++        /// 等待期间交给编译通道边等边泵宿主事件，超时/失败返回 false，不把加载屏无限卡住。
++        /// </summary>
++        public bool S2AWaitForBackgroundPipeline(int timeoutMs)
++        {
++            if (timeoutMs <= 0)
++            {
++                return false;
++            }
++
++            return _gd.S2AWaitForTask(_compileTask, timeoutMs);
++        }
++
+         public bool TryGetGraphicsPipeline(ref PipelineUid key, out Auto<DisposablePipeline> pipeline)
+         {
+             if (_graphicsPipelineCache == null)
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index af0d35b81b18f33fc0e5269fb5568a82ef6a0bf0..933492653142e4c7366bed1afdb4533291752446 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -322,6 +322,55 @@ namespace Ryujinx.Graphics.Vulkan
+             else worker.Wait(task, S2AWaitPump);
+         }
+ 
++        /// <summary>
++        /// S2A：有界等待一个后台任务，等待期间照常泵宿主事件（S2AWaitPump：WSI 租约 / 停止）。
++        /// 返回 false = 超时、被取消或任务失败；不把加载屏卡死，也不把失败当成功。
++        /// </summary>
++        internal bool S2AWaitForTask(Task task, int timeoutMs)
++        {
++            ArgumentNullException.ThrowIfNull(task);
++            ArgumentOutOfRangeException.ThrowIfLessThan(timeoutMs, 1);
++
++            CompileWorker worker = S2ACompileWorker;
++
++            if (worker == null)
++            {
++                // 没有编译通道：退化为有界阻塞等待（苹果路径不进入加载屏预热，这里只作兜底）。
++                try
++                {
++                    return task.Wait(timeoutMs);
++                }
++                catch (AggregateException)
++                {
++                    return false;
++                }
++            }
++
++            // 编译通道线程不能等排在自己队列里的活（会自锁）；已完成才算数。
++            if (worker.IsWorkerThread)
++            {
++                return task.IsCompletedSuccessfully;
++            }
++
++            try
++            {
++                worker.Wait(task, S2AWaitPump, timeoutMs);
++                return true;
++            }
++            catch (TimeoutException)
++            {
++                return false;
++            }
++            catch (OperationCanceledException)
++            {
++                return false;
++            }
++            catch (Exception)
++            {
++                return false;
++            }
++        }
++
+         internal HelperShader HelperShader { get; private set; }
+         internal PipelineFull PipelineInternal => _pipeline;
+ 

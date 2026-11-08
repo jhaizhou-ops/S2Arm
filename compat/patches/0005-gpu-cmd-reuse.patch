@@ -1,0 +1,207 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+index c0f8ccf76402353c1fbbc69cfd3bbde4796a6d46..250fa14c009d1e8274f1465c0608c4674424d6a3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+@@ -7,7 +7,9 @@ using Ryujinx.Graphics.Gpu.Engine.Twod;
+ using Ryujinx.Graphics.Gpu.Image;
+ using Ryujinx.Graphics.Gpu.Memory;
+ using System;
++using System.Collections.Generic;
+ using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
+ 
+ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ {
+@@ -53,6 +55,104 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+         private DmaState _state;
+ 
++        // ---- S2A：免解读缓存（命令流复用第 1 级）----
++        // 解读（DMA 状态机 + 两条快路径的判断）只依赖段内容与段开始时的 _state，是纯函数：键 = 内容哈希 + 长度 + 起始 _state。
++        // 第一次照常解读并把产生的操作按序记下（方法写入 / 内联数据整块 / 常量缓冲整块）与结束 _state；之后同键直接按记录调同样的 Send / LoadInlineData / ConstantBufferUpdate，
++        // 参数值从本段的字里取（内容相同），GPU 地址按本段基址重算（同内容的段常在不同地址：命令环）。解读中抛异常的段不进缓存。
++        private struct S2AOp
++        {
++            public byte Kind; // 0 方法写入（值取本段第 Index 个字），1 内联数据整块，2 常量缓冲整块，3 立即数方法写入（值在 Count）
++            public bool IsLast;
++            public int Index, Method, Sub, Count;
++        }
++
++        private sealed class S2ASeg
++        {
++            public int Len;
++            public DmaState Start, End;
++            public S2AOp[] Ops;
++        }
++
++        private const int S2ASegMinLen = 8, S2ASegCap = 32768;
++        private readonly Dictionary<ulong, S2ASeg> _s2aSegs = new();
++        // S2A：两次准入——段第一次未命中只把键记进这张直接映射表（哈希高 16 位定位，64K 项、只分配一次），照常解读、不记录不入缓存；
++        // 同一键再次未命中才记录入缓存。只出现一次的段（内联常量数据等）若每次都入缓存，旧库实测动森岛上 60 秒托管分配 468 MB（稳态的 97%）。
++        private const int S2ASeenBits = 16;
++        private readonly ulong[] _s2aSeen = new ulong[1 << S2ASeenBits];
++        private List<S2AOp> _s2aRec;
++        private readonly List<S2AOp> _s2aRecBuf = new(); // S2A：记录用的表复用；存进缓存时 ToArray
++
++        private static bool S2AStateEq(in DmaState a, in DmaState b) =>
++            a.Method == b.Method && a.SubChannel == b.SubChannel && a.MethodCount == b.MethodCount && a.NonIncrementing == b.NonIncrementing && a.IncrementOnce == b.IncrementOnce;
++
++        private static ulong S2AHash(ReadOnlySpan<int> words, in DmaState st)
++        {
++            ulong h = 0xcbf29ce484222325UL ^ (ulong)words.Length;
++            h = (h ^ (uint)st.Method) * 0x100000001b3UL;
++            h = (h ^ (uint)st.SubChannel) * 0x100000001b3UL;
++            h = (h ^ (uint)st.MethodCount) * 0x100000001b3UL;
++            h = (h ^ (st.NonIncrementing ? 1UL : 0) ^ (st.IncrementOnce ? 2UL : 0)) * 0x100000001b3UL;
++            ReadOnlySpan<ulong> q = MemoryMarshal.Cast<int, ulong>(words);
++            for (int i = 0; i < q.Length; i++)
++            {
++                h = (h ^ q[i]) * 0x100000001b3UL;
++                h ^= h >> 29;
++            }
++
++            if ((words.Length & 1) != 0)
++            {
++                h = (h ^ (uint)words[^1]) * 0x100000001b3UL;
++            }
++
++            return h;
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        private void S2ARecOp(byte kind, int index, int method, int sub, int count, bool isLast)
++        {
++            _s2aRec?.Add(new S2AOp { Kind = kind, Index = index, Method = method, Sub = sub, Count = count, IsLast = isLast });
++        }
++
++        private void S2AReplay(ulong baseGpuVa, ReadOnlySpan<int> cb, S2ASeg seg)
++        {
++            S2AOp[] ops = seg.Ops;
++            for (int i = 0; i < ops.Length; i++)
++            {
++                ref readonly S2AOp op = ref ops[i];
++                switch (op.Kind)
++                {
++                    case 0:
++                        Send(baseGpuVa + (ulong)op.Index * 4, op.Method, cb[op.Index], op.Sub, op.IsLast);
++                        break;
++                    case 3:
++                        Send(baseGpuVa + (ulong)op.Index * 4, op.Method, op.Count, op.Sub, true);
++                        break;
++                    case 1:
++                        ReadOnlySpan<int> data = cb.Slice(op.Index, op.Count);
++                        if (op.Sub == 0)
++                        {
++                            _3dClass.LoadInlineData(data);
++                        }
++                        else if (op.Sub == 1)
++                        {
++                            _computeClass.LoadInlineData(data);
++                        }
++                        else
++                        {
++                            _i2mClass.LoadInlineData(data);
++                        }
++
++                        break;
++                    case 2:
++                        _3dClass.ConstantBufferUpdate(cb.Slice(op.Index, op.Count));
++                        break;
++                }
++            }
++
++            _state = seg.End;
++            _3dClass.FlushUboDirty();
++        }
++
+         private readonly ThreedClass _3dClass;
+         private readonly ComputeClass _computeClass;
+         private readonly InlineToMemoryClass _i2mClass;
+@@ -84,6 +184,54 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         /// <param name="baseGpuVa">Base GPU virtual address of the command buffer</param>
+         /// <param name="commandBuffer">Command buffer</param>
+         public void Process(ulong baseGpuVa, ReadOnlySpan<int> commandBuffer)
++        {
++            if (commandBuffer.Length < S2ASegMinLen) // S2A：免解读缓存（短段直接解读）
++            {
++                ProcessCore(baseGpuVa, commandBuffer);
++                return;
++            }
++
++            ulong key = S2AHash(commandBuffer, _state);
++            DmaState start = _state;
++
++            if (_s2aSegs.TryGetValue(key, out S2ASeg seg) && seg.Len == commandBuffer.Length && S2AStateEq(seg.Start, start))
++            {
++                S2AReplay(baseGpuVa, commandBuffer, seg);
++                return;
++            }
++
++            ref ulong seen = ref _s2aSeen[(int)(key >> (64 - S2ASeenBits))];
++            if (seen != key)
++            {
++                seen = key;
++                ProcessCore(baseGpuVa, commandBuffer);
++                return;
++            }
++
++            _s2aRec = _s2aRecBuf;
++            _s2aRec.Clear();
++
++            try
++            {
++                ProcessCore(baseGpuVa, commandBuffer);
++            }
++            finally
++            {
++                _s2aRec = null;
++            }
++
++            if (_s2aSegs.Count >= S2ASegCap)
++            {
++                _s2aSegs.Clear();
++            }
++
++            _s2aSegs[key] = new S2ASeg { Len = commandBuffer.Length, Start = start, End = _state, Ops = _s2aRecBuf.ToArray() };
++        }
++
++        /// <summary>
++        /// S2A: 原 Process 主体（逐字解读），解读中顺带给免解读缓存记录操作。
++        /// </summary>
++        private void ProcessCore(ulong baseGpuVa, ReadOnlySpan<int> commandBuffer)
+         {
+             for (int index = 0; index < commandBuffer.Length; index++)
+             {
+@@ -98,6 +246,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                         continue;
+                     }
+ 
++                    S2ARecOp(0, index, _state.Method, _state.SubChannel, 0, _state.MethodCount <= 1); // S2A：免解读缓存记录
+                     Send(gpuVa, _state.Method, command, _state.SubChannel, _state.MethodCount <= 1);
+ 
+                     if (!_state.NonIncrementing)
+@@ -134,6 +283,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                             _state.NonIncrementing = meth.SecOp == SecOp.NonIncMethod;
+                             break;
+                         case SecOp.ImmdDataMethod:
++                            S2ARecOp(3, index, meth.MethodAddress, meth.MethodSubchannel, meth.ImmdData, true); // S2A：立即数方法，值在 Count 里
+                             Send(gpuVa, meth.MethodAddress, meth.ImmdData, meth.MethodSubchannel, true);
+                             break;
+                     }
+@@ -161,6 +311,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+                 ReadOnlySpan<int> data = commandBuffer.Slice(offset, consumeCount);
+ 
++                S2ARecOp(1, offset, 0, _state.SubChannel, consumeCount, false); // S2A：免解读缓存记录
++
+                 if (_state.SubChannel == 0)
+                 {
+                     _3dClass.LoadInlineData(data);
+@@ -201,6 +353,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 meth.MethodCount < availableCount &&
+                 meth.SecOp == SecOp.NonIncMethod)
+             {
++                S2ARecOp(2, offset + 1, 0, 0, meth.MethodCount, false); // S2A：免解读缓存记录
+                 _3dClass.ConstantBufferUpdate(commandBuffer.Slice(offset + 1, meth.MethodCount));
+ 
+                 return true;

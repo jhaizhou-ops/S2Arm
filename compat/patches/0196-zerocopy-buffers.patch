@@ -1,0 +1,343 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 6e7982fa4660e30cb2aecd2e5e952389c4d188ec..c7a3d974cb54d924477f0adc6ba063cf4e92558b 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -528,6 +528,7 @@ namespace Ryujinx.Graphics.Gpu
+             bool strict = (flags & HostSyncFlags.Strict) == HostSyncFlags.Strict;
+             bool force = (flags & HostSyncFlags.Force) == HostSyncFlags.Force;
+ 
++            Memory.S2AZeroCopy.Log();
+             Memory.S2ABufFlushStat.Log();
+             Memory.S2ABufClassStat.Log();
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 7aaa2560dbcc0be64db8ad45c6afcb736cbd1e6c..bd2f2114d44205e58e2b952ca6d782b219836704 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -85,33 +85,67 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+         private HashSet<MultiRangeBuffer> _virtualDependencies;
+ 
++        // S2A 缓冲零拷贝：本缓冲的宿主缓冲建在游戏内存上（见构造函数）；被模拟引擎写过就降级（S2AMarkEngineWritten → S2ADemote）
++        private bool _s2aZeroCopy;
++        private bool _s2aDemote;
++        internal bool S2AIsZeroCopy => _s2aZeroCopy;
++
++        internal void S2AMarkEngineWritten()
++        {
++            if (_s2aZeroCopy)
++            {
++                _s2aDemote = true;
++            }
++        }
++
++        // 降级成普通缓冲（GPU 线程，取用时）：照 ChangeBacking——建普通后备，GPU 按命令顺序把当前内容拷过去（在途的 GPU 写排在前面，拷得到），
++        // 迁移待回写记录、通知缓存重绑；旧的零拷贝句柄随迁移在 GPU 用完后释放。之后照常上传（快照语义），引擎写的顺序就对了
++        private void S2ADemote()
++        {
++            _s2aDemote = false;
++
++            if (!_s2aZeroCopy)
++            {
++                return;
++            }
++
++            BufferAccess access = BackingState.SwitchAccess(this);
++            BufferHandle newHandle = _context.Renderer.CreateBuffer((int)Size, access);
++            _context.Renderer.Pipeline.CopyBuffer(Handle, newHandle, 0, 0, (int)Size);
++            _modifiedRanges?.SelfMigration();
++            Handle = newHandle;
++            _s2aZeroCopy = false;
++            _physicalMemory.BufferCache.BufferBackingChanged(this);
++            System.Threading.Interlocked.Increment(ref S2AZeroCopy.Demoted);
++        }
++
+         // S2A 诊断 S2A_BUFCLASS_STAT（见 S2ABufClassStat）：本缓冲被怎么用过（各用法位或起来）
+         internal byte S2AUse;
+ 
+         internal void S2ANoteUse(BufferStage stage, bool write)
+         {
+             BufferStage raw = stage & BufferStage.StageMask, st = stage & BufferStage.StorageMask;
+-            byte b;
++            byte b = 0;
+ 
+             if ((st & BufferStage.StorageWrite) != 0 || raw == BufferStage.TransformFeedback || (write && raw != BufferStage.Copy))
+             {
+-                b = S2ABufClassStat.GpuOutput;
++                b |= S2ABufClassStat.GpuOutput;
+             }
+             else if (st != 0)
+             {
+-                b = S2ABufClassStat.StorageRead;
++                b |= S2ABufClassStat.StorageRead;
+             }
+             else if (raw <= BufferStage.Fragment)
+             {
+-                b = S2ABufClassStat.Uniform;
++                b |= S2ABufClassStat.Uniform;
+             }
+             else if (raw == BufferStage.VertexBuffer || raw == BufferStage.IndexBuffer)
+             {
+-                b = S2ABufClassStat.VertexIndex;
++                b |= S2ABufClassStat.VertexIndex;
+             }
+             else
+             {
+-                b = S2ABufClassStat.Other;
++                b |= S2ABufClassStat.Other;
+             }
+ 
+             S2AUse |= b;
+@@ -162,7 +196,21 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             BufferAccess access = BackingState.SwitchAccess(this);
+ 
+-            Handle = context.Renderer.CreateBuffer((int)size, access);
++            // S2A 缓冲零拷贝（帧率能耗线 10-23，S2A_ZEROCOPY=1，缺省关；docs/研究/零拷贝方案.md §3）：iPhone 与 Switch 同为统一内存，
++            // 宿主缓冲直接建在游戏内存上（渲染器 nxgal_buf_create_host：newBufferWithBytesNoCopy，>4 MB 按 GPU 取址懒建 4 MB 窗口，驻留安全阀），
++            // 游戏写不再上传、GPU 写不再拷回；游戏写 GPU 改过的缓冲不再先等 GPU 回写，读只等不拷
++            nint s2aHost = S2AZeroCopy.Eligible(stage, baseBuffers) ? physicalMemory.GetHostPointer(new Ryujinx.Memory.Range.MultiRange(address, size)) : 0;
++
++            if (s2aHost != 0 && (Handle = context.Renderer.CreateBuffer(s2aHost, (int)size)) != BufferHandle.Null)
++            {
++                _s2aZeroCopy = true;
++                System.Threading.Interlocked.Increment(ref S2AZeroCopy.Buffers);
++                System.Threading.Interlocked.Add(ref S2AZeroCopy.Bytes, (long)size);
++            }
++            else
++            {
++                Handle = context.Renderer.CreateBuffer((int)size, access);
++            }
+ 
+             _useGranular = size > GranularBufferThreshold;
+ 
+@@ -229,6 +277,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// </summary>
+         private void ChangeBacking()
+         {
++            // 零拷贝缓冲就在游戏内存上，没有「设备内存 / 主机内存」之分，不换后备
++            if (_s2aZeroCopy)
++            {
++                return;
++            }
++
+             BufferAccess access = BackingState.SwitchAccess(this);
+ 
+             BufferHandle newHandle = _context.Renderer.CreateBuffer((int)Size, access);
+@@ -320,6 +374,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         public void SynchronizeMemory(ulong address, ulong size)
+         {
++            if (_s2aDemote)
++            {
++                S2ADemote();
++            }
++
+             if (_useGranular)
+             {
+                 _memoryTrackingGranular.QueryModified(address, size, _modifiedDelegate, _context.SequenceNumber);
+@@ -343,7 +402,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                             S2ABufClassStat.NoteUpload(S2AUse, (long)Size);
+                         }
+ 
+-                        _context.Renderer.SetBufferData(Handle, 0, _physicalMemory.GetSpan(Address, (int)Size));
++                        // 零拷贝：数据已在游戏内存里，不上传
++                        if (!_s2aZeroCopy)
++                        {
++                            _context.Renderer.SetBufferData(Handle, 0, _physicalMemory.GetSpan(Address, (int)Size));
++                        }
++
+                         CopyToDependantVirtualBuffers();
+                     }
+ 
+@@ -474,7 +538,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 ChangeBacking();
+             }
+ 
+-            if (BackingState.IsDeviceLocal)
++            // 零拷贝缓冲不建预回写：预回写在同步点把缓冲拷进单独的回写缓冲、之后再写回游戏内存——零拷贝下等于把同步点的旧快照盖回游戏内存，
++            // 冲掉游戏之后更新的数据（10-23 塞尔达零拷贝白屏根因，二分落在 64 KB～4 MB 的设备本地缓冲）
++            if (BackingState.IsDeviceLocal && !_s2aZeroCopy)
+             {
+                 _preFlush ??= new BufferPreFlush(_context, this, FlushImpl);
+ 
+@@ -661,7 +727,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 S2ABufClassStat.NoteUpload(S2AUse, (long)mSize);
+             }
+ 
+-            _context.Renderer.SetBufferData(Handle, offset, _physicalMemory.GetSpan(mAddress, (int)mSize));
++            // 零拷贝：数据已在游戏内存里，不上传
++            if (!_s2aZeroCopy)
++            {
++                _context.Renderer.SetBufferData(Handle, offset, _physicalMemory.GetSpan(mAddress, (int)mSize));
++            }
++            else
++            {
++                System.Threading.Interlocked.Increment(ref S2AZeroCopy.UploadSkipped);
++            }
+ 
+             CopyToDependantVirtualBuffers(mAddress, mSize);
+         }
+@@ -737,6 +811,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="size">Size in bytes of the range</param>
+         private void FlushImpl(BufferHandle handle, ulong address, ulong size)
+         {
++            // 零拷贝：GPU 写的就是游戏内存，没东西要拷回（有虚拟缓冲依赖时照旧，它们的数据要合进来）。不论传进来的是当前句柄还是合并 / 迁移前的旧句柄
++            // （GetSnapshotFlushAction）：零拷贝缓冲的每个句柄都映射在同一段游戏内存上，读出来再写回只会在两次之间和游戏 / GPU 的写竞态、写进旧值
++            if (_s2aZeroCopy && _virtualDependencies == null)
++            {
++                System.Threading.Interlocked.Increment(ref S2AZeroCopy.FlushSkipped);
++
++                return;
++            }
++
+             int offset = (int)(address - Address);
+ 
+             using PinnedSpan<byte> data = _context.Renderer.GetBufferData(handle, offset, (int)size);
+@@ -837,6 +920,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="size">Size in bytes</param>
+         public void ExternalFlush(ulong address, ulong size)
+         {
++            // 零拷贝：读、写都照旧等写它的同步号做完，只是回写本身成了空操作（FlushImpl）。写也必须等：同步号立即模式下游戏等同步号提前返回，
++            // 以为 GPU 已做完就写；GPU 若还在往同一段写，会把游戏刚写的字节盖掉——原版「先等 GPU 做完再放行写」正好兜住（10-23 总指挥审出，第一版写不等已撤）
++
+             // S2A（帧率能耗线 10-23）：游戏读、它还没在 CPU 上等过这段 GPU 结果（要等的同步号 > 游戏已确认的 G）：按 Switch 语义读内存现值，不阻塞、不回写；
+             // 回写动作保留、只放开所碰子页，G 推过或 GPU 再写这段时设回（S2AGameSync）。随 S2A_GPU_READFLUSH（缺省关）
+             if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReadTouch && S2AGpuReadFlush && Image.S2AUnsyncNoWait.On && _modifiedRanges != null)
+@@ -1287,4 +1373,52 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         }
+     }
+ 
++    // S2A 缓冲零拷贝开关与计数（见 Buffer 构造函数；每 10 秒由 BufferCache 打一行）
++    internal static class S2AZeroCopy
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_ZEROCOPY") == "1";
++
++        /// <summary>
++        /// 规则：只给建时带存储写用途（GPU 输出）的缓冲开零拷贝；合并进来的旧缓冲里有降级过 / 不是零拷贝的就不开（它的内容在普通后备里）。
++        /// 命令流里被模拟引擎写的缓冲（常量缓冲、内联上传目标）不开——就算建时是存储写，被引擎写到也当场降级（Buffer.S2AMarkEngineWritten）
++        /// </summary>
++        public static bool Eligible(BufferStage stage, Buffer[] baseBuffers)
++        {
++            if (!On || (stage & BufferStage.StorageWrite) != BufferStage.StorageWrite)
++            {
++                return false;
++            }
++
++            foreach (Buffer b in baseBuffers)
++            {
++                if (!b.S2AIsZeroCopy)
++                {
++                    return false;
++                }
++            }
++
++            return true;
++        }
++
++        public static long Buffers, Bytes, UploadSkipped, FlushSkipped, Demoted;
++        private static long _next;
++
++        public static void Log()
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            long now = System.Diagnostics.Stopwatch.GetTimestamp();
++
++            if (now < _next)
++            {
++                return;
++            }
++
++            _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
++            System.Console.Error.WriteLine($"[缓冲零拷贝] 建在游戏内存上 {Buffers} 个（累计 {Bytes >> 20} MB）；省掉上传 {UploadSkipped} 次、拷回 {FlushSkipped} 次；被引擎写到降级 {Demoted} 个");
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 0973d82cb85c2c713f410d235b4bb0a5a1f8b586..e696f0e8276a844c246e27961059cb5f18fa5385 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -1112,6 +1112,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// forcing rebind and any overlapping multi-range buffers to be recreated.
+         /// </summary>
+         /// <param name="buffer">The buffer that has changed handle</param>
++        // S2A 缓冲零拷贝：引擎写到的零拷贝缓冲标成待降级（见 PhysicalMemory.S2AEngineWrote）
++        internal void S2AEngineWrote(ulong address, ulong size)
++        {
++            foreach (Buffer buffer in _buffers.FindOverlapsAsSpan(address, size))
++            {
++                buffer.S2AMarkEngineWritten();
++            }
++        }
++
+         public void BufferBackingChanged(Buffer buffer)
+         {
+             NotifyBuffersModified?.Invoke();
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 63a72effcf906e3d06e8455c1a9e5c67b4aa88ec..489b78056f90de95377b346fe3327ead335bd873 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -250,6 +250,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="data">Data to be written</param>
+         public void WriteTrackedResource(ulong address, ReadOnlySpan<byte> data)
+         {
++            S2AEngineWrote(address, (ulong)data.Length);
+             _cpuMemory.SignalMemoryTracking(address, (ulong)data.Length, true, precise: true);
+             _cpuMemory.WriteUntracked(address, data);
+         }
+@@ -262,6 +263,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="kind">Kind of the resource being written, which will not be signalled as CPU modified</param>
+         public void WriteTrackedResource(ulong address, ReadOnlySpan<byte> data, ResourceKind kind)
+         {
++            S2AEngineWrote(address, (ulong)data.Length);
+             _cpuMemory.SignalMemoryTracking(address, (ulong)data.Length, true, precise: true, exemptId: (int)kind);
+             _cpuMemory.WriteUntracked(address, data);
+         }
+@@ -273,6 +275,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="data">Data to be written</param>
+         public void Write(ulong address, ReadOnlySpan<byte> data)
+         {
++            S2AEngineWrote(address, (ulong)data.Length);
+             _cpuMemory.Write(address, data);
+         }
+ 
+@@ -283,6 +286,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="data">Data to be written</param>
+         public void Write(MultiRange range, ReadOnlySpan<byte> data)
+         {
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange r = range.GetSubRange(i);
++                S2AEngineWrote(r.Address, r.Size);
++            }
++
+             WriteImpl(range, data, _cpuMemory.Write);
+         }
+ 
+@@ -316,9 +325,22 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <returns>True if the data was changed, false otherwise</returns>
+         public bool WriteWithRedundancyCheck(ulong address, ReadOnlySpan<byte> data)
+         {
++            S2AEngineWrote(address, (ulong)data.Length);
+             return _cpuMemory.WriteWithRedundancyCheck(address, data);
+         }
+ 
++        // S2A 缓冲零拷贝（S2A_ZEROCOPY=1）：模拟 GPU 引擎在命令流里写游戏内存（常量缓冲更新、内联上传、DMA、信号量 / 报告）都经这几个入口。
++        // 被它们写到的零拷贝缓冲必须降级成普通缓冲：引擎写当场落进游戏内存（模拟 GPU 自己马上要在 CPU 上读），宿主 GPU 落后一截，
++        // 排在前面还没执行的绘制若读的是同一块内存，会看到命令流里「将来」的值（10-23 塞尔达零拷贝白屏的第二个根因）。这里只登记（不拿跟踪锁），
++        // 下次取用时降级（Buffer.SynchronizeMemory）。只认 GPU 线程上的写（引擎都在那里跑）
++        private void S2AEngineWrote(ulong address, ulong size)
++        {
++            if (S2AZeroCopy.On && size != 0 && _context.IsGpuThread())
++            {
++                BufferCache.S2AEngineWrote(address, size);
++            }
++        }
++
+         private delegate void WriteCallback(ulong address, ReadOnlySpan<byte> data);
+ 
+         /// <summary>

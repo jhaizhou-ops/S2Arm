@@ -1,0 +1,22 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index 2f9d05d124c8e58ec2a3bb74843b44881b3bf0b0..88eddd0965e866ffb18cf60cbf0f785fea8ab13f 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -141,11 +141,13 @@ namespace Ryujinx.HLE.HOS
+             // region used that is used is Application, so we can use the other ones for anything.
+             KMemoryRegionManager region = KernelContext.MemoryManager.MemoryRegions[(int)MemoryRegion.NvServices];
+ 
++            // S2Arm: start each block on a 16 KB boundary (sizes unchanged): the game maps these through host aliases of
++            // 16 KB pages, which need the same offset inside the page (the 0x1000 time block shifted the next one)
+             ulong hidPa = region.Address;
+-            ulong fontPa = region.Address + HidSize;
+-            ulong iirsPa = region.Address + HidSize + FontSize;
+-            ulong timePa = region.Address + HidSize + FontSize + IirsSize;
+-            ulong appletCaptureBufferPa = region.Address + HidSize + FontSize + IirsSize + TimeSize;
++            ulong fontPa = Ryujinx.Common.BitUtils.AlignUp<ulong>(hidPa + HidSize, 0x4000);
++            ulong iirsPa = Ryujinx.Common.BitUtils.AlignUp<ulong>(fontPa + FontSize, 0x4000);
++            ulong timePa = Ryujinx.Common.BitUtils.AlignUp<ulong>(iirsPa + IirsSize, 0x4000);
++            ulong appletCaptureBufferPa = Ryujinx.Common.BitUtils.AlignUp<ulong>(timePa + TimeSize, 0x4000);
+ 
+             KPageList hidPageList = new();
+             KPageList fontPageList = new();

@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+index 154ed24fc758d4fb2b8d2be49d0c4a51321765b1..f49b70148f337878d3222fbd3302228029d380ae 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -217,6 +217,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     {
+                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                     }
++                    else if (type == AtomSize.F32FtzRn && storageKind == StorageKind.GlobalMemory)
++                    {
++                        // S2Arm 11-05: a 32-bit float add to global memory (RED.E.ADD.F32.FTZ.RN / ATOM .F32; Zelda: Ocarina of Time, 398 in 33 shaders, which the old
++                        // log-and-drop path lost: luminance and histogram sums). No float atomic in the IR: a compare-and-swap loop on the word's bits, which returns the value
++                        // before this thread's add, as the atomic does. Bits are compared, so a NaN in memory does not loop forever
++                        Operand lblRetry = Label();
++                        context.MarkLabel(lblRetry);
++                        Operand old = context.Load(StorageKind.GlobalMemory, e0, e1);
++                        Operand sum = context.FPAdd(old, value);
++                        Operand seen = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, e0, e1, old, sum);
++                        context.BranchIfFalse(lblRetry, context.ICompareEqual(seen, old));
++                        res = old;
++                    }
+                     else
+                     {
+                         context.TranslatorContext.GpuAccessor.Log($"Invalid reduction type: {type}.");

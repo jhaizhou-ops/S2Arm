@@ -1,0 +1,96 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
+index 17045e4e93a228f3fc8c85062ee3a5a7d744bf50..d63bcaa14ad6e5288b7c20dea4dbcf1fa4e38e7e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
+@@ -50,6 +50,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 // Make sure to clone the object to not temper the real instance.
+                 bufferItem = (BufferItem)tmp.Clone();
+ 
++                // S2Arm: the queue's instance is not referenced after the copy (ConsumerBase only read it)
++                Consumer.RecycleBufferItem(tmp);
++
+                 if (waitForFence)
+                 {
+                     bufferItem.Fence.WaitForever(_gpuContext);
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueConsumer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueConsumer.cs
+index 68560240b423f9215d3f92d68e7c1a05b7515f67..49eecac580164aa6102e48b4c2df339dbdb8f351 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueConsumer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueConsumer.cs
+@@ -86,6 +86,17 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             return Status.Success;
+         }
+ 
++        /// <summary>
++        /// S2Arm: hands an item returned by <see cref="AcquireBuffer"/> back to the queue once the caller has copied it.
++        /// </summary>
++        public void RecycleBufferItem(BufferItem item)
++        {
++            lock (Core.Lock)
++            {
++                Core.ReturnBufferItemLocked(item);
++            }
++        }
++
+         public Status DetachBuffer(int slot)
+         {
+             lock (Core.Lock)
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
+index 8399c6d6763a61821a713206f91a9faef8402c53..f6f2225005570e49de1289363190f72c23a14848 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
+@@ -47,6 +47,23 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         public event Action BufferQueued;
+ 
++        // S2Arm: queued items are recycled once the consumer has taken its copy (QueueBuffer allocated an item plus
++        // a ~0x170-byte graphic buffer pointer per frame). Accessed under Lock.
++        private readonly Stack<BufferItem> _itemPool = new();
++
++        public BufferItem RentBufferItemLocked()
++        {
++            return _itemPool.Count != 0 ? _itemPool.Pop() : new BufferItem();
++        }
++
++        public void ReturnBufferItemLocked(BufferItem item)
++        {
++            if (_itemPool.Count < BufferSlotArray.NumBufferSlots)
++            {
++                _itemPool.Push(item);
++            }
++        }
++
+         public BufferQueueCore(Switch device, ulong pid)
+         {
+             Slots = new BufferSlotArray();
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+index 9afb26c657921fae86768238d9e0b922be1572e0..bed5d387b10545acc2324f72fc173412624d2cb0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+@@ -352,7 +352,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                     return Status.BadValue;
+             }
+ 
+-            BufferItem item = new();
++            BufferItem item = null;
+ 
+             IConsumerListener frameAvailableListener = null;
+             IConsumerListener frameReplaceListener = null;
+@@ -397,6 +397,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 Core.Slots[slot].QueueTime = TimeSpanType.FromTimeSpan(_tickSource.ElapsedTime);
+                 Core.Slots[slot].PresentationTime = TimeSpanType.Zero;
+ 
++                // S2Arm: every field is assigned below, so a recycled item needs no reset
++                item = Core.RentBufferItemLocked();
++
+                 item.AcquireCalled = Core.Slots[slot].AcquireCalled;
+                 item.Crop = input.Crop;
+                 item.Transform = input.Transform;
+@@ -445,6 +448,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                         Core.Queue.RemoveAt(0);
+                         Core.Queue.Insert(0, item);
+ 
++                        Core.ReturnBufferItemLocked(frontItem);
++
+                         frameReplaceListener = Core.ConsumerListener;
+                     }
+                     else

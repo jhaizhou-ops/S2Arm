@@ -1,0 +1,253 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/ISoftwareKeyboardRenderer.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/ISoftwareKeyboardRenderer.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f9783d33521e3a8d1d71e93577fddab0e902538
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/ISoftwareKeyboardRenderer.cs
+@@ -0,0 +1,13 @@
++using Ryujinx.HLE.UI;
++using Ryujinx.Memory;
++
++namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
++{
++    internal interface ISoftwareKeyboardRenderer
++    {
++        void CreateSurface(RenderingSurfaceInfo surfaceInfo);
++        void DrawMutableElements(SoftwareKeyboardUIState state);
++        void CopyImageToBuffer();
++        bool WriteBufferToMemory(IVirtualMemoryManager destination, ulong position);
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRenderer.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRenderer.cs
+index f65d6a0181939873744ebc44bf78760006f4555a..17e6af3374ec9a92cc85f5576308a0822c90cead 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRenderer.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRenderer.cs
+@@ -11,19 +11,20 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+     internal class SoftwareKeyboardRenderer : IDisposable
+     {
+         private const int TextBoxBlinkSleepMilliseconds = 100;
++        private const int TextBoxBlinkThreshold = 8;
+         private const int RendererWaitTimeoutMilliseconds = 100;
+ 
+         private readonly object _stateLock = new();
+ 
+         private readonly SoftwareKeyboardUIState _state = new();
+-        private readonly SoftwareKeyboardRendererBase _renderer;
++        private readonly ISoftwareKeyboardRenderer _renderer;
+ 
+         private readonly TimedAction _textBoxBlinkTimedAction = new();
+         private readonly TimedAction _renderAction = new();
+ 
+         public SoftwareKeyboardRenderer(IHostUITheme uiTheme)
+         {
+-            _renderer = new SoftwareKeyboardRendererBase(uiTheme);
++            _renderer = SoftwareKeyboardRendererFactory.Create(uiTheme);
+ 
+             StartTextBoxBlinker(_textBoxBlinkTimedAction, _state, _stateLock);
+             StartRenderer(_renderAction, _renderer, _state, _stateLock);
+@@ -37,7 +38,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+                 {
+                     // The blinker is on half of the time and events such as input
+                     // changes can reset the blinker.
+-                    state.TextBoxBlinkCounter = (state.TextBoxBlinkCounter + 1) % (2 * SoftwareKeyboardRendererBase.TextBoxBlinkThreshold);
++                    state.TextBoxBlinkCounter = (state.TextBoxBlinkCounter + 1) % (2 * TextBoxBlinkThreshold);
+ 
+                     // Tell the render thread there is something new to render.
+                     Monitor.PulseAll(stateLock);
+@@ -45,7 +46,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+             }, TextBoxBlinkSleepMilliseconds);
+         }
+ 
+-        private static void StartRenderer(TimedAction timedAction, SoftwareKeyboardRendererBase renderer, SoftwareKeyboardUIState state, object stateLock)
++        private static void StartRenderer(TimedAction timedAction, ISoftwareKeyboardRenderer renderer, SoftwareKeyboardUIState state, object stateLock)
+         {
+             SoftwareKeyboardUIState internalState = new();
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs
+index 309e2cbde37ec4057914bc8497f42cf033bc756f..2c1131a4904ac8fbbce040f7e34ea6e6d71cdd27 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs
+@@ -12,7 +12,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+     /// <summary>
+     /// Base class that generates the graphics for the software keyboard applet during inline mode.
+     /// </summary>
+-    internal class SoftwareKeyboardRendererBase
++    internal class SoftwareKeyboardRendererBase : ISoftwareKeyboardRenderer
+     {
+         public const int TextBoxBlinkThreshold = 8;
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe5d9c7fb3c553f79e6cb34c7fc07954f2c274fb
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererFactory.cs
+@@ -0,0 +1,19 @@
++using Ryujinx.HLE.UI;
++using System;
++
++namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
++{
++    internal static class SoftwareKeyboardRendererFactory
++    {
++        public static ISoftwareKeyboardRenderer Create(IHostUITheme theme)
++        {
++#if S2A_ANDROID_HOST
++            // AndroidHostUi already rejects theme/input requests. Preserve that explicit
++            // unsupported boundary; never confirm text or pretend a renderer produced pixels.
++            throw new NotSupportedException("Android host UI is not connected: inline keyboard renderer");
++#else
++            return new SoftwareKeyboardRendererBase(theme);
++#endif
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+index e0bf990b48912844f5606c94b3e264c95ea849f7..8018d847198e8a8a783c2a659aeb994640906190 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+@@ -1,7 +1,6 @@
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Common.Memory;
+ using Ryujinx.HLE.HOS.Services.Caps.Types;
+-using SkiaSharp;
+ using System;
+ using System.Globalization;
+ using System.IO;
+@@ -132,20 +131,17 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+                 filePath = GenerateFilePath(folderPath, applicationAlbumEntry, currentDateTime, hash);
+             }
+ 
+-            using SKBitmap bitmap = new(new SKImageInfo(ScreenshotWidth, ScreenshotHeight, SKColorType.Rgba8888));
+-
+-            nint pixels = bitmap.GetPixels();
+-
+-            if (pixels == 0)
++            byte[] jpeg;
++            try
++            {
++                jpeg = ScreenshotEncoding.Encode(screenshotData[..ScreenshotDataSize], ScreenshotWidth, ScreenshotHeight, 80);
++            }
++            catch (ScreenshotBitmapAllocationException)
+             {
+                 return ResultCode.InvalidArgument;
+             }
+-
+-            screenshotData[..ScreenshotDataSize].CopyTo(new Span<byte>((void*)pixels, ScreenshotDataSize));
+-
+-            using SKData data = bitmap.Encode(SKEncodedImageFormat.Jpeg, 80);
+             using FileStream file = File.OpenWrite(filePath);
+-            data.SaveTo(file);
++            file.Write(jpeg);
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs b/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6545dda1cde833b2e25356c149bbf820eac6740b
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/ScreenshotEncoding.cs
+@@ -0,0 +1,29 @@
++using System;
++
++namespace Ryujinx.HLE.HOS.Services.Caps
++{
++    internal sealed class ScreenshotBitmapAllocationException : Exception { }
++
++    internal static class ScreenshotEncoding
++    {
++        public static byte[] Encode(ReadOnlySpan<byte> rgba, int width, int height, int quality)
++        {
++            if (width <= 0 || height <= 0 || width > 4096 || height > 4096 ||
++                quality < 0 || quality > 100 || (long)width * height * 4 != rgba.Length)
++                throw new ArgumentException("Invalid packed RGBA screenshot");
++            byte[] jpeg;
++            if (S2AHooks.EncodeScreenshotJpeg != null)
++                jpeg = S2AHooks.EncodeScreenshotJpeg(rgba, width, height, quality);
++            else
++#if S2A_ANDROID_HOST
++                throw new NotSupportedException("Android screenshot encoder is not connected");
++#else
++                jpeg = SkiaScreenshotEncoder.Encode(rgba, width, height, quality);
++#endif
++            if (jpeg == null || jpeg.Length < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 ||
++                jpeg[^2] != 0xff || jpeg[^1] != 0xd9)
++                throw new InvalidOperationException("Screenshot provider did not return a complete JPEG");
++            return jpeg;
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/SkiaScreenshotEncoder.cs b/src/Ryujinx.HLE/HOS/Services/Caps/SkiaScreenshotEncoder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1730dfab1120fabd5b0932dbc2b42691dbdf867
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/SkiaScreenshotEncoder.cs
+@@ -0,0 +1,19 @@
++using SkiaSharp;
++using System;
++
++namespace Ryujinx.HLE.HOS.Services.Caps
++{
++    // Default hosts retain the original Skia layout, JPEG quality and bytes.
++    internal static class SkiaScreenshotEncoder
++    {
++        public static unsafe byte[] Encode(ReadOnlySpan<byte> rgba, int width, int height, int quality)
++        {
++            using SKBitmap bitmap = new(new SKImageInfo(width, height, SKColorType.Rgba8888));
++            nint pixels = bitmap.GetPixels();
++            if (pixels == 0) throw new ScreenshotBitmapAllocationException();
++            rgba.CopyTo(new Span<byte>((void*)pixels, rgba.Length));
++            using SKData data = bitmap.Encode(SKEncodedImageFormat.Jpeg, quality);
++            return data?.ToArray() ?? throw new InvalidOperationException("Screenshot JPEG encoding failed");
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/Ryujinx.HLE.csproj b/src/Ryujinx.HLE/Ryujinx.HLE.csproj
+index 450e997904e907b83b425c8220e9c3f42e7551ad..87690931c644413418d4cd0843cf7edecd3588aa 100644
+--- a/src/Ryujinx.HLE/Ryujinx.HLE.csproj
++++ b/src/Ryujinx.HLE/Ryujinx.HLE.csproj
+@@ -34,6 +34,18 @@
+     <PackageReference Include="Open.Nat.V2" />
+   </ItemGroup>
+ 
++  <!-- linux-bionic is the Android host. Its platform codec is mandatory; other
++       hosts retain their existing Skia implementation and package selection. -->
++  <PropertyGroup>
++    <S2AAndroidHost Condition="'$(S2AAndroidHost)' == '' and $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-bionic-'))">true</S2AAndroidHost>
++    <DefineConstants Condition="'$(S2AAndroidHost)' == 'true'">$(DefineConstants);S2A_ANDROID_HOST</DefineConstants>
++  </PropertyGroup>
++  <ItemGroup Condition="'$(S2AAndroidHost)' == 'true'">
++    <Compile Remove="HOS/Services/Caps/SkiaScreenshotEncoder.cs" />
++    <Compile Remove="HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs" />
++    <PackageReference Remove="SkiaSharp;SkiaSharp.NativeAssets.Win32;SkiaSharp.NativeAssets.macOS;SkiaSharp.NativeAssets.Linux.NoDependencies" />
++  </ItemGroup>
++
+   <ItemGroup>
+     <None Remove="Debugger\Gdb\Xml\aarch64-core.xml" />
+     <None Remove="Debugger\Gdb\Xml\aarch64-fpu.xml" />
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index cc839d701bf0cee8a33df5a945c0a586e02e0043..65c5a94f12d0c914f28be468099b45cc170ba390 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -22,6 +22,9 @@ namespace Ryujinx.HLE
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;
+ 
++        // Platform JPEG encoding; null preserves the existing Skia implementation on default hosts.
++        public static Ryujinx.HLE.UI.ScreenshotJpegEncoder EncodeScreenshotJpeg;
++
+         // Game committed a file system (fsp-srv IFileSystem.Commit, i.e. a save): S2Arm records a marker in the touch-pad recording
+         public static delegate*<void> SaveCommitted;
+ 
+diff --git a/src/Ryujinx.HLE/UI/ScreenshotJpegEncoder.cs b/src/Ryujinx.HLE/UI/ScreenshotJpegEncoder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..608eb612aad2cc790daa754d131d83bd2a4ce67a
+--- /dev/null
++++ b/src/Ryujinx.HLE/UI/ScreenshotJpegEncoder.cs
+@@ -0,0 +1,8 @@
++using System;
++
++namespace Ryujinx.HLE.UI
++{
++    // Packed RGBA8888, premultiplied alpha, top-to-bottom rows; no row padding.
++    // Return a complete JPEG or throw. A provider must never report success without encoding.
++    public delegate byte[] ScreenshotJpegEncoder(ReadOnlySpan<byte> rgba, int width, int height, int quality);
++}

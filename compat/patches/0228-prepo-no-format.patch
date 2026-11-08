@@ -1,0 +1,40 @@
+diff --git a/src/Ryujinx.Horizon/HorizonStatic.cs b/src/Ryujinx.Horizon/HorizonStatic.cs
+index b0343a2cd0a8439a2f3504480bdb55e4748e4487..8869553658cbf9ad2701b088a631021babbff710 100644
+--- a/src/Ryujinx.Horizon/HorizonStatic.cs
++++ b/src/Ryujinx.Horizon/HorizonStatic.cs
+@@ -8,6 +8,9 @@ namespace Ryujinx.Horizon
+ {
+     public static class HorizonStatic
+     {
++        // S2Arm: 有订阅者才排版 / 起线程（PrepoService 先问这里，见那边注释）
++        internal static bool HasPlayReportHandlers => PlayReport != null;
++
+         internal static void HandlePlayReport(PlayReport report) =>
+             new Thread(() => PlayReport?.Invoke(report))
+             {
+diff --git a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+index 10af5bbf9ef25846044a75f8236f4e02d24c2fe5..f34199a73ed13a74870dd2fadfd250eacab1b65a 100644
+--- a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
++++ b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+@@ -226,6 +226,21 @@ namespace Ryujinx.Horizon.Prepo.Ipc
+                 return Result.Success;
+             }
+ 
++            // S2Arm: 没人订阅 PlayReport 事件时（S2Arm 全仓没有订阅者，报告也不上传）不解析、不排版、不起线程，只记一行长度（帧率能耗线 10-24）。
++            //   原先每份报告解成 MessagePack 对象树、整份排成缩进 JSON（字节数组每字节 6 字符）、经四五次整串拷贝写日志：
++            //   真机马车8 读盘段第 412–420 帧一批报告产 69 MB 字符串，夹着一次 28 ms gen1；服务层单测 32 KB 报告整进程分配 2524 KB。返回码不变（pid 照旧经 arp 核）
++            if (!HorizonStatic.HasPlayReportHandlers)
++            {
++                if (_arp.GetApplicationInstanceId(out _, pid).IsFailure)
++                {
++                    return PrepoResult.InvalidPid;
++                }
++
++                Logger.Info?.Print(LogClass.ServicePrepo, $"PlayReport {playReportKind} in room {gameRoom}: {reportBuffer.Length} bytes (not parsed: no subscriber)");
++
++                return Result.Success;
++            }
++
+             StringBuilder builder = new();
+             MessagePackObject deserializedReport = MessagePackSerializer.UnpackMessagePackObject(reportBuffer.ToArray());
+ 

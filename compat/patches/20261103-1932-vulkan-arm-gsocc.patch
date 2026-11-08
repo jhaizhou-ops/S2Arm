@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 7eb9ff1d942984e25675abf00cac9e1a10d003cd..665db96d9586b828e8c54d2eac93cebf4de85a27 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -314,6 +314,15 @@ namespace Ryujinx.Graphics.Vulkan
+                     $"driverID={(hasDriverProperties ? driverProperties.DriverID.ToString() : "unavailable")}, " +
+                     $"driverVersion={properties.DriverVersion} (0x{properties.DriverVersion:X8}, {DriverQuirks.FormatVersion(properties.DriverVersion)}), " +
+                     $"driverInfo={driverInfo}, disabled={quirks.Disabled}, forced={quirks.Forced}");
++                if (quirks.Disabled.HasFlag(DisabledDriverFeatures.GeometryShader))
++                {
++                    Logger.Warning?.Print(LogClass.Gpu,
++                        $"命中 Mali GS + occlusion 缺陷规避：vendor=0x{properties.VendorID:X}, " +
++                        $"driverID={(hasDriverProperties ? driverProperties.DriverID.ToString() : "unavailable")}, " +
++                        $"driverVersion={properties.DriverVersion} (0x{properties.DriverVersion:X8}, " +
++                        $"{DriverQuirks.FormatVersion(properties.DriverVersion)}), driverInfo={driverInfo}，" +
++                        $"改走 GS-as-compute（SupportsGeometryShader=false）");
++                }
+             }
+ 
+             PhysicalDeviceFeatures2 features2 = new()
+@@ -538,7 +547,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 DepthClamp = supportedFeatures.DepthClamp,
+                 DualSrcBlend = supportedFeatures.DualSrcBlend,
+                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
+-                GeometryShader = supportedFeatures.GeometryShader,
++                GeometryShader = supportedFeatures.GeometryShader && !quirks.Disabled.HasFlag(DisabledDriverFeatures.GeometryShader),
+                 ImageCubeArray = supportedFeatures.ImageCubeArray,
+                 IndependentBlend = supportedFeatures.IndependentBlend,
+                 LogicOp = supportedFeatures.LogicOp,

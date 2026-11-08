@@ -1,0 +1,61 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+index ed405f21b4d2b075ac30d1e8192647e1c039b435..344b0a1ea486eb1ad6c06257720d3b656c77924f 100644
+--- a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
++++ b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+@@ -47,7 +47,8 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg.H264
+                 writer.WriteUe(0); // Num ref frames in pic order cnt cycle
+             }
+ 
+-            writer.WriteUe(16); // Max num ref frames
++            // S2Arm: 元数据带参考帧数就用它（VideoToolbox 路径会填一个不越过 frame_num 周期的值），没带（上游恒 0）保持原样 16
++            writer.WriteUe(pictureInfo.NumRefFrames == 0 ? 16u : pictureInfo.NumRefFrames); // Max num ref frames
+             writer.WriteBit(false); // Gaps in frame num value allowed flag
+             writer.WriteUe(pictureInfo.PicWidthInMbsMinus1);
+             writer.WriteUe(pictureInfo.PicHeightInMapUnitsMinus1);
+diff --git a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+index 8284d39666e721d0124355a818fb0ff32bc47a8d..f888bb26d03752625dbb13b4a465b081e5aa364c 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+@@ -44,6 +44,7 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+         private int[] _gopEnds = new int[64];
+         private int _gopLen, _gopCount;
+         private bool _gopValid;
++        private bool _skipLogged;
+         // S2Arm: diagnostic — S2A_VT_FAULT_FRAME=<n> invalidates the session (handle kept) after the n-th decoded picture, so the next frame
+         // fails with kVTInvalidSessionErr exactly as after iOS background; lets the recovery path be exercised on a Mac
+         private static readonly long FaultFrame = long.TryParse(Environment.GetEnvironmentVariable("S2A_VT_FAULT_FRAME"), out long f) ? f : -1;
+@@ -65,6 +66,19 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+ 
+             VideoToolboxSurface surface = (VideoToolboxSurface)output;
+ 
++            // S2Arm: 本实例还没出过图时，先等 IDR。没有参考帧的 P 帧 VideoToolbox 一定解不对：本机报 kVTVideoDecoderBadDataErr
++            // (-12909)，别的系统版本可能不报错直接输出色块，两种情况都不该把帧交进去（交进去只会污染新会话）
++            if (_last == 0 && !HasIdr(bitstream))
++            {
++                if (!_skipLogged)
++                {
++                    _skipLogged = true;
++                    Logger.Info?.Print(LogClass.Nvdec, "VideoToolbox H.264：新会话首帧不是 IDR，先不收，等首个 IDR");
++                }
++
++                return false;
++            }
++
+             if (_waitIdr)
+             {
+                 if (!HasIdr(bitstream))
+@@ -76,6 +90,14 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+                 Logger.Info?.Print(LogClass.Nvdec, "VideoToolbox H.264：等到 IDR，重建会话接着解");
+             }
+ 
++            // S2Arm: nvdec 元数据不带 max_num_ref_frames（上游恒 0），重建 SPS 只能写死 16。VideoToolbox 按这个上限保留 DPB，上限等于
++            // frame_num 周期（16）时，回绕后 DPB 里同时有两个同 frame_num 的帧，参考列表取到回绕前的旧帧，P 帧整段解错而且一次都不报错
++            // （实测 keyint=60 / ref=1 的 130 帧里 88 帧 PSNR 18.8–23.8；上限写 8 时 130 帧全部 PSNR 99，与 FFmpeg 逐像素一致）。
++            // 这里给 8 封顶，也不越过 frame_num 周期
++            int maxFrameNumLog2 = (int)pictureInfo.Log2MaxFrameNumMinus4 + 4;
++            uint maxFrameNum = maxFrameNumLog2 >= 16 ? 1u << 16 : 1u << maxFrameNumLog2;
++            pictureInfo.NumRefFrames = Math.Min(8u, maxFrameNum - 1);
++
+             ReadOnlySpan<byte> paramSets = SpsAndPpsReconstruction.Reconstruct(ref pictureInfo, _workBuffer);
+ 
+             if (!UpdateParameterSets(paramSets))

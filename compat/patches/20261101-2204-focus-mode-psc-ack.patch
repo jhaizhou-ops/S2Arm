@@ -1,0 +1,209 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+index 91172055d9291fd4255433da7136c845f3d2c3a9..00efd4eddb08d82ae15b7c36e7f0f63ffe8c3723 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+@@ -174,13 +174,14 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+         // SetFocusHandlingMode(b8, b8, b8)
+         public ResultCode SetFocusHandlingMode(ServiceCtx context)
+         {
+-            bool unknownFlag1 = context.RequestData.ReadBoolean();
+-            bool unknownFlag2 = context.RequestData.ReadBoolean();
+-            bool unknownFlag3 = context.RequestData.ReadBoolean();
++            // S2Arm（P2-37）：三个标志依次是焦点通知、后台、暂停（libnx appletSetFocusHandlingMode 的组合），通知与暂停交给 AppletState 生效
++            bool notify = context.RequestData.ReadBoolean();
++            bool background = context.RequestData.ReadBoolean();
++            bool suspend = context.RequestData.ReadBoolean();
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceAm, new { unknownFlag1, unknownFlag2, unknownFlag3 });
++            Logger.Stub?.PrintStub(LogClass.ServiceAm, new { notify, background, suspend });
+ 
+-            context.Device.System.AppletState.FocusHandlingMode = (unknownFlag1, unknownFlag2, unknownFlag3);   // S2Arm：原先读完即弃
++            context.Device.System.AppletState.SetFocusHandlingMode(notify, suspend);
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+index f0827ac10316f7f3110e2c7b57fa9d91f5788c83..0dd5ff01e5a29e9e728edefd692a286d3b579d1e 100644
+--- a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
++++ b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+@@ -17,18 +17,55 @@ namespace Ryujinx.HLE.HOS.SystemState
+         public IdDictionary IndirectLayerHandles { get; }
+ 
+         // S2Arm（缺口扫描族 1 / 2，11-01）：游戏经 ISelfController 设的焦点 / 模式通知开关，原先各自存在 ISelfController 里读完即弃。
+-        //   失焦暂停缺省开（与主机一致：应用失焦即挂起，游戏用 SetOutOfFocusSuspendingEnabled(false) 关）；模式变化通知缺省开，游戏显式关了才不发
+-        public bool OutOfFocusSuspending { get; private set; } = true;
++        //   模式变化通知缺省开，游戏显式关了才不发。
++        // 焦点处理（审计 P2-37）：按 am 的三种模式（参照 libnx appletSetFocusHandlingMode 与 yuzu 系 LifecycleManager）。
++        //   SetFocusHandlingMode(通知, 后台, 暂停)：暂停 = 0 → NoSuspend；暂停 = 1 时从 NoSuspend 回 SuspendHomeSleep。
++        //   SetOutOfFocusSuspendingEnabled：1 → AlwaysSuspend；0 时从 AlwaysSuspend 回 SuspendHomeSleep。
++        //   宿主失焦（Mac 窗口失焦、开键位窗口）按 am「前台被遮挡」处理：AlwaysSuspend 冻结客机、游戏不知道自己失焦（焦点状态不变、不发消息）；
++        //   另两种照常运行、焦点状态变 OutOfFocus。通知 = 0 时焦点变化不发消息（状态照变）。
++        //   「后台」标志在 am 里只管 HOME / 睡眠下的 Background 状态，我方宿主没有这种状态，不存。
++        //   缺省 AlwaysSuspend：同改前「失焦暂停缺省开」，游戏什么都不设时失焦即冻结
++        private enum FocusHandling { AlwaysSuspend, SuspendHomeSleep, NoSuspend }
++
++        private FocusHandling _focusHandling = FocusHandling.AlwaysSuspend;
++        // AlwaysSuspend 下吞掉的失焦：回前台时同样不发消息（游戏从头到尾不知道）
++        private bool _focusLossHidden;
++
++        public bool OutOfFocusSuspending => _focusHandling == FocusHandling.AlwaysSuspend;
++        public bool FocusStateChangedNotification { get; private set; } = true;
+         public bool OperationModeChangedNotification { get; set; } = true;
+         public bool PerformanceModeChangedNotification { get; set; } = true;
+-        public (bool, bool, bool) FocusHandlingMode { get; set; }
+-        // 宿主接线（S2A.Services）：失焦暂停开关变了就告诉平台壳（平台壳失焦时据此冻结客机）
++        // 宿主接线（S2A.Services）：失焦暂停（= AlwaysSuspend）变了就告诉平台壳（平台壳失焦时据此冻结客机）
+         public static System.Action<bool> OutOfFocusSuspendingChanged;
+ 
++        public void SetFocusHandlingMode(bool notify, bool suspend)
++        {
++            FocusStateChangedNotification = notify;
++
++            if (!suspend)
++            {
++                _focusHandling = FocusHandling.NoSuspend;
++            }
++            else if (_focusHandling == FocusHandling.NoSuspend)
++            {
++                _focusHandling = FocusHandling.SuspendHomeSleep;
++            }
++
++            OutOfFocusSuspendingChanged?.Invoke(OutOfFocusSuspending);
++        }
++
+         public void SetOutOfFocusSuspending(bool on)
+         {
+-            OutOfFocusSuspending = on;
+-            OutOfFocusSuspendingChanged?.Invoke(on);
++            if (on)
++            {
++                _focusHandling = FocusHandling.AlwaysSuspend;
++            }
++            else if (_focusHandling == FocusHandling.AlwaysSuspend)
++            {
++                _focusHandling = FocusHandling.SuspendHomeSleep;
++            }
++
++            OutOfFocusSuspendingChanged?.Invoke(OutOfFocusSuspending);
+         }
+ 
+         public AppletStateMgr(Horizon system)
+@@ -42,8 +79,29 @@ namespace Ryujinx.HLE.HOS.SystemState
+ 
+         public void SetFocus(bool isFocused)
+         {
++            // S2Arm（P2-37）：AlwaysSuspend 下失焦由平台壳冻结，游戏不知道自己失焦；回前台也就没有变化可通知
++            if (!isFocused && OutOfFocusSuspending)
++            {
++                _focusLossHidden = true;
++
++                return;
++            }
++
++            if (isFocused && _focusLossHidden)
++            {
++                _focusLossHidden = false;
++
++                return;
++            }
++
+             FocusState = isFocused ? FocusState.InFocus : FocusState.OutOfFocus;
+ 
++            // S2Arm（P2-37）：游戏用 SetFocusHandlingMode 第一个标志关了焦点通知就不发消息
++            if (!FocusStateChangedNotification)
++            {
++                return;
++            }
++
+             Messages.Enqueue(AppletMessage.FocusStateChanged);
+ 
+             if (isFocused)
+diff --git a/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+index 9256a9994f6c1869fc01f01c5a00f3f0cfaf91e4..e81e3f497f9a49c9cf01e834c297ed3f782feb52 100644
+--- a/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
++++ b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+@@ -10,7 +10,7 @@ using System.Threading;
+ namespace Ryujinx.Horizon.Psc.Ipc
+ {
+     // psc 模块（S2Arm 最小实现，缺口扫描族 1）：Initialize 交出一个事件；宿主进后台 / 睡眠时 PscHost.Request 往所有已初始化的模块排一条
+-    //   休眠请求、回来时排一条唤醒请求并点亮事件；GetRequest 回队首（没有请求时回 FullAwake），Acknowledge 出队，队里还有就再点亮。
++    //   休眠请求、回来时排一条唤醒请求并点亮事件；GetRequest 回队首（没有请求时回 FullAwake），Acknowledge / AcknowledgeEx(队首状态) 出队，队里还有就再点亮。
+     //   不阻塞宿主：游戏不确认也照常进后台 / 回来（iOS 后台本来整体冻结，回来后游戏依次读到休眠、唤醒）
+     partial class PmModule : IPmModule, IDisposable
+     {
+@@ -55,20 +55,7 @@ namespace Ryujinx.Horizon.Psc.Ipc
+         [CmifCommand(2)]
+         public Result Acknowledge()
+         {
+-            lock (_lock)
+-            {
+-                if (_requests.Count > 0)
+-                {
+-                    _requests.Dequeue();
+-                }
+-
+-                if (_requests.Count > 0)
+-                {
+-                    Os.SignalSystemEvent(ref _event);
+-                }
+-            }
+-
+-            return Result.Success;
++            return Dequeue(null);
+         }
+ 
+         [CmifCommand(3)]
+@@ -82,7 +69,34 @@ namespace Ryujinx.Horizon.Psc.Ipc
+         [CmifCommand(4)] // 5.1.0+
+         public Result AcknowledgeEx(PmState state)
+         {
+-            return Acknowledge();
++            return Dequeue(state);
++        }
++
++        // 确认 = 出队首（审计 P2-38）：没初始化回 psc NotInitialized；队列空、或带状态确认与队首不符回失败且不出队。
++        //   主机对后两种的真实失败码未公开（switchbrew / Atmosphère 只登记了 psc 2 / 3），用通用 InvalidState
++        private Result Dequeue(PmState? state)
++        {
++            lock (_lock)
++            {
++                if (!_initialized)
++                {
++                    return PscResult.NotInitialized;
++                }
++
++                if (_requests.Count == 0 || (state.HasValue && _requests.Peek() != state.Value))
++                {
++                    return KernelResult.InvalidState;
++                }
++
++                _requests.Dequeue();
++
++                if (_requests.Count > 0)
++                {
++                    Os.SignalSystemEvent(ref _event);
++                }
++            }
++
++            return Result.Success;
+         }
+ 
+         // 宿主侧（S2A.Services Lifecycle）：休眠 = SleepReady，唤醒 = FullAwake
+diff --git a/src/Ryujinx.Horizon/Sdk/Psc/PscResult.cs b/src/Ryujinx.Horizon/Sdk/Psc/PscResult.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..07b854b5a2b452b3d66924f3ef19eae1a26ea127
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Psc/PscResult.cs
+@@ -0,0 +1,12 @@
++using Ryujinx.Horizon.Common;
++
++namespace Ryujinx.Horizon.Sdk.Psc
++{
++    // psc 结果码（值同主机，Atmosphère psc_results.hpp / switchbrew 错误码表）
++    static class PscResult
++    {
++        private const int ModuleId = 138;
++
++        public static Result NotInitialized => new(ModuleId, 3);
++    }
++}

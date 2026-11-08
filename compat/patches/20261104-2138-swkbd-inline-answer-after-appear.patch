@@ -1,0 +1,92 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index 90774ba334bbaf67230eb778fc1e12f3baa08c1d..4f0b2bc135cd132e077b614de3cdeffdeb83b1b6 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -15,6 +15,7 @@ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+ using System.Text;
+ using System.Threading;
++using System.Threading.Tasks;
+ 
+ namespace Ryujinx.HLE.HOS.Applets
+ {
+@@ -61,8 +62,12 @@ namespace Ryujinx.HLE.HOS.Applets
+         private SoftwareKeyboardRenderer _keyboardRenderer = null;
+ 
+         // S2Arm: headless host (no UI theme) — no on-screen keyboard; when the game shows the inline keyboard,
+-        // the text comes from the host's input dialog policy (same as the foreground keyboard) and is submitted at once
++        // the text comes from the host's input dialog policy (same as the foreground keyboard), fitted to the game's Appear limits,
++        // and is submitted once the appear has settled
+         private bool _headless;
++        private KeyboardCalcFlags _lastCalcFlags;
++        private int _headlessAnswer;
++        private const int HeadlessAnswerDelayMs = 500;
+         private NpadReader _npads = null;
+         private bool _canAcceptController = false;
+         private KeyboardInputMode _inputMode = KeyboardInputMode.ControllerAndKeyboard;
+@@ -431,6 +436,12 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                     bool updateText = false;
+ 
++                    if (_headless && newCalc.Flags != _lastCalcFlags)
++                    {
++                        _lastCalcFlags = newCalc.Flags;
++                        Logger.Info?.Print(LogClass.ServiceAm, $"Inline keyboard Calc flags 0x{(ulong)newCalc.Flags:x} in state {_backgroundState}");
++                    }
++
+                     if ((newCalc.Flags & KeyboardCalcFlags.Initialize) != 0)
+                     {
+                         _interactiveSession.Push(InlineResponses.FinishedInitialize(_backgroundState));
+@@ -482,10 +493,27 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                     if (_headless && _backgroundState == InlineKeyboardState.Shown)
+                     {
+-                        SoftwareKeyboardUIArgs args = new() { KeyboardMode = KeyboardMode.Default, InitialText = _textValue, StringLengthMax = MaxUiTextSize };
++                        SoftwareKeyboardAppearEx a = newCalc.Appear;
++                        int max = a.TextMaxLength > 0 ? Math.Min(a.TextMaxLength, MaxUiTextSize) : MaxUiTextSize;
++                        SoftwareKeyboardUIArgs args = new() { KeyboardMode = a.KeyboardMode, InitialText = _textValue, StringLengthMin = a.TextMinLength, StringLengthMax = max };
+                         bool ok = _device.UIHandler.DisplayInputDialog(args, out string text);
+-                        text ??= _textValue ?? string.Empty;
+-                        PushUpdatedState(text, text.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                        text = FitLength(text ?? _textValue ?? string.Empty, a.TextMinLength, max);
++                        int answer = ++_headlessAnswer;
++
++                        // A real keyboard's input arrives frames after the game has seen it Shown, never in the same batch as the
++                        // Appear reply: hand the answer over once the appear has settled, unless the game moved on meanwhile
++                        _ = Task.Delay(HeadlessAnswerDelayMs).ContinueWith(_ =>
++                        {
++                            lock (_lock)
++                            {
++                                if (answer != _headlessAnswer || _backgroundState != InlineKeyboardState.Shown)
++                                {
++                                    return;
++                                }
++
++                                PushUpdatedState(text, text.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                            }
++                        }, TaskScheduler.Default);
+                     }
+                     break;
+                 case InlineKeyboardRequest.Finalize:
+@@ -503,6 +531,21 @@ namespace Ryujinx.HLE.HOS.Applets
+             }
+         }
+ 
++        // S2Arm: the inline keyboard's answer must fit the game's Appear limits: repeat the text up to the minimum (no separator,
++        // so the result stays in the text's own character set: a numeric field stays digits), cut at the maximum
++        internal static string FitLength(string text, int min, int max)
++        {
++            if (text.Length > 0)
++            {
++                while (text.Length < min)
++                {
++                    text += text;
++                }
++            }
++
++            return max > 0 && text.Length > max ? text[..max] : text;
++        }
++
+         private void ActivateFrontend()
+         {
+             if (_headless)

@@ -1,0 +1,109 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs b/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
+index 5b14564d358e04e473e53db1c9ac825265d3c310..1779537b4ea5724ba023222371eda4e35c8607cd 100644
+--- a/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
+@@ -289,6 +289,15 @@ namespace Ryujinx.Graphics.Shader.Decoders
+                     case 0x98c:
+                     case 0x38c:
+                         context.SetUsedFeature(FeatureFlags.SharedMemory);
++                        break;
++                    case 0x923:
++                    case 0x927:
++                        // A task or mesh shader's stage memory is in shared memory (ISBERD and the stage output store, InstEmitAmpereMem.cs AIsberd / AStageOut)
++                        if (gpuAccessor.QueryAmpereStageMemory() != null)
++                        {
++                            context.SetUsedFeature(FeatureFlags.SharedMemory);
++                        }
++
+                         break;
+                     case 0x986:
+                     case 0x386:
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index f036c1a82eb319ca3d9f857c6c525404e1addace..e9dfbb09565ce19144670456f216bba29026eab9 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -78,6 +78,15 @@ namespace Ryujinx.Graphics.Shader
+             return null;
+         }
+ 
++        /// <summary>
++        /// NVN2 (Switch 2) task and mesh shaders, translated as compute: the byte offsets in shared memory of their stage memory (the workgroup's number, the payload a mesh
++        /// shader's task wrote, the outputs, a mesh shader's primitive bytes), which ISBERD and the stage output store (0x927) address; null for other shaders.
++        /// </summary>
++        int[] QueryAmpereStageMemory()
++        {
++            return null;
++        }
++
+         /// <summary>
+         /// Gets a span of the specified memory location, containing shader code.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index 235523151383fc756e112d158a5a865f59c72481..81493f9537a86e7017c95551d63053b199ca7875 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -97,6 +97,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             alu(0x124, InstName.Out, AOut);
+             x(0x923, InstName.Isberd, AIsberd, N);
++            x(0x927, InstName.Ast, AStageOut, N, writesRd: false);
+             x(0x34e, InstName.Lepc, ALepc, N);
+             x(0x357, InstName.Nop, ANop, N, writesRd: false);
+             x(0x957, InstName.Nop, ANop, N, writesRd: false);
+@@ -122,12 +123,56 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         {
+             AmpereOp x = new(context.CurrOp);
+ 
++            int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
++
++            if (stage != null)
++            {
++                // A task or mesh shader's stage input (QueryAmpereStageMemory; upstream (MIT) 1d4b8e82b, MIT). Mode 72..79: 0x78 its workgroup's number, 0x38 a word of the payload
++                // its task wrote, [Ra + offset]
++                int mode = x.Bits(72, 80);
++
++                if (mode != 0x78 && mode != 0x38)
++                {
++                    throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
++                }
++
++                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
++                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
++                return;
++            }
++
+             if (x.Rd < RegisterConsts.RegisterZeroIndex)
+             {
+                 context.Copy(Register(x.Rd, RegisterType.Gpr), AGpr(x.Ra));
+             }
+         }
+ 
++        // Task and mesh shaders' stage output (0x927; upstream (MIT) 1d4b8e82b, MIT): [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload; 0xf8 a word of a mesh
++        // shader's attributes (each component 0x80 bytes for 32 vertices or primitives); 0x88 the primitive count byte, 0x80 a primitive index byte. Bytes go through the shared
++        // memory's byte store (a compare-and-swap on the word), since neighbouring threads write neighbouring bytes. A mesh workgroup of 32 threads is one warp on the console,
++        // all at the same instruction, so the zero count each thread writes first cannot pass the count one thread writes later; Metal's threads run in no such step and the
++        // stage memory starts at zero (Dsh.cs MeshStage), so that store (0x88 of RZ) is left out
++        public static void AStageOut(EmitterContext context)
++        {
++            AmpereOp x = new(context.CurrOp);
++            int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
++            int mode = x.Bits(72, 80);
++
++            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
++            {
++                throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
++            }
++
++            if (mode == 0x88 && x.Rb == RegisterConsts.RegisterZeroIndex)
++            {
++                return;
++            }
++
++            bool word = mode == 0xb8 || mode == 0xf8;
++            Operand addr = context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
++            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
++        }
++
+         public static void ALepc(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);

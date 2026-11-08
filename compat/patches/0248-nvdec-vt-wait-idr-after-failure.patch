@@ -1,0 +1,112 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+index b3fe4164837585e294abc31e712165843c684690..6c3046900c26c4fd71477696546f04938d04a717 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+@@ -30,6 +30,11 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+         private readonly OutputSlot* _slot = (OutputSlot*)NativeMemory.AllocZeroed((nuint)sizeof(OutputSlot));
+         private bool _failed;
+         private long _frames;
++        // S2Arm: iOS invalidates the hardware decode session while the app is in the background; after it the next frames fail, and a fresh
++        // session decoding P frames without their references gives colour blocks (#495: one flash about 19 s after coming back). After a
++        // failure the session is dropped and frames are skipped until the next IDR, repeating the last good picture meanwhile
++        private bool _waitIdr;
++        private nint _last;      // last good picture (CVPixelBuffer, retained)
+ 
+         private struct OutputSlot
+         {
+@@ -47,6 +52,18 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+             }
+ 
+             VideoToolboxSurface surface = (VideoToolboxSurface)output;
++
++            if (_waitIdr)
++            {
++                if (!HasIdr(bitstream))
++                {
++                    return RepeatLast(surface);
++                }
++
++                _waitIdr = false;
++                Logger.Info?.Print(LogClass.Nvdec, "VideoToolbox H.264：等到 IDR，重建会话接着解");
++            }
++
+             ReadOnlySpan<byte> paramSets = SpsAndPpsReconstruction.Reconstruct(ref pictureInfo, _workBuffer);
+ 
+             if (!UpdateParameterSets(paramSets))
+@@ -97,7 +114,7 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+ 
+                 if (st != 0 || _slot->Status != 0 || _slot->ImageBuffer == 0)
+                 {
+-                    Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264 解码失败：提交 {st}，回调 {_slot->Status}，出帧 {(_slot->ImageBuffer != 0 ? "有" : "无")}");
++                    Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264 解码失败：提交 {st}，回调 {_slot->Status}，出帧 {(_slot->ImageBuffer != 0 ? "有" : "无")}；丢掉会话，等下一个 IDR（其间重复上一张好图）");
+ 
+                     if (_slot->ImageBuffer != 0)
+                     {
+@@ -105,10 +122,19 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+                         _slot->ImageBuffer = 0;
+                     }
+ 
+-                    return false;
++                    DestroySession();
++                    _waitIdr = true;
++
++                    return RepeatLast(surface);
+                 }
+             }
+ 
++            if (_last != 0)
++            {
++                CoreFoundation.CFRelease(_last);
++            }
++
++            _last = CoreFoundation.CFRetain(_slot->ImageBuffer);
+             surface.Attach(_slot->ImageBuffer);   // 引用转给面
+             _slot->ImageBuffer = 0;
+ 
+@@ -120,6 +146,33 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+             return true;
+         }
+ 
++        private bool RepeatLast(VideoToolboxSurface surface)
++        {
++            if (_last == 0)
++            {
++                return false;
++            }
++
++            surface.Attach(CoreFoundation.CFRetain(_last));
++
++            return true;
++        }
++
++        private static bool HasIdr(ReadOnlySpan<byte> annexB)
++        {
++            int pos = 0;
++
++            while (NextNal(annexB, ref pos, out ReadOnlySpan<byte> nal))
++            {
++                if (nal.Length > 0 && (nal[0] & 0x1F) == 5)
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
+         // 参数集变了才重建格式描述；会话不收新格式就重建会话
+         private bool UpdateParameterSets(ReadOnlySpan<byte> annexB)
+         {
+@@ -318,6 +371,12 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+         {
+             DestroySession();
+ 
++            if (_last != 0)
++            {
++                CoreFoundation.CFRelease(_last);
++                _last = 0;
++            }
++
+             if (_format != 0)
+             {
+                 CoreFoundation.CFRelease(_format);

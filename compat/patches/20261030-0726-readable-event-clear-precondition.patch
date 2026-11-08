@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
+index 112761220a9556f0ae4d85a8432c4243101c739e..3532bac0df1a382d1de0fb0b1427c96a8c585197 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KReadableEvent.cs
+@@ -1,3 +1,4 @@
++// S2Arm: ClearIfSignaled clears the native event only after the managed precondition succeeds.
+ using Ryujinx.HLE.HOS.Kernel.Common;
+ using Ryujinx.Horizon.Common;
+ 
+@@ -50,15 +51,15 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+         {
+             Result result;
+ 
+-            if (S2ANativeEvent != 0)
+-            {
+-                S2AHooks.EventClear(S2ANativeEvent);
+-            }
+-
+             KernelContext.CriticalSection.Enter();
+ 
+             if (_signaled)
+             {
++                if (S2ANativeEvent != 0)
++                {
++                    S2AHooks.EventClear(S2ANativeEvent);
++                }
++
+                 _signaled = false;
+ 
+                 result = Result.Success;

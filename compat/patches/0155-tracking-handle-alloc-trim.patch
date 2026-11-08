@@ -1,0 +1,169 @@
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index 0160791e8a42acb2f448e2aae17ae1fb69a153d7..fbfd11b207c292310aa51c8ed587cb9a975d61df 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -159,11 +159,14 @@ namespace Ryujinx.Memory.Tracking
+         /// <param name="size">Size of the handle's memory region</param>
+         /// <param name="guest">True if getting handles for guest protection, false otherwise</param>
+         /// <returns>A list of virtual regions within the given range</returns>
++        // S2A（帧率能耗线 10-22）：建区域的委托按宿主 / 游戏侧各缓存一个（原来每次调用都新建闭包 + 委托，每个句柄两次约 192 B）
++        private Func<ulong, ulong, VirtualRegion> _hostRegionFactory, _guestRegionFactory;
++
+         internal List<VirtualRegion> GetVirtualRegionsForHandle(ulong va, ulong size, bool guest)
+         {
+             NonOverlappingRangeList<VirtualRegion> regions = guest ? _guestVirtualRegions : _virtualRegions;
+             regions.Lock.EnterUpgradeableReadLock();
+-            regions.GetOrAddRegions(out List<VirtualRegion> result, va, size, (va, size) => new VirtualRegion(this, va, size, guest));
++            regions.GetOrAddRegions(out List<VirtualRegion> result, va, size, guest ? _guestRegionFactory ??= (va, size) => new VirtualRegion(this, va, size, true) : _hostRegionFactory ??= (va, size) => new VirtualRegion(this, va, size, false));
+             regions.Lock.ExitUpgradeableReadLock();
+             
+             return result;
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index f0edee3fca754d4acbadb79a555b8f68e277381b..f52f6d77779057dc99b5beb73a511bbd4092a829 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -51,12 +51,13 @@ namespace Ryujinx.Memory.Tracking
+ 
+         private event Action OnDirty;
+ 
+-        private readonly Lock _preActionLock = new();
++        // S2A（帧率能耗线 10-22）：锁按需建（多数句柄从不注册动作；巫师3 换场景一帧建 8000+ 个句柄，每个 48 B）
++        private Lock _preActionLock;
++        private Lock PreActionLock => _preActionLock ?? Interlocked.CompareExchange(ref _preActionLock, new Lock(), null) ?? _preActionLock;
+         private RegionSignal _preAction; // Action to perform before a read or write. This will block the memory access.
+         private PreciseRegionSignal _preciseAction; // Action to perform on a precise read or write.
+         private readonly List<VirtualRegion> _regions;
+         private readonly List<VirtualRegion> _guestRegions;
+-        private readonly List<VirtualRegion> _allRegions;
+         private readonly MemoryTracking _tracking;
+         private bool _disposed;
+ 
+@@ -103,6 +104,9 @@ namespace Ryujinx.Memory.Tracking
+         /// <param name="id">Handle ID</param>
+         /// <param name="flags">Region flags</param>
+         /// <param name="mapped">True if the region handle starts mapped</param>
++        /// <summary>S2A 诊断（帧率能耗线 10-22）：句柄累计新建 / 释放数、虚拟区域累计新建数（GPU 层每 Tick 看增量，判对象池能不能接住换场景）</summary>
++        public static long S2ACreated, S2ADisposed, S2AVRegions;
++
+         internal RegionHandle(
+             MemoryTracking tracking,
+             ulong address,
+@@ -135,7 +139,7 @@ namespace Ryujinx.Memory.Tracking
+ 
+             _regions = tracking.GetVirtualRegionsForHandle(address, size, false);
+             _guestRegions = GetGuestRegions(tracking, address, size, flags);
+-            _allRegions = new List<VirtualRegion>(_regions.Count + _guestRegions.Count);
++            System.Threading.Interlocked.Increment(ref S2ACreated);
+ 
+             InitializeRegions();
+         }
+@@ -172,7 +176,7 @@ namespace Ryujinx.Memory.Tracking
+ 
+             _regions = tracking.GetVirtualRegionsForHandle(address, size, false);
+             _guestRegions = GetGuestRegions(tracking, address, size, flags);
+-            _allRegions = new List<VirtualRegion>(_regions.Count + _guestRegions.Count);
++            System.Threading.Interlocked.Increment(ref S2ACreated);
+ 
+             InitializeRegions();
+         }
+@@ -196,10 +200,12 @@ namespace Ryujinx.Memory.Tracking
+ 
+         private void InitializeRegions()
+         {
+-            _allRegions.AddRange(_regions);
+-            _allRegions.AddRange(_guestRegions);
++            foreach (VirtualRegion region in _regions)
++            {
++                region.Handles.Add(this);
++            }
+ 
+-            foreach (VirtualRegion region in _allRegions)
++            foreach (VirtualRegion region in _guestRegions)
+             {
+                 region.Handles.Add(this);
+             }
+@@ -282,7 +288,7 @@ namespace Ryujinx.Memory.Tracking
+ 
+                 try
+                 {
+-                    lock (_preActionLock)
++                    lock (PreActionLock)
+                     {
+                         _preAction?.Invoke(maxAddress, minEndAddress - maxAddress);
+ 
+@@ -357,7 +363,12 @@ namespace Ryujinx.Memory.Tracking
+ 
+             lock (_tracking.TrackingLock)
+             {
+-                foreach (VirtualRegion region in _allRegions)
++                foreach (VirtualRegion region in _regions)
++                {
++                    protectionChanged |= region.UpdateProtection();
++                }
++
++                foreach (VirtualRegion region in _guestRegions)
+                 {
+                     protectionChanged |= region.UpdateProtection();
+                 }
+@@ -407,7 +418,7 @@ namespace Ryujinx.Memory.Tracking
+         {
+             ClearVolatile();
+ 
+-            lock (_preActionLock)
++            lock (PreActionLock)
+             {
+                 RegionSignal lastAction = Interlocked.Exchange(ref _preAction, action);
+ 
+@@ -415,7 +426,12 @@ namespace Ryujinx.Memory.Tracking
+                 {
+                     lock (_tracking.TrackingLock)
+                     {
+-                        foreach (VirtualRegion region in _allRegions)
++                        foreach (VirtualRegion region in _regions)
++                        {
++                            region.UpdateProtection();
++                        }
++
++                        foreach (VirtualRegion region in _guestRegions)
+                         {
+                             region.UpdateProtection();
+                         }
+@@ -458,8 +474,6 @@ namespace Ryujinx.Memory.Tracking
+             {
+                 _regions.Add(region);
+             }
+-
+-            _allRegions.Add(region);
+         }
+ 
+         /// <summary>
+@@ -511,10 +525,16 @@ namespace Ryujinx.Memory.Tracking
+             GC.SuppressFinalize(this);
+ 
+             _disposed = true;
++            System.Threading.Interlocked.Increment(ref S2ADisposed);
+ 
+             lock (_tracking.TrackingLock)
+             {
+-                foreach (VirtualRegion region in _allRegions)
++                foreach (VirtualRegion region in _regions)
++                {
++                    region.RemoveHandle(this);
++                }
++
++                foreach (VirtualRegion region in _guestRegions)
+                 {
+                     region.RemoveHandle(this);
+                 }
+diff --git a/src/Ryujinx.Memory/Tracking/VirtualRegion.cs b/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
+index e95754c7a47d56021fd24c3fc343a3a28c2a9d4d..dbfe168b05c8e582b94c7dcd535eaf0ab58eeb40 100644
+--- a/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
++++ b/src/Ryujinx.Memory/Tracking/VirtualRegion.cs
+@@ -17,6 +17,7 @@ namespace Ryujinx.Memory.Tracking
+ 
+         public VirtualRegion(MemoryTracking tracking, ulong address, ulong size, bool guest, MemoryPermission lastPermission = MemoryPermission.Invalid) : base(address, size)
+         {
++            System.Threading.Interlocked.Increment(ref RegionHandle.S2AVRegions);
+             _lastPermission = lastPermission;
+             _tracking = tracking;
+ 

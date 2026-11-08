@@ -1,0 +1,385 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index 28f5db580be290167bc7eea2dc5389b72ed65ecf..513aea65cd101358976bb52a77fdda16a63f9de4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -86,7 +86,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+             {
+                 _executionPending = false;
+                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();   // S2A：宏执行计时（定「要不要预编」用，见 S2AMacroAot.Account）
++                long s2aA = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：拆账诊断——哪种宏引擎在执行中分配（每种只报第一次）
+                 _executionEngine?.Execute(code[Position..], state, _argument);
++                if (S2AAllocTrace.On)
++                {
++                    long d = GC.GetAllocatedBytesForCurrentThread() - s2aA;   // 只在有分配时才拼标签（诊断自己不能每次执行都分配：10-20 第一版每次插值字符串，污染读数）
++                    S2AAllocTrace.Raw(0x60_0000 | (_executionEngine is MacroHLE ? (int)_hleFunction : 0xff), d);   // 按 HLE 函数累计（0xff = 非 HLE 引擎）
++                    if (d > 0 && S2AAllocTrace.FirstSeen(_executionEngine?.GetType(), (int)_hleFunction)) Console.Error.WriteLine($"[分配·宏] {_executionEngine?.GetType().Name}/{_hleFunction} 位置 {Position} 一次执行分配 {d} B");
++                }
+                 S2AMacroAot.Account(_executionEngine, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+             }
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+index a9a96d54a829627358490e150d84dd28a6e37f09..e25247f4bdd7be380544b6c0b1efb5005a8664d2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+@@ -150,6 +150,27 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         /// </summary>
+         /// <param name="type">Counter to be written to memory</param>
+         private void ReportCounter(ReportCounterType type)
++        {
++            // S2A：Payload（信号量值，最常见）当场写、不经回调——原本本地函数捕获 gpuVa / ticks / counter / this，
++            // C# 把它们提进方法开头就分配的闭包对象（48 B），Payload 也照付，动森岛上每帧约 3 次。语义同原版：写 {payload, 时间戳}、计数缓存记 null
++            if (type == ReportCounterType.Payload)
++            {
++                ulong va = _state.State.SemaphoreAddress.Pack();
++                CounterData data = new()
++                {
++                    Counter = (ulong)_state.State.SemaphorePayload,
++                    Timestamp = _context.GetTimestamp(),
++                };
++
++                _channel.MemoryManager.Write(va, data);
++                _channel.MemoryManager.CounterCache.AddOrUpdate(va, null);
++                return;
++            }
++
++            ReportCounterQuery(type);
++        }
++
++        private void ReportCounterQuery(ReportCounterType type)
+         {
+             ulong gpuVa = _state.State.SemaphoreAddress.Pack();
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 7ee32e83df00ff8739c42063e981e4794339a09d..f1bcd67f42a3cd5d682e0d6e82490acc259f39fc 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -87,6 +87,11 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         internal ConcurrentDictionary<ulong, PhysicalMemory> PhysicalMemoryRegistry { get; }
+ 
++        // S2A：注册表的数组快照（注册 / 注销 / 清空时重建）。每帧的 ProcessShaderCacheQueue 原本 foreach ConcurrentDictionary.Values，
++        // 每次新建一份快照集合（动森渲染线程每帧约 170 B）；整体换引用，GPU 线程读不加锁
++        private volatile PhysicalMemory[] _s2aPhysSnap = [];
++        private void S2ARefreshPhysSnap() => _s2aPhysSnap = [.. PhysicalMemoryRegistry.Values];
++
+         /// <summary>
+         /// Support buffer updater.
+         /// </summary>
+@@ -205,6 +210,8 @@ namespace Ryujinx.Graphics.Gpu
+                 throw new ArgumentException("The PID was already registered", nameof(pid));
+             }
+ 
++            S2ARefreshPhysSnap();
++
+             physicalMemory.ShaderCache.ShaderCacheStateChanged += ShaderCacheStateUpdate;
+         }
+ 
+@@ -216,6 +223,7 @@ namespace Ryujinx.Graphics.Gpu
+         {
+             if (PhysicalMemoryRegistry.TryRemove(pid, out PhysicalMemory physicalMemory))
+             {
++                S2ARefreshPhysSnap();
+                 physicalMemory.ShaderCache.ShaderCacheStateChanged -= ShaderCacheStateUpdate;
+                 physicalMemory.Dispose();
+             }
+@@ -329,7 +337,7 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         public void ProcessShaderCacheQueue()
+         {
+-            foreach (PhysicalMemory physicalMemory in PhysicalMemoryRegistry.Values)
++            foreach (PhysicalMemory physicalMemory in _s2aPhysSnap)
+             {
+                 physicalMemory.ShaderCache.ProcessShaderCacheQueue();
+             }
+@@ -474,6 +482,7 @@ namespace Ryujinx.Graphics.Gpu
+             SupportBufferUpdater.Dispose();
+ 
+             PhysicalMemoryRegistry.Clear();
++            S2ARefreshPhysSnap();
+ 
+             RunDeferredActions();
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index bfb4b839e1216b60de5b63263976e3e811748828..82d4941d791692e49193c14b4170081e470c25e2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -50,6 +50,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+         private readonly HandlesCallbackDelegate _signalModifyingCallback;
+         private readonly HandlesCallbackDelegate _discardDataCallback;
+         private readonly HandlesCallbackDelegate _checkDirtyCallback;
++        private readonly HandlesCallbackDelegate _synchronizeMemoryCallback;   // S2A：同步回调缓存成委托（原 lambda 捕获 texture，每次同步分配闭包 + 委托 80 B；动森渲染线程每帧一次，10-20 拆账实测）
++        private Texture _syncTexture;   // S2A：_synchronizeMemoryCallback 正在同步的贴图（同 _loadNeeded，本来就不可并发；嵌套调用按栈保存恢复）
+ 
+         /// <summary>
+         /// The storage texture associated with this group.
+@@ -134,6 +136,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _signalModifyingCallback = SignalModifyingCallback;
+             _discardDataCallback = DiscardDataCallback;
+             _checkDirtyCallback = CheckDirtyCallback;
++            _synchronizeMemoryCallback = SynchronizeMemoryCallback;
+         }
+ 
+         /// <summary>
+@@ -323,85 +326,99 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             FlushIncompatibleOverlapsIfNeeded();
+ 
+-            EvaluateRelevantHandles(texture, (baseHandle, regionCount, split, bound) =>
+-            {
+-                bool dirty = false;
+-                bool anyModified = false;
+-                bool anyNotDirty = false;
++            Texture prev = _syncTexture;
++            _syncTexture = texture;
+ 
+-                for (int i = 0; i < regionCount; i++)
+-                {
+-                    TextureGroupHandle group = _handles[baseHandle + i];
++            try
++            {
++                EvaluateRelevantHandles(texture, _synchronizeMemoryCallback, out _);
++            }
++            finally
++            {
++                _syncTexture = prev;
++            }
++        }
+ 
+-                    bool modified = group.Modified;
+-                    bool handleDirty = false;
+-                    bool handleUnmapped = false;
++        private bool SynchronizeMemoryCallback(int baseHandle, int regionCount, bool split, bool bound)
++        {
++            Texture texture = _syncTexture;
+ 
+-                    foreach (RegionHandle handle in group.Handles)
+-                    {
+-                        if (handle.Dirty)
+-                        {
+-                            handle.Reprotect();
+-                            handleDirty = true;
+-                        }
+-                        else
+-                        {
+-                            handleUnmapped |= handle.Unmapped;
+-                        }
+-                    }
++            bool dirty = false;
++            bool anyModified = false;
++            bool anyNotDirty = false;
+ 
+-                    // If the modified flag is still present, prefer the data written from gpu.
+-                    // A write from CPU will do a flush before writing its data, which should unset this.
+-                    if (modified)
+-                    {
+-                        handleDirty = false;
+-                    }
++            for (int i = 0; i < regionCount; i++)
++            {
++                TextureGroupHandle group = _handles[baseHandle + i];
+ 
+-                    // Evaluate if any copy dependencies need to be fulfilled. A few rules:
+-                    // If the copy handle needs to be synchronized, prefer our own state.
+-                    // If we need to be synchronized and there is a copy present, prefer the copy.
++                bool modified = group.Modified;
++                bool handleDirty = false;
++                bool handleUnmapped = false;
+ 
+-                    if (group.NeedsCopy && group.Copy(_context))
++                foreach (RegionHandle handle in group.Handles)
++                {
++                    if (handle.Dirty)
+                     {
+-                        anyModified |= true; // The copy target has been modified.
+-                        handleDirty = false;
++                        handle.Reprotect();
++                        handleDirty = true;
+                     }
+                     else
+                     {
+-                        anyModified |= modified;
+-                        dirty |= handleDirty;
++                        handleUnmapped |= handle.Unmapped;
+                     }
++                }
+ 
+-                    if (group.NeedsCopy)
+-                    {
+-                        // The texture we copied from is still being written to. Copy from it again the next time this texture is used.
+-                        texture.SignalGroupDirty();
+-                    }
++                // If the modified flag is still present, prefer the data written from gpu.
++                // A write from CPU will do a flush before writing its data, which should unset this.
++                if (modified)
++                {
++                    handleDirty = false;
++                }
+ 
+-                    bool loadNeeded = handleDirty && !handleUnmapped;
++                // Evaluate if any copy dependencies need to be fulfilled. A few rules:
++                // If the copy handle needs to be synchronized, prefer our own state.
++                // If we need to be synchronized and there is a copy present, prefer the copy.
+ 
+-                    anyNotDirty |= !loadNeeded;
+-                    _loadNeeded[baseHandle + i] = loadNeeded;
++                if (group.NeedsCopy && group.Copy(_context))
++                {
++                    anyModified |= true; // The copy target has been modified.
++                    handleDirty = false;
++                }
++                else
++                {
++                    anyModified |= modified;
++                    dirty |= handleDirty;
+                 }
+ 
+-                if (dirty)
++                if (group.NeedsCopy)
+                 {
+-                    if (anyNotDirty || (_handles.Length > 1 && (anyModified || split)))
+-                    {
+-                        // Partial texture invalidation. Only update the layers/levels with dirty flags of the storage.
++                    // The texture we copied from is still being written to. Copy from it again the next time this texture is used.
++                    texture.SignalGroupDirty();
++                }
+ 
+-                        SynchronizePartial(baseHandle, regionCount);
+-                    }
+-                    else
+-                    {
+-                        // Full texture invalidation.
++                bool loadNeeded = handleDirty && !handleUnmapped;
+ 
+-                        texture.SynchronizeFull();
+-                    }
++                anyNotDirty |= !loadNeeded;
++                _loadNeeded[baseHandle + i] = loadNeeded;
++            }
++
++            if (dirty)
++            {
++                if (anyNotDirty || (_handles.Length > 1 && (anyModified || split)))
++                {
++                    // Partial texture invalidation. Only update the layers/levels with dirty flags of the storage.
++
++                    SynchronizePartial(baseHandle, regionCount);
++                }
++                else
++                {
++                    // Full texture invalidation.
++
++                    texture.SynchronizeFull();
+                 }
++            }
+ 
+-                return true;
+-            }, out _);
++            return true;
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 0cb1758730fd141cffba5202991c851ced5f62e9..05586cf2ea3f0c5cda2e90d0037d49ee73398321 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -18,6 +18,11 @@ namespace Ryujinx.Graphics.Gpu
+         private static int _depth;
+         private static long _nextDump;
+ 
++        private static readonly HashSet<(Type, int)> _seen = new();
++
++        /// <summary>诊断用：某个（类型, 编号）第一次出现返回 true（只在 On 时调；值元组键，判重本身不分配）</summary>
++        public static bool FirstSeen(Type t, int n) { lock (_seen) return _seen.Add((t, n)); }
++
+         public static long Begin()
+         {
+             if (!On || _depth++ != 0)
+@@ -73,7 +78,7 @@ namespace Ryujinx.Graphics.Gpu
+             }
+         }
+ 
+-        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键" };
++        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调" };
+ 
+         private static string Name(int key) => (key >> 20) switch
+         {
+@@ -81,6 +86,7 @@ namespace Ryujinx.Graphics.Gpu
+             1 => $"宏 {key & 0xffff}",
+             2 => $"内联数据 子通道 {key & 0xffff}",
+             4 => _rawNames[key & 0xf],
++            6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
+         };
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs b/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
+index b2e0abf21c247dc4e2a4e5521a614f035a694dfe..61d804ed74b6b006c97106959d5d3cb10ea7ebf6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
++++ b/src/Ryujinx.Graphics.Gpu/Synchronization/Syncpoint.cs
+@@ -80,11 +80,13 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+ 
+             lock (_waiters)
+             {
+-                _waiters.RemoveAll(item =>
++                // S2A：手写稳定删除（原 RemoveAll + 捕获三个局部的 lambda，每次递增新建闭包 + 委托 88 B，动森岛上每帧约 3 次；语义同 RemoveAll：逐个判一次、留下的保持原序）
++                int keep = 0;
++                for (int r = 0; r < _waiters.Count; r++)
+                 {
+-                    bool isPastThreshold = currentValue >= item.Threshold;
++                    SyncpointWaiterHandle item = _waiters[r];
+ 
+-                    if (isPastThreshold)
++                    if (currentValue >= item.Threshold)
+                     {
+                         if (expired == null)
+                         {
+@@ -97,9 +99,16 @@ namespace Ryujinx.Graphics.Gpu.Synchronization
+                             expiredList.Add(item);
+                         }
+                     }
++                    else
++                    {
++                        _waiters[keep++] = item;
++                    }
++                }
+ 
+-                    return isPastThreshold;
+-                });
++                if (keep < _waiters.Count)
++                {
++                    _waiters.RemoveRange(keep, _waiters.Count - keep);
++                }
+             }
+ 
+             // Call the callbacks as a separate step.
+diff --git a/src/Ryujinx.Graphics.Gpu/Window.cs b/src/Ryujinx.Graphics.Gpu/Window.cs
+index 5c3463f2a99cf202a4ac57065d7bb543830ddd58..b9fb488266eb18edb795d29cff1f87f64b958751 100644
+--- a/src/Ryujinx.Graphics.Gpu/Window.cs
++++ b/src/Ryujinx.Graphics.Gpu/Window.cs
+@@ -199,13 +199,16 @@ namespace Ryujinx.Graphics.Gpu
+ 
+             if (_frameQueue.TryDequeue(out PresentationTexture pt))
+             {
++                long s2aA = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（上屏各步）
+                 pt.AcquireCallback(_context, pt.UserObj);
++                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0008, t - s2aA); s2aA = t; }
+ 
+                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
+ 
+                 pt.Cache.Tick();
+ 
+                 texture.SynchronizeMemory();
++                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0009, t - s2aA); s2aA = t; }
+ 
+                 ImageCrop crop = new(
+                     (int)(pt.Crop.Left * texture.ScaleFactor),
+@@ -239,8 +242,10 @@ namespace Ryujinx.Graphics.Gpu
+                 }
+ 
+                 _context.Renderer.Window.Present(texture.HostTexture, crop, swapBuffersCallback);
++                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_000a, t - s2aA); s2aA = t; }
+ 
+                 pt.ReleaseCallback(pt.UserObj);
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000b, GC.GetAllocatedBytesForCurrentThread() - s2aA);
+             }
+         }
+ 

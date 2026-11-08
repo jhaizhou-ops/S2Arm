@@ -1,0 +1,92 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 1ded4f517139c2d9085c4942d08f1d067266ea90..f0cf5a8868440cf49ee60456a1a52fde622ca42e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -398,11 +398,11 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             lifo.Write(ref state);
+         }
+ 
+-        private void UpdateUnusedSixInputIfNotEqual(ref RingLifo<SixAxisSensorState> currentlyUsed, ref RingLifo<SixAxisSensorState> possiblyUnused)
++        private void UpdateUnusedSixInputIfNotEqual(ref RingLifo<SixAxisSensorState> currentlyUsed, ref RingLifo<SixAxisSensorState> possiblyUnused, ref SixAxisSensorState used)
+         {
+             if (!Unsafe.AreSame(ref currentlyUsed, ref possiblyUnused))
+             {
+-                SixAxisSensorState newState = new();
++                SixAxisSensorState newState = used;   // S2Arm：单一体感源时其余样式的记录写同一份读数，不写全零（上游写全零）
+ 
+                 WriteNewSixInputEntry(ref possiblyUnused, ref newState);
+             }
+@@ -513,13 +513,15 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+                 if (SetSixAxisState(states[i]))
+                 {
+-                    i++;
+-
+-                    if (i >= states.Count)
++                    // S2Arm 11-05（#55 Switch Sports Joy-Con 校准「无法调整」）：双 Joy-Con 样式要一左一右两份读数；只有一个体感源（手机）时只来一份，
++                    //   上游直接 return，右手那条记录从来不更新（全零），游戏校准两只 Joy-Con、右手那只永远失败。单一体感源 = 左右同一份读数
++                    if (i + 1 >= states.Count || states[i + 1].PlayerId != states[i].PlayerId)
+                     {
+-                        return;
++                        SetSixAxisState(states[i], true);
++                        continue;
+                     }
+ 
++                    i++;
+                     SetSixAxisState(states[i], true);
+                 }
+             }
+@@ -612,19 +614,16 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+             if (!isRightPair)
+             {
+-                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.FullKeySixAxisSensor);
+-                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.HandheldSixAxisSensor);
+-                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyDualSixAxisSensor);
+-                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyLeftSixAxisSensor);
+-                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyRightSixAxisSensor);
++                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.FullKeySixAxisSensor, ref newState);
++                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.HandheldSixAxisSensor, ref newState);
++                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyDualSixAxisSensor, ref newState);
++                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyLeftSixAxisSensor, ref newState);
++                UpdateUnusedSixInputIfNotEqual(ref lifo, ref currentNpad.JoyRightSixAxisSensor, ref newState);
+             }
+ 
+             if (!needUpdateRight && !isRightPair)
+             {
+-                SixAxisSensorState emptyState = new()
+-                {
+-                    Attributes = SixAxisSensorAttribute.IsConnected,
+-                };
++                SixAxisSensorState emptyState = newState;   // S2Arm：同上，双 Joy-Con 右手的记录也写同一份读数
+ 
+                 WriteNewSixInputEntry(ref currentNpad.JoyDualRightSixAxisSensor, ref emptyState);
+             }
+@@ -651,8 +650,12 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                                     + Math.Abs(storage.AngularVelocity.Y)
+                                     + Math.Abs(storage.AngularVelocity.Z);
+ 
+-            // TODO: check against config deadzone and add sensitivity setting
+-            return ((acceleration <= 1.0F) && (angularVelocity <= 1.0F));
++            // S2Arm 11-05：静止 = 只受重力（加速度模长 0.9–1.1 g）且几乎不转（三轴角速度绝对值和 ≤ 0.02 转/秒）。上游按「三轴加速度绝对值和 ≤ 1」判，
++            //   平放静止时光重力就约 1 g（手机实测和 1.04），几乎永远判没静止
++            float ax = storage.Acceleration.X, ay = storage.Acceleration.Y, az = storage.Acceleration.Z;
++            float norm = MathF.Sqrt(ax * ax + ay * ay + az * az);
++            _ = acceleration;
++            return norm >= 0.9F && norm <= 1.1F && angularVelocity <= 0.02F;
+         }
+ 
+         private void UpdateDisconnectedInputSixAxis(PlayerIndex index)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 79d71fb5a27cc0e5c3f82aec4ae1239b19a35d22..21d5f81bcaebeb63b02317253d182a0689c1315e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -611,7 +611,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             
+             // uint typeValue = (uint) sixAxisSensorHandle;                 // 0x0 	0x4 	TypeValue
+             // uint npadStyleIndex = (uint) sixAxisSensorHandle & 0xff;     // 0x0 	0x1 	NpadStyleIndex
+-            int playerNumber = (sixAxisSensorHandle << 8) & 0xff;           // 0x1 	0x1 	PlayerNumber
++            int playerNumber = (sixAxisSensorHandle >> 8) & 0xff;           // 0x1 	0x1 	PlayerNumber（S2Arm 11-05：上游写成 << 8，恒取 0，Player2 起都问成了 Player1）
+             // uint deviceIdx= ((uint) sixAxisSensorHandle << 16) & 0xff;   // 0x2 	0x1 	DeviceIdx 
+             // uint unknown = ((uint) sixAxisSensorHandle << 24) & 0xff;
+             

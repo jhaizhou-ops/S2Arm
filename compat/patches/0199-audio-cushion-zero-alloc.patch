@@ -1,0 +1,62 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index bff240d6b784a2e140843fc72dec7b1f44b0dfe2..5b5294cfb4a0db2413772e25e5ee038839923403 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -74,7 +74,6 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _lastHealTicks;
+         private int _heals;
+         private bool _testStallDone;
+-        private int _cushions;
+         // 测试钩子：S2A_AUDIO_TEST_PRODUCER_STALL_AT=<秒>:<毫秒> —— 开播后到点在送声音的入口（QueueBuffer）睡一次，模拟 GC 停顿卡住生产方、吃光缓冲垫
+         private static readonly (int AtS, int Ms) _testProdStall = ParseProdStall(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_PRODUCER_STALL_AT"));
+         private bool _testProdStallDone;
+@@ -375,12 +374,9 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             protected override void OnReturned(int bytes, long inFlightAfter) => _s._diag.OnReturned(bytes, inFlightAfter);
+ 
+-            // S2Arm (10-23 马车8 杂音): 欠载后补静音垫，每次打一行（罕见事件）
+-            protected override void OnCushion(int bytes, long zeroTicks)
+-            {
+-                int n = Interlocked.Increment(ref _s._cushions);
+-                Console.Error.WriteLine($"[声] 输出 #{_s._diag.Index}：中途欠载（在途归零 {zeroTicks * 1000.0 / Stopwatch.Frequency:F1} ms 后才有新数据）→ 先补 {bytes / _s._bytesPerFrame * 1000.0 / _s.RequestedSampleRate:F0} ms 静音重建缓冲垫（第 {n} 次）");
+-            }
++            // S2Arm (10-23 马车8 杂音): 欠载后补静音垫。这里在游戏的 AppendBuffer 线程上，只记数（零分配，服务层零分配单测守着）；
++            //   行由 S2AOutputDiag 的 10 秒汇报线程打
++            protected override void OnCushion(int bytes, long zeroTicks) => _s._diag.OnCushion(bytes / _s._bytesPerFrame, zeroTicks);
+         }
+ 
+         private void OutputCallback(nint userData, nint audioQueue, nint bufferPtr)
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index c5a979e4b703772ecd881c52f5b0ebfeb89ad085..568b27ca3b7be5efc50f900f3c7261c6b86a91b8 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -77,6 +77,15 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         // Reporter's snapshot of the previous line (deltas per 10 s)
+         private long _repCallbacks, _repSubmitted, _repPlayed, _repUnderruns, _repPauses;
++        // 欠载补垫（DeviceBufferPump.OnCushion，游戏线程上调）：只做原子记数，10 秒汇报时打一行
++        private int _cushions, _repCushions, _lastCushionFrames;
++        private long _lastCushionZeroTicks;
++        public void OnCushion(int frames, long zeroTicks)
++        {
++            Volatile.Write(ref _lastCushionFrames, frames);
++            Volatile.Write(ref _lastCushionZeroTicks, zeroTicks);
++            Interlocked.Increment(ref _cushions);
++        }
+ 
+         // WAV ring: written under the pump lock, drained by the writer thread
+         private readonly byte[] _ring;
+@@ -415,6 +424,13 @@ namespace Ryujinx.Audio.Backends.Apple
+                         $"断供 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+                         $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
++                    int cu = Volatile.Read(ref d._cushions);
++                    if (cu != d._repCushions)
++                    {
++                        Console.Error.WriteLine($"[声] 输出 #{d.Index} 10 秒：中途欠载补垫 {cu - d._repCushions} 次（最近一次在途归零 {Volatile.Read(ref d._lastCushionZeroTicks) * 1000.0 / Stopwatch.Frequency:F1} ms 后才有新数据，先补 {Volatile.Read(ref d._lastCushionFrames) * 1000.0 / d._rate:F0} ms 静音重建缓冲垫）");
++                        d._repCushions = cu;
++                    }
++
+                     d._repCallbacks = cb;
+                     d._repSubmitted = sub;
+                     d._repPlayed = pl;

@@ -1,0 +1,52 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 91ab34638d1bf58e77c937dd63f15fcf257f6ca8..3aa4e3aa7f87d3e185c7dcd51a7e591d0e36f0c7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -703,8 +703,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         public void SynchronizeFull()
+         {
+-            _physicalMemory.S2ASignalReadForTexture(Range);
+-            ReadOnlySpan<byte> data = _physicalMemory.S2AGetSpanScratch(Range, out MemoryOwner<byte> s2aScratch);
++            ReadOnlySpan<byte> data = _physicalMemory.S2AGetTextureReadSpan(Range, out MemoryOwner<byte> s2aScratch);
+             using MemoryOwner<byte> s2aScratchUse = s2aScratch;   // 多段拼接暂存：本函数各出口都已用完 data（转格式 / 直传都另拷），离开即还
+ 
+             if (S2ATryUploadDirect(data))
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 4bea46a4807b77288ffa18ce739be804983d9ff4..2c5fbdcf43cee3b4d143076d86375383f26683f9 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -461,7 +461,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             int spanEndIndex = -1;
+             int spanBase = 0;
+             ReadOnlySpan<byte> dataSpan = ReadOnlySpan<byte>.Empty;
+-            MemoryOwner<byte> s2aScratch = null;   // 多段拼接暂存（PhysicalMemory.S2AGetSpanScratch）：换下一段 / 离开时还
++            MemoryOwner<byte> s2aScratch = null;   // 纹理读取租约：换下一段 / 离开时还
+             try
+             {
+             for (int i = 0; i < regionCount; i++)
+@@ -499,9 +499,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                         int size = endOffset - spanBase;
+ 
+                         MultiRange s2aSlice = Storage.Range.Slice((ulong)spanBase, (ulong)size);
+-                        _physicalMemory.S2ASignalReadForTexture(s2aSlice);
+                         s2aScratch?.Dispose();
+-                        dataSpan = _physicalMemory.S2AGetSpanScratch(s2aSlice, out s2aScratch);
++                        s2aScratch = null;
++                        dataSpan = _physicalMemory.S2AGetTextureReadSpan(s2aSlice, out s2aScratch);
+                     }
+ 
+                     // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 9fc4ae947f97fba8a0eece5e329bd192a281cd18..e9a897854cdf789aad1fd12c1fe726dec31724e1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -232,7 +232,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             if (copy == null)
+             {
+                 S2ASignalReadForTexture(range);
+-                return GetSpan(range);
++                return S2AGetSpanScratch(range, out owner);
+             }
+ 
+             // 先检查每段与总长，不能让 ulong 加法或 int 截断把真实映射洞隐藏起来。

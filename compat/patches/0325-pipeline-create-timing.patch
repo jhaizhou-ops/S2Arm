@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index fbd8488f4d1b1816d0c27b84e6d89948b7056209..cccc45fc41abe7a8e3db82c0973a833a34f02be7 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -9,6 +9,24 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private const int RequiredSubgroupSize = 32;
+         private const int MaxDynamicStatesCount = 9;
++        private static long _s2aPipeCount, _s2aPipeMs, _s2aPipeMax, _s2aPipeSlow, _s2aPipeReported;
++
++        // S2A：Android 启动期 GPU 线程连续满载，区分是驱动管线编译还是别的工作。
++        private static void S2AReportPipelineTime(long start)
++        {
++            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
++            _s2aPipeCount++;
++            _s2aPipeMs += (long)ms;
++            if ((long)ms > _s2aPipeMax) _s2aPipeMax = (long)ms;
++            if (ms > 50) _s2aPipeSlow++;
++            long now = Environment.TickCount64;
++            if (now - _s2aPipeReported >= 5000)
++            {
++                _s2aPipeReported = now;
++                Console.Error.WriteLine($"[vkpb] 管线创建：{_s2aPipeCount} 条、总 {_s2aPipeMs} ms、max {_s2aPipeMax} ms、>50ms {_s2aPipeSlow}");
++                _s2aPipeCount = _s2aPipeMs = _s2aPipeMax = _s2aPipeSlow = 0;
++            }
++        }
+ 
+         public PipelineUid Internal;
+ 
+@@ -395,7 +413,9 @@ namespace Ryujinx.Graphics.Vulkan
+                     pipelineCreateInfo.Stage.PSpecializationInfo = info;
+                 }
+ 
++                long s2aComputeStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                 gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();
++                S2AReportPipelineTime(s2aComputeStart);
+             }
+ 
+             pipeline = new Auto<DisposablePipeline>(new DisposablePipeline(gd.Api, device, pipelineHandle));
+@@ -699,7 +719,9 @@ namespace Ryujinx.Graphics.Vulkan
+                     RenderPass = renderPass,
+                 };
+ 
++                long s2aGraphicsStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                 Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
++                S2AReportPipelineTime(s2aGraphicsStart);
+ 
+                 if (throwOnError)
+                 {

@@ -1,0 +1,397 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fc5a4cb2e55574ad163a204389d161ce391cf36
+--- /dev/null
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -0,0 +1,377 @@
++using LibHac;
++using LibHac.Common;
++using LibHac.Fs;
++using LibHac.Fs.Fsa;
++using LibHac.FsSrv.FsCreator;
++using LibHac.FsSrv.Impl;
++using LibHac.FsSystem;
++using LibHac.FsSystem.Save;
++using Ryujinx.Common.Logging;
++using System;
++using System.IO;
++using System.Runtime.InteropServices;
++using System.Threading;
++using Path = LibHac.Fs.Path;
++
++namespace Ryujinx.HLE.FileSystem
++{
++    // S2Arm: writable directory saves on the host's APFS take the transaction from the upstream reference implementation / Super Mario Odyssey iOS (MIT, see README):
++    // at mount the committed directory <save>/0 is clonefile'd (copy-on-write, no bytes copied) into the working directory <save>/1 and the
++    // game reads and writes there; Commit clones the working directory to <save>/.s2a_new and renamex_np(RENAME_SWAP)s it with <save>/0,
++    // then deletes the swapped-out old version. Killed or powered off at any moment, <save>/0 is the old version or the new one, never a mix.
++    // LibHac's own directory save copies the whole tree byte by byte at every mount and every commit. Here LibHac still serves files, locks
++    // and extra data (opened with journaling off, so it works on <save>/1 directly and commits nothing); this layer does the clone and the swap.
++    // Read-only opens, other kinds of saves and anything the host cannot clone keep LibHac's path unchanged.
++    public sealed class S2ASaveDataFileSystemCreator : ISaveDataFileSystemCreator
++    {
++        private readonly ISaveDataFileSystemCreator _inner;
++        private readonly string _baseDir;
++
++        public S2ASaveDataFileSystemCreator(ISaveDataFileSystemCreator inner, string baseDir)
++        {
++            _inner = inner;
++            _baseDir = baseDir;
++        }
++
++        // Host directory of a save, as LibHac's emulated built-in storage lays it out (<base>/bis/<partition>/save/<id>); null when not a host directory
++        internal static string HostDir(string baseDir, SaveDataSpaceId spaceId, ulong saveDataId)
++        {
++            string partition = spaceId switch
++            {
++                SaveDataSpaceId.User => "user",
++                SaveDataSpaceId.System => "system",
++                _ => null,
++            };
++
++            if (partition == null || !(OperatingSystem.IsMacOS() || OperatingSystem.IsIOS()))
++            {
++                return null;
++            }
++
++            string dir = System.IO.Path.Combine(baseDir, "bis", partition, "save", saveDataId.ToString("x16"));
++
++            return Directory.Exists(dir) ? dir : null;
++        }
++
++        public Result Create(ref SharedRef<ISaveDataFileSystem> outFileSystem, ref readonly SharedRef<IFileSystem> baseFileSystem, SaveDataSpaceId spaceId, ulong saveDataId, bool allowDirectorySaveData, bool isDeviceUniqueMac, bool isJournalingSupported, bool isMultiCommitSupported, bool openReadOnly, bool openShared, ISaveDataCommitTimeStampGetter timeStampGetter, bool isReconstructible)
++        {
++            string dir = openReadOnly || !isJournalingSupported ? null : HostDir(_baseDir, spaceId, saveDataId);
++            string why = dir == null ? null : S2ASaveTransaction.Mount(dir);
++
++            if (dir == null || why != null)
++            {
++                if (why != null)
++                {
++                    S2ASaveTransaction.Red($"存档事务：挂载 {dir} 时{why}，这次改走 LibHac 原样的逐字节复制（已提交版本不动）");
++                }
++
++                return _inner.Create(ref outFileSystem, in baseFileSystem, spaceId, saveDataId, allowDirectorySaveData, isDeviceUniqueMac, isJournalingSupported, isMultiCommitSupported, openReadOnly, openShared, timeStampGetter, isReconstructible);
++            }
++
++            using SharedRef<ISaveDataFileSystem> fileSystem = default;
++            Result result = _inner.Create(ref fileSystem.Ref, in baseFileSystem, spaceId, saveDataId, allowDirectorySaveData, isDeviceUniqueMac, isJournalingSupported: false, isMultiCommitSupported, openReadOnly, openShared, timeStampGetter, isReconstructible);
++
++            if (result.IsFailure())
++            {
++                return result;
++            }
++
++            using SharedRef<ISaveDataFileSystem> wrapped = new(new S2ASaveTransaction(ref fileSystem.Ref, dir));
++            outFileSystem.SetByMove(ref wrapped.Ref);
++
++            return Result.Success;
++        }
++
++        public Result CreateRaw(ref SharedRef<IFile> outFile, ref readonly SharedRef<IFileSystem> fileSystem, ulong saveDataId, OpenMode openMode) => _inner.CreateRaw(ref outFile, in fileSystem, saveDataId, openMode);
++        public Result CreateExtraDataAccessor(ref SharedRef<ISaveDataExtraDataAccessor> outExtraDataAccessor, ref readonly SharedRef<IStorage> baseStorage, bool isDeviceUniqueMac, bool isIntegritySaveData, bool isReconstructible) => _inner.CreateExtraDataAccessor(ref outExtraDataAccessor, in baseStorage, isDeviceUniqueMac, isIntegritySaveData, isReconstructible);
++        public Result CreateInternalStorage(ref SharedRef<IFileSystem> outFileSystem, ref readonly SharedRef<IFileSystem> baseFileSystem, SaveDataSpaceId spaceId, ulong saveDataId, bool isDeviceUniqueMac, bool useUniqueKey1, ISaveDataCommitTimeStampGetter timeStampGetter, bool isReconstructible) => _inner.CreateInternalStorage(ref outFileSystem, in baseFileSystem, spaceId, saveDataId, isDeviceUniqueMac, useUniqueKey1, timeStampGetter, isReconstructible);
++        public Result RecoverMasterHeader(ref readonly SharedRef<IFileSystem> baseFileSystem, ulong saveDataId, IBufferManager bufferManager, bool isDeviceUniqueMac, bool isReconstructible) => _inner.RecoverMasterHeader(in baseFileSystem, saveDataId, bufferManager, isDeviceUniqueMac, isReconstructible);
++        public Result UpdateMac(ref readonly SharedRef<IFileSystem> baseFileSystem, ulong saveDataId, bool isDeviceUniqueMac, bool isReconstructible) => _inner.UpdateMac(in baseFileSystem, saveDataId, isDeviceUniqueMac, isReconstructible);
++        public Result Format(in ValueSubStorage saveImageStorage, long blockSize, int countExpandMax, uint blockCount, uint journalBlockCount, IBufferManager bufferManager, bool isDeviceUniqueMac, in HashSalt hashSalt, RandomDataGenerator encryptionKeyGenerator, bool isReconstructible, uint version) => _inner.Format(in saveImageStorage, blockSize, countExpandMax, blockCount, journalBlockCount, bufferManager, isDeviceUniqueMac, in hashSalt, encryptionKeyGenerator, isReconstructible, version);
++        public Result FormatAsIntegritySaveData(in ValueSubStorage saveImageStorage, long blockSize, uint blockCount, IBufferManager bufferManager, bool isDeviceUniqueMac, RandomDataGenerator encryptionKeyGenerator, bool isReconstructible, uint version) => _inner.FormatAsIntegritySaveData(in saveImageStorage, blockSize, blockCount, bufferManager, isDeviceUniqueMac, encryptionKeyGenerator, isReconstructible, version);
++        public Result ExtractSaveDataParameters(out JournalIntegritySaveDataParameters outParams, IStorage saveFileStorage, bool isDeviceUniqueMac, bool isReconstructible) => _inner.ExtractSaveDataParameters(out outParams, saveFileStorage, isDeviceUniqueMac, isReconstructible);
++        public Result ExtendSaveData(SaveDataExtender extender, in ValueSubStorage baseStorage, in ValueSubStorage logStorage, bool isDeviceUniqueMac, bool isReconstructible) => _inner.ExtendSaveData(extender, in baseStorage, in logStorage, isDeviceUniqueMac, isReconstructible);
++        public Result IsProvisionallyCommittedSaveData(out bool outIsProvisionallyCommitted, ref readonly SharedRef<IFileSystem> baseFileSystem, in SaveDataInfo info, bool isDeviceUniqueMac, ISaveDataCommitTimeStampGetter timeStampGetter, bool isReconstructible) => _inner.IsProvisionallyCommittedSaveData(out outIsProvisionallyCommitted, in baseFileSystem, in info, isDeviceUniqueMac, timeStampGetter, isReconstructible);
++        public void SetMacGenerationSeed(ReadOnlySpan<byte> seed) => _inner.SetMacGenerationSeed(seed);
++        public IMacGenerator GetMacGenerator(bool isDeviceUniqueMac, bool isTemporaryTransferSave) => _inner.GetMacGenerator(isDeviceUniqueMac, isTemporaryTransferSave);
++        public void Dispose() => _inner.Dispose();
++    }
++
++    // One mounted transactional save: forwards to LibHac's directory save (journaling off, working on <save>/1) and owns Commit / Rollback
++    public sealed partial class S2ASaveTransaction : ISaveDataFileSystem
++    {
++        private const uint RenameSwap = 0x2;   // renamex_np RENAME_SWAP
++
++        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
++        private static partial int clonefile(string src, string dst, uint flags);
++
++        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
++        private static partial int renamex_np(string from, string to, uint flags);
++
++        private SharedRef<ISaveDataFileSystem> _base;
++        private readonly string _dir;
++        private readonly object _lock = new();
++        private static int _commits;
++        private int _openWritable;   // files open for writing: a commit with one open is refused, as LibHac's journaled commit does
++
++        internal S2ASaveTransaction(ref SharedRef<ISaveDataFileSystem> baseFileSystem, string dir)
++        {
++            _base = SharedRef<ISaveDataFileSystem>.CreateMove(ref baseFileSystem);
++            _dir = dir;
++        }
++
++        internal static void Red(string what)
++        {
++            Logger.Error?.Print(LogClass.ServiceFs, what);
++            S2AHooks.Red?.Invoke(what);
++        }
++
++        private static string Errno(string op) => $"{op} 失败（errno {Marshal.GetLastPInvokeError()}）";
++
++        // Before LibHac opens the save: clear what an interrupted transaction left, then clone the committed version into the working directory.
++        // Returns why it could not (the caller then takes LibHac's own path), or null
++        internal static string Mount(string dir)
++        {
++            string committed = System.IO.Path.Combine(dir, "0"), working = System.IO.Path.Combine(dir, "1"), fresh = System.IO.Path.Combine(dir, ".s2a_new");
++
++            try
++            {
++                if (Directory.Exists(fresh))
++                {
++                    Directory.Delete(fresh, true);   // a clone that never got swapped in, or the old version a swap left behind
++                }
++
++                if (!Directory.Exists(committed))
++                {
++                    // Never committed (LibHac creates only the working directory for a new save): what it has is the save, as LibHac's own recovery takes it
++                    if (!Directory.Exists(working))
++                    {
++                        Directory.CreateDirectory(working);
++                    }
++
++                    if (clonefile(working, committed, 0) != 0)
++                    {
++                        return Errno("把工作目录克隆成已提交版本");
++                    }
++                }
++
++                if (Directory.Exists(working))
++                {
++                    Directory.Delete(working, true);
++                }
++
++                if (clonefile(committed, working, 0) != 0)
++                {
++                    return Errno("把已提交版本克隆成工作目录");
++                }
++
++                string extra0 = System.IO.Path.Combine(dir, "ExtraData0"), extra1 = System.IO.Path.Combine(dir, "ExtraData1");
++
++                if (File.Exists(extra0))
++                {
++                    File.Copy(extra0, extra1, overwrite: true);
++                }
++            }
++            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++            {
++                return $"出错：{e.Message}";
++            }
++
++            return null;
++        }
++
++        // Swap the working directory in as the committed version; on any failure the committed version stays as it was
++        private Result CommitLocked()
++        {
++            if (Volatile.Read(ref _openWritable) > 0)
++            {
++                return ResultFs.WriteModeFileNotClosed.Log();
++            }
++
++            string committed = System.IO.Path.Combine(_dir, "0"), working = System.IO.Path.Combine(_dir, "1"), fresh = System.IO.Path.Combine(_dir, ".s2a_new");
++            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
++
++            try
++            {
++                if (Directory.Exists(fresh))
++                {
++                    Directory.Delete(fresh, true);
++                }
++
++                if (clonefile(working, fresh, 0) != 0)
++                {
++                    int errno = Marshal.GetLastPInvokeError();
++                    Red($"存档事务：提交 {_dir} 时克隆工作目录失败（errno {errno}），已提交版本不动");
++
++                    return errno == 28 ? ResultFs.UsableSpaceNotEnough.Log() : ResultFs.UnexpectedInLocalFileSystemE.Log();   // 28 = ENOSPC
++                }
++
++                if (renamex_np(fresh, committed, RenameSwap) != 0)
++                {
++                    Red($"存档事务：提交 {_dir} 时{Errno("原子交换（RENAME_SWAP）")}，已提交版本不动");
++                    Directory.Delete(fresh, true);
++
++                    return ResultFs.UnexpectedInLocalFileSystemE.Log();
++                }
++
++                Directory.Delete(fresh, true);   // the old version, swapped out
++
++                // Extra data (owner, sizes, time stamps) follows as one file: a copy, then rename(2) over the committed one
++                string extra0 = System.IO.Path.Combine(_dir, "ExtraData0"), extra1 = System.IO.Path.Combine(_dir, "ExtraData1"), extraNew = System.IO.Path.Combine(_dir, ".s2a_extra");
++
++                if (File.Exists(extra1))
++                {
++                    File.Copy(extra1, extraNew, overwrite: true);
++                    File.Move(extraNew, extra0, overwrite: true);
++                }
++
++                Logger.Info?.Print(LogClass.ServiceFs, $"存档提交 #{Interlocked.Increment(ref _commits)}：{_dir} 克隆 + 原子交换 {System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds:F1} ms");
++            }
++            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++            {
++                Red($"存档事务：提交 {_dir} 出错：{e.Message}");
++
++                return ResultFs.UnexpectedInLocalFileSystemE.Log();
++            }
++
++            return Result.Success;
++        }
++
++        protected override Result DoCommit()
++        {
++            lock (_lock)
++            {
++                return CommitLocked();
++            }
++        }
++
++        public override Result CommitExtraData(bool updateTimeStamp)
++        {
++            lock (_lock)
++            {
++                Result result = _base.Get.CommitExtraData(updateTimeStamp);
++
++                return result.IsFailure() ? result : CommitLocked();
++            }
++        }
++
++        // Discard what was written since the last commit: the working directory becomes a fresh clone of the committed version
++        protected override Result DoRollback()
++        {
++            lock (_lock)
++            {
++                string committed = System.IO.Path.Combine(_dir, "0"), working = System.IO.Path.Combine(_dir, "1"), fresh = System.IO.Path.Combine(_dir, ".s2a_new");
++
++                try
++                {
++                    if (Directory.Exists(fresh))
++                    {
++                        Directory.Delete(fresh, true);
++                    }
++
++                    if (clonefile(committed, fresh, 0) != 0 || renamex_np(fresh, working, RenameSwap) != 0)
++                    {
++                        Red($"存档事务：回滚 {_dir} 时{Errno("克隆 / 交换")}，工作目录保持原样");
++
++                        return ResultFs.UnexpectedInLocalFileSystemE.Log();
++                    }
++
++                    Directory.Delete(fresh, true);
++                }
++                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++                {
++                    Red($"存档事务：回滚 {_dir} 出错：{e.Message}");
++
++                    return ResultFs.UnexpectedInLocalFileSystemE.Log();
++                }
++
++                return Result.Success;
++            }
++        }
++
++        protected override Result DoOpenFile(ref UniqueRef<IFile> outFile, ref readonly Path path, OpenMode mode)
++        {
++            using UniqueRef<IFile> file = new();
++            Result result = _base.Get.OpenFile(ref file.Ref, in path, mode);
++
++            if (result.IsFailure())
++            {
++                return result;
++            }
++
++            if ((mode & OpenMode.Write) != 0)
++            {
++                Interlocked.Increment(ref _openWritable);
++                outFile.Reset(new WritableFile(ref file.Ref, this));
++            }
++            else
++            {
++                outFile.Set(ref file.Ref);
++            }
++
++            return Result.Success;
++        }
++
++        private sealed class WritableFile : IFile
++        {
++            private UniqueRef<IFile> _file;
++            private S2ASaveTransaction _owner;
++
++            public WritableFile(ref UniqueRef<IFile> file, S2ASaveTransaction owner)
++            {
++                _file = new UniqueRef<IFile>(ref file);
++                _owner = owner;
++            }
++
++            protected override Result DoRead(out long bytesRead, long offset, Span<byte> destination, in ReadOption option) => _file.Get.Read(out bytesRead, offset, destination, in option);
++            protected override Result DoWrite(long offset, ReadOnlySpan<byte> source, in WriteOption option) => _file.Get.Write(offset, source, in option);
++            protected override Result DoFlush() => _file.Get.Flush();
++            protected override Result DoSetSize(long size) => _file.Get.SetSize(size);
++            protected override Result DoGetSize(out long size) => _file.Get.GetSize(out size);
++            protected override Result DoOperateRange(Span<byte> outBuffer, OperationId operationId, long offset, long size, ReadOnlySpan<byte> inBuffer) => _file.Get.OperateRange(outBuffer, operationId, offset, size, inBuffer);
++
++            public override void Dispose()
++            {
++                _file.Destroy();
++
++                if (_owner != null)
++                {
++                    Interlocked.Decrement(ref _owner._openWritable);
++                    _owner = null;
++                }
++
++                base.Dispose();
++            }
++        }
++
++        protected override Result DoCreateFile(ref readonly Path path, long size, CreateFileOptions option) => _base.Get.CreateFile(in path, size, option);
++        protected override Result DoDeleteFile(ref readonly Path path) => _base.Get.DeleteFile(in path);
++        protected override Result DoCreateDirectory(ref readonly Path path) => _base.Get.CreateDirectory(in path);
++        protected override Result DoDeleteDirectory(ref readonly Path path) => _base.Get.DeleteDirectory(in path);
++        protected override Result DoDeleteDirectoryRecursively(ref readonly Path path) => _base.Get.DeleteDirectoryRecursively(in path);
++        protected override Result DoCleanDirectoryRecursively(ref readonly Path path) => _base.Get.CleanDirectoryRecursively(in path);
++        protected override Result DoRenameFile(ref readonly Path currentPath, ref readonly Path newPath) => _base.Get.RenameFile(in currentPath, in newPath);
++        protected override Result DoRenameDirectory(ref readonly Path currentPath, ref readonly Path newPath) => _base.Get.RenameDirectory(in currentPath, in newPath);
++        protected override Result DoGetEntryType(out DirectoryEntryType entryType, ref readonly Path path) => _base.Get.GetEntryType(out entryType, in path);
++        protected override Result DoGetFreeSpaceSize(out long freeSpace, ref readonly Path path) => _base.Get.GetFreeSpaceSize(out freeSpace, in path);
++        protected override Result DoGetTotalSpaceSize(out long totalSpace, ref readonly Path path) => _base.Get.GetTotalSpaceSize(out totalSpace, in path);
++        protected override Result DoOpenDirectory(ref UniqueRef<IDirectory> outDirectory, ref readonly Path path, OpenDirectoryMode mode) => _base.Get.OpenDirectory(ref outDirectory, in path, mode);
++        protected override Result DoCommitProvisionally(long counter) => _base.Get.CommitProvisionally(counter);
++        protected override Result DoFlush() => _base.Get.Flush();
++        protected override Result DoGetFileTimeStampRaw(out FileTimeStampRaw timeStamp, ref readonly Path path) => _base.Get.GetFileTimeStampRaw(out timeStamp, in path);
++        protected override Result DoQueryEntry(Span<byte> outBuffer, ReadOnlySpan<byte> inBuffer, QueryId queryId, ref readonly Path path) => _base.Get.QueryEntry(outBuffer, inBuffer, queryId, in path);
++        protected override Result DoGetFileSystemAttribute(out FileSystemAttribute outAttribute) => _base.Get.GetFileSystemAttribute(out outAttribute);
++
++        public override bool IsSaveDataFileSystemCacheEnabled() => _base.Get.IsSaveDataFileSystemCacheEnabled();
++        public override Result RollbackOnlyModified() => _base.Get.RollbackOnlyModified();
++        public override Result WriteExtraData(in SaveDataExtraData extraData) => _base.Get.WriteExtraData(in extraData);
++        public override Result ReadExtraData(out SaveDataExtraData extraData) => _base.Get.ReadExtraData(out extraData);
++        public override void RegisterExtraDataAccessorObserver(ISaveDataExtraDataAccessorObserver observer, SaveDataSpaceId spaceId, ulong saveDataId) => _base.Get.RegisterExtraDataAccessorObserver(observer, spaceId, saveDataId);
++
++        public override void Dispose()
++        {
++            _base.Destroy();
++            base.Dispose();
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+index 4e0fdf554633684eb31c1775d8cbad3d577ac236..58a44e2b98ee2cf344bfdc1add9c637719148da7 100644
+--- a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
++++ b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+@@ -203,6 +203,9 @@ namespace Ryujinx.HLE.FileSystem
+             // Use our own encrypted fs creator that doesn't actually do any encryption
+             fsServerObjects.FsCreators.EncryptedFileSystemCreator = new EncryptedFileSystemCreator();
+ 
++            // S2Arm: writable directory saves commit by clonefile + atomic swap instead of a byte-by-byte copy (S2ASaveCommit.cs)
++            fsServerObjects.FsCreators.SaveDataFileSystemCreator = new S2ASaveDataFileSystemCreator(fsServerObjects.FsCreators.SaveDataFileSystemCreator, AppDataManager.BaseDirPath);
++
+             GameCard = fsServerObjects.GameCard;
+             SdCard = fsServerObjects.Sdmmc;
+ 

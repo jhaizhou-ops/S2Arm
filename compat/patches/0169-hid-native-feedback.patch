@@ -1,0 +1,113 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 0b0a46913dec161e105886ffa6f38644731a4327..4b07883b7ce6fd0af7d46669170b8636583ff2f7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -23,14 +23,24 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         private readonly bool[] _supportedPlayers;
+         private VibrationValue _neutralVibrationValue = new()
+         {
+-            AmplitudeLow = 0.01f,
++            AmplitudeLow = 0f,
+             FrequencyLow = 160f,
+             AmplitudeHigh = 0f,
+             FrequencyHigh = 320f,
+         };
+ 
+         internal NpadJoyHoldType JoyHold { get; set; }
+-        internal bool SixAxisActive = false; // TODO: link to hidserver when implemented
++        private readonly HashSet<(long UserId, int Handle)> _sixAxisSensors = new();
++        public bool SixAxisActive { get { lock (_sixAxisSensors) return _sixAxisSensors.Count != 0; } }
++
++        public void SetSixAxisActive(long userId, int handle, bool active)
++        {
++            lock (_sixAxisSensors)
++            {
++                if (active) _sixAxisSensors.Add((userId, handle));
++                else _sixAxisSensors.Remove((userId, handle));
++            }
++        }
+         internal ControllerType SupportedStyleSets { get; set; }
+ 
+         public Dictionary<PlayerIndex, ConcurrentQueue<(VibrationValue, VibrationValue)>> RumbleQueues = new();
+@@ -56,7 +66,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             _activeCount = 0;
+ 
+             JoyHold = NpadJoyHoldType.Vertical;
+-            SixAxisActive = false;
+         }
+ 
+         internal ref KEvent GetStyleSetUpdateEvent(PlayerIndex player)
+@@ -644,7 +653,8 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // (10-21 d2r: ~70 calls per second, 232 B each, half of the game threads' remaining service allocations)
+         public void UpdateRumbleQueue(PlayerIndex index, byte position, VibrationValue vibrationValue)
+         {
+-            UpdateRumbleQueue(index, position == 0 ? vibrationValue : _neutralVibrationValue, position == 1 ? vibrationValue : _neutralVibrationValue);
++            UpdateRumbleQueue(index, position == 0 ? vibrationValue : GetLastVibrationValue(index, 0),
++                position == 1 ? vibrationValue : GetLastVibrationValue(index, 1));
+         }
+ 
+         // S2Arm: a left / right pair where a missing side is neutral (IHidServer.SendVibrationValues groups, without the per-group
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/Types/Vibration/VibrationValue.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/Types/Vibration/VibrationValue.cs
+index 490d1e6ab2a04e556724fa00a208330c763280f7..240e6c5b2ccf49cc90782ce7ee6e2f6d105b5110 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/Types/Vibration/VibrationValue.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidServer/Types/Vibration/VibrationValue.cs
+@@ -2,7 +2,7 @@ using System;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Hid
+ {
+-    public struct VibrationValue
++    public struct VibrationValue : IEquatable<VibrationValue>
+     {
+         public float AmplitudeLow;
+         public float FrequencyLow;
+@@ -11,14 +11,16 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         public readonly override bool Equals(object obj)
+         {
+-            return obj is VibrationValue value &&
+-                   AmplitudeLow == value.AmplitudeLow &&
+-                   AmplitudeHigh == value.AmplitudeHigh;
++            return obj is VibrationValue value && Equals(value);
+         }
+ 
++        public readonly bool Equals(VibrationValue value) =>
++            AmplitudeLow == value.AmplitudeLow && FrequencyLow == value.FrequencyLow &&
++            AmplitudeHigh == value.AmplitudeHigh && FrequencyHigh == value.FrequencyHigh;
++
+         public readonly override int GetHashCode()
+         {
+-            return HashCode.Combine(AmplitudeLow, AmplitudeHigh);
++            return HashCode.Combine(AmplitudeLow, FrequencyLow, AmplitudeHigh, FrequencyHigh);
+         }
+ 
+         public static bool operator ==(VibrationValue left, VibrationValue right)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 2064c18a9dfd1a94fdaa138a0fae398ddcbedbbb..1e765fc91d907f6dece96a84b1d474bf60cdb29b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -364,6 +364,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             context.RequestData.BaseStream.Position += 4; // Padding
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ 
++            context.Device.Hid.Npads.SetSixAxisActive(appletResourceUserId, sixAxisSensorHandle, true);
+             Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle });
+ 
+             return ResultCode.Success;
+@@ -377,6 +378,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             context.RequestData.BaseStream.Position += 4; // Padding
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ 
++            context.Device.Hid.Npads.SetSixAxisActive(appletResourceUserId, sixAxisSensorHandle, false);
+             Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, sixAxisSensorHandle });
+ 
+             return ResultCode.Success;
+@@ -625,9 +627,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             context.RequestData.BaseStream.Position += 4; // Padding
+             long appletResourceUserId = context.RequestData.ReadInt64();
+             
+-            // TODO: link to context.Device.Hid.Npads.SixAxisActive when properly implemented
+-            // We currently do not support stopping or starting SixAxisTracking.
+-            
+             context.ResponseData.Write(context.Device.Hid.Npads.isAtRest(playerNumber));
+             return ResultCode.Success;
+         }

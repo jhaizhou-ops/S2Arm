@@ -1,0 +1,122 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 07ccd2ec045b13c85149d4ea624e19e841bf4e28..bd11878b16cf413f414f7137d89d922701fd4ce5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -46,6 +46,11 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         public Dictionary<PlayerIndex, ConcurrentQueue<(VibrationValue, VibrationValue)>> RumbleQueues = new();
+         public Dictionary<PlayerIndex, (VibrationValue, VibrationValue)> LastVibrationValues = new();
+         private readonly object _rumbleLock = new();
++        // Output hooks run under this same lock. They must not call back from native code or wait for transport IO.
++        public object RumbleSyncRoot => _rumbleLock;
++        public Action RumbleBeforeAccepted;
++        public Action<PlayerIndex, VibrationValue, VibrationValue> RumbleAccepted;
++        public Action<bool> RumblePermissionChanged;
+         private bool _vibrationPermitted = true;
+         public bool VibrationPermitted { get { lock (_rumbleLock) return _vibrationPermitted; } }
+ 
+@@ -56,6 +61,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                 if (_vibrationPermitted == permitted) return;
+                 _vibrationPermitted = permitted;
+                 LastVibrationValues.Clear();
++                RumblePermissionChanged?.Invoke(permitted);
+                 if (!permitted) foreach (var queue in RumbleQueues.Values)
+                 {
+                     while (queue.TryDequeue(out _)) { }
+@@ -651,19 +657,22 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         public void UpdateRumbleQueue(PlayerIndex index, Dictionary<byte, VibrationValue> dualVibrationValues)
+         {
+-            if (RumbleQueues.ContainsKey(index))
++            lock (_rumbleLock)
+             {
++                if (RumbleAccepted == null && !RumbleQueues.ContainsKey(index)) return;
++                if (!_vibrationPermitted) return;
++                RumbleBeforeAccepted?.Invoke();
+                 if (!dualVibrationValues.TryGetValue(0, out VibrationValue leftVibrationValue))
+                 {
+-                    leftVibrationValue = _neutralVibrationValue;
++                    leftVibrationValue = GetLastVibrationValueLocked(index, 0);
+                 }
+ 
+                 if (!dualVibrationValues.TryGetValue(1, out VibrationValue rightVibrationValue))
+                 {
+-                    rightVibrationValue = _neutralVibrationValue;
++                    rightVibrationValue = GetLastVibrationValueLocked(index, 1);
+                 }
+ 
+-                UpdateRumbleQueue(index, leftVibrationValue, rightVibrationValue);
++                UpdateRumbleQueue(index, leftVibrationValue, rightVibrationValue, prepared: true);
+             }
+         }
+ 
+@@ -673,26 +682,39 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         {
+             lock (_rumbleLock)
+             {
+-                UpdateRumbleQueue(index, position == 0 ? vibrationValue : GetLastVibrationValue(index, 0),
+-                    position == 1 ? vibrationValue : GetLastVibrationValue(index, 1));
++                if (!_vibrationPermitted) return;
++                // Check the output session before filling the unmodified side from the previous accepted pair.
++                RumbleBeforeAccepted?.Invoke();
++                UpdateRumbleQueue(index, position == 0 ? vibrationValue : GetLastVibrationValueLocked(index, 0),
++                    position == 1 ? vibrationValue : GetLastVibrationValueLocked(index, 1), prepared: true);
+             }
+         }
+ 
+-        // S2Arm: a left / right pair where a missing side is neutral (IHidServer.SendVibrationValues groups, without the per-group
+-        // dictionary; same result as the dictionary overload above)
++        // A batch updates only its specified handles; retain an absent side from the same output session.
+         public void UpdateRumbleQueue(PlayerIndex index, bool hasLeft, VibrationValue left, bool hasRight, VibrationValue right)
+         {
+-            if (RumbleQueues.ContainsKey(index))
++            lock (_rumbleLock)
+             {
+-                UpdateRumbleQueue(index, hasLeft ? left : _neutralVibrationValue, hasRight ? right : _neutralVibrationValue);
++                if (RumbleAccepted == null && !RumbleQueues.ContainsKey(index)) return;
++                if (!_vibrationPermitted) return;
++                RumbleBeforeAccepted?.Invoke();
++                UpdateRumbleQueue(index, hasLeft ? left : GetLastVibrationValueLocked(index, 0),
++                    hasRight ? right : GetLastVibrationValueLocked(index, 1), prepared: true);
+             }
+         }
+ 
+-        private void UpdateRumbleQueue(PlayerIndex index, VibrationValue leftVibrationValue, VibrationValue rightVibrationValue)
++        private void UpdateRumbleQueue(PlayerIndex index, VibrationValue leftVibrationValue, VibrationValue rightVibrationValue, bool prepared = false)
+         {
+             lock (_rumbleLock)
+             {
+                 if (!_vibrationPermitted) return;
++                if (!prepared) RumbleBeforeAccepted?.Invoke();
++                if (RumbleAccepted != null)
++                {
++                    RumbleAccepted(index, leftVibrationValue, rightVibrationValue);
++                    LastVibrationValues[index] = (leftVibrationValue, rightVibrationValue);
++                    return;
++                }
+                 if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
+                 {
+                     if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue) || !leftVibrationValue.Equals(dualVibrationValue.Item1) || !rightVibrationValue.Equals(dualVibrationValue.Item2))
+@@ -709,15 +731,17 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         {
+             lock (_rumbleLock)
+             {
+-                if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue))
+-                {
+-                    return _neutralVibrationValue;
+-                }
+-
+-                return (position == 0) ? dualVibrationValue.Item1 : dualVibrationValue.Item2;
++                RumbleBeforeAccepted?.Invoke();
++                return GetLastVibrationValueLocked(index, position);
+             }
+         }
+ 
++        private VibrationValue GetLastVibrationValueLocked(PlayerIndex index, byte position)
++        {
++            if (!LastVibrationValues.TryGetValue(index, out var values)) return _neutralVibrationValue;
++            return position == 0 ? values.Item1 : values.Item2;
++        }
++
+         public void ResetRumble(PlayerIndex index)
+         {
+             lock (_rumbleLock)

@@ -1,0 +1,269 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/ManagerServer.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/ManagerServer.cs
+index 911296ff5238a34e4149698b4c828ae974588ef2..482ca3684ba1d4e4492c9f9cb80c18872cc3696e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/ManagerServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AccountService/ManagerServer.cs
+@@ -1,13 +1,6 @@
+-using Microsoft.IdentityModel.JsonWebTokens;
+-using Microsoft.IdentityModel.Tokens;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.HOS.Kernel.Threading;
+ using Ryujinx.HLE.HOS.Services.Account.Acc.AsyncContext;
+-using System;
+-using System.Collections.Generic;
+-using System.Security.Claims;
+-using System.Security.Cryptography;
+-using System.Text;
+ using System.Threading;
+ using System.Threading.Tasks;
+ 
+@@ -15,91 +8,32 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
+ {
+     class ManagerServer
+     {
+-        // TODO: Determine where and how NetworkServiceAccountId is set.
+-        private const long NetworkServiceAccountId = 0xcafe;
+-
+ #pragma warning disable IDE0052 // Remove unread private member
+         private readonly UserId _userId;
+ #pragma warning restore IDE0052
+ 
+-        private byte[] _cachedTokenData;
+-        private DateTime _cachedTokenExpiry;
+-
+         public ManagerServer(UserId userId)
+         {
+             _userId = userId;
+         }
+ 
+-        private static string GenerateIdToken()
+-        {
+-            using RSA provider = RSA.Create(2048);
+-
+-            RSAParameters parameters = provider.ExportParameters(true);
+-
+-            RsaSecurityKey secKey = new(parameters);
+-
+-            SigningCredentials credentials = new(secKey, SecurityAlgorithms.RsaSha256);
+-
+-            credentials.Key.KeyId = parameters.ToString();
+-
+-            byte[] rawUserId = new byte[0x10];
+-            RandomNumberGenerator.Fill(rawUserId);
+-
+-            byte[] deviceId = new byte[0x10];
+-            RandomNumberGenerator.Fill(deviceId);
+-
+-            byte[] deviceAccountId = new byte[0x10];
+-            RandomNumberGenerator.Fill(deviceAccountId);
+-
+-            SecurityTokenDescriptor descriptor = new()
+-            {
+-                Subject = new ClaimsIdentity([new Claim(JwtRegisteredClaimNames.Sub, Convert.ToHexString(rawUserId).ToLower())]),
+-                SigningCredentials = credentials,
+-                Audience = "ed9e2f05d286f7b8",
+-                Issuer = "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com",
+-                TokenType = "id_token",
+-                IssuedAt = DateTime.UtcNow,
+-                Expires = DateTime.UtcNow + TimeSpan.FromHours(3),
+-                Claims = new Dictionary<string, object>
+-                {
+-                    { "jku", "https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com/1.0.0/certificates" },
+-                    { "di", Convert.ToHexString(deviceId).ToLower() },
+-                    { "sn", "XAW10000000000" },
+-                    { "bs:did", Convert.ToHexString(deviceAccountId).ToLower() }
+-                }
+-            };
+-
+-            return new JsonWebTokenHandler().CreateToken(descriptor);
+-        }
+-
+         public ResultCode CheckAvailability(ServiceCtx context)
+         {
+-            // NOTE: This opens the file at "su/baas/USERID_IN_UUID_STRING.dat" where USERID_IN_UUID_STRING is formatted as "%08x-%04x-%04x-%02x%02x-%08x%04x".
+-            //       Then it searches the Availability of Online Services related to the UserId in this file and returns it.
+-
+-            Logger.Stub?.PrintStub(LogClass.ServiceAcc);
+-
+-            // NOTE: Even if we try to return different error codes here, the guest still needs other calls.
+-            return ResultCode.Success;
++            // 真机码未查到，按离线语义假设：没有绑定网络账号。
++            return ResultCode.NetworkServiceAccountRegistrationRequired;
+         }
+ 
+         public ResultCode GetAccountId(ServiceCtx context)
+         {
+-            // NOTE: This opens the file at "su/baas/USERID_IN_UUID_STRING.dat" (where USERID_IN_UUID_STRING is formatted
+-            //       as "%08x-%04x-%04x-%02x%02x-%08x%04x") in the account:/ savedata.
+-            //       Then it searches the NetworkServiceAccountId related to the UserId in this file and returns it.
+-
+-            Logger.Stub?.PrintStub(LogClass.ServiceAcc, new { NetworkServiceAccountId });
+-
+-            context.ResponseData.Write(NetworkServiceAccountId);
+-
+-            return ResultCode.Success;
++            // 真机码未查到，按离线语义假设：没有绑定网络账号，不写虚构账号 ID。
++            return ResultCode.NetworkServiceAccountRegistrationRequired;
+         }
+ 
+         public ResultCode EnsureIdTokenCacheAsync(ServiceCtx context, out IAsyncContext asyncContext)
+         {
+             KEvent asyncEvent = new(context.Device.System.KernelContext);
+-            AsyncExecution asyncExecution = new(asyncEvent);
++            // 真机码未查到，按离线语义假设：同步返回对象，异步 GetResult 回错。
++            AsyncExecution asyncExecution = new(asyncEvent, ResultCode.NetworkServiceAccountRegistrationRequired);
+ 
+             asyncExecution.Initialize(1000, EnsureIdTokenCacheAsyncImpl);
+ 
+@@ -116,7 +50,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
+             //       in the "account:/" savedata.
+             //       Then its read data, use dauth API with this data to get the Token Id and probably store the dauth response
+             //       in "su/cache/USERID_IN_UUID_STRING.dat" (where USERID_IN_UUID_STRING is formatted as "%08x-%04x-%04x-%02x%02x-%08x%04x") in the "account:/" savedata.
+-            //       Since we don't support online services, we can stub it.
++            //       The offline result is carried by AsyncExecution.
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceAcc);
+ 
+@@ -126,50 +60,14 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
+ 
+         public ResultCode LoadIdTokenCache(ServiceCtx context)
+         {
+-            ulong bufferPosition = context.Request.ReceiveBuff[0].Position;
+-#pragma warning disable IDE0059 // Remove unnecessary value assignment
+-            ulong bufferSize = context.Request.ReceiveBuff[0].Size;
+-#pragma warning restore IDE0059
+-
+-            // NOTE: This opens the file at "su/cache/USERID_IN_UUID_STRING.dat" (where USERID_IN_UUID_STRING is formatted as "%08x-%04x-%04x-%02x%02x-%08x%04x")
+-            //       in the "account:/" savedata and writes some data in the buffer.
+-            //       Since we don't support online services, we can stub it.
+-
+-            Logger.Stub?.PrintStub(LogClass.ServiceAcc);
+-
+-            /*
+-            if (internal_object != null)
+-            {
+-                if (bufferSize > 0xC00)
+-                {
+-                    return ResultCode.InvalidIdTokenCacheBufferSize;
+-                }
+-            }
+-            */
+-
+-            if (_cachedTokenData == null || DateTime.UtcNow > _cachedTokenExpiry)
+-            {
+-                _cachedTokenExpiry = DateTime.UtcNow + TimeSpan.FromHours(3);
+-                _cachedTokenData = Encoding.ASCII.GetBytes(GenerateIdToken());
+-            }
+-
+-            byte[] tokenData = _cachedTokenData;
+-
+-            context.Memory.Write(bufferPosition, tokenData);
+-            context.ResponseData.Write(tokenData.Length);
+-
+-            return ResultCode.Success;
++            // 真机码未查到，按离线语义假设：命令 3 / 4 均不签发伪造的令牌。
++            return ResultCode.NetworkServiceAccountRegistrationRequired;
+         }
+ 
+         public ResultCode GetNintendoAccountUserResourceCacheForApplication(ServiceCtx context)
+         {
+-            Logger.Stub?.PrintStub(LogClass.ServiceAcc, new { NetworkServiceAccountId });
+-
+-            context.ResponseData.Write(NetworkServiceAccountId);
+-
+-            // TODO: determine and fill the output IPC buffer.
+-
+-            return ResultCode.Success;
++            // 真机码未查到，按离线语义假设：不返回虚构账号与空资料。
++            return ResultCode.NetworkServiceAccountRegistrationRequired;
+         }
+ 
+         public ResultCode StoreOpenContext(ServiceCtx context)
+@@ -182,14 +80,15 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AccountService
+         public ResultCode LoadNetworkServiceLicenseKindAsync(ServiceCtx context, out IAsyncNetworkServiceLicenseKindContext asyncContext)
+         {
+             KEvent asyncEvent = new(context.Device.System.KernelContext);
+-            AsyncExecution asyncExecution = new(asyncEvent);
++            // 真机码未查到，按离线语义假设：同步返回对象，异步 GetResult 回错。
++            AsyncExecution asyncExecution = new(asyncEvent, ResultCode.NetworkServiceAccountRegistrationRequired);
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceAcc);
+ 
+             // NOTE: This is an extension of the data retrieved from the id token cache.
+             asyncExecution.Initialize(1000, EnsureIdTokenCacheAsyncImpl);
+ 
+-            asyncContext = new IAsyncNetworkServiceLicenseKindContext(asyncExecution, NetworkServiceLicenseKind.Subscribed);
++            asyncContext = new IAsyncNetworkServiceLicenseKindContext(asyncExecution, null);
+ 
+             // return ResultCode.NullObject if the IAsyncNetworkServiceLicenseKindContext pointer is null. Doesn't occur in our case.
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
+index 919f6e96788f3f9faea3f0c533f5dc98d3478736..d4885db27ffa78c6e59018cfe13d0bf6054e0511 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/AsyncContext/AsyncExecution.cs
+@@ -12,6 +12,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AsyncContext
+         private readonly CancellationToken _token;
+ 
+         public KEvent SystemEvent { get; }
++        public ResultCode Result { get; }
+         public bool IsInitialized { get; private set; }
+         public bool IsRunning { get; private set; }
+         // S2Arm: completion state of the task itself. HasDone / GetResult answer from it, not from the event: the SDK attaches the event as an
+@@ -20,9 +21,10 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc.AsyncContext
+         private volatile bool _done;
+         public bool IsDone => _done;
+ 
+-        public AsyncExecution(KEvent asyncEvent)
++        public AsyncExecution(KEvent asyncEvent, ResultCode result = ResultCode.Success)
+         {
+             SystemEvent = asyncEvent;
++            Result = result;
+ 
+             _tokenSource = new CancellationTokenSource();
+             _token = _tokenSource.Token;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
+index 0b771de82611101620a4fc1a3a165fd478def084..df261706def49ad671514d858a306508cf2b18c5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncContext.cs
+@@ -73,7 +73,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+                 return ResultCode.Unknown41;
+             }
+ 
+-            return ResultCode.Success;
++            return AsyncExecution.Result;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncNetworkServiceLicenseKindContext.cs b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncNetworkServiceLicenseKindContext.cs
+index 17583850641dc2c9e6a9dd86bf2aa326384ac759..64f445f16aa43c8f895db425d554ca91afad4ce2 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncNetworkServiceLicenseKindContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/Acc/IAsyncNetworkServiceLicenseKindContext.cs
+@@ -20,11 +20,16 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
+                 return ResultCode.AsyncExecutionNotInitialized;
+             }
+ 
+-            if (!AsyncExecution.SystemEvent.ReadableEvent.IsSignaled())
++            if (!AsyncExecution.IsDone)
+             {
+                 return ResultCode.Unknown41;
+             }
+ 
++            if (AsyncExecution.Result != ResultCode.Success)
++            {
++                return AsyncExecution.Result;
++            }
++
+             if (!_serviceLicenseKind.HasValue)
+             {
+                 return ResultCode.MissingNetworkServiceLicenseKind;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Account/ResultCode.cs b/src/Ryujinx.HLE/HOS/Services/Account/ResultCode.cs
+index 6bd3cce85a21538a9a34dd5ea9b396312334645c..8c2d8a410d7c150d05237459996c196bc545ab68 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Account/ResultCode.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Account/ResultCode.cs
+@@ -16,6 +16,7 @@ namespace Ryujinx.HLE.HOS.Services.Account
+         Unknown41 = (41 << ErrorCodeShift) | ModuleId,
+         InternetRequestDenied = (59 << ErrorCodeShift) | ModuleId,
+         UserNotFound = (100 << ErrorCodeShift) | ModuleId,
++        NetworkServiceAccountRegistrationRequired = (200 << ErrorCodeShift) | ModuleId,
+         NullObject = (302 << ErrorCodeShift) | ModuleId,
+         Unknown341 = (341 << ErrorCodeShift) | ModuleId,
+         MissingNetworkServiceLicenseKind = (400 << ErrorCodeShift) | ModuleId,

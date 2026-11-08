@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 5b5294cfb4a0db2413772e25e5ee038839923403..7edd5a4c9ec08e8344d726e2cc2260d087ca67a1 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -155,6 +155,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     }
+ 
+                     s.S2ATestHooks(now);
++                    s.S2APrimeFallback();
+ 
+                     // 主路径：系统通知。中断结束 → 重新激活 + 重启；媒体服务重置 → 重建队列
+                     if ((notes & (S2AAudioNotes.Ended | S2AAudioNotes.Reset)) != 0)
+@@ -204,6 +205,22 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
++        // S2Arm (10-24 #164 动森开场视频黑屏): 预充期的兜底启播要有人按时检查。原先只在 Start / 交下一块缓冲时检查：
++        //   视频播放器经 AudioOut 只交一块 1024 帧（21 ms < 预充下限 64 ms）、等它播完才交下一块，没人再来检查，设备永不开播，
++        //   游戏线程空转等这块播完、视频按声音时钟一帧不要（iPad 局：输出 #2 回调 0 次、交设备 1024 帧，整段视频全黑）。看门狗每 250 ms 补一次检查
++        private void S2APrimeFallback()
++        {
++            if (!Volatile.Read(ref _started) || _queueRunning)
++            {
++                return;
++            }
++
++            lock (_lock)
++            {
++                MaybeStartQueue();
++            }
++        }
++
+         // 兜底：开着播、在途有数据，设备却超过 StallMs 不回调。每次触发都打【红】，带上最近一条系统通知，免得悄悄盖住别的毛病
+         private void S2ACheckStall(long now)
+         {

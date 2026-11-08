@@ -1,0 +1,47 @@
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index 66aef1bd691d3ce87447ed31051dce9fbb854259..99154d54d3b23b0a4646f3df1ebeb6b241d7031f 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -304,6 +304,7 @@ namespace Ryujinx.Memory.Tracking
+                 // Temporarily release the tracking lock while we're running the action.
+                 Monitor.Exit(_tracking.TrackingLock);
+ 
++                bool consumed = false;
+                 try
+                 {
+                     lock (PreActionLock)
+@@ -320,6 +321,7 @@ namespace Ryujinx.Memory.Tracking
+                             if (!S2AKeepAction)
+                             {
+                                 Interlocked.Exchange(ref _preAction, null);
++                                consumed = true;
+                             }
+ 
+                             S2AKeepAction = false;
+@@ -334,6 +336,26 @@ namespace Ryujinx.Memory.Tracking
+                 {
+                     Monitor.Enter(_tracking.TrackingLock);
+                 }
++
++                // S2A（#1427 回归）：动作消费后把另一保护域也收口。动作可由宿主域信号跑完（GetSpan(tracked) 等
++                // 托管读，VirtualMemoryEvent guest:false）——重入闸跳过嵌套同句柄信号后，_preAction 在外层宿主域
++                // 信号里清掉，本域 Signal 的 UpdateProtection 只更新自己，guest 域仍停在「动作挂着」的 None 记账：
++                // 原生 act/want 不再退，排空把页设回不可读，之后同段托管借用读直接缺页（8E DmaClass.Copy AV）。
++                // 消费后按 RegisterActionImpl 同款把两域都重算——guest 域是唯一驱动真实页保护的域，必须收到
++                // 非 None（act 退）；宿主域顺手同步，防 _lastPermission 记账漂移。S2AKeepAction 时 _preAction
++                // 未清不算消费，两域照旧保持 None。
++                if (consumed)
++                {
++                    foreach (VirtualRegion region in _regions)
++                    {
++                        region.UpdateProtection();
++                    }
++
++                    foreach (VirtualRegion region in _guestRegions)
++                    {
++                        region.UpdateProtection();
++                    }
++                }
+             }
+ 
+             if (write)

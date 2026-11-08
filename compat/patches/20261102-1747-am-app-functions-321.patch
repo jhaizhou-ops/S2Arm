@@ -1,0 +1,20 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index fdb9c22df1718e297cc74a31ab43ad1c1cf066c9..9506f6ae4aef6cf411eeb2c0ed27e54c7e9b4ab8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -666,6 +666,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(321)]
++        // 未命名（Switch 2 SDK 起局读一个初始开关，Eden-NS2 记为 VI 缓冲权限位 4 / 画面分享声音用）-> b8：宿主不做画面分享，回 0（Pokopia nninitInitializeSdkModule 问；代码自写）
++        public ResultCode GetInitialScreenSharingEnabledS2(ServiceCtx context)
++        {
++            context.ResponseData.Write(false);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(210)] // 20.0.0+
+         // GetUnknownEvent() -> handle<copy>
+         public ResultCode GetUnknownEvent(ServiceCtx context)

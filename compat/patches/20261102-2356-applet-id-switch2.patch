@@ -1,0 +1,40 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
+index c383e8f58330219d8466f495997682a3b270fb7a..1acb4b35213eae5ba0b10548ddafc60f5bdf2a70 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
+@@ -11,7 +11,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+         // CreateLibraryApplet(u32, u32) -> object<nn::am::service::ILibraryAppletAccessor>
+         public ResultCode CreateLibraryApplet(ServiceCtx context)
+         {
+-            AppletId appletId = (AppletId)context.RequestData.ReadInt32();
++            AppletId appletId = AppletIdWire.Read(context.RequestData.ReadUInt32());
+ #pragma warning disable IDE0059 // Remove unnecessary value assignment
+             int libraryAppletMode = context.RequestData.ReadInt32();
+ #pragma warning restore IDE0059
+@@ -25,7 +25,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+         // CreateLibraryAppletEx(u32, u32, u64) -> object<nn::am::service::ILibraryAppletAccessor>
+         public ResultCode CreateLibraryAppletEx(ServiceCtx context)
+         {
+-            AppletId appletId = (AppletId)context.RequestData.ReadInt32();
++            AppletId appletId = AppletIdWire.Read(context.RequestData.ReadUInt32());
+ 
+             _ = context.RequestData.ReadInt32(); // libraryAppletMode
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/Types/AppletId.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/Types/AppletId.cs
+index d9970341f284c66216b528f99832a3c2b1898545..020b48c1bda64c7007e20d8e64a8cff904212995 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/Types/AppletId.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/Types/AppletId.cs
+@@ -24,4 +24,13 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE
+         LibAppletAuth = 0x19,
+         MyPage = 0x1A,
+     }
++
++    // S2Arm (11-02 Pokopia 起名卡死): Switch 2 SDKs pass library applet ids as 0x01vv00ii, where ii is the Switch 1 id
++    //   (software keyboard 0x01020011, error 0x0100000E, player select 0x01000010, shop 0x01000014, MyPage 0x0100001A,
++    //   controller 0x0100000C, data erase 0x0100000D). Taken as is, every one fell to the dummy applet and Pokopia
++    //   recreated the keyboard every 20 ms for good (7502 times in one hand test), the player frozen in the naming dialogue.
++    static class AppletIdWire
++    {
++        public static AppletId Read(uint raw) => (raw >> 24) == 0x01 ? (AppletId)(raw & 0xFF) : (AppletId)raw;
++    }
+ }

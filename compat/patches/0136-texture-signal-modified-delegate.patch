@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 82d4941d791692e49193c14b4170081e470c25e2..6d790b8c837d5a8fd11772a9597091883e6920c3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -48,6 +48,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         private delegate bool HandlesCallbackDelegate(int baseHandle, int regionCount, bool split = false, bool specialData = false);
+ 
+         private readonly HandlesCallbackDelegate _signalModifyingCallback;
++        private readonly HandlesCallbackDelegate _signalModifiedCallback;   // S2A：原 lambda 隐式捕获 this，每次 SignalModified 新建一个委托（48 B；巫师3 计算派发贴图提交 / 2D 拷贝稳态各 48 B）
+         private readonly HandlesCallbackDelegate _discardDataCallback;
+         private readonly HandlesCallbackDelegate _checkDirtyCallback;
+         private readonly HandlesCallbackDelegate _synchronizeMemoryCallback;   // S2A：同步回调缓存成委托（原 lambda 捕获 texture，每次同步分配闭包 + 委托 80 B；动森渲染线程每帧一次，10-20 拆账实测）
+@@ -134,6 +135,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _flushIncompatibleOverlaps = TextureCompatibility.IsFormatHostIncompatible(storage.Info, context.Capabilities);
+ 
+             _signalModifyingCallback = SignalModifyingCallback;
++            _signalModifiedCallback = SignalModifiedCallback;
+             _discardDataCallback = DiscardDataCallback;
+             _checkDirtyCallback = CheckDirtyCallback;
+             _synchronizeMemoryCallback = SynchronizeMemoryCallback;
+@@ -732,17 +734,19 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+             ClearIncompatibleOverlaps(texture);
+ 
+-            EvaluateRelevantHandles(texture, (baseHandle, regionCount, split, bound) =>
++            EvaluateRelevantHandles(texture, _signalModifiedCallback, out _);
++        }
++
++        bool SignalModifiedCallback(int baseHandle, int regionCount, bool split, bool bound)
++        {
++            for (int i = 0; i < regionCount; i++)
+             {
+-                for (int i = 0; i < regionCount; i++)
+-                {
+-                    TextureGroupHandle group = _handles[baseHandle + i];
++                TextureGroupHandle group = _handles[baseHandle + i];
+ 
+-                    group.SignalModified(_context);
+-                }
+-                
+-                return true;
+-            }, out _);
++                group.SignalModified(_context);
++            }
++
++            return true;
+         }
+ 
+         /// <summary>

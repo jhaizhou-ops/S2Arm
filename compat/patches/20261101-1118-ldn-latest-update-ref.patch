@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/Types/NodeLatestUpdate.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/Types/NodeLatestUpdate.cs
+index 664a230327f88b86034909dbc6fb6099d17dfc24..13d77faf592e9e688e70949850053cb890320b82 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/Types/NodeLatestUpdate.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/Types/NodeLatestUpdate.cs
+@@ -16,7 +16,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.Types
+     {
+         private static readonly Lock _lock = new();
+ 
+-        public static void CalculateLatestUpdate(this Array8<NodeLatestUpdate> array, Array8<NodeInfo> beforeNodes, Array8<NodeInfo> afterNodes)
++        // S2Arm: Array8 is a struct; take it by ref so flags land on the caller's field (by value they went to a copy and the game always read 0; audit 11-01 P1-25).
++        public static void CalculateLatestUpdate(this ref Array8<NodeLatestUpdate> array, Array8<NodeInfo> beforeNodes, Array8<NodeInfo> afterNodes)
+         {
+             lock (_lock)
+             {
+@@ -44,7 +45,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.Types
+             }
+         }
+ 
+-        public static NodeLatestUpdate[] ConsumeLatestUpdate(this Array8<NodeLatestUpdate> array, int number)
++        public static NodeLatestUpdate[] ConsumeLatestUpdate(this ref Array8<NodeLatestUpdate> array, int number)
+         {
+             NodeLatestUpdate[] result = new NodeLatestUpdate[number];
+ 

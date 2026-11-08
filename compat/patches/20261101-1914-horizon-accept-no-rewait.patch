@@ -1,0 +1,55 @@
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+index df28077cb0284ff42c60b1336122ceba1e48c44c..ec93f0710179b0288c338b89bdb810a8c7ac98f2 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+@@ -103,10 +103,13 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+             S2AHorizonHooks.PortRegistered?.Invoke(this, server);
+         }
+ 
+-        // S2Arm: accept one pending session on this server port now, on the caller's thread (same path as the receive loop)
++        // S2Arm: accept one pending session on this server port now, on the caller's thread (same accept as the receive loop).
++        // The port stays linked in the receive loop's wait list (the loop never selected and unlinked it), so it is not
++        // registered again: re-registering added the same port once more per GetService (unbounded wait-list growth, and a
++        // woken loop moved the copies into _multiWait until MultiWaitImpl's 64-handle array overflowed).
+         internal Result S2AProcessForServer(Server server)
+         {
+-            return ProcessForServer(server);
++            return AcceptForServer(server);
+         }
+ 
+         protected virtual Result OnNeedsToAccept(int portIndex, Server server)
+@@ -255,14 +258,7 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+ 
+             try
+             {
+-                if (server.StaticObject != null)
+-                {
+-                    return AcceptSession(server.PortHandle, server.StaticObject.Clone());
+-                }
+-                else
+-                {
+-                    return OnNeedsToAccept(server.PortIndex, server);
+-                }
++                return AcceptForServer(server);
+             }
+             finally
+             {
+@@ -270,6 +266,18 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+             }
+         }
+ 
++        private Result AcceptForServer(Server server)
++        {
++            if (server.StaticObject != null)
++            {
++                return AcceptSession(server.PortHandle, server.StaticObject.Clone());
++            }
++            else
++            {
++                return OnNeedsToAccept(server.PortIndex, server);
++            }
++        }
++
+         private Result ProcessForSession(MultiWaitHolder holder)
+         {
+             DebugUtil.Assert((UserDataTag)holder.UserData == UserDataTag.Session);

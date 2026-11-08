@@ -1,0 +1,789 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderProgram.cs b/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderProgram.cs
+index 4f56dcac241eb8d9b437cc6a680df8e53149e8de..a31e7f673827e54fb3a7d34e232e0a7ccfd2aa6c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderProgram.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderProgram.cs
+@@ -24,6 +24,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public ShaderAsCompute GeometryAsCompute { get; }
+ 
++        /// <summary>
++        /// S2A：转计算程序的直通顶点着色器信息（宿主图形程序的顶点阶段；复合宿主二进制带上它，加载时重建图形程序的着色器信息，见 S2AVtg）。
++        /// </summary>
++        public Ryujinx.Graphics.Shader.ShaderProgramInfo S2APassthroughInfo { get; init; }
++
+         /// <summary>
+         /// GPU state used to create this version of the shader.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 2db3bad129f172c89ff8f76b58262b84ffaefc72..799ee447af8f14ab5e17e15f6e2e1c4486d48597 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -22,7 +22,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const ushort FileFormatVersionMajor = 1;
+         private const ushort FileFormatVersionMinor = 2;
+         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
+-        private const uint CodeGenVersion = 7354 + 3;   // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen）
++        // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen，
++        //   +4（10-21 画面着色器线合批一次升）：点大小运行时化（支持缓冲在 s2a_widen 前加 s2a_point）+ 转计算程序进缓存（阶段掩码口径改、复合宿主二进制））
++        private const uint CodeGenVersion = 7354 + 4;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+@@ -503,6 +505,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         return null;
+                     }
+ 
++                    // S2A：顶点 / 几何转计算的程序是复合二进制（图形 / 顶点计算 / 几何计算三个宿主程序 + 保留布局，S2AVtg）：分段建、不翻译
++                    if (!lazy.IsCompute && S2AVtg.IsPacked(hostCode))
++                    {
++                        return S2AMaterializeVtg(lazy, hostCode, shaders, specState);
++                    }
++
+                     ShaderInfo shaderInfo = ShaderInfoBuilder.BuildForCache(
+                         lazy.Context,
+                         shaders,
+@@ -532,6 +540,43 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
++        /// <summary>S2A：着色器信息读写（转计算复合二进制里的直通顶点信息用同一格式，S2AVtg）。</summary>
++        internal static ShaderProgramInfo S2AReadShaderProgramInfo(ref BinarySerializer dataReader) => ReadShaderProgramInfo(ref dataReader);
++
++        internal static void S2AWriteShaderProgramInfo(ref BinarySerializer dataWriter, ShaderProgramInfo info) => WriteShaderProgramInfo(ref dataWriter, info);
++
++        private static int _s2aVtgMaterialized;
++
++        // S2A：按需实化一个转计算程序：拆复合二进制、建三个宿主程序、三个都链接成功才用（任一失败 = 当未缓存，首遇照常翻译）
++        private static CachedShaderProgram S2AMaterializeVtg(S2ALazyProgram lazy, byte[] hostCode, CachedShaderStage[] shaders, ShaderSpecializationState specState)
++        {
++            S2AVtg.Unpacked vtg = S2AVtg.Unpack(hostCode);
++
++            if (vtg == null)
++            {
++                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 转计算复合二进制坏（按需实化）");
++                return null;
++            }
++
++            CachedShaderProgram program = S2AVtg.Load(lazy.Context, vtg, shaders, specState);
++
++            if (S2AVtg.CheckLink(program, true) != ProgramLinkStatus.Success)
++            {
++                program.Dispose();
++                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 转计算宿主二进制载入失败（按需实化）");
++                return null;
++            }
++
++            int n = System.Threading.Interlocked.Increment(ref _s2aVtgMaterialized);
++
++            if (n <= 32)
++            {
++                Console.Error.WriteLine($"[gal] 转计算程序按需实化 #{n}：程序 {lazy.ProgramIndex}（复合宿主二进制，不翻译）");
++            }
++
++            return program;
++        }
++
+         /// <summary>
+         /// Reads the host code for a given shader, if existent.
+         /// </summary>
+@@ -659,7 +704,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             for (int index = 0; index < program.Shaders.Length; index++)
+             {
+                 CachedShaderStage shader = program.Shaders[index];
+-                if (shader == null || (shader.Info != null && shader.Info.Stage == ShaderStage.Compute))
++
++                // S2A：计算程序（只有一个阶段）的掩码为 0；图形程序全部非空阶段都进掩码。上游按「阶段信息是计算」跳过，
++                // 转计算程序的顶点 / 几何阶段信息就是计算版，会被漏掉而下面照写它们的阶段条目，读回错位（S2AVtg）
++                if (shader == null || program.Shaders.Length == 1)
+                 {
+                     continue;
+                 }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index 75547f130a095b5edaaa677fe23542499b8da3be..310307409326612bdc1328c407250f50894ade9c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -117,6 +117,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             /// </summary>
+             public readonly bool IsCompute;
+ 
++            /// <summary>
++            /// S2A：顶点 / 几何转计算的程序（非空时按它建三个宿主程序，TranslatedStages 不用）。
++            /// </summary>
++            public readonly S2AVtg.Translation Vtg;
++
+             /// <summary>
+             /// Creates a new translated shader compilation entry.
+             /// </summary>
+@@ -130,13 +135,15 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 CachedShaderStage[] shaders,
+                 ShaderSpecializationState specState,
+                 int programIndex,
+-                bool isCompute)
++                bool isCompute,
++                S2AVtg.Translation vtg = null)
+             {
+                 TranslatedStages = translatedStages;
+                 Shaders = shaders;
+                 SpecializationState = specState;
+                 ProgramIndex = programIndex;
+                 IsCompute = isCompute;
++                Vtg = vtg;
+             }
+         }
+ 
+@@ -415,7 +422,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             // If not yet compiled, do nothing. This avoids blocking to wait for shader compilation.
+             while (_validationQueue.TryPeek(out ProgramEntry entry))
+             {
+-                ProgramLinkStatus result = entry.CachedProgram.HostProgram.CheckProgramLink(false);
++                ProgramLinkStatus result = S2AVtg.CheckLink(entry.CachedProgram, false);
+ 
+                 if (result != ProgramLinkStatus.Incomplete)
+                 {
+@@ -439,7 +446,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+             while (_validationQueue.TryDequeue(out ProgramEntry entry) && Active)
+             {
+-                ProcessCompiledProgram(ref entry, entry.CachedProgram.HostProgram.CheckProgramLink(true), asyncCompile: false);
++                ProcessCompiledProgram(ref entry, S2AVtg.CheckLink(entry.CachedProgram, true), asyncCompile: false);
+             }
+         }
+ 
+@@ -472,7 +479,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 }
+ 
+                 // Fetch the binary code from the backend if it isn't already present.
+-                byte[] binaryCode = entry.BinaryCode ?? entry.CachedProgram.HostProgram.GetBinary();
++                byte[] binaryCode = entry.BinaryCode ?? S2AVtg.GetBinary(entry.CachedProgram);   // S2A：转计算程序取复合二进制
+ 
+                 _programList.Add(entry.ProgramIndex, (entry.CachedProgram, binaryCode));
+                 SignalCompiled();
+@@ -520,6 +527,15 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         {
+             while (_compilationQueue.TryDequeue(out ProgramCompilation compilation) && Active)
+             {
++                if (compilation.Vtg != null)
++                {
++                    CachedShaderProgram vtgProgram = S2AVtg.CreatePrograms(_context, compilation.Vtg, compilation.SpecializationState, compilation.SpecializationState.PipelineState, fromCache: true);
++
++                    EnqueueForValidation(new ProgramEntry(vtgProgram, null, compilation.ProgramIndex, isCompute: false, isBinary: false));
++
++                    continue;
++                }
++
+                 ShaderSource[] shaderSources = new ShaderSource[compilation.TranslatedStages.Length];
+ 
+                 ShaderInfoBuilder shaderInfoBuilder = new(_context, compilation.SpecializationState.TransformFeedbackDescriptors != null);
+@@ -555,7 +571,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             // Submitting more seems to cause NVIDIA OpenGL driver to crash.
+             if (_validationQueue.Count >= _backendParallelCompileThreads && _validationQueue.TryDequeue(out ProgramEntry entry))
+             {
+-                ProcessCompiledProgram(ref entry, entry.CachedProgram.HostProgram.CheckProgramLink(true), asyncCompile: false);
++                ProcessCompiledProgram(ref entry, S2AVtg.CheckLink(entry.CachedProgram, true), asyncCompile: false);
+             }
+         }
+ 
+@@ -672,10 +688,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             bool geometryHasStore = hasGeometryShader && translatorContexts[4].HasStore;
+             bool vertexToCompute = ShouldConvertVertexToCompute(_context, vertexHasStore, geometryHasStore, hasGeometryShader);
+ 
+-            // We don't support caching shader stages that have been converted to compute currently,
+-            // so just eliminate them if they exist in the cache.
++            // S2A：转计算的程序照 GetGraphicsShader 同一路径翻译（S2AVtg），建三个宿主程序；上游在这里把它们丢掉
+             if (vertexToCompute)
+             {
++                S2AVtg.Translation vtg = S2AVtg.Translate(_context, translatorContexts, gpuAccessors, guestShaders, specState.TransformFeedbackDescriptors != null);
++
++                _compilationQueue.Enqueue(new ProgramCompilation(null, vtg.Shaders, newSpecState, programIndex, isCompute: false, vtg));
++
+                 return;
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9f7182681e9eac70689759ee530352f0d6cfa4b
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -0,0 +1,396 @@
++using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.Gpu.Shader.DiskCache;
++using Ryujinx.Graphics.Shader;
++using Ryujinx.Graphics.Shader.Translation;
++using System;
++using System.Buffers.Binary;
++using System.Collections.Generic;
++using System.IO;
++
++namespace Ryujinx.Graphics.Gpu.Shader
++{
++    /// <summary>
++    /// S2A：顶点 / 几何转计算（后端不支持几何着色器或顶点阶段存储写时，Ryujinx 把它们翻成计算着色器跑，见 ShaderCache.GetGraphicsShader）的程序进磁盘缓存。
++    /// 上游不缓存这类程序（写入跳过、加载器丢弃），每局首遇都要当场翻译 + 后端现编。这里补三件事：
++    ///   1. 翻译：与 GetGraphicsShader 同一顺序同一调用（加载器按客体代码重建、出包烘焙 shbake 共用），得到各阶段缓存条目、顶点 / 几何计算着色器与保留布局、宿主图形程序（直通顶点 + 片元）；
++    ///   2. 宿主程序二进制：一个程序有三个宿主程序（图形、顶点计算、几何计算），打成一个复合二进制（魔数 S2AV），各段是后端自己的程序二进制，另带保留布局与直通顶点的着色器信息；
++    ///   3. 加载：按复合二进制分段 LoadProgramBinary，重建 ShaderAsCompute，不翻译。
++    /// </summary>
++    static class S2AVtg
++    {
++        public const uint Magic = 0x56413253;   // "S2AV"
++        public const uint Version = 1;
++
++        public sealed class Translation
++        {
++            public CachedShaderStage[] Shaders;
++            public readonly List<ShaderProgram> GraphicsStages = new();
++            public ShaderProgram VertexCompute;
++            public ShaderProgram GeometryCompute;
++            public ResourceReservations VertexReservations;
++            public ResourceReservations GeometryReservations;
++            public ShaderProgramInfo PassthroughInfo;
++            public bool TfEnabled;
++        }
++
++        /// <summary>程序是否要转计算（与 GetGraphicsShader / 加载器同一判据）。tcs 按 Ryujinx 阶段下标（0 = VertexA，1 顶点 … 5 片元）。</summary>
++        public static bool IsVtg(GpuContext context, TranslatorContext[] tcs)
++        {
++            bool hasGs = tcs[4] != null;
++            bool vsStore = tcs[1] != null && tcs[1].HasStore;
++            bool gsStore = hasGs && tcs[4].HasStore;
++
++            return ShaderCache.ShouldConvertVertexToCompute(context, vsStore, gsStore, hasGs);
++        }
++
++        /// <summary>
++        /// 按 GetGraphicsShader 的转计算路径翻译（调用顺序逐条对应：先设几何的顶点输出表、逐阶段 InitializeReservedCounts、顶点翻成计算后立刻取保留布局并生成直通顶点、
++        /// 几何翻成计算后取保留布局）。guest：各阶段客体代码与常量段 1（下标同 tcs）。
++        /// </summary>
++        public static Translation Translate(GpuContext context, TranslatorContext[] tcs, GpuAccessorBase[] accessors, GuestCodeAndCbData?[] guest, bool tfEnabled)
++        {
++            bool hasGs = tcs[4] != null;
++            bool gsStore = hasGs && tcs[4].HasStore;
++            bool vertexToCompute = IsVtg(context, tcs);
++            bool geometryToCompute = ShaderCache.ShouldConvertGeometryToCompute(context, gsStore);
++
++            Translation t = new() { Shaders = new CachedShaderStage[guest.Length], TfEnabled = tfEnabled };
++
++            if (geometryToCompute && tcs[4] != null)
++            {
++                tcs[4].SetVertexOutputMapForGeometryAsCompute(tcs[1]);
++            }
++
++            TranslatorContext previousStage = null;
++
++            for (int stageIndex = 0; stageIndex < Constants.ShaderStages; stageIndex++)
++            {
++                TranslatorContext currentStage = tcs[stageIndex + 1];
++
++                if (currentStage != null)
++                {
++                    accessors[stageIndex].InitializeReservedCounts(tfEnabled, vertexToCompute);
++
++                    bool asCompute = (stageIndex == 0 && vertexToCompute) || (stageIndex == 3 && geometryToCompute);
++                    GuestCodeAndCbData g = guest[stageIndex + 1].Value;
++                    ShaderProgram program;
++
++                    if (stageIndex == 0 && tcs[0] != null)
++                    {
++                        program = currentStage.Translate(tcs[0], asCompute);
++                        t.Shaders[0] = new CachedShaderStage(null, guest[0].Value.Code, guest[0].Value.Cb1Data);
++                        t.Shaders[1] = new CachedShaderStage(program.Info, g.Code, g.Cb1Data);
++                    }
++                    else
++                    {
++                        program = currentStage.Translate(asCompute);
++                        t.Shaders[stageIndex + 1] = new CachedShaderStage(program.Info, g.Code, g.Cb1Data);
++                    }
++
++                    if (asCompute)
++                    {
++                        if (stageIndex == 0)
++                        {
++                            t.VertexCompute = program;
++                            t.VertexReservations = currentStage.GetResourceReservations();
++
++                            TranslatorContext lastInVertexPipeline = geometryToCompute ? tcs[4] ?? currentStage : currentStage;
++
++                            program = lastInVertexPipeline.GenerateVertexPassthroughForCompute();
++                            t.PassthroughInfo = program.Info;
++                        }
++                        else
++                        {
++                            t.GeometryCompute = program;
++                            t.GeometryReservations = currentStage.GetResourceReservations();
++                            program = null;
++                        }
++                    }
++
++                    if (program != null)
++                    {
++                        t.GraphicsStages.Add(program);
++                    }
++
++                    previousStage = currentStage;
++                }
++                else if (
++                    previousStage != null &&
++                    previousStage.LayerOutputWritten &&
++                    stageIndex == 3 &&
++                    !context.Capabilities.SupportsLayerVertexTessellation)
++                {
++                    t.GraphicsStages.Add(previousStage.GenerateGeometryPassthrough());
++                }
++            }
++
++            return t;
++        }
++
++        /// <summary>按翻译结果建三个宿主程序（与 GetGraphicsShader 同一组 ShaderInfo）。</summary>
++        public static CachedShaderProgram CreatePrograms(GpuContext context, Translation t, ShaderSpecializationState specState, ProgramPipelineState? pipeline, bool fromCache)
++        {
++            ShaderInfoBuilder infoBuilder = new(context, t.TfEnabled, vertexAsCompute: true);
++            ShaderSource[] sources = new ShaderSource[t.GraphicsStages.Count];
++
++            for (int i = 0; i < sources.Length; i++)
++            {
++                sources[i] = ShaderCache.CreateShaderSource(t.GraphicsStages[i]);
++                infoBuilder.AddStageInfo(t.GraphicsStages[i].Info);
++            }
++
++            IProgram hostProgram = context.Renderer.CreateProgram(sources, infoBuilder.Build(pipeline, fromCache));
++            ShaderAsCompute vertexAsCompute = CreateCompute(context, t.VertexCompute, t.VertexReservations, t.TfEnabled, fromCache);
++            ShaderAsCompute geometryAsCompute = t.GeometryCompute != null ? CreateCompute(context, t.GeometryCompute, t.GeometryReservations, t.TfEnabled, fromCache) : null;
++
++            return new CachedShaderProgram(hostProgram, vertexAsCompute, geometryAsCompute, specState, t.Shaders) { S2APassthroughInfo = t.PassthroughInfo };
++        }
++
++        private static ShaderAsCompute CreateCompute(GpuContext context, ShaderProgram program, ResourceReservations reservations, bool tfEnabled, bool fromCache)
++        {
++            ShaderSource source = new(program.Code, program.BinaryCode, ShaderStage.Compute, program.Language);
++            ShaderInfo info = ShaderInfoBuilder.BuildForVertexAsCompute(context, program.Info, tfEnabled, fromCache);
++
++            return new ShaderAsCompute(context.Renderer.CreateProgram([source], info), program.Info, reservations);
++        }
++
++        /// <summary>
++        /// 复合宿主二进制（小端）：u32 魔数 "S2AV"、u32 版本、u32 标志（位 0 变换反馈、位 1 有几何计算段），
++        /// 图形段 {u32 长, 后端程序二进制}、顶点计算段 {u32 长, 后端程序二进制, 保留布局 ResourceReservations.S2ASerializedSize 字节}、
++        /// [几何计算段 同上]、{u32 长, 直通顶点着色器信息（DiskCacheHostStorage 着色器信息同格式）}。
++        /// </summary>
++        public static byte[] Pack(bool tfEnabled, byte[] graphics, byte[] vertex, ResourceReservations vertexReservations, byte[] geometry, ResourceReservations geometryReservations, ShaderProgramInfo passthroughInfo)
++        {
++            using MemoryStream infoStream = new();
++            BinarySerializer infoWriter = new(infoStream);
++            DiskCacheHostStorage.S2AWriteShaderProgramInfo(ref infoWriter, passthroughInfo);
++            byte[] info = infoStream.ToArray();
++
++            using MemoryStream ms = new();
++            using BinaryWriter w = new(ms);
++            w.Write(Magic);
++            w.Write(Version);
++            w.Write((tfEnabled ? 1u : 0u) | (geometry != null ? 2u : 0u));
++            w.Write(graphics.Length);
++            w.Write(graphics);
++            WritePart(w, vertex, vertexReservations);
++
++            if (geometry != null)
++            {
++                WritePart(w, geometry, geometryReservations);
++            }
++
++            w.Write(info.Length);
++            w.Write(info);
++            w.Flush();
++
++            return ms.ToArray();
++        }
++
++        private static void WritePart(BinaryWriter w, byte[] code, ResourceReservations reservations)
++        {
++            Span<byte> r = stackalloc byte[ResourceReservations.S2ASerializedSize];
++            reservations.S2AWrite(r);
++            w.Write(code.Length);
++            w.Write(code);
++            w.Write(r);
++        }
++
++        public static bool IsPacked(ReadOnlySpan<byte> hostCode) => hostCode.Length >= 12 && BinaryPrimitives.ReadUInt32LittleEndian(hostCode) == Magic;
++
++        public sealed class Unpacked
++        {
++            public bool TfEnabled;
++            public byte[] Graphics;
++            public byte[] Vertex;
++            public ResourceReservations VertexReservations;
++            public byte[] Geometry;
++            public ResourceReservations GeometryReservations;
++            public ShaderProgramInfo PassthroughInfo;
++        }
++
++        /// <summary>拆复合二进制；格式坏或版本不符返回 null。</summary>
++        public static Unpacked Unpack(byte[] hostCode)
++        {
++            try
++            {
++                using MemoryStream ms = new(hostCode, writable: false);
++                using BinaryReader r = new(ms);
++
++                if (r.ReadUInt32() != Magic || r.ReadUInt32() != Version)
++                {
++                    return null;
++                }
++
++                uint flags = r.ReadUInt32();
++                Unpacked u = new() { TfEnabled = (flags & 1) != 0 };
++                u.Graphics = ReadExact(r);
++                (u.Vertex, u.VertexReservations) = ReadPart(r);
++
++                if ((flags & 2) != 0)
++                {
++                    (u.Geometry, u.GeometryReservations) = ReadPart(r);
++                }
++
++                // 着色器信息的读法（BinarySerializer）遇流尾会死等：长度先核对，截断的复合二进制在这里就拒掉
++                byte[] info = ReadExact(r);
++
++                if (info == null || u.Graphics == null || u.Vertex == null || ((flags & 2) != 0 && u.Geometry == null) || info.Length < 8 || ms.Position != ms.Length)
++                {
++                    return null;
++                }
++
++                using MemoryStream infoStream = new(info, writable: false);
++                BinarySerializer infoReader = new(infoStream);
++                u.PassthroughInfo = DiskCacheHostStorage.S2AReadShaderProgramInfo(ref infoReader);
++
++                return u.VertexReservations != null && (u.Geometry == null || u.GeometryReservations != null) && infoStream.Position == infoStream.Length ? u : null;
++            }
++            catch (Exception e) when (e is EndOfStreamException || e is IOException || e is ArgumentException || e is DiskCacheLoadException)
++            {
++                return null;
++            }
++        }
++
++        // 读「u32 长 + 字节」：长度为负或剩余字节不够返回 null
++        private static byte[] ReadExact(BinaryReader r)
++        {
++            int n = r.ReadInt32();
++
++            if (n < 0 || n > r.BaseStream.Length - r.BaseStream.Position)
++            {
++                return null;
++            }
++
++            return r.ReadBytes(n);
++        }
++
++        private static (byte[], ResourceReservations) ReadPart(BinaryReader r)
++        {
++            byte[] code = ReadExact(r);
++
++            if (code == null)
++            {
++                return (null, null);
++            }
++
++            byte[] res = r.ReadBytes(ResourceReservations.S2ASerializedSize);
++
++            return (code, ResourceReservations.S2ARead(res));
++        }
++
++        /// <summary>
++        /// 按复合二进制建三个宿主程序（不翻译）。shaders：各阶段缓存条目（ReadHostCode 读出，顶点 / 几何的着色器信息就是它们计算版的信息，与运行时同一对象口径）。
++        /// </summary>
++        public static CachedShaderProgram Load(GpuContext context, Unpacked u, CachedShaderStage[] shaders, ShaderSpecializationState specState)
++        {
++            ShaderInfoBuilder infoBuilder = new(context, u.TfEnabled, vertexAsCompute: true);
++            infoBuilder.AddStageInfo(u.PassthroughInfo);
++
++            for (int index = 2; index < shaders.Length; index++)
++            {
++                // 几何（下标 4）已转计算，不进图形程序；曲面（2 / 3）与片元（5）照常
++                if (shaders[index] != null && index != 4)
++                {
++                    infoBuilder.AddStageInfo(shaders[index].Info);
++                }
++            }
++
++            bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
++            IProgram hostProgram = context.Renderer.LoadProgramBinary(u.Graphics, hasFragmentShader, infoBuilder.Build(specState.PipelineState, fromCache: true));
++
++            ShaderProgramInfo vertexInfo = shaders[1].Info;
++            ShaderAsCompute vertexAsCompute = new(
++                context.Renderer.LoadProgramBinary(u.Vertex, false, ShaderInfoBuilder.BuildForVertexAsCompute(context, vertexInfo, u.TfEnabled, fromCache: true)),
++                vertexInfo,
++                u.VertexReservations);
++
++            ShaderAsCompute geometryAsCompute = null;
++
++            if (u.Geometry != null)
++            {
++                ShaderProgramInfo geometryInfo = shaders[4].Info;
++                geometryAsCompute = new(
++                    context.Renderer.LoadProgramBinary(u.Geometry, false, ShaderInfoBuilder.BuildForVertexAsCompute(context, geometryInfo, u.TfEnabled, fromCache: true)),
++                    geometryInfo,
++                    u.GeometryReservations);
++            }
++
++            return new CachedShaderProgram(hostProgram, vertexAsCompute, geometryAsCompute, specState, shaders) { S2APassthroughInfo = u.PassthroughInfo };
++        }
++
++        private static int _runtimeN;
++
++        /// <summary>
++        /// 运行时当场翻译出一个转计算程序（缓存 / 离线包没覆盖到）：打一行点名各阶段客体代码指纹（SHA-256 前 16 位，同 shbake dump），前 32 个。
++        /// 出包配对规则漏的哪支、实际配的是哪几支，局日志里直接查（grep「转计算程序当场翻译」）
++        /// </summary>
++        public static void NoteRuntime(CachedShaderStage[] shaders)
++        {
++            int n = System.Threading.Interlocked.Increment(ref _runtimeN);
++
++            if (n > 32)
++            {
++                return;
++            }
++
++            string[] names = { "vs_a", "vs", "tcs", "tes", "gs", "fs" };
++            System.Text.StringBuilder sb = new();
++
++            for (int i = 0; i < shaders.Length && i < names.Length; i++)
++            {
++                if (shaders[i] != null)
++                {
++                    sb.Append(' ').Append(names[i]).Append('=').Append(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(shaders[i].Code))[..16].ToLowerInvariant());
++                }
++            }
++
++            Console.Error.WriteLine($"[gal] 转计算程序当场翻译 #{n}：{sb}");
++        }
++
++        /// <summary>程序的宿主二进制：转计算程序 = 复合二进制（三个宿主程序各取 GetBinary）；其余 = 宿主程序 GetBinary。</summary>
++        public static byte[] GetBinary(CachedShaderProgram program)
++        {
++            if (program.VertexAsCompute == null)
++            {
++                return program.HostProgram.GetBinary();
++            }
++
++            return Pack(
++                program.SpecializationState.TransformFeedbackDescriptors != null,
++                program.HostProgram.GetBinary(),
++                program.VertexAsCompute.HostProgram.GetBinary(),
++                program.VertexAsCompute.Reservations,
++                program.GeometryAsCompute?.HostProgram.GetBinary(),
++                program.GeometryAsCompute?.Reservations,
++                program.S2APassthroughInfo);
++        }
++
++        /// <summary>程序各宿主程序的链接状态合起来：任一失败 = 失败，任一未完成 = 未完成，否则成功。</summary>
++        public static ProgramLinkStatus CheckLink(CachedShaderProgram program, bool blocking)
++        {
++            ProgramLinkStatus s = program.HostProgram.CheckProgramLink(blocking);
++
++            foreach (ShaderAsCompute c in new[] { program.VertexAsCompute, program.GeometryAsCompute })
++            {
++                if (c == null)
++                {
++                    continue;
++                }
++
++                ProgramLinkStatus cs = c.HostProgram.CheckProgramLink(blocking);
++
++                if (cs == ProgramLinkStatus.Failure || s == ProgramLinkStatus.Failure)
++                {
++                    s = ProgramLinkStatus.Failure;
++                }
++                else if (cs == ProgramLinkStatus.Incomplete)
++                {
++                    s = ProgramLinkStatus.Incomplete;
++                }
++            }
++
++            return s;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index aecc62e552d0ca39aed716283647d3a057a13b31..809aca29eb30ef78581585d918222775c9fd7770 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -132,13 +132,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             while (_programsToSaveQueue.TryPeek(out ProgramToSave programToSave))
+             {
+-                ProgramLinkStatus result = programToSave.HostProgram.CheckProgramLink(false);
++                // S2A：转计算程序有三个宿主程序，全部编完才取（复合）二进制（S2AVtg）
++                ProgramLinkStatus result = S2AVtg.CheckLink(programToSave.CachedProgram, false);
+ 
+                 if (result != ProgramLinkStatus.Incomplete)
+                 {
+                     if (result == ProgramLinkStatus.Success)
+                     {
+-                        _cacheWriter.AddShader(programToSave.CachedProgram, programToSave.BinaryCode ?? programToSave.HostProgram.GetBinary());
++                        _cacheWriter.AddShader(programToSave.CachedProgram, programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram));
+                     }
+ 
+                     _programsToSaveQueue.Dequeue();
+@@ -400,6 +401,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             ShaderAsCompute vertexAsCompute = null;
+             ShaderAsCompute geometryAsCompute = null;
++            ShaderProgramInfo passthroughInfo = null;
+ 
+             for (int stageIndex = 0; stageIndex < Constants.ShaderStages; stageIndex++)
+             {
+@@ -449,6 +451,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                             TranslatorContext lastInVertexPipeline = geometryToCompute ? translatorContexts[4] ?? currentStage : currentStage;
+ 
+                             program = lastInVertexPipeline.GenerateVertexPassthroughForCompute();
++                            passthroughInfo = program.Info;
+                         }
+                         else
+                         {
+@@ -481,14 +484,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             IProgram hostProgram = _context.Renderer.CreateProgram(shaderSourcesArray, info);
+ 
+-            gpShaders = new(hostProgram, vertexAsCompute, geometryAsCompute, specState, shaders);
++            gpShaders = new(hostProgram, vertexAsCompute, geometryAsCompute, specState, shaders) { S2APassthroughInfo = passthroughInfo };
+ 
+             _graphicsShaderCache.Add(gpShaders);
+ 
+-            // We don't currently support caching shaders that have been converted to compute.
+-            if (vertexAsCompute == null)
++            // S2A：转计算的程序也进磁盘缓存（复合宿主二进制，S2AVtg；上游不缓存，每局首遇现翻）
++            EnqueueProgramToSave(gpShaders, hostProgram, shaderSourcesArray);
++
++            if (vertexAsCompute != null)
+             {
+-                EnqueueProgramToSave(gpShaders, hostProgram, shaderSourcesArray);
++                S2AVtg.NoteRuntime(shaders);
+             }
+ 
+             _gpPrograms[addresses] = gpShaders;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/IoUsage.cs b/src/Ryujinx.Graphics.Shader/Translation/IoUsage.cs
+index 8ce2da4a031259b7e9ed5c04e0bccc2936398822..eb5ba9c720abdebf95c80cf268d3fb07a122933b 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/IoUsage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/IoUsage.cs
+@@ -10,6 +10,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public readonly byte ClipDistancesWritten { get; }
+         public readonly int UserDefinedMap { get; }
+ 
++        // S2A：原始特性位（ResourceReservations.S2AWrite 序列化用）
++        internal readonly FeatureFlags S2AUsedFeatures => _usedFeatures;
++
+         public IoUsage(FeatureFlags usedFeatures, byte clipDistancesWritten, int userDefinedMap)
+         {
+             _usedFeatures = usedFeatures;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
+index c89c4d0b66689afadbdded51782240c29fd3311e..1c2323d0d119b5fc4064bb1b9bb28b1318f4af51 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
+@@ -76,22 +76,90 @@ namespace Ryujinx.Graphics.Shader.Translation
+             bool isTransformFeedbackEmulated,
+             bool vertexAsCompute,
+             IoUsage? vacInput,
+-            IoUsage vacOutput) : this(isTransformFeedbackEmulated, vertexAsCompute)
++            IoUsage vacOutput) : this(
++                isTransformFeedbackEmulated,
++                vertexAsCompute,
++                vacInput,
++                vacOutput,
++                gpuAccessor.QueryHostSupportsViewportIndexVertexTessellation(),
++                gpuAccessor.QueryHostSupportsViewportMask())
+         {
++        }
++
++        // S2A：构造输入只有这几项（宿主能力两项取值、而非整个 IGpuAccessor），记下来供转计算程序进磁盘缓存后按同一输入重建（S2AWrite / S2ARead）
++        private ResourceReservations(
++            bool isTransformFeedbackEmulated,
++            bool vertexAsCompute,
++            IoUsage? vacInput,
++            IoUsage vacOutput,
++            bool hostViewportIndexVt,
++            bool hostViewportMask) : this(isTransformFeedbackEmulated, vertexAsCompute)
++        {
++            _s2aTfe = isTransformFeedbackEmulated;
++            _s2aInput = vacInput;
++            _s2aOutput = vacOutput;
++            _s2aVpIndex = hostViewportIndexVt;
++            _s2aVpMask = hostViewportMask;
++
+             if (vertexAsCompute)
+             {
+                 _offsets = new();
+ 
+                 if (vacInput.HasValue)
+                 {
+-                    InputSizePerInvocation = FillIoOffsetMap(gpuAccessor, StorageKind.Input, vacInput.Value);
++                    InputSizePerInvocation = FillIoOffsetMap(hostViewportIndexVt, hostViewportMask, StorageKind.Input, vacInput.Value);
+                 }
+ 
+-                OutputSizePerInvocation = FillIoOffsetMap(gpuAccessor, StorageKind.Output, vacOutput);
++                OutputSizePerInvocation = FillIoOffsetMap(hostViewportIndexVt, hostViewportMask, StorageKind.Output, vacOutput);
+             }
+         }
+ 
+-        private int FillIoOffsetMap(IGpuAccessor gpuAccessor, StorageKind storageKind, IoUsage vacUsage)
++        private readonly bool _s2aTfe;
++        private readonly IoUsage? _s2aInput;
++        private readonly IoUsage _s2aOutput;
++        private readonly bool _s2aVpIndex;
++        private readonly bool _s2aVpMask;
++
++        /// <summary>S2A：S2AWrite 写出的字节数（版本 1）。</summary>
++        public const int S2ASerializedSize = 20;
++
++        /// <summary>
++        /// S2A：转计算（顶点 / 几何当计算着色器跑）的保留布局序列化，进 Ryujinx 磁盘缓存，加载时 S2ARead 按同一构造输入重建（偏移表与运行时翻译时算的同一份）。
++        /// 布局（小端）：u8 版本 1、u8 标志（位 0 变换反馈模拟、位 1 有输入用法、位 2 宿主顶点阶段写视口号、位 3 宿主视口掩码）、u8 输入裁剪距离位、u8 输出裁剪距离位、
++        /// u32 输入特性位、i32 输入自定义位置位、u32 输出特性位、i32 输出自定义位置位。
++        /// </summary>
++        public void S2AWrite(System.Span<byte> o)
++        {
++            o[..S2ASerializedSize].Clear();
++            o[0] = 1;
++            o[1] = (byte)((_s2aTfe ? 1 : 0) | (_s2aInput.HasValue ? 2 : 0) | (_s2aVpIndex ? 4 : 0) | (_s2aVpMask ? 8 : 0));
++            IoUsage i = _s2aInput ?? default;
++            o[2] = i.ClipDistancesWritten;
++            o[3] = _s2aOutput.ClipDistancesWritten;
++            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(o[4..], (uint)i.S2AUsedFeatures);
++            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(o[8..], i.UserDefinedMap);
++            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(o[12..], (uint)_s2aOutput.S2AUsedFeatures);
++            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(o[16..], _s2aOutput.UserDefinedMap);
++        }
++
++        /// <summary>S2A：按 S2AWrite 的字节重建转计算保留布局；版本 / 长度不符返回 null。</summary>
++        public static ResourceReservations S2ARead(System.ReadOnlySpan<byte> b)
++        {
++            if (b.Length < S2ASerializedSize || b[0] != 1)
++            {
++                return null;
++            }
++
++            int f = b[1];
++            IoUsage? input = (f & 2) != 0
++                ? new IoUsage((FeatureFlags)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(b[4..]), b[2], System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(b[8..]))
++                : null;
++            IoUsage output = new((FeatureFlags)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(b[12..]), b[3], System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(b[16..]));
++
++            return new ResourceReservations((f & 1) != 0, vertexAsCompute: true, input, output, (f & 4) != 0, (f & 8) != 0);
++        }
++
++        private int FillIoOffsetMap(bool hostViewportIndexVt, bool hostViewportMask, StorageKind storageKind, IoUsage vacUsage)
+         {
+             int offset = 0;
+ 
+@@ -118,12 +186,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 _offsets.Add(new IoDefinition(storageKind, IoVariable.Layer), offset++);
+             }
+ 
+-            if (vacUsage.UsesViewportIndex && gpuAccessor.QueryHostSupportsViewportIndexVertexTessellation())
++            if (vacUsage.UsesViewportIndex && hostViewportIndexVt)
+             {
+                 _offsets.Add(new IoDefinition(storageKind, IoVariable.VertexIndex), offset++);
+             }
+ 
+-            if (vacUsage.UsesViewportMask && gpuAccessor.QueryHostSupportsViewportMask())
++            if (vacUsage.UsesViewportMask && hostViewportMask)
+             {
+                 _offsets.Add(new IoDefinition(storageKind, IoVariable.ViewportMask), offset++);
+             }

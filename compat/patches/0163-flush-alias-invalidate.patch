@@ -1,0 +1,92 @@
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+index 220fcb9aca48c932b5ec64a24e72d9fcc0acccac..2c8356a51931e60c01e0c2558c2886cc4d7f311a 100644
+--- a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -51,6 +51,7 @@ namespace Ryujinx.Cpu
+ 
+             public void WriteUntracked(ulong va, ReadOnlySpan<byte> data)
+             {
++                if (S2AWriteLog.On) S2AWriteLog.Who = "不跟踪区域写回（贴图回写 / 清缓冲）";
+                 Target.WriteUntracked(va, data);
+                 Return(this);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 9eb786703560afaaa53071e271ce525057bd7e11..11f95ec124a3b3bfb6f4220ce2e212ad75ac762b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -667,6 +667,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="handle">Buffer handle to flush data from</param>
+         /// <param name="address">Start address of the range</param>
+         /// <param name="size">Size in bytes of the range</param>
++        private static readonly bool S2AFlushAlias = Environment.GetEnvironmentVariable("S2A_FLUSH_ALIAS") == "1";
++
+         private void FlushImpl(BufferHandle handle, ulong address, ulong size)
+         {
+             int offset = (int)(address - Address);
+@@ -674,7 +676,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             using PinnedSpan<byte> data = _context.Renderer.GetBufferData(handle, offset, (int)size);
+ 
+             // TODO: When write tracking shaders, they will need to be aware of changes in overlapping buffers.
+-            _physicalMemory.WriteUntracked(address, CopyFromDependantVirtualBuffers(data.Get(), address, size));
++            ReadOnlySpan<byte> s2aData = CopyFromDependantVirtualBuffers(data.Get(), address, size);
++
++            // S2A（帧率能耗线 10-23）：回写改了客体内存，别名到同一段的贴图 / 池等没收到失效、一直拿旧内容（漏写检测真机每局确认 9x1 / 1x1 R16G16B16A16Float）。
++            // S2A_FLUSH_ALIAS=1：写前按「写」发跟踪事件、豁免缓冲（缓冲就是数据来源），等同把这次回写当一次 CPU 写通知其余资源
++            if (S2AFlushAlias)
++            {
++                _physicalMemory.S2ASignalFlushAlias(address, size);
++            }
++
++            if (Ryujinx.Memory.S2AWriteLog.On) Ryujinx.Memory.S2AWriteLog.Who = "缓冲回写 Buffer.FlushImpl";
++            _physicalMemory.WriteUntracked(address, s2aData);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 63a72effcf906e3d06e8455c1a9e5c67b4aa88ec..ba292dfb645c339918aa4131f1aa8bad7c0611e5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -385,6 +385,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         // （宿主线程没有改道，见 graphics/track/track.c READFLUSH 宿主读），宿主读到旧值再传给 GPU 就盖掉 GPU 新值。S2A_TEX_READ_TRACK=0 关
+         private static readonly bool _s2aTexReadTrack = Environment.GetEnvironmentVariable("S2A_TEX_READ_TRACK") != "0";
+ 
++        // S2A：缓冲回写前通知别名到同一段的非缓冲资源（贴图、池、着色器）——按写发事件、豁免缓冲（见 Buffer.FlushImpl）
++        public void S2ASignalFlushAlias(ulong address, ulong size)
++        {
++            _cpuMemory.SignalMemoryTracking(address, size, true, false, (int)ResourceKind.Buffer);
++        }
++
+         public void S2ASignalReadForTexture(MultiRange range)
+         {
+             if (!_s2aTexReadTrack)
+diff --git a/src/Ryujinx.Memory/S2AWriteLog.cs b/src/Ryujinx.Memory/S2AWriteLog.cs
+index bf5ab66f0bdd81b6cce94a3a909396c34392188b..66053b4b8923993caa929faeb83f7b0b697d9378 100644
+--- a/src/Ryujinx.Memory/S2AWriteLog.cs
++++ b/src/Ryujinx.Memory/S2AWriteLog.cs
+@@ -9,6 +9,8 @@ namespace Ryujinx.Memory
+     public static class S2AWriteLog
+     {
+         public static bool On;
++        // 调用点自报的写入方（NativeAOT 上 StackTrace 取不到方法名，iOS 只显示「.」）：设了就用它，记完清掉
++        [ThreadStatic] public static string Who;
+         private const int N = 4096;
+         private static readonly (ulong Va, int Len, bool Flush, long Tick, string Who)[] _ring = new (ulong, int, bool, long, string)[N];
+         private static long _n;
+@@ -21,13 +23,15 @@ namespace Ryujinx.Memory
+                 return;
+             }
+ 
++            string who = Who;
++            Who = null;
+             StackTrace st = new(2, false);
+-            StringBuilder sb = new();
++            StringBuilder sb = new(who ?? "");
+ 
+             for (int i = 0; i < 3 && i < st.FrameCount; i++)
+             {
+                 var m = st.GetFrame(i)?.GetMethod();
+-                sb.Append(i == 0 ? "" : " ← ").Append(m?.DeclaringType?.Name).Append('.').Append(m?.Name);
++                sb.Append(i == 0 && who == null ? "" : " ← ").Append(m?.DeclaringType?.Name).Append('.').Append(m?.Name);
+             }
+ 
+             lock (_lock)

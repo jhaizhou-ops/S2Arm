@@ -1,0 +1,522 @@
+diff --git a/src/Ryujinx.Common/Logging/Logger.cs b/src/Ryujinx.Common/Logging/Logger.cs
+index 50d3405d7eba7007b66d331c24cfc4d73f33f7c7..14a8674cf2f66371d4f7ef2f7193b7079909eea0 100644
+--- a/src/Ryujinx.Common/Logging/Logger.cs
++++ b/src/Ryujinx.Common/Logging/Logger.cs
+@@ -39,6 +39,11 @@ namespace Ryujinx.Common.Logging
+             }
+         }
+ 
++        public static void S2AResetStubHits()
++        {
++            lock (_s2aStubHits) _s2aStubHits.Clear();
++        }
++
+         private static readonly Stopwatch _time;
+ 
+         private static readonly bool[] _enabledClasses;
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+index 79272ca1edd4d3cd2cf6eb6f03ff355f167075d2..02c1b3d0e4eee4c1921d7f047b64427111a45250 100644
+--- a/src/Ryujinx.Common/S2AThreadAlloc.cs
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -25,6 +25,17 @@ namespace Ryujinx.Common
+         }
+ 
+         private static readonly List<Slot> _slots = new();
++        private static int _generation;
++        [ThreadStatic] private static int _threadGeneration;
++
++        public static void ResetSession()
++        {
++            lock (_slots)
++            {
++                _slots.Clear();
++                Interlocked.Increment(ref _generation);
++            }
++        }
+ 
+         [ThreadStatic]
+         private static Slot _slot;
+@@ -41,12 +52,13 @@ namespace Ryujinx.Common
+ 
+             long now = GC.GetAllocatedBytesForCurrentThread();
+ 
+-            if (_slot == null)
++            if (_slot == null || _threadGeneration != Volatile.Read(ref _generation))
+             {
+                 _slot = new Slot { Name = name ?? Thread.CurrentThread.Name ?? $"线程 {Environment.CurrentManagedThreadId}" };
+ 
+                 lock (_slots)
+                 {
++                    _threadGeneration = _generation;
+                     _slots.Add(_slot);
+                 }
+ 
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+index f1f3b27276d9125816993d5aeecb485cefb3cbb0..632479bf77cced6e5a9001d234e695cf2e6cbb6b 100644
+--- a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -60,6 +60,20 @@ namespace Ryujinx.Cpu
+         private static Slot[] _slots = new Slot[8];
+         private static int _count;
+ 
++        // No GPU or guest thread may still own a region. A live writer is a shutdown
++        // error, never permission to discard its pending write-back into guest memory.
++        public static void ResetSession()
++        {
++            lock (_lock)
++            {
++                for (int i = 0; i < _count; i++)
++                    if (_slots[i].Used) throw new InvalidOperationException("GPU 写回区域尚未归还，禁止重启");
++                for (int i = 0; i < _count; i++) NativeMemory.Free(_slots[i].Buf);
++                _slots = new Slot[8];
++                _count = 0;
++            }
++        }
++
+         /// <summary>
+         /// Rents a writable copy of <paramref name="current"/> (the guest bytes at <paramref name="va"/>) that is written back to
+         /// <paramref name="target"/> with WriteUntracked when the region is disposed.
+diff --git a/src/Ryujinx.HLE/HOS/Services/Bluetooth/BluetoothDriver/BluetoothEventManager.cs b/src/Ryujinx.HLE/HOS/Services/Bluetooth/BluetoothDriver/BluetoothEventManager.cs
+index 2c72752768dbc54a89b65eafe2e809fb549c54df..8c38cb49543b4c4bbcea177db42800d528c93cba 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Bluetooth/BluetoothDriver/BluetoothEventManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Bluetooth/BluetoothDriver/BluetoothEventManager.cs
+@@ -4,6 +4,13 @@ namespace Ryujinx.HLE.HOS.Services.Bluetooth.BluetoothDriver
+ {
+     static class BluetoothEventManager
+     {
++        internal static void S2AReset()
++        {
++            InitializeBleDebugEvent = UnknownBleDebugEvent = RegisterBleDebugEvent = null;
++            InitializeBleEvent = UnknownBleEvent = RegisterBleEvent = null;
++            InitializeBleDebugEventHandle = UnknownBleDebugEventHandle = RegisterBleDebugEventHandle = 0;
++            InitializeBleEventHandle = UnknownBleEventHandle = RegisterBleEventHandle = 0;
++        }
+         public static KEvent InitializeBleDebugEvent;
+         public static int InitializeBleDebugEventHandle;
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Mii/DatabaseImpl.cs b/src/Ryujinx.HLE/HOS/Services/Mii/DatabaseImpl.cs
+index cd2115132df8396121c58392750e516bdcd4b3f7..e9eabe78d08be2a86602b69a54998c0e206cff65 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Mii/DatabaseImpl.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Mii/DatabaseImpl.cs
+@@ -9,6 +9,8 @@ namespace Ryujinx.HLE.HOS.Services.Mii
+     {
+         private static DatabaseImpl _instance;
+ 
++        internal static void S2AReset() => _instance = null;
++
+         public static DatabaseImpl Instance
+         {
+             get
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+index 9e6365da46cd98374811b55006aa9a20ddaf538f..6a7dd6fb88c2bb1d9eee0fcc0602dac07a3dc9ba 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+@@ -653,6 +653,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+             }
+ 
+             _host1xContextRegistry.Clear();
++            Array.Clear(DeviceSyncpoints);
++            ChannelResourcePolicy = ResourcePolicy.Device;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+index eb69cce22f1efcf6d190d3fd8e68d4a487db0107..8be3b45d93dd1c4cd6ade7164921baf5b777b42f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+@@ -20,6 +20,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap
+ 
+         private static readonly NvMapIdDictionary _maps = new();
+ 
++        internal static void S2AReset() => _maps.Clear();
++
+         public NvMapDeviceFile(ServiceCtx context, IVirtualMemoryManager memory, ulong owner) : base(context, owner)
+         {
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
+index e609859541981db2bbb8642d04a58a26199ed82b..b9969e7764734d758cfb469b8dd8dc2203eb6ccd 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
+@@ -11,6 +11,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+     {
+         private static readonly ConcurrentDictionary<ulong, BsdContext> _registry = new();
+ 
++        internal static void S2AReset()
++        {
++            foreach (ulong pid in _registry.Keys) DeleteContext(pid);
++        }
++
+         private readonly Lock _lock = new();
+ 
+         private readonly List<IFileDescriptor> _fds;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+index 350bad6e32ca5f3e2c79041364a6f9b73facb7a6..54c60d7b74c15a8e719b8a00188201712e67ed79 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+@@ -249,11 +249,16 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                     throw Error(SocketError.WouldBlock);
+                 }
+ 
+-                while (!_closed)
++                while (!_closed && !S2AShutdown.Requested)
+                 {
+                     Monitor.Wait(_network);
+                 }
+ 
++                if (S2AShutdown.Requested)
++                {
++                    throw Error(SocketError.Interrupted);
++                }
++
+                 throw Error(SocketError.ConnectionAborted);
+             }
+         }
+@@ -390,7 +395,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                 int timeout = _options.GetValueOrDefault(SocketOptionName.ReceiveTimeout);
+                 long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
+ 
+-                while (_receiveQueue.Count == 0 && !_readShutdown && !_closed)
++                while (_receiveQueue.Count == 0 && !_readShutdown && !_closed && !S2AShutdown.Requested)
+                 {
+                     if (!Blocking)
+                     {
+@@ -407,6 +412,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                     Monitor.Wait(_network, deadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(left, int.MaxValue));
+                 }
+ 
++                if (S2AShutdown.Requested)
++                {
++                    throw Error(SocketError.Interrupted);
++                }
++
+                 if (_receiveQueue.Count == 0)
+                 {
+                     return 0;
+@@ -435,7 +445,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             {
+                 long deadline = microSeconds < 0 ? long.MaxValue : Environment.TickCount64 + microSeconds / 1000;
+ 
+-                while (true)
++                while (!S2AShutdown.Requested)
+                 {
+                     bool ready = mode switch
+                     {
+@@ -453,6 +463,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+                     Monitor.Wait(_network, deadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(left, int.MaxValue));
+                 }
++
++                throw Error(SocketError.Interrupted);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ssl/BuiltInCertificateManager.cs b/src/Ryujinx.HLE/HOS/Services/Ssl/BuiltInCertificateManager.cs
+index 763ab8d602ea1b881828848bffdf4b097916c9b3..7a2f50369efcbc4e0a00cb26067f62c82fffcd05 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ssl/BuiltInCertificateManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ssl/BuiltInCertificateManager.cs
+@@ -28,6 +28,8 @@ namespace Ryujinx.HLE.HOS.Services.Ssl
+ 
+         private static BuiltInCertificateManager _instance;
+ 
++        internal static void S2AReset() => _instance = null;
++
+         public static BuiltInCertificateManager Instance
+         {
+             get
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
+index f6f2225005570e49de1289363190f72c23a14848..a00546fd83318c12a9526d1550f574f412aed467 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueCore.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.HOS.Kernel.Threading;
+ using Ryujinx.HLE.HOS.Services.SurfaceFlinger.Types;
+@@ -9,6 +10,48 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ {
+     class BufferQueueCore
+     {
++        // The host must cancel blocked producer IPC before it can dispose the
++        // compositor. Keep only weak monitor references in the process-wide
++        // shutdown callback, so previous sessions are not retained by it.
++        private static readonly List<WeakReference<object>> _s2aWaitLocks = [];
++
++        static BufferQueueCore()
++        {
++            S2AShutdown.OnRequest(S2AWakeWaiters);
++        }
++
++        internal static void S2ARegisterWaitLock(object waitLock)
++        {
++            lock (_s2aWaitLocks)
++            {
++                _s2aWaitLocks.RemoveAll(static weak => !weak.TryGetTarget(out _));
++                _s2aWaitLocks.Add(new WeakReference<object>(waitLock));
++            }
++
++            if (S2AShutdown.Requested)
++            {
++                lock (waitLock) Monitor.PulseAll(waitLock);
++            }
++        }
++
++        private static void S2AWakeWaiters()
++        {
++            WeakReference<object>[] waitLocks;
++            lock (_s2aWaitLocks)
++            {
++                waitLocks = _s2aWaitLocks.ToArray();
++                _s2aWaitLocks.Clear();
++            }
++
++            foreach (WeakReference<object> weak in waitLocks)
++            {
++                if (weak.TryGetTarget(out object waitLock))
++                {
++                    lock (waitLock) Monitor.PulseAll(waitLock);
++                }
++            }
++        }
++
+         public BufferSlotArray Slots;
+         public int OverrideMaxBufferCount;
+         public bool UseAsyncBuffer;
+@@ -97,6 +140,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             BufferHistory = new BufferInfo[BufferHistoryArraySize];
+             EnableExternalEvent = true;
+             MaxBufferCountCached = 0;
++            S2ARegisterWaitLock(Lock);
+         }
+ 
+         public int GetMinUndequeuedBufferCountLocked(bool async)
+@@ -222,7 +266,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private void WaitForLock()
+         {
+-            if (Active)
++            if (Active && !S2AShutdown.Requested)
+             {
+                 Monitor.Wait(Lock);
+             }
+@@ -261,12 +305,14 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             return !slot.GraphicBuffer.IsNull && slot.GraphicBuffer.Object.Buffer.Surfaces[0].NvMapHandle == item.GraphicBuffer.Object.Buffer.Surfaces[0].NvMapHandle;
+         }
+ 
+-        public void WaitWhileAllocatingLocked()
++        public bool WaitWhileAllocatingLocked()
+         {
+-            while (IsAllocating)
++            while (IsAllocating && Active && !S2AShutdown.Requested)
+             {
+                 WaitIsAllocatingEvent();
+             }
++
++            return Active && !S2AShutdown.Requested;
+         }
+ 
+         public void CheckSystemEventsLocked(int maxBufferCount)
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+index 247ed931b40ababc07637db7ad7449a139e740f5..0f5a195edde0b3ea87ca016d096b951235130193 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Cpu;
+ using Ryujinx.HLE.HOS.Kernel.Threading;
+@@ -34,6 +35,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             _callbackTicket = 0;
+             _nextCallbackTicket = 0;
+             _currentCallbackTicket = 0;
++            BufferQueueCore.S2ARegisterWaitLock(_callbackLock);
+         }
+ 
+         public override Status RequestBuffer(int slot, out AndroidStrongPointer<GraphicBuffer> graphicBuffer)
+@@ -264,9 +266,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+         {
+             lock (Core.Lock)
+             {
+-                Core.WaitWhileAllocatingLocked();
+-
+-                if (Core.IsAbandoned)
++                if (!Core.WaitWhileAllocatingLocked() || Core.IsAbandoned)
+                 {
+                     graphicBuffer = default;
+                     fence = AndroidFence.NoFence;
+@@ -308,7 +308,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+         {
+             lock (Core.Lock)
+             {
+-                Core.WaitWhileAllocatingLocked();
++                if (!Core.WaitWhileAllocatingLocked())
++                {
++                    slot = BufferSlotArray.InvalidBufferSlot;
++                    return Status.NoInit;
++                }
+ 
+                 Status status = WaitForFreeSlotThenRelock(false, out slot, out Status returnFlags);
+ 
+@@ -359,7 +363,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             lock (Core.Lock)
+             {
+-                if (Core.IsAbandoned)
++                if (Core.IsAbandoned || !Core.Active || S2AShutdown.Requested)
+                 {
+                     return Status.NoInit;
+                 }
+@@ -484,11 +488,16 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             lock (_callbackLock)
+             {
+-                while (_callbackTicket != _currentCallbackTicket)
++                while (_callbackTicket != _currentCallbackTicket && !S2AShutdown.Requested)
+                 {
+                     Monitor.Wait(_callbackLock);
+                 }
+ 
++                if (S2AShutdown.Requested)
++                {
++                    return Status.NoInit;
++                }
++
+                 frameAvailableListener?.OnFrameAvailable(ref item);
+                 frameReplaceListener?.OnFrameReplaced(ref item);
+ 
+@@ -612,7 +621,10 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             lock (Core.Lock)
+             {
+-                Core.WaitWhileAllocatingLocked();
++                if (!Core.WaitWhileAllocatingLocked())
++                {
++                    return Status.NoInit;
++                }
+ 
+                 if (Core.IsAbandoned)
+                 {
+@@ -748,7 +760,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             while (tryAgain)
+             {
+-                if (Core.IsAbandoned)
++                if (Core.IsAbandoned || !Core.Active || S2AShutdown.Requested)
+                 {
+                     freeSlot = BufferSlotArray.InvalidBufferSlot;
+ 
+@@ -837,10 +849,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+                     Core.WaitDequeueEvent();
+ 
+-                    if (!Core.Active)
+-                    {
+-                        break;
+-                    }
++                    // A cancelled wait must return NoInit on the next pass,
++                    // never Success with an invalid slot or retry forever.
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/HOSBinderDriverServer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/HOSBinderDriverServer.cs
+index 5151930a570f659f556600beb74396846c1652c4..c3629d0203e98dda5af133efc381516979777fc9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/HOSBinderDriverServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/HOSBinderDriverServer.cs
+@@ -14,6 +14,15 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private static readonly Lock _lock = new();
+ 
++        internal static void S2AReset()
++        {
++            lock (_lock)
++            {
++                _registeredBinderObjects.Clear();
++                _lastBinderId = 0;
++            }
++        }
++
+         public static int RegisterBinderObject(IBinder binder)
+         {
+             lock (_lock)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
+index f8e36bcd721da46d745d0c96cc5fad765a8d26ca..cd298c6f7effaa3acb094483a5e300fc7a736956 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeManager.cs
+@@ -12,6 +12,8 @@ namespace Ryujinx.HLE.HOS.Services.Time
+     {
+         private static TimeManager _instance;
+ 
++        internal static void S2AReset() => _instance = null;
++
+         public static TimeManager Instance
+         {
+             get
+diff --git a/src/Ryujinx.HLE/S2ADirect.cs b/src/Ryujinx.HLE/S2ADirect.cs
+index 8ade529fd5e2954fbed5a4a4113b2a1a76fad3b1..944d7fd5cdc661dd0f41d6ecc5f0f32b00c77e7d 100644
+--- a/src/Ryujinx.HLE/S2ADirect.cs
++++ b/src/Ryujinx.HLE/S2ADirect.cs
+@@ -9,7 +9,9 @@ namespace Ryujinx.HLE
+     /// </summary>
+     public static unsafe class S2ADirect
+     {
+-        public static readonly bool On = Probe();
++        public static bool On { get; private set; } = Probe();
++
++        public static void BeginSession() => On = Probe();
+ 
+         /// <summary>直连图形层给一段客体内存（NVN 内存池）开 nvmap 句柄，返回句柄号（nvnTextureGetNvRmSurfaceNVX 用）</summary>
+         public static int NvMapFromGuest(ulong address, uint size) => HOS.Services.Nv.NvDrvServices.NvMap.NvMapDeviceFile.S2AFromGuest(address, size);
+diff --git a/src/Ryujinx.HLE/S2ASessionState.cs b/src/Ryujinx.HLE/S2ASessionState.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a9d6a21e6bb893ec165cfe1d7066ccb4764404f
+--- /dev/null
++++ b/src/Ryujinx.HLE/S2ASessionState.cs
+@@ -0,0 +1,36 @@
++namespace Ryujinx.HLE
++{
++    // Called only after guest/service threads have exited and Switch.Dispose returned.
++    // These upstream singletons otherwise retain the old kernel, file system or guest addresses.
++    internal static unsafe class S2ASessionState
++    {
++        internal static void End()
++        {
++            HOS.Services.Fs.S2ASaveShare.CloseAll();
++            HOS.Services.Sockets.Bsd.BsdContext.S2AReset();
++            HOS.Services.Sockets.Bsd.Proxy.SocketHelpers.UnregisterProxy();
++            HOS.Services.Nv.NvDrvServices.NvMap.NvMapDeviceFile.S2AReset();
++            HOS.Services.SurfaceFlinger.HOSBinderDriverServer.S2AReset();
++            HOS.Services.Time.TimeManager.S2AReset();
++            HOS.Services.Mii.DatabaseImpl.S2AReset();
++            HOS.Services.Ssl.BuiltInCertificateManager.S2AReset();
++            HOS.Services.Bluetooth.BluetoothDriver.BluetoothEventManager.S2AReset();
++            S2AHooks.MakeSession = null;
++            S2AHooks.StartHorizonService = null;
++            S2AHooks.EventSignal = null;
++            S2AHooks.EventClear = null;
++            S2AHooks.SaveCommitted = null;
++            S2AHooks.TickSource = null;
++            S2AHooks.GuestView = null;
++            S2AHooks.OpenSystemDataStorage = null;
++            S2AHooks.OpenAocDataStorage = null;
++            S2AHooks.TimeZoneDataDir = null;
++            S2AHooks.SharedFontDir = null;
++            S2AHooks.SystemDataRoot = null;
++            S2AHooks.SystemDataAsked = null;
++            S2AHooks.FsFailed = null;
++            S2AHooks.LdnInitializing = null;
++            S2AHooks.Red = null;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Horizon/ServiceTable.cs b/src/Ryujinx.Horizon/ServiceTable.cs
+index 23b522c761e55a61c6f6bedc8d1dc98e1381d8fb..54657c03de1d621179f648a13df114f6f84c9a77 100644
+--- a/src/Ryujinx.Horizon/ServiceTable.cs
++++ b/src/Ryujinx.Horizon/ServiceTable.cs
+@@ -78,6 +78,8 @@ namespace Ryujinx.Horizon
+             _servicesReadyEvent.WaitOne();
+         }
+ 
++        public bool WaitServicesReady(int millisecondsTimeout) => _servicesReadyEvent.WaitOne(millisecondsTimeout);
++
+         // Explicit platform startup contracts may bound/cancel the wait. Keep the
+         // original no-argument path unchanged for existing hosts.
+         public void WaitServicesReady(TimeSpan timeout, CancellationToken cancellationToken)

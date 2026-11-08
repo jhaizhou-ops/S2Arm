@@ -1,0 +1,185 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index 6a8aa299dd9d1e95b174d2a8f8ab2363b9792193..36d44bc632e5099390e5e316f3a1c8900d32b6d3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -755,14 +755,18 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+                     previousStage = currentStage;
+                 }
+-                else if (
+-                    previousStage != null &&
+-                    previousStage.LayerOutputWritten &&
+-                    stageIndex == 3 &&
+-                    !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
++                else
+                 {
+-                    S2AGsDiag.NotePassthrough("DiskCacheLoader");   // #1456：追加点来源
+-                    translatedStages.Add(previousStage.GenerateGeometryPassthrough());
++                    switch (S2ALayerRouteFor(_context, previousStage, stageIndex))
++                    {
++                        case S2ALayerRoute.GeometryPassthrough:
++                            S2AGsDiag.NotePassthrough("DiskCacheLoader");   // #1456：追加点来源
++                            translatedStages.Add(previousStage.GenerateGeometryPassthrough());
++                            break;
++                        case S2ALayerRoute.Unsupported:
++                            S2ARejectLayerRoute();
++                            break;
++                    }
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index e5b38f7d586cde3106cb3f5c8a71626a0068d15e..4be36111cc1a8083038ae3d65c4cbbdbe4665c27 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -99,6 +99,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                             TranslatorContext lastInVertexPipeline = geometryToCompute ? tcs[4] ?? currentStage : currentStage;
+ 
+                             program = lastInVertexPipeline.GenerateVertexPassthroughForCompute();
++                            ShaderCache.S2ACheckLayerPassthrough(context, program);
+                             t.PassthroughInfo = program.Info;
+                         }
+                         else
+@@ -116,14 +117,18 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     previousStage = currentStage;
+                 }
+-                else if (
+-                    previousStage != null &&
+-                    previousStage.LayerOutputWritten &&
+-                    stageIndex == 3 &&
+-                    !context.Capabilities.SupportsLayerVertexTessellation)
++                else
+                 {
+-                    S2AGsDiag.NotePassthrough("S2AVtg");   // #1456：追加点来源
+-                    t.GraphicsStages.Add(previousStage.GenerateGeometryPassthrough());
++                    switch (ShaderCache.S2ALayerRouteFor(context, previousStage, stageIndex))
++                    {
++                        case ShaderCache.S2ALayerRoute.GeometryPassthrough:
++                            S2AGsDiag.NotePassthrough("S2AVtg");   // #1456：追加点来源
++                            t.GraphicsStages.Add(previousStage.GenerateGeometryPassthrough());
++                            break;
++                        case ShaderCache.S2ALayerRoute.Unsupported:
++                            ShaderCache.S2ARejectLayerRoute();
++                            break;
++                    }
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 6c3ad53aa160a111a8331c10c02c206ff5004fa0..7c2fcec471ac23e40c00a596bce51aee96408360 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -750,6 +750,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                             TranslatorContext lastInVertexPipeline = geometryToCompute ? translatorContexts[4] ?? currentStage : currentStage;
+ 
+                             program = lastInVertexPipeline.GenerateVertexPassthroughForCompute();
++                            S2ACheckLayerPassthrough(_context, program);
+                             passthroughInfo = program.Info;
+                         }
+                         else
+@@ -767,14 +768,18 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     previousStage = currentStage;
+                 }
+-                else if (
+-                    previousStage != null &&
+-                    previousStage.LayerOutputWritten &&
+-                    stageIndex == 3 &&
+-                    !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
++                else
+                 {
+-                    S2AGsDiag.NotePassthrough("ShaderCache");   // #1456：追加点来源
+-                    shaderSources.Add(CreateShaderSource(previousStage.GenerateGeometryPassthrough()));
++                    switch (S2ALayerRouteFor(_context, previousStage, stageIndex))
++                    {
++                        case S2ALayerRoute.GeometryPassthrough:
++                            S2AGsDiag.NotePassthrough("ShaderCache");   // #1456：追加点来源
++                            shaderSources.Add(CreateShaderSource(previousStage.GenerateGeometryPassthrough()));
++                            break;
++                        case S2ALayerRoute.Unsupported:
++                            S2ARejectLayerRoute();
++                            break;
++                    }
+                 }
+             }
+ 
+@@ -851,6 +856,78 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return !capabilities.SupportsVertexStoreAndAtomics || !capabilities.SupportsGeometryShader;
+         }
+ 
++        /// <summary>
++        /// S2A：顶点管线末段（顶点 / 细分求值）写了渲染目标层（gl_Layer）、本程序又没有客体几何着色器时，宿主侧的合法通路。
++        /// 四处直通几何追加点（当场编译、磁盘缓存重建、转计算翻译、离线烘焙）共用一个判定；能力表取冻结档
++        /// （GpuAccessorBase.S2ATranslationCapabilities），与转计算判据同一份，不各查各的 context.Capabilities。
++        /// 旧判定只查 SupportsLayerVertexTessellation、漏了 SupportsGeometryShader：A-GSOCC 把 Arm 的 geometryShader
++        /// 关掉后（9000 Mali-G710，#1456 系规避）照样追加 GenerateGeometryPassthrough 的真硬件几何阶段，
++        /// 管线带着硬件 GS 创建、一画设备就丢（generic Z-A）。
++        /// </summary>
++        public enum S2ALayerRoute
++        {
++            /// <summary>不需要补段：没写层，或宿主认顶点 / 细分求值直接写层（Vulkan 1.2 shaderOutputLayer、VK_EXT_shader_viewport_index_layer、Metal）。</summary>
++            Native,
++            /// <summary>唯一通路是追加硬件直通几何着色器：层值在翻译时走私进通用属性输出，由它转成真 gl_Layer。</summary>
++            GeometryPassthrough,
++            /// <summary>没有任何通路：宿主既不支持几何着色器、也不认顶点写层。补段 = 往管线塞硬件 GS；调用方必须拒建，不得产出阶段。</summary>
++            Unsupported,
++        }
++
++        /// <summary>层输出通路判定（见 S2ALayerRoute）。previousStage / stageIndex 照各调用点循环里的原值传入。</summary>
++        /// <param name="context">GPU context of the shader</param>
++        /// <param name="previousStage">Translation context of the previous active stage (vertex or tessellation evaluation)</param>
++        /// <param name="stageIndex">Current stage index in the shader stages loop (3 = empty geometry slot)</param>
++        /// <returns>The legal route for the layer output</returns>
++        public static S2ALayerRoute S2ALayerRouteFor(GpuContext context, TranslatorContext previousStage, int stageIndex)
++        {
++            if (previousStage == null || stageIndex != 3 || !previousStage.LayerOutputWritten)
++            {
++                return S2ALayerRoute.Native;
++            }
++
++            Capabilities caps = GpuAccessorBase.S2ATranslationCapabilities(context);
++
++            if (caps.SupportsLayerVertexTessellation)
++            {
++                return S2ALayerRoute.Native;
++            }
++
++            return caps.SupportsGeometryShader ? S2ALayerRoute.GeometryPassthrough : S2ALayerRoute.Unsupported;
++        }
++
++        private static int _s2aLayerRouteRed;
++
++        /// <summary>
++        /// 层输出通路 Unsupported 时调（含转计算直通顶点自己写 gl_Layer 而宿主不认顶点写层：那条通路同样不存在）：
++        /// 报红一次（同 S2AVtg 空二进制口径），然后抛。运行时由 StateUpdater 的着色器异常捕获按组补现场并跳过本组绘制，
++        /// GPU 线程不退出；加载器计入 ErrorCount、不排队；烘焙记 error_b。不建含非法阶段的管线，也不静默丢层画错。
++        /// </summary>
++        public static void S2ARejectLayerRoute()
++        {
++            if (Interlocked.Exchange(ref _s2aLayerRouteRed, 1) == 0)
++            {
++                Console.Error.WriteLine("[gal] 【红】着色器写渲染目标层（gl_Layer）：宿主不支持几何着色器、也不支持顶点 / 细分直接写层（Vulkan 1.2 shaderOutputLayer / VK_EXT_shader_viewport_index_layer）——没有合法通路，本组着色器不建管线、相关绘制跳过");
++            }
++
++            throw new InvalidOperationException("S2A: shader writes gl_Layer but the host supports neither geometryShader nor layer output from vertex/tessellation; no legal route exists.");
++        }
++
++        /// <summary>
++        /// 转计算通路的直通顶点着色器生成后调：直通顶点若带层输出（客体几何以计算跑、往渲染目标层写过），
++        /// 它自己要写 gl_Layer，同样需要宿主认顶点写层——不认就没有合法通路，照拒建处理。
++        /// </summary>
++        /// <param name="context">GPU context of the shader</param>
++        /// <param name="passthrough">The generated vertex passthrough program</param>
++        public static void S2ACheckLayerPassthrough(GpuContext context, ShaderProgram passthrough)
++        {
++            if (passthrough.Info.UsesRtLayer &&
++                !GpuAccessorBase.S2ATranslationCapabilities(context).SupportsLayerVertexTessellation)
++            {
++                S2ARejectLayerRoute();
++            }
++        }
++
+         /// <summary>
+         /// Creates a compute shader from a vertex, tessellation or geometry shader that has been converted to compute.
+         /// </summary>

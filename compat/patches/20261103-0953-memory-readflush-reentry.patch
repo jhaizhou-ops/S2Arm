@@ -1,0 +1,96 @@
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index e9e841f6060cc09d34c5812545fd4500fe3cd533..a7b8aa9e503cfa16439649022431218c63ca36ca 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -422,11 +422,19 @@ namespace Ryujinx.Memory.Tracking
+             return true;
+         }
+ 
++        /// <summary>
++        /// S2A（#1397 诊断/负控）：置真关掉 RegionHandle 级的回写重入闸（见 RegionHandle.Signal 的
++        /// s2aInSignal 注释）——宿主测试去掉闸时对拍深度用，生产勿置。
++        /// </summary>
++        [ThreadStatic] public static bool S2AReadFlushNoGuard;
++
+         /// <summary>
+         /// S2A（#199 收口回写）：GPU 改过、还没回写的子页被读之前发同一个读跟踪事件——客机缺页
+         /// （NxTrack.Touch 读分支）与 GuestMemory 的托管不跟踪读共用这一入口。回写动作在本线程跑完、
+         /// 页恢复可读后才返回；失败原样上抛。S2AReadTouch 置位期间 GPU 层只回写所碰子页（部分回写）。
+-        /// 回写动作里可再发收口读（嵌套）：收尾恢复进入前的值，不清外层的标志（11-01 审计 P2-40）。
++        /// 回写动作里可再发收口读（嵌套）：重入闸在 RegionHandle 级（信号命中在信号句柄自身时跳过、
++        /// 同段别名句柄照常同步），收口入口本身不加区间闸；收尾恢复进入前的值，不清外层的标志
++        /// （11-01 审计 P2-40）。
+         /// </summary>
+         /// <param name="va">读区间起点（游戏地址）</param>
+         /// <param name="size">读区间长度</param>
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index 65dcaba3e6b3c0e4990d2df2a8709fb11ea24112..66aef1bd691d3ce87447ed31051dce9fbb854259 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -264,6 +264,17 @@ namespace Ryujinx.Memory.Tracking
+         [ThreadStatic]
+         public static bool S2AKeepAction;
+ 
++        /// <summary>
++        /// S2A（#1397 重入闸，等价原生 t_in_touch 上移一层）：本线程正在执行回写动作的句柄栈。
++        /// 回写动作里取可写区会对仍在排空的区间再发收口读事件——8E 实测该自触发沿
++        /// Signal→FlushAction→取可写区→再收口每级 12 帧约 0x640 字节无界叠宿主栈，8 MiB 也吃满
++        /// （nx-84 确定性 SIGSEGV/SEGV_ACCERR）。信号命中在信号句柄自身时跳过动作（在跑的那次
++        /// 调用本身就是这次信号要的回写，不重发、不延后——丢不得也无需补），同段其余别名句柄
++        /// 照常同步执行，保「读之前先回写」的顺序语义。
++        /// </summary>
++        [ThreadStatic]
++        private static List<RegionHandle> s2aInSignal;
++
+         internal void Signal(ulong address, ulong size, bool write, ref IList<RegionHandle> handleIterable)
+         {
+             // If this handle was already unmapped (even if just partially),
+@@ -275,7 +286,10 @@ namespace Ryujinx.Memory.Tracking
+                 return;
+             }
+ 
+-            if (_preAction != null)
++            if (_preAction != null &&
++                (MemoryTracking.S2AReadFlushNoGuard ||
++                 s2aInSignal == null ||
++                 !s2aInSignal.Contains(this)))
+             {
+                 // Limit the range to within this handle.
+                 ulong maxAddress = Math.Max(address, RealAddress);
+@@ -294,18 +308,26 @@ namespace Ryujinx.Memory.Tracking
+                 {
+                     lock (PreActionLock)
+                     {
+-                        S2AKeepAction = false;
+-                        _preAction?.Invoke(maxAddress, minEndAddress - maxAddress);
+-
+-                        // The action is removed after it returns, to ensure that the null check above succeeds when
+-                        // it's still in progress rather than continuing and possibly missing a required data flush.
+-                        // S2A：动作只回写了所碰的一段（部分回写）时置 S2AKeepAction：动作保留、保护保持 None，其余部分照旧拦（不留放开再登记的窗口）
+-                        if (!S2AKeepAction)
++                        (s2aInSignal ??= new List<RegionHandle>()).Add(this);
++                        try
+                         {
+-                            Interlocked.Exchange(ref _preAction, null);
++                            S2AKeepAction = false;
++                            _preAction?.Invoke(maxAddress, minEndAddress - maxAddress);
++
++                            // The action is removed after it returns, to ensure that the null check above succeeds when
++                            // it's still in progress rather than continuing and possibly missing a required data flush.
++                            // S2A：动作只回写了所碰的一段（部分回写）时置 S2AKeepAction：动作保留、保护保持 None，其余部分照旧拦（不留放开再登记的窗口）
++                            if (!S2AKeepAction)
++                            {
++                                Interlocked.Exchange(ref _preAction, null);
++                            }
++
++                            S2AKeepAction = false;
++                        }
++                        finally
++                        {
++                            s2aInSignal.RemoveAt(s2aInSignal.Count - 1);
+                         }
+-
+-                        S2AKeepAction = false;
+                     }
+                 }
+                 finally

@@ -1,0 +1,64 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+index 01e372beea3a264445ba16ce5e9cc43af4f96bf7..c7f015fa7243ee3bdc57ae057d2f85d8083f52c8 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+@@ -18,7 +18,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             _renderer = renderer;
+         }
+ 
+-        // S2A_TEXARR_REUSE=1：入队那份从精确长度池取（执行完在命令里归还），不每次 ToArray（见 S2ATexArrReuse）
++        // 贴图数组复用开着时（缺省开）：入队那份从精确长度池取（执行完在命令里归还），不每次 ToArray（见 S2ATexArrReuse）
+         private static T[] S2ACopy<T>(T[] a) where T : class
+         {
+             if (!S2ATexArrReuse.On)
+diff --git a/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs b/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
+index 5565a44d58d5179028cd5af5e117e21ab0b9642c..f756ac6b645327d8531830dd2da63103fb4832f8 100644
+--- a/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
++++ b/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
+@@ -4,7 +4,7 @@ using System.Collections.Concurrent;
+ namespace Ryujinx.Graphics.GAL
+ {
+     /// <summary>
+-    /// S2A（画幅线 10-24，GC gen1 晋升定因）：贴图数组绑定更新不再每次新建大数组。S2A_TEXARR_REUSE=1 开，缺省关（内存 / GC 类：同包 A/B 达标再翻）。
++    /// S2A（画幅线 10-24，GC gen1 晋升定因）：贴图数组绑定更新不再每次新建大数组。缺省开（10-24 总指挥批：测试机2 同局交替两局，GPU 线程分配 −62%、每帧分配 3742→3271 / 3063→2026 B、帧时不退）；S2A_TEXARR_REUSE=0 关。
+     /// 塞尔达 iPhone 可操作阶段一个 GC 间隔 8.2 MB 分配里，TextureManager.CommitGraphicsBindings 占 3.2 MB、ITexture[] 2.1 MB 居首：
+     /// 贴图池一改，TextureBindingsArrayCache 整条重建贴图数组条目，每次 new ISampler[数组长度] + ITexture[数组长度]；
+     /// 双线程渲染 ThreadedTextureArray 再 ToArray() 复制一份进命令队列，渲染线程执行时 Select(...).ToArray() 又一份；宽屏包装层 Unwrap 再一份。
+@@ -13,19 +13,19 @@ namespace Ryujinx.Graphics.GAL
+     /// </summary>
+     public static class S2ATexArrReuse
+     {
+-        // 开关：S2A_TEXARR_REUSE=1 一直开；设了 S2A_ALT（同局交替，原生层 runtime/src/alt.c）时按相位开——开段开、关段 / MARK 前关。
++        // 开关：缺省开；S2A_TEXARR_REUSE=0 一直关、=1 一直开；没给且设了 S2A_ALT（同局交替，原生层 runtime/src/alt.c）时按相位开——开段开、关段 / MARK 前关。
+         //   切换跨在入队与执行之间也安全：入队时开（池里取）、执行时关 → 那份照旧路径用完交给 GC；入队时关（ToArray 私有副本）、执行时开 → 原地改私有副本再归还
+-        static readonly bool s_env = Environment.GetEnvironmentVariable("S2A_TEXARR_REUSE") == "1";
++        static readonly string s_env = Environment.GetEnvironmentVariable("S2A_TEXARR_REUSE");
+         static bool s_alt = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_ALT"));
+         [System.Runtime.InteropServices.DllImport("s2a_native")] static extern int s2a_alt_phase();
+         public static bool On
+         {
+             get
+             {
+-                if (s_env) return true;
+-                if (!s_alt) return false;
++                if (s_env == "0") return false;
++                if (s_env == "1" || !s_alt) return true;
+                 try { return s2a_alt_phase() == 1; }
+-                catch (Exception) { s_alt = false; return false; }   // 回放器 / 单测等不在宿主里跑的进程：没有原生层
++                catch (Exception) { s_alt = false; return true; }   // 回放器 / 单测等不在宿主里跑的进程：没有原生层、不交替，按缺省开
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
+index 171ffbe33071f4a5231840c3eb9d60ee7ae77956..35d0db6bf6b407854a9f107567e8f84e0e5ad16a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
+@@ -227,7 +227,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             public readonly IImageArray ImageArray;
+ 
+             /// <summary>
+-            /// S2A（S2A_TEXARR_REUSE=1）：贴图数组条目重建时复用的数组（只给贴图数组；图像数组双线程下按引用入队，不能复用）
++            /// S2A（贴图数组复用，缺省开）：贴图数组条目重建时复用的数组（只给贴图数组；图像数组双线程下按引用入队，不能复用）
+             /// </summary>
+             public ITexture[] S2ATexBuf;
+             public ISampler[] S2ASmpBuf;

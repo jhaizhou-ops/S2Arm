@@ -1,0 +1,2190 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index 8a83a1220274bb2e1b5ec394511d7824a2900118..add93c6003fa8c09b79186c8b2a3b281cb6ee3fc 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -81,6 +81,16 @@ namespace Ryujinx.Graphics.GAL
+ 
+         public readonly ulong MaximumGpuMemory;
+ 
++        // S2A（F1）：存储缓冲访存按宿主绑定窗口（OpArrayLength）检查并钳位下标。只有 Vulkan 渲染器在设备未启用
++        //   robustBufferAccess 时置真（Mali / Adreno 等）；Metal（NxCaps 也报 Vulkan）、NVIDIA、离线能力表为假，
++        //   为假时 GlobalToStorage 的输出与改前逐字节相同。计入宿主缓存能力身份（只在为真时写入，为假时身份不变）。
++        public readonly bool S2AStorageWindowClamp;
++
++        // S2A（F1）：越界记录缓冲（缺省关的诊断开关 S2A_SSBO_OOB_DIAG=1，且 S2AStorageWindowClamp 为真）。
++        //   为真时片元 / 计算阶段（宿主支持 vertexPipelineStoresAndAtomics 时含顶点 / 细分 / 几何）多一个可写记录缓冲；
++        //   计入宿主缓存能力身份，开与关的宿主程序不混用。
++        public readonly bool S2AStorageOobRecord;
++
+         public Capabilities(
+             TargetApi api,
+             string vendorName,
+@@ -147,8 +157,12 @@ namespace Ryujinx.Graphics.GAL
+             bool s2aVertexPull = false,
+             bool requiresLinkedVaryingInterface = false,
+             int maximumVertexOutputComponents = 0,
+-            int maximumFragmentInputComponents = 0)
++            int maximumFragmentInputComponents = 0,
++            bool s2aStorageWindowClamp = false,
++            bool s2aStorageOobRecord = false)
+         {
++            S2AStorageWindowClamp = s2aStorageWindowClamp;
++            S2AStorageOobRecord = s2aStorageWindowClamp && s2aStorageOobRecord;
+             S2AVertexPull = s2aVertexPull;
+             RequiresLinkedVaryingInterface = requiresLinkedVaryingInterface;
+             MaximumVertexOutputComponents = maximumVertexOutputComponents;
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+index 73cb6483b3a22a1ee083705e585eb21dac8516df..cd4bc3af119ae47db90441968df376b3fb3f07f7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+@@ -173,6 +173,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+             {
+                 BufferDescriptor sb = info.SBuffers[index];
+ 
++                // S2A（F1）：越界记录缓冲不是客体存储缓冲，由渲染器按程序绑定
++                if (sb.Flags.HasFlag(BufferUsageFlags.S2AOobRecord))
++                {
++                    continue;
++                }
++
+                 ulong sbDescAddress = _channel.BufferManager.GetComputeUniformBufferAddress(sb.SbCbSlot);
+                 sbDescAddress += (ulong)sb.SbCbOffset * 4;
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 1a722cf994fc701da4c9759f843783410fedcbda..ffc14576d73e44f8e14d809c68e2b834a49bde4f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -393,6 +393,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 {
+                     BufferDescriptor sb = info.SBuffers[index];
+ 
++                    // S2A（F1）：越界记录缓冲不是客体存储缓冲，由渲染器按程序绑定
++                    if (sb.Flags.HasFlag(BufferUsageFlags.S2AOobRecord))
++                    {
++                        continue;
++                    }
++
+                     ulong sbDescAddress = _channel.BufferManager.GetGraphicsUniformBufferAddress(stage, sb.SbCbSlot);
+                     sbDescAddress += (ulong)sb.SbCbOffset * 4;
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderBindings.cs b/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderBindings.cs
+index 4683a5d0c00937a115afe4a5676282ff14e14ba1..5eb1b5e3ad4dbc926519d2e4993364f560a32ccd 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderBindings.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/CachedShaderBindings.cs
+@@ -106,7 +106,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 }).ToArray();
+ 
+                 ConstantBufferBindings[i] = stage.Info.CBuffers.ToArray();
+-                StorageBufferBindings[i] = stage.Info.SBuffers.ToArray();
++                // S2A（F1）：越界记录缓冲不是客体槽位，由渲染器按程序绑定
++                StorageBufferBindings[i] = stage.Info.SBuffers.Where(sb => !sb.Flags.HasFlag(BufferUsageFlags.S2AOobRecord)).ToArray();
+             }
+ 
+             MaxTextureBinding = maxTextureBinding;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index 1eb6b936a55a37c6509df80b33d2bc42f72639eb..41b0835d68e7cb705c0cea547d3dff382e0caf4c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -72,6 +72,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             writer.Write(capabilities.ShaderSubgroupSize);
+             writer.Write(capabilities.StorageBufferOffsetAlignment);
+             writer.Write(capabilities.GatherBiasPrecision);
++            // S2A（F1）：只在为真时追加，为假（Metal、NVIDIA、改前）时身份字节与改前相同，已有宿主缓存继续可用
++            if (capabilities.S2AStorageWindowClamp || capabilities.S2AStorageOobRecord)
++            {
++                writer.Write("s2a-storage-window");
++                writer.Write(capabilities.S2AStorageWindowClamp);
++                writer.Write(capabilities.S2AStorageOobRecord);
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index fbc95c616cc7bd3cf7e4d5aabfe35a23cb227b84..ab482590992b456fe41645d19f0f64285bcfbc16 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -115,6 +115,35 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return new SetBindingPair(_context.Capabilities.StorageBufferSetIndex, binding + _reservedStorageBuffers);
+         }
+ 
++        /// <summary>S2A（F1）：存储缓冲访存按宿主绑定窗口钳位（只由 Vulkan 渲染器在未启用 robustBufferAccess 时置真）。</summary>
++        public bool QueryHostStorageWindowClamp()
++        {
++            return _context.Capabilities.S2AStorageWindowClamp;
++        }
++
++        /// <summary>S2A（F1）：越界记录诊断（缺省关，S2A_SSBO_OOB_DIAG=1）。</summary>
++        public bool QueryHostStorageOobRecord()
++        {
++            return _context.Capabilities.S2AStorageOobRecord;
++        }
++
++        /// <summary>
++        /// S2A（F1）：越界记录缓冲绑定。只有开了记录诊断的 Vulkan 渲染器按程序绑定它（S2AStorageOobRecorder）；顶点 / 细分 / 几何阶段
++        /// 在宿主不支持 vertexPipelineStoresAndAtomics 时不写存储缓冲，不给记录（越界仍钳位）。片元阶段按 fragmentStoresAndAtomics
++        /// 可用处理：Capabilities 不带这一位，Ryujinx 的片元存储写本来就依赖它。
++        /// </summary>
++        public SetBindingPair CreateS2AStorageOobRecordBinding(ShaderStage stage)
++        {
++            bool vtg = stage is ShaderStage.Vertex or ShaderStage.TessellationControl or ShaderStage.TessellationEvaluation or ShaderStage.Geometry;
++
++            if (!_context.Capabilities.S2AStorageOobRecord || (vtg && !_context.Capabilities.SupportsVertexStoreAndAtomics))
++            {
++                return new SetBindingPair(-1, -1);
++            }
++
++            return new SetBindingPair(_context.Capabilities.StorageBufferSetIndex, S2AStorageOobRecord.Binding);
++        }
++
+         public SetBindingPair CreateTextureBinding(int count, bool isBuffer)
+         {
+             int binding;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+index c74c612a50b27decf7f0de50dfe4fc02f1795722..2ba2d06854c922dfe5fbd9f8eb61e79b9a989f82 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+@@ -33,6 +33,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         private List<ResourceDescriptor>[] _resourceDescriptors;
+         private List<ResourceUsage>[] _resourceUsages;
+ 
++        // S2A（F1）：用到越界记录缓冲的阶段（各阶段共用一个绑定号，布局里只放一项）
++        private ResourceStages _s2aOobRecordStages;
++        private bool _s2aOobRecordAdded;
++
+         /// <summary>
+         /// Creates a new shader info builder.
+         /// </summary>
+@@ -236,6 +240,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             foreach (BufferDescriptor buffer in buffers)
+             {
++                if (buffer.Flags.HasFlag(BufferUsageFlags.S2AOobRecord))
++                {
++                    _s2aOobRecordStages |= stages;
++                    continue;
++                }
++
+                 GetUsages(buffer.Set).Add(new ResourceUsage(
+                     buffer.Binding,
+                     1,
+@@ -348,6 +358,17 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>Shader information</returns>
+         public ShaderInfo Build(ProgramPipelineState? pipeline, bool fromCache = false)
+         {
++            if (_s2aOobRecordStages != ResourceStages.None && !_s2aOobRecordAdded)
++            {
++                // S2A（F1）：越界记录缓冲。用法不记写：它只在越界分支里写、命令缓冲完成后由渲染器读，
++                //   不参与 draw 之间的存储缓冲写屏障（ShaderCollection.IncoherentBufferWriteStages）
++                int storageSetIndex = _context.Capabilities.StorageBufferSetIndex;
++
++                GetDescriptors(storageSetIndex).Add(new ResourceDescriptor(S2AStorageOobRecord.Binding, 1, ResourceType.StorageBuffer, _s2aOobRecordStages));
++                GetUsages(storageSetIndex).Add(new ResourceUsage(S2AStorageOobRecord.Binding, 1, ResourceType.StorageBuffer, _s2aOobRecordStages, false));
++                _s2aOobRecordAdded = true;
++            }
++
+             int totalSets = _resourceDescriptors.Length;
+ 
+             ResourceDescriptorCollection[] descriptors = new ResourceDescriptorCollection[totalSets];
+diff --git a/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs b/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs
+index 10b9848319bcdf00989b62722f1f7750acb9db43..916562d616f5bdbd000c837de9dd2c0a289b71e2 100644
+--- a/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs
++++ b/src/Ryujinx.Graphics.Shader/BufferUsageFlags.cs
+@@ -14,5 +14,11 @@ namespace Ryujinx.Graphics.Shader
+         /// Buffer is written to.
+         /// </summary>
+         Write = 1 << 0,
++
++        /// <summary>
++        /// S2A（F1）：不是客体存储缓冲，而是越界记录缓冲（<see cref="S2AStorageOobRecord"/>）。
++        /// 不读 SbDescriptor、不按客体槽位绑定；由渲染器按程序绑定，资源用法不计入着色器写（不产生缓冲写屏障）。
++        /// </summary>
++        S2AOobRecord = 1 << 1,
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGen.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGen.cs
+index 939b57aa7b9b13398b7bbe861b17f4c7ffc036a2..ad37e56c0ceff188494e666e07c05f39a98256a1 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGen.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGen.cs
+@@ -164,6 +164,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
+                     case Instruction.Load:
+                         return Load(context, operation);
+ 
++                    case Instruction.ArrayLength:
++                        return ArrayLength(context, operation);
++
+                     case Instruction.Lod:
+                         return Lod(context, operation);
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenHelper.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenHelper.cs
+index 4b28f3878d42fb6dc6a78d75325790d558cc891c..8a97a33836c9334deee34320f0d03a54c1b68686 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenHelper.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenHelper.cs
+@@ -127,6 +127,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
+             Add(Instruction.VoteAll,                  InstType.CallUnary,      "allInvocationsARB");
+             Add(Instruction.VoteAllEqual,             InstType.CallUnary,      "allInvocationsEqualARB");
+             Add(Instruction.VoteAny,                  InstType.CallUnary,      "anyInvocationARB");
++            Add(Instruction.ArrayLength,              InstType.Special);
+ #pragma warning restore IDE0055
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenMemory.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenMemory.cs
+index 881ca0d47d3c8804a2d08503a5a2a47f7ac14a24..969f556a519c88a656bb0d9e81f1037a76999fd7 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Instructions/InstGenMemory.cs
+@@ -158,6 +158,22 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl.Instructions
+             return GenerateLoadOrStore(context, operation, isStore: false);
+         }
+ 
++        // S2A（F1）：存储缓冲运行时数组元素数（宿主绑定窗口），源为常量 [绑定号, 字段号]
++        public static string ArrayLength(CodeGenContext context, AstOperation operation)
++        {
++            if (operation.StorageKind != StorageKind.StorageBuffer ||
++                operation.GetSource(0) is not AstOperand { Type: OperandType.Constant } bindingIndex ||
++                operation.GetSource(1) is not AstOperand { Type: OperandType.Constant } fieldIndex)
++            {
++                throw new InvalidOperationException($"{operation.Inst} needs a storage buffer with constant binding and field operands.");
++            }
++
++            BufferDefinition buffer = context.Properties.StorageBuffers[bindingIndex.Value];
++            StructureField field = buffer.Type.Fields[fieldIndex.Value];
++
++            return $"uint({buffer.Name}.{field.Name}.length())";
++        }
++
+         public static string Lod(CodeGenContext context, AstOperation operation)
+         {
+             AstTextureOperation texOp = (AstTextureOperation)operation;
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index ed4ebcefbca2f29a9f6ddd8de9f7c8677d282b9f..54989c4af6e67bbe6842be719d86f74fe6d7f583 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -143,6 +143,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             Add(Instruction.VoteAll,                  GenerateVoteAll);
+             Add(Instruction.VoteAllEqual,             GenerateVoteAllEqual);
+             Add(Instruction.VoteAny,                  GenerateVoteAny);
++            Add(Instruction.ArrayLength,              GenerateArrayLength);
+ #pragma warning restore IDE0055
+         }
+ 
+@@ -864,6 +865,24 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             return GenerateLoadOrStore(context, operation, isStore: false);
+         }
+ 
++        // S2A（F1）：OpArrayLength 取存储缓冲运行时数组的元素数，即宿主描述符实际绑定的窗口（range / 步长）
++        private static OperationResult GenerateArrayLength(CodeGenContext context, AstOperation operation)
++        {
++            if (operation.StorageKind != StorageKind.StorageBuffer ||
++                operation.GetSource(0) is not AstOperand { Type: OperandType.Constant } bindingIndex ||
++                operation.GetSource(1) is not AstOperand { Type: OperandType.Constant } fieldIndex)
++            {
++                throw new InvalidOperationException($"{operation.Inst} needs a storage buffer with constant binding and field operands.");
++            }
++
++            SpvInstruction result = context.ArrayLength(
++                context.TypeU32(),
++                context.StorageBuffers[bindingIndex.Value],
++                (SpvLiteralInteger)fieldIndex.Value);
++
++            return new OperationResult(AggregateType.U32, result);
++        }
++
+         private static OperationResult GenerateLod(CodeGenContext context, AstOperation operation)
+         {
+             AstTextureOperation texOp = (AstTextureOperation)operation;
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 0e3ccf13d780c0e2fee1958bebec4fecb00a18c4..f270d4c404c5c89f5fb3607608a7c8e0f3f1944f 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -66,6 +66,34 @@ namespace Ryujinx.Graphics.Shader
+         /// <returns>Binding number</returns>
+         SetBindingPair CreateStorageBufferBinding(int index);
+ 
++        /// <summary>
++        /// S2A（F1）：存储缓冲访存是否按宿主绑定窗口（OpArrayLength）检查并钳位下标。只有未启用 robustBufferAccess 的 Vulkan
++        /// 渲染器为真；为假时 GlobalToStorage 的输出与改前逐字节相同。
++        /// </summary>
++        bool QueryHostStorageWindowClamp()
++        {
++            return false;
++        }
++
++        /// <summary>
++        /// S2A（F1）：越界记录诊断是否开启（缺省关，开启时必有钳位）。开启但某阶段拿不到记录绑定时，翻译期报黄。
++        /// </summary>
++        bool QueryHostStorageOobRecord()
++        {
++            return false;
++        }
++
++        /// <summary>
++        /// S2A（F1）：越界记录缓冲（<see cref="S2AStorageOobRecord"/>）的绑定；记录诊断关、或该阶段不允许着色器写存储缓冲时为 (-1, -1)，
++        /// 此时越界访存仍钳位，只是不记录。
++        /// </summary>
++        /// <param name="stage">翻译中的阶段</param>
++        /// <returns>集合与绑定号</returns>
++        SetBindingPair CreateS2AStorageOobRecordBinding(ShaderStage stage)
++        {
++            return new SetBindingPair(-1, -1);
++        }
++
+         /// <summary>
+         /// Gets the binding number of a texture.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/Instruction.cs b/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/Instruction.cs
+index f63a8c4beb54af55e5c3f83e81e3fde3ec975513..fd87ab8ce60f1774ce020dcf6f9547d2e50f3b16 100644
+--- a/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/Instruction.cs
++++ b/src/Ryujinx.Graphics.Shader/IntermediateRepresentation/Instruction.cs
+@@ -126,6 +126,9 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
+         VoteAllEqual,
+         VoteAny,
+ 
++        // S2A（F1）：存储缓冲运行时数组的元素数（宿主实际绑定窗口），源为 [绑定号, 字段号]。追加在末尾，前面各值不变
++        ArrayLength,
++
+         Count,
+ 
+         FP32 = 1 << 16,
+diff --git a/src/Ryujinx.Graphics.Shader/S2AStorageOobRecord.cs b/src/Ryujinx.Graphics.Shader/S2AStorageOobRecord.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..97b1bc24e46a3aacb0ea2fc482696a581c4e0540
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Shader/S2AStorageOobRecord.cs
+@@ -0,0 +1,52 @@
++namespace Ryujinx.Graphics.Shader
++{
++    /// <summary>
++    /// S2A（F1）：全局访存越出宿主绑定窗口的记录缓冲合同（着色器写、渲染器在命令缓冲完成后读）。
++    /// 每个宿主程序一段（渲染器按程序分配，描述符偏移选段），着色器只在越界分支里写：
++    /// 计数用原子加；拿到旧值 0 的那次调用写首个越界的详情，最后写 <see cref="WordInfo"/>（带 <see cref="InfoValid"/>）。
++    /// 绑定号固定在存储缓冲集合里所有阶段（5 × 16）与保留绑定（转计算 3 + 变换反馈模拟 4）之上，各阶段共用一个绑定。
++    /// </summary>
++    public static class S2AStorageOobRecord
++    {
++        /// <summary>存储缓冲描述符集合里的绑定号。</summary>
++        public const int Binding = 96;
++
++        /// <summary>越界调用次数（原子加，32 位回绕）。</summary>
++        public const int WordCount = 0;
++
++        /// <summary>首个越界：<see cref="InfoValid"/> | 访存类别 &lt;&lt; 28 | 阶段 &lt;&lt; 24 | 基址 cbuf 槽 &lt;&lt; 16 | 基址 cbuf 字偏移。</summary>
++        public const int WordInfo = 1;
++
++        /// <summary>首个越界：客体地址低 32 位。</summary>
++        public const int WordAddressLow = 2;
++
++        /// <summary>首个越界：相对宿主绑定窗口起点的字节偏移。</summary>
++        public const int WordOffset = 3;
++
++        /// <summary>首个越界：宿主绑定窗口长度（32 位字数，OpArrayLength）。</summary>
++        public const int WordWindowLength = 4;
++
++        /// <summary>首个越界：着色器读到的存储缓冲描述符（基址低 / 高 32 位、大小字），即基址 cbuf 位置起的 3 个字。</summary>
++        public const int WordBaseLow = 5;
++        public const int WordBaseHigh = 6;
++        public const int WordSize = 7;
++
++        /// <summary>首个越界：本阶段客体代码 XXHash128（Low 低 / 高 32 位，High 低 / 高 32 位），与翻译期【红】行同一段字节。</summary>
++        public const int WordHash = 8;
++
++        /// <summary>着色器写的字数。</summary>
++        public const int Words = 12;
++
++        public const uint InfoValid = 1u << 31;
++
++        public const int KindShift = 28;
++        public const int StageShift = 24;
++        public const int CbSlotShift = 16;
++
++        /// <summary>访存类别（<see cref="KindShift"/> 起 3 位）：单目标 / 多目标 × 读 / 写 / 原子。</summary>
++        public const uint KindLoad = 0;
++        public const uint KindStore = 1;
++        public const uint KindAtomic = 2;
++        public const uint KindMultiTarget = 4;
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/InstructionInfo.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/InstructionInfo.cs
+index b2ddf6ab7a8f9cdfbdc8270a5e8b48504a160ae2..fdf1cd1a40b88bf24cb9046cb7e3de23398bdb39 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/InstructionInfo.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/InstructionInfo.cs
+@@ -133,6 +133,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+             Add(Instruction.VoteAll,                  AggregateType.Bool,   AggregateType.Bool);
+             Add(Instruction.VoteAllEqual,             AggregateType.Bool,   AggregateType.Bool);
+             Add(Instruction.VoteAny,                  AggregateType.Bool,   AggregateType.Bool);
++            Add(Instruction.ArrayLength,              AggregateType.U32,    AggregateType.S32,     AggregateType.S32);
+ #pragma warning restore IDE0055
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
+index 3d19586dbf2ad2e0aaf24d264ac2f2aa27c2e288..4a603a7dfd33ae0ac1ea2955e60f295f34a64324 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
+@@ -689,6 +689,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return context.Add(Instruction.Load, storageKind, Local(), e0, e1);
+         }
+ 
++        // S2A（F1）：存储缓冲 binding 的字段 fieldIndex（运行时数组）的元素数
++        public static Operand ArrayLength(this EmitterContext context, int binding, int fieldIndex)
++        {
++            return context.Add(Instruction.ArrayLength, StorageKind.StorageBuffer, Local(), Const(binding), Const(fieldIndex));
++        }
++
+         public static Operand Load(this EmitterContext context, StorageKind storageKind, int binding)
+         {
+             return context.Add(Instruction.Load, storageKind, Local(), Const(binding));
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+index 55628c88b786e0e8c54919b8112dec45c1807915..97fbe5ab6b4118d60dc7eb63779287d83910abd0 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -7,6 +7,49 @@ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
+ 
+ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ {
++    /// <summary>
++    /// S2A：单目标存储缓冲访存在翻译期能静态看出偏移为负（或带负常量）的位置，由 TranslatorContext 带程序哈希提示
++    /// （整体负常量报红、寄存器 + 负常量报黄；只在钳位生效时收集）。
++    /// </summary>
++    /// <param name="CbSlot">存放存储缓冲基址的常量缓冲槽</param>
++    /// <param name="CbOffset">基址在该常量缓冲内的字偏移</param>
++    /// <param name="Offset">Definite 时为完整常量偏移，否则为寄存器之外的常量部分</param>
++    /// <param name="Definite">偏移整体是常量（确定为负）；否则是寄存器 + 负常量（可能为负）</param>
++    readonly record struct StorageOffsetFinding(int CbSlot, int CbOffset, long Offset, bool Definite);
++
++    /// <summary>
++    /// S2A（F1）：GlobalToStorage 的翻译期附加输入输出：静态负偏移收集（报红用）、越界记录里写的本阶段身份，
++    /// 以及本阶段没有越界记录绑定时「只检查不记录」的访存处数（报黄用）。
++    /// </summary>
++    /// <param name="Stage">翻译中的阶段</param>
++    /// <param name="CodeHashLow">本阶段客体代码 XXHash128 的 Low</param>
++    /// <param name="CodeHashHigh">本阶段客体代码 XXHash128 的 High</param>
++    sealed class StorageRangeContext(ShaderStage stage, ulong codeHashLow, ulong codeHashHigh)
++    {
++        public List<StorageOffsetFinding> Findings { get; } = [];
++        public ShaderStage Stage { get; } = stage;
++        public ulong CodeHashLow { get; } = codeHashLow;
++        public ulong CodeHashHigh { get; } = codeHashHigh;
++
++        /// <summary>单目标访存处数：仍按宿主窗口检查并钳位，但越界不进记录缓冲、不报红。</summary>
++        public int UnrecordedSingleTarget { get; private set; }
++
++        /// <summary>多目标访存处数：同上。</summary>
++        public int UnrecordedMultiTarget { get; private set; }
++
++        public void CountUnrecorded(bool isMultiTarget)
++        {
++            if (isMultiTarget)
++            {
++                UnrecordedMultiTarget++;
++            }
++            else
++            {
++                UnrecordedSingleTarget++;
++            }
++        }
++    }
++
+     static class GlobalToStorage
+     {
+         private const int DriverReservedCb = 0;
+@@ -211,7 +254,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             BasicBlock[] blocks,
+             ResourceManager resourceManager,
+             IGpuAccessor gpuAccessor,
+-            TargetLanguage targetLanguage)
++            TargetLanguage targetLanguage,
++            StorageRangeContext storageRange = null)
+         {
+             GtsContext gtsContext = new(hfm);
+ 
+@@ -231,6 +275,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                             resourceManager,
+                             gpuAccessor,
+                             targetLanguage,
++                            storageRange,
+                             block,
+                             node);
+ 
+@@ -301,6 +346,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             ResourceManager resourceManager,
+             IGpuAccessor gpuAccessor,
+             TargetLanguage targetLanguage,
++            StorageRangeContext storageRange,
+             BasicBlock block,
+             LinkedListNode<INode> node)
+         {
+@@ -308,64 +354,42 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             Operand globalAddress = operation.GetSource(0);
+             SearchResult result = FindUniqueBaseAddressCb(gtsContext, block, globalAddress, needsOffset: true);
+ 
++            // S2A（F1）：钳位只在宿主要求时生效（未启用 robustBufferAccess 的 Vulkan 渲染器）；为假（Metal、NVIDIA、离线能力表）时
++            //   走改前的原样代码，输出逐字节不变
++            bool clamp = gpuAccessor.QueryHostStorageWindowClamp();
++
++            if (result.Found && !clamp)
++            {
++                return ReplaceSingleTargetUnclamped(gtsContext, resourceManager, gpuAccessor, targetLanguage, node, operation, globalAddress, result);
++            }
++
+             if (result.Found)
+             {
+                 // We found the storage buffer that is being accessed.
+-                // There are two possible paths here, if the operation is simple enough,
+-                // we just generate the storage access code inline.
+-                // Otherwise, we generate a function call (and the function if necessary).
+-
+-                Operand offset = result.Offset;
+-
+-                bool storageUnaligned = gpuAccessor.QueryHasUnalignedStorageBuffer();
+-
+-                if (storageUnaligned)
+-                {
+-                    Operand baseAddress = Cbuf(result.SbCbSlot, result.SbCbOffset);
+-
+-                    Operand baseAddressMasked = Local();
+-                    Operand hostOffset = Local();
++                // S2A（C1/F1）：原先简单访存直接内联 `(偏移 >> 2)`，没有任何范围比较；32 位字节偏移超出宿主绑定时
++                //   （负偏移回绕，或客体本来就远超 SbDescriptor.Size 的正偏移），宿主访问「绑定基址 + 最多 4 GiB」。没开
++                //   robustBufferAccess 的驱动（Mali）直接按这个地址取数并缺页。现在单目标访存（含 phi / 内存回溯归属的）一律走辅助函数，
++                //   由 TryGenerateStorageOp 按宿主实际绑定窗口（OpArrayLength）检查并钳位下标，见那里的说明。
+ 
+-                    int alignment = gpuAccessor.QueryHostStorageBufferOffsetAlignment();
++                RecordStorageOffsetFinding(storageRange?.Findings, result);
+ 
+-                    Operation maskOp = new(Instruction.BitwiseAnd, baseAddressMasked, baseAddress, Const(-alignment));
+-                    Operation subOp = new(Instruction.Subtract, hostOffset, globalAddress, baseAddressMasked);
+-
+-                    node.List.AddBefore(node, maskOp);
+-                    node.List.AddBefore(node, subOp);
+-
+-                    offset = hostOffset;
+-                }
+-                else if (result.ConstOffset != 0)
++                if (!TryGenerateSingleTargetStorageOp(
++                    gtsContext,
++                    resourceManager,
++                    gpuAccessor,
++                    targetLanguage,
++                    storageRange,
++                    operation,
++                    result,
++                    out int functionId))
+                 {
+-                    Operand newOffset = Local();
+-
+-                    Operation addOp = new(Instruction.Add, newOffset, offset, Const(result.ConstOffset));
+-
+-                    node.List.AddBefore(node, addOp);
+-
+-                    offset = newOffset;
++                    return null;
+                 }
+ 
+-                if (CanUseInlineStorageOp(operation, targetLanguage))
+-                {
+-                    return GenerateInlineStorageOp(resourceManager, node, operation, offset, result);
+-                }
+-                else
+-                {
+-                    if (!TryGenerateSingleTargetStorageOp(
+-                        gtsContext,
+-                        resourceManager,
+-                        targetLanguage,
+-                        operation,
+-                        result,
+-                        out int functionId))
+-                    {
+-                        return null;
+-                    }
++                CountUnrecordedAccess(resourceManager, gpuAccessor, storageRange, isMultiTarget: false);
+ 
+-                    return GenerateCallStorageOp(node, operation, offset, functionId);
+-                }
++                // The helper takes the low 32 bits of the guest address and computes the binding-relative offset itself.
++                return GenerateCallStorageOp(node, operation, globalAddress, functionId);
+             }
+             else
+             {
+@@ -379,74 +403,58 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     resourceManager,
+                     gpuAccessor,
+                     targetLanguage,
++                    clamp ? storageRange : null,
+                     block,
+                     operation,
++                    clamp,
+                     out int functionId))
+                 {
+                     return null;
+                 }
+ 
++                if (clamp)
++                {
++                    CountUnrecordedAccess(resourceManager, gpuAccessor, storageRange, isMultiTarget: true);
++                }
++
+                 return GenerateCallStorageOp(node, operation, null, functionId);
+             }
+         }
+ 
+-        private static bool CanUseInlineStorageOp(Operation operation, TargetLanguage targetLanguage)
++        /// <summary>
++        /// S2A（F1）：开了越界记录诊断、但本阶段拿不到记录绑定时（顶点 / 细分 / 几何阶段且宿主无 vertexPipelineStoresAndAtomics）
++        /// 访存仍检查并钳位，但越界既不进记录、也不报红。按访存处计数，由 TranslatorContext 翻译期打限次【黄】；不加任何 GPU 工作。
++        /// 记录诊断关（缺省）时不计：那时所有阶段都不记录，不逐阶段提示。
++        /// </summary>
++        private static void CountUnrecordedAccess(ResourceManager resourceManager, IGpuAccessor gpuAccessor, StorageRangeContext storageRange, bool isMultiTarget)
+         {
+-            if (operation.StorageKind != StorageKind.GlobalMemory)
++            if (storageRange != null && gpuAccessor.QueryHostStorageOobRecord() && !resourceManager.S2AStorageOobRecordSupported)
+             {
+-                return false;
++                storageRange.CountUnrecorded(isMultiTarget);
+             }
+-
+-            return (operation.Inst != Instruction.AtomicMaxS32 &&
+-                    operation.Inst != Instruction.AtomicMinS32) || targetLanguage == TargetLanguage.Spirv;
+         }
+ 
+-        private static LinkedListNode<INode> GenerateInlineStorageOp(
+-            ResourceManager resourceManager,
+-            LinkedListNode<INode> node,
+-            Operation operation,
+-            Operand offset,
+-            SearchResult result)
++        private static void RecordStorageOffsetFinding(List<StorageOffsetFinding> findings, SearchResult result)
+         {
+-            bool isStore = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
+-            if (!resourceManager.TryGetStorageBufferBinding(result.SbCbSlot, result.SbCbOffset, isStore, out int binding))
++            if (findings == null || result.Offset == null)
+             {
+-                return null;
++                return;
+             }
+ 
+-            Operand wordOffset = Local();
+-
+-            Operand[] sources;
++            bool definite = result.Offset.Type == OperandType.Constant;
++            long offset = (definite ? result.Offset.Value : 0L) + result.ConstOffset;
+ 
+-            if (operation.Inst == Instruction.AtomicCompareAndSwap)
+-            {
+-                sources =
+-                [
+-                    Const(binding),
+-                    Const(0),
+-                    wordOffset,
+-                    operation.GetSource(operation.SourcesCount - 2),
+-                    operation.GetSource(operation.SourcesCount - 1)
+-                ];
+-            }
+-            else if (isStore)
+-            {
+-                sources = [Const(binding), Const(0), wordOffset, operation.GetSource(operation.SourcesCount - 1)];
+-            }
+-            else
++            if (offset >= 0)
+             {
+-                sources = [Const(binding), Const(0), wordOffset];
++                return;
+             }
+ 
+-            Operation shiftOp = new(Instruction.ShiftRightU32, wordOffset, offset, Const(2));
+-            Operation storageOp = new(operation.Inst, StorageKind.StorageBuffer, operation.Dest, sources);
+-
+-            node.List.AddBefore(node, shiftOp);
+-            LinkedListNode<INode> newNode = node.List.AddBefore(node, storageOp);
+-
+-            Utils.DeleteNode(node, operation);
++            StorageOffsetFinding finding = new(result.SbCbSlot, result.SbCbOffset, offset, definite);
+ 
+-            return newNode;
++            if (!findings.Contains(finding))
++            {
++                findings.Add(finding);
++            }
+         }
+ 
+         private static LinkedListNode<INode> GenerateCallStorageOp(LinkedListNode<INode> node, Operation operation, Operand offset, int functionId)
+@@ -502,7 +510,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+         private static bool TryGenerateSingleTargetStorageOp(
+             GtsContext gtsContext,
+             ResourceManager resourceManager,
++            IGpuAccessor gpuAccessor,
+             TargetLanguage targetLanguage,
++            StorageRangeContext storageRange,
+             Operation operation,
+             SearchResult result,
+             out int functionId)
+@@ -527,7 +537,24 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ 
+             EmitterContext context = new();
+ 
+-            Operand offset = Argument(0);
++            // S2A（C1/F1）：宿主绑定窗口起点与 BufferManager.Set*StorageBuffer 一致：AlignDown(基址, 宿主对齐)。
++            //   对齐特化下基址已对齐，窗口起点就是基址。偏移 = 客体地址低 32 位 − 窗口起点低 32 位（64 位差的低 32 位）。
++            //   不用客体地址高 32 位：Get40BitsAddress 对负立即数不做高位符号扩展（高位会多 1），非 .E 访存高位恒为 0，
++            //   拿它比较会把合法的「寄存器 − 立即数」访问误判为越界。窗口长度不再读 cbuf 里的大小（槽 0 以外不可信，
++            //   宿主按映射长度、最多 1 MiB 绑定），统一用 OpArrayLength 取宿主描述符实际绑定的长度，见 TryGenerateStorageOp。
++            Operand globalAddressLow = Argument(0);
++            Operand baseAddressLow = Cbuf(result.SbCbSlot, result.SbCbOffset);
++            Operand windowStart = baseAddressLow;
++
++            if (gpuAccessor.QueryHasUnalignedStorageBuffer())
++            {
++                int alignment = gpuAccessor.QueryHostStorageBufferOffsetAlignment();
++
++                windowStart = context.BitwiseAnd(baseAddressLow, Const(-alignment));
++            }
++
++            Operand offset = context.ISubtract(globalAddressLow, windowStart);
++
+             Operand compare = null;
+             Operand value = null;
+ 
+@@ -541,6 +568,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 value = Argument(1);
+             }
+ 
++            // 读与原子有返回值（未用的原子结果由调用处丢弃），写没有
++            bool returnsValue = operation.Inst != Instruction.Store;
++
+             if (!TryGenerateStorageOp(
+                 resourceManager,
+                 targetLanguage,
+@@ -551,23 +581,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 compare,
+                 value,
+                 result,
+-                out Operand resultValue))
++                new OobRecordSite(storageRange, isMultiTarget: false, globalAddressLow),
++                returnsValue))
+             {
+                 functionId = 0;
+                 return false;
+             }
+ 
+-            bool returnsValue = resultValue != null;
+-
+-            if (returnsValue)
+-            {
+-                context.Return(resultValue);
+-            }
+-            else
+-            {
+-                context.Return();
+-            }
+-
+             string functionName = GetFunctionName(operation, isMultiTarget: false, targetCbs);
+ 
+             Function function = new(
+@@ -587,8 +607,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             ResourceManager resourceManager,
+             IGpuAccessor gpuAccessor,
+             TargetLanguage targetLanguage,
++            StorageRangeContext storageRange,
+             BasicBlock block,
+             Operation operation,
++            bool clamp,
+             out int functionId)
+         {
+             Queue<PhiNode> phis = new();
+@@ -679,6 +701,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             Operand globalAddressLow = Argument(0);
+             Operand globalAddressHigh = Argument(1);
+ 
++            // S2A（F1）：钳位时读与原子有返回值（与单目标一致，未用的原子结果由调用处丢弃），写没有；不钳位时同改前（按有无目的操作数）
++            bool returnsValue = clamp ? operation.Inst != Instruction.Store : operation.Dest != null;
++
+             foreach (uint targetCb in targetCbs)
+             {
+                 (int sbCbSlot, int sbCbOffset) = UnpackCbSlotAndOffset(targetCb);
+@@ -721,6 +746,40 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 Operand baseAddressMasked = context.BitwiseAnd(baseAddrLow, Const(-alignment));
+                 Operand hostOffset = context.ISubtract(globalAddressLow, baseAddressMasked);
+ 
++                if (!clamp)
++                {
++                    if (!TryGenerateStorageOpUnclamped(
++                        resourceManager,
++                        targetLanguage,
++                        context,
++                        operation.Inst,
++                        operation.StorageKind,
++                        hostOffset,
++                        compare,
++                        value,
++                        result,
++                        out Operand resultValue))
++                    {
++                        functionId = 0;
++                        return false;
++                    }
++
++                    if (resultValue != null)
++                    {
++                        context.Return(resultValue);
++                    }
++                    else
++                    {
++                        context.Return();
++                    }
++
++                    context.MarkLabel(lblSkip);
++
++                    continue;
++                }
++
++                // S2A（F1）：客体范围选中这个目标后，宿主访问仍按宿主绑定窗口检查并钳位（槽 0 以外的「大小」字不可信，
++                //   宿主最多绑 1 MiB）；TryGenerateStorageOp 在两条路上都自己返回。
+                 if (!TryGenerateStorageOp(
+                     resourceManager,
+                     targetLanguage,
+@@ -731,26 +790,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     compare,
+                     value,
+                     result,
+-                    out Operand resultValue))
++                    new OobRecordSite(storageRange, isMultiTarget: true, globalAddressLow),
++                    returnsValue))
+                 {
+                     functionId = 0;
+                     return false;
+                 }
+ 
+-                if (resultValue != null)
+-                {
+-                    context.Return(resultValue);
+-                }
+-                else
+-                {
+-                    context.Return();
+-                }
+-
+                 context.MarkLabel(lblSkip);
+             }
+ 
+-            bool returnsValue = operation.Dest != null;
+-
+             if (returnsValue)
+             {
+                 context.Return(Const(0));
+@@ -813,7 +862,496 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return nameBuilder.ToString();
+         }
+ 
++        /// <summary>
++        /// S2A（F1）：越界记录的翻译期固定部分：本阶段身份与访存类别，越界分支里写进记录缓冲。
++        /// </summary>
++        private readonly struct OobRecordSite(StorageRangeContext storageRange, bool isMultiTarget, Operand globalAddressLow)
++        {
++            public StorageRangeContext StorageRange { get; } = storageRange;
++            public bool IsMultiTarget { get; } = isMultiTarget;
++            public Operand GlobalAddressLow { get; } = globalAddressLow;
++        }
++
++        /// <summary>
++        /// 生成一次存储缓冲访存，并在两条路上都返回（读 / 原子返回值，写不返回）。
++        /// S2A（F1）：按宿主实际绑定窗口检查，与客体描述符里的大小无关：
++        /// - 窗口长度 = OpArrayLength（宿主描述符 range / 4），所有 cbuf 槽统一；
++        /// - 字下标 &lt; 窗口长度才算界内；越界时下标钳成 0 再访存或跳过，读返回 0（不访存的语义与多目标找不到目标、
++        ///   NVIDIA 上 robustBufferAccess 的越界读 0 相同），写 / 原子不执行（原子返回 0）。这与 Maxwell 真机不同：真机的
++        ///   LDG/STG 是 64 位客体 VA 裸访存，只要那块客体内存有效就会读到真实数据，宿主只承载了 SbDescriptor 窗口；
++        /// - 钳位而不只是分支：读不放在分支里，而是「下标先按界内选择、再无条件读、再按界内选择结果」，
++        ///   所以即使驱动编译器把分支 if-conversion 或推测执行，发出的地址也在窗口内（0268 只有分支，Wonder 9000 上
++        ///   同一条访存仍按原偏移缺页，见坑记录）；
++        /// - 窗口长度为 0（宿主 range 不足 4 字节）时读仍在第 0 字发出，比窗口多读 4 字节，但地址是绑定起点，仍在该 VkBuffer
++        ///   内、已映射；结果照样选 0；
++        /// - 越界时若有记录缓冲（<see cref="S2AStorageOobRecord"/>，缺省关的诊断），原子加计数，拿到旧值 0 的调用写首个越界详情。
++        /// 每次访存新增：一次 OpArrayLength、一次无符号比较、一次（写为分支，读为两次）选择；记录只在越界分支执行。
++        /// </summary>
+         private static bool TryGenerateStorageOp(
++            ResourceManager resourceManager,
++            TargetLanguage targetLanguage,
++            EmitterContext context,
++            Instruction inst,
++            StorageKind storageKind,
++            Operand offset,
++            Operand compare,
++            Operand value,
++            SearchResult result,
++            OobRecordSite recordSite,
++            bool returnsValue)
++        {
++            bool isStore = inst.IsAtomic() || inst == Instruction.Store;
++
++            if (!resourceManager.TryGetStorageBufferBinding(result.SbCbSlot, result.SbCbOffset, isStore, out int binding))
++            {
++                return false;
++            }
++
++            Operand rawWordOffset = context.ShiftRightU32(offset, Const(2));
++            Operand windowLength = context.ArrayLength(binding, 0);
++            Operand inRange = context.ICompareLessUnsigned(rawWordOffset, windowLength);
++            Operand wordOffset = context.ConditionalSelect(inRange, rawWordOffset, Const(0));
++
++            if (!isStore)
++            {
++                value = context.Load(StorageKind.StorageBuffer, binding, Const(0), wordOffset);
++
++                if (IsSmallInt(storageKind))
++                {
++                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, offset);
++
++                    switch (storageKind)
++                    {
++                        case StorageKind.GlobalMemoryS8:
++                            value = context.ShiftRightS32(value, bitOffset);
++                            value = context.BitfieldExtractS32(value, Const(0), Const(8));
++                            break;
++                        case StorageKind.GlobalMemoryS16:
++                            value = context.ShiftRightS32(value, bitOffset);
++                            value = context.BitfieldExtractS32(value, Const(0), Const(16));
++                            break;
++                        case StorageKind.GlobalMemoryU8:
++                            value = context.ShiftRightU32(value, bitOffset);
++                            value = context.BitwiseAnd(value, Const(byte.MaxValue));
++                            break;
++                        case StorageKind.GlobalMemoryU16:
++                            value = context.ShiftRightU32(value, bitOffset);
++                            value = context.BitwiseAnd(value, Const(ushort.MaxValue));
++                            break;
++                    }
++                }
++
++                Operand loaded = context.ConditionalSelect(inRange, value, Const(0));
++
++                if (TryGetOobRecordBinding(resourceManager, recordSite, out int recordBinding))
++                {
++                    Operand lblInRange = Label();
++                    context.BranchIfTrue(lblInRange, inRange);
++                    EmitOobRecord(context, recordBinding, recordSite, inst, result, offset, windowLength);
++                    context.MarkLabel(lblInRange);
++                }
++
++                context.Return(loaded);
++
++                return true;
++            }
++
++            Operand lblOutOfRange = Label();
++            context.BranchIfFalse(lblOutOfRange, inRange);
++
++            Operand resultValue = null;
++
++            if (inst.IsAtomic())
++            {
++                if (IsSmallInt(storageKind))
++                {
++                    throw new NotImplementedException();
++                }
++
++                switch (inst)
++                {
++                    case Instruction.AtomicAdd:
++                        resultValue = context.AtomicAdd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicAnd:
++                        resultValue = context.AtomicAnd(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicCompareAndSwap:
++                        resultValue = context.AtomicCompareAndSwap(StorageKind.StorageBuffer, binding, Const(0), wordOffset, compare, value);
++                        break;
++                    case Instruction.AtomicMaxS32:
++                        if (targetLanguage == TargetLanguage.Spirv)
++                        {
++                            resultValue = context.AtomicMaxS32(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        }
++                        else
++                        {
++                            resultValue = GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                            {
++                                return context.IMaximumS32(memValue, value);
++                            });
++                        }
++
++                        break;
++                    case Instruction.AtomicMaxU32:
++                        resultValue = context.AtomicMaxU32(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicMinS32:
++                        if (targetLanguage == TargetLanguage.Spirv)
++                        {
++                            resultValue = context.AtomicMinS32(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        }
++                        else
++                        {
++                            resultValue = GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                            {
++                                return context.IMinimumS32(memValue, value);
++                            });
++                        }
++
++                        break;
++                    case Instruction.AtomicMinU32:
++                        resultValue = context.AtomicMinU32(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicOr:
++                        resultValue = context.AtomicOr(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicSwap:
++                        resultValue = context.AtomicSwap(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                    case Instruction.AtomicXor:
++                        resultValue = context.AtomicXor(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                        break;
++                }
++            }
++            else
++            {
++                int bitSize = storageKind switch
++                {
++                    StorageKind.GlobalMemoryS8 or
++                    StorageKind.GlobalMemoryU8 => 8,
++                    StorageKind.GlobalMemoryS16 or
++                    StorageKind.GlobalMemoryU16 => 16,
++                    _ => 32,
++                };
++
++                if (bitSize < 32)
++                {
++                    Operand bitOffset = HelperFunctionManager.GetBitOffset(context, offset);
++
++                    GenerateAtomicCasLoop(context, wordOffset, binding, (memValue) =>
++                    {
++                        return context.BitfieldInsert(memValue, value, bitOffset, Const(bitSize));
++                    });
++                }
++                else
++                {
++                    context.Store(StorageKind.StorageBuffer, binding, Const(0), wordOffset, value);
++                }
++            }
++
++            EmitReturn(context, returnsValue, resultValue);
++
++            context.MarkLabel(lblOutOfRange);
++
++            if (TryGetOobRecordBinding(resourceManager, recordSite, out int storeRecordBinding))
++            {
++                EmitOobRecord(context, storeRecordBinding, recordSite, inst, result, offset, windowLength);
++            }
++
++            EmitReturn(context, returnsValue, Const(0));
++
++            return true;
++        }
++
++        private static void EmitReturn(EmitterContext context, bool returnsValue, Operand resultValue)
++        {
++            if (returnsValue)
++            {
++                context.Return(resultValue ?? Const(0));
++            }
++            else
++            {
++                context.Return();
++            }
++        }
++
++        private static bool TryGetOobRecordBinding(ResourceManager resourceManager, OobRecordSite recordSite, out int binding)
++        {
++            binding = -1;
++
++            return recordSite.StorageRange != null && resourceManager.TryGetS2AStorageOobRecordBinding(out binding);
++        }
++
++        /// <summary>
++        /// S2A（F1）：越界分支里写记录缓冲。计数每次越界调用都加；只有拿到旧值 0 的调用写详情，最后写带有效位的信息字。
++        /// </summary>
++        private static void EmitOobRecord(
++            EmitterContext context,
++            int recordBinding,
++            OobRecordSite recordSite,
++            Instruction inst,
++            SearchResult result,
++            Operand offset,
++            Operand windowLength)
++        {
++            uint kind = inst == Instruction.Store ? S2AStorageOobRecord.KindStore
++                : inst.IsAtomic() ? S2AStorageOobRecord.KindAtomic
++                : S2AStorageOobRecord.KindLoad;
++
++            if (recordSite.IsMultiTarget)
++            {
++                kind |= S2AStorageOobRecord.KindMultiTarget;
++            }
++
++            StorageRangeContext range = recordSite.StorageRange;
++
++            uint info = S2AStorageOobRecord.InfoValid |
++                (kind << S2AStorageOobRecord.KindShift) |
++                ((uint)range.Stage << S2AStorageOobRecord.StageShift) |
++                ((uint)(byte)result.SbCbSlot << S2AStorageOobRecord.CbSlotShift) |
++                (ushort)result.SbCbOffset;
++
++            void StoreWord(int word, Operand wordValue) =>
++                context.Store(StorageKind.StorageBuffer, recordBinding, Const(0), Const(word), wordValue);
++
++            Operand previous = context.AtomicAdd(StorageKind.StorageBuffer, recordBinding, Const(0), Const(S2AStorageOobRecord.WordCount), Const(1));
++
++            Operand lblRecorded = Label();
++            context.BranchIfTrue(lblRecorded, context.ICompareNotEqual(previous, Const(0)));
++
++            StoreWord(S2AStorageOobRecord.WordAddressLow, recordSite.GlobalAddressLow);
++            StoreWord(S2AStorageOobRecord.WordOffset, offset);
++            StoreWord(S2AStorageOobRecord.WordWindowLength, windowLength);
++            StoreWord(S2AStorageOobRecord.WordBaseLow, Cbuf(result.SbCbSlot, result.SbCbOffset));
++            StoreWord(S2AStorageOobRecord.WordBaseHigh, Cbuf(result.SbCbSlot, result.SbCbOffset + 1));
++            StoreWord(S2AStorageOobRecord.WordSize, Cbuf(result.SbCbSlot, result.SbCbOffset + 2));
++            StoreWord(S2AStorageOobRecord.WordHash, Const((int)(uint)range.CodeHashLow));
++            StoreWord(S2AStorageOobRecord.WordHash + 1, Const((int)(uint)(range.CodeHashLow >> 32)));
++            StoreWord(S2AStorageOobRecord.WordHash + 2, Const((int)(uint)range.CodeHashHigh));
++            StoreWord(S2AStorageOobRecord.WordHash + 3, Const((int)(uint)(range.CodeHashHigh >> 32)));
++            StoreWord(S2AStorageOobRecord.WordInfo, Const((int)info));
++
++            context.MarkLabel(lblRecorded);
++        }
++
++        // ---------- S2A（F1）：以下是不钳位时用的改前原样代码（只改了函数名），见 ReplaceSingleTargetUnclamped ----------
++
++        /// <summary>
++        /// S2A（F1）：不钳位时的单目标访存，即改前的原样代码（简单访存内联 `偏移 >> 2`，其余走单目标辅助函数）。
++        /// Metal（NxCaps 也报 Vulkan）、NVIDIA（开了 robustBufferAccess）与离线能力表走这里，输出与改前逐字节相同。
++        /// </summary>
++        private static LinkedListNode<INode> ReplaceSingleTargetUnclamped(
++            GtsContext gtsContext,
++            ResourceManager resourceManager,
++            IGpuAccessor gpuAccessor,
++            TargetLanguage targetLanguage,
++            LinkedListNode<INode> node,
++            Operation operation,
++            Operand globalAddress,
++            SearchResult result)
++        {
++            // We found the storage buffer that is being accessed.
++            // There are two possible paths here, if the operation is simple enough,
++            // we just generate the storage access code inline.
++            // Otherwise, we generate a function call (and the function if necessary).
++
++            Operand offset = result.Offset;
++
++            bool storageUnaligned = gpuAccessor.QueryHasUnalignedStorageBuffer();
++
++            if (storageUnaligned)
++            {
++                Operand baseAddress = Cbuf(result.SbCbSlot, result.SbCbOffset);
++
++                Operand baseAddressMasked = Local();
++                Operand hostOffset = Local();
++
++                int alignment = gpuAccessor.QueryHostStorageBufferOffsetAlignment();
++
++                Operation maskOp = new(Instruction.BitwiseAnd, baseAddressMasked, baseAddress, Const(-alignment));
++                Operation subOp = new(Instruction.Subtract, hostOffset, globalAddress, baseAddressMasked);
++
++                node.List.AddBefore(node, maskOp);
++                node.List.AddBefore(node, subOp);
++
++                offset = hostOffset;
++            }
++            else if (result.ConstOffset != 0)
++            {
++                Operand newOffset = Local();
++
++                Operation addOp = new(Instruction.Add, newOffset, offset, Const(result.ConstOffset));
++
++                node.List.AddBefore(node, addOp);
++
++                offset = newOffset;
++            }
++
++            if (CanUseInlineStorageOp(operation, targetLanguage))
++            {
++                return GenerateInlineStorageOp(resourceManager, node, operation, offset, result);
++            }
++            else
++            {
++                if (!TryGenerateSingleTargetStorageOpUnclamped(
++                    gtsContext,
++                    resourceManager,
++                    targetLanguage,
++                    operation,
++                    result,
++                    out int functionId))
++                {
++                    return null;
++                }
++
++                return GenerateCallStorageOp(node, operation, offset, functionId);
++            }
++        }
++
++        private static bool CanUseInlineStorageOp(Operation operation, TargetLanguage targetLanguage)
++        {
++            if (operation.StorageKind != StorageKind.GlobalMemory)
++            {
++                return false;
++            }
++
++            return (operation.Inst != Instruction.AtomicMaxS32 &&
++                    operation.Inst != Instruction.AtomicMinS32) || targetLanguage == TargetLanguage.Spirv;
++        }
++
++        private static LinkedListNode<INode> GenerateInlineStorageOp(
++            ResourceManager resourceManager,
++            LinkedListNode<INode> node,
++            Operation operation,
++            Operand offset,
++            SearchResult result)
++        {
++            bool isStore = operation.Inst == Instruction.Store || operation.Inst.IsAtomic();
++            if (!resourceManager.TryGetStorageBufferBinding(result.SbCbSlot, result.SbCbOffset, isStore, out int binding))
++            {
++                return null;
++            }
++
++            Operand wordOffset = Local();
++
++            Operand[] sources;
++
++            if (operation.Inst == Instruction.AtomicCompareAndSwap)
++            {
++                sources =
++                [
++                    Const(binding),
++                    Const(0),
++                    wordOffset,
++                    operation.GetSource(operation.SourcesCount - 2),
++                    operation.GetSource(operation.SourcesCount - 1)
++                ];
++            }
++            else if (isStore)
++            {
++                sources = [Const(binding), Const(0), wordOffset, operation.GetSource(operation.SourcesCount - 1)];
++            }
++            else
++            {
++                sources = [Const(binding), Const(0), wordOffset];
++            }
++
++            Operation shiftOp = new(Instruction.ShiftRightU32, wordOffset, offset, Const(2));
++            Operation storageOp = new(operation.Inst, StorageKind.StorageBuffer, operation.Dest, sources);
++
++            node.List.AddBefore(node, shiftOp);
++            LinkedListNode<INode> newNode = node.List.AddBefore(node, storageOp);
++
++            Utils.DeleteNode(node, operation);
++
++            return newNode;
++        }
++
++        private static bool TryGenerateSingleTargetStorageOpUnclamped(
++            GtsContext gtsContext,
++            ResourceManager resourceManager,
++            TargetLanguage targetLanguage,
++            Operation operation,
++            SearchResult result,
++            out int functionId)
++        {
++            List<uint> targetCbs = [PackCbSlotAndOffset(result.SbCbSlot, result.SbCbOffset)];
++
++            if (gtsContext.TryGetFunctionId(operation, isMultiTarget: false, targetCbs, out functionId))
++            {
++                return true;
++            }
++
++            int inArgumentsCount = 1;
++
++            if (operation.Inst == Instruction.AtomicCompareAndSwap)
++            {
++                inArgumentsCount = 3;
++            }
++            else if (operation.Inst == Instruction.Store || operation.Inst.IsAtomic())
++            {
++                inArgumentsCount = 2;
++            }
++
++            EmitterContext context = new();
++
++            Operand offset = Argument(0);
++            Operand compare = null;
++            Operand value = null;
++
++            if (inArgumentsCount == 3)
++            {
++                compare = Argument(1);
++                value = Argument(2);
++            }
++            else if (inArgumentsCount == 2)
++            {
++                value = Argument(1);
++            }
++
++            if (!TryGenerateStorageOpUnclamped(
++                resourceManager,
++                targetLanguage,
++                context,
++                operation.Inst,
++                operation.StorageKind,
++                offset,
++                compare,
++                value,
++                result,
++                out Operand resultValue))
++            {
++                functionId = 0;
++                return false;
++            }
++
++            bool returnsValue = resultValue != null;
++
++            if (returnsValue)
++            {
++                context.Return(resultValue);
++            }
++            else
++            {
++                context.Return();
++            }
++
++            string functionName = GetFunctionName(operation, isMultiTarget: false, targetCbs);
++
++            Function function = new(
++                ControlFlowGraph.Create(context.GetOperations()).Blocks,
++                functionName,
++                returnsValue,
++                inArgumentsCount,
++                0);
++
++            functionId = gtsContext.AddFunction(operation, isMultiTarget: false, targetCbs, function);
++
++            return true;
++        }
++
++        private static bool TryGenerateStorageOpUnclamped(
+             ResourceManager resourceManager,
+             TargetLanguage targetLanguage,
+             EmitterContext context,
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
+index 022532af80fac8bd618c9310658402cf806eac64..582db7a8288be16666e692c5ac4aa41aa9d7ee26 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/Optimizer.cs
+@@ -18,7 +18,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ 
+             // TODO: Some of those are not optimizations and shouldn't be here.
+ 
+-            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
++            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage, context.StorageRange);
+ 
+             bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index 442b8b8691260b082f9e06bc0e1e295f5170d8dd..f5aea3de331ec1da1619413b78b93eeae4251e52 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -28,6 +28,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         private readonly HashSet<int> _usedConstantBufferBindings;
+ 
++        private SetBindingPair _s2aOobRecord = new(-1, -1);
++        private bool _s2aOobRecordQueried;
++
+         private readonly record struct TextureInfo(int CbufSlot, int Handle, int ArrayLength, bool Separate, SamplerType Type, TextureFormat Format);
+ 
+         private struct TextureMeta
+@@ -185,6 +188,43 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return true;
+         }
+ 
++        /// <summary>
++        /// S2A（F1）：本阶段能否有越界记录绑定。只问 GPU 访问器、不声明绑定（不给程序多加可写存储缓冲）。
++        /// </summary>
++        public bool S2AStorageOobRecordSupported => _gpuAccessor.CreateS2AStorageOobRecordBinding(_stage).Binding >= 0;
++
++        /// <summary>
++        /// S2A（F1）：越界记录缓冲（<see cref="S2AStorageOobRecord"/>）的绑定号；第一次调用时向 GPU 访问器申请并声明（可写、各阶段同一绑定号）。
++        /// 渲染器或本阶段不支持时返回 false，调用方只做范围检查、不记录。
++        /// </summary>
++        public bool TryGetS2AStorageOobRecordBinding(out int binding)
++        {
++            if (!_s2aOobRecordQueried)
++            {
++                _s2aOobRecordQueried = true;
++                _s2aOobRecord = _gpuAccessor.CreateS2AStorageOobRecordBinding(_stage);
++
++                if (_s2aOobRecord.Binding >= 0)
++                {
++                    StructureType type = new(new[]
++                    {
++                        new StructureField(AggregateType.Array | AggregateType.U32, "data", 0),
++                    });
++
++                    Properties.AddOrUpdateStorageBuffer(new(
++                        BufferLayout.Std430,
++                        _s2aOobRecord.SetIndex,
++                        _s2aOobRecord.Binding,
++                        $"{_stagePrefix}_s2a_oob",
++                        type,
++                        BufferUsageFlags.Write | BufferUsageFlags.S2AOobRecord));
++                }
++            }
++
++            binding = _s2aOobRecord.Binding;
++            return binding >= 0;
++        }
++
+         private bool TryGetSbSlot(byte sbCbSlot, ushort sbCbOffset, out int slot)
+         {
+             int key = PackSbCbInfo(sbCbSlot, sbCbOffset);
+@@ -477,7 +517,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public BufferDescriptor[] GetStorageBufferDescriptors()
+         {
+-            BufferDescriptor[] descriptors = new BufferDescriptor[_sbSlots.Count];
++            // S2A（F1）：越界记录缓冲排在客体存储缓冲之后，槽位记 byte.MaxValue（不是客体槽位，Gpu 层按 S2AOobRecord 标志跳过）
++            bool hasOobRecord = _s2aOobRecord.Binding >= 0;
++            BufferDescriptor[] descriptors = new BufferDescriptor[_sbSlots.Count + (hasOobRecord ? 1 : 0)];
+ 
+             int descriptorIndex = 0;
+ 
+@@ -493,6 +535,17 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 }
+             }
+ 
++            if (hasOobRecord)
++            {
++                descriptors[descriptorIndex++] = new BufferDescriptor(
++                    _s2aOobRecord.SetIndex,
++                    _s2aOobRecord.Binding,
++                    byte.MaxValue,
++                    0,
++                    0,
++                    BufferUsageFlags.Write | BufferUsageFlags.S2AOobRecord);
++            }
++
+             if (descriptors.Length != descriptorIndex)
+             {
+                 Array.Resize(ref descriptors, descriptorIndex);
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TransformContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TransformContext.cs
+index 1e87585f1802205221bfb4d516b5eb3a7bbd0065..0c9907a7f41a7263dbeb057d57aaf65b36ed6f5c 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TransformContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TransformContext.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
++using Ryujinx.Graphics.Shader.Translation.Optimizations;
+ 
+ namespace Ryujinx.Graphics.Shader.Translation
+ {
+@@ -13,6 +14,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public readonly TargetLanguage TargetLanguage;
+         public readonly ShaderStage Stage;
+         public readonly ref FeatureFlags UsedFeatures;
++        public readonly StorageRangeContext StorageRange;
+ 
+         public TransformContext(
+             HelperFunctionManager hfm,
+@@ -23,7 +25,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+             TargetApi targetApi,
+             TargetLanguage targetLanguage,
+             ShaderStage stage,
+-            ref FeatureFlags usedFeatures)
++            ref FeatureFlags usedFeatures,
++            StorageRangeContext storageRange)
+         {
+             Hfm = hfm;
+             Blocks = blocks;
+@@ -34,6 +37,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             TargetLanguage = targetLanguage;
+             Stage = stage;
+             UsedFeatures = ref usedFeatures;
++            StorageRange = storageRange;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index d512a12fb3f88576f98d5b2cbea5565faad231c1..1320f868baa0a6e3d6d109c983a4c8c9ce68526e 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Graphics.Shader.CodeGen;
+ using Ryujinx.Graphics.Shader.CodeGen.Glsl;
+ using Ryujinx.Graphics.Shader.CodeGen.Spirv;
+@@ -9,6 +10,8 @@ using Ryujinx.Graphics.Shader.Translation.Transforms;
+ using System;
+ using System.Collections.Generic;
+ using System.Numerics;
++using System.Runtime.InteropServices;
++using System.Threading;
+ using static Ryujinx.Graphics.Shader.IntermediateRepresentation.OperandHelper;
+ using static Ryujinx.Graphics.Shader.Translation.Translator;
+ 
+@@ -329,6 +332,79 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return s2aProgram;
+         }
+ 
++        // S2A（C1/F1）：单目标存储缓冲访存偏移静态可见为负时翻译期提示（零成本）：整体是负常量报【红】（低于客体基址；
++        //   未对齐特化下 AlignDown 留出的前缀可能仍把它含在宿主窗口内，宿主侧结果由运行时窗口检查决定），寄存器 + 负常量报【黄】
++        //   （Maxwell 产物里 `[Rx − 立即数]` 很常见，绝大多数合法）。只在钳位生效时收集。
++        //   程序哈希 = 本阶段客体代码（含头）的 XXHash128，与 ShaderCache 存的 CachedShaderStage.Code 同一段字节。
++        //   限次：全进程前 S2AStorageOffsetReportLines 条逐条打，之后只在第 2^k 条打一行带累计数。
++        private const int S2AStorageOffsetReportLines = 32;
++        private static int _s2aStorageOffsetReports;
++
++        // S2A（F1）：开了越界记录诊断、但本阶段拿不到记录绑定时，「只检查不记录」的访存翻译期按阶段打一行【黄】，限次同上（独立计数）。
++        private static int _s2aUnrecordedStorageReports;
++
++        // S2A（F1）：本阶段身份（阶段 + 客体代码哈希）。GlobalToStorage 把它编进越界记录，渲染器读回后按同一哈希报红。
++        private StorageRangeContext S2ACreateStorageRangeContext()
++        {
++            ReadOnlySpan<byte> code = MemoryMarshal.AsBytes(GpuAccessor.GetCode(Address, Size));
++            Hash128 hash = Hash128.ComputeHash(code[..Math.Min(code.Length, Size)]);
++
++            return new StorageRangeContext(Stage, hash.Low, hash.High);
++        }
++
++        private static void S2AReportStorageOffsetFindings(StorageRangeContext range)
++        {
++            if (range == null || range.Findings.Count == 0)
++            {
++                return;
++            }
++
++            string hash = new Hash128(range.CodeHashLow, range.CodeHashHigh).ToString();
++
++            foreach (StorageOffsetFinding finding in range.Findings)
++            {
++                int count = Interlocked.Increment(ref _s2aStorageOffsetReports);
++
++                if (count > S2AStorageOffsetReportLines && (count & (count - 1)) != 0)
++                {
++                    continue;
++                }
++
++                string level = finding.Definite ? "【红】" : "【黄】";
++                string kind = finding.Definite ? "常量偏移低于客体基址" : "寄存器偏移带负常量、运行时可能低于客体基址";
++                string offset = finding.Offset < 0 ? $"-0x{-finding.Offset:X}" : $"0x{finding.Offset:X}";
++
++                Console.Error.WriteLine(
++                    $"[gpu] {level}存储缓冲访存{kind}：程序 {hash} 阶段 {range.Stage} 基址 c{finding.CbSlot}[0x{finding.CbOffset * 4:X}] 偏移 {offset}；" +
++                    $"宿主侧按绑定窗口检查，窗口外读 0、写丢弃（全进程第 {count} 条）");
++            }
++        }
++
++        // S2A（F1）：越界记录缓冲（诊断开时）要着色器写存储缓冲；宿主无 vertexPipelineStoresAndAtomics 时顶点 / 细分 / 几何阶段不能写，
++        //   这些阶段的访存仍按宿主窗口检查并钳位（不发出窗口外地址），但越界读 0 / 写丢弃时没有运行时记录、不报红。
++        //   这里只在翻译期说明「本阶段有 N 处这样的访存」，不判断是否真越界，也不加 GPU 工作；命中宿主缓存不翻译就不打。
++        private static void S2AReportUnrecordedStorageAccesses(StorageRangeContext range)
++        {
++            if (range == null || range.UnrecordedSingleTarget == 0 && range.UnrecordedMultiTarget == 0)
++            {
++                return;
++            }
++
++            int count = Interlocked.Increment(ref _s2aUnrecordedStorageReports);
++
++            if (count > S2AStorageOffsetReportLines && (count & (count - 1)) != 0)
++            {
++                return;
++            }
++
++            string hash = new Hash128(range.CodeHashLow, range.CodeHashHigh).ToString();
++
++            Console.Error.WriteLine(
++                $"[gpu] 【黄】存储缓冲访存越界不记录：程序 {hash} 阶段 {range.Stage} 单目标 {range.UnrecordedSingleTarget} 处、" +
++                $"多目标 {range.UnrecordedMultiTarget} 处只做宿主绑定窗口检查与钳位（越界读 0、写 / 原子丢弃），已开越界记录诊断但本阶段没有记录绑定" +
++                $"（顶点 / 细分 / 几何阶段且宿主无 vertexPipelineStoresAndAtomics），越界时不报红（全进程第 {count} 个阶段）");
++        }
++
+         private ShaderProgram Translate(FunctionCode[] functions, ResourceManager resourceManager, FeatureFlags usedFeatures, byte clipDistancesWritten, bool asCompute)
+         {
+             if (asCompute)
+@@ -357,6 +433,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+ 
+             HelperFunctionManager hfm = new(funcs, Definitions.Stage);
++            // S2A（F1）：钳位不生效（Metal、NVIDIA）时不算哈希、不收集，GlobalToStorage 走改前原样代码
++            StorageRangeContext storageRange = GpuAccessor.QueryHostStorageWindowClamp() ? S2ACreateStorageRangeContext() : null;
+ 
+             for (int i = 0; i < functions.Length; i++)
+             {
+@@ -391,7 +469,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                         Options.TargetApi,
+                         Options.TargetLanguage,
+                         Definitions.Stage,
+-                        ref usedFeatures);
++                        ref usedFeatures,
++                        storageRange);
+ 
+                     Optimizer.RunPass(context);
+                     TransformPasses.RunPass(context);
+@@ -400,6 +479,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
+             }
+ 
++            S2AReportStorageOffsetFindings(storageRange);
++            S2AReportUnrecordedStorageAccesses(storageRange);
++
+             return Generate(
+                 funcs,
+                 AttributeUsage,
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 37a1959b65895b2a734f584a7951ff3605920002..d8cc43f5744219daaf71eebcf7fabb4b8a66d921 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -17,6 +17,9 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private const ulong StorageBufferMaxMirrorable = 0x2000;
+ 
++        // S2A（F1）：存储缓冲集合的绑定号上限要装下越界记录绑定（在各阶段 5 × 16 与保留绑定之上）
++        private const int StorageBufferBindings = S2AStorageOobRecord.Binding + 1;
++
+         private const int ArrayGrowthSize = 16;
+ 
+         private record struct BufferRef
+@@ -135,7 +138,7 @@ namespace Ryujinx.Graphics.Vulkan
+             // regular textures/images interleaved on the same descriptor set.
+ 
+             _uniformBufferRefs = new BufferRef[Constants.MaxUniformBufferBindings];
+-            _storageBufferRefs = new BufferRef[Constants.MaxStorageBufferBindings];
++            _storageBufferRefs = new BufferRef[StorageBufferBindings];
+             _textureRefs = new TextureRef[Constants.MaxTextureBindings * 2];
+             _imageRefs = new ImageRef[Constants.MaxImageBindings * 2];
+             _bufferTextureRefs = new TextureBuffer[Constants.MaxTextureBindings * 2];
+@@ -148,7 +151,7 @@ namespace Ryujinx.Graphics.Vulkan
+             _imageArrayExtraRefs = [];
+ 
+             _uniformBuffers = new DescriptorBufferInfo[Constants.MaxUniformBufferBindings];
+-            _storageBuffers = new DescriptorBufferInfo[Constants.MaxStorageBufferBindings];
++            _storageBuffers = new DescriptorBufferInfo[StorageBufferBindings];
+             _textures = new DescriptorImageInfo[Constants.MaxTexturesPerStage];
+             _images = new DescriptorImageInfo[Constants.MaxImagesPerStage];
+             _bufferTextures = new BufferView[Constants.MaxTexturesPerStage];
+@@ -399,6 +402,34 @@ namespace Ryujinx.Graphics.Vulkan
+             _program = program;
+             _updateDescriptorCacheCbIndex = true;
+             _dirty = DirtyFlags.All;
++
++            SetS2AOobRecord(program.S2AOobRegion);
++        }
++
++        // S2A（F1）：越界记录绑定指向本程序的记录段（Gpu 层不绑它）。只有布局里有记录绑定的程序才有段（分不到自己的段时
++        //   是记录器的共用丢弃段，见 S2AStorageOobRecorder.Discard），没有段的程序布局里没有这个绑定，原值不会被它读写。
++        private void SetS2AOobRecord(S2AStorageOobRegion region)
++        {
++            if (region == null)
++            {
++                return;
++            }
++
++            const int Binding = S2AStorageOobRecord.Binding;
++
++            BufferRef newRef = new(region.Buffer) { Offset = region.Offset };
++            ref BufferRef currentRef = ref _storageBufferRefs[Binding];
++
++            if (!currentRef.Equals(newRef))
++            {
++                currentRef = newRef;
++                _storageBuffers[Binding] = new DescriptorBufferInfo
++                {
++                    Offset = (ulong)region.Offset,
++                    Range = (ulong)region.Size,
++                };
++                _storageSet.Clear(Binding);
++            }
+         }
+ 
+         public void SetImage(CommandBufferScoped cbs, ShaderStage stage, int binding, ITexture image)
+@@ -692,6 +723,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             ShaderCollection program = _program;
+ 
++            // S2A（F1）：本命令缓冲用到这个程序，它的越界记录段在命令缓冲完成时读回
++            program.S2AOobRegion?.Use(cbs);
++
+             if ((_dirty & DirtyFlags.Uniform) == DirtyFlags.Uniform)
+             {
+                 if (program.UsePushDescriptors)
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index 86ddc079088b87070b0a83732e04b5899977fd24..75b3674b6a5218bba55c42331346581f9f09fc5c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -337,6 +337,7 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             Gd.Barriers.Flush(Cbs, false, null, null);
++            Gd.S2AStorageOob?.InsertHostReadBarrier(Cbs);   // S2A（F1）：用过带越界记录的程序时，结束前让记录对主机可见
+             CommandBuffer = (Cbs = Gd.CommandBufferPool.ReturnAndRent(Cbs)).CommandBuffer;
+             Gd.RegisterFlush();
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2AStorageOobRecorder.cs b/src/Ryujinx.Graphics.Vulkan/S2AStorageOobRecorder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3ba7fdff052caff06ce949398e177e0ce442685
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Vulkan/S2AStorageOobRecorder.cs
+@@ -0,0 +1,362 @@
++using Ryujinx.Common;
++using Ryujinx.Graphics.Shader;
++using Silk.NET.Vulkan;
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.Threading;
++
++namespace Ryujinx.Graphics.Vulkan
++{
++    /// <summary>
++    /// S2A（F1）：全局访存越出宿主绑定窗口的记录缓冲（着色器侧合同见 <see cref="S2AStorageOobRecord"/>）。
++    /// 每个带记录绑定的宿主程序分到一段（宿主可见、一致内存），描述符偏移选段；程序在某个命令缓冲里用过，
++    /// 这一段就作为该命令缓冲的依赖（IAuto），命令缓冲的栅栏完成时（CommandBufferPool 回收）读一次计数，
++    /// 计数比上次多就按程序哈希打【红】：每个程序前 32 次检出逐条打，之后只在第 2^k 次打；全进程另按同一规则限次。
++    /// 红行在回收路径上只入队，由线程池输出（回收持 CommandBufferPool 锁，不在锁里同步写 stderr）。
++    /// 不加任何等待、不跳 draw；只有用过这些程序的命令缓冲在结束前多一个「着色器写 → 主机读」内存屏障。
++    /// 缺省关：只在 S2A_SSBO_OOB_DIAG=1 且设备未启用 robustBufferAccess 时创建（VulkanRenderer），否则着色器里没有记录绑定。
++    /// </summary>
++    sealed class S2AStorageOobRecorder : IDisposable
++    {
++        private const int RegionsPerPage = 1024;
++        private const int ReportEachUpTo = 32;
++
++        /// <summary>诊断开关：启动 extra s2arm.diag_ssbo_oob（安卓）或环境变量 S2A_SSBO_OOB_DIAG=1。</summary>
++        public static bool DiagnosticsRequested => Environment.GetEnvironmentVariable("S2A_SSBO_OOB_DIAG") == "1";
++
++        private readonly VulkanRenderer _gd;
++        private readonly int _stride;
++        private readonly List<BufferHolder> _pages = [];
++        private readonly Stack<int> _free = new();
++        private readonly Lock _lock = new();
++        private readonly bool[] _hostReadBarrier = new bool[CommandBufferPool.MaxCommandBuffers];
++        private readonly ConcurrentQueue<string> _pendingLines = new();
++        private int _allocated;
++        private int _detections;
++        private int _drainScheduled;
++
++        /// <summary>
++        /// 共用丢弃段（第一页第 0 段）：分不到自己的段时程序的记录绑定指向它，越界写落在这里、不读回、不报红，
++        /// 免得记录绑定沿用上一个程序的段、把检出算到别人头上。
++        /// </summary>
++        public S2AStorageOobRegion Discard { get; }
++
++        private S2AStorageOobRecorder(VulkanRenderer gd, int stride)
++        {
++            _gd = gd;
++            _stride = stride;
++
++            // 第一页在渲染器初始化时建好（程序可能在后台线程创建）；之后不够时才在分配锁里加页
++            if (TryAddPage())
++            {
++                _allocated = 1;
++                Discard = CreateRegion(0, isDiscard: true);
++            }
++        }
++
++        /// <summary>建记录器；第一页（含丢弃段）建不出来时返回 null，渲染器按「记录关」报能力，着色器不声明记录绑定。</summary>
++        public static S2AStorageOobRecorder TryCreate(VulkanRenderer gd, ulong minStorageBufferOffsetAlignment)
++        {
++            // 段长是描述符偏移的对齐量的整数倍，且装得下着色器写的字数
++            int alignment = (int)Math.Max(1UL, minStorageBufferOffsetAlignment);
++            int bytes = S2AStorageOobRecord.Words * sizeof(uint);
++            int stride = (bytes + alignment - 1) / alignment * alignment;
++
++            S2AStorageOobRecorder recorder = new(gd, stride);
++
++            if (recorder.Discard == null)
++            {
++                recorder.Dispose();
++                Console.Error.WriteLine("[gpu] 【红】存储缓冲越界记录：记录缓冲建不出来，本局越界记录关闭（钳位不受影响）");
++                return null;
++            }
++
++            Console.Error.WriteLine("[gpu] 【黄】存储缓冲越界记录已开（S2A_SSBO_OOB_DIAG=1）：片元 / 计算着色器多一个可写记录缓冲，本局帧率 / 像素读数不作数");
++            return recorder;
++        }
++
++        private unsafe bool TryAddPage()
++        {
++            int size = RegionsPerPage * _stride;
++            BufferHolder page = _gd.BufferManager.Create(_gd, size, baseType: BufferAllocationType.HostMapped);
++
++            if (page == null || page.Map(0, size) == nint.Zero)
++            {
++                page?.Dispose();
++                return false;
++            }
++
++            new Span<byte>((void*)page.Map(0, size), size).Clear();
++            _pages.Add(page);
++
++            return true;
++        }
++
++        /// <summary>给一个宿主程序分一段并清零；分不到（加页失败）时给共用丢弃段（不读回、不报红）。</summary>
++        public S2AStorageOobRegion Allocate()
++        {
++            lock (_lock)
++            {
++                int index;
++
++                if (_free.Count != 0)
++                {
++                    index = _free.Pop();
++                }
++                else
++                {
++                    index = _allocated;
++
++                    if (index / RegionsPerPage >= _pages.Count && !TryAddPage())
++                    {
++                        return Discard;
++                    }
++
++                    _allocated++;
++                }
++
++                return CreateRegion(index, isDiscard: false);
++            }
++        }
++
++        private unsafe S2AStorageOobRegion CreateRegion(int index, bool isDiscard)
++        {
++            BufferHolder holder = _pages[index / RegionsPerPage];
++            int offset = index % RegionsPerPage * _stride;
++            nint pointer = holder.Map(0, RegionsPerPage * _stride) + offset;
++
++            // 段只在没有任何命令缓冲引用时才回收，清零时 GPU 不会再写它
++            new Span<byte>((void*)pointer, _stride).Clear();
++
++            return new S2AStorageOobRegion(this, index, holder.GetBuffer(), offset, _stride, pointer, isDiscard);
++        }
++
++        internal void Release(int index)
++        {
++            lock (_lock)
++            {
++                _free.Push(index);
++            }
++        }
++
++        internal void RequestHostReadBarrier(int commandBufferIndex)
++        {
++            _hostReadBarrier[commandBufferIndex] = true;
++        }
++
++        /// <summary>
++        /// 命令缓冲结束前调用（渲染通道外）：这个命令缓冲里用过带记录的程序时，插一个着色器写 → 主机读的内存屏障，
++        /// 让栅栏完成后主机能读到计数（Vulkan 规范：栅栏本身不保证设备写对主机可见）。
++        /// </summary>
++        public unsafe void InsertHostReadBarrier(CommandBufferScoped cbs)
++        {
++            if (!_hostReadBarrier[cbs.CommandBufferIndex])
++            {
++                return;
++            }
++
++            _hostReadBarrier[cbs.CommandBufferIndex] = false;
++
++            MemoryBarrier barrier = new()
++            {
++                SType = StructureType.MemoryBarrier,
++                SrcAccessMask = AccessFlags.ShaderWriteBit,
++                DstAccessMask = AccessFlags.HostReadBit,
++            };
++
++            _gd.Api.CmdPipelineBarrier(
++                cbs.CommandBuffer,
++                PipelineStageFlags.AllCommandsBit,
++                PipelineStageFlags.HostBit,
++                0,
++                1,
++                in barrier,
++                0,
++                null,
++                0,
++                null);
++        }
++
++        private static bool Sampled(int count) => count <= ReportEachUpTo || (count & (count - 1)) == 0;
++
++        // 在命令缓冲回收路径上（持 CommandBufferPool 锁）调用：只做限次与格式化，输出交给线程池
++        internal void Report(S2AStorageOobRegion region, uint count, uint delta, int detection, ReadOnlySpan<uint> words)
++        {
++            if (!Sampled(detection))
++            {
++                return;
++            }
++
++            // 全进程限次：按「过了每程序限次的检出」计数，同样前 32 条逐条、之后第 2^k 条
++            int line = Interlocked.Increment(ref _detections);
++
++            if (!Sampled(line))
++            {
++                return;
++            }
++
++            uint info = words[S2AStorageOobRecord.WordInfo];
++            uint kind = (info >> S2AStorageOobRecord.KindShift) & 7;
++            int stage = (int)((info >> S2AStorageOobRecord.StageShift) & 0xF);
++            int cbSlot = (int)((info >> S2AStorageOobRecord.CbSlotShift) & 0xFF);
++            int cbOffset = (int)(info & 0xFFFF);
++
++            ulong hashLow = words[S2AStorageOobRecord.WordHash] | ((ulong)words[S2AStorageOobRecord.WordHash + 1] << 32);
++            ulong hashHigh = words[S2AStorageOobRecord.WordHash + 2] | ((ulong)words[S2AStorageOobRecord.WordHash + 3] << 32);
++
++            string access = ((kind & S2AStorageOobRecord.KindMultiTarget) != 0 ? "多目标" : "单目标") + (kind & 3) switch
++            {
++                S2AStorageOobRecord.KindStore => "写",
++                S2AStorageOobRecord.KindAtomic => "原子",
++                _ => "读",
++            };
++
++            string stageName = stage < (int)ShaderStage.Count ? ((ShaderStage)stage).ToString() : stage.ToString();
++
++            _pendingLines.Enqueue(
++                $"[gpu] 【红】存储缓冲访存越出宿主绑定窗口：程序 {new Hash128(hashLow, hashHigh)} 阶段 {stageName} {access} " +
++                $"基址 c{cbSlot}[0x{cbOffset * 4:X}]；首个越界：客体地址低 32 位 0x{words[S2AStorageOobRecord.WordAddressLow]:X8} " +
++                $"窗口内偏移 0x{words[S2AStorageOobRecord.WordOffset]:X8} 窗口 0x{(ulong)words[S2AStorageOobRecord.WordWindowLength] * 4:X} 字节 " +
++                $"着色器读到的描述符 0x{words[S2AStorageOobRecord.WordBaseHigh]:X8}{words[S2AStorageOobRecord.WordBaseLow]:X8}+0x{words[S2AStorageOobRecord.WordSize]:X}；" +
++                $"新增 {delta} 次、累计 {count} 次（该程序第 {detection} 次检出，宿主程序段 {region.Index}，全进程第 {line} 条）；" +
++                "越界读按 0、写和原子丢弃，与 Maxwell 真机读写真实客体内存不同");
++
++            if (Interlocked.Exchange(ref _drainScheduled, 1) == 0)
++            {
++                ThreadPool.UnsafeQueueUserWorkItem(static recorder => recorder.Drain(), this, preferLocal: false);
++            }
++        }
++
++        private void Drain()
++        {
++            do
++            {
++                Volatile.Write(ref _drainScheduled, 0);
++
++                while (_pendingLines.TryDequeue(out string line))
++                {
++                    Console.Error.WriteLine(line);
++                }
++            }
++            while (!_pendingLines.IsEmpty && Interlocked.Exchange(ref _drainScheduled, 1) == 0);
++        }
++
++        public void Dispose()
++        {
++            lock (_lock)
++            {
++                foreach (BufferHolder page in _pages)
++                {
++                    page.Dispose();
++                }
++
++                _pages.Clear();
++            }
++        }
++    }
++
++    /// <summary>
++    /// S2A（F1）：一个宿主程序的记录段。作为命令缓冲依赖登记（每个命令缓冲一次），栅栏完成回收时读计数并报红；
++    /// 程序释放且没有命令缓冲再引用它时，段还给记录器。丢弃段（<see cref="S2AStorageOobRecorder.Discard"/>）不登记、不读回、不归还。
++    /// </summary>
++    sealed class S2AStorageOobRegion : IAuto
++    {
++        private readonly S2AStorageOobRecorder _recorder;
++        private readonly nint _pointer;
++        private readonly bool _isDiscard;
++        private readonly BitMap _cbOwnership = new(CommandBufferPool.MaxCommandBuffers);
++        private int _referenceCount = 1;
++        private uint _lastCount;
++        private int _detections;
++
++        public int Index { get; }
++        public Auto<DisposableBuffer> Buffer { get; }
++        public int Offset { get; }
++        public int Size { get; }
++
++        internal S2AStorageOobRegion(S2AStorageOobRecorder recorder, int index, Auto<DisposableBuffer> buffer, int offset, int size, nint pointer, bool isDiscard)
++        {
++            _recorder = recorder;
++            _isDiscard = isDiscard;
++            Index = index;
++            Buffer = buffer;
++            Offset = offset;
++            Size = size;
++            _pointer = pointer;
++        }
++
++        /// <summary>程序在这个命令缓冲里用到时调用（描述符更新时）；每个命令缓冲只登记一次。</summary>
++        public void Use(CommandBufferScoped cbs)
++        {
++            if (!_isDiscard && _cbOwnership.Set(cbs.CommandBufferIndex))
++            {
++                cbs.AddDependant(this);
++                _recorder.RequestHostReadBarrier(cbs.CommandBufferIndex);
++            }
++        }
++
++        public bool HasCommandBufferDependency(CommandBufferScoped cbs)
++        {
++            return _cbOwnership.IsSet(cbs.CommandBufferIndex);
++        }
++
++        public void IncrementReferenceCount()
++        {
++            Interlocked.Increment(ref _referenceCount);
++        }
++
++        public void DecrementReferenceCount(int cbIndex)
++        {
++            _cbOwnership.Clear(cbIndex);
++            Check();
++            DecrementReferenceCount();
++        }
++
++        public void DecrementReferenceCount()
++        {
++            if (Interlocked.Decrement(ref _referenceCount) == 0)
++            {
++                _recorder.Release(Index);
++            }
++        }
++
++        /// <summary>程序释放时调用；之后由最后一个引用它的命令缓冲完成时归还。</summary>
++        public void Release()
++        {
++            if (!_isDiscard)
++            {
++                DecrementReferenceCount();
++            }
++        }
++
++        private unsafe void Check()
++        {
++            uint* words = (uint*)_pointer;
++            uint count = Volatile.Read(ref words[S2AStorageOobRecord.WordCount]);
++
++            if (count == _lastCount)
++            {
++                return;
++            }
++
++            // 首个越界的详情由同一次调用在计数之后写，最后写信息字；还没写完（那次调用所在的命令缓冲仍在执行）就等下次完成再读
++            if ((Volatile.Read(ref words[S2AStorageOobRecord.WordInfo]) & S2AStorageOobRecord.InfoValid) == 0)
++            {
++                return;
++            }
++
++            Span<uint> snapshot = stackalloc uint[S2AStorageOobRecord.Words];
++
++            for (int i = 0; i < snapshot.Length; i++)
++            {
++                snapshot[i] = Volatile.Read(ref words[i]);
++            }
++
++            uint delta = count - _lastCount;
++            _lastCount = count;
++
++            _recorder.Report(this, count, delta, ++_detections, snapshot);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index 37e6e765883199f945320531de564a98f0181ea6..0a90ab816b82af092c9bada4983d3d7ce32fdd30 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -35,6 +35,9 @@ namespace Ryujinx.Graphics.Vulkan
+         public ResourceBindingSegment[][] BindingSegments { get; }
+         public DescriptorSetTemplate[] Templates { get; }
+ 
++        /// <summary>S2A（F1）：本程序的越界记录段（布局里有记录绑定时才有；记录器分不到段时为 null，记录绑定落到空 / 占位缓冲）</summary>
++        public S2AStorageOobRegion S2AOobRegion { get; }
++
+         public ProgramLinkStatus LinkStatus { get; private set; }
+ 
+         public readonly SpecDescription[] SpecDescriptions;
+@@ -162,10 +165,31 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+             _s2aLayout = resourceLayout;
+ 
++            S2AOobRegion = HasS2AOobRecordBinding(resourceLayout) ? gd.S2AStorageOob?.Allocate() : null;
++
+             _compileTask = Task.CompletedTask;
+             _firstBackgroundUse = false;
+         }
+ 
++        // S2A（F1）：布局的存储缓冲集合里有越界记录绑定（翻译期发现单目标 / 多目标全局访存的程序才有）
++        private static bool HasS2AOobRecordBinding(ResourceLayout layout)
++        {
++            if (layout.Sets.Count <= PipelineBase.StorageSetIndex)
++            {
++                return false;
++            }
++
++            foreach (ResourceDescriptor descriptor in layout.Sets[PipelineBase.StorageSetIndex].Descriptors)
++            {
++                if (descriptor.Binding == Ryujinx.Graphics.Shader.S2AStorageOobRecord.Binding)
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
+         public ShaderCollection(
+             VulkanRenderer gd,
+             Device device,
+@@ -818,6 +842,9 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 _s2aDisposed = true;
+ 
++                // S2A（F1）：段由最后一个引用它的命令缓冲完成时归还（期间仍会按完成读计数）
++                S2AOobRegion?.Release();
++
+                 // Active module/pipeline jobs own the VkShaderModule and pipelines. A partial
+                 // VTG load can dispose a valid part before its background job finishes; wait
+                 // for that job first. A timed-out driver call retains the objects (leak) and
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 98ccba46992fdbf9c6f30072fb7071ccc051674e..d63adea91bd6a63779c9ee0a2cf74540c3fd93e2 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -80,6 +80,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         internal BufferManager BufferManager { get; private set; }
+ 
++        /// <summary>S2A（F1）：存储缓冲越界记录（按程序分段，命令缓冲完成后读回报红）；缺省关（S2A_SSBO_OOB_DIAG=1 才建），关时为 null</summary>
++        internal S2AStorageOobRecorder S2AStorageOob { get; private set; }
++
+         internal HashSet<ShaderCollection> Shaders { get; }
+         internal HashSet<ITexture> Textures { get; }
+         internal HashSet<SamplerHolder> Samplers { get; }
+@@ -516,6 +519,12 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             BufferManager = new BufferManager(this, _device);
+ 
++            // S2A（F1）：越界记录是缺省关的诊断（S2A_SSBO_OOB_DIAG=1），且只在钳位生效（未启用 robustBufferAccess）时建
++            if (!_enabledFeatures.Core.RobustBufferAccess && S2AStorageOobRecorder.DiagnosticsRequested)
++            {
++                S2AStorageOob = S2AStorageOobRecorder.TryCreate(this, _physicalDevice.PhysicalDeviceProperties.Limits.MinStorageBufferOffsetAlignment);
++            }
++
+             SyncManager = new SyncManager(this, _device);
+             // One renderer-owned lane for every shader-module and pipeline driver call.
+             S2ACompileWorker = new CompileWorker();
+@@ -869,7 +878,10 @@ namespace Ryujinx.Graphics.Vulkan
+                 maximumGpuMemory: GetTotalGPUMemory(),
+                 requiresLinkedVaryingInterface: true,
+                 maximumVertexOutputComponents: checked((int)limits.MaxVertexOutputComponents),
+-                maximumFragmentInputComponents: checked((int)limits.MaxFragmentInputComponents));
++                maximumFragmentInputComponents: checked((int)limits.MaxFragmentInputComponents),
++                // S2A（F1）：没开 robustBufferAccess 的设备（只有 NVIDIA 开）上越界存储缓冲访存没有驱动兜底，翻译期按宿主窗口钳位
++                s2aStorageWindowClamp: !features.RobustBufferAccess,
++                s2aStorageOobRecord: S2AStorageOob != null);
+         }
+ 
+         private ulong GetTotalGPUMemory()
+@@ -1216,6 +1228,7 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+             HelperShader.Dispose();
+             _pipeline.Dispose();
++            S2AStorageOob?.Dispose();
+             BufferManager.Dispose();
+             PipelineLayoutCache.Dispose();
+             Barriers.Dispose();

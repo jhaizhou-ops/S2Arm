@@ -1,0 +1,136 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/IpcService.cs b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+index 2dd39fe89abb938a9dc9b90371d476e6d59296b3..4009f5408324a429f37380e1869c182f0c67026f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/IpcService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+@@ -3,6 +3,7 @@ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.Exceptions;
+ using Ryujinx.HLE.HOS.Ipc;
+ using System;
++using System.Collections.Concurrent;
+ using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.IO;
+@@ -19,7 +20,11 @@ namespace Ryujinx.HLE.HOS.Services
+         public ServerBase Server { get; private set; }
+ 
+         private IpcService _parent;
+-        private readonly IdDictionary _domainObjects;
++        // S2Arm: 延迟创建。域对象的表只有「转成域 / 加了域对象」的服务才用得到，而取子会话类命令
++        //   （time:u 的各个时钟、hid 各句柄）每次请求都 new 一个服务、进构造就走不到这里，
++        //   原来每建一个实例就 new IdDictionary + new ConcurrentDictionary，是 H05 普查里时钟命令剩下的那 1–2 KB。
++        //   _selfId 也是 -1 表示「还没转域」，所以这里保持 null 与它一致。
++        private IdDictionary _domainObjects;
+         private int _selfId;
+         private bool _isDomain;
+ 
+@@ -30,15 +35,38 @@ namespace Ryujinx.HLE.HOS.Services
+         private readonly nint _s2aCmif;
+         private readonly nint _s2aTipc;
+ 
+-        public IpcService(ServerBase server = null, bool registerTipc = false)
+-        {
+-            Stopwatch sw = Stopwatch.StartNew();
++        // S2Arm: 命令表按「服务类型」缓存一份。原来每个 IpcService 实例都在构造里重新解析一遍反射特性
++        //   （GetMethods + GetCustomAttributes + SelectMany + ToDictionary），而「取子会话」类命令每次请求都 new 一个服务实例，
++        //   于是游戏每帧读一次时钟就付 5–16 KB 的反射分配（H05 普查实测 time:u 三个时钟命令：16089 / 6995 / 5351 B）。
++        //   同一类型的命令表恒定（特性是编译期常量，方法集合不随实例变），所以按类型缓存后这些命令降到 0 字节。
++        //   ConcurrentDictionary：服务实例会在线程上并发创建（游戏线程 + 音频线程 + 各服务线程）。
++        private static readonly ConcurrentDictionary<Type, IReadOnlyDictionary<int, MethodInfo>> _cmifCache = new();
++        private static readonly ConcurrentDictionary<Type, IReadOnlyDictionary<int, MethodInfo>> _tipcCache = new();
+ 
+-            CmifCommands = GetType()
++        private static IReadOnlyDictionary<int, MethodInfo> BuildCmifCommands(Type type)
++        {
++            return type
+                 .GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public)
+                 .SelectMany(methodInfo => methodInfo.GetCustomAttributes<CommandCmifAttribute>()
+                 .Select(command => (command.Id, methodInfo)))
+                 .ToDictionary(command => command.Id, command => command.methodInfo);
++        }
++
++        private static IReadOnlyDictionary<int, MethodInfo> BuildTipcCommands(Type type)
++        {
++            return type
++                .GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public)
++                .SelectMany(methodInfo => methodInfo.GetCustomAttributes<CommandTipcAttribute>()
++                    .Select(command => (command.Id, methodInfo)))
++                .ToDictionary(command => command.Id, command => command.methodInfo);
++        }
++
++        public IpcService(ServerBase server = null, bool registerTipc = false)
++        {
++            Stopwatch sw = Stopwatch.StartNew();
++
++            // S2Arm: 按类型缓存（见 _cmifCache 的注释）：同一服务类型的第二个实例起不再走反射解析
++            CmifCommands = _cmifCache.GetOrAdd(GetType(), static t => BuildCmifCommands(t));
+ 
+             sw.Stop();
+ 
+@@ -52,11 +80,7 @@ namespace Ryujinx.HLE.HOS.Services
+             {
+                 sw.Start();
+ 
+-                TipcCommands = GetType()
+-                    .GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public)
+-                    .SelectMany(methodInfo => methodInfo.GetCustomAttributes<CommandTipcAttribute>()
+-                        .Select(command => (command.Id, methodInfo)))
+-                    .ToDictionary(command => command.Id, command => command.methodInfo);
++                TipcCommands = _tipcCache.GetOrAdd(GetType(), static t => BuildTipcCommands(t));
+ 
+                 sw.Stop();
+ 
+@@ -72,15 +96,16 @@ namespace Ryujinx.HLE.HOS.Services
+             (_s2aCmif, _s2aTipc) = S2AIpcDispatch.Lookup(GetType());
+ 
+             _parent = this;
+-            _domainObjects = new IdDictionary();
+             _selfId = -1;
+         }
+ 
++        private IdDictionary DomainObjects => _domainObjects ??= new IdDictionary();
++
+         public int ConvertToDomain()
+         {
+             if (_selfId == -1)
+             {
+-                _selfId = _domainObjects.Add(this);
++                _selfId = DomainObjects.Add(this);
+             }
+ 
+             _isDomain = true;
+@@ -306,12 +331,12 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+         private int Add(IpcService obj)
+         {
+-            return _domainObjects.Add(obj);
++            return DomainObjects.Add(obj);
+         }
+ 
+         private bool Delete(int id)
+         {
+-            object obj = _domainObjects.Delete(id);
++            object obj = _domainObjects?.Delete(id);
+ 
+             if (obj is IDisposable disposableObj)
+             {
+@@ -323,7 +348,7 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+         private IpcService GetObject(int id)
+         {
+-            return _domainObjects.GetData<IpcService>(id);
++            return _domainObjects?.GetData<IpcService>(id);
+         }
+ 
+         public void SetParent(IpcService parent)
+@@ -333,6 +358,11 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+         public virtual void DestroyAtExit()
+         {
++            if (_domainObjects == null)
++            {
++                return;
++            }
++
+             foreach (object domainObject in _domainObjects.Values)
+             {
+                 if (domainObject != this && domainObject is IDisposable disposableObj)

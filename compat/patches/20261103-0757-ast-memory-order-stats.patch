@@ -1,0 +1,38 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index 0f26674dc778269e3db2443248cb64d3227a96d2..fa391058bdcf5b32f1c940f6e5c134873b55c50b 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -7,6 +7,21 @@ using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
+ 
+ namespace Ryujinx.Graphics.Shader.StructuredIr
+ {
++    // S2Arm (#1429 acceptance): per-thread count of definitions kept in place
++    // only because of the #1414 memory-order rule. Translation of one shader
++    // runs on one thread, so callers take the count right after translating it.
++    public static class AstMemoryOrderStats
++    {
++        [System.ThreadStatic] internal static int Kept;
++
++        public static int Take()
++        {
++            int kept = Kept;
++            Kept = 0;
++            return kept;
++        }
++    }
++
+     static class AstOptimizer
+     {
+         public static void Optimize(StructuredProgramContext context)
+@@ -40,6 +55,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                             {
+                                 PropagateExpression(propVar, assignment.Source);
+                             }
++                            else if (propVar.Uses.Count > 0)
++                            {
++                                // Only branch where #1414 changes output: the old code propagated here.
++                                AstMemoryOrderStats.Kept++;
++                            }
+                         }
+ 
+                         if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0)

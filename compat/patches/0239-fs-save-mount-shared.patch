@@ -1,0 +1,138 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+index defb54749eb33b8f3a3e570a2da04247afb3ec93..a694527bab0fe484792a7ca4298b0767cde0e999 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+@@ -10,10 +10,12 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+     class IFileSystem : DisposableIpcService
+     {
+         private SharedRef<LibHac.FsSrv.Sf.IFileSystem> _fileSystem;
++        private readonly string _s2aSaveKey;   // S2Arm: save data mount shared through S2ASaveShare (null for other file systems)
+ 
+-        public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider)
++        public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider, string s2aSaveKey = null)
+         {
+             _fileSystem = SharedRef<LibHac.FsSrv.Sf.IFileSystem>.CreateMove(ref provider);
++            _s2aSaveKey = s2aSaveKey;
+         }
+ 
+         public SharedRef<LibHac.FsSrv.Sf.IFileSystem> GetBaseFileSystem()
+@@ -234,6 +236,11 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+             if (isDisposing)
+             {
+                 _fileSystem.Destroy();
++
++                if (_s2aSaveKey != null)
++                {
++                    S2ASaveShare.Closed(_s2aSaveKey);
++                }
+             }
+         }
+     }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 75fdcfc0b71b27e712b135cbc41e99fe07d7fee4..04a1b7928a6a4f4df758d606ce53346490ddd691 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -362,13 +362,21 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+             SaveDataAttribute attribute = context.RequestData.ReadStruct<SaveDataAttribute>();
+             using SharedRef<IFileSystem> fileSystem = new();
+ 
+-            Result result = _baseFileSystemProxy.Get.OpenSaveDataFileSystem(ref fileSystem.Ref, spaceId, in attribute);
+-            if (result.IsFailure())
++            // S2Arm: a save the application already has open is shared, not re-opened (S2ASaveShare)
++            string key = S2ASaveShare.Key(spaceId, in attribute);
++
++            if (!S2ASaveShare.TryShare(key, ref fileSystem.Ref))
+             {
+-                return (ResultCode)result.Value;
++                Result result = _baseFileSystemProxy.Get.OpenSaveDataFileSystem(ref fileSystem.Ref, spaceId, in attribute);
++                if (result.IsFailure())
++                {
++                    return (ResultCode)result.Value;
++                }
++
++                S2ASaveShare.Opened(key, in fileSystem.Ref);
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key));
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs b/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad3bccbc987a1ba3f47d9dac91b3d417745613c8
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs
+@@ -0,0 +1,72 @@
++using LibHac.Common;
++using LibHac.Fs;
++using System;
++using System.Collections.Generic;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.HLE.HOS.Services.Fs
++{
++    // S2Arm: opening a save data file system that the application already has open hands back the same underlying file
++    // system instead of opening it again. A directory save data file system re-synchronizes its working copy from the
++    // committed copy every time it is opened, so a second open silently wiped the uncommitted changes of the mount that
++    // was still open (10-26 census Two Point Hospital: keeps one mount open for the whole session, mounts the same save
++    // again around each save step; the directories it had created on the first mount vanished, CreateFile under them
++    // failed, and it wrote through the null file object). Every mount of a save sees one view, as on the console.
++    static class S2ASaveShare
++    {
++        private sealed class Entry
++        {
++            public SharedRef<LibHac.FsSrv.Sf.IFileSystem> FileSystem;
++            public int Count;
++        }
++
++        private static readonly object _lock = new();
++        private static readonly Dictionary<string, Entry> _open = new();
++
++        public static string Key(SaveDataSpaceId spaceId, in SaveDataAttribute attribute)
++        {
++            ReadOnlySpan<byte> raw = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref System.Runtime.CompilerServices.Unsafe.AsRef(in attribute), 1));
++
++            return $"{(byte)spaceId:x2}:{Convert.ToHexString(raw)}";
++        }
++
++        // A new reference to the open file system for this save, or false when none is open
++        public static bool TryShare(string key, ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> outFileSystem)
++        {
++            lock (_lock)
++            {
++                if (!_open.TryGetValue(key, out Entry entry))
++                {
++                    return false;
++                }
++
++                entry.Count++;
++                outFileSystem.SetByCopy(in entry.FileSystem);
++
++                return true;
++            }
++        }
++
++        // The save was just opened: keep a reference so later opens share it while any mount lives
++        public static void Opened(string key, in SharedRef<LibHac.FsSrv.Sf.IFileSystem> fileSystem)
++        {
++            lock (_lock)
++            {
++                _open[key] = new Entry { FileSystem = SharedRef<LibHac.FsSrv.Sf.IFileSystem>.CreateCopy(in fileSystem), Count = 1 };
++            }
++        }
++
++        // One mount was released; the last one drops the kept reference, which closes the save as before
++        public static void Closed(string key)
++        {
++            lock (_lock)
++            {
++                if (_open.TryGetValue(key, out Entry entry) && --entry.Count == 0)
++                {
++                    _open.Remove(key);
++                    entry.FileSystem.Destroy();
++                }
++            }
++        }
++    }
++}

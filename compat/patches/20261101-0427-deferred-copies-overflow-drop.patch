@@ -1,0 +1,117 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index 472317e6b13e699177dc8833c601e6034a171704..fc2f6e3a30bcae04f8a1c01648b8d5c920198f60 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -393,7 +393,8 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+             else
+             {
+-                // A query begin outside a subpass is invalid; defer to the next pass's subpass 0.
++                // Occlusion/transform-feedback queries are only valid inside a subpass;
++                // deferring every out-of-pass begin to the next pass's subpass 0 keeps one code path.
+                 _pendingQueryBegins.Add((pool, isOcclusion, query));
+             }
+         }
+@@ -436,22 +437,31 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public void CopyQueryResults(BufferedQuery query, int segment)
+         {
+-            _pendingQueryCopies.Add((query, segment));
++            CopyQueryResults(query, segment, 1);
++        }
++
++        public void CopyQueryResults(BufferedQuery query, int firstSegment, int count)
++        {
++            for (int i = 0; i < count; i++)
++            {
++                _pendingQueryCopies.Add((query, firstSegment + i));
++            }
+ 
+-            if (AutoFlush.RegisterPendingQuery())
++            if (count > 0 && AutoFlush.RegisterPendingQuery())
+             {
+                 FlushCommandsImpl();
+             }
+         }
+ 
+         // Ends every segment still recording before vkCmdEndRenderPass (VUID 07004).
++        // Copies are deliberately not queued here: a mid-cycle Reset clears the slots
++        // CPU-side and a stale copy landing afterwards reads back as ready-but-wrong.
+         protected override void CloseQueriesForRenderPassEnd()
+         {
+             foreach ((QueryPool pool, _, BufferedQuery query) in _activeQueries)
+             {
+                 int slot = query.SegmentEnded();
+                 Gd.Api.CmdEndQuery(CommandBuffer, pool, (uint)slot);
+-                _pendingQueryCopies.Add((query, slot));
+             }
+ 
+             _resumeQueries.AddRange(_activeQueries);
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+index f1b89a6de066847ffa4ddfe464375f183687eead..d07df590518510cfcbe90bd77ed172deef094a60 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+@@ -187,6 +187,10 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             set => _endDeferred = value ? 1 : 0;
+         }
+ 
++        // Latched at segment-overflow: the query can never produce a valid result.
++        // Consumers drop such events instead of retrying them forever.
++        public bool Overflowed => Volatile.Read(ref _overflowed) != 0;
++
+         public void End(bool withResult)
+         {
+             bool recordedEnd = false;
+@@ -199,11 +203,13 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             {
+                 Volatile.Write(ref _segmentMax, Math.Max(_segment, 1));
+                 Volatile.Write(ref _ended, 1);
+-                if (recordedEnd || _endDeferred != 0)
++                // All segment copies queue only at End: every slot the reader will sum is
++                // written by a copy recorded after the last Begin-clear, so a stale copy
++                // from a previous cycle can never masquerade as a fresh result.
++                if (_segment > 0 || recordedEnd || _endDeferred != 0)
+                 {
+-                    _pipeline.CopyQueryResults(this, Math.Max(0, _segment - 1));
++                    _pipeline.CopyQueryResults(this, 0, Math.Max(_segment, 1));
+                 }
+-                // Resumed-between-passes end: the closing pass already queued the last segment's copy.
+             }
+             else
+             {
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+index 482728f5a53fbabb5065dbce7b9568672838e7c8..cdf413c595b9f6aeed2c4098c374773c2a2afb00 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+@@ -69,6 +69,15 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                     return true;
+                 }
+ 
++                // A latched overflow has no valid result ever: it already counted and
++                // reported once at BeginSegment. Drop the event — no result, no guest
++                // callback — so it cannot head-block the queue and re-report per retry.
++                if (_counter.Overflowed)
++                {
++                    Dispose();
++                    return true;
++                }
++
+                 if (ClearCounter)
+                 {
+                     result = 0;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 303df2fa4971e839cc9421198c7dc323c6300286..86325763a4bef2f4546ffa637451aabd59e312d9 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -120,8 +120,9 @@ namespace Ryujinx.Graphics.Vulkan
+         public bool S2ACounterLifetime { get; set; }
+         public bool S2AStopCountersForExit(int milliseconds) => _counters.S2AStopForExit(milliseconds);
+ 
+-        // Query results whose bounded wait expired this session. Read-only for the
+-        // session-summary line; counted once per expiry at the latch site.
++        // Query results counted on the failure path this session, for the收局 summary line.
++        // 口径: each bounded-wait expiry counts once (an event retried every 500 ms counts
++        // per expiry, per the逐拍报红 policy); a latched segment overflow counts once per query.
+         private long _queryTimeouts;
+         public long QueryTimeouts => Interlocked.Read(ref _queryTimeouts);
+         internal void IncrementQueryTimeouts() => Interlocked.Increment(ref _queryTimeouts);

@@ -1,0 +1,129 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
+index 86da8f5f07fe3739eea3a3967fc5663d3c23ea69..2644303aae7afdd848a317841d0b0788ac25b04b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheCommon.cs
+@@ -8,6 +8,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+     /// </summary>
+     static class DiskCacheCommon
+     {
++        // Diagnostic output is opt-in on every platform; cache behavior is unchanged.
++        internal static readonly bool S2ACacheDiagnostics = System.Environment.GetEnvironmentVariable("S2A_SHADER_CACHE_DIAG") == "1";
++
+         /// <summary>
+         /// Opens a file for read or write.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 39754830d46903a558746dfcfcf22c9d77f0c8fb..674af57c92412f21e95036a65278aa99a2f26c65 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -1239,7 +1239,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             {
+                 tocFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
+                 dataFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
+-                if (!_s2aHostPathLogged)
++                if (DiskCacheCommon.S2ACacheDiagnostics && !_s2aHostPathLogged)
+                 {
+                     _s2aHostPathLogged = true;
+                     Console.Error.WriteLine($"[vkpb] 宿主缓存路径：base={_basePath} toc={Path.GetFullPath(GetHostTocFileName(context))}");
+@@ -1252,9 +1252,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     header.Timestamp != timestamp)
+                 {
+                     // S2A 诊断：宿主 TOC 身份不符会清空整份宿主缓存；统计旧/新时间戳与长度。
+-                    Console.Error.WriteLine($"[vkpb] 宿主 TOC 重置：{tocFileStream.Name} " +
+-                        $"旧 ts={header.Timestamp:x} 新 ts={timestamp:x} toc={tocFileStream.Length} data={dataFileStream.Length} " +
+-                        $"程序 {programIndex} base={_basePath}");
++                    if (DiskCacheCommon.S2ACacheDiagnostics)
++                    {
++                        Console.Error.WriteLine($"[vkpb] 宿主 TOC 重置：{tocFileStream.Name} " +
++                            $"旧 ts={header.Timestamp:x} 新 ts={timestamp:x} toc={tocFileStream.Length} data={dataFileStream.Length} " +
++                            $"程序 {programIndex} base={_basePath}");
++                    }
+                     CreateToc(tocFileStream, ref header, TochMagic, CodeGenVersion, timestamp);
+                     dataFileStream.SetLength(0);
+                 }
+@@ -1300,7 +1303,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 dataFileStream.Flush();
+                 tocWriter.Write(ref offsetAndSize);
+                 tocFileStream.Flush();
+-                if (_s2aHostWrites++ < 8 || _s2aHostWrites % 128 == 0)
++                if (DiskCacheCommon.S2ACacheDiagnostics && (_s2aHostWrites++ < 8 || _s2aHostWrites % 128 == 0))
+                 {
+                     Console.Error.WriteLine($"[vkpb] 宿主 TOC 写：idx={programIndex} off={tocOffset} " +
+                         $"len={tocFileStream.Length} bytes={hostCode.Length} data={dataFileStream.Length}");
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 8839019413b99d03bb9a193f7b7c7fe12bb3e1b3..b9168aca60f919db101fba5b0a1177e469aa0a89 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -156,26 +156,34 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 if (result == ProgramLinkStatus.Success)
+                 {
+                     byte[] binary = programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram);
+-                    if (binary == null || binary.Length == 0) _s2aSaveEmpty++;
+-                    else _s2aSaveWritten++;
++                    if (DiskCacheCommon.S2ACacheDiagnostics)
++                    {
++                        if (binary == null || binary.Length == 0) _s2aSaveEmpty++;
++                        else _s2aSaveWritten++;
++                    }
+                     _cacheWriter.AddShader(programToSave.CachedProgram, binary);
+                 }
+                 else
+                 {
+-                    _s2aSaveFailed++;
++                    // A failed link is actionable even when periodic diagnostics are off.
++                    Console.Error.WriteLine("[gal] 【红】着色器程序链接失败，未写入宿主缓存");
++                    if (DiskCacheCommon.S2ACacheDiagnostics) _s2aSaveFailed++;
+                 }
+             }
+ 
+             // S2A 诊断：每 5 s 一行，判断宿主记录不落盘是“没入队 / 永远 Incomplete / 二进制为空”。
+-            _s2aSaveIncomplete = _programsToSaveQueue.Count;
+-            long now = Environment.TickCount64;
+-            if (now - _s2aSaveReported >= 5000 &&
+-                (_s2aSaveEnqueued | _s2aSaveWritten | _s2aSaveEmpty | _s2aSaveFailed) != 0)
++            if (DiskCacheCommon.S2ACacheDiagnostics)
+             {
+-                _s2aSaveReported = now;
+-                Console.Error.WriteLine($"[vkpb] 存缓存计数：翻译 {_s2aTranslated}、入队 {_s2aSaveEnqueued}、已写 {_s2aSaveWritten}、" +
+-                    $"空二进制 {_s2aSaveEmpty}、失败 {_s2aSaveFailed}、队列 {_s2aSaveIncomplete}");
+-                _s2aTranslated = _s2aSaveEnqueued = _s2aSaveWritten = _s2aSaveEmpty = _s2aSaveFailed = 0;
++                _s2aSaveIncomplete = _programsToSaveQueue.Count;
++                long now = Environment.TickCount64;
++                if (now - _s2aSaveReported >= 5000 &&
++                    (_s2aSaveEnqueued | _s2aSaveWritten | _s2aSaveEmpty | _s2aSaveFailed) != 0)
++                {
++                    _s2aSaveReported = now;
++                    Console.Error.WriteLine($"[vkpb] 存缓存计数：翻译 {_s2aTranslated}、入队 {_s2aSaveEnqueued}、已写 {_s2aSaveWritten}、" +
++                        $"空二进制 {_s2aSaveEmpty}、失败 {_s2aSaveFailed}、队列 {_s2aSaveIncomplete}");
++                    _s2aTranslated = _s2aSaveEnqueued = _s2aSaveWritten = _s2aSaveEmpty = _s2aSaveFailed = 0;
++                }
+             }
+         }
+ 
+@@ -335,7 +343,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             cpShader = new CachedShaderProgram(hostProgram, specState, translatedShader.Shader);
+ 
+             _computeShaderCache.Add(cpShader);
+-            _s2aTranslated++;
++            if (DiskCacheCommon.S2ACacheDiagnostics) _s2aTranslated++;
+             EnqueueProgramToSave(cpShader, hostProgram, shaderSourcesArray);
+             _cpPrograms[gpuVa] = cpShader;
+             S2ASeen.Note(cpShader);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
+@@ -703,7 +711,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _graphicsShaderCache.Add(gpShaders);
+ 
+             // S2A：转计算的程序也进磁盘缓存（复合宿主二进制，S2AVtg；上游不缓存，每局首遇现翻）
+-            _s2aTranslated++;
++            if (DiskCacheCommon.S2ACacheDiagnostics) _s2aTranslated++;
+             EnqueueProgramToSave(gpShaders, hostProgram, shaderSourcesArray);
+ 
+             if (vertexAsCompute != null)
+@@ -809,7 +817,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2AWantBinary(program.GeometryAsCompute?.HostProgram);
+ 
+                 _programsToSaveQueue.Enqueue(programToSave);
+-                _s2aSaveEnqueued++;
++                if (DiskCacheCommon.S2ACacheDiagnostics) _s2aSaveEnqueued++;
+             }
+         }
+ 

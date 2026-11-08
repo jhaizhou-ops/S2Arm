@@ -1,0 +1,102 @@
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
+index 3f25028957a6a387a27226e58da8ef82ced5392d..b07b3df946c3b5e169eb72fff8adfdea3e994f1e 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
+@@ -14,6 +14,7 @@ namespace Ryujinx.HLE.HOS.Ipc
+             Position = word1;
+             Position |= (word2 << 4) & 0x0f00000000;
+             Position |= (word2 << 34) & 0x7000000000;
++            Position = S2AHooks.FixIpcAddr(Position);   // S2Arm: restore bit 39 (macOS alias region above 2^39)
+ 
+             Size = word0;
+             Size |= (word2 << 8) & 0xf00000000;
+@@ -30,6 +31,7 @@ namespace Ryujinx.HLE.HOS.Ipc
+             Position = word1;
+             Position |= (word2 << 4) & 0x0f00000000;
+             Position |= (word2 << 34) & 0x7000000000;
++            Position = S2AHooks.FixIpcAddr(Position);   // S2Arm: restore bit 39 (macOS alias region above 2^39)
+ 
+             Size = word0;
+             Size |= (word2 << 8) & 0xf00000000;
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
+index 31b3ed10de7790c43b00be60e48c6f5b54492848..4adf0b0dd4f69a244946c235ff1e22b74702ba0f 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
+@@ -21,6 +21,7 @@ namespace Ryujinx.HLE.HOS.Ipc
+             Position = word1;
+             Position |= (word0 << 20) & 0x0f00000000;
+             Position |= (word0 << 30) & 0x7000000000;
++            Position = S2AHooks.FixIpcAddr(Position);   // S2Arm: restore bit 39 (macOS alias region above 2^39)
+ 
+             Index = ((uint)word0 >> 0) & 0x03f;
+             Index |= ((uint)word0 >> 3) & 0x1c0;
+@@ -36,6 +37,7 @@ namespace Ryujinx.HLE.HOS.Ipc
+             Position = word1;
+             Position |= (word0 << 20) & 0x0f00000000;
+             Position |= (word0 << 30) & 0x7000000000;
++            Position = S2AHooks.FixIpcAddr(Position);   // S2Arm: restore bit 39 (macOS alias region above 2^39)
+ 
+             Index = ((uint)word0 >> 0) & 0x03f;
+             Index |= ((uint)word0 >> 3) & 0x1c0;
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index db1efd54f1bf2e178d608e88b89be7fe3b249417..53a6164a5e081d90ecbc57635f657e9501cf36ca 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -19,6 +19,12 @@ namespace Ryujinx.HLE
+         // Horizon.StartNewServices: start a Horizon (new IPC framework) service on an S2Arm thread instead of a Ryujinx kernel process
+         public static delegate*<Ryujinx.Horizon.ServiceEntry, void> StartHorizonService;
+ 
++        // IPC buffer descriptors carry 39-bit addresses. On macOS the game's address window tops out at 2^39 and an alias region that does not
++        // fit is extended above it, so bit 39 of a buffer there is lost when the game packs the descriptor; this restores it (native
++        // svc_mem.c s2a_ipc_addr39: only when the 39-bit address is not a game address and adding bit 39 gives a mapped one). Null = as decoded.
++        public static delegate* unmanaged<ulong, ulong> IpcAddr39;
++        public static ulong FixIpcAddr(ulong a) => IpcAddr39 == null ? a : IpcAddr39(a);
++
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;
+ 
+diff --git a/src/Ryujinx.Horizon/S2AHorizonHooks.cs b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+index efb329236688fbebebbff89eaa4c2335083853f6..ce99dd46a013a059472f785aa7ced4f750158482 100644
+--- a/src/Ryujinx.Horizon/S2AHorizonHooks.cs
++++ b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+@@ -6,8 +6,13 @@ namespace Ryujinx.Horizon
+     // S2Arm: hooks for in-thread direct dispatch of Horizon services (services/S2A.Services sets them; when unset,
+     // behaviour is upstream's). The game's requests are processed on the game thread through the service's own
+     // ServerManager (ProcessRequest), instead of the service thread's receive loop.
+-    static class S2AHorizonHooks
++    static unsafe class S2AHorizonHooks
+     {
++        // IPC buffer descriptor addresses are 39-bit: restore bit 39 for a buffer in the part of the alias region above 2^39 (macOS;
++        // same native function as Ryujinx.HLE S2AHooks.IpcAddr39). Null = as decoded.
++        public static delegate* unmanaged<ulong, ulong> IpcAddr39;
++        public static ulong FixIpcAddr(ulong a) => IpcAddr39 == null ? a : IpcAddr39(a);
++
+         // Android 的显式进程收局 owner；未设置时音频服务仍由上游 Shutdown 释放。
+         public static Action<IDisposable> AudioCreated;
+ 
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcBufferDescriptor.cs b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcBufferDescriptor.cs
+index 4e962894743407dfab6e4fa2cd3d21a80d99397e..f18a3d9bcf755cdc8e568fb86aa0fb9186ae2a72 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcBufferDescriptor.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcBufferDescriptor.cs
+@@ -8,7 +8,7 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+         private readonly uint _word2;
+ #pragma warning restore CS0649
+ 
+-        public ulong Address => _addressLow | (((ulong)_word2 << 4) & 0xf00000000UL) | (((ulong)_word2 << 34) & 0x7000000000UL);
++        public ulong Address => S2AHorizonHooks.FixIpcAddr(_addressLow | (((ulong)_word2 << 4) & 0xf00000000UL) | (((ulong)_word2 << 34) & 0x7000000000UL));   // S2Arm: bit 39
+         public ulong Size => _sizeLow | ((ulong)_word2 << 8) & 0xf00000000UL;
+         public HipcBufferMode Mode => (HipcBufferMode)(_word2 & 3);
+ 
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcStaticDescriptor.cs b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcStaticDescriptor.cs
+index 3d11d0212c691d209e3c15022cd42662d04b6a7f..dd87b0297291e2fd6bdb22438376da5ae7c95389 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcStaticDescriptor.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/HipcStaticDescriptor.cs
+@@ -4,7 +4,7 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+     {
+         private readonly ulong _data;
+ 
+-        public ulong Address => ((((_data >> 2) & 0x70) | ((_data >> 12) & 0xf)) << 32) | (_data >> 32);
++        public ulong Address => S2AHorizonHooks.FixIpcAddr(((((_data >> 2) & 0x70) | ((_data >> 12) & 0xf)) << 32) | (_data >> 32));   // S2Arm: bit 39
+         public ushort Size => (ushort)(_data >> 16);
+         public int ReceiveIndex => (int)(_data & 0xf);
+ 

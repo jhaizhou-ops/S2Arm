@@ -1,0 +1,44 @@
+diff --git a/src/Ryujinx.Common/S2ARealtime.cs b/src/Ryujinx.Common/S2ARealtime.cs
+index 054f9907a7b1337443b82dafab5285383924e679..bb23a61ebf94fbb352e67896e9a877f0f7354692 100644
+--- a/src/Ryujinx.Common/S2ARealtime.cs
++++ b/src/Ryujinx.Common/S2ARealtime.cs
+@@ -12,6 +12,9 @@ namespace Ryujinx.Common
+     /// was 27–34 ms late at each catch-up (thread handoff and preempted renders, not the work itself: render ≤ 3 ms), the processor
+     /// dropped up to 946 periods per 10 s and the device played that much silence (crackle on iPhone too). CoreAudio's own IO threads
+     /// use this policy; a thread that overruns its computation budget is demoted by the kernel, so a bug cannot starve the system.
++    /// Cost (10-24 direct-mode acnh on iPhone): Apple schedules time-constraint threads on performance cores only, so the 0.13-core
++    /// renderer loop sat 100% on P-cores for ~0.12 W. S2A_AUDIO_SCHED=utility instead gives the thread QoS utility (efficiency cores,
++    /// not real-time) for an A/B against underruns: the device keeps ≥ 70 ms in flight, so a 5 ms period only has to be met on average.
+     /// </remarks>
+     public static partial class S2ARealtime
+     {
+@@ -49,6 +52,13 @@ namespace Ryujinx.Common
+         [LibraryImport("libc")]
+         private static partial uint task_self_trap();
+ 
++        [LibraryImport("libc")]
++        private static partial int pthread_set_qos_class_self_np(uint qosClass, int relativePriority);
++
++        private const uint QosClassUtility = 0x11;
++
++        private static readonly bool Utility = Environment.GetEnvironmentVariable("S2A_AUDIO_SCHED") == "utility";
++
+         /// <summary>
+         /// Make the calling thread real-time: every <paramref name="periodNs"/> it needs up to <paramref name="computationNs"/> of CPU,
+         /// done within <paramref name="constraintNs"/>. Returns the kernel result (0 = applied); does nothing off Apple platforms.
+@@ -60,6 +70,15 @@ namespace Ryujinx.Common
+                 return -1;
+             }
+ 
++            if (Utility)
++            {
++                int qrc = pthread_set_qos_class_self_np(QosClassUtility, 0);
++
++                Console.Error.WriteLine($"[S2A 声音] {who}：QoS utility{(qrc == 0 ? "已设" : $"没设上（rc {qrc}）")}（不设实时调度，S2A_AUDIO_SCHED=utility）");
++
++                return qrc;
++            }
++
+             mach_timebase_info(out MachTimebaseInfo tb);
+ 
+             uint Ticks(long ns) => (uint)(ns * tb.Denom / tb.Numer);

@@ -1,0 +1,89 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index e1571fc78306d6eb2c35246a34de3fcc7e64b268..af39016e3e1f39c5e125a145570e0d879d328ea6 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -374,6 +374,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                     continue;
+                 }
+ 
++                if (ioDefinition.StorageKind == StorageKind.Input && Instructions.LaneIdEmulated(context, ioDefinition.IoVariable))
++                {
++                    continue; // S2Arm: computed instead of declared (see Instructions.LaneIdEmulated)
++                }
++
+                 bool isOutput = ioDefinition.StorageKind.IsOutput();
+                 bool isPerPatch = ioDefinition.StorageKind.IsPerPatch();
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index 79383ec4d9e9913ae55fb9fcf5dbd12870853bc9..3fb859ffd66d7f0eebc45d6a8b8b29000d7706df 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1672,8 +1672,28 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             return new OperationResult(varType, context.AtomicCompareExchange(context.GetType(varType), elemPointer, one, zero, zero, value1, value0));
+         }
+ 
++        // S2Arm: Metal vertex functions have SIMD-group functions but no lane-id input, and SPIRV-Cross refuses the SubgroupLocalInvocationId
++        // builtin there. In the vertex stage the lane id is replaced by the exclusive prefix count of active lanes (simd_prefix_exclusive_sum(1)),
++        // which equals the hardware lane id whenever the whole SIMD group is active.
++        internal static bool LaneIdEmulated(CodeGenContext context, IoVariable ioVariable)
++        {
++            return ioVariable == IoVariable.SubgroupLaneId && context.Definitions.Stage == ShaderStage.Vertex;
++        }
++
++        private static SpvInstruction EmulatedLaneId(CodeGenContext context)
++        {
++            SpvInstruction execution = context.Constant(context.TypeU32(), Scope.Subgroup);
++            return context.GroupNonUniformIAdd(context.TypeU32(), execution, GroupOperation.ExclusiveScan, context.Constant(context.TypeU32(), 1));
++        }
++
+         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)
+         {
++            if (!isStore && operation.StorageKind == StorageKind.Input && operation.GetSource(0) is AstOperand io0 &&
++                io0.Type == OperandType.Constant && LaneIdEmulated(context, (IoVariable)io0.Value))
++            {
++                return new OperationResult(AggregateType.U32, EmulatedLaneId(context));
++            }
++
+             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
+ 
+             if (isStore)
+@@ -1888,6 +1908,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         private static SpvInstruction GetScalarInput(CodeGenContext context, IoVariable ioVariable)
+         {
++            if (LaneIdEmulated(context, ioVariable))
++            {
++                return EmulatedLaneId(context);
++            }
++
+             (_, AggregateType varType) = IoMap.GetSpirvBuiltIn(ioVariable);
+             varType &= AggregateType.ElementTypeMask;
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+index e1561446b9a737cc32d76e5d822307fcffc5fd49..e9e56f92dc692e107e76a3616cdd435abeca0685 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -50,6 +50,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             context.AddCapability(Capability.GroupNonUniformBallot);
+             context.AddCapability(Capability.GroupNonUniformShuffle);
+             context.AddCapability(Capability.GroupNonUniformVote);
++            context.AddCapability(Capability.GroupNonUniformArithmetic); // S2Arm: vertex-stage lane id emulation (Instructions.LaneIdEmulated)
+             context.AddCapability(Capability.ImageBuffer);
+             context.AddCapability(Capability.ImageGatherExtended);
+             context.AddCapability(Capability.ImageQuery);
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index 2ec00ce2d81b51d437b79f913d532ce20c0cd5e1..7cf3d64930362102769b699a3883f56340775686 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -296,7 +296,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+             bool needsOffsetsEmulation = hasOffsets && !gpuAccessor.QueryHostSupportsTextureGatherOffsets();
+ 
+-            bool hasInvalidOffset = needsOffsetsEmulation || ((hasOffset || hasOffsets) && !gpuAccessor.QueryHostSupportsNonConstantTextureOffset());
++            // S2Arm: SPIR-V ConstOffsets only takes constants, so four per-texel gather offsets that are runtime values cannot be expressed natively
++            // on any host; treat them as invalid here and let the constant check below keep the constant case native (upstream emitted an
++            // OpConstantComposite of non-constant ids, i.e. invalid SPIR-V).
++            bool hasInvalidOffset = needsOffsetsEmulation || hasOffsets || (hasOffset && !gpuAccessor.QueryHostSupportsNonConstantTextureOffset());
+ 
+             bool isBindless = (texOp.Flags & TextureFlags.Bindless) != 0;
+ 

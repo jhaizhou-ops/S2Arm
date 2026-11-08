@@ -1,0 +1,235 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+index fed2f630db7c64b0c297cfb91970aa46d5eafe39..fe239ab788673d5ded8fafae97c85d06a2f5c839 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/SupportBufferUpdater.cs
+@@ -21,6 +21,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             Vector4<float> defaultScale = new() { X = 1f, Y = 0f, Z = 0f, W = 0f };
+             _data.RenderScale.AsSpan().Fill(defaultScale);
++            _data.RenderScaleY.AsSpan().Fill(defaultScale);
+             DirtyRenderScale(0, SupportBuffer.RenderScaleMaxCount);
+         }
+ 
+@@ -54,6 +55,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private void DirtyRenderScale(int offset, int count)
+         {
+             DirtyGenericField<Vector4<float>>(SupportBuffer.GraphicsRenderScaleOffset, offset, count);
++            DirtyGenericField<Vector4<float>>(SupportBuffer.RenderScaleYOffset, offset, count);
+         }
+ 
+         /// <summary>
+@@ -95,6 +97,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         public void SetRenderTargetScale(float scale)
+         {
+             _data.RenderScale[0].X = scale;
++            _data.RenderScaleY[0].X = scale;
+             DirtyRenderScale(0, 1); // Just the first element.
+         }
+ 
+@@ -110,6 +113,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             if (renderScaleSpan[1 + index].X != scale)
+             {
+                 renderScaleSpan[1 + index].X = scale;
++                _data.RenderScaleY[1 + index].X = scale;
+                 DirtyRenderScale(1 + index, 1);
+             }
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 567f4e12002415c9d5624714192e3bb2969a09a4..1cc3051a2394833884017cca37523008cf78e451 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -25,7 +25,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen，
+         //   +4（10-21 画面着色器线合批一次升）：点大小运行时化（支持缓冲在 s2a_widen 前加 s2a_point）+ 转计算程序进缓存（阶段掩码口径改、复合宿主二进制））
+         //   +5（10-21 画面·着色器线）：顶点输入按原始位读（宿主顶点自取，翻译结果不随属性类型变，补丁 vattr-raw）
+-        private const uint CodeGenVersion = 7354 + 5;
++        private const uint CodeGenVersion = 7354 + 6; // S2A：片元双轴分辨率倍率，支持缓冲追加 render_scale_y
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
+index 3d272dccca2d7b2555e3bfdb42be90d354726fc7..b4be65f1dbb993824496be7f6e9892e348cbb8ab 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
+@@ -179,7 +179,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 {
+                     // FragCoord X/Y must be divided by the render target scale, if resolution scaling is active,
+                     // because the shader code is not expecting scaled values.
+-                    res = context.FPDivide(res, context.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.RenderScale), Const(0)));
++                    SupportBufferField scaleField = op.Imm10 == AttributeConsts.PositionY ? SupportBufferField.RenderScaleY : SupportBufferField.RenderScale;
++                    res = context.FPDivide(res, context.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)scaleField), Const(0)));
+ 
+                     if (op.Imm10 == AttributeConsts.PositionY && context.TranslatorContext.Options.TargetApi != TargetApi.OpenGL)
+                     {
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index d2a657f4ce481ef3bfe76eeef2ae9c7bdd4d87bb..4c6e758b8c118881f69a795664dbd0e7eb891de2 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -28,6 +28,7 @@ namespace Ryujinx.Graphics.Shader
+         // S2A：点大小运行时化（见 SupportBuffer.S2APoint）；插在 s2a_widen 之前，不放最后：放最后时 Ryujinx 的脏区（连续一段）会跨过包装层自己写的 s2a_widen 把它盖成 0
+         S2APoint,
+         S2AWiden,   // S2A：宽屏边缘外推参数（见 SupportBuffer.S2AWiden）
++        RenderScaleY,   // S2A：分辨率纵向倍率；宽屏只覆盖原 RenderScale 的横向值
+     }
+ 
+     public struct SupportBuffer
+@@ -49,6 +50,7 @@ namespace Ryujinx.Graphics.Shader
+         public static readonly int S2AFlagsOffset;
+         public static readonly int S2APointOffset;
+         public static readonly int S2AWidenOffset;
++        public static readonly int RenderScaleYOffset;
+ 
+         public const int FragmentIsBgraCount = 8;
+         // One for the render target, 64 for the textures, and 8 for the images.
+@@ -78,6 +80,7 @@ namespace Ryujinx.Graphics.Shader
+             S2AFlagsOffset = OffsetOf(ref instance, ref instance.S2AFlags);
+             S2APointOffset = OffsetOf(ref instance, ref instance.S2APoint);
+             S2AWidenOffset = OffsetOf(ref instance, ref instance.S2AWiden);
++            RenderScaleYOffset = OffsetOf(ref instance, ref instance.RenderScaleY);
+             S2ARegistry = S2AMakeRegistry();
+             S2ACheckLayout();
+         }
+@@ -101,6 +104,7 @@ namespace Ryujinx.Graphics.Shader
+             ("s2a_widen.y：边缘外推门限²（浮点位）", S2AWidenOffset + 4, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.z：横向收缩量（浮点位；原尺寸居中层全宽视口 + 收缩 1/k）", S2AWidenOffset + 8, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.w：原画框外推的 pad（浮点位；0 = 关，SpirvExtrap 片元平移 / 插值外推、SpirvEdgePush 写 location 31）", S2AWidenOffset + 12, 4, "画幅线 SpirvExtrap"),
++            ("render_scale_y：纵向分辨率倍率，沿用逐纹理黑名单", RenderScaleYOffset, FieldSize * RenderScaleMaxCount, "画幅线 分辨率倍率"),
+         ];
+ 
+         private static void S2ACheckLayout()
+@@ -137,6 +141,7 @@ namespace Ryujinx.Graphics.Shader
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_flags"),
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_point"),
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_widen"),
++                new StructureField(AggregateType.Array | AggregateType.FP32, "render_scale_y", RenderScaleMaxCount),
+             ]);
+         }
+ 
+@@ -167,8 +172,9 @@ namespace Ryujinx.Graphics.Shader
+         // 出包离线烘焙取不到运行时值（零配置缺省 0，10-21 怪猎 27 支顶点函数全因它不在离线库、首遇现编），改为从这里读：一份顶点着色器覆盖所有点大小，翻译不再读这项特化
+         public Vector4<int> S2APoint;
+ 
+-        // S2A（画幅线，10-20 从 s2a_flags.y/z 迁出）：宽屏边缘外推参数，x = 外推量 1 − 1/k、y = 门限² ((1 − 3‰)/k)²（都是浮点位；画幅线 visual/s2a-widen 按此实现），z / w 留空；
+-        // 只由包装层逐次绘制写（不推的绘制写 0 = 原样），Ryujinx 侧不标脏这一段——上传区间到不了它，只有建缓冲时整段清零一次。s2a_flags 整个归 0042 / 0044
++        // S2A：宽屏边缘外推参数，x = 外推量、y = 门限² / 原画框外推比例、z = 收缩量、w = 原画框外推 pad（浮点位）。
++        // 包装层逐次绘制写；RenderScaleY 更新使连续上传区间经过这里时，包装层跟踪并在下次绘制恢复参数。s2a_flags 整个归 0042 / 0044。
+         public Vector4<int> S2AWiden;
++        public Array73<Vector4<float>> RenderScaleY;
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
+index ec181bb09ee5465d97eb45cf1ce3bd3a6b21d40b..f74a098ba5af90afc04627aedfdd9723e251613a 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
+@@ -78,6 +78,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 HelperFunctionName.ConvertFloatToDouble => GenerateConvertFloatToDoubleFunction(),
+                 HelperFunctionName.TexelFetchScale => GenerateTexelFetchScaleFunction(),
+                 HelperFunctionName.TextureSizeUnscale => GenerateTextureSizeUnscaleFunction(),
++                HelperFunctionName.TexelFetchScaleY => GenerateTexelFetchScaleFunction(true),
++                HelperFunctionName.TextureSizeUnscaleY => GenerateTextureSizeUnscaleFunction(true),
+                 _ => throw new ArgumentException($"Invalid function name {functionName}"),
+             };
+         }
+@@ -361,7 +363,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 srcThreadId);
+         }
+ 
+-        private Function GenerateTexelFetchScaleFunction()
++        private Function GenerateTexelFetchScaleFunction(bool y = false)
+         {
+             EmitterContext context = new();
+ 
+@@ -369,7 +371,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             Operand samplerIndex = Argument(1);
+             Operand index = GetScaleIndex(context, samplerIndex);
+ 
+-            Operand scale = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index);
++            Operand scale = context.Load(StorageKind.ConstantBuffer, 0, Const((int)(y ? SupportBufferField.RenderScaleY : SupportBufferField.RenderScale)), index);
+ 
+             Operand scaleIsOne = context.FPCompareEqual(scale, ConstF(1f));
+             Operand lblScaleNotOne = Label();
+@@ -389,9 +391,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                 Operand negScale = context.FPNegate(scale);
+                 Operand inputScaled = context.FPMultiply(context.IConvertS32ToFP32(input), negScale);
+-                Operand fragCoordX = context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(0));
+-                Operand fragCoordY = context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(1));
+-                Operand fragCoord = context.ConditionalSelect(Argument(2), fragCoordY, fragCoordX);
++                Operand fragCoord = context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, Const(y ? 1 : 0));
+                 Operand inputBias = context.FPModulo(fragCoord, negScale);
+                 Operand inputWithBias = context.FPAdd(inputScaled, inputBias);
+ 
+@@ -409,10 +409,10 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             context.Return(context.FP32ConvertToS32(inputScaled2));
+ 
+-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "TexelFetchScale", true, inArgumentsCount, 0);
++            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, y ? "TexelFetchScaleY" : "TexelFetchScale", true, inArgumentsCount, 0);
+         }
+ 
+-        private Function GenerateTextureSizeUnscaleFunction()
++        private Function GenerateTextureSizeUnscaleFunction(bool y = false)
+         {
+             EmitterContext context = new();
+ 
+@@ -420,7 +420,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             Operand samplerIndex = Argument(1);
+             Operand index = GetScaleIndex(context, samplerIndex);
+ 
+-            Operand scale = context.FPAbsolute(context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index));
++            Operand scale = context.FPAbsolute(context.Load(StorageKind.ConstantBuffer, 0, Const((int)(y ? SupportBufferField.RenderScaleY : SupportBufferField.RenderScale)), index));
+ 
+             Operand scaleIsOne = context.FPCompareEqual(scale, ConstF(1f));
+             Operand lblScaleNotOne = Label();
+@@ -433,7 +433,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             context.Return(context.FP32ConvertToS32(inputUnscaled));
+ 
+-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "TextureSizeUnscale", true, 2, 0);
++            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, y ? "TextureSizeUnscaleY" : "TextureSizeUnscale", true, 2, 0);
+         }
+ 
+         private Operand GetScaleIndex(EmitterContext context, Operand index)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
+index 09b17729d49878b65707c27139cbf40e731fba73..ca0392d3cbbd067946460a351e22c46b0c49993d 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
+@@ -16,5 +16,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         ShuffleXor,
+         TexelFetchScale,
+         TextureSizeUnscale,
++        TexelFetchScaleY,
++        TextureSizeUnscaleY,
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index bba87b902a756c99bb7e1ee117e2db00b133cbdd..20a8e6dfea20cb01e5c682c9e1b80f2551d5c9d7 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -66,12 +66,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+                 for (int index = 0; index < coordsCount; index++)
+                 {
++                    int componentFunctionId = index == 1 && stage == ShaderStage.Fragment
++                        ? hfm.GetOrCreateFunctionId(HelperFunctionName.TexelFetchScaleY) : functionId;
+                     Operand scaledCoord = Local();
+                     Operand[] callArgs;
+ 
+                     if (stage == ShaderStage.Fragment)
+                     {
+-                        callArgs = [Const(functionId), texOp.GetSource(coordsIndex + index), Const(samplerIndex), Const(index)
++                        callArgs = [Const(componentFunctionId), texOp.GetSource(coordsIndex + index), Const(samplerIndex), Const(index)
+                         ];
+                     }
+                     else
+@@ -128,7 +130,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                         }
+                     }
+ 
+-                    Operand[] callArgs = [Const(functionId), dest, Const(samplerIndex)];
++                    int componentFunctionId = index == 1 && stage == ShaderStage.Fragment
++                        ? hfm.GetOrCreateFunctionId(HelperFunctionName.TextureSizeUnscaleY) : functionId;
++                    Operand[] callArgs = [Const(componentFunctionId), dest, Const(samplerIndex)];
+ 
+                     node.List.AddAfter(node, new Operation(Instruction.Call, 0, unscaledSize, callArgs));
+                 }

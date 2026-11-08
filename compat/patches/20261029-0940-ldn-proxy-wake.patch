@@ -1,0 +1,617 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
+index cabdcacb4c23f33962f6295645c17835054f53c7..c4e61ddc44ec0af9d4ad7a4c573771102357184f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common.Memory;
+ using Ryujinx.HLE.HOS.Services.Ldn.Types;
+ using Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.Types;
+ using System;
++using System.Collections.Generic;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ {
+@@ -51,6 +52,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+         private void NetworkChanged(object sender, NetworkChangeEventArgs e)
+         {
++            S2AFilterNewStations(NetworkInfo.Ldn.Nodes, e.Info.Ldn.Nodes);
+             LatestUpdates.CalculateLatestUpdate(NetworkInfo.Ldn.Nodes, e.Info.Ldn.Nodes);
+ 
+             NetworkInfo = e.Info;
+@@ -85,11 +87,82 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+         public ResultCode SetStationAcceptPolicy(AcceptPolicy acceptPolicy)
+         {
++            _acceptPolicy = acceptPolicy;
+             _parent.NetworkClient.SetStationAcceptPolicy(acceptPolicy);
+ 
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm (LDN G12): the station accept filter (nn::ldn AddAcceptFilterEntry / ClearAcceptFilter). The relay enforces AcceptAll /
++        // RejectAll and lets BlackList / WhiteList stations in; the host then rejects a newly joined station whose MAC the list does
++        // not allow (relay Reject → that station gets Rejected + Disconnect), the same outcome as the access point refusing it.
++        private AcceptPolicy _acceptPolicy;
++        private readonly HashSet<ulong> _acceptFilter = new();
++
++        public void AddAcceptFilterEntry(ReadOnlySpan<byte> macAddress)
++        {
++            lock (_acceptFilter)
++            {
++                _acceptFilter.Add(S2AMacKey(macAddress));
++            }
++        }
++
++        public void ClearAcceptFilter()
++        {
++            lock (_acceptFilter)
++            {
++                _acceptFilter.Clear();
++            }
++        }
++
++        internal static ulong S2AMacKey(ReadOnlySpan<byte> mac)
++        {
++            ulong key = 0;
++
++            for (int i = 0; i < 6; i++)
++            {
++                key = key << 8 | mac[i];
++            }
++
++            return key;
++        }
++
++        // BlackList: listed MACs are refused; WhiteList: only listed MACs are let in; AcceptAll / RejectAll are the relay's
++        internal static bool S2AAllowed(AcceptPolicy policy, HashSet<ulong> filter, ulong mac) => policy switch
++        {
++            AcceptPolicy.BlackList => !filter.Contains(mac),
++            AcceptPolicy.WhiteList => filter.Contains(mac),
++            _ => true,
++        };
++
++        private void S2AFilterNewStations(Array8<NodeInfo> before, Array8<NodeInfo> after)
++        {
++            if (!Connected || (_acceptPolicy != AcceptPolicy.BlackList && _acceptPolicy != AcceptPolicy.WhiteList))
++            {
++                return;
++            }
++
++            for (int i = 1; i < after.Length; i++)   // node 0 is this access point
++            {
++                if (after[i].IsConnected == 0 || before[i].IsConnected != 0)
++                {
++                    continue;
++                }
++
++                bool allowed;
++
++                lock (_acceptFilter)
++                {
++                    allowed = S2AAllowed(_acceptPolicy, _acceptFilter, S2AMacKey(after[i].MacAddress.AsSpan()));
++                }
++
++                if (!allowed)
++                {
++                    _parent.NetworkClient.Reject(DisconnectReason.Rejected, after[i].NodeId);
++                }
++            }
++        }
++
+         public ResultCode CreateNetwork(SecurityConfig securityConfig, UserConfig userConfig, NetworkConfig networkConfig)
+         {
+             CreateAccessPointRequest request = new()
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index 17e8ce01970801d7e5e0007c4a005794c5c68029..3ec023fca57b65358a489eb3f8086bcba1f63549 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -524,14 +524,18 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             uint protocolValue =  context.RequestData.ReadUInt32();
+ 
+             // On NX only input value 1 or 3 is allowed, with an error being thrown otherwise.
++            // S2Arm (LDN G12): that error is the guest's InvalidArgument result, not a host exception out of the service. Every station
++            // on the RyuLdn relay speaks the same protocol, so a valid value changes nothing else (complete, not a stub).
+ 
+             if (protocolValue != 1 && protocolValue != 3)
+             {
+-                throw new ArgumentException($"{GetType().FullName}: Protocol value is not 1 or 3!! Protocol value: {protocolValue}");
++                Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"SetProtocol: invalid protocol value {protocolValue}");
++
++                return ResultCode.InvalidArgument;
+             }
+-            
++
+             Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"SetProtocol: protocolValue = {protocolValue}");
+-            Logger.Stub?.PrintStub(LogClass.ServiceLdn, new { protocolValue});
++
+             return ResultCode.Success;
+         }
+ 
+@@ -842,7 +846,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return _nifmResultCode;
+             }
+ 
+-            // TODO
++            // S2Arm (LDN G12): only an access point keeps an accept filter (nn::ldn: InvalidState otherwise); the host enforces it
++            if (_accessPoint == null || (_state != NetworkState.AccessPoint && _state != NetworkState.AccessPointCreated))
++            {
++                return ResultCode.InvalidState;
++            }
++
++            _accessPoint.AddAcceptFilterEntry(context.RequestData.ReadBytes(6));
+ 
+             return ResultCode.Success;
+         }
+@@ -857,7 +867,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return _nifmResultCode;
+             }
+ 
+-            // TODO
++            // S2Arm (LDN G12): same state rule as AddAcceptFilterEntry
++            if (_accessPoint == null || (_state != NetworkState.AccessPoint && _state != NetworkState.AccessPointCreated))
++            {
++                return ResultCode.InvalidState;
++            }
++
++            _accessPoint.ClearAcceptFilter();
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/Proxy/LdnProxySocket.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/Proxy/LdnProxySocket.cs
+index 4cdb8e8b8b704765ea6099bdfdddde58044910ae..359e5ca80b9b0a7d55ce9117aad61d5f568aed51 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/Proxy/LdnProxySocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnRyu/Proxy/LdnProxySocket.cs
+@@ -190,6 +190,48 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                 {
+                     _receiveQueue.Enqueue(packet);
+                 }
++
++                // S2Arm: wake a blocked recv / recvfrom and mixed selects (FreeBSD: a datagram makes the socket readable)
++                _receiveEvent.Set();
++                S2ABsdWake.Signal();
++            }
++        }
++
++        // S2Arm: blocking recv waits until data is queued or reads are shut down, for at most the SO_RCVTIMEO budget (0 / -1 = no limit).
++        // The auto-reset event can carry a stale signal from a datagram that a non-blocking read already took, so one wake is not proof
++        // of data: re-check and keep waiting the remaining time. Returns with the caller re-checking the queue under its lock.
++        private void WaitReceive(int timeoutMs)
++        {
++            long deadline = timeoutMs > 0 ? Environment.TickCount64 + timeoutMs : long.MaxValue;
++
++            while (true)
++            {
++                lock (_receiveQueue)
++                {
++                    if (_receiveQueue.Count > 0 || _readShutdown)
++                    {
++                        return;
++                    }
++                }
++
++                int wait = -1;
++
++                if (deadline != long.MaxValue)
++                {
++                    long left = deadline - Environment.TickCount64;
++
++                    if (left <= 0)
++                    {
++                        return;
++                    }
++
++                    wait = (int)Math.Min(left, int.MaxValue);
++                }
++
++                if (!_receiveEvent.WaitOne(wait))
++                {
++                    return;
++                }
+             }
+         }
+ 
+@@ -228,7 +270,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                         // Is this request made for us?
+                         IPEndPoint endpoint = GetEndpoint(request.Info.DestIpV4, request.Info.DestPort);
+ 
+-                        if (Equals(endpoint, LocalEndPoint))
++                        // S2Arm: a listener bound to INADDR_ANY accepts connections to any local address on its port (FreeBSD in_pcblookup)
++                        IPEndPoint listening = (IPEndPoint)LocalEndPoint;
++                        if (Equals(endpoint, listening) || (listening.Address.Equals(IPAddress.Any) && endpoint.Port == listening.Port))
+                         {
+                             // Yes - let's accept.
+                             IPEndPoint remoteEndpoint = GetEndpoint(request.Info.SourceIpV4, request.Info.SourcePort);
+@@ -270,8 +314,14 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+         public void Close()
+         {
+             _closed = true;
++            _readShutdown = true;   // S2Arm: a recv blocked on this socket returns 0 instead of waiting forever
+ 
+             _proxy.UnregisterSocket(this);
++            Volatile.Write(ref _connecting, false);   // a pending connect returns refused (no reply was kept)
++            _receiveEvent.Set();
++            _acceptEvent.Set();
++            _connectEvent.Set();
++            S2ABsdWake.Signal();
+ 
+             if (Connected)
+             {
+@@ -291,7 +341,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+ 
+         public void Connect(EndPoint remoteEP)
+         {
+-            if (_isListening || !IsBound)
++            // S2Arm: connect on an unbound socket binds it implicitly (FreeBSD); only a listening socket refuses
++            if (_isListening)
+             {
+                 throw new InvalidOperationException();
+             }
+@@ -302,8 +353,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+             }
+ 
+             IPEndPoint localEp = EnsureLocalEndpoint(true);
++            IsBound = true;
+ 
+-            _connecting = true;
++            _connectResponse = default;
++            Volatile.Write(ref _connecting, true);
+ 
+             _proxy.RequestConnection(localEp, (IPEndPoint)remoteEP, ProtocolType);
+ 
+@@ -312,7 +365,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                 throw new SocketException((int)WsaError.WSAEWOULDBLOCK);
+             }
+ 
+-            _connectEvent.WaitOne(); //timeout?
++            // S2Arm: wait for the peer's reply (HandleConnectResponse), not just any signal of the event
++            while (Volatile.Read(ref _connecting))
++            {
++                _connectEvent.WaitOne();
++            }
+ 
+             if (_connectResponse.Info.SourceIpV4 == 0)
+             {
+@@ -324,14 +381,15 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+ 
+         public void HandleConnectResponse(ProxyConnectResponse obj)
+         {
+-            if (!_connecting)
++            if (!Volatile.Read(ref _connecting))
+             {
+                 return;
+             }
+ 
+-            _connecting = false;
++            // S2Arm: keep the reply for Connect (upstream tested the never-assigned field, so every connect looked refused) and wake it
++            _connectResponse = obj;
+ 
+-            if (_connectResponse.Info.SourceIpV4 != 0)
++            if (obj.Info.SourceIpV4 != 0)
+             {
+                 IPEndPoint remoteEp = GetEndpoint(obj.Info.SourceIpV4, obj.Info.SourcePort);
+                 RemoteEndPoint = remoteEp;
+@@ -344,16 +402,23 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+ 
+                 SignalError(WsaError.WSAECONNREFUSED);
+             }
++
++            Volatile.Write(ref _connecting, false);
++            _connectEvent.Set();
++            S2ABsdWake.Signal();
+         }
+ 
+         public void Disconnect(bool reuseSocket)
+         {
+             if (Connected)
+             {
++                // S2Arm: take the peer before ConnectionEnded clears it (upstream passed the cleared null → NullReferenceException on every close)
++                IPEndPoint remote = RemoteEndPoint as IPEndPoint;
++
+                 ConnectionEnded();
+ 
+                 // The other side needs to be notified that connection ended.
+-                _proxy.EndConnection(LocalEndPoint as IPEndPoint, RemoteEndPoint as IPEndPoint, ProtocolType);
++                _proxy.EndConnection(LocalEndPoint as IPEndPoint, remote, ProtocolType);
+             }
+         }
+ 
+@@ -366,22 +431,48 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+             }
+         }
+ 
++        // S2Arm (LDN G5): IP / TCP options that only tune a real network path (the proxy relays whole datagrams / streams over the
++        // relay's TCP) are kept and read back as set; anything else is ENOPROTOOPT like FreeBSD, never an unhandled exception
++        private static readonly (SocketOptionLevel, SocketOptionName)[] _pathOptions =
++        [
++            (SocketOptionLevel.Tcp, SocketOptionName.NoDelay),
++            (SocketOptionLevel.IP, SocketOptionName.IpTimeToLive),
++            (SocketOptionLevel.IP, SocketOptionName.TypeOfService),
++            (SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive),
++            (SocketOptionLevel.IP, SocketOptionName.MulticastLoopback),
++            (SocketOptionLevel.IP, SocketOptionName.DontFragment),
++        ];
++
++        private readonly Dictionary<(SocketOptionLevel, SocketOptionName), int> _pathOptionValues = new();
++
+         public void GetSocketOption(SocketOptionLevel optionLevel, SocketOptionName optionName, byte[] optionValue)
+         {
+-            if (optionLevel != SocketOptionLevel.Socket)
++            int result;
++
++            if (optionLevel == SocketOptionLevel.Socket)
+             {
+-                throw new NotImplementedException();
++                lock (_socketOptions)
++                {
++                    if (!_socketOptions.TryGetValue(optionName, out result))
++                    {
++                        throw new SocketException((int)WsaError.WSAENOPROTOOPT);
++                    }
++                }
+             }
+-
+-            if (_socketOptions.TryGetValue(optionName, out int result))
++            else if (Array.IndexOf(_pathOptions, (optionLevel, optionName)) >= 0)
+             {
+-                byte[] data = BitConverter.GetBytes(result);
+-                Array.Copy(data, 0, optionValue, 0, Math.Min(data.Length, optionValue.Length));
++                lock (_pathOptionValues)
++                {
++                    result = _pathOptionValues.GetValueOrDefault((optionLevel, optionName));
++                }
+             }
+             else
+             {
+-                throw new NotImplementedException();
++                throw new SocketException((int)WsaError.WSAENOPROTOOPT);
+             }
++
++            byte[] data = BitConverter.GetBytes(result);
++            Array.Copy(data, 0, optionValue, 0, Math.Min(data.Length, optionValue.Length));
+         }
+ 
+         public void Listen(int backlog)
+@@ -401,7 +492,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                 _connectRequests.Enqueue(obj);
+             }
+ 
+-            _connectEvent.Set();
++            // S2Arm: a pending connection makes the listener readable: wake the blocked accept (upstream set the connect event)
++            _acceptEvent.Set();
++            S2ABsdWake.Signal();
+         }
+ 
+         public void HandleDisconnect(ProxyDisconnectMessage message)
+@@ -456,9 +549,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                 }
+             }
+ 
+-            int timeout = _receiveTimeout;
+-
+-            _receiveEvent.WaitOne(timeout == 0 ? -1 : timeout);
++            WaitReceive(_receiveTimeout);
+ 
+             if (!Connected && ProtocolType == ProtocolType.Tcp)
+             {
+@@ -510,9 +601,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                 }
+             }
+ 
+-            int timeout = _receiveTimeout;
+-
+-            _receiveEvent.WaitOne(timeout == 0 ? -1 : timeout);
++            WaitReceive(_receiveTimeout);
+ 
+             if (!Connected && ProtocolType == ProtocolType.Tcp)
+             {
+@@ -740,7 +829,17 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+         {
+             if (optionLevel != SocketOptionLevel.Socket)
+             {
+-                throw new NotImplementedException();
++                if (Array.IndexOf(_pathOptions, (optionLevel, optionName)) < 0)
++                {
++                    throw new SocketException((int)WsaError.WSAENOPROTOOPT);
++                }
++
++                lock (_pathOptionValues)
++                {
++                    _pathOptionValues[(optionLevel, optionName)] = optionValue;
++                }
++
++                return;
+             }
+ 
+             switch (optionName)
+@@ -782,6 +881,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnRyu.Proxy
+                     // _writeShutdown = true;
+                     break;
+             }
++
++            // S2Arm: shutdown(SHUT_RD) makes a blocked recv return 0 (FreeBSD soshutdown → sorflush wakes the receive buffer)
++            if (_readShutdown)
++            {
++                _receiveEvent.Set();
++                S2ABsdWake.Signal();
++            }
+         }
+ 
+         public void ProxyDestroyed()
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index c634dd82529bc4b359a83ecb86a05d5cc4d0f052..d9483a6c947380e3ee015f33f0125604f240903c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -329,13 +329,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             // have no common wait primitive: poll every manager without waiting, then sleep 1 ms, until something is ready or time is up.
+             long deadline = timeout < 0 ? long.MaxValue : System.Diagnostics.Stopwatch.GetTimestamp() + timeout * System.Diagnostics.Stopwatch.Frequency / 1000000;
+ 
+-            // S2Arm: when every descriptor is an eventfd or an offline socket, wait on their common change signal instead of polling
++            // S2Arm: when every descriptor is an eventfd, an offline socket or an LDN proxy socket, wait on their common change signal instead of polling
+             // every 1 ms (S2ABsdWake); a host socket in the set keeps the 1 ms poll (its readiness does not signal)
+             bool wakeable = true;
+ 
+             foreach (PollEvent evnt in events)
+             {
+-                wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && ms.Socket is Proxy.OfflineSocket);
++                wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && (ms.Socket is Proxy.OfflineSocket || ms.Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket));
+             }
+ 
+             while (true)
+@@ -516,7 +516,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+                 foreach (PollEvent evnt in events)
+                 {
+-                    wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && ms.Socket is Proxy.OfflineSocket);
++                    wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && (ms.Socket is Proxy.OfflineSocket || ms.Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket));
+                 }
+ 
+                 while (true)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+index 6bea866dbe2d92c012af3c92f6b83cc525fcc826..9cc3b76e1506e0d997d873cee8dab5b0ee8281fe 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+@@ -560,6 +560,114 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             vlen = index + 1;
+         }
+ 
++        // S2Arm (LDN G13): FreeBSD recvmmsg semantics on a socket without a host socket — each message receives one datagram
++        // (gathered, then scattered over its iovs; the length is the datagram size). Only the first receive follows the socket's
++        // blocking mode; later messages are filled only while a datagram is already queued. An error after the first datagram
++        // ends the batch with what was received.
++        private LinuxError ProxyRecvMMsg(out int vlen, BsdMMsgHdr message, BsdSocketFlags flags)
++        {
++            vlen = 0;
++            SocketFlags socketFlags = ConvertBsdSocketFlags(flags);
++
++            foreach (BsdMsgHdr msgHeader in message.Messages)
++            {
++                if (vlen > 0 && !Socket.Poll(0, SelectMode.SelectRead))
++                {
++                    break;
++                }
++
++                int capacity = 0;
++
++                foreach (byte[] iov in msgHeader.Iov)
++                {
++                    capacity += iov.Length;
++                }
++
++                byte[] datagram = new byte[capacity];
++                int size;
++
++                try
++                {
++                    size = Socket.Receive(datagram, socketFlags, out SocketError socketError);
++
++                    if (socketError != SocketError.Success)
++                    {
++                        return vlen > 0 ? LinuxError.SUCCESS : WinSockHelper.ConvertSocketError(socketError);
++                    }
++                }
++                catch (SocketException exception)
++                {
++                    return vlen > 0 ? LinuxError.SUCCESS : WinSockHelper.ConvertError((WsaError)exception.ErrorCode);
++                }
++
++                int offset = 0;
++
++                foreach (byte[] iov in msgHeader.Iov)
++                {
++                    int count = Math.Min(iov.Length, size - offset);
++
++                    if (count <= 0)
++                    {
++                        break;
++                    }
++
++                    datagram.AsSpan(offset, count).CopyTo(iov);
++                    offset += count;
++                }
++
++                msgHeader.Length = (uint)size;
++                vlen++;
++            }
++
++            return LinuxError.SUCCESS;
++        }
++
++        // S2Arm (LDN G13): FreeBSD sendmmsg semantics — each message is one datagram (its iovs gathered) to the connected peer
++        private LinuxError ProxySendMMsg(out int vlen, BsdMMsgHdr message, BsdSocketFlags flags)
++        {
++            vlen = 0;
++            SocketFlags socketFlags = ConvertBsdSocketFlags(flags);
++
++            foreach (BsdMsgHdr msgHeader in message.Messages)
++            {
++                int length = 0;
++
++                foreach (byte[] iov in msgHeader.Iov)
++                {
++                    length += iov.Length;
++                }
++
++                byte[] datagram = new byte[length];
++                int offset = 0;
++
++                foreach (byte[] iov in msgHeader.Iov)
++                {
++                    iov.CopyTo(datagram, offset);
++                    offset += iov.Length;
++                }
++
++                try
++                {
++                    int sent = Socket.Send(datagram, socketFlags, out SocketError socketError);
++
++                    if (socketError != SocketError.Success)
++                    {
++                        return vlen > 0 ? LinuxError.SUCCESS : WinSockHelper.ConvertSocketError(socketError);
++                    }
++
++                    msgHeader.Length = (uint)sent;
++                }
++                catch (SocketException exception)
++                {
++                    return vlen > 0 ? LinuxError.SUCCESS : WinSockHelper.ConvertError((WsaError)exception.ErrorCode);
++                }
++
++                vlen++;
++            }
++
++            return LinuxError.SUCCESS;
++        }
++
+         // TODO: Find a way to support passing the timeout somehow without changing the socket ReceiveTimeout.
+         public LinuxError RecvMMsg(out int vlen, BsdMMsgHdr message, BsdSocketFlags flags, TimeVal timeout)
+         {
+@@ -582,7 +690,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 return LinuxError.SUCCESS;
+             }
+ 
+-            // S2Arm: scatter / gather goes straight to the host socket; sockets without one (offline, LDN proxy) do not support it
++            // S2Arm (LDN G13): an LDN proxy socket takes one datagram per message like FreeBSD recvmmsg
++            if (Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket)
++            {
++                return ProxyRecvMMsg(out vlen, message, flags);
++            }
++
++            // S2Arm: scatter / gather goes straight to the host socket; an offline socket has neither and does not support it
+             if (Socket is not DefaultSocket)
+             {
+                 Logger.Warning?.Print(LogClass.ServiceBsd, "RecvMMsg on a socket without a host socket is not supported");
+@@ -633,7 +747,13 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 return LinuxError.SUCCESS;
+             }
+ 
+-            // S2Arm: scatter / gather goes straight to the host socket; sockets without one (offline, LDN proxy) do not support it
++            // S2Arm (LDN G13): an LDN proxy socket sends one datagram per message like FreeBSD sendmmsg
++            if (Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket)
++            {
++                return ProxySendMMsg(out vlen, message, flags);
++            }
++
++            // S2Arm: scatter / gather goes straight to the host socket; an offline socket has neither and does not support it
+             if (Socket is not DefaultSocket)
+             {
+                 Logger.Warning?.Print(LogClass.ServiceBsd, "SendMMsg on a socket without a host socket is not supported");

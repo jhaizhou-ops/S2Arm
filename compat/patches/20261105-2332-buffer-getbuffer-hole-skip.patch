@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 96a2a0271dc58a56569c63b3c01f982aab7edc26..8c0e81f0b3c1885dc8b9598f5dfba4d6613bb33a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -986,6 +986,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             {
+                 MemoryRange subRange = range.GetSubRange(i);
+ 
++                // S2A：多段里的未映射段是洞不是缺登记——建缓冲时按同一哨兵跳过（CreateMultiRangeBuffer /
++                // UpdateVirtualBufferDependencies），这里对它 FindOverlap(ulong.MaxValue) 必得空，跳过
++                if (subRange.Address == MemoryManager.PteUnmapped)
++                {
++                    continue;
++                }
++
+                 Buffer subBuffer = _buffers.FindOverlap(subRange.Address, subRange.Size);
+ 
+                 subBuffer.SynchronizeMemory(subRange.Address, subRange.Size);
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 60935c9c777c08cc1695c3bb1a71407a57733566..624a86d8aaf1447d78fb39e531b6f962378594f2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -18,6 +18,7 @@
+     <InternalsVisibleTo Include="S2A.PsoWarmGateTest" /> <!-- S2A：加载屏预热后端门控 / 总预算单测（tests/pso_warm_gate） -->
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+     <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
++    <InternalsVisibleTo Include="S2A.GpuBufferHoleTest" /> <!-- S2A：带洞多段缓冲提交绑定单测（tests/gpu_bufferhole，BotW qbotw8e NRE） -->
+   </ItemGroup>
+ 
+   <ItemGroup>

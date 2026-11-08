@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
+index d4e5d1221cb33b0d3b11d7ff9756c9a7f48c9df1..904544c1497e69501c5068d4edadfce0c279f90f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
+@@ -43,6 +43,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+         public ResultCode Write(ServiceCtx context)
+         {
+             ulong position = context.Request.SendBuff[0].Position;
++            ulong bufferSize = context.Request.SendBuff[0].Size;
+ 
+             WriteOption writeOption = context.RequestData.ReadStruct<WriteOption>();
+             context.RequestData.BaseStream.Position += 4;
+@@ -50,8 +51,15 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+             long offset = context.RequestData.ReadInt64();
+             long size = context.RequestData.ReadInt64();
+ 
++            // S2A：先在 64 位域检查，避免 span 长度和 LibHac 内部 size 转换截断。
++            // LibHac FileInterfaceAdapter 对缓冲不足返回 ResultFs.InvalidSize。
++            if (bufferSize > int.MaxValue || size > (long)bufferSize)
++            {
++                return (ResultCode)ResultFs.InvalidSize.Log().Value;
++            }
++
+             // S2A：直接从客体内存读（GetSpan 正常模式即客体内存指针），不按写入长度另开托管数组（iPhone 低区地址只剩几百 MB，大写入会 OOM）
+-            ReadOnlySpan<byte> data = context.Memory.GetSpan(position, (int)context.Request.SendBuff[0].Size);
++            ReadOnlySpan<byte> data = context.Memory.GetSpan(position, (int)bufferSize);
+ 
+             return (ResultCode)_baseFile.Get.Write(offset, new InBuffer(data), size, writeOption).Value;
+         }

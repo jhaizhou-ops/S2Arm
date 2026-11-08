@@ -1,0 +1,158 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+index ad776fe6e51354b25773754560a25694af8c0c6a..1bfeec1ebf7bbbebaccae90f48ff243fb6f626fe 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+@@ -235,6 +235,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+             // NOTE: Original service calls IOperationModeManager::GetDefaultDisplayResolution of omm service.
+             //       IOperationModeManager::GetDefaultDisplayResolution of omm service call IManagerDisplayService::GetDisplayResolution of vi service.
+             (ulong width, ulong height) = AndroidSurfaceComposerClient.GetDisplayInfo(context);
++            S2ADisplay.Report("am.ICommonStateGetter.GetDefaultDisplayResolution", width, height);
+ 
+             context.ResponseData.Write((uint)width);
+             context.ResponseData.Write((uint)height);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
+index c45030984c04f7ba00334ec41139abc61fb9cb6a..0a4837b47b00533266e9fac33c7ad64f0447d571 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
+@@ -6,14 +6,10 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService.ApplicationDisplayService
+         public static (ulong, ulong) GetDisplayInfo(ServiceCtx context, ulong displayId = 0)
+         {
+             // TODO: This need to be REd, it should returns the driver resolution and more.
+-            if (context.Device.System.State.DockedMode)
+-            {
+-                return (1920, 1080);
+-            }
+-            else
+-            {
+-                return (1280, 720);
+-            }
++            // S2Arm: width follows the host screen aspect (S2ADisplay); height unchanged
++            ulong height = context.Device.System.State.DockedMode ? 1080UL : 720UL;
++
++            return (S2ADisplay.Width(height), height);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/IManagerDisplayService.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/IManagerDisplayService.cs
+index 0e5d103d134b3c18c46d842b4906c2c716293b52..9aca7ad80c9653f9d4727cd4cf705d36b1a4e42d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/IManagerDisplayService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/IManagerDisplayService.cs
+@@ -18,6 +18,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService.ApplicationDisplayService
+             ulong displayId = context.RequestData.ReadUInt64();
+ 
+             (ulong width, ulong height) = AndroidSurfaceComposerClient.GetDisplayInfo(context, displayId);
++            S2ADisplay.Report("vi.IManagerDisplayService.GetDisplayResolution", width, height);
+ 
+             context.ResponseData.Write(width);
+             context.ResponseData.Write(height);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/ISystemDisplayService.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/ISystemDisplayService.cs
+index 50729069265af135a834d36a8e158ed4f1ae516f..ffe734a6a359b97a9d5cb55156d2bcedffac4e3c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/ISystemDisplayService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/ISystemDisplayService.cs
+@@ -45,6 +45,7 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService.ApplicationDisplayService
+             ulong displayId = context.RequestData.ReadUInt64();
+ 
+             (ulong width, ulong height) = AndroidSurfaceComposerClient.GetDisplayInfo(context, displayId);
++            S2ADisplay.Report("vi.ISystemDisplayService.GetDisplayMode", width, height);
+ 
+             context.ResponseData.Write((uint)width);
+             context.ResponseData.Write((uint)height);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
+index 99c640aa0623aff2b14b625e33a18a4624fc14bb..c49ec3ffe38c74a3b6f6f04a22249adc6dc139d9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
+@@ -54,11 +54,12 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
+                 _displayInfo.Add(displayInfo);
+             }
+ 
+-            AddDisplayInfo("Default", true, 1, 1920, 1080);
+-            AddDisplayInfo("External", true, 1, 1920, 1080);
++            // S2Arm: display widths follow the host screen aspect (S2ADisplay); heights unchanged
++            AddDisplayInfo("Default", true, 1, S2ADisplay.Width(1080), 1080);
++            AddDisplayInfo("External", true, 1, S2ADisplay.Width(1080), 1080);
+             AddDisplayInfo("Edid", true, 1, 0, 0);
+-            AddDisplayInfo("Internal", true, 1, 1920, 1080);
+-            AddDisplayInfo("Null", false, 0, 1920, 1080);
++            AddDisplayInfo("Internal", true, 1, S2ADisplay.Width(1080), 1080);
++            AddDisplayInfo("Null", false, 0, S2ADisplay.Width(1080), 1080);
+         }
+ 
+         [CommandCmif(100)]
+@@ -133,6 +134,8 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
+                 context.Memory.Write(displayInfoBuffer + (ulong)(i * Unsafe.SizeOf<DisplayInfo>()), _displayInfo[i]);
+             }
+ 
++            S2ADisplay.Report("vi.IApplicationDisplayService.ListDisplays", _displayInfo[0].Width, _displayInfo[0].Height);
++
+             context.ResponseData.Write(displayCount);
+ 
+             return ResultCode.Success;
+@@ -220,7 +223,10 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
+             // NOTE: Returns ResultCode.InvalidArguments if width and height pointer are null, doesn't occur in our case.
+ 
+             // NOTE: Values are hardcoded in original service.
+-            context.ResponseData.Write(1280UL); // Width
++            // S2Arm: width follows the host screen aspect (S2ADisplay); the original hardcodes 1280x720
++            ulong width = S2ADisplay.Width(720);
++            S2ADisplay.Report("vi.IApplicationDisplayService.GetDisplayResolution", width, 720);
++            context.ResponseData.Write(width);  // Width
+             context.ResponseData.Write(720UL);  // Height
+ 
+             return ResultCode.Success;
+diff --git a/src/Ryujinx.HLE/S2ADisplay.cs b/src/Ryujinx.HLE/S2ADisplay.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ccf7a118f236bc4b19aae5516f5ec6067299b11b
+--- /dev/null
++++ b/src/Ryujinx.HLE/S2ADisplay.cs
+@@ -0,0 +1,51 @@
++using System;
++using System.Collections.Concurrent;
++using System.Globalization;
++
++namespace Ryujinx.HLE
++{
++    // S2Arm: display resolution reported to the game follows the host screen's aspect ratio (native widescreen, the game
++    // computes its own frustum). Height is unchanged (1080 docked / 720 handheld); width = round(height × aspect / 2) × 2.
++    // Aspect comes from the host (iOS shell from the screen, Mac from S2A_SCREEN_ASPECT "w:h" or a decimal); default 16:9,
++    // which reproduces the original 1920 / 1280.
++    public static class S2ADisplay
++    {
++        private static double _aspect = Parse(Environment.GetEnvironmentVariable("S2A_SCREEN_ASPECT")) ?? 16.0 / 9.0;
++        private static readonly ConcurrentDictionary<string, byte> _logged = new();
++
++        public static double Aspect
++        {
++            get => _aspect;
++            set => _aspect = value > 0 ? value : 16.0 / 9.0;
++        }
++
++        public static ulong Width(ulong height) => (ulong)Math.Round(height * _aspect / 2) * 2;
++
++        // First query per interface logs one line (the widescreen loop checks whether the game reads it at all)
++        public static void Report(string where, ulong width, ulong height)
++        {
++            if (_logged.TryAdd(where, 0))
++            {
++                Console.Error.WriteLine($"[宽] 显示分辨率被查询：{where} → {width}x{height}");
++            }
++        }
++
++        private static double? Parse(string s)
++        {
++            if (string.IsNullOrWhiteSpace(s))
++            {
++                return null;
++            }
++
++            string[] p = s.Split(':', 'x', '/');
++
++            if (p.Length == 2 && double.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double w) &&
++                double.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && w > 0 && h > 0)
++            {
++                return w / h;
++            }
++
++            return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out double a) && a > 0 ? a : null;
++        }
++    }
++}

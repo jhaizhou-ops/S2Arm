@@ -1,0 +1,230 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index c2650319baacd4b048fb9416dc906345d5e98e4a..6e7982fa4660e30cb2aecd2e5e952389c4d188ec 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -528,6 +528,9 @@ namespace Ryujinx.Graphics.Gpu
+             bool strict = (flags & HostSyncFlags.Strict) == HostSyncFlags.Strict;
+             bool force = (flags & HostSyncFlags.Force) == HostSyncFlags.Force;
+ 
++            Memory.S2ABufFlushStat.Log();
++            Memory.S2ABufClassStat.Log();
++
+             if (BufferMigrations.Count > 0)
+             {
+                 ulong currentSyncNumber = Renderer.GetCurrentSync();
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 80391aebbcfa0cb3f8827446ca3d60e4980bd494..7aaa2560dbcc0be64db8ad45c6afcb736cbd1e6c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -84,6 +84,38 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private readonly Action<ulong, ulong> _modifiedDelegate;
+ 
+         private HashSet<MultiRangeBuffer> _virtualDependencies;
++
++        // S2A 诊断 S2A_BUFCLASS_STAT（见 S2ABufClassStat）：本缓冲被怎么用过（各用法位或起来）
++        internal byte S2AUse;
++
++        internal void S2ANoteUse(BufferStage stage, bool write)
++        {
++            BufferStage raw = stage & BufferStage.StageMask, st = stage & BufferStage.StorageMask;
++            byte b;
++
++            if ((st & BufferStage.StorageWrite) != 0 || raw == BufferStage.TransformFeedback || (write && raw != BufferStage.Copy))
++            {
++                b = S2ABufClassStat.GpuOutput;
++            }
++            else if (st != 0)
++            {
++                b = S2ABufClassStat.StorageRead;
++            }
++            else if (raw <= BufferStage.Fragment)
++            {
++                b = S2ABufClassStat.Uniform;
++            }
++            else if (raw == BufferStage.VertexBuffer || raw == BufferStage.IndexBuffer)
++            {
++                b = S2ABufClassStat.VertexIndex;
++            }
++            else
++            {
++                b = S2ABufClassStat.Other;
++            }
++
++            S2AUse |= b;
++        }
+         private readonly ReaderWriterLockSlim _virtualDependenciesLock;
+ 
+         private int _sequenceNumber;
+@@ -305,6 +337,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     else
+                     {
+                         BackingState.RecordSet();
++
++                        if (S2ABufClassStat.On)
++                        {
++                            S2ABufClassStat.NoteUpload(S2AUse, (long)Size);
++                        }
++
+                         _context.Renderer.SetBufferData(Handle, 0, _physicalMemory.GetSpan(Address, (int)Size));
+                         CopyToDependantVirtualBuffers();
+                     }
+@@ -618,6 +656,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             int offset = (int)(mAddress - Address);
+ 
++            if (S2ABufClassStat.On)
++            {
++                S2ABufClassStat.NoteUpload(S2AUse, (long)mSize);
++            }
++
+             _context.Renderer.SetBufferData(Handle, offset, _physicalMemory.GetSpan(mAddress, (int)mSize));
+ 
+             CopyToDependantVirtualBuffers(mAddress, mSize);
+@@ -811,6 +854,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 }
+             }
+ 
++            long s2aT0 = S2ABufFlushStat.On || S2ABufClassStat.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
++
+             _context.Renderer.BackgroundContextAction(() =>
+             {
+                 BufferModifiedRangeList ranges = _modifiedRanges;
+@@ -821,6 +866,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     ranges.WaitForAndFlushRanges(address, size);
+                 }
+             }, true);
++
++            if (S2ABufClassStat.On)
++            {
++                S2ABufClassStat.NoteFlush(S2AUse, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT0);
++            }
++
++            if (S2ABufFlushStat.On)
++            {
++                S2ABufFlushStat.Note(Ryujinx.Memory.Tracking.MemoryTracking.S2AReadTouch, _context.IsGpuThread(), System.Diagnostics.Stopwatch.GetTimestamp() - s2aT0);
++            }
+         }
+ 
+         /// <summary>
+@@ -1143,4 +1198,93 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             Console.Error.WriteLine(sb.ToString());
+         }
+     }
++
++    // S2A 诊断 S2A_BUFCLASS_STAT=1（缺省关，帧率能耗线 10-23 零拷贝收益重估）：缓冲按用法分类（优先级：引擎写过 > GPU 输出 > 存储读 > 常量 > 顶点索引 > 其他），
++    // 每类累计上传字节、回写次数与耗时（含等同步号），每 10 秒一行。「引擎写过」= 常量缓冲更新 / 内联上传 / DMA 经 BufferCache.ForceDirty 标脏过
++    internal static class S2ABufClassStat
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_BUFCLASS_STAT") == "1";
++        public const byte GpuOutput = 1, Uniform = 2, VertexIndex = 4, EngineWrite = 8, StorageRead = 16, Other = 32;
++        private static readonly string[] _name = { "引擎写过", "GPU 输出", "存储读", "常量", "顶点索引", "其他" };
++        private static readonly long[] _up = new long[6], _upN = new long[6], _fl = new long[6], _flT = new long[6];
++        private static long _next;
++
++        private static int Class(byte use) => (use & EngineWrite) != 0 ? 0 : (use & GpuOutput) != 0 ? 1 : (use & StorageRead) != 0 ? 2 : (use & Uniform) != 0 ? 3 : (use & VertexIndex) != 0 ? 4 : 5;
++
++        public static void NoteUpload(byte use, long bytes)
++        {
++            int k = Class(use);
++            System.Threading.Interlocked.Add(ref _up[k], bytes);
++            System.Threading.Interlocked.Increment(ref _upN[k]);
++        }
++
++        public static void NoteFlush(byte use, long ticks)
++        {
++            int k = Class(use);
++            System.Threading.Interlocked.Increment(ref _fl[k]);
++            System.Threading.Interlocked.Add(ref _flT[k], ticks);
++        }
++
++        public static void Log()
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            long now = System.Diagnostics.Stopwatch.GetTimestamp();
++
++            if (now < _next)
++            {
++                return;
++            }
++
++            _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
++            double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
++            var sb = new System.Text.StringBuilder("[缓冲分类账] 累计（上传 次·MB / 回写 次·ms）：");
++
++            for (int k = 0; k < 6; k++)
++            {
++                sb.Append($" {_name[k]} {_upN[k]}·{_up[k] >> 20} / {_fl[k]}·{_flT[k] * f:F0}；");
++            }
++
++            System.Console.Error.WriteLine(sb.ToString());
++        }
++    }
++
++    // S2A 诊断 S2A_BUFFLUSH_STAT=1（缺省关，帧率能耗线 10-23 零拷贝方案 §2）：缓冲回写（ExternalFlush：游戏碰 GPU 改过的缓冲）按「读 / 写」×「GPU 线程 / 其他线程」计次数与耗时（含等同步号）。
++    // 写的那部分零拷贝后整段消失（不拷也不等），读的只剩等
++    internal static class S2ABufFlushStat
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_BUFFLUSH_STAT") == "1";
++        private static readonly long[] _n = new long[4], _t = new long[4];
++        private static long _next;
++
++        public static void Note(bool read, bool gpuThread, long ticks)
++        {
++            int k = (read ? 0 : 2) + (gpuThread ? 1 : 0);
++            System.Threading.Interlocked.Increment(ref _n[k]);
++            System.Threading.Interlocked.Add(ref _t[k], ticks);
++        }
++
++        public static void Log()
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            long now = System.Diagnostics.Stopwatch.GetTimestamp();
++
++            if (now < _next)
++            {
++                return;
++            }
++
++            _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
++            double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
++            System.Console.Error.WriteLine($"[缓冲回写拆账] 累计 读·其他线程 {_n[0]} 次 {_t[0] * f:F0} ms / 读·GPU 线程 {_n[1]} 次 {_t[1] * f:F0} ms / 写·其他线程 {_n[2]} 次 {_t[2] * f:F0} ms / 写·GPU 线程 {_n[3]} 次 {_t[3] * f:F0} ms");
++        }
++    }
++
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index e09b0d4d863e1d544351ea5af9750c2b67539771..0973d82cb85c2c713f410d235b4bb0a5a1f8b586 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -467,6 +467,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 _dirtyCache[gpuVa] = result;
+             }
+ 
++            if (S2ABufClassStat.On)
++            {
++                result.Buffer.S2AUse |= S2ABufClassStat.EngineWrite;
++            }
++
+             result.Buffer.ForceDirty(result.Address, size);
+         }
+ 
+@@ -1033,6 +1038,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     S2ARemember(address, size, buffer);
+                 }
+ 
++                if (S2ABufClassStat.On)
++                {
++                    buffer.S2ANoteUse(stage, write);
++                }
++
+                 buffer.CopyFromDependantVirtualBuffers();
+                 buffer.SynchronizeMemory(address, size);
+ 

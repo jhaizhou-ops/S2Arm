@@ -1,0 +1,188 @@
+diff --git a/src/Ryujinx.Common/Memory/MemoryOwner.cs b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+index 433caf86d75713f5cec0e1a89c8bd15aaeeafa35..c0505d1d3a9b5cb501d1b0216096c39b407d94bb 100644
+--- a/src/Ryujinx.Common/Memory/MemoryOwner.cs
++++ b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+@@ -155,6 +155,7 @@ namespace Ryujinx.Common.Memory
+         
+         private readonly int _length;
+         private T[]? _array;
++        private S2ANativeBlock<T>? _native;   // S2A：大块原生暂存（S2A_MO_NATIVE=1），与 _array 二选一
+ 
+         /// <summary>
+         /// Initializes a new instance of the <see cref="MemoryOwner{T}"/> class with the specified parameters.
+@@ -163,6 +164,11 @@ namespace Ryujinx.Common.Memory
+         private MemoryOwner(int length)
+         {
+             _length = length;
++            if (S2ANativeBlock<T>.Eligible(length) && S2ANativeBlock<T>.TryAlloc(length) is { } nb)
++            {
++                _native = nb;
++                return;
++            }
+             _array = ArrayPooling.Get(length);
+         }
+ 
+@@ -186,7 +192,7 @@ namespace Ryujinx.Common.Memory
+         {
+             MemoryOwner<T> result = new(length);
+ 
+-            result._array.AsSpan(0, length).Clear();
++            result.Span.Clear();
+ 
+             return result;
+         }
+@@ -200,7 +206,7 @@ namespace Ryujinx.Common.Memory
+         {
+             MemoryOwner<T> result = new(buffer.Length);
+ 
+-            buffer.CopyTo(result._array);
++            buffer.CopyTo(result.Span);
+ 
+             return result;
+         }
+@@ -224,6 +230,11 @@ namespace Ryujinx.Common.Memory
+ 
+                 if (array is null)
+                 {
++                    if (_native is { } nb)
++                    {
++                        return nb.Memory;
++                    }
++
+                     ThrowObjectDisposedException();
+                 }
+ 
+@@ -246,6 +257,11 @@ namespace Ryujinx.Common.Memory
+ 
+                 if (array is null)
+                 {
++                    if (_native is { } nb)
++                    {
++                        return nb.GetSpan();
++                    }
++
+                     ThrowObjectDisposedException();
+                 }
+ 
+@@ -264,6 +280,8 @@ namespace Ryujinx.Common.Memory
+             {
+                 ArrayPooling.Return(array);
+             }
++
++            Interlocked.Exchange(ref _native, null)?.Free();
+         }
+ 
+         /// <summary>
+@@ -276,6 +294,112 @@ namespace Ryujinx.Common.Memory
+         }
+     }
+ 
++    // S2A：MemoryOwner 大块改原生暂存（原生层 10-24，S2A_MO_NATIVE=1，缺省关——性能取舍，真机达标再翻）。
++    // 大对象堆几乎全是贴图转格式 / 解码 / 上传暂存的 byte[]（2048²×4 等），读盘段把大对象堆顶到 400 MB、gen2 才清，且 GC 段只能放低区。
++    // 非托管 T 且 ≥ 85000 字节（进大对象堆的门槛）的租用改从宿主窗口尾部取（原生层 s2a_tail_map，标签 247「托管大块暂存」），Dispose 即还。
++    // 尾部放不下：退回托管数组并报红（不挤 Metal 的低区）；没 Dispose 就被回收：报红、不还（漏还是调用方的错，不加兜底）
++    internal sealed unsafe class S2ANativeBlock<T> : MemoryManager<T>
++    {
++        private static readonly delegate* unmanaged<ulong, int, int, nint> _map;
++        private static readonly delegate* unmanaged<nint, ulong, int, void> _unmap;
++        private static readonly bool _on;
++        private const int User = 5 | 0x100;   // S2A_TAIL_MO | S2A_TAIL_ONLY（runtime/src/native.h）
++        private const int UserFree = 5;
++        private static long _fallN, _leakN, _leakBytes;
++
++        static S2ANativeBlock()
++        {
++            if (Environment.GetEnvironmentVariable("S2A_MO_NATIVE") != "1" || RuntimeHelpers.IsReferenceOrContainsReferences<T>())
++            {
++                return;
++            }
++            nint h = NativeLibrary.GetMainProgramHandle();
++            if (NativeLibrary.TryGetExport(h, "s2a_tail_map", out nint m) && NativeLibrary.TryGetExport(h, "s2a_tail_unmap", out nint u))
++            {
++                _map = (delegate* unmanaged<ulong, int, int, nint>)m;
++                _unmap = (delegate* unmanaged<nint, ulong, int, void>)u;
++                _on = true;
++            }
++            else
++            {
++                Console.Error.WriteLine("[分配·原生] 【红】S2A_MO_NATIVE=1 但主程序没有 s2a_tail_map 导出，MemoryOwner 照旧走托管数组");
++            }
++        }
++
++        private nint _ptr;
++        private readonly int _length;
++        private readonly ulong _bytes;
++
++        private S2ANativeBlock(nint ptr, int length, ulong bytes)
++        {
++            _ptr = ptr;
++            _length = length;
++            _bytes = bytes;
++        }
++
++        public static bool Eligible(int length) => _on && (long)length * Unsafe.SizeOf<T>() >= 85000;
++
++        public static S2ANativeBlock<T>? TryAlloc(int length)
++        {
++            ulong bytes = (ulong)length * (ulong)Unsafe.SizeOf<T>();
++            nint p = _map(bytes, User, 3);   // PROT_READ | PROT_WRITE
++            if (p != 0)
++            {
++                return new S2ANativeBlock<T>(p, length, bytes);
++            }
++            long n = Interlocked.Increment(ref _fallN);
++            if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine($"[分配·原生] 【红】窗口尾部放不下 MemoryOwner 原生块（本次 {bytes} 字节），退回托管数组：第 {n} 次");
++            }
++            return null;
++        }
++
++        public void Free()
++        {
++            nint p = Interlocked.Exchange(ref _ptr, 0);
++            if (p != 0)
++            {
++                _unmap(p, _bytes, UserFree);
++                GC.SuppressFinalize(this);
++            }
++        }
++
++        ~S2ANativeBlock()
++        {
++            if (_ptr == 0)
++            {
++                return;
++            }
++            long n = Interlocked.Increment(ref _leakN);
++            long b = Interlocked.Add(ref _leakBytes, (long)_bytes);
++            if ((n & (n - 1)) == 0)
++            {
++                Console.Error.WriteLine($"[分配·原生] 【红】MemoryOwner 原生块没 Dispose 就被回收（不还，按漏报）：累计 {n} 块 {b / 1048576.0:F1} MB，本块 {_bytes} 字节");
++            }
++        }
++
++        public override Span<T> GetSpan()
++        {
++            nint p = _ptr;
++            if (p == 0)
++            {
++                throw new ObjectDisposedException(nameof(MemoryOwner<T>), "The buffer has already been disposed.");
++            }
++            return new Span<T>((void*)p, _length);
++        }
++
++        public override MemoryHandle Pin(int elementIndex = 0) => new((byte*)_ptr + (long)elementIndex * Unsafe.SizeOf<T>());
++
++        public override void Unpin()
++        {
++        }
++
++        protected override void Dispose(bool disposing)
++        {
++        }
++    }
++
+     // S2A 诊断（帧率能耗线 10-22，S2A_ALLOC_TRACE=1 时生效）：两个数据池没接住、只能新分配的次数与字节——
+     // 种类 1 = MemoryOwner 池没命中（贴图转格式等），2 = ThreadedRenderer 环形池（8 MB）放不下走 ToArray（缓冲上传等）。每 10 秒打一行累计
+     public static class S2APoolStat

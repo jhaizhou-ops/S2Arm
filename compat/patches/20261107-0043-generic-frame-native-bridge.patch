@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs b/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs
+index 9d3164b8509373c65cb6fa46f6cfb4234a49df55..872f213107e94b1bb8fc45f8eb674e5a209c19da 100644
+--- a/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs
++++ b/src/Ryujinx.Graphics.Vulkan/S2AFrameTrace.cs
+@@ -9,11 +9,11 @@ namespace Ryujinx.Graphics.Vulkan
+     // Android generic only. Disabled sessions never call native code per wait.
+     public static class S2AFrameTrace
+     {
+-        [DllImport("s2a_native")] private static extern int nvn_vk_frame_log_on();
+-        [DllImport("s2a_native")] private static extern void nvn_vk_frame_log_fence_wait(ulong ns);
++        [DllImport("s2a_native")] private static extern int s2a_frame_log_on();
++        [DllImport("s2a_native")] private static extern void s2a_frame_log_fence_wait(ulong ns);
+         private static int _enabled;
+ 
+-        public static void InitializeAndroid() => Volatile.Write(ref _enabled, nvn_vk_frame_log_on());
++        public static void InitializeAndroid() => Volatile.Write(ref _enabled, s2a_frame_log_on());
+         public static void Disable() => Volatile.Write(ref _enabled, 0);
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         public static long Begin() => Volatile.Read(ref _enabled) != 0 ? Stopwatch.GetTimestamp() : 0;
+@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Vulkan
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         public static void EndFence(long started)
+         {
+-            if (started != 0) nvn_vk_frame_log_fence_wait(ElapsedNs(started));
++            if (started != 0) s2a_frame_log_fence_wait(ElapsedNs(started));
+         }
+     }
+ }

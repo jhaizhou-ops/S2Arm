@@ -1,0 +1,99 @@
+diff --git a/src/Ryujinx.Graphics.GAL/IRenderer.cs b/src/Ryujinx.Graphics.GAL/IRenderer.cs
+index 4c6fb63251cfa9e222a949dc45500545b1296055..840292ffeda184270d87a3eb7db4576778ec7718 100644
+--- a/src/Ryujinx.Graphics.GAL/IRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/IRenderer.cs
+@@ -57,6 +57,8 @@ namespace Ryujinx.Graphics.GAL
+ 
+         ISampler CreateSampler(SamplerCreateInfo info);
+         ITexture CreateTexture(TextureCreateInfo info);
++        /// <summary>S2A：携带纹理自身的分辨率倍率；尺寸已缩放，不再次改尺寸。默认后端沿用原建纹理接口。</summary>
++        ITexture CreateTexture(TextureCreateInfo info, float resolutionScale) => CreateTexture(info);
+         ITextureArray CreateTextureArray(int size, bool isBuffer);
+ 
+         bool PrepareHostMapping(nint address, ulong size);
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Renderer/CreateTextureCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Renderer/CreateTextureCommand.cs
+index 7caf5bc1a4fd1bd6f7d70b5a88adf3d2f07a3df6..38e2d359603071202b5ef233eb8b2ba672b4aadc 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Renderer/CreateTextureCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Renderer/CreateTextureCommand.cs
+@@ -8,16 +8,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Renderer
+         public readonly CommandType CommandType => CommandType.CreateTexture;
+         private TableRef<ThreadedTexture> _texture;
+         private TextureCreateInfo _info;
++        private float _resolutionScale;
+ 
+-        public void Set(TableRef<ThreadedTexture> texture, TextureCreateInfo info)
++        public void Set(TableRef<ThreadedTexture> texture, TextureCreateInfo info, float resolutionScale)
+         {
+             _texture = texture;
+             _info = info;
++            _resolutionScale = resolutionScale;
+         }
+ 
+         public static void Run(ref CreateTextureCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+-            command._texture.Get(threaded).Base = renderer.CreateTexture(command._info);
++            command._texture.Get(threaded).Base = renderer.CreateTexture(command._info, command._resolutionScale);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index e4ec0c5337de7d4a6dd1da221f878931ae125f78..aa1ad8455af1877e0ce07c88eab834daff0ce6d9 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -480,12 +480,14 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             QueueCommand();
+         }
+ 
+-        public unsafe ITexture CreateTexture(TextureCreateInfo info)
++        public ITexture CreateTexture(TextureCreateInfo info) => CreateTexture(info, 1f);
++
++        public unsafe ITexture CreateTexture(TextureCreateInfo info, float resolutionScale)
+         {
+             if (IsGpuThread())
+             {
+                 ThreadedTexture texture = new(this, info);
+-                New<CreateTextureCommand>()->Set(Ref(texture), info);
++                New<CreateTextureCommand>()->Set(Ref(texture), info, resolutionScale);
+                 QueueCommand();
+ 
+                 return texture;
+@@ -500,7 +502,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+                 try
+                 {
+-                    texture.Base = _baseRenderer.CreateTexture(info);
++                    texture.Base = _baseRenderer.CreateTexture(info, resolutionScale);
+                 }
+                 finally
+                 {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 21c4ae332b14bd159877b5ecf4e93927d15abc14..a372c340929feb0deec1af9604f4a582aa31c17b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -280,7 +280,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 Debug.Assert(!isView);
+ 
+                 TextureCreateInfo createInfo = TextureCache.GetCreateInfo(Info, _context.Capabilities, ScaleFactor);
+-                { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
++                { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo, ScaleFactor); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
+ 
+                 SynchronizeMemory(); // Load the data.
+                 if (ScaleMode == TextureScaleMode.Scaled)
+@@ -304,7 +304,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+ 
+                     TextureCreateInfo createInfo = TextureCache.GetCreateInfo(Info, _context.Capabilities, ScaleFactor);
+-                    { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
++                    { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo, ScaleFactor); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
+                 }
+             }
+         }
+@@ -492,7 +492,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             if (storage == null)
+             {
+                 TextureCreateInfo createInfo = TextureCache.GetCreateInfo(Info, _context.Capabilities, scale);
+-                storage = _context.Renderer.CreateTexture(createInfo);
++                storage = _context.Renderer.CreateTexture(createInfo, scale);
+             }
+ 
+             if (copy)

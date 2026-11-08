@@ -1,0 +1,263 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+index e4e6edd01cb415f77fbeb227062b08d2d9c13c94..b222649ab51bc5d6b22ccbf7531e98c286ffcd23 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -28,7 +28,14 @@ namespace Ryujinx.HLE.FileSystem
+     {
+         private readonly ISaveDataFileSystemCreator _inner;
+         private readonly string _baseDir;
+-        private static int _unregisteredReported;
++
++        // 本进程里可写存档没走原子提交的原因，位或累计（11-01 全量审计 P2-13）：界面经 services 导出 S2A_SaveAtomicState 读，非 0 就提示
++        //   「当前磁盘不能安全保存，请把游戏库挪到本机磁盘」。只记可写、带日志的用户 / 系统存档；只读打开、别的存档种类不算
++        public const int NonAtomicUnregistered = 1;   // 平台没登记宿主目录原语（S2AHostFileSystem.Transaction）
++        public const int NonAtomicVolume = 2;         // 存档所在的卷过不了克隆 / 原子交换探测（IHostDirectoryTransaction.Supported 为假）
++        public const int NonAtomicMount = 4;          // 卷可以，但这次挂载准备工作目录失败（S2ASaveTransaction.Mount 给了原因）
++        private static int _nonAtomic;
++        public static int NonAtomic => Volatile.Read(ref _nonAtomic);
+ 
+         public S2ASaveDataFileSystemCreator(ISaveDataFileSystemCreator inner, string baseDir)
+         {
+@@ -62,7 +69,7 @@ namespace Ryujinx.HLE.FileSystem
+ 
+             if (txn == null)
+             {
+-                if (Interlocked.Exchange(ref _unregisteredReported, 1) == 0)
++                if ((Interlocked.Or(ref _nonAtomic, NonAtomicUnregistered) & NonAtomicUnregistered) == 0)
+                 {
+                     S2ASaveTransaction.Red("存档事务：平台没登记宿主目录原语（S2AHostFileSystem.Transaction），存档走 LibHac 原路、不做原子提交");
+                 }
+@@ -70,7 +77,17 @@ namespace Ryujinx.HLE.FileSystem
+                 return null;
+             }
+ 
+-            return txn.Supported(dir) ? dir : null;
++            if (!txn.Supported(dir))
++            {
++                if ((Interlocked.Or(ref _nonAtomic, NonAtomicVolume) & NonAtomicVolume) == 0)
++                {
++                    S2ASaveTransaction.Red($"存档事务：{dir} 所在的卷做不了克隆 / 原子交换，存档走 LibHac 逐字节复制、不做原子提交");
++                }
++
++                return null;
++            }
++
++            return dir;
+         }
+ 
+         public Result Create(ref SharedRef<ISaveDataFileSystem> outFileSystem, ref readonly SharedRef<IFileSystem> baseFileSystem, SaveDataSpaceId spaceId, ulong saveDataId, bool allowDirectorySaveData, bool isDeviceUniqueMac, bool isJournalingSupported, bool isMultiCommitSupported, bool openReadOnly, bool openShared, ISaveDataCommitTimeStampGetter timeStampGetter, bool isReconstructible)
+@@ -82,6 +99,7 @@ namespace Ryujinx.HLE.FileSystem
+             {
+                 if (why != null)
+                 {
++                    Interlocked.Or(ref _nonAtomic, NonAtomicMount);
+                     S2ASaveTransaction.Red($"存档事务：挂载 {dir} 时{why}，这次改走 LibHac 原样的逐字节复制（已提交版本不动）");
+                 }
+ 
+@@ -226,15 +244,26 @@ namespace Ryujinx.HLE.FileSystem
+                 return;
+             }
+ 
+-            byte[] data = File.ReadAllBytes(pending), token = new byte[TokenSize];
+-            bool swapped = data.Length >= TokenSize && Txn.ReadToken(System.IO.Path.Combine(dir, "0"), token, out int tokenLength) == 0 && tokenLength == TokenSize
+-                && data.AsSpan(0, TokenSize).SequenceEqual(token);
++            byte[] data = File.ReadAllBytes(pending);
+ 
+-            if (swapped)
++            if (data.Length >= TokenSize)
+             {
+-                string extraNew = System.IO.Path.Combine(dir, ".s2a_extra");
+-                File.WriteAllBytes(extraNew, data[TokenSize..]);
+-                File.Move(extraNew, System.IO.Path.Combine(dir, "ExtraData0"), overwrite: true);
++                byte[] token = new byte[TokenSize];
++                int e = Txn.ReadToken(System.IO.Path.Combine(dir, "0"), token, out int tokenLength);
++
++                // 读不出提交号 = 不知道交换发生没有：待写文件留着、报错，下次挂载 / 提交再判（11-01 全量审计 P2-29：原先当成没交换，把新附加数据删了，
++                //   下次挂载再用旧 ExtraData0 盖掉 ExtraData1）。只有读成功且对不上才算确实没交换
++                if (e != 0)
++                {
++                    throw new IOException(Errno("读已提交版本的提交号", e));
++                }
++
++                if (tokenLength == TokenSize && data.AsSpan(0, TokenSize).SequenceEqual(token))
++                {
++                    string extraNew = System.IO.Path.Combine(dir, ".s2a_extra");
++                    File.WriteAllBytes(extraNew, data[TokenSize..]);
++                    File.Move(extraNew, System.IO.Path.Combine(dir, "ExtraData0"), overwrite: true);
++                }
+             }
+ 
+             File.Delete(pending);
+@@ -310,14 +339,41 @@ namespace Ryujinx.HLE.FileSystem
+                 return ResultFs.UnexpectedInLocalFileSystemE.Log();
+             }
+ 
+-            // Swapped in: the commit stands. What is left is housekeeping a later mount or commit redoes, so it does not turn the commit into a failure
+-            int synced = Txn.SyncDirectory(_dir);   // 交换后的两个目录项（0 / .s2a_new）落盘：掉电后看到的是交换后的样子
++            // 交换后的两个目录项（0 / .s2a_new）落盘成功才算提交（11-01 全量审计 P1-6：原先落盘失败只报红仍回成功，掉电或强杀回到上一版且没有提示）。
++            //   落不了盘就换回去、报失败：已提交的仍是上一版（它的提交号对不上待写附加数据），工作目录不动，游戏再提交一次就重做克隆 + 交换 + 落盘。
++            //   不重试落盘：fsync 失败后再调一次成功不说明前面的数据落了盘
++            bool durable = true;
++            int synced = Txn.SyncDirectory(_dir);
+ 
+             if (synced != 0)
+             {
+-                Red($"存档事务：{_dir} 已交换，{Errno("目录项落盘", synced)}（掉电可能回到上一版）");
++                int back = Txn.Exchange(fresh, committed);
++
++                if (back == 0)
++                {
++                    Red($"存档事务：{_dir} 已交换但{Errno("目录项落盘", synced)}，已换回上一版、这次提交报失败（工作目录保留，再提交即重做）");
++
++                    try
++                    {
++                        File.Delete(pending);
++                        Directory.Delete(fresh, true);   // 这次的新版本克隆
++                        Txn.SyncDirectory(_dir);
++                    }
++                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++                    {
++                        Red($"存档事务：{_dir} 换回上一版后清理没做完（{e.Message}），下次挂载 / 提交清掉");
++                    }
++
++                    return ResultFs.UnexpectedInLocalFileSystemE.Log();
++                }
++
++                // 换不回去：已提交的就是这一版（附加数据照常跟上），但经不经得起掉电不知道，按失败报给游戏
++                Red($"存档事务：{_dir} 已交换但{Errno("目录项落盘", synced)}，换回上一版也{Errno("交换", back)}：已提交的是这一版、掉电可能丢，这次提交报失败");
++                durable = false;
+             }
+ 
++            // Swapped in and on disk: the commit stands. What is left is housekeeping a later mount or commit redoes, so it does not turn the commit into a failure
++
+             try
+             {
+                 ApplyPendingExtra(_dir);
+@@ -336,6 +392,11 @@ namespace Ryujinx.HLE.FileSystem
+                 Red($"存档事务：{_dir} 已提交，换出的旧版本没删掉（{e.Message}），下次挂载清掉");
+             }
+ 
++            if (!durable)
++            {
++                return ResultFs.UnexpectedInLocalFileSystemE.Log();
++            }
++
+             Logger.Info?.Print(LogClass.ServiceFs, $"存档提交 #{Interlocked.Increment(ref _commits)}：{_dir} 克隆 + 原子交换 {System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds:F1} ms");
+ 
+             return Result.Success;
+@@ -359,12 +420,20 @@ namespace Ryujinx.HLE.FileSystem
+             }
+         }
+ 
+-        // Discard what was written since the last commit: the working directory becomes a fresh clone of the committed version
++        // Discard what was written since the last commit: the working directory becomes a fresh clone of the committed version, and the working
++        // extra data (ExtraData1) a copy of the committed one (ExtraData0), as at mount (11-01 全量审计 P1-19：原先只换文件树，附加数据留着未提交那份，
++        // 下次提交把这组不一致的附加数据发布出去；开着写模式文件也照换；换上之后删旧树失败被报成回滚失败)
+         protected override Result DoRollback()
+         {
+             lock (_lock)
+             {
++                if (Volatile.Read(ref _openWritable) > 0)
++                {
++                    return ResultFs.WriteModeFileNotClosed.Log();   // 同提交：换走工作目录后，开着的描述符还指在换出的旧树上，再写就丢
++                }
++
+                 string committed = System.IO.Path.Combine(_dir, "0"), working = System.IO.Path.Combine(_dir, "1"), fresh = System.IO.Path.Combine(_dir, ".s2a_new");
++                string extra0 = System.IO.Path.Combine(_dir, "ExtraData0"), extraNew = System.IO.Path.Combine(_dir, ".s2a_extra1");
+ 
+                 try
+                 {
+@@ -373,16 +442,28 @@ namespace Ryujinx.HLE.FileSystem
+                         Directory.Delete(fresh, true);
+                     }
+ 
++                    bool hasExtra = File.Exists(extra0);
++
++                    if (hasExtra)
++                    {
++                        File.Copy(extra0, extraNew, overwrite: true);   // 先备好，交换后只剩一步改名
++                    }
++
+                     int e = Txn.CloneTree(committed, fresh);
+ 
+                     if (e != 0 || (e = Txn.Exchange(fresh, working)) != 0)
+                     {
+                         Red($"存档事务：回滚 {_dir} 时{Errno("克隆 / 交换", e)}，工作目录保持原样");
++                        File.Delete(extraNew);
+ 
+                         return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                     }
+ 
+-                    Directory.Delete(fresh, true);
++                    // 文件树已换回；附加数据改名失败就报回滚失败（游戏再回滚一次即重做，整个过程可重复）
++                    if (hasExtra)
++                    {
++                        File.Move(extraNew, System.IO.Path.Combine(_dir, "ExtraData1"), overwrite: true);
++                    }
+                 }
+                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                 {
+@@ -391,6 +472,16 @@ namespace Ryujinx.HLE.FileSystem
+                     return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                 }
+ 
++                // 回滚已成立：换出的旧工作树删不掉只报红，下次挂载 / 提交清掉
++                try
++                {
++                    Directory.Delete(fresh, true);
++                }
++                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++                {
++                    Red($"存档事务：{_dir} 已回滚，换出的旧工作目录没删掉（{e.Message}），下次挂载清掉");
++                }
++
+                 return Result.Success;
+             }
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+index a694527bab0fe484792a7ca4298b0767cde0e999..eb35705fe2f8c0e96a4e29dc484f9cc76b3364b0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+@@ -11,11 +11,13 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+     {
+         private SharedRef<LibHac.FsSrv.Sf.IFileSystem> _fileSystem;
+         private readonly string _s2aSaveKey;   // S2Arm: save data mount shared through S2ASaveShare (null for other file systems)
++        private readonly bool _s2aGameSave;    // S2Arm: the application's account / device save: its Commit is a save point (11-01 全量审计 P1-20)
+ 
+-        public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider, string s2aSaveKey = null)
++        public IFileSystem(ref SharedRef<LibHac.FsSrv.Sf.IFileSystem> provider, string s2aSaveKey = null, bool s2aGameSave = false)
+         {
+             _fileSystem = SharedRef<LibHac.FsSrv.Sf.IFileSystem>.CreateMove(ref provider);
+             _s2aSaveKey = s2aSaveKey;
++            _s2aGameSave = s2aGameSave;
+         }
+ 
+         public SharedRef<LibHac.FsSrv.Sf.IFileSystem> GetBaseFileSystem()
+@@ -154,10 +156,12 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+         {
+             ResultCode resultCode = (ResultCode)_fileSystem.Get.Commit().Value;
+ 
+-            // S2Arm: a committed save marks the touch-pad recording (formal runs replay the player's input from the last save)
++            // S2Arm: a committed save marks the touch-pad recording (formal runs replay the player's input from the last save).
++            // Only the application's account / device save counts (what the save point copies): cache / temporary storage and every other
++            // file system commit with success too (11-01 全量审计 P1-20)
+             unsafe
+             {
+-                if (resultCode == ResultCode.Success && S2AHooks.SaveCommitted != null)
++                if (resultCode == ResultCode.Success && _s2aGameSave && S2AHooks.SaveCommitted != null)
+                 {
+                     S2AHooks.SaveCommitted();
+                 }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 7764260edc34c8819503d7a69b49bd96769d9c64..03b51937e28df7fa618dc974f66ca430fe94c252 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -371,7 +371,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return (ResultCode)result.Value;
+             }
+ 
+-            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key));
++            MakeObject(context, new FileSystemProxy.IFileSystem(ref fileSystem.Ref, key, attribute.Type is SaveDataType.Account or SaveDataType.Device));
+ 
+             return ResultCode.Success;
+         }

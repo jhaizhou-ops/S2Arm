@@ -1,0 +1,125 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs b/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
+index 65532ffeb7671eadddba0f846960dec191ae2fd7..5b14564d358e04e473e53db1c9ac825265d3c310 100644
+--- a/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
++++ b/src/Ryujinx.Graphics.Shader/Decoders/DecoderAmpere.cs
+@@ -107,6 +107,24 @@ namespace Ryujinx.Graphics.Shader.Decoders
+                             nBlock.Split(currBlock);
+                             blocks.Insert(nBlkIndex + 1, currBlock);
+ 
++                            // S2Arm: Block.Split hands the left block's successors to the right one but leaves their predecessor lists naming the left
++                            // block; the jump-table search (FindBrxTableAmpere) walks predecessors and then scanned the wrong block's tail (Pokopia
++                            // 1c4d178e06fd4d54: the BRX's LDC c[0x1] sat in the right half, the left half's last write of the register was an FMNMX → no table)
++                            foreach (Block succ in currBlock.Successors)
++                            {
++                                if (succ == currBlock)
++                                {
++                                    continue;
++                                }
++
++                                int pi = succ.Predecessors.IndexOf(nBlock);
++
++                                if (pi >= 0)
++                                {
++                                    succ.Predecessors[pi] = currBlock;
++                                }
++                            }
++
+                             continue;
+                         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+index 12ea4be7c44039289d66370140b01a07ec4d7c29..125935a2b4b28c31dbce01f3084888148ca8cc8b 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+@@ -85,6 +85,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             x(0x804, InstName.R2p, AR2p, N, writesRd: false);
+             x(0x204, InstName.R2p, AR2p, N, writesRd: false);
+             x(0x803, InstName.P2r, AP2r, N);
++            x(0x883, InstName.P2r, AUp2ur, N, uniform: true);
+             x(0x203, InstName.P2r, AP2r, N);
+             x(0x81c, InstName.Psetp, APlop3, N, writesRd: false);
+             x(0x89c, InstName.Psetp, APlop3, N, uniform: true, writesRd: false);
+@@ -647,9 +648,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         {
+             AmpereOp x = new(context.CurrOp);
+ 
+-            if (x.Bit(91) || x.Bits(78, 80) != 0)
++            int mode = x.Bits(78, 80);
++
++            if (x.Bit(91) || mode == 1)
++            {
++                throw AFail(context, "LDC with a bindless bank or the IL address mode");
++            }
++
++            // S2Arm: .IS / .ISL (78..79 = 2 / 3): the bank adds Ra's high 16 bits, the offset takes its low 16, as Maxwell's LDC (InstEmitMemory.Ldc). Pokopia
++            // 17be1fb1efb979c2 / 9f5ef40993abb90e: LDC.64.IS Rd, c[0x0][R0] (their bank index is a value the shader computed)
++            if (mode >= 2)
+             {
+-                throw AFail(context, "LDC with a bindless bank or an address mode");
++                Operand ra = x.Ra == RegisterConsts.RegisterZeroIndex ? Const(0) : Register(x.Ra, RegisterType.Gpr);
++                Operand bankOp = context.IAdd(Const(x.Bits(54, 59)), context.BitfieldExtractU32(ra, Const(16), Const(16)));
++
++                ALoadConstant(context, x, bankOp, context.BitwiseAnd(ra, Const(0xffff)), (int)x.SignedField(38, 54), uniform: false);
++
++                return;
+             }
+ 
+             if (x.Ra == RegisterConsts.RegisterZeroIndex)
+@@ -664,6 +679,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         }
+ 
+         private static void ALoadConstant(EmitterContext context, AmpereOp x, int bank, Operand index, int offset, bool uniform)
++        {
++            ALoadConstant(context, x, Const(bank), index, offset, uniform);
++        }
++
++        private static void ALoadConstant(EmitterContext context, AmpereOp x, Operand bank, Operand index, int offset, bool uniform)
+         {
+             int size = x.Bits(73, 76);
+ 
+@@ -679,7 +699,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             for (int k = 0; k < (size == 5 ? 2 : 1) && rd + k < zero; k++)
+             {
+-                Operand value = EmitLoadConstant(context, Const(bank), context.IAdd(wordOffset, Const(k)));
++                Operand value = EmitLoadConstant(context, bank, context.IAdd(wordOffset, Const(k)));
+ 
+                 if (size < 4)
+                 {
+@@ -1289,6 +1309,36 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             EmitP2r(context, Register(x.Ra, RegisterType.Gpr), Register(x.Rd, RegisterType.Gpr), mask, (ByteSel)x.Bits(76, 78), false);
+         }
+ 
++        // S2Arm: UP2UR URd, UPR, URa, mask (0x883, immediate mask at 32..63): the uniform predicates UP0..UP6 into one byte of URa's value (byte at 76..77), as P2R does
++        // with P0..P6. Bit 91 set in every one seen (Pokopia compute 02616462339c6a91: UP2UR UR6, UPR, URZ, 0x1); Eden-NS2 lowers that form the same way. Without it: unsupported
++        public static void AUp2ur(EmitterContext context)
++        {
++            AmpereOp x = new(context.CurrOp);
++
++            if (!x.Bit(91))
++            {
++                throw AFail(context, "UP2UR without bit 91");
++            }
++
++            int shift = x.Bits(76, 78) * 8;
++            int mask = (int)(x.Imm32 & 0xff);
++            Operand src = x.Ra >= RegisterConsts.UniformZeroIndex ? Const(0) : Register(x.Ra, RegisterType.Uniform);
++            Operand insert = Const(0);
++
++            for (int i = 0; i < RegisterConsts.UniformPredsCount; i++)
++            {
++                insert = context.BitwiseOr(insert, context.ConditionalSelect(Register(i, RegisterType.UniformPredicate), Const(1 << (i + shift)), Const(0)));
++            }
++
++            int maskShifted = mask << shift;
++            Operand res = context.BitwiseOr(context.BitwiseAnd(src, Const(~maskShifted)), context.BitwiseAnd(insert, Const(maskShifted)));
++
++            if (x.Rd < RegisterConsts.UniformZeroIndex)
++            {
++                context.Copy(Register(x.Rd, RegisterType.Uniform), res);
++            }
++        }
++
+         // PLOP3 Pd0, Pd1, a (87..90), b (77..80), c (68..71; uniform with bit 67), lut0 (64..67 | 72..77 << 3), lut1 (16..24)
+         public static void APlop3(EmitterContext context)
+         {

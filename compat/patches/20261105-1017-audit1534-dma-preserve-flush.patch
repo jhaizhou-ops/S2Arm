@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 2f2ed43a0e4db9f3a44d66f88703410a5e9f64fb..ef3febbf66ee1092ed8b6535c03892c7db8a026e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -227,6 +227,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 total = checked(total + checked((int)part.Size));
+             }
+             if (total != target.Length) throw new ArgumentException("DMA preserve-read range length mismatch.");
++            // 审计 #1534 P1-7：保留读取读的是矩形外要原样写回的目标字节。GPU 改过、还没回写的部分先按跟踪状态回写
++            //   （同源区的 tracked 读、贴图读前回写；上游借页直读碰到受保护页时由缺页走同一事件），否则拿未跟踪的旧字节连同矩形一起写回、盖掉 GPU 的结果
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange part = range.GetSubRange(i);
++                if (part.Size != 0) _cpuMemory.SignalMemoryTracking(part.Address, part.Size, false);
++            }
+             int offset = 0;
+             for (int i = 0; i < range.Count; i++)
+             {

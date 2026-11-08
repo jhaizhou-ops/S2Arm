@@ -1,0 +1,53 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
+index d416ef233c9e69fd2bf96e83da9c78f2c19cd0c9..cabdcacb4c23f33962f6295645c17835054f53c7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/AccessPoint.cs
+@@ -24,6 +24,21 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             _parent.NetworkClient.NetworkChange += NetworkChanged;
+         }
+ 
++        // S2A（审计 #748 P1）：选举改指换中继客户端时接入点对象不重建——游戏已写的广告数据只存在本对象（客户端建房前不收），
++        //   重建就丢成空。只把网络变化订阅从旧客户端挪到新客户端（换客户端前后各调一次）
++        internal void S2AUnbindClient()
++        {
++            if (_parent.NetworkClient != null)
++            {
++                _parent.NetworkClient.NetworkChange -= NetworkChanged;
++            }
++        }
++
++        internal void S2ABindClient()
++        {
++            _parent.NetworkClient.NetworkChange += NetworkChanged;
++        }
++
+         public void Dispose()
+         {
+             if (_parent?.NetworkClient != null)
+@@ -100,7 +115,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 AddressList = addressList,
+             };
+ 
+-            bool success = _parent.NetworkClient.CreateNetworkPrivate(request, _advertiseData);
++            bool success = _parent.NetworkClient.CreateNetworkPrivate(request, _advertiseData ?? []);   // S2A：没写过广告数据按空广告（同公开建房），不把空引用交给编码
+ 
+             return success ? ResultCode.Success : ResultCode.InvalidState;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index c19d9ba29640de60e1b332a5cd0b4135d5972bac..17e8ce01970801d7e5e0007c4a005794c5c68029 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -1306,10 +1306,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                     _station = new Station(this);
+                     break;
+                 case NetworkState.AccessPoint:
+-                    _accessPoint?.Dispose();
+-                    _accessPoint = null;
++                    // S2A（审计 #748 P1）：接入点不重建，广告数据留在原对象上；只换订阅（旧客户端由 RefreshNetworkClient 断开停掉）
++                    _accessPoint?.S2AUnbindClient();
+                     RefreshNetworkClient(context);
+-                    _accessPoint = new AccessPoint(this);
++                    _accessPoint?.S2ABindClient();
+                     break;
+             }
+         }

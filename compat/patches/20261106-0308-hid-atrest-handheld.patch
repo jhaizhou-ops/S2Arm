@@ -1,0 +1,15 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 21d5f81bcaebeb63b02317253d182a0689c1315e..84f5096a0c85d054202a1f2bfb69a593f09e477a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -611,7 +611,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             
+             // uint typeValue = (uint) sixAxisSensorHandle;                 // 0x0 	0x4 	TypeValue
+             // uint npadStyleIndex = (uint) sixAxisSensorHandle & 0xff;     // 0x0 	0x1 	NpadStyleIndex
+-            int playerNumber = (sixAxisSensorHandle >> 8) & 0xff;           // 0x1 	0x1 	PlayerNumber（S2Arm 11-05：上游写成 << 8，恒取 0，Player2 起都问成了 Player1）
++            // 0x1 0x1 NpadIdType（S2Arm 11-05：上游写成 << 8，恒取 0，Player2 起都问成了 Player1；11-06：这个字节是 NpadIdType，掌机是 0x20，
++            //   直接当下标越界、IndexOutOfRange 带走整局（密特罗德 究极 复刻版开局即退），按 NpadIdType 换成共享内存的手柄下标）
++            int playerNumber = (int)HidUtils.GetIndexFromNpadIdType((NpadIdType)((sixAxisSensorHandle >> 8) & 0xff));
+             // uint deviceIdx= ((uint) sixAxisSensorHandle << 16) & 0xff;   // 0x2 	0x1 	DeviceIdx 
+             // uint unknown = ((uint) sixAxisSensorHandle << 24) & 0xff;
+             

@@ -1,0 +1,322 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index 0c911066f3ea00e9e930b8af22f265d63d93232a..a0a57676279964adf45258a5b7fd7d85b88ec242 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -102,6 +102,11 @@ namespace Ryujinx.Graphics.GAL
+         //   本机能力重算，与特化状态里的 decode 位一并生效。
+         public readonly Format[] UnsupportedUniformTexelBufferFormats;
+ 
++        // S2A：宿主支持无格式存储图像写（Vulkan shaderStorageImageWriteWithoutFormat）。存储 texel buffer
++        //   只在宿主同时支持无格式读/写时才把 Image Format 声明成 Unknown（VUID-08737 根修），
++        //   输出代码不同 → 计入宿主缓存能力身份与 program profile（为假时字节与改前相同）。
++        public readonly bool SupportsImageStoreFormatted;
++
+         public Capabilities(
+             TargetApi api,
+             string vendorName,
+@@ -172,10 +177,12 @@ namespace Ryujinx.Graphics.GAL
+             bool s2aStorageWindowClamp = false,
+             bool s2aStorageOobRecord = false,
+             Format[] unsupportedUniformTexelBufferFormats = null,
+-            bool supportsGeometryShaderOcclusionQuery = false)
++            bool supportsGeometryShaderOcclusionQuery = false,
++            bool supportsImageStoreFormatted = false)
+         {
+             SupportsGeometryShaderOcclusionQuery = supportsGeometryShaderOcclusionQuery;
+             UnsupportedUniformTexelBufferFormats = unsupportedUniformTexelBufferFormats;
++            SupportsImageStoreFormatted = supportsImageStoreFormatted;
+             S2AStorageWindowClamp = s2aStorageWindowClamp;
+             S2AStorageOobRecord = s2aStorageWindowClamp && s2aStorageOobRecord;
+             S2AVertexPull = s2aVertexPull;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index fbcec3ad7ea55dd12c823a6dac691bab621a490a..4c98d88b50856198e7e1c77dfd63655d0c8c06a7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -40,7 +40,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // +11: Guest texel-buffer declarations and reads follow the bound view's
+         // numeric type rather than float (VUID-07753); float-declared caches must
+         // be re-translated.
+-        internal const uint CodeGenVersion = 7354 + 11;
++        // +12: Storage texel-buffer image format is decoupled from numeric type
++        // (VUID-08737); caches with the coupled declaration must be re-translated.
++        internal const uint CodeGenVersion = 7354 + 12;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index f7f3b86b998aad3e6be1de09bd8196944d06f5de..96f281de05095759a2831592e0cbe50db0233313 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -99,6 +99,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 writer.Write("s2a-gsocc");
+                 writer.Write(true);
+             }
++            // S2A（VUID-08737 根修）：只在为真时追加，为假时身份字节与改前相同。无格式写支持与否
++            //   决定存储 texel buffer 的 Image Format 声明（Unknown vs 具体格式），输出不同必须分身份。
++            if (capabilities.SupportsImageStoreFormatted)
++            {
++                writer.Write("s2a-store-without-format");
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index 8d9fc883948a7fe3e5693c66e1ac762e0113d0d6..5145ae48b0b48d9f5ab07de5f83b46eb815f2bfc 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -282,6 +282,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         public bool QueryHostSupportsImageLoadFormatted() => TranslationCapabilities.SupportsImageLoadFormatted;
+ 
++        public bool QueryHostSupportsImageStoreFormatted() => TranslationCapabilities.SupportsImageStoreFormatted;
++
+         public bool QueryHostSupportsLayerVertexTessellation() => TranslationCapabilities.SupportsLayerVertexTessellation;
+ 
+         public bool QueryHostSupportsNonConstantTextureOffset() => TranslationCapabilities.SupportsNonConstantTextureOffset;
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+index b6e8badc40fae5a71be6805b32d6f8845d33f096..04042024642d2e24fa90526862bcfac0a506286b 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+@@ -386,7 +386,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
+                     arrayDecl = "[]";
+                 }
+ 
+-                string imageTypeName = definition.Type.GetGlslImageTypeName(definition.Format.GetComponentType());
++                // S2A：数值型与声明格式分开——format 可为 Unknown（宿主支持无格式读写），
++                //   uimage/iimage 仍按绑定视图（definition.SampledType 由 ResourceManager 按描述符填）。
++                string imageTypeName = definition.Type.GetGlslImageTypeName(definition.SampledType);
+ 
+                 if (definition.Flags.HasFlag(TextureUsageFlags.ImageCoherent))
+                 {
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 4e6675cceb7773f28d99d695d1694b43fdb91766..d0dd1da3d44de5be9738aecf31484e5fc0d52198 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -243,20 +243,37 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                 Dim dim = GetDim(image.Type);
+ 
+-                // S2A：格式未知的存储图像（ImageFormat.Unknown）写入要声明 StorageImageWriteWithoutFormat，否则 spirv-val 判非法（#199）
+-                if (image.Format == TextureFormat.Unknown && image.Flags.HasFlag(TextureUsageFlags.ImageStore))
++                ImageFormat imageFormat = GetImageFormat(image.Format);
++
++                // S2A：无格式（ImageFormat.Unknown）存储图像的读/写分别要求 StorageImageReadWithoutFormat /
++                //   StorageImageWriteWithoutFormat，否则 spirv-val 判非法（#199）。Unknown 只在宿主支持无格式读
++                //   时产出（ResourceManager 的门控一致），读 capability 随之恒可声明；写按 ImageStore 标志。
++                //   写具体格式且属扩展集合（R16ui 等）时按规范补 StorageImageExtendedFormats（VUID-08737），
++                //   能否真用由设备特性 shaderStorageImageExtendedFormats 决定。
++                if (image.Format == TextureFormat.Unknown)
++                {
++                    context.AddCapability(Capability.StorageImageReadWithoutFormat);
++
++                    if (image.Flags.HasFlag(TextureUsageFlags.ImageStore))
++                    {
++                        context.AddCapability(Capability.StorageImageWriteWithoutFormat);
++                    }
++                }
++                else if (IsExtendedImageFormat(imageFormat))
+                 {
+-                    context.AddCapability(Capability.StorageImageWriteWithoutFormat);
++                    context.AddCapability(Capability.StorageImageExtendedFormats);
+                 }
+ 
++                // S2A：Sampled Type 与 Image Format 分开（VUID-07753 同时成立）：声明格式可为 Unknown，
++                //   数值型仍跟绑定视图（image.SampledType 由 ResourceManager 按描述符填）。
+                 SpvInstruction imageType = context.TypeImage(
+-                    context.GetType(image.Format.GetComponentType()),
++                    context.GetType(image.SampledType),
+                     dim,
+                     image.Type.HasFlag(SamplerType.Shadow),
+                     image.Type.HasFlag(SamplerType.Array),
+                     image.Type.HasFlag(SamplerType.Multisample),
+                     AccessQualifier.ReadWrite,
+-                    GetImageFormat(image.Format));
++                    imageFormat);
+ 
+                 SpvInstruction imagePointerType = context.TypePointer(StorageClass.UniformConstant, imageType);
+                 SpvInstruction imageArrayPointerType = imagePointerType;
+@@ -310,6 +327,21 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             };
+         }
+ 
++        // S2A：SPIR-V Image Format 中不经 StorageImageExtendedFormats 即可用的集合——spirv-val（vulkan1.2）
++        //   实测之外的具体格式（R*/Rg*/Rgba16(Snorm)/Rgb10A2/Rgb10a2ui/R11fG11fB10f/R64*）全要求该 capability。
++        private static bool IsExtendedImageFormat(ImageFormat format)
++        {
++            return format switch
++            {
++                ImageFormat.Unknown or
++                ImageFormat.Rgba32f or ImageFormat.Rgba16f or ImageFormat.Rgba8 or ImageFormat.Rgba8Snorm or
++                ImageFormat.Rgba8i or ImageFormat.Rgba8ui or ImageFormat.Rgba16i or ImageFormat.Rgba16ui or
++                ImageFormat.Rgba32i or ImageFormat.Rgba32ui or
++                ImageFormat.R32f or ImageFormat.R32i or ImageFormat.R32ui => false,
++                _ => true,
++            };
++        }
++
+         private static ImageFormat GetImageFormat(TextureFormat format)
+         {
+             return format switch
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 5b16f8ea387a7012f72214023242ac2fb3a3421e..f036c1a82eb319ca3d9f857c6c525404e1addace 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -362,6 +362,15 @@ namespace Ryujinx.Graphics.Shader
+             return true;
+         }
+ 
++        /// <summary>
++        /// Queries host support for writable images without a explicit format declaration on the shader.
++        /// </summary>
++        /// <returns>True if formatless image store is supported, false otherwise</returns>
++        bool QueryHostSupportsImageStoreFormatted()
++        {
++            return true;
++        }
++
+         /// <summary>
+         /// Queries host support for writes to the layer from vertex or tessellation shader stages.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+index f4aa0b09ecb94ba576b6e04ab18bd5c10d598522..09e5468330d418e75f31f585409b8d4f34655c1e 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/ShaderProperties.cs
+@@ -81,8 +81,10 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+         {
+             // When the formatted load extension is supported, we don't need to
+             // specify a format, we can just declare it without a format and the GPU will handle it.
+-            // Texel buffer 除外：OpTypeImage 的 Sampled Type 必须与绑定视图数值型一致（VUID-07753），
+-            // 只有拿到描述符格式才知道该声明 uint / sint / float，所以总是查询。
++            // Texel buffer 除外：Sampled Type 与操作数类型必须与绑定视图数值型一致（VUID-07753），
++            // 只有拿到描述符格式才知道该用 uint / sint / float，所以总是查询。
++            // 注意：本函数返回的是视图格式（进 TextureInfo / texOp.Format）；OpTypeImage 的
++            // Image Format 声明由 ResourceManager 按宿主无格式读写能力再判（VUID-08737）。
+             if (gpuAccessor.QueryHostSupportsImageLoadFormatted() && !isTexelBuffer)
+             {
+                 return TextureFormat.Unknown;
+diff --git a/src/Ryujinx.Graphics.Shader/TextureUsageFlags.cs b/src/Ryujinx.Graphics.Shader/TextureUsageFlags.cs
+index 306435fd6de4a23ddb65e5f2add90dc60d99db4d..991862cb137dbd215a25b12c1a9ffadefd125070 100644
+--- a/src/Ryujinx.Graphics.Shader/TextureUsageFlags.cs
++++ b/src/Ryujinx.Graphics.Shader/TextureUsageFlags.cs
+@@ -15,5 +15,9 @@ namespace Ryujinx.Graphics.Shader
+         NeedsScaleValue = 1 << 1,
+         ImageStore = 1 << 2,
+         ImageCoherent = 1 << 3,
++
++        // S2A：被原子指令使用的图像。原子经 OpImageTexelPointer 访问，Vulkan 要求
++        // Image Format 为 R64i/R64ui/R32f/R32i/R32ui（VUID-04658），不得声明成 Unknown。
++        ImageAtomic = 1 << 4,
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index 70d367810b74144ebc4213000cd5dc202efece25..ccf0dc70b2d62f4eb3e23ea3182472f28194ae19 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -311,7 +311,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 isWrite,
+                 accurateType,
+                 coherent,
+-                separate);
++                separate,
++                inst == Instruction.ImageAtomic);
+ 
+             _gpuAccessor.RegisterTexture(handle, cbufSlot);
+ 
+@@ -329,7 +330,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+             bool write,
+             bool accurateType,
+             bool coherent,
+-            bool separate)
++            bool separate,
++            bool isAtomic)
+         {
+             int dimensions = type == SamplerType.None ? 0 : type.Dimensions;
+             Dictionary<TextureInfo, TextureMeta> dict = isImage ? _usedImages : _usedTextures;
+@@ -355,6 +357,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 usageFlags |= TextureUsageFlags.ImageStore;
+             }
+ 
++            if (isAtomic)
++            {
++                usageFlags |= TextureUsageFlags.ImageAtomic;
++            }
++
+             if (coherent)
+             {
+                 usageFlags |= TextureUsageFlags.ImageCoherent;
+@@ -431,8 +438,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 nameSuffix = cbufSlot < 0 ? $"{prefix}_tcb_{handle:X}" : $"{prefix}_cb{cbufSlot}_{handle:X}";
+             }
+ 
+-            // S2A：客体 texel buffer 的采样声明数值型必须与绑定视图一致（VUID-07753）。采样路径不记格式，
+-            // 按描述符视图查询；其余路径 format 即声明格式（未知 / 非缓冲 = FP32，与旧行为一致）。
++            // S2A：客体 texel buffer 的声明数值型必须与绑定视图一致（VUID-07753）。采样路径不记格式，
++            // 按描述符视图查询；其余路径 format 即数值型来源（未知 / 非缓冲 = FP32，与旧行为一致）。
+             AggregateType sampledType = info.Format.GetComponentType();
+ 
+             if (!isImage && (type & SamplerType.Mask) == SamplerType.TextureBuffer)
+@@ -440,6 +447,27 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 sampledType = _gpuAccessor.QueryTextureFormat(handle, cbufSlot).GetComponentType();
+             }
+ 
++            // S2A：存储 texel buffer 的 Image Format 与数值型分开（VUID-08737）：宿主支持无格式读
++            // （写时还要求无格式写）时保持 Unknown——R16ui 等扩展格式要求 StorageImageExtendedFormats
++            // capability，宿主特性缺失时模块直接被拒；必须写具体格式时由 Declarations 补 capability、
++            // 由设备特性门控。原子经 OpImageTexelPointer 访问、Vulkan 只收 R64/R32 具体格式（VUID-04658），
++            // 累计用途里只要有原子就不得 Unknown。
++            TextureFormat declaredFormat = info.Format;
++
++            if (isImage && (type & SamplerType.Mask) == SamplerType.TextureBuffer)
++            {
++                TextureUsageFlags mergedFlags = dict[info].UsageFlags;
++                bool formatless =
++                    !mergedFlags.HasFlag(TextureUsageFlags.ImageAtomic) &&
++                    _gpuAccessor.QueryHostSupportsImageLoadFormatted() &&
++                    (!mergedFlags.HasFlag(TextureUsageFlags.ImageStore) ||
++                        _gpuAccessor.QueryHostSupportsImageStoreFormatted());
++                if (formatless)
++                {
++                    declaredFormat = TextureFormat.Unknown;
++                }
++            }
++
+             TextureDefinition definition = new TextureDefinition(
+                 setIndex,
+                 binding,
+@@ -447,8 +475,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 separate,
+                 $"{_stagePrefix}_{nameSuffix}",
+                 meta.Type,
+-                info.Format,
+-                meta.UsageFlags,
++                declaredFormat,
++                dict[info].UsageFlags,
+                 sampledType);
+ 
+             if (isImage)
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 209ac05ebe7615592d1a47a1a566e918c6b931d4..628a51bd6ecae124543e3d971147dd6ada46ec80 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -562,6 +562,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 ShaderClipDistance = supportedFeatures.ShaderClipDistance,
+                 ShaderFloat64 = supportedFeatures.ShaderFloat64,
+                 ShaderImageGatherExtended = supportedFeatures.ShaderImageGatherExtended,
++                // S2A：存储图像 / texel buffer 必须写具体格式而属扩展集合时，模块声明
++                // StorageImageExtendedFormats（VUID-08737 根修）——特性开与关由设备支持度决定。
++                ShaderStorageImageExtendedFormats = supportedFeatures.ShaderStorageImageExtendedFormats,
+                 ShaderStorageImageMultisample = supportedFeatures.ShaderStorageImageMultisample,
+                 ShaderStorageImageReadWithoutFormat = supportedFeatures.ShaderStorageImageReadWithoutFormat,
+                 ShaderStorageImageWriteWithoutFormat = supportedFeatures.ShaderStorageImageWriteWithoutFormat,
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 7e09faa9ce2a3fd15a0ebc6fce3d177c53334288..88984e2e9da1bbf240bbdc6d6fea27eb55551331 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1058,6 +1058,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsGeometryShaderPassthrough: Capabilities.SupportsGeometryShaderPassthrough,
+                 supportsTransformFeedback: Capabilities.SupportsTransformFeedback,
+                 supportsImageLoadFormatted: features.ShaderStorageImageReadWithoutFormat,
++                supportsImageStoreFormatted: features.ShaderStorageImageWriteWithoutFormat,
+                 supportsLayerVertexTessellation: supportsLayerViewportOutput,
+                 supportsMismatchingViewFormat: true,
+                 supportsCubemapView: !IsAmdGcn,

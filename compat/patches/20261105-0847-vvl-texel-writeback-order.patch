@@ -1,0 +1,617 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/AlignedTexelWritebackQueue.cs b/src/Ryujinx.Graphics.Vulkan/AlignedTexelWritebackQueue.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..72f908a2cf03899257fe92e1012d6b57d629461c
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Vulkan/AlignedTexelWritebackQueue.cs
+@@ -0,0 +1,158 @@
++using System;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Vulkan
++{
++    /// <summary>
++    /// S2A（PR #1487 修复①）：未对齐 texel 写视图的回写挂账分两段——
++    /// 描述符绑定阶段先进 pending，使用它的 draw/dispatch 记录完成后由渲染线程
++    /// promote 进 armed；flush 只消费 armed。这样「绑定 → 真正绘制」之间发生的
++    /// 宿主侧访问（同 holder 上第二个视图的 CreateView、GetBuffer、SignalWrite 等）
++    /// 不会提前把还没被 GPU 写过的影子拷回源缓冲、也不会提前销毁影子和视图。
++    /// 队列内部加锁：后台线程可以安全读状态（报红判定），但只在渲染线程取账。
++    /// </summary>
++    /// <typeparam name="T">影子缓冲句柄类型（BufferHolder 用 Auto&lt;DisposableBuffer&gt;）。</typeparam>
++    internal sealed class AlignedTexelWritebackQueue<T> where T : class
++    {
++        internal readonly struct Entry
++        {
++            public readonly T Shadow;
++            public readonly int SrcOffset;
++            public readonly int Size;
++
++            public Entry(T shadow, int srcOffset, int size)
++            {
++                Shadow = shadow;
++                SrcOffset = srcOffset;
++                Size = size;
++            }
++        }
++
++        private readonly object _lock = new();
++        private List<Entry> _pending;
++        private List<Entry> _armed;
++
++        /// <summary>挂一笔写回（pending）。同一份影子重复挂账按影子去重。</summary>
++        /// <returns>true = 新挂入；false = 该影子已在 pending/armed 中（调用方不要再加引用计数）。</returns>
++        public bool Arm(T shadow, int srcOffset, int size)
++        {
++            lock (_lock)
++            {
++                if (Contains(_pending, shadow) || Contains(_armed, shadow))
++                {
++                    return false;
++                }
++
++                (_pending ??= []).Add(new Entry(shadow, srcOffset, size));
++                return true;
++            }
++        }
++
++        /// <summary>
++        /// draw/dispatch 记录完成后调用：pending 全部转为 armed。
++        /// <paramref name="keepAlive"/> 返回 false 的账说明影子已失效（缓存被清），
++        /// 直接丢弃并返回给调用方——不能拿旧影子去盖后来写进源的新数据。
++        /// </summary>
++        /// <returns>被丢弃的账（含影子引用，调用方负责释放）；无则 null。</returns>
++        public List<Entry> Promote(Func<Entry, bool> keepAlive)
++        {
++            lock (_lock)
++            {
++                if (_pending == null)
++                {
++                    return null;
++                }
++
++                List<Entry> dropped = null;
++
++                foreach (Entry entry in _pending)
++                {
++                    if (keepAlive(entry))
++                    {
++                        (_armed ??= []).Add(entry);
++                    }
++                    else
++                    {
++                        (dropped ??= []).Add(entry);
++                    }
++                }
++
++                _pending = null;
++                return dropped;
++            }
++        }
++
++        /// <summary>取走并清空全部 armed 账（pending 不动）。无账返回 null。</summary>
++        public List<Entry> TakeArmed()
++        {
++            lock (_lock)
++            {
++                List<Entry> armed = _armed;
++                _armed = null;
++                return armed;
++            }
++        }
++
++        /// <summary>取走并清空 pending + armed（Dispose 用）。无账返回 null。</summary>
++        public List<Entry> TakeAll()
++        {
++            lock (_lock)
++            {
++                if (_pending == null)
++                {
++                    List<Entry> armed = _armed;
++                    _armed = null;
++                    return armed;
++                }
++
++                List<Entry> all = _armed ?? [];
++                all.AddRange(_pending);
++                _pending = null;
++                _armed = null;
++                return all;
++            }
++        }
++
++        /// <summary>pending 或 armed 中是否还有账（后台路径报红判定用）。</summary>
++        public bool HasAny
++        {
++            get
++            {
++                lock (_lock)
++                {
++                    return _pending != null || _armed != null;
++                }
++            }
++        }
++
++        /// <summary>armed 中是否已有可落账（渲染线程快速判空用）。</summary>
++        public bool HasArmed
++        {
++            get
++            {
++                lock (_lock)
++                {
++                    return _armed != null;
++                }
++            }
++        }
++
++        private static bool Contains(List<Entry> list, T shadow)
++        {
++            if (list == null)
++            {
++                return false;
++            }
++
++            foreach (Entry entry in list)
++            {
++                if (ReferenceEquals(entry.Shadow, shadow))
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+index 007fa5f38c00c95f384382ee1deba1c9ed6edc30..0716f6ac33ced3cefaee854d6fde39d226a73f11 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Silk.NET.Vulkan;
+ using System;
+@@ -40,8 +41,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private CacheByRange<BufferHolder> _cachedConvertedBuffers;
+ 
+-        private List<AlignedTexelWriteback> _alignedTexelWrites;
+-        private List<Action> _alignedTexelViewInvalidates;
++        private readonly AlignedTexelWritebackQueue<Auto<DisposableBuffer>> _alignedTexelWrites = new();
++        private HashSet<Action> _alignedTexelViewInvalidates;
+ 
+         public int Size { get; }
+ 
+@@ -65,13 +66,6 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private Action _decrementReferenceCount;
+ 
+-        private readonly struct AlignedTexelWriteback(Auto<DisposableBuffer> shadow, int srcOffset, int size)
+-        {
+-            public readonly Auto<DisposableBuffer> Shadow = shadow;
+-            public readonly int SrcOffset = srcOffset;
+-            public readonly int Size = size;
+-        }
+-
+         public BufferHolder(VulkanRenderer gd, Device device, VkBuffer buffer, MemoryAllocation allocation, int size, BufferAllocationType type, BufferAllocationType currentType)
+         {
+             _gd = gd;
+@@ -154,8 +148,10 @@ namespace Ryujinx.Graphics.Vulkan
+             if (!_cachedConvertedBuffers.TryGetValue(offset, size, key, out BufferHolder shadow))
+             {
+                 shadow = _gd.BufferManager.Create(_gd, size, baseType: BufferAllocationType.DeviceLocal);
++                S2APipelineDiagnostics.ReportAlignedTexelShadow();
+ 
+                 _gd.PipelineInternal.EndRenderPass();
++                S2APipelineDiagnostics.ReportAlignedTexelEndRenderPass();
+ 
+                 Copy(_gd, cbs, _buffer, shadow.GetBuffer(), offset, 0, size);
+ 
+@@ -174,20 +170,40 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         internal void ArmAlignedTexelWriteback(Auto<DisposableBuffer> alignedCopy, int srcOffset, int size)
+         {
+-            List<AlignedTexelWriteback> writes = _alignedTexelWrites ??= [];
++            // 挂账先进 pending——使用它的 draw/dispatch 记录完成后才 promote 生效，
++            // 绑定到绘制之间的宿主侧访问不会提前把没被写过的影子拷回源缓冲。
++            if (_alignedTexelWrites.Arm(alignedCopy, srcOffset, size))
++            {
++                alignedCopy.IncrementReferenceCount();
++            }
++        }
+ 
+-            foreach (AlignedTexelWriteback write in writes)
++        internal void PromoteAlignedTexelWritebacks()
++        {
++            List<AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry> dropped =
++                _alignedTexelWrites.Promote(IsAlignedTexelShadowLive);
++
++            if (dropped != null)
+             {
+-                if (write.Shadow == alignedCopy && write.SrcOffset == srcOffset && write.Size == size)
++                foreach (AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry write in dropped)
+                 {
+-                    return;
++                    write.Shadow.Dispose();
+                 }
+             }
++        }
+ 
+-            alignedCopy.IncrementReferenceCount();
+-            writes.Add(new AlignedTexelWriteback(alignedCopy, srcOffset, size));
++        private bool IsAlignedTexelShadowLive(AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry write)
++        {
++            // pending 期间源被写过 → 影子被 ClearRange 逐出缓存；拿着死影子回写会用旧数据
++            // 盖新数据，这笔账必须丢弃。armed 账不存在这个问题：宿主写源前 flush 会先消费它。
++            AlignedTexelCopyCacheKey key = new();
++
++            return _cachedConvertedBuffers.TryGetValue(write.SrcOffset, write.Size, key, out BufferHolder shadow) &&
++                   ReferenceEquals(shadow.GetBuffer(), write.Shadow);
+         }
+ 
++        internal bool HasAlignedTexelWritebacks => _alignedTexelWrites.HasAny;
++
+         private unsafe Auto<DisposableBufferView> CreateViewDirect(VkFormat format, int offset, int size)
+         {
+             BufferViewCreateInfo bufferViewCreateInfo = new()
+@@ -227,22 +243,24 @@ namespace Ryujinx.Graphics.Vulkan
+             _alignedTexelViewInvalidates = null;
+         }
+ 
+-        private void FlushAlignedTexelWrites()
++        internal void FlushAlignedTexelWrites()
+         {
+-            List<AlignedTexelWriteback> writes = _alignedTexelWrites;
++            // 只消费 armed 账——pending 账对应的 draw/dispatch 还没被 GPU 写过，不能提前拷回。
++            List<AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry> writes =
++                _alignedTexelWrites.TakeArmed();
+ 
+-            if (writes == null || writes.Count == 0)
++            if (writes == null)
+             {
+                 return;
+             }
+ 
+-            _alignedTexelWrites = null;
+-
+             _gd.PipelineInternal.EndRenderPass();
++            S2APipelineDiagnostics.ReportAlignedTexelEndRenderPass();
++            S2APipelineDiagnostics.ReportAlignedTexelWriteback(writes.Count);
+ 
+             CommandBufferScoped cbs = _gd.PipelineInternal.CurrentCommandBuffer;
+ 
+-            foreach (AlignedTexelWriteback write in writes)
++            foreach (AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry write in writes)
+             {
+                 Copy(_gd, cbs, write.Shadow, _buffer, 0, write.SrcOffset, write.Size);
+                 write.Shadow.Dispose();
+@@ -255,7 +273,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private void FlushAlignedTexelWritesAndWait(int offset, int size)
+         {
+-            if (_alignedTexelWrites == null)
++            if (!_alignedTexelWrites.HasAny)
+             {
+                 return;
+             }
+@@ -265,22 +283,16 @@ namespace Ryujinx.Graphics.Vulkan
+                 FlushAlignedTexelWrites();
+                 _gd.FlushAllCommands();
+             }
+-            else
++            else if (_alignedTexelWrites.HasArmed)
+             {
+-                List<AlignedTexelWriteback> writes = _alignedTexelWrites;
+-                _alignedTexelWrites = null;
+-
+-                CommandBufferPool pool = _gd.BackgroundResources.Get().GetPool();
+-
+-                using (CommandBufferScoped cbs = pool.Rent())
+-                {
+-                    foreach (AlignedTexelWriteback write in writes)
+-                    {
+-                        Copy(_gd, cbs, write.Shadow, _buffer, 0, write.SrcOffset, write.Size);
+-                        write.Shadow.Dispose();
+-                        _cachedConvertedBuffers.ClearRange(write.SrcOffset, write.Size);
+-                    }
+-                }
++                // 修复②：armed 账对应的写命令录在渲染线程还没提交的命令缓冲里。
++                // 后台池上的拷贝会抢在 draw/dispatch 之前跑、把还没写过的影子拷回源；
++                // 这里不静默拷贝、不改 _cachedConvertedBuffers——报红，等渲染线程落账。
++                Logger.Error?.Print(LogClass.Gpu,
++                    "【红】后台线程访问挂着未落账 texel 写回的缓冲：渲染线程还没提交写命令，" +
++                    "后台静默拷贝会拷到旧数据——等渲染线程在下个 draw/dispatch 或 EndRenderPass 落账后再读。");
++                throw new InvalidOperationException(
++                    "Pending aligned texel write-back cannot be flushed from a background thread.");
+             }
+ 
+             WaitForFences(offset, size);
+@@ -1102,14 +1114,13 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             _gd.PipelineInternal?.FlushCommandsIfWeightExceeding(_buffer, (ulong)Size);
+ 
+-            if (_alignedTexelWrites != null)
++            List<AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry> writes = _alignedTexelWrites.TakeAll();
++            if (writes != null)
+             {
+-                foreach (AlignedTexelWriteback write in _alignedTexelWrites)
++                foreach (AlignedTexelWritebackQueue<Auto<DisposableBuffer>>.Entry write in writes)
+                 {
+                     write.Shadow.Dispose();
+                 }
+-
+-                _alignedTexelWrites = null;
+             }
+ 
+             _buffer.Dispose();
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferManager.cs b/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
+index 0df48e69d22452ae0cf51b50b322493774e05c7d..0459bb699a5120fd7b0245ce0495033bd5c8ac5f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Silk.NET.Vulkan;
+ using System;
++using System.Collections.Generic;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+ using VkBuffer = Silk.NET.Vulkan.Buffer;
+@@ -79,6 +80,11 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private readonly IdList<BufferHolder> _buffers;
+ 
++        // 修①：挂过未对齐 texel 写回账的源 holder 集合——渲染线程在 draw/dispatch 记录
++        // 完成后 promote、在下一次 draw/dispatch 或 EndRenderPass 前主动落账。
++        private readonly HashSet<BufferHolder> _alignedTexelWritebackHolders = [];
++        private readonly object _alignedTexelWritebackLock = new();
++
+         public int BufferCount { get; private set; }
+ 
+         public StagingBuffer StagingBuffer { get; }
+@@ -427,10 +433,57 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             if (TryGetBuffer(handle, out BufferHolder holder))
+             {
++                lock (_alignedTexelWritebackLock)
++                {
++                    _alignedTexelWritebackHolders.Add(holder);
++                }
++
+                 holder.ArmAlignedTexelWriteback(alignedCopy, srcOffset, size);
+             }
+         }
+ 
++        /// <summary>渲染线程在每个 draw/dispatch 记录完成后调用：绑定阶段挂的账转为有效回写。</summary>
++        internal void PromotePendingAlignedTexelWritebacks()
++        {
++            lock (_alignedTexelWritebackLock)
++            {
++                foreach (BufferHolder holder in _alignedTexelWritebackHolders)
++                {
++                    holder.PromoteAlignedTexelWritebacks();
++                }
++            }
++        }
++
++        /// <summary>渲染线程在下一次 draw/dispatch 或 EndRenderPass 前主动落掉已生效的回写。</summary>
++        internal void FlushArmedAlignedTexelWritebacks()
++        {
++            List<BufferHolder> snapshot;
++
++            lock (_alignedTexelWritebackLock)
++            {
++                if (_alignedTexelWritebackHolders.Count == 0)
++                {
++                    return;
++                }
++
++                snapshot = new List<BufferHolder>(_alignedTexelWritebackHolders);
++            }
++
++            // holder 的落账内部会再进 EndRenderPass → 回到这里，所以先拍快照、持锁外迭代。
++            foreach (BufferHolder holder in snapshot)
++            {
++                holder.FlushAlignedTexelWrites();
++
++                if (!holder.HasAlignedTexelWritebacks)
++                {
++                    lock (_alignedTexelWritebackLock)
++                    {
++                        _alignedTexelWritebackHolders.Remove(holder);
++                    }
++                }
++            }
++        }
++
+         public Auto<DisposableBuffer> GetBuffer(CommandBuffer commandBuffer, BufferHandle handle, bool isWrite, bool isSSBO = false)
+         {
+             if (TryGetBuffer(handle, out BufferHolder holder))
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index 79cb2d0f688e5baa5756a85e98c8aa9804465cb0..d44246d7f41adf9662a39b07ade043e926d448d2 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -435,6 +435,9 @@ namespace Ryujinx.Graphics.Vulkan
+             RecreateComputePipelineIfNeeded();
+ 
+             Gd.Api.CmdDispatch(CommandBuffer, (uint)groupsX, (uint)groupsY, (uint)groupsZ);
++
++            // 修①：dispatch 记录完成——绑定阶段挂的 texel 写回账从此刻起生效可落。
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DispatchComputeIndirect(Auto<DisposableBuffer> indirectBuffer, int indirectBufferOffset)
+@@ -450,6 +453,8 @@ namespace Ryujinx.Graphics.Vulkan
+             RecreateComputePipelineIfNeeded();
+ 
+             Gd.Api.CmdDispatchIndirect(CommandBuffer, indirectBuffer.Get(Cbs, indirectBufferOffset, 12).Value, (ulong)indirectBufferOffset);
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void Draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance)
+@@ -496,6 +501,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 Gd.Api.CmdDraw(CommandBuffer, (uint)vertexCount, (uint)instanceCount, (uint)firstVertex, (uint)firstInstance);
+             }
++
++            // 修①：draw 记录完成——绑定阶段挂的 texel 写回账从此刻起生效可落。
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         private void UpdateIndexBufferPattern()
+@@ -562,6 +570,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 Gd.Api.CmdDrawIndexed(CommandBuffer, (uint)indexCount, (uint)instanceCount, (uint)firstIndex, firstVertex, (uint)firstInstance);
+             }
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DrawIndexedIndirect(BufferRange indirectBuffer)
+@@ -608,6 +618,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 Gd.Api.CmdDrawIndexedIndirect(CommandBuffer, buffer, (ulong)indirectBuffer.Offset, 1, (uint)indirectBuffer.Size);
+             }
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DrawIndexedIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
+@@ -700,6 +712,8 @@ namespace Ryujinx.Graphics.Vulkan
+                         (uint)stride);
+                 }
+             }
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DrawIndirect(BufferRange indirectBuffer)
+@@ -720,6 +734,8 @@ namespace Ryujinx.Graphics.Vulkan
+             DrawCount++;
+ 
+             Gd.Api.CmdDrawIndirect(CommandBuffer, buffer, (ulong)indirectBuffer.Offset, 1, (uint)indirectBuffer.Size);
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DrawIndirectCount(BufferRange indirectBuffer, BufferRange parameterBuffer, int maxDrawCount, int stride)
+@@ -757,6 +773,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 (ulong)parameterBuffer.Offset,
+                 (uint)maxDrawCount,
+                 (uint)stride);
++
++            Gd.BufferManager.PromotePendingAlignedTexelWritebacks();
+         }
+ 
+         public void DrawTexture(ITexture texture, ISampler sampler, Extents2DF srcRegion, Extents2DF dstRegion)
+@@ -1645,6 +1663,10 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private void RecreateComputePipelineIfNeeded()
+         {
++            // 修①：上一次 dispatch 生效的写回账在描述符更新前落掉——本 draw 可能
++            // 经没变脏的描述符读同一段源缓冲，必须先拿到影子写回的数据。
++            Gd.BufferManager.FlushArmedAlignedTexelWritebacks();
++
+             if (_computeStateDirty || Pbp != PipelineBindPoint.Compute)
+             {
+                 CreatePipeline(PipelineBindPoint.Compute);
+@@ -1757,6 +1779,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private bool RecreateGraphicsPipelineIfNeeded()
+         {
++            // 修①：同 RecreateComputePipelineIfNeeded——上一次 draw 生效的写回账先落。
++            Gd.BufferManager.FlushArmedAlignedTexelWritebacks();
++
+             if (AutoFlush.ShouldFlushDraw(DrawCount))
+             {
+                 Gd.FlushAllCommands();
+@@ -1896,6 +1921,10 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public void EndRenderPass()
+         {
++            // 修①：渲染通道结束前主动落掉已生效的 texel 写回账（落账内部会再进这里，
++            // 此时账已取空、不会递归）。pending 账不动——它的绘制还没记录。
++            Gd.BufferManager.FlushArmedAlignedTexelWritebacks();
++
+             if (RenderPassActive)
+             {
+                 FramebufferParams.AddStoreOpUsage();
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+index 0c9de1bdca1ac4c17eb29b5288aa083c7a1d0b34..71e7b8878f66882e2a0e2eaa793026b288932c5c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
++++ b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+@@ -23,6 +23,15 @@ namespace Ryujinx.Graphics.Vulkan
+         private static long _cacheImportBytes;
+         private static string _cacheImportError = "未尝试";
+ 
++        // 修⑦：texel 影子开销计数——建影子数 / 回写 flush 次数与段数 / 回写触发的 EndRenderPass 数。
++        // 始终计数（Interlocked 便宜），汇总进 [vkpb] 行；S2A_TEXEL_DIAG=1 时每次回写打一行。
++        private static long _texelShadows;
++        private static long _texelWritebackFlushes;
++        private static long _texelWritebackEntries;
++        private static long _texelEndRenderPasses;
++
++        internal static readonly bool TexelDiag = Environment.GetEnvironmentVariable("S2A_TEXEL_DIAG") == "1";
++
+         /// <summary>S2A：驱动管线缓存导入结果（字节数 / null = 命中，非 null = 未命中原因），进 [vkpb] 汇总行。</summary>
+         public static void ReportCacheImport(long bytes, string error)
+         {
+@@ -117,6 +126,32 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        /// <summary>修⑦：新建一个未对齐 texel 影子。</summary>
++        public static void ReportAlignedTexelShadow()
++        {
++            Interlocked.Increment(ref _texelShadows);
++        }
++
++        /// <summary>修⑦：影子填充 / 回写前被迫 EndRenderPass（代价所在）。</summary>
++        public static void ReportAlignedTexelEndRenderPass()
++        {
++            Interlocked.Increment(ref _texelEndRenderPasses);
++        }
++
++        /// <summary>修⑦：一次 texel 写回落账（entries = 本次拷回段数）。</summary>
++        public static void ReportAlignedTexelWriteback(int entries)
++        {
++            long flushes = Interlocked.Increment(ref _texelWritebackFlushes);
++            long totalEntries = Interlocked.Add(ref _texelWritebackEntries, entries);
++
++            if (TexelDiag)
++            {
++                Console.Error.WriteLine(
++                    $"[vktex] 回写 {entries} 段（累计 flush {flushes} 次 / {totalEntries} 段、" +
++                    $"影子 {Interlocked.Read(ref _texelShadows)} 建、EndRenderPass {Interlocked.Read(ref _texelEndRenderPasses)} 次）");
++            }
++        }
++
+         public static string Summary()
+         {
+             long create = Interlocked.Read(ref _createFailures);
+@@ -134,7 +169,10 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             return $"建管线失败 {create}、未链接跳过 {skips}（图形 {graphics} / 计算 {compute}）、" +
+                    $"反馈环采样附件 {feedback}（颜色 {feedbackColor} / 深度 {feedbackDepth}）、" +
+-                   $"深度反馈环拆通道 {depthSplits}、{cache}";
++                   $"深度反馈环拆通道 {depthSplits}、{cache}、" +
++                   $"texel 影子 {Interlocked.Read(ref _texelShadows)} 建、" +
++                   $"回写 {Interlocked.Read(ref _texelWritebackFlushes)} 次 {Interlocked.Read(ref _texelWritebackEntries)} 段、" +
++                   $"回写触 EndRenderPass {Interlocked.Read(ref _texelEndRenderPasses)} 次";
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs b/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
+index 710dd8e705beb5ff84906bac04114231618fbdc5..942ba68c004278ddd1e07ff93c37126532efa945 100644
+--- a/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
+@@ -133,7 +133,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 _gd.BufferManager.ArmAlignedTexelWriteback(_bufferHandle, _alignedCopy, _offset, _size);
+             }
+ 
+-            return _bufferView?.Get(cbs, _offset, _size, write).Value ?? default;
++            // 修④：视图建在影子上时合法范围是 [0, size)，用量记账若仍按源 _offset 会记出界。
++            return _bufferView?.Get(cbs, _alignedCopy != null ? 0 : _offset, _size, write).Value ?? default;
+         }
+     }
+ }

@@ -1,0 +1,2 @@
+程序号	关键词	上游	下一步
+010026800E304000		上游无（我方直连抽取器缺陷：tools 的 shader_split.py 读 BNSH 不核指针边界，越界指针抛 struct.error 整款中止）	修复已入车（wire-c/bnsh-bounds），恢复出包后重出核

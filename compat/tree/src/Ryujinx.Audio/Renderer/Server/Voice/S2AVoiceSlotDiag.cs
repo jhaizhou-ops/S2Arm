@@ -1,0 +1,130 @@
+using Ryujinx.Audio.Renderer.Common;
+using System;
+using PlayState = Ryujinx.Audio.Renderer.Server.Types.PlayState;
+
+namespace Ryujinx.Audio.Renderer.Server.Voice
+{
+    /// <summary>
+    /// S2Arm: voice slot diagnostics (S2A_AUDIO_VOICE_DIAG=1). Read-only over <see cref="VoiceInfo"/> and the CPU
+    /// <see cref="VoiceState"/> after each RequestUpdate; never changes what is written back to the guest.
+    /// Every <see cref="WindowSeconds"/> it returns one summary line: voices in use, per PlayState counts,
+    /// voices allocated / released and wave buffers consumed during the window.
+    /// </summary>
+    public sealed class S2AVoiceSlotDiag
+    {
+        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_AUDIO_VOICE_DIAG") == "1";
+
+        public const double WindowSeconds = 10.0;
+
+        private readonly bool[] _prevInUse;
+        private readonly uint[] _prevConsumed;
+        private double _windowStart = -1;
+
+        // Snapshot of the latest update.
+        public int InUse, Started, Stopped, Stopping, Paused, DropFlag;
+
+        // Accumulated over the current window.
+        public int Allocated, Released, Updates;
+        public ulong Consumed;
+
+        public S2AVoiceSlotDiag(uint voiceCount)
+        {
+            _prevInUse = new bool[voiceCount];
+            _prevConsumed = new uint[voiceCount];
+        }
+
+        /// <summary>
+        /// Observe the voice context right after the voices were updated from the guest input.
+        /// </summary>
+        /// <returns>The summary line when a window closes, otherwise null.</returns>
+        public string Observe(VoiceContext context, double nowSeconds, int sessionId)
+        {
+            int count = Math.Min((int)context.GetCount(), _prevInUse.Length);
+
+            InUse = Started = Stopped = Stopping = Paused = DropFlag = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                ref VoiceInfo info = ref context.GetState(i);
+
+                bool prevInUse = _prevInUse[i];
+
+                if (!info.InUse)
+                {
+                    if (prevInUse)
+                    {
+                        Released++;
+                    }
+
+                    _prevInUse[i] = false;
+                    _prevConsumed[i] = 0;
+
+                    continue;
+                }
+
+                InUse++;
+
+                switch (info.PlayState)
+                {
+                    case PlayState.Started: Started++; break;
+                    case PlayState.Stopped: Stopped++; break;
+                    case PlayState.Stopping: Stopping++; break;
+                    case PlayState.Paused: Paused++; break;
+                }
+
+                if (info.VoiceDropFlag)
+                {
+                    DropFlag++;
+                }
+
+                // The guest reads PlayedWaveBuffersCount = WaveBufferConsumed of channel 0 (0 while IsNew).
+                uint consumed = info.IsNew || info.ChannelsCount == 0
+                    ? 0
+                    : context.GetUpdateStateForCpu(info.ChannelResourceIds[0]).Span[0].WaveBufferConsumed;
+
+                if (info.IsNew)
+                {
+                    // A slot freed and acquired again between two updates shows up as IsNew while still in use.
+                    if (prevInUse)
+                    {
+                        Released++;
+                    }
+
+                    Allocated++;
+                }
+                else if (!prevInUse)
+                {
+                    Allocated++;
+                }
+                else
+                {
+                    Consumed += consumed >= _prevConsumed[i] ? consumed - _prevConsumed[i] : consumed;
+                }
+
+                _prevInUse[i] = true;
+                _prevConsumed[i] = consumed;
+            }
+
+            Updates++;
+
+            if (_windowStart < 0)
+            {
+                _windowStart = nowSeconds;
+            }
+
+            if (nowSeconds - _windowStart < WindowSeconds)
+            {
+                return null;
+            }
+
+            string line = $"[S2A 声音槽] 渲染器 {sessionId} 在用 {InUse}/{_prevInUse.Length} Started={Started} Stopping={Stopping} Stopped={Stopped} Paused={Paused} 丢弃标记={DropFlag}" +
+                          $" | {nowSeconds - _windowStart:F1} 秒内 新分配={Allocated} 释放={Released} 缓冲已消耗={Consumed} 更新={Updates}";
+
+            _windowStart = nowSeconds;
+            Allocated = Released = Updates = 0;
+            Consumed = 0;
+
+            return line;
+        }
+    }
+}

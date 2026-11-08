@@ -1,0 +1,158 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 5e0967a02669545f184f725bcc90b36e98fa66ae..0a085c98e2ff1516aa9643859a1b8089a8ec646b 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -534,6 +534,37 @@ namespace Ryujinx.Graphics.Vulkan
+             SignalDirty(DirtyFlags.Storage);
+         }
+ 
++        private static readonly HashSet<Format> _linearFilterFallbackWarnedFormats = new();
++
++        internal static bool WarnLinearFilterFallbackOnce(Format format)
++        {
++            return _linearFilterFallbackWarnedFormats.Add(format);
++        }
++
++        private Auto<DisposableSampler> SelectSampler(TextureView view, SamplerHolder sampler)
++        {
++            if (sampler == null || view == null)
++            {
++                return sampler?.GetSampler();
++            }
++
++            if (sampler.UsesLinearFiltering &&
++                !_gd.FormatCapabilities.OptimalFormatSupports(FormatFeatureFlags.SampledImageFilterLinearBit, view.Info.Format))
++            {
++                if (WarnLinearFilterFallbackOnce(view.Info.Format))
++                {
++                    Ryujinx.Common.Logging.Logger.Warning?.Print(
++                        Ryujinx.Common.Logging.LogClass.Gpu,
++                        $"【黄】Format \"{view.Info.Format}\" does not support VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT; " +
++                        "linear-filtering sampler downgraded to nearest for this pairing.");
++                }
++
++                return sampler.GetNearestSampler();
++            }
++
++            return sampler.GetSampler();
++        }
++
+         public void SetTextureAndSampler(
+             CommandBufferScoped cbs,
+             ShaderStage stage,
+@@ -552,7 +583,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 iRef.View?.ClearUsage(FeedbackLoopHazards);
+                 view?.PrepareForUsage(cbs, stage.ConvertToPipelineStageFlags(), FeedbackLoopHazards);
+ 
+-                iRef = new(stage, view, view.GetImageView(), ((SamplerHolder)sampler)?.GetSampler());
++                iRef = new(stage, view, view.GetImageView(), SelectSampler(view, (SamplerHolder)sampler));
+             }
+             else
+             {
+@@ -574,7 +605,7 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 view.Storage.QueueWriteToReadBarrier(cbs, AccessFlags.ShaderReadBit, stage.ConvertToPipelineStageFlags());
+ 
+-                _textureRefs[binding] = new(stage, view, view.GetIdentityImageView(), ((SamplerHolder)sampler)?.GetSampler());
++                _textureRefs[binding] = new(stage, view, view.GetIdentityImageView(), SelectSampler(view, (SamplerHolder)sampler));
+ 
+                 SignalDirty(DirtyFlags.Texture);
+             }
+diff --git a/src/Ryujinx.Graphics.Vulkan/SamplerHolder.cs b/src/Ryujinx.Graphics.Vulkan/SamplerHolder.cs
+index 600f0fafc95ed9f92af9bc0c939e575ee107a98b..6f474f4ce91e53620ba1507bc5bf02d65b237234 100644
+--- a/src/Ryujinx.Graphics.Vulkan/SamplerHolder.cs
++++ b/src/Ryujinx.Graphics.Vulkan/SamplerHolder.cs
+@@ -7,14 +7,45 @@ namespace Ryujinx.Graphics.Vulkan
+     class SamplerHolder : ISampler
+     {
+         private readonly VulkanRenderer _gd;
++        private readonly Device _device;
++        private readonly SamplerCreateInfo _info;
+         private readonly Auto<DisposableSampler> _sampler;
++        private Auto<DisposableSampler> _nearestSampler;
+ 
+-        public unsafe SamplerHolder(VulkanRenderer gd, Device device, SamplerCreateInfo info)
++        internal bool UsesLinearFiltering { get; }
++
++        public SamplerHolder(VulkanRenderer gd, Device device, SamplerCreateInfo info)
+         {
+             _gd = gd;
++            _device = device;
++            _info = info;
+ 
+             gd.Samplers.Add(this);
+ 
++            _sampler = CreateSampler(device, info, forceNearest: false, out bool usesLinearFiltering);
++            UsesLinearFiltering = usesLinearFiltering;
++        }
++
++        internal static void ForceNearestFiltering(ref Silk.NET.Vulkan.SamplerCreateInfo samplerCreateInfo)
++        {
++            samplerCreateInfo.MagFilter = Filter.Nearest;
++            samplerCreateInfo.MinFilter = Filter.Nearest;
++            samplerCreateInfo.MipmapMode = SamplerMipmapMode.Nearest;
++            samplerCreateInfo.AnisotropyEnable = false;
++            samplerCreateInfo.MaxAnisotropy = 1f;
++        }
++
++        internal static bool ComputeUsesLinearFiltering(in Silk.NET.Vulkan.SamplerCreateInfo samplerCreateInfo)
++        {
++            return
++                samplerCreateInfo.MagFilter == Filter.Linear ||
++                samplerCreateInfo.MinFilter == Filter.Linear ||
++                samplerCreateInfo.MipmapMode == SamplerMipmapMode.Linear ||
++                samplerCreateInfo.AnisotropyEnable;
++        }
++
++        private unsafe Auto<DisposableSampler> CreateSampler(Device device, SamplerCreateInfo info, bool forceNearest, out bool usesLinearFiltering)
++        {
+             (Filter minFilter, SamplerMipmapMode mipFilter) = info.MinFilter.Convert();
+ 
+             float minLod = info.MinLod;
+@@ -48,9 +79,20 @@ namespace Ryujinx.Graphics.Vulkan
+                 UnnormalizedCoordinates = false, // TODO: Use unnormalized coordinates.
+             };
+ 
++            usesLinearFiltering = ComputeUsesLinearFiltering(in samplerCreateInfo);
++
++            if (forceNearest)
++            {
++                // VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT is not guaranteed
++                // for every sampled format (e.g. R16G16_UNORM on Mali). VUID 04552 /
++                // 04553 forbid binding a linear-filtering sampler to such views, so a
++                // nearest variant is used for that pairing instead.
++                ForceNearestFiltering(ref samplerCreateInfo);
++            }
++
+             SamplerCustomBorderColorCreateInfoEXT customBorderColor;
+ 
+-            if (cantConstrain && gd.Capabilities.SupportsCustomBorderColor)
++            if (cantConstrain && _gd.Capabilities.SupportsCustomBorderColor)
+             {
+                 ClearColorValue color = new(
+                     info.BorderColor.Red,
+@@ -68,9 +110,14 @@ namespace Ryujinx.Graphics.Vulkan
+                 samplerCreateInfo.BorderColor = BorderColor.FloatCustomExt;
+             }
+ 
+-            gd.Api.CreateSampler(device, in samplerCreateInfo, null, out Sampler sampler).ThrowOnError();
++            _gd.Api.CreateSampler(device, in samplerCreateInfo, null, out Sampler sampler).ThrowOnError();
++
++            return new Auto<DisposableSampler>(new DisposableSampler(_gd.Api, device, sampler));
++        }
+ 
+-            _sampler = new Auto<DisposableSampler>(new DisposableSampler(gd.Api, device, sampler));
++        public Auto<DisposableSampler> GetNearestSampler()
++        {
++            return _nearestSampler ??= CreateSampler(_device, _info, forceNearest: true, out _);
+         }
+ 
+         private static BorderColor GetConstrainedBorderColor(ColorF arbitraryBorderColor, out bool cantConstrain)
+@@ -114,6 +161,7 @@ namespace Ryujinx.Graphics.Vulkan
+             if (_gd.Samplers.Remove(this))
+             {
+                 _sampler.Dispose();
++                _nearestSampler?.Dispose();
+             }
+         }
+     }

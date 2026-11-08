@@ -1,0 +1,95 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index ee5f2d5bbd5ee1cd42351484b7fc200b9b191acf..f1ffbe3d265d40496ec2b091f5a031d569a64fde 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -18,7 +18,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+     class DmaClass : IDeviceState
+     {
+         private static readonly bool S2ADmaBufOn = System.Environment.GetEnvironmentVariable("S2A_DMA_BUF") == "1";
+-        private static readonly bool S2ADmaPreserveReadOn = System.Environment.GetEnvironmentVariable("S2A_DMA_PRESERVE_READ") == "1";
++        // Diagnostic-only old path: a borrowed span read of guest memory. It AVs whenever the
++        // destination page is tracker-protected (READFLUSH/GPU-modified), so production must
++        // never select it. Kept solely for the host red control.
++        private static readonly bool S2ADmaBorrowedReadOn = System.Environment.GetEnvironmentVariable("S2A_DMA_BORROWED_READ") == "1";
+         private byte[] _s2aDstBuf;
+ 
+         private readonly GpuContext _context;
+@@ -539,10 +542,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 bool s2aOwn = S2ADmaBufOn && dstSize <= (32 << 20);
+                 byte[] s2aDst = s2aOwn ? (_s2aDstBuf != null && _s2aDstBuf.Length >= dstSize ? _s2aDstBuf : (_s2aDstBuf = new byte[(int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)dstSize)])) : System.Buffers.ArrayPool<byte>.Shared.Rent(dstSize);
+                 Span<byte> dstSpan = s2aDst.AsSpan(0, dstSize);
+-                if (S2ADmaPreserveReadOn)
+-                    memoryManager.S2ACopyUntrackedForDma(dstGpuVa + (ulong)dstBaseOffset, s2aDst.AsMemory(0, dstSize));
+-                else
++                // The destination has to be read to preserve the bytes outside the copied
++                // rectangle. A borrowed span is not safe here: the page may be PROT_NONE for
++                // READFLUSH/GPU-modified tracking, and a managed fault cannot be recovered by
++                // the tracker on Android (NativeAOT turns it into AccessViolation/FailFast).
++                // Use the untracked platform copy (read-only alias) by default.
++                if (S2ADmaBorrowedReadOn)
+                     memoryManager.GetSpan(dstGpuVa + (ulong)dstBaseOffset, dstSize).CopyTo(dstSpan);
++                else
++                    memoryManager.S2ACopyUntrackedForDma(dstGpuVa + (ulong)dstBaseOffset, s2aDst.AsMemory(0, dstSize));
+                 S2AAllocTrace.Step(0x40_002d, ref s2aA);
+ 
+                 TextureParams srcParams = new(srcRegionX, srcRegionY, srcBaseOffset, srcBpp, srcLinear, srcCalculator);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index e9a897854cdf789aad1fd12c1fe726dec31724e1..e184383620df5a5ccb71f4b2c09ffea709b697d5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -189,11 +189,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         // Reuse the platform readonly-copy provider without the tracked-read
+         // signaling performed by the texture helper. This method never writes
+         // guest memory, changes its protection, or recursively flushes the GPU.
+-        internal void S2ACopyUntrackedForDma(MultiRange range, Memory<byte> target)
++        // If a platform has no readonly-copy provider, fall back to the tracker's
++        // own untracked read (same protected-safe alias semantics). Never fall back
++        // to a borrowed span: a PROT_NONE destination page would fault in managed
++        // code, which NativeAOT turns into an unrecoverable AccessViolation.
++        internal unsafe void S2ACopyUntrackedForDma(MultiRange range, Memory<byte> target)
+         {
+             if (target.Length == 0) return;
+-            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory
+-                ?? throw new NotSupportedException("DMA preserve-read requires a platform readonly-copy provider.");
++            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory;
++            if (copy == null && MemoryTracking.S2AReadUntracked == null)
++                throw new NotSupportedException("DMA preserve-read requires a platform readonly-copy or untracked-read provider.");
+             if (!_context.IsGpuThread())
+                 throw new InvalidOperationException("DMA preserve-read requires the GPU owner thread.");
+             int total = 0;
+@@ -211,11 +216,34 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             {
+                 MemoryRange part = range.GetSubRange(i);
+                 int size = (int)part.Size;
+-                if (size != 0) copy(part.Address, target.Slice(offset, size));
++                if (size != 0)
++                {
++                    if (copy != null) copy(part.Address, target.Slice(offset, size));
++                    else S2ACopyUntrackedForDmaFallback(part.Address, target.Slice(offset, size));
++                }
+                 offset += size;
+             }
+         }
+ 
++        // Tracker-provided untracked read (NxTrack.S2AReadUntracked → s2a_track_read_untracked):
++        // reads PROT_NONE pages through the shared read-only alias, never through a borrowed span.
++        private static unsafe void S2ACopyUntrackedForDmaFallback(ulong address, Memory<byte> target)
++        {
++            delegate*<ulong, byte*, int, void> read = MemoryTracking.S2AReadUntracked;
++            if (read == null)
++                throw new NotSupportedException("DMA preserve-read requires an untracked-read provider.");
++            fixed (byte* dst = target.Span)
++            {
++                int offset = 0;
++                while (offset < target.Length)
++                {
++                    int size = Math.Min(target.Length - offset, 1 << 20);
++                    read(address + (ulong)offset, dst + offset, size);
++                    offset += size;
++                }
++            }
++        }
++
+         /// <summary>
+         /// 纹理上传的正常读取。精确 GPU 读同步仍先执行；平台副本只解决源页保护，不代替读回。
+         /// 返回的 owner 由调用者在转换和上传取数结束后归还；归还不会写入 guest。

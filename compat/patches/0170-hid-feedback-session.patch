@@ -1,0 +1,132 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 4b07883b7ce6fd0af7d46669170b8636583ff2f7..07ccd2ec045b13c85149d4ea624e19e841bf4e28 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -45,6 +45,24 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         public Dictionary<PlayerIndex, ConcurrentQueue<(VibrationValue, VibrationValue)>> RumbleQueues = new();
+         public Dictionary<PlayerIndex, (VibrationValue, VibrationValue)> LastVibrationValues = new();
++        private readonly object _rumbleLock = new();
++        private bool _vibrationPermitted = true;
++        public bool VibrationPermitted { get { lock (_rumbleLock) return _vibrationPermitted; } }
++
++        public void SetVibrationPermitted(bool permitted)
++        {
++            lock (_rumbleLock)
++            {
++                if (_vibrationPermitted == permitted) return;
++                _vibrationPermitted = permitted;
++                LastVibrationValues.Clear();
++                if (!permitted) foreach (var queue in RumbleQueues.Values)
++                {
++                    while (queue.TryDequeue(out _)) { }
++                    queue.Enqueue((_neutralVibrationValue, _neutralVibrationValue));
++                }
++            }
++        }
+ 
+         public NpadDevices(Switch device, bool active = true) : base(device, active)
+         {
+@@ -653,8 +671,11 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // (10-21 d2r: ~70 calls per second, 232 B each, half of the game threads' remaining service allocations)
+         public void UpdateRumbleQueue(PlayerIndex index, byte position, VibrationValue vibrationValue)
+         {
+-            UpdateRumbleQueue(index, position == 0 ? vibrationValue : GetLastVibrationValue(index, 0),
+-                position == 1 ? vibrationValue : GetLastVibrationValue(index, 1));
++            lock (_rumbleLock)
++            {
++                UpdateRumbleQueue(index, position == 0 ? vibrationValue : GetLastVibrationValue(index, 0),
++                    position == 1 ? vibrationValue : GetLastVibrationValue(index, 1));
++            }
+         }
+ 
+         // S2Arm: a left / right pair where a missing side is neutral (IHidServer.SendVibrationValues groups, without the per-group
+@@ -669,25 +690,41 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         private void UpdateRumbleQueue(PlayerIndex index, VibrationValue leftVibrationValue, VibrationValue rightVibrationValue)
+         {
+-            if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
++            lock (_rumbleLock)
+             {
+-                if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue) || !leftVibrationValue.Equals(dualVibrationValue.Item1) || !rightVibrationValue.Equals(dualVibrationValue.Item2))
++                if (!_vibrationPermitted) return;
++                if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
+                 {
+-                    currentQueue.Enqueue((leftVibrationValue, rightVibrationValue));
++                    if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue) || !leftVibrationValue.Equals(dualVibrationValue.Item1) || !rightVibrationValue.Equals(dualVibrationValue.Item2))
++                    {
++                        currentQueue.Enqueue((leftVibrationValue, rightVibrationValue));
+ 
+-                    LastVibrationValues[index] = (leftVibrationValue, rightVibrationValue);
++                        LastVibrationValues[index] = (leftVibrationValue, rightVibrationValue);
++                    }
+                 }
+             }
+         }
+ 
+         public VibrationValue GetLastVibrationValue(PlayerIndex index, byte position)
+         {
+-            if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue))
++            lock (_rumbleLock)
+             {
+-                return _neutralVibrationValue;
++                if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue))
++                {
++                    return _neutralVibrationValue;
++                }
++
++                return (position == 0) ? dualVibrationValue.Item1 : dualVibrationValue.Item2;
+             }
++        }
+ 
+-            return (position == 0) ? dualVibrationValue.Item1 : dualVibrationValue.Item2;
++        public void ResetRumble(PlayerIndex index)
++        {
++            lock (_rumbleLock)
++            {
++                LastVibrationValues.Remove(index);
++                if (RumbleQueues.TryGetValue(index, out var queue)) while (queue.TryDequeue(out _)) { }
++            }
+         }
+ 
+         public ConcurrentQueue<(VibrationValue, VibrationValue)> GetRumbleQueue(PlayerIndex index)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 1e765fc91d907f6dece96a84b1d474bf60cdb29b..1b982222730ca6c87588524badef31aaf356457c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -23,7 +23,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         private bool _sixAxisSensorFusionEnabled;
+         private bool _unintendedHomeButtonInputProtectionEnabled;
+         private bool _npadAnalogStickCenterClampEnabled;
+-        private bool _vibrationPermitted;
+         private bool _usbFullKeyControllerEnabled;
+         private readonly bool _isFirmwareUpdateAvailableForSixAxisSensor;
+         private bool _isSixAxisSensorUnalteredPassthroughEnabled;
+@@ -57,7 +56,6 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             // TODO: signal event at right place
+             _xpadIdEvent.ReadableEvent.Signal();
+ 
+-            _vibrationPermitted = true;
+         }
+ 
+         [CommandCmif(0)]
+@@ -1292,9 +1290,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // PermitVibration(bool Enable)
+         public ResultCode PermitVibration(ServiceCtx context)
+         {
+-            _vibrationPermitted = context.RequestData.ReadBoolean();
+-
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, new { _vibrationPermitted });
++            context.Device.Hid.Npads.SetVibrationPermitted(context.RequestData.ReadBoolean());
+ 
+             return ResultCode.Success;
+         }
+@@ -1303,7 +1299,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+         // IsVibrationPermitted() -> bool IsEnabled
+         public ResultCode IsVibrationPermitted(ServiceCtx context)
+         {
+-            context.ResponseData.Write(_vibrationPermitted);
++            context.ResponseData.Write(context.Device.Hid.Npads.VibrationPermitted);
+ 
+             return ResultCode.Success;
+         }

@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 4f5884fe3600acae6c5ba46e28ab71a9052fe1fa..54a4ed3be82247e34665a14cc19977ea3d0dfa4c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -158,7 +158,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             // TODO: In the future, a GUI could enable user-specified search priority
+             if (((1 << (int)context.Device.System.State.DesiredTitleLanguage) & supportedLanguages) == 0)
+             {
+-                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), firstSupported));
++                SystemLanguage newLanguage = Enum.Parse<SystemLanguage>(Enum.GetName(typeof(TitleLanguage), PickFallbackLanguage(supportedLanguages, S2AHooks.TitleLanguageFallback)));
+                 desiredLanguageCode = SystemStateMgr.GetLanguageCode((int)newLanguage);
+ 
+                 Logger.Info?.Print(LogClass.ServiceAm, $"Application doesn't support configured language. Using {newLanguage}");
+@@ -169,6 +169,20 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: the first of the host's fallback languages the game supports, else the game's first supported language (upstream)
++        internal static int PickFallbackLanguage(int supportedLanguages, TitleLanguage[] fallback)
++        {
++            foreach (TitleLanguage t in fallback ?? Array.Empty<TitleLanguage>())
++            {
++                if (((1 << (int)t) & supportedLanguages) != 0)
++                {
++                    return (int)t;
++                }
++            }
++
++            return BitOperations.TrailingZeroCount(supportedLanguages);
++        }
++
+         [CommandCmif(22)]
+         // SetTerminateResult(u32)
+         public ResultCode SetTerminateResult(ServiceCtx context)
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 97cc498053d327217847f7623cc723ab849eb2c8..0b99626ce72a8c0e4cc5e94e806e01cae72fede5 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -11,6 +11,10 @@ namespace Ryujinx.HLE
+         // in the serving process's handle table that the dispatcher turns into a game handle when the reply is written.
+         public static delegate*<IpcService, int> MakeSession;
+ 
++        // GetDesiredLanguage when the game does not support the system language: try these in order before upstream's "first supported"
++        // (the host passes the system's preferred languages, then Simplified / Traditional Chinese, then English). Null = upstream.
++        public static Ryujinx.HLE.HOS.SystemState.TitleLanguage[] TitleLanguageFallback;
++
+         // KReadableEvent bound to a native event (KReadableEvent.S2ANativeEvent != 0): mirror Signal / Clear to it,
+         // because the game waits on the native event (WaitSynchronization never enters C#).
+         public static delegate*<ulong, void> EventSignal;

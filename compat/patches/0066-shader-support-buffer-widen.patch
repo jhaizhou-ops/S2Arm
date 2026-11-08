@@ -1,0 +1,101 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 30e57c005cbdd13c99e67fa9120744719c15dbee..6582e0fa2cad6a2eb55db1fb1998e5080828d63c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -22,7 +22,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const ushort FileFormatVersionMajor = 1;
+         private const ushort FileFormatVersionMinor = 2;
+         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
+-        private const uint CodeGenVersion = 7354 + 2;   // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试）
++        private const uint CodeGenVersion = 7354 + 3;   // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen）
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index a2f6b605f65b1d381211393430f65360c89a2292..8498267876711ce1c628b57885cf4cb9c68c1ea0 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -25,6 +25,7 @@ namespace Ryujinx.Graphics.Shader
+         TfeOffset,
+         TfeVertexCount,
+         S2AFlags,   // S2A：运行时化的特化状态（见 SupportBuffer.S2AFlags）
++        S2AWiden,   // S2A：宽屏边缘外推参数（见 SupportBuffer.S2AWiden）
+     }
+ 
+     public struct SupportBuffer
+@@ -44,6 +45,7 @@ namespace Ryujinx.Graphics.Shader
+         public static readonly int TfeOffsetOffset;
+         public static readonly int TfeVertexCountOffset;
+         public static readonly int S2AFlagsOffset;
++        public static readonly int S2AWidenOffset;
+ 
+         public const int FragmentIsBgraCount = 8;
+         // One for the render target, 64 for the textures, and 8 for the images.
+@@ -71,6 +73,47 @@ namespace Ryujinx.Graphics.Shader
+             TfeOffsetOffset = OffsetOf(ref instance, ref instance.TfeOffset);
+             TfeVertexCountOffset = OffsetOf(ref instance, ref instance.TfeVertexCount);
+             S2AFlagsOffset = OffsetOf(ref instance, ref instance.S2AFlags);
++            S2AWidenOffset = OffsetOf(ref instance, ref instance.S2AWiden);
++            S2ARegistry = S2AMakeRegistry();
++            S2ACheckLayout();
++        }
++
++        /// <summary>
++        /// S2A：我方在支持缓冲里新增的全部字段，细到分量登记（偏移 / 字节数 / 用途 / 所有者）。类型初始化时断言互不重叠、不越界——
++        /// 10-20 补丁 0044（贴图非归一化位图，s2a_flags.y/z/w）与画幅线外推参数（读 s2a_flags.y/z）同占一处，外推绘制时片元贴图按非归一化坐标采样画错；
++        /// 新加字段先在这里登记，撞了第一次用到支持缓冲就抛异常（门禁 / 起局即红），不再靠人看。
++        /// </summary>
++        public static readonly (string Name, int Offset, int Size, string Owner)[] S2ARegistry;   // 在静态构造里、算完偏移之后赋值（字段初始化器先于构造体执行，偏移还是 0）
++
++        private static (string Name, int Offset, int Size, string Owner)[] S2AMakeRegistry() =>
++        [
++            ("s2a_flags.x：位 0 深度 −1..1、位 1 绘制参数取内建", S2AFlagsOffset, 4, "帧率能耗线 0042"),
++            ("s2a_flags.y：顶点 / 计算阶段贴图非归一化位图", S2AFlagsOffset + 4, 4, "帧率能耗线 0044"),
++            ("s2a_flags.z：片元阶段贴图非归一化位图", S2AFlagsOffset + 8, 4, "帧率能耗线 0044"),
++            ("s2a_flags.w：几何阶段贴图非归一化位图", S2AFlagsOffset + 12, 4, "帧率能耗线 0044"),
++            ("alpha_test.x/y：透明测试比较方式 / 参考值", FragmentAlphaTestOffset, 8, "帧率能耗线 0056"),
++            ("s2a_widen.x：边缘外推量（浮点位）", S2AWidenOffset, 4, "画幅线 SpirvEdgePush"),
++            ("s2a_widen.y：边缘外推门限²（浮点位）", S2AWidenOffset + 4, 4, "画幅线 SpirvEdgePush"),
++        ];
++
++        private static void S2ACheckLayout()
++        {
++            var r = S2ARegistry;
++            for (int i = 0; i < r.Length; i++)
++            {
++                if (r[i].Offset < 0 || r[i].Size <= 0 || r[i].Offset + r[i].Size > RequiredSize)
++                {
++                    throw new System.InvalidOperationException($"S2A 支持缓冲登记越界：{r[i].Name}（{r[i].Owner}）偏移 {r[i].Offset} 长 {r[i].Size}，结构 {RequiredSize} 字节");
++                }
++
++                for (int j = 0; j < i; j++)
++                {
++                    if (r[i].Offset < r[j].Offset + r[j].Size && r[j].Offset < r[i].Offset + r[i].Size)
++                    {
++                        throw new System.InvalidOperationException($"S2A 支持缓冲字段重叠：{r[i].Name}（{r[i].Owner}）与 {r[j].Name}（{r[j].Owner}）");
++                    }
++                }
++            }
+         }
+ 
+         internal static StructureType GetStructureType()
+@@ -84,7 +127,8 @@ namespace Ryujinx.Graphics.Shader
+                 new StructureField(AggregateType.Array | AggregateType.FP32, "render_scale", RenderScaleMaxCount),
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "tfe_offset"),
+                 new StructureField(AggregateType.S32, "tfe_vertex_count"),
+-                new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_flags")
++                new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_flags"),
++                new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_widen"),
+             ]);
+         }
+ 
+@@ -110,5 +154,9 @@ namespace Ryujinx.Graphics.Shader
+             return binding >= 0 && group < 3 && index < 32 ? group * 32 + index : -1;
+         }
+         public Vector4<int> S2AFlags;
++
++        // S2A（画幅线，10-20 从 s2a_flags.y/z 迁出）：宽屏边缘外推参数，x = 外推量 1 − 1/k、y = 门限² ((1 − 3‰)/k)²（都是浮点位；画幅线 visual/s2a-widen 按此实现），z / w 留空；
++        // 只由包装层逐次绘制写（不推的绘制写 0 = 原样），Ryujinx 侧不标脏这一段——上传区间到不了它，只有建缓冲时整段清零一次。s2a_flags 整个归 0042 / 0044
++        public Vector4<int> S2AWiden;
+     }
+ }

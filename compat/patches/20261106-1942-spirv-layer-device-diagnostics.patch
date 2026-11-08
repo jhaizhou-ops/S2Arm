@@ -1,0 +1,21 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 628a51bd6ecae124543e3d971147dd6ada46ec80..45c95b4b1a5cd71c11d0af16394c281ce55f6640 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -861,6 +861,16 @@ namespace Ryujinx.Graphics.Vulkan
+                     $"structure={nameof(PhysicalDeviceShaderDrawParametersFeatures)}, " +
+                     $"shaderDrawParameters queried={(bool)supportedDrawParameters.ShaderDrawParameters}, " +
+                     $"requested={(bool)drawParameters.ShaderDrawParameters}, enabled={enabledFeatures.ShaderDrawParameters}");
++                Logger.Info?.Print(LogClass.Gpu,
++                    $"Vulkan layer/viewport features: apiVersion={(Version)(Version32)physicalDevice.PhysicalDeviceProperties.ApiVersion}, " +
++                    $"shaderOutputLayer queried={(hasVulkan12 ? ((bool)supportedPhysicalDeviceVulkan12Features.ShaderOutputLayer).ToString() : "not-queried")}, " +
++                    $"requested={(bool)featuresVk12.ShaderOutputLayer}, enabled={(bool)enabledFeatures.Vulkan12.ShaderOutputLayer}; " +
++                    $"shaderOutputViewportIndex queried={(hasVulkan12 ? ((bool)supportedPhysicalDeviceVulkan12Features.ShaderOutputViewportIndex).ToString() : "not-queried")}, " +
++                    $"requested={(bool)featuresVk12.ShaderOutputViewportIndex}, enabled={(bool)enabledFeatures.Vulkan12.ShaderOutputViewportIndex}; " +
++                    $"VK_EXT_shader_viewport_index_layer supported={physicalDevice.IsDeviceExtensionPresent("VK_EXT_shader_viewport_index_layer")}, " +
++                    $"requested={requestedFeatures.HasExtension("VK_EXT_shader_viewport_index_layer")}, " +
++                    $"enabled={enabledFeatures.HasExtension("VK_EXT_shader_viewport_index_layer")}; " +
++                    $"VK_NV_viewport_array2 enabled={enabledFeatures.HasExtension("VK_NV_viewport_array2")}");
+                 return device;
+             }
+             finally

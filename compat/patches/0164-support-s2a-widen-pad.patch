@@ -1,0 +1,12 @@
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index 445a23d4362742b302aaf26c486ac774bd62e915..d2a657f4ce481ef3bfe76eeef2ae9c7bdd4d87bb 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -100,6 +100,7 @@ namespace Ryujinx.Graphics.Shader
+             ("s2a_widen.x：边缘外推量（浮点位）", S2AWidenOffset, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.y：边缘外推门限²（浮点位）", S2AWidenOffset + 4, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.z：横向收缩量（浮点位；原尺寸居中层全宽视口 + 收缩 1/k）", S2AWidenOffset + 8, 4, "画幅线 SpirvEdgePush"),
++            ("s2a_widen.w：原画框外推的 pad（浮点位；0 = 关，SpirvExtrap 片元平移 / 插值外推、SpirvEdgePush 写 location 31）", S2AWidenOffset + 12, 4, "画幅线 SpirvExtrap"),
+         ];
+ 
+         private static void S2ACheckLayout()

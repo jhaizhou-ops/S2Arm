@@ -1,0 +1,2 @@
+程序号	构建号	款	档位	平台	结论	日期	读数	依据
+010057D00B612000	ffd0078f805bf3dc13c281319095f8e7	itb	19.5:9	iPhone	过	2026-10-27	2868×1320 四边到边、黑边 0（按 16:9 两侧应各留 261 px）；出图 1564×720 横纵缩放差 0.03%；tools/aspect_measure.py 量标题 logo「INTO」绝对拉伸 0.0677%（阈值 1%），corr 0.995	GayoZhao 真机（iPhone 16 Pro）10-26 / 10-27 两局，读数与截图 docs/validation/widen-itb-20261027/；链号未记；从 graphics/widen/tables/verified.tsv 依据栏补登

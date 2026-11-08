@@ -1,0 +1,71 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index 19f0053b15ba18b5acca52c198d49ef0a2c5188a..895859bdcfccd48794351bb8e15b6329e4ad5481 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -337,6 +337,7 @@ namespace Ryujinx.HLE.HOS
+                 if (AppletState.OperationModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
+                 if (AppletState.PerformanceModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
+                 AppletState.MessageEvent.ReadableEvent.Signal();
++                AppletState.OperationModeRefreshEvent.ReadableEvent.Signal();   // S2Arm：Switch 2 的 210（AppletStateMgr 注释）
+ 
+                 SignalDisplayResolutionChange();
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 800e6b6c11a2aec62284294d7640638649548a58..652cfff013ceb2259e5973905d9bb2e506ef10c2 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -691,11 +691,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+ 
+         [CommandCmif(210)] // 20.0.0+
+         // GetUnknownEvent() -> handle<copy>
++        //   S2Arm：Switch 2 进程上这是 GetOperationModeRefreshEvent，交出随模式切换触发的事件（AppletStateMgr.OperationModeRefreshEvent 注释）；
++        //   Switch 1 的用途未知，仍交永不触发的事件
+         public ResultCode GetUnknownEvent(ServiceCtx context)
+         {
+             if (_unknownEventHandle == 0)
+             {
+-                if (context.Process.HandleTable.GenerateHandle(_unknownEvent.ReadableEvent, out _unknownEventHandle) != Result.Success)
++                KEvent evt = S2AHooks.Switch2 ? context.Device.System.AppletState.OperationModeRefreshEvent : _unknownEvent;
++
++                if (context.Process.HandleTable.GenerateHandle(evt.ReadableEvent, out _unknownEventHandle) != Result.Success)
+                 {
+                     throw new InvalidOperationException("Out of handles!");
+                 }
+diff --git a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+index 0dd5ff01e5a29e9e728edefd692a286d3b579d1e..ce4a6d7fabc6ac17d34e65f8590a7cb1801d2ad3 100644
+--- a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
++++ b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+@@ -12,6 +12,11 @@ namespace Ryujinx.HLE.HOS.SystemState
+ 
+         public KEvent MessageEvent { get; }
+ 
++        // S2Arm：Switch 2 的 IApplicationFunctions 210。Switch 2 SDK 的 nn::oe::GetOperationMode 缓存模式，只在这个事件触发后才重问
++        //   ICommonStateGetter，所以每次掌机 / 主机模式切换都要触发（不看模式变化通知开关）。事实取自 Eden-NS2（GPL，代码自写）
++        //   am/service/application_functions.cpp GetOperationModeRefreshEvent、am/lifecycle_manager.cpp OnOperationAndPerformanceModeChanged
++        public KEvent OperationModeRefreshEvent { get; }
++
+         public IdDictionary AppletResourceUserIds { get; }
+ 
+         public IdDictionary IndirectLayerHandles { get; }
+@@ -72,6 +77,7 @@ namespace Ryujinx.HLE.HOS.SystemState
+         {
+             Messages = new ConcurrentQueue<AppletMessage>();
+             MessageEvent = new KEvent(system.KernelContext);
++            OperationModeRefreshEvent = new KEvent(system.KernelContext);
+ 
+             AppletResourceUserIds = new IdDictionary();
+             IndirectLayerHandles = new IdDictionary();
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 0b99626ce72a8c0e4cc5e94e806e01cae72fede5..d0992ee2fb1860a5449d588cb20012fe0898f62e 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -11,6 +11,9 @@ namespace Ryujinx.HLE
+         // in the serving process's handle table that the dispatcher turns into a game handle when the reply is written.
+         public static delegate*<IpcService, int> MakeSession;
+ 
++        // 游戏是 Switch 2 程序（NPDM 是 Switch 2 的 ACID 布局；services Application.Register 按 NpdmCompat 设）。只给语义随机型变的命令分派用
++        public static bool Switch2;
++
+         // GetDesiredLanguage when the game does not support the system language: try these in order before upstream's "first supported"
+         // (the host passes the system's preferred languages, then Simplified / Traditional Chinese, then English). Null = upstream.
+         public static Ryujinx.HLE.HOS.SystemState.TitleLanguage[] TitleLanguageFallback;

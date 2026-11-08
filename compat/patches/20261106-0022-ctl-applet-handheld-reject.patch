@@ -1,0 +1,64 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs b/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
+index fb632e6e26c328a2eb3bd5487c41a0148ebba500..53b5298398efec8633e79e36dd4defdda06ca46e 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/Controller/ControllerApplet.cs
+@@ -18,6 +18,12 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         private AppletSession _normalSession;
+ 
++        // S2Arm：上一次手柄设置的请求与应答（每次拉起都新建小程序实例，故放静态；按 Horizon 实例区分，同进程重启不串）
++        private static Horizon s_lastSystem;
++        private static byte[] s_lastPrivate = [];
++        private static byte[] s_lastArg = [];
++        private static PlayerIndex s_lastPrimary = PlayerIndex.Unknown;
++
+         public event EventHandler AppletStateChanged;
+ 
+         public ControllerApplet(Horizon system)
+@@ -79,7 +85,7 @@ namespace Ryujinx.HLE.HOS.Applets
+             int playerMax = argHeader.PlayerCountMax;
+             bool singleMode = argHeader.EnableSingleMode != 0;
+ 
+-            Logger.Stub?.PrintStub(LogClass.ServiceHid, $"ControllerApplet Arg {playerMin} {playerMax} {argHeader.EnableTakeOverConnection} {argHeader.EnableSingleMode}");
++            Logger.Stub?.PrintStub(LogClass.ServiceHid, $"ControllerApplet Arg {playerMin} {playerMax} {argHeader.EnableTakeOverConnection} {argHeader.EnableSingleMode} LeftJustify={argHeader.EnableLeftJustify} PermitJoyDual={argHeader.EnablePermitJoyDual}");
+ 
+             if (singleMode)
+             {
+@@ -87,15 +93,26 @@ namespace Ryujinx.HLE.HOS.Applets
+                 playerMin = playerMax = 1;
+             }
+ 
++            // S2Arm：游戏紧接着用同样参数再拉起手柄设置 = 上次答的掌机格游戏不收（11-05 超级舞动 瓦力欧制造：样式 Handheld + JoyconPair，
++            //   答掌机格后每帧重开、整局 14949 次）。真机上玩家这时照游戏提示拆下 Joy-Con、在小程序里改接法；这里同样把掌机格从本次可接受样式里去掉，
++            //   交宿主改接游戏收的非掌机样式（如双 Joy-Con 接 Player1）。参数不同或上次不是掌机格就照原样
++            ControllerType acceptedStyles = (ControllerType)privateArg.NpadStyleSet;
++            bool sameRequest = ReferenceEquals(s_lastSystem, _system) && controllerSupportArgPrivate.AsSpan().SequenceEqual(s_lastPrivate) && controllerSupportArg.AsSpan().SequenceEqual(s_lastArg);
++            if (sameRequest && s_lastPrimary == PlayerIndex.Handheld && (acceptedStyles & ~ControllerType.Handheld) != 0)
++            {
++                acceptedStyles &= ~ControllerType.Handheld;
++                Logger.Info?.Print(LogClass.ServiceHid, $"ControllerApplet: same request re-launched after a Handheld answer, offering {acceptedStyles} instead");
++            }
++
+             int configuredCount;
+             PlayerIndex primaryIndex;
+-            while (!_system.Device.Hid.Npads.Validate(playerMin, playerMax, (ControllerType)privateArg.NpadStyleSet, out configuredCount, out primaryIndex))
++            while (!_system.Device.Hid.Npads.Validate(playerMin, playerMax, acceptedStyles, out configuredCount, out primaryIndex))
+             {
+                 ControllerAppletUIArgs uiArgs = new()
+                 {
+                     PlayerCountMin = playerMin,
+                     PlayerCountMax = playerMax,
+-                    SupportedStyles = (ControllerType)privateArg.NpadStyleSet,
++                    SupportedStyles = acceptedStyles,
+                     SupportedPlayers = _system.Device.Hid.Npads.GetSupportedPlayers(),
+                     IsDocked = _system.State.DockedMode,
+                 };
+@@ -114,6 +131,8 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceHid, $"ControllerApplet ReturnResult {result.PlayerCount} {result.SelectedId}");
+ 
++            (s_lastSystem, s_lastPrivate, s_lastArg, s_lastPrimary) = (_system, controllerSupportArgPrivate, controllerSupportArg, primaryIndex);
++
+             _normalSession.Push(BuildResponse(result));
+             AppletStateChanged?.Invoke(this, null);
+ 

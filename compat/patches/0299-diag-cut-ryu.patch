@@ -1,0 +1,800 @@
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+index f1c579ab4dccf8150160aa3921cd05e42e820407..f1f3b27276d9125816993d5aeecb485cefb3cbb0 100644
+--- a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -51,7 +51,6 @@ namespace Ryujinx.Cpu
+ 
+             public void WriteUntracked(ulong va, ReadOnlySpan<byte> data)
+             {
+-                if (S2AWriteLog.On) S2AWriteLog.Who = "不跟踪区域写回（贴图回写 / 清缓冲）";
+                 Target.WriteUntracked(va, data);
+                 Return(this);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index 5a07bd83b5e480f6707efda4f051d72d25070e2f..c9e5a013d06eabe7a90ff3f192cd7af1f37d984e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -178,13 +178,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+ 
+             return true;
+         }
+-        private static readonly bool _s2aDmaTrace = Environment.GetEnvironmentVariable("S2A_DMA_TRACE") == "1";
+-        private int _s2aTexToBufN, _s2aTexToBufMiss;
++        private int _s2aTexToBufN;
+ 
+         /// <summary>
+         /// S2A：块线性源整张贴图 → 线性目标，源贴图在 GPU 上时在 GPU 上拷进目标缓冲（不回写源）。条件不满足返回 false，调用方走原路径：
+         /// 源是缓存里单层单级、非压缩、可回写（格式无转换）、未缩放的贴图且拷贝区就是整张；目标行跨度正、容得下一行、一行字节 4 对齐；目标区间上没有贴图、物理连续。
+-        /// S2A_DMA_TEX2BUF=0 关；S2A_DMA_TRACE=1 打前 8 次没走成的原因
++        /// S2A_DMA_TEX2BUF=0 关
+         /// </summary>
+         private bool S2ATexToLinearOnGpu(MemoryManager memoryManager, DmaTexture src, ulong srcGpuVa, int srcBpp, int dstBpp, int srcStride, int xCount, int yCount, ulong dstVa, int dstStride)
+         {
+@@ -250,12 +249,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 why = "目标物理不连续";
+             }
+ 
+-            if (_s2aDmaTrace && ++_s2aTexToBufMiss <= 8)
+-            {
+-                Console.Error.WriteLine($"[gpu] DMA 贴图 → 线性目标没走 GPU 拷贝（第 {_s2aTexToBufMiss} 次）：{why}｜源 {src.Width}x{src.Height} 区域 {src.RegionX},{src.RegionY},{src.RegionZ} bpp {srcBpp}/{dstBpp} 拷 {xCount}x{yCount} 目标跨度 {dstStride}" +
+-                    (source != null ? $"｜源贴图 {source.Info.Width}x{source.Info.Height} {source.Info.FormatInfo.Format} 缩放 {source.ScaleFactor}" : ""));
+-            }
+-
+             return false;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index 92d9700a71a153378c67b31a4deb7ab15553c00b..da17baacd5674196b695cc2b9981fb11885b92c7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -257,11 +257,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             {
+                 _s2aSyncedSeq = Volatile.Read(ref _s2aPushSeq);
+                 sync();
+-
+-                if (Image.S2AStaleCheck.On)
+-                {
+-                    Image.S2AStaleCheck.AfterDrain(_context);
+-                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 16691be77922d523b90cb004765e78c91954b230..22e33c6b6efc5d4ee0d1ae0b717f398f5f7cee61 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -529,8 +529,6 @@ namespace Ryujinx.Graphics.Gpu
+             bool force = (flags & HostSyncFlags.Force) == HostSyncFlags.Force;
+ 
+             Memory.S2AZeroCopy.Log();
+-            Memory.S2ABufFlushStat.Log();
+-            Memory.S2ABufClassStat.Log();
+ 
+             if (BufferMigrations.Count > 0)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs b/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs
+deleted file mode 100644
+index c1066e5d95d8493ab24e4a1db9953e47e27a5da7..0000000000000000000000000000000000000000
+--- a/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs
++++ /dev/null
+@@ -1,140 +0,0 @@
+-using Ryujinx.Common;
+-using System;
+-using System.Collections.Generic;
+-using System.Diagnostics;
+-
+-namespace Ryujinx.Graphics.Gpu.Image
+-{
+-    // S2A 诊断（帧率能耗线 10-23，八方2 地面黑块）：贴图「漏写」检测，S2A_STALE_CHECK=<秒>（缺省关，关时零开销）。
+-    // 要证明的事：宿主贴图内容是不是某次 CPU 写没变成跟踪事件、一直停在旧数据（黑块局绘制数与正常局相同，坏在数据不在少画）。
+-    // 做法：整张同步时记下所用客体内存的哈希；每隔 N 秒、在 GPU 线程刚排空写跟踪之后（游戏此前的写都已成事件），
+-    // 对「上次整张同步过、组里没有 GPU 改过、也没有脏句柄」的贴图重算客体内存哈希。不同 = 内容变了却没被标脏（嫌疑）。
+-    // 排空之后、检查之前别的线程刚写的会误中，所以嫌疑留到下一次排空再确认：那时仍没脏、仍不同才报「漏写」。
+-    static class S2AStaleCheck
+-    {
+-        public static readonly bool On;
+-        private static readonly long _interval;
+-        private static long _next;
+-        private static int _pass;
+-        private static readonly List<(Texture Tex, Hash128 Now)> _suspects = [];
+-        private static readonly List<Texture> _all = [];
+-        private static readonly HashSet<Texture> _reported = [];
+-        // 正对照：S2A_STALE_SELFTEST=1 时第一遍对一张可查贴图做一次不经跟踪的 1 字节写（不产生脏事件），检测必须确认它
+-        private static bool _selfTest = Environment.GetEnvironmentVariable("S2A_STALE_SELFTEST") == "1";
+-        private static Texture _selfTestTex;
+-
+-        static S2AStaleCheck()
+-        {
+-            if (int.TryParse(Environment.GetEnvironmentVariable("S2A_STALE_CHECK"), out int s) && s > 0)
+-            {
+-                On = true;
+-                _interval = s * Stopwatch.Frequency;
+-                Ryujinx.Memory.S2AWriteLog.On = true;
+-            }
+-        }
+-
+-        /// <summary>GPU 线程、写跟踪刚排空之后调</summary>
+-        public static void AfterDrain(GpuContext context)
+-        {
+-            if (_suspects.Count != 0)
+-            {
+-                Confirm();
+-            }
+-
+-            long now = Stopwatch.GetTimestamp();
+-
+-            if (now < _next)
+-            {
+-                return;
+-            }
+-
+-            _next = now + _interval;
+-            Scan(context);
+-        }
+-
+-        private static void Scan(GpuContext context)
+-        {
+-            _pass++;
+-            _all.Clear();
+-
+-            foreach (Memory.PhysicalMemory pm in context.PhysicalMemoryRegistry.Values)
+-            {
+-                pm.TextureCache.S2AForEach(_all);
+-            }
+-
+-            int eligible = 0;
+-            long t0 = Stopwatch.GetTimestamp();
+-
+-            foreach (Texture t in _all)
+-            {
+-                if (!t.S2AEligible())
+-                {
+-                    continue;
+-                }
+-
+-                eligible++;
+-
+-                if (_selfTest)
+-                {
+-                    _selfTest = false;
+-                    _selfTestTex = t;
+-                    t.S2ASelfTestCorrupt();
+-                    Console.Error.WriteLine($"[漏写检测·正对照] 已对 {t.S2ADescribe()} 做 1 字节不跟踪写，下一遍必须确认它");
+-                }
+-
+-                Hash128 h = t.S2AGuestHash();
+-
+-                if (h != t.S2ASyncHash)
+-                {
+-                    _suspects.Add((t, h));
+-                }
+-            }
+-
+-            double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+-            Console.Error.WriteLine($"[漏写检测] 第 {_pass} 遍：贴图 {_all.Count}，可查 {eligible}，嫌疑 {_suspects.Count}，耗时 {ms:F1} ms");
+-            _all.Clear();
+-        }
+-
+-        private static void Confirm()
+-        {
+-            int confirmed = 0;
+-
+-            foreach ((Texture t, Hash128 seen) in _suspects)
+-            {
+-                // 已被标脏（排空前的写）/ 已重新同步 / 已被 GPU 改：不是漏写
+-                if (!t.S2AEligible())
+-                {
+-                    continue;
+-                }
+-
+-                Hash128 h = t.S2AGuestHash();
+-
+-                if (h == t.S2ASyncHash)
+-                {
+-                    continue;
+-                }
+-
+-                confirmed++;
+-
+-                if (t == _selfTestTex)
+-                {
+-                    Console.Error.WriteLine("[漏写检测·正对照] 通过：不跟踪写被确认");
+-                }
+-
+-                if (_reported.Add(t))
+-                {
+-                    Console.Error.WriteLine($"[漏写检测·确认] 第 {_pass} 遍：{t.S2ADescribe()}；同步后客体内存变了却没被标脏（上次整张同步在第 {t.S2ASyncPass} 遍之前）{t.S2AWriters()}");
+-                }
+-            }
+-
+-            if (confirmed != 0)
+-            {
+-                Console.Error.WriteLine($"[漏写检测] 第 {_pass} 遍确认 {confirmed} 张（嫌疑 {_suspects.Count}）");
+-            }
+-
+-            _suspects.Clear();
+-        }
+-
+-        public static int Pass => _pass;
+-    }
+-}
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 78cd84c40d48fde3ee6d414ddae918a5fa574990..91ab34638d1bf58e77c937dd63f15fcf257f6ca8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -1,4 +1,3 @@
+-using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Common.Memory;
+ using Ryujinx.Graphics.GAL;
+@@ -616,39 +615,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+         }
+ 
+-        // S2A 漏写检测（S2AStaleCheck，S2A_STALE_CHECK 开时才写）：上次整张同步所用客体内存的哈希
+-        internal Hash128 S2ASyncHash;
+-        internal bool S2ASyncValid;
+-        internal int S2ASyncPass;
+-
+-        internal bool S2AEligible() => S2ASyncValid && Target != Target.TextureBuffer && Group != null && !Group.S2AAnyModifiedOrDirty();
+-
+-        internal Hash128 S2AGuestHash() => Hash128.ComputeHash(_physicalMemory.GetSpan(Range));
+-
+-        internal string S2AWriters()
+-        {
+-            System.Text.StringBuilder sb = new();
+-
+-            for (int i = 0; i < Range.Count; i++)
+-            {
+-                var r = Range.GetSubRange(i);
+-                sb.Append(Ryujinx.Memory.S2AWriteLog.Find(r.Address, r.Size));
+-                sb.Append(_physicalMemory.BufferCache.S2AHasGpuModified(r.Address, r.Size) ? "｜重叠缓冲有 GPU 改过" : "｜重叠缓冲无 GPU 改过");
+-            }
+-
+-            return sb.ToString();
+-        }
+-
+-        // 正对照用：首字节取反，经不跟踪写落回客体内存（写跟踪把写入值当基线，不报脏）
+-        internal void S2ASelfTestCorrupt()
+-        {
+-            ulong va = Range.GetSubRange(0).Address;
+-            byte b = _physicalMemory.GetSpan(va, 1)[0];
+-            _physicalMemory.WriteUntracked(va, [(byte)~b]);
+-        }
+-
+-        internal string S2ADescribe() => $"贴图 0x{Range.GetSubRange(0).Address:x} 长 {Range.GetSize()} 段 {Range.Count} {Info.FormatInfo.Format} {Info.Width}x{Info.Height}x{Info.DepthOrLayers} levels={Info.Levels} linear={Info.IsLinear} target={Target}";
+-
+         /// <summary>
+         /// Signal that this texture is dirty, indicating that the texture group must be checked.
+         /// </summary>
+@@ -741,13 +707,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+             ReadOnlySpan<byte> data = _physicalMemory.S2AGetSpanScratch(Range, out MemoryOwner<byte> s2aScratch);
+             using MemoryOwner<byte> s2aScratchUse = s2aScratch;   // 多段拼接暂存：本函数各出口都已用完 data（转格式 / 直传都另拷），离开即还
+ 
+-            if (S2AStaleCheck.On)
+-            {
+-                S2ASyncHash = Hash128.ComputeHash(data);
+-                S2ASyncValid = true;
+-                S2ASyncPass = S2AStaleCheck.Pass;
+-            }
+-
+             if (S2ATryUploadDirect(data))
+             {
+                 return;
+@@ -850,8 +809,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+         // 整张写入前的状态处理（SetData / S2ASetData 共用）：取消缩放、查脏、标覆盖回写
+         private void PrepareSetData()
+         {
+-            S2ASyncValid = false;
+-
+             BlacklistScale();
+ 
+             Group.CheckDirty(this, true);
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index 92a1ca904e617273b44347660eecdf278d1af079..a24f0effb8bcdedc0f7868c030ad8f41dabf37d1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -48,24 +48,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private readonly AutoDeleteCache _cache;
+ 
+-        // S2A 漏写检测：GPU 线程上取全部贴图
+-        internal void S2AForEach(List<Texture> into)
+-        {
+-            _texturesLock.EnterReadLock();
+-
+-            try
+-            {
+-                foreach (Texture t in _textures)
+-                {
+-                    into.Add(t);
+-                }
+-            }
+-            finally
+-            {
+-                _texturesLock.ExitReadLock();
+-            }
+-        }
+-
+         /// <summary>
+         /// Constructs a new instance of the texture manager.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 56d2720f6506b2a5fdfd3652ff9e62c6534f4f19..0542f3bf998d504ca3fd71856c0f6380213ea4c1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -346,28 +346,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+             return true;
+         }
+ 
+-        // S2A 漏写检测：组里有 GPU 改过（宿主内容为准）或有脏句柄（待同步，属正常）的贴图不查
+-        internal bool S2AAnyModifiedOrDirty()
+-        {
+-            foreach (TextureGroupHandle group in _handles)
+-            {
+-                if (group.Modified)
+-                {
+-                    return true;
+-                }
+-
+-                foreach (RegionHandle handle in group.Handles)
+-                {
+-                    if (handle.Dirty)
+-                    {
+-                        return true;
+-                    }
+-                }
+-            }
+-
+-            return false;
+-        }
+-
+         /// <summary>
+         /// Synchronize memory for a given texture.
+         /// If overlapping tracking handles are dirty, fully or partially synchronize the texture data.
+@@ -480,7 +458,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="regionCount">The number of handles to synchronize</param>
+         private void SynchronizePartial(int baseHandle, int regionCount)
+         {
+-            Storage.S2ASyncValid = false;   // S2A 漏写检测：部分同步后整张哈希不再代表宿主内容
+             int spanEndIndex = -1;
+             int spanBase = 0;
+             ReadOnlySpan<byte> dataSpan = ReadOnlySpan<byte>.Empty;
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index f9253aadd2d0c4833668bf8058892cf940e64bf0..aca5518da7998b3c2c5a06e6c3d97fb0b4e33b24 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -119,37 +119,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             System.Threading.Interlocked.Increment(ref S2AZeroCopy.Demoted);
+         }
+ 
+-        // S2A 诊断 S2A_BUFCLASS_STAT（见 S2ABufClassStat）：本缓冲被怎么用过（各用法位或起来）
+-        internal byte S2AUse;
+-
+-        internal void S2ANoteUse(BufferStage stage, bool write)
+-        {
+-            BufferStage raw = stage & BufferStage.StageMask, st = stage & BufferStage.StorageMask;
+-            byte b = 0;
+-
+-            if ((st & BufferStage.StorageWrite) != 0 || raw == BufferStage.TransformFeedback || (write && raw != BufferStage.Copy))
+-            {
+-                b |= S2ABufClassStat.GpuOutput;
+-            }
+-            else if (st != 0)
+-            {
+-                b |= S2ABufClassStat.StorageRead;
+-            }
+-            else if (raw <= BufferStage.Fragment)
+-            {
+-                b |= S2ABufClassStat.Uniform;
+-            }
+-            else if (raw == BufferStage.VertexBuffer || raw == BufferStage.IndexBuffer)
+-            {
+-                b |= S2ABufClassStat.VertexIndex;
+-            }
+-            else
+-            {
+-                b |= S2ABufClassStat.Other;
+-            }
+-
+-            S2AUse |= b;
+-        }
+         private readonly ReaderWriterLockSlim _virtualDependenciesLock;
+ 
+         private int _sequenceNumber;
+@@ -397,11 +366,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     {
+                         BackingState.RecordSet();
+ 
+-                        if (S2ABufClassStat.On)
+-                        {
+-                            S2ABufClassStat.NoteUpload(S2AUse, (long)Size);
+-                        }
+-
+                         // 零拷贝：数据已在游戏内存里，不上传
+                         if (!_s2aZeroCopy)
+                         {
+@@ -484,8 +448,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+         public void SignalModified(ulong address, ulong size, BufferStage stage)
+         {
+-            if (ModTrace.On) ModTrace.Note(address, size, stage);
+-
+             EnsureRangeList();
+ 
+             TryQueueBackingChange(stage);
+@@ -728,11 +690,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             int offset = (int)(mAddress - Address);
+ 
+-            if (S2ABufClassStat.On)
+-            {
+-                S2ABufClassStat.NoteUpload(S2AUse, (long)mSize);
+-            }
+-
+             // 零拷贝：数据已在游戏内存里，不上传
+             if (!_s2aZeroCopy)
+             {
+@@ -835,7 +792,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             // S2A（10-23）：回写只走不触发跟踪的写，同上游。本函数在区间表写锁里调，再发跟踪事件（拿 TrackingLock）会和 GPU 线程
+             // 「持 TrackingLock → PreciseAction → 区间表 Clear」成 ABBA 死锁（0163 回写别名即此，已删；单测 graphics/track/tests/flushlock）
+-            if (Ryujinx.Memory.S2AWriteLog.On) Ryujinx.Memory.S2AWriteLog.Who = "缓冲回写 Buffer.FlushImpl";
+             _physicalMemory.WriteUntracked(address, s2aData);
+         }
+ 
+@@ -946,8 +902,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 }
+             }
+ 
+-            long s2aT0 = S2ABufFlushStat.On || S2ABufClassStat.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+-
+             _context.Renderer.BackgroundContextAction(() =>
+             {
+                 BufferModifiedRangeList ranges = _modifiedRanges;
+@@ -958,16 +912,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     ranges.WaitForAndFlushRanges(address, size);
+                 }
+             }, true);
+-
+-            if (S2ABufClassStat.On)
+-            {
+-                S2ABufClassStat.NoteFlush(S2AUse, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT0);
+-            }
+-
+-            if (S2ABufFlushStat.On)
+-            {
+-                S2ABufFlushStat.Note(Ryujinx.Memory.Tracking.MemoryTracking.S2AReadTouch, _context.IsGpuThread(), System.Diagnostics.Stopwatch.GetTimestamp() - s2aT0);
+-            }
+         }
+ 
+         /// <summary>
+@@ -1260,125 +1204,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         }
+     }
+ 
+-    // S2A 诊断（帧率能耗线 10-22，缺省关）：S2A_MOD_TRACE=<lo>-<hi>（十六进制客体地址）时，落在区间里的「GPU 改过」按来源阶段计次，每 10 秒打一行。
+-    // 查塞尔达游戏线程每帧 CPU 写 GPU 改过的页（先回写等同步号约 10 ms/帧）：这段内存是谁标成 GPU 改过的
+-    internal static class ModTrace
+-    {
+-        public static readonly bool On;
+-        static readonly ulong _lo, _hi;
+-        static readonly long[] _n = new long[256], _b = new long[256];
+-        static long _last;
+-        static ModTrace()
+-        {
+-            string v = Environment.GetEnvironmentVariable("S2A_MOD_TRACE");
+-            if (string.IsNullOrEmpty(v)) return;
+-            string[] p = v.Split('-');
+-            if (p.Length != 2) return;
+-            _lo = Convert.ToUInt64(p[0].Replace("0x", ""), 16); _hi = Convert.ToUInt64(p[1].Replace("0x", ""), 16);
+-            On = _hi > _lo;
+-            _last = System.Diagnostics.Stopwatch.GetTimestamp();
+-        }
+-        public static void Note(ulong address, ulong size, BufferStage stage)
+-        {
+-            if (address + size <= _lo || address >= _hi) return;
+-            Interlocked.Increment(ref _n[(byte)stage]); Interlocked.Add(ref _b[(byte)stage], (long)size);
+-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+-            if (now - _last < System.Diagnostics.Stopwatch.Frequency * 10) return;
+-            _last = now;
+-            var sb = new System.Text.StringBuilder($"[modtrace] {_lo:x}-{_hi:x} 累计 GPU 改过按来源（阶段 / 存储读写位）：");
+-            for (int i = 0; i < 256; i++) if (_n[i] != 0) sb.Append($" {(BufferStage)(i & 0x3f)}{((i & 0xc0) == 0x80 ? "+存储写" : (i & 0xc0) == 0xc0 ? "+存储原子" : (i & 0xc0) == 0x40 ? "+存储读" : "")}×{_n[i]}（{_b[i] / 1024} KB）");
+-            Console.Error.WriteLine(sb.ToString());
+-        }
+-    }
+-
+-    // S2A 诊断 S2A_BUFCLASS_STAT=1（缺省关，帧率能耗线 10-23 零拷贝收益重估）：缓冲按用法分类（优先级：引擎写过 > GPU 输出 > 存储读 > 常量 > 顶点索引 > 其他），
+-    // 每类累计上传字节、回写次数与耗时（含等同步号），每 10 秒一行。「引擎写过」= 常量缓冲更新 / 内联上传 / DMA 经 BufferCache.ForceDirty 标脏过
+-    internal static class S2ABufClassStat
+-    {
+-        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_BUFCLASS_STAT") == "1";
+-        public const byte GpuOutput = 1, Uniform = 2, VertexIndex = 4, EngineWrite = 8, StorageRead = 16, Other = 32;
+-        private static readonly string[] _name = { "引擎写过", "GPU 输出", "存储读", "常量", "顶点索引", "其他" };
+-        private static readonly long[] _up = new long[6], _upN = new long[6], _fl = new long[6], _flT = new long[6];
+-        private static long _next;
+-
+-        private static int Class(byte use) => (use & EngineWrite) != 0 ? 0 : (use & GpuOutput) != 0 ? 1 : (use & StorageRead) != 0 ? 2 : (use & Uniform) != 0 ? 3 : (use & VertexIndex) != 0 ? 4 : 5;
+-
+-        public static void NoteUpload(byte use, long bytes)
+-        {
+-            int k = Class(use);
+-            System.Threading.Interlocked.Add(ref _up[k], bytes);
+-            System.Threading.Interlocked.Increment(ref _upN[k]);
+-        }
+-
+-        public static void NoteFlush(byte use, long ticks)
+-        {
+-            int k = Class(use);
+-            System.Threading.Interlocked.Increment(ref _fl[k]);
+-            System.Threading.Interlocked.Add(ref _flT[k], ticks);
+-        }
+-
+-        public static void Log()
+-        {
+-            if (!On)
+-            {
+-                return;
+-            }
+-
+-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+-
+-            if (now < _next)
+-            {
+-                return;
+-            }
+-
+-            _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
+-            double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+-            var sb = new System.Text.StringBuilder("[缓冲分类账] 累计（上传 次·MB / 回写 次·ms）：");
+-
+-            for (int k = 0; k < 6; k++)
+-            {
+-                sb.Append($" {_name[k]} {_upN[k]}·{_up[k] >> 20} / {_fl[k]}·{_flT[k] * f:F0}；");
+-            }
+-
+-            System.Console.Error.WriteLine(sb.ToString());
+-        }
+-    }
+-
+-    // S2A 诊断 S2A_BUFFLUSH_STAT=1（缺省关，帧率能耗线 10-23 零拷贝方案 §2）：缓冲回写（ExternalFlush：游戏碰 GPU 改过的缓冲）按「读 / 写」×「GPU 线程 / 其他线程」计次数与耗时（含等同步号）。
+-    // 写的那部分零拷贝后整段消失（不拷也不等），读的只剩等
+-    internal static class S2ABufFlushStat
+-    {
+-        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_BUFFLUSH_STAT") == "1";
+-        private static readonly long[] _n = new long[4], _t = new long[4];
+-        private static long _next;
+-
+-        public static void Note(bool read, bool gpuThread, long ticks)
+-        {
+-            int k = (read ? 0 : 2) + (gpuThread ? 1 : 0);
+-            System.Threading.Interlocked.Increment(ref _n[k]);
+-            System.Threading.Interlocked.Add(ref _t[k], ticks);
+-        }
+-
+-        public static void Log()
+-        {
+-            if (!On)
+-            {
+-                return;
+-            }
+-
+-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+-
+-            if (now < _next)
+-            {
+-                return;
+-            }
+-
+-            _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
+-            double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+-            System.Console.Error.WriteLine($"[缓冲回写拆账] 累计 读·其他线程 {_n[0]} 次 {_t[0] * f:F0} ms / 读·GPU 线程 {_n[1]} 次 {_t[1] * f:F0} ms / 写·其他线程 {_n[2]} 次 {_t[2] * f:F0} ms / 写·GPU 线程 {_n[3]} 次 {_t[3] * f:F0} ms");
+-        }
+-    }
+-
+     // S2A 缓冲零拷贝开关与计数（见 Buffer 构造函数；每 10 秒由 BufferCache 打一行）
+     internal static class S2AZeroCopy
+     {
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index e696f0e8276a844c246e27961059cb5f18fa5385..edc713fcb785f4bda5ca4e857a572bb43fc2d223 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -467,11 +467,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 _dirtyCache[gpuVa] = result;
+             }
+ 
+-            if (S2ABufClassStat.On)
+-            {
+-                result.Buffer.S2AUse |= S2ABufClassStat.EngineWrite;
+-            }
+-
+             result.Buffer.ForceDirty(result.Address, size);
+         }
+ 
+@@ -1038,11 +1033,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     S2ARemember(address, size, buffer);
+                 }
+ 
+-                if (S2ABufClassStat.On)
+-                {
+-                    buffer.S2ANoteUse(stage, write);
+-                }
+-
+                 buffer.CopyFromDependantVirtualBuffers();
+                 buffer.SynchronizeMemory(address, size);
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 5bd8af465ddedd970fb6f3b1c4aecbaf05061de2..c805af09bc5e7fcafe5e2160ad46096301f7bdd0 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -12,48 +12,10 @@ namespace Ryujinx.Graphics.Gpu
+     /// </summary>
+     public static class S2AAllocTrace
+     {
+-        public static readonly bool AllocOn = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
+ 
+-        // S2A_GPU_TIME=1（帧率能耗线 10-23，马车8 进赛道首帧 GPU 模拟线程 233 ms 里约 107 ms 无分段）：同一套打点改记耗时（Stopwatch 刻度），
+-        // 每次上屏结算本帧：本帧墙钟超过 S2A_GPU_TIME_MS（缺省 50）就打本帧各段耗时排行（[耗时·渲染] 行，全打不截断）。与 S2A_ALLOC_TRACE 互斥（同开时按耗时）
+-        public static readonly bool TimeOn = Environment.GetEnvironmentVariable("S2A_GPU_TIME") == "1";
+-        public static readonly bool On = AllocOn || TimeOn;
+-        private static readonly long _slowTicks = (long.TryParse(Environment.GetEnvironmentVariable("S2A_GPU_TIME_MS"), out long ms) ? ms : 50) * Stopwatch.Frequency / 1000;
+-        private static readonly Dictionary<int, (long Bytes, long Calls)> _fr = new();
+-        private static long _frStart, _frNo;
+-
+-        /// <summary>打点取值：耗时模式取时间戳，否则取本线程已分配字节</summary>
+-        public static long Now() => TimeOn ? Stopwatch.GetTimestamp() : GC.GetAllocatedBytesForCurrentThread();
+-
+-        /// <summary>上屏时调（Window.Present 末尾）：耗时模式下结算本帧，慢帧打排行</summary>
+-        public static void FrameEnd()
+-        {
+-            if (!TimeOn)
+-            {
+-                return;
+-            }
+-
+-            long now = Stopwatch.GetTimestamp();
+-            _frNo++;
+-
+-            lock (_acc)
+-            {
+-                if (_frStart != 0 && now - _frStart >= _slowTicks)
+-                {
+-                    double f = 1000.0 / Stopwatch.Frequency;
+-                    long disp = _fr.Where(kv => kv.Key >> 20 < 4).Sum(kv => kv.Value.Bytes);
+-                    Console.Error.WriteLine($"[耗时·渲染] 第 {_frNo} 次上屏 帧墙钟 {(now - _frStart) * f:F1} ms：GPFIFO 分派（最外层）合计 {disp * f:F1} ms；各段（包含式，可重叠）：");
+-                    foreach (var kv in _fr.OrderByDescending(kv => kv.Value.Bytes))
+-                    {
+-                        Console.Error.WriteLine($"[耗时·渲染]   {Name(kv.Key)}：{kv.Value.Bytes * f:F2} ms / {kv.Value.Calls} 次");
+-                    }
+-                }
+-
+-                _fr.Clear();
+-            }
+-
+-            _frStart = now;
+-        }
++        /// <summary>打点取值：本线程已分配字节</summary>
++        public static long Now() => GC.GetAllocatedBytesForCurrentThread();
+ 
+         private static readonly Dictionary<int, (long Bytes, long Calls)> _acc = new();
+         private static int _depth;
+@@ -116,12 +78,6 @@ namespace Ryujinx.Graphics.Gpu
+                 {
+                     _acc.TryGetValue(key, out var v);
+                     _acc[key] = (v.Bytes + bytes, v.Calls + 1);
+-
+-                    if (TimeOn)
+-                    {
+-                        _fr.TryGetValue(key, out var w);
+-                        _fr[key] = (w.Bytes + bytes, w.Calls + 1);
+-                    }
+                 }
+             }
+         }
+@@ -190,7 +146,7 @@ namespace Ryujinx.Graphics.Gpu
+ 
+         public static string SinceLastGc()
+         {
+-            if (!AllocOn)
++            if (!On)
+             {
+                 return null;
+             }
+@@ -231,11 +187,6 @@ namespace Ryujinx.Graphics.Gpu
+         private static void Dump()
+         {
+             // 段、状态组、宏引擎与资源子项都是包含式计数，不重复进入分派累计。
+-            if (TimeOn)
+-            {
+-                return;   // 耗时模式只按慢帧打（FrameEnd），不打全局累计
+-            }
+-
+             long total = _acc.Where(kv => kv.Key >> 20 < 4).Sum(kv => kv.Value.Bytes);
+             Console.Error.WriteLine($"[分配·渲染] GPFIFO 分派累计 {total} B（前 20，字节 / 有分配的调用次数）：");
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Window.cs b/src/Ryujinx.Graphics.Gpu/Window.cs
+index f3aa427e3601bc387867017edd3d674ca3130ab8..4592ba65e7db7974ff39486def85bbcc36763c16 100644
+--- a/src/Ryujinx.Graphics.Gpu/Window.cs
++++ b/src/Ryujinx.Graphics.Gpu/Window.cs
+@@ -278,7 +278,6 @@ namespace Ryujinx.Graphics.Gpu
+ 
+                 pt.ReleaseCallback(pt.UserObj);
+                 if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000b, S2AAllocTrace.Now() - s2aA);
+-                S2AAllocTrace.FrameEnd();   // S2A_GPU_TIME：结算本帧耗时、慢帧打排行
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Memory/S2AWriteLog.cs b/src/Ryujinx.Memory/S2AWriteLog.cs
+deleted file mode 100644
+index 66053b4b8923993caa929faeb83f7b0b697d9378..0000000000000000000000000000000000000000
+--- a/src/Ryujinx.Memory/S2AWriteLog.cs
++++ /dev/null
+@@ -1,67 +0,0 @@
+-using System;
+-using System.Diagnostics;
+-using System.Text;
+-
+-namespace Ryujinx.Memory
+-{
+-    // S2A 诊断（帧率能耗线 10-23，地面黑块漏写检测）：最近 4096 次不跟踪写（地址、长度、是否回写、调用方两层方法名）环形记录。
+-    // 只在漏写检测开着时由 Ryujinx.Graphics.Gpu.Image.S2AStaleCheck 打开；关时 Note 只多一次布尔判断。
+-    public static class S2AWriteLog
+-    {
+-        public static bool On;
+-        // 调用点自报的写入方（NativeAOT 上 StackTrace 取不到方法名，iOS 只显示「.」）：设了就用它，记完清掉
+-        [ThreadStatic] public static string Who;
+-        private const int N = 4096;
+-        private static readonly (ulong Va, int Len, bool Flush, long Tick, string Who)[] _ring = new (ulong, int, bool, long, string)[N];
+-        private static long _n;
+-        private static readonly object _lock = new();
+-
+-        public static void Note(ulong va, int len, bool flush)
+-        {
+-            if (!On)
+-            {
+-                return;
+-            }
+-
+-            string who = Who;
+-            Who = null;
+-            StackTrace st = new(2, false);
+-            StringBuilder sb = new(who ?? "");
+-
+-            for (int i = 0; i < 3 && i < st.FrameCount; i++)
+-            {
+-                var m = st.GetFrame(i)?.GetMethod();
+-                sb.Append(i == 0 && who == null ? "" : " ← ").Append(m?.DeclaringType?.Name).Append('.').Append(m?.Name);
+-            }
+-
+-            lock (_lock)
+-            {
+-                _ring[_n++ % N] = (va, len, flush, Stopwatch.GetTimestamp(), sb.ToString());
+-            }
+-        }
+-
+-        /// <summary>环里与 [va, va+size) 重叠的不跟踪写，最近的在前，最多 max 条</summary>
+-        public static string Find(ulong va, ulong size, int max = 4)
+-        {
+-            StringBuilder sb = new();
+-            int hit = 0;
+-
+-            lock (_lock)
+-            {
+-                for (long k = _n - 1; k >= 0 && k >= _n - N && hit < max; k--)
+-                {
+-                    var e = _ring[k % N];
+-
+-                    if (e.Va < va + size && va < e.Va + (ulong)e.Len)
+-                    {
+-                        double ago = (Stopwatch.GetTimestamp() - e.Tick) * 1000.0 / Stopwatch.Frequency;
+-                        sb.Append($"｜0x{e.Va:x}+{e.Len} {(e.Flush ? "回写" : "引擎写")} {ago:F0} ms 前 {e.Who}");
+-                        hit++;
+-                    }
+-                }
+-            }
+-
+-            return hit == 0 ? "｜环内（最近 4096 次）无重叠的不跟踪写" : sb.ToString();
+-        }
+-    }
+-}

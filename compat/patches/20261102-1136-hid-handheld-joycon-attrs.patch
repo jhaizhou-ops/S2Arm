@@ -1,0 +1,17 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 96e90994cf4648bdd39c55b5cdc4f225ad180674..fea903f48d80d4524a5815386d6bb0903cbae5b1 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -449,6 +449,12 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             switch (currentNpad.StyleSet)
+             {
+                 case NpadStyleTag.Handheld:
++                    // S2Arm：掌机 = 左右两只 Joy-Con 都插在机身滑轨上，真机属性里左右各自「已连 + 有线」都置位。原先只给已连 + 有线，
++                    //   网球 Aces 认掌机要求已连 + 左已连 + 右已连（main+0x252378），判手柄没就绪、每帧重拉手柄小程序，约 100 秒后游戏堆耗尽断言
++                    newState.Attributes |= NpadAttribute.IsWired |
++                                           NpadAttribute.IsLeftConnected | NpadAttribute.IsLeftWired |
++                                           NpadAttribute.IsRightConnected | NpadAttribute.IsRightWired;
++                    break;
+                 case NpadStyleTag.FullKey:
+                     newState.Attributes |= NpadAttribute.IsWired;
+                     break;

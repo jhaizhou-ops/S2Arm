@@ -1,0 +1,26 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index a3532d6bde607fa9ddfe0fa4a2f0bf46c196ea74..11506ea1317581af7e6672d46804be2d08d5bb31 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -466,8 +466,6 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+             for (int i = 0; i < regionCount; i++)
+             {
+-                for (int i = 0; i < regionCount; i++)
+-                {
+                     if (_loadNeeded[baseHandle + i])
+                     {
+                         (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) info = GetHandleInformation(baseHandle + i);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index deaaf2cf62e0dfa7574e6538dc5862419e51efd9..24148b608e6ff88006ff13959fa0ee5da6a1c8e0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -815,7 +815,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     // S2A：提前热已在后台读好就直接用（读缓存 + 解压不上渲染路径），没读到再现读
+                     lazy.Done = true;
+                     _s2aPre.Remove(lazy.ProgramIndex, out (ShaderSpecializationState, byte[], CachedShaderStage[]) pre);
+-                    (ShaderSpecializationState specState, byte[] hostCode, CachedShaderStage[] shaders) = pre;
++                    (specState, hostCode, shaders) = pre;
+ 
+                     if (hostCode == null)
+                     {

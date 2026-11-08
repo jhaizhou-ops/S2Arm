@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index e3b02fc705d87d34af770ee786e4c32a9b2dc360..292c19d6cc73ff0c7a6af2d41651ea50e14e5b93 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -14,6 +14,7 @@ using Silk.NET.Vulkan.Extensions.EXT;
+ using Silk.NET.Vulkan.Extensions.KHR;
+ using System;
+ using System.Collections.Generic;
++using System.Linq;
+ using System.Runtime.InteropServices;
+ using System.Security.Cryptography;
+ using System.Text;
+@@ -1122,7 +1123,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 return new FailedProgram("STAGE");
+             }
+ 
+-            Interlocked.Increment(ref S2AProgramBinaryLoads);
++            long loads = Interlocked.Increment(ref S2AProgramBinaryLoads);
++            if (loads <= 8 || (loads & (loads - 1)) == 0)
++                Console.Error.WriteLine($"[vkpb] 程序记录载入 #{loads}：{binary.Sources.Length} 段，{binary.Sources.Sum(s => s.BinaryCode?.Length ?? 0)} 字节");
+ 
+             // Compute programs carry a default pipeline state in the current CreateProgram
+             // path; graphics programs without state were created without background compile.

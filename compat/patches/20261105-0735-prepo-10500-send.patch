@@ -1,0 +1,152 @@
+diff --git a/src/Ryujinx.Horizon/Prepo/Ipc/AsyncContext.cs b/src/Ryujinx.Horizon/Prepo/Ipc/AsyncContext.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf70162c1df096098f7a2cc2b96a5e9ed2a37614
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Prepo/Ipc/AsyncContext.cs
+@@ -0,0 +1,52 @@
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.OsTypes;
++using Ryujinx.Horizon.Sdk.Prepo;
++using Ryujinx.Horizon.Sdk.Sf;
++using System;
++
++namespace Ryujinx.Horizon.Prepo.Ipc
++{
++    // S2Arm：prepo 的异步上下文（nn::prepo::detail::ipc::IAsyncContext，Switch 2 prepo:u 10500 回出）。命令表取自时之笛 sdk 代理 vtable 0xe72478：
++    //   0 = 取完成事件（回复制句柄；nn::prepo::AsyncContext::GetCompletionEvent 0x5a9230 以手动清除挂上，失败即 AbortImpl）、
++    //   1 = Cancel（无入无出；AsyncContext::Cancel 0x5a92e0 失败即 AbortImpl）、2 = GetResult（无入无出，结果即命令结果；0x5a9320）。
++    //   与 nn::account 的 IAsyncContext（0 / 1 / 2 HasDone / 3 GetResult）不同形：没有 HasDone。
++    //   报告在 10500 里已同步收完（sdk 发完即销毁传输内存），所以建出来就是已完成：事件已亮，Cancel 无事可做
++    partial class AsyncContext : IAsyncContext, IDisposable
++    {
++        private readonly Result _result;
++        private SystemEventType _event;
++
++        public AsyncContext(Result result)
++        {
++            _result = result;
++
++            Os.CreateSystemEvent(out _event, EventClearMode.ManualClear, interProcess: true).AbortOnFailure();
++            Os.SignalSystemEvent(ref _event);
++        }
++
++        [CmifCommand(0)]
++        public Result GetSystemEvent([CopyHandle] out int eventHandle)
++        {
++            eventHandle = Os.GetReadableHandleOfSystemEvent(ref _event);
++
++            return Result.Success;
++        }
++
++        [CmifCommand(1)]
++        public Result Cancel()
++        {
++            return Result.Success;
++        }
++
++        [CmifCommand(2)]
++        public Result GetResult()
++        {
++            return _result;
++        }
++
++        public void Dispose()
++        {
++            Os.DestroySystemEvent(ref _event);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+index f34199a73ed13a74870dd2fadfd250eacab1b65a..f1f531c01e04a58386c109c69e0eea5ea0797bdc 100644
+--- a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
++++ b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+@@ -130,6 +130,59 @@ namespace Ryujinx.Horizon.Prepo.Ipc
+             return Result.Success;
+         }
+ 
++        // S2Arm：Switch 2 nn::prepo::PlayReport::Send(Uid) 的发送命令（时之笛 0400486024DEC000 玩法转场发）。线上格式取自时之笛 sdk 代理 0x5aba60 / 发送助手 0x5ac640：
++        //   域消息；pid；X 缓冲 = 事件名（含结尾 NUL）；复制句柄 1 个 = 报告缓冲建成的传输内存（PlayReportImpl::Send 0x5aadc0 以权限「无」建，IPC 一返回就销毁，所以报告要在本命令里同步收完）；
++        //   数据 u8 @0 = 是否做同意检查、u32 @4 = 报告缓冲容量（传输内存长）、u32 @8 = 报告长、Uid @0x10、u64 @0x20 = pid 占位；回出对象 IAsyncContext。
++        //   本机离线、报告不上传：照存报告（10107）收下并记一行，回已完成、结果成功的异步上下文
++        [CmifCommand(10500)] // Switch 2
++        public Result SendReportWithUser(
++            out IAsyncContext asyncContext,
++            bool optInCheckEnabled,
++            uint transferMemorySize,
++            uint reportSize,
++            Uid userId,
++            [Buffer(HipcBufferFlags.In | HipcBufferFlags.Pointer)] ReadOnlySpan<byte> eventIdBuffer,
++            [CopyHandle] int transferMemoryHandle,
++            [ClientProcessId] ulong pid)
++        {
++            asyncContext = null;
++
++            try
++            {
++                if ((_permissionLevel & PrepoServicePermissionLevel.User) == 0)
++                {
++                    return PrepoResult.PermissionDenied;
++                }
++
++                if (reportSize > transferMemorySize)
++                {
++                    throw new NotImplementedException($"prepo:u 10500：报告长 0x{reportSize:X} 超过传输内存长 0x{transferMemorySize:X}（sdk 不会这样发，真机回什么不知道）");
++                }
++
++                ulong address = HorizonStatic.Syscall.GetTransferMemoryAddress(transferMemoryHandle);
++
++                if (address == 0)
++                {
++                    throw new NotImplementedException($"prepo:u 10500：句柄 0x{transferMemoryHandle:X} 不是传输内存（真机回什么不知道）");
++                }
++
++                Result result = ProcessPlayReport(PlayReportKind.Normal, eventIdBuffer, HorizonStatic.AddressSpace.GetSpan(address, (int)reportSize), pid, userId, true);
++
++                if (result.IsFailure)
++                {
++                    return result;
++                }
++
++                asyncContext = new AsyncContext(Result.Success);
++
++                return Result.Success;
++            }
++            finally
++            {
++                HorizonStatic.Syscall.CloseHandle(transferMemoryHandle);
++            }
++        }
++
+         [CmifCommand(20100)]
+         public Result SaveSystemReport([Buffer(HipcBufferFlags.In | HipcBufferFlags.Pointer)] ReadOnlySpan<byte> gameRoomBuffer, ApplicationId applicationId, [Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<byte> reportBuffer)
+         {
+diff --git a/src/Ryujinx.Horizon/Sdk/Prepo/IAsyncContext.cs b/src/Ryujinx.Horizon/Sdk/Prepo/IAsyncContext.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..661280915f12717641e878ae16d3b646eb3dcd65
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Prepo/IAsyncContext.cs
+@@ -0,0 +1,12 @@
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.Sf;
++
++namespace Ryujinx.Horizon.Sdk.Prepo
++{
++    interface IAsyncContext : IServiceObject
++    {
++        Result GetSystemEvent(out int eventHandle);
++        Result Cancel();
++        Result GetResult();
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Prepo/IPrepoService.cs b/src/Ryujinx.Horizon/Sdk/Prepo/IPrepoService.cs
+index a55570d54d67b6da031e880b7afa2dd0fda801a9..cb63755334f05b09e172d994bdddf9ce20a2c445 100644
+--- a/src/Ryujinx.Horizon/Sdk/Prepo/IPrepoService.cs
++++ b/src/Ryujinx.Horizon/Sdk/Prepo/IPrepoService.cs
+@@ -15,6 +15,7 @@ namespace Ryujinx.Horizon.Sdk.Prepo
+         Result RequestImmediateTransmission();
+         Result GetTransmissionStatus(out int status);
+         Result GetSystemSessionId(out ulong systemSessionId);
++        Result SendReportWithUser(out IAsyncContext asyncContext, bool optInCheckEnabled, uint transferMemorySize, uint reportSize, Uid userId, ReadOnlySpan<byte> eventIdBuffer, int transferMemoryHandle, ulong pid);
+         Result SaveSystemReport(ReadOnlySpan<byte> gameRoomBuffer, ApplicationId applicationId, ReadOnlySpan<byte> reportBuffer);
+         Result SaveSystemReportWithUser(Uid userId, ReadOnlySpan<byte> gameRoomBuffer, ApplicationId applicationId, ReadOnlySpan<byte> reportBuffer);
+         Result IsUserAgreementCheckEnabled(out bool enabled);

@@ -1,0 +1,413 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index ea0734d8848e98686b800c939558f911a658537a..4c100fc6ce7bf21c45e7667d9a141e2e7979850c 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -45,6 +45,9 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         private readonly object _lock = new();
+ 
++        // S2Arm: underrun counters / S2A_AUDIO_WAV capture, see S2AOutputDiag
++        private readonly S2AOutputDiag _diag;
++
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+         private delegate void AudioQueueOutputCallback(
+             nint userData,
+@@ -64,6 +67,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             _callbackDelegate = OutputCallback;
+             _bytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * (int)requestedChannelCount;
+             _samples = new AudioSampleQueue(_bytesPerFrame * (int)requestedSampleRate);
++            _diag = S2AOutputDiag.Create(_bytesPerFrame, (int)requestedChannelCount, (int)requestedSampleRate, BackendHelper.GetSampleSize(requestedSampleFormat) * 8);
+ 
+             _gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
+ 
+@@ -133,6 +137,11 @@ namespace Ryujinx.Audio.Backends.Apple
+             buffer->AudioDataByteSize = (uint)capacityBytes;
+             _bufferBytesFilled[bufferIndex] = bytesToRead;
+ 
++            if (_started)
++            {
++                _diag.OnFill(framesPerBuffer, framesToRead, _samples.Length / _bytesPerFrame, dst);
++            }
++
+             AudioQueueEnqueueBuffer(_audioQueue, bufferPtr, 0, nint.Zero);
+         }
+ 
+@@ -249,6 +258,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _queued[(_queuedHead + _queuedCount) % _queued.Length] = (buffer.DataPointer, sampleCount);
+                 _queuedCount++;
+             }
++
++            _diag.OnEnqueue((int)sampleCount, _samples.Length / _bytesPerFrame);
+         }
+ 
+         public override void Start()
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..129837a6ba01669aaef8cbc50c9b0d6b99c1cbfe
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -0,0 +1,333 @@
++using Ryujinx.Audio.Renderer.Dsp;
++using System;
++using System.Diagnostics;
++using System.IO;
++using System.Threading;
++
++namespace Ryujinx.Audio.Backends.Apple
++{
++    // S2Arm: output diagnostics for the CoreAudio sessions.
++    // - Always on, allocation-free on the callback: per-session counters (written by the CoreAudio callback thread only), and every
++    //   10 s one "[声] …" line from a reporter thread: callbacks, frames requested / supplied, underruns (a callback of a flowing stream
++    //   that got fewer frames than it asked for: the rest plays as silence), longest underrun run, smallest backlog left after a read,
++    //   longest gap between callbacks, plus the renderer's dropped periods (AudioProcessor skip) and worst period lateness.
++    // - S2A_AUDIO_WAV=<path>: every byte handed to CoreAudio (padding included) is copied into a preallocated ring and written by a
++    //   writer thread to <path>.<session>.wav (16-bit PCM header, sizes rewritten after each write so a crashed run still reads).
++    internal sealed class S2AOutputDiag
++    {
++        private const int MaxSessions = 8;
++        private static readonly S2AOutputDiag[] _all = new S2AOutputDiag[MaxSessions];
++        private static int _nextIndex = -1;
++        private static int _reporterStarted;
++        private static readonly string _wavBase = Environment.GetEnvironmentVariable("S2A_AUDIO_WAV");
++
++        public readonly int Index;
++        private readonly int _bytesPerFrame;
++        private readonly int _channels;
++        private readonly int _rate;
++        private readonly int _bitsPerSample;
++
++        // Written by the callback thread only; read (racy, diagnostics) by the reporter
++        private long _callbacks;
++        private long _framesRequested;
++        private long _framesSupplied;
++        private long _underruns;
++        private long _missingRun;
++        private long _maxMissingRun;
++        private long _minBacklog = long.MaxValue;
++        private long _maxGapTicks;
++        private long _lastCallbackTicks;
++        private bool _flowing;
++
++        // Reporter's snapshot of the previous line (deltas per 10 s)
++        private long _repCallbacks, _repRequested, _repSupplied, _repUnderruns;
++
++        // WAV ring: written by the callback thread, drained by the writer thread
++        private readonly byte[] _ring;
++        private long _ringWritten;
++        private long _ringRead;
++        private long _ringDropped;
++
++        // Event trace beside the wav (<path>.<session>.tsv): one single-writer ring per producer thread kind
++        private struct Ev { public long T; public int A; public int B; public int G; public long P; }
++        private const int EvCap = 1 << 16;
++        private readonly Ev[] _cbEv;
++        private readonly Ev[] _enqEv;
++        private long _cbEvW, _cbEvR, _enqEvW, _enqEvR;
++
++        private S2AOutputDiag(int index, int bytesPerFrame, int channels, int rate, int bitsPerSample)
++        {
++            Index = index;
++            _bytesPerFrame = bytesPerFrame;
++            _channels = channels;
++            _rate = rate;
++            _bitsPerSample = bitsPerSample;
++
++            if (!string.IsNullOrEmpty(_wavBase))
++            {
++                // 4 s of audio
++                _ring = new byte[bytesPerFrame * rate * 4];
++                _cbEv = new Ev[EvCap];
++                _enqEv = new Ev[EvCap];
++                new Thread(WriterLoop) { IsBackground = true, Name = $"S2A.AudioWav.{index}" }.Start();
++            }
++        }
++
++        public static S2AOutputDiag Create(int bytesPerFrame, int channels, int rate, int bitsPerSample)
++        {
++            int index = Interlocked.Increment(ref _nextIndex);
++            S2AOutputDiag d = new(index, bytesPerFrame, channels, rate, bitsPerSample);
++
++            if (index < MaxSessions)
++            {
++                Volatile.Write(ref _all[index], d);
++            }
++
++            if (Interlocked.Exchange(ref _reporterStarted, 1) == 0)
++            {
++                new Thread(ReporterLoop) { IsBackground = true, Name = "S2A.AudioDiag" }.Start();
++            }
++
++            Console.Error.WriteLine($"[声] 输出会话 #{index}：{channels} 声道 {rate} Hz {bitsPerSample} 位{(_wavBase != null ? $"，写 {_wavBase}.{index}.wav" : "")}");
++
++            return d;
++        }
++
++        /// <summary>
++        /// One CoreAudio callback refill: requested frames, frames that came from the queue, frames still queued after the read,
++        /// and the bytes handed to CoreAudio.
++        /// </summary>
++        public void OnFill(int requestedFrames, int suppliedFrames, int backlogFrames, ReadOnlySpan<byte> handedToDevice)
++        {
++            long now = Stopwatch.GetTimestamp();
++
++            if (_lastCallbackTicks != 0)
++            {
++                long gap = now - _lastCallbackTicks;
++
++                if (gap > _maxGapTicks)
++                {
++                    _maxGapTicks = gap;
++                }
++            }
++
++            _lastCallbackTicks = now;
++            _callbacks++;
++            _framesRequested += requestedFrames;
++            _framesSupplied += suppliedFrames;
++
++            if (suppliedFrames < requestedFrames)
++            {
++                if (_flowing)
++                {
++                    _underruns++;
++                }
++
++                if (_flowing || _missingRun > 0)
++                {
++                    _missingRun += requestedFrames - suppliedFrames;
++                }
++            }
++
++            if (suppliedFrames > 0)
++            {
++                if (_missingRun > 0 && suppliedFrames == requestedFrames)
++                {
++                    // The stream resumed: the run of missing frames is over (a run that never resumes is the stream ending, not an underrun)
++                    if (_missingRun > _maxMissingRun)
++                    {
++                        _maxMissingRun = _missingRun;
++                    }
++
++                    _missingRun = 0;
++                }
++
++                if (backlogFrames < _minBacklog)
++                {
++                    _minBacklog = backlogFrames;
++                }
++            }
++
++            _flowing = suppliedFrames > 0;
++
++            if (_ring != null)
++            {
++                WriteRing(handedToDevice);
++                PutEv(_cbEv, ref _cbEvW, Volatile.Read(ref _cbEvR), now, suppliedFrames, backlogFrames);
++            }
++        }
++
++        /// <summary>
++        /// A buffer was queued (frames), and the frames queued after it.
++        /// </summary>
++        public void OnEnqueue(int frames, int backlogFrames)
++        {
++            if (_ring != null)
++            {
++                PutEv(_enqEv, ref _enqEvW, Volatile.Read(ref _enqEvR), Stopwatch.GetTimestamp(), frames, backlogFrames);
++            }
++        }
++
++        private static void PutEv(Ev[] ring, ref long w, long r, long t, int a, int b)
++        {
++            if (w - r >= ring.Length)
++            {
++                return;
++            }
++
++            ring[w % ring.Length] = new Ev { T = t, A = a, B = b, G = GC.CollectionCount(0) + GC.CollectionCount(1) * 1000 + GC.CollectionCount(2) * 1000000, P = (long)GC.GetTotalPauseDuration().TotalMicroseconds };
++            Volatile.Write(ref w, w + 1);
++        }
++
++        private static void DrainEv(StreamWriter tw, Ev[] ring, ref long r, long w, char kind)
++        {
++            for (; r < w; r++)
++            {
++                Ev e = ring[r % ring.Length];
++                tw.Write(kind); tw.Write('\t'); tw.Write(e.T * 1_000_000 / Stopwatch.Frequency); tw.Write('\t'); tw.Write(e.A); tw.Write('\t'); tw.Write(e.B); tw.Write('\t'); tw.Write(e.G); tw.Write('\t'); tw.WriteLine(e.P);
++            }
++        }
++
++        private void WriteRing(ReadOnlySpan<byte> data)
++        {
++            long written = _ringWritten;
++            long free = _ring.Length - (written - Volatile.Read(ref _ringRead));
++
++            if (data.Length > free)
++            {
++                _ringDropped += data.Length;
++                return;
++            }
++
++            int pos = (int)(written % _ring.Length);
++            int first = Math.Min(data.Length, _ring.Length - pos);
++
++            data[..first].CopyTo(_ring.AsSpan(pos));
++            data[first..].CopyTo(_ring.AsSpan(0));
++
++            Volatile.Write(ref _ringWritten, written + data.Length);
++        }
++
++        private void WriterLoop()
++        {
++            string path = $"{_wavBase}.{Index}.wav";
++
++            try
++            {
++                using FileStream fs = new(path, FileMode.Create, FileAccess.Write, FileShare.Read);
++                using StreamWriter tw = new($"{_wavBase}.{Index}.tsv");
++
++                WriteHeader(fs, 0);
++
++                long dataBytes = 0;
++
++                while (true)
++                {
++                    Thread.Sleep(100);
++
++                    long er = _cbEvR; DrainEv(tw, _cbEv, ref er, Volatile.Read(ref _cbEvW), 'c'); Volatile.Write(ref _cbEvR, er);
++                    er = _enqEvR; DrainEv(tw, _enqEv, ref er, Volatile.Read(ref _enqEvW), 'q'); Volatile.Write(ref _enqEvR, er);
++                    tw.Flush();
++
++                    long written = Volatile.Read(ref _ringWritten);
++                    long read = _ringRead;
++
++                    if (written == read)
++                    {
++                        continue;
++                    }
++
++                    while (read < written)
++                    {
++                        int pos = (int)(read % _ring.Length);
++                        int n = (int)Math.Min(written - read, _ring.Length - pos);
++
++                        fs.Write(_ring, pos, n);
++                        read += n;
++                    }
++
++                    dataBytes += written - _ringRead;
++                    Volatile.Write(ref _ringRead, read);
++
++                    fs.Seek(0, SeekOrigin.Begin);
++                    WriteHeader(fs, dataBytes);
++                    fs.Seek(0, SeekOrigin.End);
++                    fs.Flush();
++                }
++            }
++            catch (Exception e)
++            {
++                Console.Error.WriteLine($"[声] 【红】写 {path} 失败：{e.Message}");
++            }
++        }
++
++        private void WriteHeader(Stream s, long dataBytes)
++        {
++            Span<byte> h = stackalloc byte[44];
++            uint data = (uint)Math.Min(dataBytes, uint.MaxValue - 36);
++            int blockAlign = _channels * _bitsPerSample / 8;
++
++            "RIFF"u8.CopyTo(h);
++            BitConverter.TryWriteBytes(h[4..], 36 + data);
++            "WAVEfmt "u8.CopyTo(h[8..]);
++            BitConverter.TryWriteBytes(h[16..], 16);
++            BitConverter.TryWriteBytes(h[20..], (ushort)(_bitsPerSample == 32 ? 3 : 1));
++            BitConverter.TryWriteBytes(h[22..], (ushort)_channels);
++            BitConverter.TryWriteBytes(h[24..], _rate);
++            BitConverter.TryWriteBytes(h[28..], _rate * blockAlign);
++            BitConverter.TryWriteBytes(h[32..], (ushort)blockAlign);
++            BitConverter.TryWriteBytes(h[34..], (ushort)_bitsPerSample);
++            "data"u8.CopyTo(h[36..]);
++            BitConverter.TryWriteBytes(h[40..], data);
++
++            s.Write(h);
++        }
++
++        private static void ReporterLoop()
++        {
++            while (true)
++            {
++                Thread.Sleep(10_000);
++
++                long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
++                long lateNs = Interlocked.Exchange(ref AudioProcessor.S2AMaxLateNs, 0);
++
++                for (int i = 0; i < MaxSessions; i++)
++                {
++                    S2AOutputDiag d = Volatile.Read(ref _all[i]);
++
++                    if (d == null)
++                    {
++                        continue;
++                    }
++
++                    long cb = d._callbacks, req = d._framesRequested, sup = d._framesSupplied, und = d._underruns;
++                    long dcb = cb - d._repCallbacks;
++
++                    if (dcb == 0)
++                    {
++                        continue;
++                    }
++
++                    long maxRun = Math.Max(d._maxMissingRun, d._missingRun);
++                    long minBacklog = d._minBacklog;
++                    double maxGapMs = d._maxGapTicks * 1000.0 / Stopwatch.Frequency;
++
++                    d._maxMissingRun = 0;
++                    d._minBacklog = long.MaxValue;
++                    d._maxGapTicks = 0;
++
++                    Console.Error.WriteLine(
++                        $"[声] 输出 #{d.Index} 10 秒：回调 {dcb} 次，要 {req - d._repRequested} 帧、供 {sup - d._repSupplied} 帧，欠载 {und - d._repUnderruns} 次，" +
++                        $"最长欠载 {maxRun * 1000.0 / d._rate:F1} ms，读后最少余 {(minBacklog == long.MaxValue ? -1 : minBacklog)} 帧，回调最长间隔 {maxGapMs:F1} ms；" +
++                        $"渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++
++                    d._repCallbacks = cb;
++                    d._repRequested = req;
++                    d._repSupplied = sup;
++                    d._repUnderruns = und;
++                }
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index 64c5cbd0dfb938ed7b155aa3a5575eae25232f50..b6364df55e5e94cbe53594ffee3eb436d487c38d 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -44,6 +44,11 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         // 测试机1 线程表：两条线程合计约 1.9 万运行段/秒（每段 2.5–7.6 µs），设计每 5 ms 一次交接
+         private static readonly bool S2AInline = Environment.GetEnvironmentVariable("S2A_AUDIO_INLINE") == "1";
+ 
++        // S2Arm: diagnostics read (and reset) by the output backend's reporter: periods dropped by the catch-up skip below, and the
++        // worst lateness of a period start (how long after its due time the loop got to it)
++        public static long S2ASkippedPeriods;
++        public static long S2AMaxLateNs;
++
+         public AudioProcessor()
+         {
+         }
+@@ -183,6 +188,14 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             {
+                 // Skip a few frames so that we're not too far behind. (the target number of frames)
+                 _lastTime += increment * (bufferedFrames - TargetBufferedFrames);
++                Interlocked.Add(ref S2ASkippedPeriods, bufferedFrames - TargetBufferedFrames);
++            }
++
++            long s2aLate = timeNow - (_lastTime + increment);
++
++            if (s2aLate > Volatile.Read(ref S2AMaxLateNs))
++            {
++                Volatile.Write(ref S2AMaxLateNs, s2aLate);
+             }
+ 
+             // S2Arm: one sleep to the end of the period instead of polling WaitOne(1) (3.4 wakeups per 5 ms period → 1)

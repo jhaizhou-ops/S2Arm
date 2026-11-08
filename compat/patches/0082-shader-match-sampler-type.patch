@@ -1,0 +1,19 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index 53a3b9f6ffae36ee3df306b46a6df3fb84466929..30535a640a7dfa4727d976cb09552e70d86eb7c3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -849,6 +849,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 {
+                     return false;
+                 }
++
++                // S2A：翻译时查询过采样器类型（QuerySamplerType）的，类型不同就不能复用。上游不比：上游缓存条目都由同一游戏运行时翻译，类型天然一致；
++                // 出包离线烘焙拿不到运行时描述符，按缺省 Texture1D 翻（10-20 动森全屏后处理顶点着色器把二维参数贴图当一维采样，远景景深失效）
++                if ((specializationState.Value.QueriedFlags & QueriedTextureStateFlags.SamplerType) == QueriedTextureStateFlags.SamplerType &&
++                    specializationState.Value.TextureTarget.ConvertSamplerType() != descriptor.UnpackTextureTarget().ConvertSamplerType())
++                {
++                    return false;
++                }
+             }
+ 
+             return true;

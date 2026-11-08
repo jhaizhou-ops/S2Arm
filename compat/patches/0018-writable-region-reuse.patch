@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Memory/WritableRegion.cs b/src/Ryujinx.Memory/WritableRegion.cs
+index 54facb5085bf07f93d2bdd29a08219c664f7fddf..e9f6a747cef8f23493f488ba93addbb3bef120b7 100644
+--- a/src/Ryujinx.Memory/WritableRegion.cs
++++ b/src/Ryujinx.Memory/WritableRegion.cs
+@@ -12,7 +12,19 @@ namespace Ryujinx.Memory
+ 
+         private bool NeedsWriteback => _block != null;
+ 
+-        public Memory<byte> Memory { get; }
++        public Memory<byte> Memory { get; private set; }
++
++        // S2Arm: re-point a region that has no write-back block (Dispose is then a no-op), so a memory manager whose
++        // memory is directly addressable can hand out regions without allocating one per call
++        public void S2AReuse(Memory<byte> memory)
++        {
++            if (NeedsWriteback || _memoryOwner != null)
++            {
++                throw new InvalidOperationException("S2Arm: only regions without write-back can be reused");
++            }
++
++            Memory = memory;
++        }
+ 
+         public WritableRegion(IWritableBlock block, ulong va, Memory<byte> memory, bool tracked = false)
+         {

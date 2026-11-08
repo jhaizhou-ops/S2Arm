@@ -1,0 +1,164 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+index a876ecb2de2abe77ef3d48968552e0aef9273b4a..186a4e8a6fe6e0df03c7ccf9f4d2c7b4a5cde79d 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -665,8 +665,42 @@ namespace Ryujinx.HLE.FileSystem
+         protected override Result DoRenameFile(ref readonly Path currentPath, ref readonly Path newPath) { lock (_lock) return _base.Get.RenameFile(in currentPath, in newPath); }
+         protected override Result DoRenameDirectory(ref readonly Path currentPath, ref readonly Path newPath) { lock (_lock) return _base.Get.RenameDirectory(in currentPath, in newPath); }
+         protected override Result DoGetEntryType(out DirectoryEntryType entryType, ref readonly Path path) => _base.Get.GetEntryType(out entryType, in path);
+-        protected override Result DoGetFreeSpaceSize(out long freeSpace, ref readonly Path path) => _base.Get.GetFreeSpaceSize(out freeSpace, in path);
+-        protected override Result DoGetTotalSpaceSize(out long totalSpace, ref readonly Path path) => _base.Get.GetTotalSpaceSize(out totalSpace, in path);
++        // Space within the save's size, not the host volume's (S2ASaveSpace)
++        protected override Result DoGetFreeSpaceSize(out long freeSpace, ref readonly Path path)
++        {
++            UnsafeHelpers.SkipParamInit(out freeSpace);
++            Result result = _base.Get.GetFreeSpaceSize(out long hostFree, in path);
++
++            if (result.IsFailure())
++            {
++                return result;
++            }
++
++            lock (_lock)
++            {
++                result = _base.Get.ReadExtraData(out SaveDataExtraData extraData);
++
++                return result.IsFailure() ? result : S2ASaveSpace.GetFreeSpaceSize(out freeSpace, in extraData, System.IO.Path.Combine(_dir, "1"), hostFree);
++            }
++        }
++
++        protected override Result DoGetTotalSpaceSize(out long totalSpace, ref readonly Path path)
++        {
++            UnsafeHelpers.SkipParamInit(out totalSpace);
++            Result result = _base.Get.GetTotalSpaceSize(out long hostTotal, in path);
++
++            if (result.IsFailure())
++            {
++                return result;
++            }
++
++            lock (_lock)
++            {
++                result = _base.Get.ReadExtraData(out SaveDataExtraData extraData);
++
++                return result.IsFailure() ? result : S2ASaveSpace.GetTotalSpaceSize(out totalSpace, in extraData, hostTotal);
++            }
++        }
+         protected override Result DoOpenDirectory(ref UniqueRef<IDirectory> outDirectory, ref readonly Path path, OpenDirectoryMode mode) => _base.Get.OpenDirectory(ref outDirectory, in path, mode);
+         protected override Result DoCommitProvisionally(long counter) => _base.Get.CommitProvisionally(counter);
+         protected override Result DoFlush() => _base.Get.Flush();
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveSpace.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveSpace.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..14e1bce268cf7f22adfe8d5b52a8151e9dc843f8
+--- /dev/null
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveSpace.cs
+@@ -0,0 +1,83 @@
++using LibHac;
++using LibHac.Fs;
++using System;
++using System.Collections.Concurrent;
++using System.IO;
++
++namespace Ryujinx.HLE.FileSystem
++{
++    // S2Arm: free / total space of a save data file system as the console reports it. On the console a save is a fixed-size image:
++    // GetTotalSpaceSize is its data size and GetFreeSpaceSize what is left of it, both within the size the save was created with
++    // (extra data DataSize) or later extended to (am ExtendSaveData → nn::fs::ExtendApplicationSaveData). Upstream's directory save
++    // forwards both to the host disk, so a game asking how much room its save has gets the host volume (hundreds of GB) — more
++    // than the save can ever hold. 11-04 Minecraft 1.21.111: asks GetFreeSpaceSize right before creating a world, gets ~316 GB
++    // back, never creates the world directory, CreateFile level.dat fails PathNotFound and the game shows "Something went wrong";
++    // with 288 MB (the size it extended its save to) the world is created and played (docs/坑记录.md 11-04 Minecraft).
++    // Capacity = max(DataSize, the size am reports for the save): am's GetSaveDataSize is an upstream stub answering 200 MB until
++    // the game extends (IApplicationFunctions), so an account / device save is never smaller than what am told the game it has.
++    public static class S2ASaveSpace
++    {
++        // Upstream IApplicationFunctions' default for GetSaveDataSize / GetSaveDataSizeMax (its NOTE: "hardcode the values to 200mb")
++        public const long AmDefaultSize = 200000000;
++
++        private static readonly ConcurrentDictionary<(ulong Program, SaveDataType Type, ulong UserHigh, ulong UserLow), long> _extended = new();
++
++        // am ExtendSaveData: the save of this program / type / user now has at least dataSize bytes (an extension never shrinks a save)
++        public static void Extend(ulong programId, SaveDataType type, ulong userHigh, ulong userLow, long dataSize)
++        {
++            _extended.AddOrUpdate((programId, type, userHigh, userLow), dataSize, (_, old) => Math.Max(old, dataSize));
++        }
++
++        // Size of the save described by its extra data; 0 = unknown (no size recorded, nothing am answered for it)
++        public static long Capacity(in SaveDataExtraData extraData)
++        {
++            long capacity = Math.Max(extraData.DataSize, 0);
++            SaveDataType type = extraData.Attribute.Type;
++
++            if (type is SaveDataType.Account or SaveDataType.Device)
++            {
++                var key = (extraData.Attribute.ProgramId.Value, type, extraData.Attribute.UserId.Id.High, extraData.Attribute.UserId.Id.Low);
++                capacity = Math.Max(capacity, _extended.TryGetValue(key, out long extended) ? extended : AmDefaultSize);
++            }
++
++            return capacity;
++        }
++
++        // Bytes the save's files take: sum of file lengths under its working directory on the host
++        public static long Used(string directory)
++        {
++            long used = 0;
++
++            if (!Directory.Exists(directory))
++            {
++                return 0;
++            }
++
++            foreach (FileInfo file in new DirectoryInfo(directory).EnumerateFiles("*", SearchOption.AllDirectories))
++            {
++                used += file.Length;
++            }
++
++            return used;
++        }
++
++        public static Result GetTotalSpaceSize(out long totalSpace, in SaveDataExtraData extraData, long hostTotal)
++        {
++            long capacity = Capacity(in extraData);
++            totalSpace = capacity > 0 ? capacity : hostTotal;
++
++            return Result.Success;
++        }
++
++        // What is left of the save, never more than the host volume has left
++        public static Result GetFreeSpaceSize(out long freeSpace, in SaveDataExtraData extraData, string workingDirectory, long hostFree)
++        {
++            long capacity = Capacity(in extraData);
++            freeSpace = capacity > 0 ? Math.Min(hostFree, Math.Max(capacity - Used(workingDirectory), 0)) : hostFree;
++
++            return Result.Success;
++        }
++
++        internal static void Reset() => _extended.Clear();
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 652cfff013ceb2259e5973905d9bb2e506ef10c2..5518665f3a63616d0e9a8034dbd6109478f7ad1a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -219,6 +219,9 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             _defaultSaveDataSize = saveDataSize;
+             _defaultJournalSaveDataSize = journalSize;
+ 
++            // S2Arm: the save itself grows too — its file system reports space within the extended size (FileSystem/S2ASaveSpace)
++            Ryujinx.HLE.FileSystem.S2ASaveSpace.Extend(context.Device.Processes.GetProcess(_pid).Identity.ApplicationId, saveDataType, userId.Id.High, userId.Id.Low, saveDataSize);
++
+             context.ResponseData.Write((uint)ResultCode.Success);
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceAm, new { saveDataType, userId, saveDataSize, journalSize });
+diff --git a/src/Ryujinx.HLE/S2ASessionState.cs b/src/Ryujinx.HLE/S2ASessionState.cs
+index 5a9d6a21e6bb893ec165cfe1d7066ccb4764404f..5191dea04ce11ee7cc501f18e53f15f9ac3d9899 100644
+--- a/src/Ryujinx.HLE/S2ASessionState.cs
++++ b/src/Ryujinx.HLE/S2ASessionState.cs
+@@ -7,6 +7,7 @@ namespace Ryujinx.HLE
+         internal static void End()
+         {
+             HOS.Services.Fs.S2ASaveShare.CloseAll();
++            Ryujinx.HLE.FileSystem.S2ASaveSpace.Reset();
+             HOS.Services.Sockets.Bsd.BsdContext.S2AReset();
+             HOS.Services.Sockets.Bsd.Proxy.SocketHelpers.UnregisterProxy();
+             HOS.Services.Nv.NvDrvServices.NvMap.NvMapDeviceFile.S2AReset();

@@ -1,0 +1,27 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 3a66aae5412862d5041479781dcf85ec3e0b1e4d..c634dd82529bc4b359a83ecb86a05d5cc4d0f052 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -351,15 +351,19 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     }
+                 }
+ 
+-                if (managersInUse == 1 || updatedCount > 0 || S2AShutdown.Requested || System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
++                // S2Arm: one clock read decides both "time is up" and how long to wait (audit #656 P2, Select half): reading it again for
++                // the wait could land past the deadline and turn a negative remainder into -1 = wait forever; S2APollWaitMs gives -1 only
++                // for an unlimited select and clamps a finite wait to [0, int.MaxValue]
++                long now = System.Diagnostics.Stopwatch.GetTimestamp();
++
++                if (managersInUse == 1 || updatedCount > 0 || S2AShutdown.Requested || now >= deadline)
+                 {
+                     break;
+                 }
+ 
+                 if (wakeable)
+                 {
+-                    long left = deadline == long.MaxValue ? -1 : (deadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 / System.Diagnostics.Stopwatch.Frequency + 1;
+-                    S2ABsdWake.Wait(seen, left < 0 ? -1 : (int)System.Math.Min(left, int.MaxValue));
++                    S2ABsdWake.Wait(seen, S2APollWaitMs(deadline, now, System.Diagnostics.Stopwatch.Frequency));
+                 }
+                 else
+                 {

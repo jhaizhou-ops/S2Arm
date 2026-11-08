@@ -1,0 +1,26 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+index 7a8fbf9b69d94b0a1ffeba421bd5d54df15d712c..a05ca23ec4d69a299ce9033505e0c60ec7e218bb 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+@@ -60,6 +60,9 @@ namespace Ryujinx.Graphics.Nvdec
+             Decode((ApplicationId)_state.State.SetApplicationId);
+         }
+ 
++        // S2Arm: called once per decoded frame (the host paces presents to the movie's rate while one plays: graphics/nvn nvn_vpace.h); null = upstream behaviour
++        public static System.Action S2AFrameDecoded;
++
+         private void Decode(ApplicationId applicationId)
+         {
+             switch (applicationId)
+@@ -75,8 +78,10 @@ namespace Ryujinx.Graphics.Nvdec
+                     break;
+                 default:
+                     Logger.Error?.Print(LogClass.Nvdec, $"Unsupported codec \"{applicationId}\".");
+-                    break;
++                    return;
+             }
++
++            S2AFrameDecoded?.Invoke();
+         }
+     }
+ }

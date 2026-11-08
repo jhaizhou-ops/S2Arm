@@ -1,0 +1,157 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetCollection.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetCollection.cs
+index a39a8d9a2ea13be59432e06b039a204e123c66b1..4b1cb83e1d504b4eba0c4545861c2f1331d7ba7c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetCollection.cs
+@@ -111,6 +111,33 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        /// <summary>
++        /// Writes a run of consecutive standalone bindings, one write per binding.
++        /// The set layout declares each of them as its own binding with DescriptorCount 1, so writing them with a
++        /// single DescriptorCount = N goes past the end of the first binding; most drivers happen to work because
++        /// the descriptors are physically adjacent, but Adreno drops everything after the first one (samples as 0).
++        /// </summary>
++        public unsafe void UpdateImagesPerBinding(int setIndex, int baseBinding, ReadOnlySpan<DescriptorImageInfo> imageInfo, DescriptorType type)
++        {
++            fixed (DescriptorImageInfo* pImageInfo = imageInfo)
++            {
++                for (int i = 0; i < imageInfo.Length; i++)
++                {
++                    WriteDescriptorSet writeDescriptorSet = new()
++                    {
++                        SType = StructureType.WriteDescriptorSet,
++                        DstSet = _descriptorSets[setIndex],
++                        DstBinding = (uint)(baseBinding + i),
++                        DescriptorType = type,
++                        DescriptorCount = 1,
++                        PImageInfo = pImageInfo + i,
++                    };
++
++                    _holder.Api.UpdateDescriptorSets(_holder.Device, 1, in writeDescriptorSet, 0, null);
++                }
++            }
++        }
++
+         public unsafe void UpdateImagesCombined(int setIndex, int baseBinding, ReadOnlySpan<DescriptorImageInfo> imageInfo, DescriptorType type)
+         {
+             if (imageInfo.Length == 0)
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetTemplate.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetTemplate.cs
+index 3b70a841aac16997980e4ef0ac5e7fe3f51dfa14..2c8d85dba57e0a3a6782bee002e6e5e6c3e4bbf8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetTemplate.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetTemplate.cs
+@@ -32,9 +32,23 @@ namespace Ryujinx.Graphics.Vulkan
+             _device = device;
+ 
+             // Create a template from the set usages. Assumes the descriptor set is updated in segment order then binding order.
++            //
++            // A non-array segment of Count consecutive bindings is not one array binding: the set layout declares
++            // each of them as its own binding with DescriptorCount 1. Writing them with a single entry of
++            // DescriptorCount = Count goes past the end of the first binding. Most drivers happen to work because
++            // the descriptors are physically adjacent, but Adreno drops everything after the first one, so the
++            // following slots stay uninitialized and sample as (0, 0, 0, 0). Expand those segments to one entry
++            // per binding; array segments keep their single entry.
++            int entryCount = 0;
+ 
+-            DescriptorUpdateTemplateEntry* entries = stackalloc DescriptorUpdateTemplateEntry[segments.Length];
++            for (int seg = 0; seg < segments.Length; seg++)
++            {
++                entryCount += segments[seg].IsArray ? 1 : segments[seg].Count;
++            }
++
++            DescriptorUpdateTemplateEntry* entries = stackalloc DescriptorUpdateTemplateEntry[entryCount];
+             nuint structureOffset = 0;
++            int entryIndex = 0;
+ 
+             for (int seg = 0; seg < segments.Length; seg++)
+             {
+@@ -43,44 +57,41 @@ namespace Ryujinx.Graphics.Vulkan
+                 int binding = segment.Binding;
+                 int count = segment.Count;
+ 
+-                if (IsBufferType(segment.Type))
+-                {
+-                    entries[seg] = new DescriptorUpdateTemplateEntry()
+-                    {
+-                        DescriptorType = segment.Type.Convert(),
+-                        DstBinding = (uint)binding,
+-                        DescriptorCount = (uint)count,
+-                        Offset = structureOffset,
+-                        Stride = (nuint)Unsafe.SizeOf<DescriptorBufferInfo>()
+-                    };
++                DescriptorType descriptorType = segment.Type.Convert();
++                nuint entrySize = IsBufferType(segment.Type)
++                    ? (nuint)Unsafe.SizeOf<DescriptorBufferInfo>()
++                    : IsBufferTextureType(segment.Type)
++                        ? (nuint)Unsafe.SizeOf<BufferView>()
++                        : (nuint)Unsafe.SizeOf<DescriptorImageInfo>();
+ 
+-                    structureOffset += (nuint)(Unsafe.SizeOf<DescriptorBufferInfo>() * count);
+-                }
+-                else if (IsBufferTextureType(segment.Type))
++                if (segment.IsArray)
+                 {
+-                    entries[seg] = new DescriptorUpdateTemplateEntry()
++                    entries[entryIndex++] = new DescriptorUpdateTemplateEntry()
+                     {
+-                        DescriptorType = segment.Type.Convert(),
++                        DescriptorType = descriptorType,
+                         DstBinding = (uint)binding,
+                         DescriptorCount = (uint)count,
+                         Offset = structureOffset,
+-                        Stride = (nuint)Unsafe.SizeOf<BufferView>()
++                        Stride = entrySize
+                     };
+ 
+-                    structureOffset += (nuint)(Unsafe.SizeOf<BufferView>() * count);
++                    structureOffset += entrySize * (nuint)count;
+                 }
+                 else
+                 {
+-                    entries[seg] = new DescriptorUpdateTemplateEntry()
++                    for (int i = 0; i < count; i++)
+                     {
+-                        DescriptorType = segment.Type.Convert(),
+-                        DstBinding = (uint)binding,
+-                        DescriptorCount = (uint)count,
+-                        Offset = structureOffset,
+-                        Stride = (nuint)Unsafe.SizeOf<DescriptorImageInfo>()
+-                    };
+-
+-                    structureOffset += (nuint)(Unsafe.SizeOf<DescriptorImageInfo>() * count);
++                        entries[entryIndex++] = new DescriptorUpdateTemplateEntry()
++                        {
++                            DescriptorType = descriptorType,
++                            DstBinding = (uint)(binding + i),
++                            DescriptorCount = 1,
++                            Offset = structureOffset,
++                            Stride = entrySize
++                        };
++
++                        structureOffset += entrySize;
++                    }
+                 }
+             }
+ 
+@@ -89,7 +100,7 @@ namespace Ryujinx.Graphics.Vulkan
+             DescriptorUpdateTemplateCreateInfo info = new()
+             {
+                 SType = StructureType.DescriptorUpdateTemplateCreateInfo,
+-                DescriptorUpdateEntryCount = (uint)segments.Length,
++                DescriptorUpdateEntryCount = (uint)entryCount,
+                 PDescriptorUpdateEntries = entries,
+ 
+                 TemplateType = DescriptorUpdateTemplateType.DescriptorSet,
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 9ce55bd65a6997ea802e8a9cf072eba4adeb8012..aa0be517de1652f199833fd6aec3d63986ca4077 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -1054,7 +1054,7 @@ namespace Ryujinx.Graphics.Vulkan
+                             }
+                         }
+ 
+-                        dsc.UpdateImages(0, binding, textures[..count], DescriptorType.CombinedImageSampler);
++                        dsc.UpdateImagesPerBinding(0, binding, textures[..count], DescriptorType.CombinedImageSampler);
+                     }
+                     else
+                     {

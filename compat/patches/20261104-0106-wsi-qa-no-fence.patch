@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index b9502d2f1b8d8b8cf6720c0b69ea0d4d511ae435..d38c94c6acc74279f5433825ef3a4887fde2bf7c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -57,6 +57,10 @@ namespace Ryujinx.Graphics.Vulkan
+         // Instance policy: a host that replaces guest backing must not retain imported pointers.
+         internal bool AllowHostMemoryImport { get; set; } = true;
+         internal bool UseSingleQueue { get; set; }
++        // Only the Android adapter can opt out through its debug-build QA gate.
++        internal bool S2AForceNoSwapchainMaintenance { get; set; }
++        internal static bool S2ASurfaceMaintenanceEnabled(bool androidWindow, bool instanceExtension, bool qaForceOff) =>
++            androidWindow && instanceExtension && !qaForceOff;
+         // Android opt-in; keep proprietary-driver attachment clears on the existing path.
+         internal bool TransferFullClears { get; set; }
+         internal long TransferFullClearCount { get; set; }
+@@ -764,7 +768,7 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             _device = VulkanInitialization.CreateDeviceWithSurfaceMaintenance(Api, _physicalDevice, queueFamilyIndex, maxQueueCount, out _enabledFeatures,
+-                WindowFactory != null && Array.IndexOf(instanceExtensions, "VK_EXT_surface_maintenance1") >= 0);
++                S2ASurfaceMaintenanceEnabled(WindowFactory != null, Array.IndexOf(instanceExtensions, "VK_EXT_surface_maintenance1") >= 0, S2AForceNoSwapchainMaintenance));
+ 
+             if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrSwapchain swapchainApi))
+             {

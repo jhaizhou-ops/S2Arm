@@ -1,0 +1,12 @@
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index 8498267876711ce1c628b57885cf4cb9c68c1ea0..80da96b32536d2df99f5dbe96e520e141a9186a8 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -94,6 +94,7 @@ namespace Ryujinx.Graphics.Shader
+             ("alpha_test.x/y：透明测试比较方式 / 参考值", FragmentAlphaTestOffset, 8, "帧率能耗线 0056"),
+             ("s2a_widen.x：边缘外推量（浮点位）", S2AWidenOffset, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.y：边缘外推门限²（浮点位）", S2AWidenOffset + 4, 4, "画幅线 SpirvEdgePush"),
++            ("s2a_widen.z：横向收缩量（浮点位；原尺寸居中层全宽视口 + 收缩 1/k）", S2AWidenOffset + 8, 4, "画幅线 SpirvEdgePush"),
+         ];
+ 
+         private static void S2ACheckLayout()

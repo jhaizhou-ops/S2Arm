@@ -1,0 +1,51 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 87981bb2adf60644438c132b625cea46f43074cd..a0867f3a1a8ca43f307e1c8284bff56d8cf326ef 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -25,7 +25,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen，
+         //   +4（10-21 画面着色器线合批一次升）：点大小运行时化（支持缓冲在 s2a_widen 前加 s2a_point）+ 转计算程序进缓存（阶段掩码口径改、复合宿主二进制））
+         //   +5（10-21 画面·着色器线）：顶点输入按原始位读（宿主顶点自取，翻译结果不随属性类型变，补丁 vattr-raw）
+-        private const uint CodeGenVersion = 7354 + 6; // S2A：片元双轴分辨率倍率，支持缓冲追加 render_scale_y
++        internal const uint CodeGenVersion = 7354 + 6; // S2A：片元双轴分辨率倍率，支持缓冲追加 render_scale_y
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+@@ -70,6 +70,18 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             public ulong Reserved;
+         }
+ 
++        internal static uint S2AReadCodeGenVersion(string directory)
++        {
++            using FileStream stream = File.OpenRead(Path.Combine(directory, SharedTocFileName));
++            BinarySerializer reader = new(stream);
++            TocHeader header = new();
++            if (!reader.TryRead(ref header) || header.Magic != TocsMagic || header.FormatVersion != FileFormatVersionPacked)
++            {
++                throw new InvalidDataException($"着色器缓存目录表格式无效：{directory}");
++            }
++            return header.CodeGenVersion;
++        }
++
+         /// <summary>
+         /// Offset and size pair.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+index 0faeb0cd5ad9b8933f3da110758de47361417aae..6a03991c5328f317d367a1f947d39e1d27176fe6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -11,6 +11,14 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+     {
+         private static int _discarded;
+ 
++        public static uint TranslatorVersion => DiskCacheHostStorage.CodeGenVersion;
++
++        public static bool HasCurrentCode(string directory, out uint version)
++        {
++            version = DiskCacheHostStorage.S2AReadCodeGenVersion(directory);
++            return version == TranslatorVersion;
++        }
++
+         /// <summary>Programs dropped from the disk cache instead of being recompiled at boot (health table / tests).</summary>
+         public static int Discarded => _discarded;
+ 

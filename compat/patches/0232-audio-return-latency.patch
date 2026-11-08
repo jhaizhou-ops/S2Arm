@@ -1,0 +1,63 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 568b27ca3b7be5efc50f900f3c7261c6b86a91b8..b290c671138a391d51c0f0ed6707205587daf212 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -68,6 +68,12 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _maxStarveTicks;
+         private long _minInFlight = long.MaxValue;
+         private long _maxGapTicks;
++        // S2Arm (10-25 数码宝贝 Mac 欠载)：设备交还时机。提交时按「已在途 + 本块」连续播放推出本块应播完的时刻，压进定长环（设备按提交顺序交还）；
++        //   交还时弹出，记「实际交还 − 应播完」= 设备输出延迟（交还比真正播完晚多少）。游戏按释放补数：这段延迟越长，游戏越晚拿到空缓冲
++        private const int LatRing = 128;
++        private readonly long[] _latDue = new long[LatRing];
++        private int _latW, _latR;
++        private long _latMin = long.MaxValue, _latMax, _latSum, _latN;
+         private long _lastCallbackTicks;
+         // Hand-back that left nothing in flight (0: not starving)
+         private long _starveSince;
+@@ -201,6 +207,11 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             _framesSubmitted += frames;
+ 
++            if (_latW - _latR < LatRing)
++            {
++                _latDue[_latW++ % LatRing] = now + (inFlightBefore + data.Length) / _bytesPerFrame * Stopwatch.Frequency / _rate;
++            }
++
+             if (_ring != null)
+             {
+                 WriteRing(data);
+@@ -222,6 +233,16 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             _lastCallbackTicks = now;
+             _callbacks++;
++
++            if (bytes > 0 && _latR < _latW)
++            {
++                long late = now - _latDue[_latR++ % LatRing];
++
++                if (late < _latMin) _latMin = late;
++                if (late > _latMax) _latMax = late;
++                _latSum += late;
++                _latN++;
++            }
+             _framesPlayed += bytes / _bytesPerFrame;
+ 
+             if (_started && bytes > 0)
+@@ -418,11 +439,14 @@ namespace Ryujinx.Audio.Backends.Apple
+                     d._maxStarveTicks = 0;
+                     d._minInFlight = long.MaxValue;
+                     d._maxGapTicks = 0;
++                    double tf = 1000.0 / Stopwatch.Frequency;
++                    string lat = d._latN > 0 ? $"；交还相对连续播完 最少 {d._latMin * tf:F1} / 平均 {d._latSum * tf / d._latN:F1} / 最多 {d._latMax * tf:F1} ms（负 = 提前）" : "";
++                    d._latMin = long.MaxValue; d._latMax = 0; d._latSum = 0; d._latN = 0;
+ 
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+-                        $"断供 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
++                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     int cu = Volatile.Read(ref d._cushions);
+                     if (cu != d._repCushions)

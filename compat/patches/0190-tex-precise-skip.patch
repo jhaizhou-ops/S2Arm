@@ -1,0 +1,76 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 3760c146758fa432fb4d865266f6a062095dc5c7..c6e7121b5476790bf1540875379d99baf4b6f823 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -1179,7 +1179,16 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <returns>A CpuRegionHandle covering the given range</returns>
+         private RegionHandle GenerateHandle(ulong address, ulong size)
+         {
+-            return _physicalMemory.BeginTracking(address, size, ResourceKind.Texture);
++            RegionHandle handle = _physicalMemory.BeginTracking(address, size, ResourceKind.Texture);
++
++            // S2A（帧率能耗线 10-23，缺省关 S2A_TEX_PRECISE_SKIP=1）：精确访问没碰本句柄的真实字节就不回写、不标脏（见 RegionHandle.S2AOutsideReal）。
++            // 塞尔达 GPU 线程上每秒约 200 次整张回写，来自写跟踪排空的精确写落在同子页里贴图旁边的数据上
++            if (S2ATexPreciseSkip.On)
++            {
++                handle.RegisterPreciseAction((a, s, w) => S2ATexPreciseSkip.Check(handle, a, s));
++            }
++
++            return handle;
+         }
+ 
+         /// <summary>
+@@ -1996,6 +2005,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
+                 double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                 long n = 0, w = 0, c = 0; foreach (var x in _acc.Values) { n += x.N; w += x.Wait; c += x.Copy; }
++                System.Console.Error.WriteLine($"[贴图回写账] 精确访问不碰贴图字节、跳过 {System.Threading.Interlocked.Read(ref S2ATexPreciseSkip.Skipped)} 次（S2A_TEX_PRECISE_SKIP={(S2ATexPreciseSkip.On ? 1 : 0)}）");
+                 System.Console.Error.WriteLine($"[贴图回写账] 累计 {n} 次：等同步 {w * f:F0} ms、拷贝 {c * f:F0} ms；提前拷进回写缓冲 {System.Threading.Interlocked.Read(ref Prefill)} 次；部分回写 {S2APartialFlush.Count} 次；游戏未同步 {UnsyncN} 次 等 {UnsyncWait * f:F0} ms / 已同步 {SyncN} 次 等 {SyncWait * f:F0} ms；未同步放行不回写 贴图 {S2AUnsyncNoWait.Count} / 缓冲 {S2AUnsyncNoWait.BufCount} 次");
+                 foreach (var kv in System.Linq.Enumerable.OrderByDescending(_acc, kv => kv.Value.Wait + kv.Value.Copy))
+                     System.Console.Error.WriteLine($"[贴图回写账]   {kv.Key}：{kv.Value.N} 次 等 {kv.Value.Wait * f:F1} ms 拷 {kv.Value.Copy * f:F1} ms");
+@@ -2012,6 +2022,24 @@ namespace Ryujinx.Graphics.Gpu.Image
+     }
+ 
+     // S2A 部分回写的开关（S2A_PARTIAL_FLUSH=0 关，A/B 用）
++    internal static class S2ATexPreciseSkip
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_TEX_PRECISE_SKIP") == "1";
++        public static long Skipped;
++
++        public static bool Check(RegionHandle handle, ulong address, ulong size)
++        {
++            if (!RegionHandle.S2AOutsideReal(handle, address, size))
++            {
++                return false;
++            }
++
++            System.Threading.Interlocked.Increment(ref Skipped);
++
++            return true;
++        }
++    }
++
+     internal static class S2APartialFlush
+     {
+         public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_PARTIAL_FLUSH") != "0";
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index 13a6c6cddd99b32f46e1e9e8831579d2e8ce27d6..98c43855a39781e51babc20477e6d5b0768c6080 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -461,6 +461,16 @@ namespace Ryujinx.Memory.Tracking
+             _preciseAction = action;
+         }
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-23，贴图假共享）：精确访问 [address, address+size) 与本句柄真实字节区间 [RealAddress, RealAddress+RealSize) 不相交。
++        /// 跟踪按页对齐登记，同一 4 KB 子页里贴图旁边的别的数据被游戏写，原版也会把整张贴图回写并标脏；访问没碰本句柄的字节时两样都不需要。
++        /// size 为 0 按相交处理（保守）
++        /// </summary>
++        public static bool S2AOutsideReal(RegionHandle handle, ulong address, ulong size)
++        {
++            return size != 0 && (address + size <= handle.RealAddress || address >= handle.RealAddress + handle.RealSize);
++        }
++
+         /// <summary>
+         /// Register an action to perform when the region is written to.
+         /// This action will not be removed when it is called - it is called each time the dirty flag is set.

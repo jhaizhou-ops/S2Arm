@@ -1,0 +1,84 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 241c12370874551f3ae885f435c7fd493ca004c6..b2151ed114ba78cae6bc86421e63186f8ea13688 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -545,9 +545,9 @@ namespace Ryujinx.Graphics.Vulkan
+             SignalDirty(DirtyFlags.Storage);
+         }
+ 
+-        private static readonly HashSet<Format> _linearFilterFallbackWarnedFormats = new();
++        private static readonly HashSet<VkFormat> _linearFilterFallbackWarnedFormats = new();
+ 
+-        internal static bool WarnLinearFilterFallbackOnce(Format format)
++        internal static bool WarnLinearFilterFallbackOnce(VkFormat format)
+         {
+             return _linearFilterFallbackWarnedFormats.Add(format);
+         }
+@@ -560,13 +560,13 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             if (sampler.UsesLinearFiltering &&
+-                !_gd.FormatCapabilities.OptimalFormatSupports(FormatFeatureFlags.SampledImageFilterLinearBit, view.Info.Format))
++                !_gd.FormatCapabilities.OptimalFormatSupports(FormatFeatureFlags.SampledImageFilterLinearBit, view.VkFormat))
+             {
+-                if (WarnLinearFilterFallbackOnce(view.Info.Format))
++                if (WarnLinearFilterFallbackOnce(view.VkFormat))
+                 {
+                     Ryujinx.Common.Logging.Logger.Warning?.Print(
+                         Ryujinx.Common.Logging.LogClass.Gpu,
+-                        $"【黄】Format \"{view.Info.Format}\" does not support VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT; " +
++                        $"【黄】Format \"{view.VkFormat}\" does not support VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT; " +
+                         "linear-filtering sampler downgraded to nearest for this pairing.");
+                 }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/FormatCapabilities.cs b/src/Ryujinx.Graphics.Vulkan/FormatCapabilities.cs
+index 605105ea83cccc964515c300310de04f17c77d96..97c564b928c5d19d5abe8e8142429d386554ac73 100644
+--- a/src/Ryujinx.Graphics.Vulkan/FormatCapabilities.cs
++++ b/src/Ryujinx.Graphics.Vulkan/FormatCapabilities.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Silk.NET.Vulkan;
+ using System;
++using System.Collections.Generic;
+ using Format = Ryujinx.Graphics.GAL.Format;
+ using VkFormat = Silk.NET.Vulkan.Format;
+ 
+@@ -55,6 +56,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private readonly FormatFeatureFlags[] _bufferTable;
+         private readonly FormatFeatureFlags[] _optimalTable;
++        private readonly Dictionary<VkFormat, FormatFeatureFlags> _optimalVkTable = new();
+ 
+         private readonly Vk _api;
+         private readonly PhysicalDevice _physicalDevice;
+@@ -150,6 +152,18 @@ namespace Ryujinx.Graphics.Vulkan
+             return (formatFeatureFlags & flags) == flags;
+         }
+ 
++        public bool OptimalFormatSupports(FormatFeatureFlags flags, VkFormat format)
++        {
++            if (!_optimalVkTable.TryGetValue(format, out FormatFeatureFlags formatFeatureFlags))
++            {
++                _api.GetPhysicalDeviceFormatProperties(_physicalDevice, format, out FormatProperties fp);
++                formatFeatureFlags = fp.OptimalTilingFeatures;
++                _optimalVkTable[format] = formatFeatureFlags;
++            }
++
++            return (formatFeatureFlags & flags) == flags;
++        }
++
+         public VkFormat ConvertToVkFormat(Format srcFormat, bool storageFeatureFlagRequired)
+         {
+             VkFormat format = FormatTable.GetFormat(srcFormat);
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index dde95fc19f78eba50a0e9163222eb35e80ef0267..8c76d3206dbefd12ce83affef3827ef7acfde3f6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -79,6 +79,7 @@
+   <ItemGroup>
+     <InternalsVisibleTo Include="S2A.VvlSyncTest" /> <!-- 附件访问状态的独立宿主回归 -->
+     <InternalsVisibleTo Include="S2A.VvlTexelTest" /> <!-- texel 视图对齐影子副本的宿主回归 -->
++    <InternalsVisibleTo Include="S2A.VvlFilterTest" /> <!-- 采样器线性滤波降级的宿主回归 -->
+   </ItemGroup>
+ 
+ </Project>

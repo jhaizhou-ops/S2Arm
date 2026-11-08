@@ -1,0 +1,198 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index 4271c3d18061b58691d3982126c4795a081c0d0b..2b58c3fea8a4479b5cd3bfbe6da1dd17a342e08f 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -23,6 +23,9 @@ namespace Ryujinx.Graphics.GAL
+         public readonly bool SupportsR4G4Format;
+         public readonly bool SupportsR4G4B4A4Format;
+         public readonly bool SupportsScaledVertexFormats;
++        // S2A：渲染器顶点自取（graphics/metal/gal_vpull.m）——顶点着色器自己按格式解码属性，产出 Maxwell 寄存器原始位。
++        // 为真时 Gpu 层把缩放整数格式原样交给渲染器（不改成整数格式），翻译器可把顶点输入声明为原始位（ShaderDefinitions.S2AVertexRaw）
++        public readonly bool S2AVertexPull;
+         public readonly bool SupportsSnormBufferTextureFormat;
+         public readonly bool SupportsSparseBuffer;
+         public readonly bool Supports5BitComponentFormat;
+@@ -136,8 +139,10 @@ namespace Ryujinx.Graphics.GAL
+             int storageBufferOffsetAlignment,
+             int textureBufferOffsetAlignment,
+             int gatherBiasPrecision,
+-            ulong maximumGpuMemory)
++            ulong maximumGpuMemory,
++            bool s2aVertexPull = false)
+         {
++            S2AVertexPull = s2aVertexPull;
+             Api = api;
+             VendorName = vendorName;
+             MemoryType = memoryType;
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 82f24d19a1a71931c8878e019bc6d1e03ea803c7..f6a3f0b3e10eff17cf44becfb1cc77da9433a801 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -996,7 +996,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+                 uint packedFormat = vertexAttrib.UnpackFormat();
+ 
+-                if (!supportsScaledFormats)
++                // S2A：渲染器顶点自取时缩放格式原样交过去（自取按格式解码：原始位读出浮点位、按类型读出整数；顶点描述符路径映射成整数格式，同下面的转换）
++                if (!supportsScaledFormats && !_context.Capabilities.S2AVertexPull)
+                 {
+                     packedFormat = vertexAttrib.UnpackType() switch
+                     {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 73f04885a82a9302bd80fc5744b115a1c6a9c2d4..2fe72de1bd992e76ca2dd079375b6924d9721976 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -24,7 +24,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const uint FileFormatVersionPacked = ((uint)FileFormatVersionMajor << 16) | FileFormatVersionMinor;
+         // S2A：特化状态运行时化改了翻译结果，旧磁盘缓存整份作废（+1 DepthMode / 绘制参数，+2 透明测试，+3 支持缓冲加 s2a_widen，
+         //   +4（10-21 画面着色器线合批一次升）：点大小运行时化（支持缓冲在 s2a_widen 前加 s2a_point）+ 转计算程序进缓存（阶段掩码口径改、复合宿主二进制））
+-        private const uint CodeGenVersion = 7354 + 4;
++        //   +5（10-21 画面·着色器线）：顶点输入按原始位读（宿主顶点自取，翻译结果不随属性类型变，补丁 vattr-raw）
++        private const uint CodeGenVersion = 7354 + 5;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index 6c324084ac5fa52226e41b7151a23902f215969b..a490c005f81da40cc7196b3a883e861363268d8a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -223,6 +223,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         public bool QueryHostSupportsScaledVertexFormats() => _context.Capabilities.SupportsScaledVertexFormats;
+ 
++        public bool QueryHostS2AVertexPull() => _context.Capabilities.S2AVertexPull;
++
+         public bool QueryHostSupportsSeparateSampler() => _context.Capabilities.SupportsSeparateSampler;
+ 
+         public bool QueryHostSupportsShaderBallot() => _context.Capabilities.SupportsShaderBallot;
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index af39016e3e1f39c5e125a145570e0d879d328ea6..97b9dd8d658356b32681e16a258a2ef9f96d7d01 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -593,6 +593,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             {
+                 context.Decorate(spvVar, Decoration.Location, (LiteralInteger)ioDefinition.Location);
+ 
++                // S2A：原始位顶点输入带名字标记，渲染器据此用原始位解码（graphics/metal/gal_vpull.m：成员名 s2a_raw<位置> → s2a_vr，且必须走顶点自取）
++                if (context.Definitions.S2AIsRawInput(ioDefinition.Location, isOutput))
++                {
++                    context.Name(spvVar, $"s2a_raw{ioDefinition.Location}");
++                }
++
+                 if (hasComponent)
+                 {
+                     context.Decorate(spvVar, Decoration.Component, (LiteralInteger)ioDefinition.Component);
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index e35c1f3291063575826f2a8785d4371139305354..968687c9d0d46153bc81da7ea57d79b6ffeec49f 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -310,6 +310,14 @@ namespace Ryujinx.Graphics.Shader
+             return true;
+         }
+ 
++        /// <summary>
++        /// S2A：宿主渲染器顶点自取（顶点着色器自己按格式解码属性，产出 Maxwell 寄存器原始位）。为真时顶点输入可声明为原始位，与属性类型无关
++        /// </summary>
++        bool QueryHostS2AVertexPull()
++        {
++            return false;
++        }
++
+         /// <summary>
+         /// Queries host API support for separate textures and samplers.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
+index 2b6647cd2989dc8e69280147b96bf0f69047713a..3d272dccca2d7b2555e3bfdb42be90d354726fc7 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAttribute.cs
+@@ -63,7 +63,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     {
+                         value = AttributeMap.GenerateAttributeLoad(context, primVertex, offset, isOutput, op.P);
+ 
++                        // S2A：顶点输入按原始位读时缩放格式已由宿主自取解码成浮点位，不再按属性类型补换算（不读 AttributeTypes）
+                         if ((!context.TranslatorContext.Definitions.SupportsScaledVertexFormats || context.VertexAsCompute) &&
++                            !context.TranslatorContext.Definitions.S2AVertexRaw &&
+                             context.TranslatorContext.Stage == ShaderStage.Vertex &&
+                             !op.O &&
+                             offset >= 0x80 &&
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index db7beaf8fb4071fcd3634bf142a9a6ccdec51c0b..59ff6935cfd9e8aab87a73e851b6f724e724e924 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -28,6 +28,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public bool S2AEarlyZRead, S2ATopologyRead, S2AHalvePrimRead, S2APointSizeRead;
+         public uint S2AAttrIntUse, S2AAttrSintUse;   // S2A：顶点属性读出值进了整数运算的位置 / 其中有带符号用法的（Transforms/S2AAttrIntUse，离线烘焙器出整数类别变体用）
+         public uint S2AAttrRead;
++        // S2A（10-21 画面·着色器线）：顶点输入按原始位读（TranslatorContext.Translate 设：宿主顶点自取 + NXGAL_VPULL 不为 0 + 非顶点转计算）。
++        // 硬件语义：顶点取数单元按格式把数据转成寄存器位（浮点 / unorm / snorm / scaled → 浮点位，int / uint → 整数位），着色器指令再按自己的类型解释；
++        // 宿主自取解码（graphics/metal/gal_vpull.m s2a_vr）照此产出原始位，于是翻译结果与属性类型无关：不读 AttributeTypes、不进特化比较（S2AAttrRead 不记）
++        public bool S2AVertexRaw;
++        public bool S2AIsRawInput(int location, bool isOutput) => S2AVertexRaw && Stage == ShaderStage.Vertex && !isOutput && !IaIndexing;
+         public bool AlphaToCoverageDitherEnable { get { S2AA2cRead = true; return _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable; } }
+         public bool ViewportTransformDisable => _graphicsState.ViewportTransformDisable;
+ 
+@@ -316,7 +321,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             AggregateType type = AggregateType.Vector4;
+ 
+-            if (Stage == ShaderStage.Vertex && !isOutput)
++            if (S2AIsRawInput(location, isOutput))
++            {
++                type |= AggregateType.U32;
++            }
++            else if (Stage == ShaderStage.Vertex && !isOutput)
+             {
+                 S2AAttrRead |= 1u << location;
+                 type |= _graphicsState.AttributeTypes[location].AsAggregate(SupportsScaledVertexFormats);
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs
+index 4f88977b0a7fef728ebf67fa83e63c8429d12cc3..b7a1e9e3e9e8ac799376f8e115dfd60d9d17da2d 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/S2AAttrIntUse.cs
+@@ -17,6 +17,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+         public static LinkedListNode<INode> RunPass(TransformContext context, LinkedListNode<INode> node)
+         {
++            // 顶点输入按原始位读（S2AVertexRaw）时翻译与属性类型无关，不用推断整数类别变体
++            if (context.Definitions.S2AVertexRaw)
++            {
++                return node;
++            }
++
+             Operation operation = (Operation)node.Value;
+             Instruction inst = operation.Inst;
+             if ((inst & (Instruction.FP32 | Instruction.FP64)) != 0)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 8f5c1249aa053e928e0715ff66e32f900a166df2..c2ccf56ae363dec7f1ed1a41446d08430746375f 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -184,6 +184,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public static bool S2ARuntimeState = Environment.GetEnvironmentVariable("S2A_RUNTIME_STATE") != "0";
+ 
++        // S2A：顶点输入按原始位读（缺省开；NXGAL_VPULL=0 关，与渲染器顶点自取同一开关——烘焙与运行时必须同一取值）。只在宿主报顶点自取时生效，顶点转计算不用
++        public static bool S2AVertexRawEnv = Environment.GetEnvironmentVariable("NXGAL_VPULL") != "0";
++
++        private bool S2AVertexRawFor(bool asCompute) => S2AVertexRawEnv && !asCompute && GpuAccessor.QueryHostS2AVertexPull();
++
+         /// <summary>S2A：单独翻译顶点阶段（离线批量翻译里没配上片元的顶点）：按「下一阶段是片元、读全部通用输入」处理，结果与配任何片元时相同</summary>
+         public void S2ASetStandaloneNextFragment()
+         {
+@@ -232,6 +237,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 _s2aMemRead = (usesLocalMemory ? S2AStateRead.LocalMem : 0) | (usesSharedMemory ? S2AStateRead.SharedMem : 0);
+             }
+ 
++            Definitions.S2AVertexRaw = S2AVertexRawFor(asCompute);
++
+             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: true, out _);
+ 
+             ShaderProgram s2aProgram = Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);
+@@ -255,6 +262,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+             bool usesLocalMemory = _program.UsedFeatures.HasFlag(FeatureFlags.LocalMemory);
+             resourceManager.SetCurrentLocalMemory(_localMemorySize, usesLocalMemory);
+ 
++            Definitions.S2AVertexRaw = S2AVertexRawFor(asCompute);
++            other.Definitions.S2AVertexRaw = Definitions.S2AVertexRaw;
++
+             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: false, out _);
+ 
+             bool otherUsesLocalMemory = other._program.UsedFeatures.HasFlag(FeatureFlags.LocalMemory);

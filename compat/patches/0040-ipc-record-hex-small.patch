@@ -1,0 +1,34 @@
+diff --git a/src/Ryujinx.Common/S2ARecord.cs b/src/Ryujinx.Common/S2ARecord.cs
+index 4af0bed684ba86b6439e4209d36372a69acd4e93..7a7174f9dbc981ba1cf28a32d91b454cbda699fd 100644
+--- a/src/Ryujinx.Common/S2ARecord.cs
++++ b/src/Ryujinx.Common/S2ARecord.cs
+@@ -41,9 +41,19 @@ namespace Ryujinx.Common
+             return h;
+         }
+ 
++        // Up to 64 bytes are written as hex (values such as pids, times and ids stay readable in a diff); longer data as length:hash
+         public static void AppendHash(StringBuilder sb, string key, ReadOnlySpan<byte> data)
+         {
+-            sb.Append('\t').Append(key).Append('=').Append(data.Length).Append(':').Append(Hash(data).ToString("x16"));
++            sb.Append('\t').Append(key).Append('=').Append(data.Length).Append(':');
++
++            if (data.Length <= 64)
++            {
++                sb.Append('#').Append(Convert.ToHexString(data));
++            }
++            else
++            {
++                sb.Append(Hash(data).ToString("x16"));
++            }
+         }
+ 
+         // Several buffers of one kind: key=size:hash,size:hash (omitted when there are none)
+@@ -74,7 +84,7 @@ namespace Ryujinx.Common
+                     try
+                     {
+                         read(address, buf);
+-                        sb.Append(':').Append(Hash(buf).ToString("x16"));
++                        sb.Append(':').Append(buf.Length <= 64 ? "#" + Convert.ToHexString(buf) : Hash(buf).ToString("x16"));
+                     }
+                     catch (Exception)
+                     {

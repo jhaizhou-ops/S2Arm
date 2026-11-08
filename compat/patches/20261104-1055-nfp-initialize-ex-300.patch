@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nfc/Nfp/NfpManager/INfp.cs b/src/Ryujinx.HLE/HOS/Services/Nfc/Nfp/NfpManager/INfp.cs
+index ca833e33d7c32b4e1ca5cc3db1eec352e05489bb..a2748a2f8668542cd5c706696598cd637288b078 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nfc/Nfp/NfpManager/INfp.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nfc/Nfp/NfpManager/INfp.cs
+@@ -44,6 +44,27 @@ namespace Ryujinx.HLE.HOS.Services.Nfc.Nfp
+             _appletResourceUserId = context.RequestData.ReadUInt64();
+             _mcuVersionData = context.RequestData.ReadUInt64();
+ 
++            return InitializeCore(context);
++        }
++
++        // S2Arm：Switch 2 SDK 的 nfp:user 命令 300（4 款 Switch 2 游戏 sdk 的 nn::nfp::detail::IUser 代理表含 300–303）。
++        //   事实取自 Eden-NS2（GPL，代码自写）nfc/nfc_interface.cpp：入参 u32 值、u64 小程序资源号、pid、32 字节一项的输入缓冲（类型 5），
++        //   真机模块按 Initialize 处理、把元素数组原样交给实现。宿主按 Initialize 同一套状态处理，输入缓冲同样只存不用。
++        //   Eden 另按「资源号须为 0 或调用进程号」回 0x60a——我方资源号是 AppletResourceUserIds 的序号、不是进程号，这条不搬
++        [CommandCmif(300)] // Switch 2
++        // InitializeEx(u32, nn::applet::AppletResourceUserId, pid, buffer<unknown, 5>)
++        public ResultCode InitializeEx(ServiceCtx context)
++        {
++            context.RequestData.ReadUInt32();
++            context.RequestData.ReadUInt32();
++            _appletResourceUserId = context.RequestData.ReadUInt64();
++            _mcuVersionData = 0;
++
++            return InitializeCore(context);
++        }
++
++        private ResultCode InitializeCore(ServiceCtx context)
++        {
+             ulong inputPosition = context.Request.SendBuff[0].Position;
+             ulong inputSize = context.Request.SendBuff[0].Size;
+ 

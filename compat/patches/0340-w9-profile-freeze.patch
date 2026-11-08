@@ -1,0 +1,784 @@
+diff --git a/src/Ryujinx.Graphics.GAL/IComputeTranslationProfileProvider.cs b/src/Ryujinx.Graphics.GAL/IComputeTranslationProfileProvider.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..72a3213de24f6b65056fb01071514c72e2e7374f
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/IComputeTranslationProfileProvider.cs
+@@ -0,0 +1,16 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// Optional immutable selection for a renderer/device lifetime. Null keeps the legacy
++    /// path. A provider must reject access after retirement; a new device returns a new
++    /// object even when its portable disk identity is equal. Consumers must not cache a
++    /// selection across provider generations. This interface grants no device features.
++    /// </summary>
++    public interface IComputeTranslationProfileProvider
++    {
++        ComputeTranslationProfile ComputeTranslationProfile { get; }
++
++        /// <summary>Capabilities from that same immutable selection; runtime memory budgets are separate.</summary>
++        Capabilities FrozenTranslationCapabilities { get; }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj b/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
+index 06228bae29b63e016e7910a7c4a42cf36aa89226..2430cf7b11ebb75abafb58b84ba177c50ea9a93d 100644
+--- a/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
++++ b/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
+@@ -12,6 +12,10 @@
+     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+   </PropertyGroup>
+ 
++  <ItemGroup>
++    <Compile Include="../../../../graphics/vulkan/cache/ComputeTranslationProfile.cs" Link="S2Arm/ComputeTranslationProfile.cs" />
++  </ItemGroup>
++
+   <ItemGroup>
+     <InternalsVisibleTo Include="S2A.ProgQueueTest" /> <!-- S2A：多线程渲染器等程序不自旋单测（graphics/tools/shbake/tests/progqueue） -->
+   </ItemGroup>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+index 5e6b3f196a37b8585f4cfbdf169041a8d3f3584e..f551335ebd62902796ca2c1a31288292a6779096 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+@@ -47,9 +47,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             _oldSpecState = oldSpecState;
+             _newSpecState = newSpecState;
+             _stageIndex = stageIndex;
+-            _isVulkan = context.Capabilities.Api == TargetApi.Vulkan;
++            _isVulkan = TranslationCapabilities.Api == TargetApi.Vulkan;
+             _hasGeometryShader = hasGeometryShader;
+-            _supportsQuads = context.Capabilities.SupportsQuads;
++            _supportsQuads = TranslationCapabilities.SupportsQuads;
+ 
+             if (stageIndex == (int)ShaderStage.Geometry - 1)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 24148b608e6ff88006ff13959fa0ee5da6a1c8e0..39754830d46903a558746dfcfcf22c9d77f0c8fb 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -246,12 +246,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <returns>Name of the file, without extension</returns>
+         private static string GetHostFileName(GpuContext context)
+         {
+-            string apiName = context.Capabilities.Api.ToString().ToLowerInvariant();
+-            string vendorName = RemoveInvalidCharacters(context.Capabilities.VendorName.ToLowerInvariant());
++            Capabilities capabilities = GpuAccessorBase.S2ATranslationCapabilities(context);
++            string apiName = capabilities.Api.ToString().ToLowerInvariant();
++            string vendorName = RemoveInvalidCharacters(capabilities.VendorName.ToLowerInvariant());
+             // Legacy host files have no effective-capability identity and are deliberately not
+             // trusted. Guest/shared records remain usable for on-demand translation. The same
+             // identity is used by ShBake and runtime (including NxGal, which reports Vulkan).
+-            string name = $"{apiName}_{vendorName}_bin_{HostCacheCapabilities.GetIdentity(context.Capabilities)}";
++            string name = $"{apiName}_{vendorName}_bin_{HostCacheCapabilities.GetIdentity(capabilities, GpuAccessorBase.S2AProfileProvider(context)?.ComputeTranslationProfile)}";
+             string discriminator = GetHostCacheDiscriminator(context);
+             return string.IsNullOrEmpty(discriminator) ? name : $"{name}_{discriminator}";
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index 41b0835d68e7cb705c0cea547d3dff382e0caf4c..1115c54ed25674a57f390c59269a7a48f000fdf4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -16,7 +16,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // Resource backing/format conversion, view sharing, sampler/viewport state, memory
+         // budgets and MME execution choices do not specialize host programs. Their explicit
+         // exclusions and consumer evidence are maintained with the cache admission tests.
+-        public static string GetIdentity(in Capabilities capabilities)
++        public static string GetIdentity(in Capabilities capabilities, ComputeTranslationProfile selected = null)
+         {
+             using MemoryStream stream = new();
+             using BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true);
+@@ -30,7 +30,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             writer.Write(capabilities.SupportsScaledVertexFormats);
+             writer.Write(capabilities.S2AVertexPull);
+             // Same language selection as ShaderCache.CreateTranslationOptions; no renderer -> GPU dependency.
+-            bool usesSpirv = GraphicsConfig.EnableSpirvCompilationOnVulkan && capabilities.Api == TargetApi.Vulkan;
++            selected?.RequireCapabilities(in capabilities);
++            bool usesSpirv = selected != null ? selected.Language == TargetLanguage.Spirv :
++                GraphicsConfig.EnableSpirvCompilationOnVulkan && capabilities.Api == TargetApi.Vulkan;
+             writer.Write(usesSpirv);
+             writer.Write(usesSpirv && capabilities.RequiresLinkedVaryingInterface);
+             writer.Write(capabilities.RequiresLinkedVaryingInterface);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index 310307409326612bdc1328c407250f50894ade9c..9b4dcdada3fbb74a32781979fd7322f6b37b7fd3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -647,7 +647,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             TranslatorContext[] translatorContexts = new TranslatorContext[Constants.ShaderStages + 1];
+             TranslatorContext nextStage = null;
+ 
+-            TargetApi api = _context.Capabilities.Api;
++            TargetApi api = GpuAccessorBase.S2ATranslationCapabilities(_context).Api;
+ 
+             bool hasCachedGs = guestShaders[4].HasValue;
+ 
+@@ -744,7 +744,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     previousStage != null &&
+                     previousStage.LayerOutputWritten &&
+                     stageIndex == 3 &&
+-                    !_context.Capabilities.SupportsLayerVertexTessellation)
++                    !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
+                 {
+                     translatedStages.Add(previousStage.GenerateGeometryPassthrough());
+                 }
+@@ -767,7 +767,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             DiskCacheGpuAccessor gpuAccessor = new(_context, shader.Code, shader.Cb1Data, specState, newSpecState, counts, 0, false);
+             gpuAccessor.InitializeReservedCounts(tfEnabled: false, vertexAsCompute: false);
+ 
+-            TranslatorContext translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, 0);
++            TranslatorContext translatorContext = DecodeComputeShader(gpuAccessor, GpuAccessorBase.S2ATranslationCapabilities(_context).Api, 0);
+ 
+             ShaderProgram program = translatorContext.Translate();
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index 9516eb4c8c0939d8421f5e0e500e8350d6326625..0fb6fb470b398a0abc52f8011e0ffb6b2d0b162c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -39,9 +39,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _channel = channel;
+             _state = state;
+             _stageIndex = stageIndex;
+-            _isVulkan = context.Capabilities.Api == TargetApi.Vulkan;
++            _isVulkan = TranslationCapabilities.Api == TargetApi.Vulkan;
+             _hasGeometryShader = hasGeometryShader;
+-            _supportsQuads = context.Capabilities.SupportsQuads;
++            _supportsQuads = TranslationCapabilities.SupportsQuads;
+ 
+             if (stageIndex == (int)ShaderStage.Geometry - 1)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index ab482590992b456fe41645d19f0f64285bcfbc16..8d9fc883948a7fe3e5693c66e1ac762e0113d0d6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -3,17 +3,49 @@ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Gpu.Image;
+ using Ryujinx.Graphics.Shader;
+ using Ryujinx.Graphics.Shader.Translation;
++using System;
+ 
+ namespace Ryujinx.Graphics.Gpu.Shader
+ {
+     /// <summary>
+     /// GPU accessor.
+     /// </summary>
+-    class GpuAccessorBase
++    class GpuAccessorBase : IComputeTranslationProfileProvider
+     {
+         private readonly GpuContext _context;
+         private readonly ResourceCounts _resourceCounts;
+         private readonly int _stageIndex;
++        private readonly IComputeTranslationProfileProvider _s2aProfileProvider;
++        private readonly ComputeTranslationProfile _s2aProfile;
++        private readonly Capabilities _s2aCapabilities;
++
++        internal static IComputeTranslationProfileProvider S2AProfileProvider(GpuContext context)
++        {
++            IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer threaded
++                ? threaded.BaseRenderer : context.Renderer;
++            return renderer as IComputeTranslationProfileProvider;
++        }
++
++        internal static Capabilities S2ATranslationCapabilities(GpuContext context)
++        {
++            IComputeTranslationProfileProvider provider = S2AProfileProvider(context);
++            return provider?.ComputeTranslationProfile != null ? provider.FrozenTranslationCapabilities : context.Capabilities;
++        }
++
++        public Capabilities FrozenTranslationCapabilities => TranslationCapabilities;
++
++        public ComputeTranslationProfile ComputeTranslationProfile
++        {
++            get
++            {
++                if (_s2aProfile != null && !ReferenceEquals(_s2aProfileProvider.ComputeTranslationProfile, _s2aProfile))
++                    throw new InvalidOperationException("The GPU accessor has a stale Vulkan translation profile generation.");
++                return _s2aProfile;
++            }
++        }
++
++        protected Capabilities TranslationCapabilities => ComputeTranslationProfile == null
++            ? _context.Capabilities : _s2aCapabilities;
+ 
+         private int _reservedConstantBuffers;
+         private int _reservedStorageBuffers;
+@@ -34,6 +66,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _context = context;
+             _resourceCounts = resourceCounts;
+             _stageIndex = stageIndex;
++            _s2aProfileProvider = S2AProfileProvider(context);
++            _s2aProfile = _s2aProfileProvider?.ComputeTranslationProfile;
++            _s2aCapabilities = _s2aProfile != null ? _s2aProfileProvider.FrozenTranslationCapabilities : context.Capabilities;
++            _s2aProfile?.RequireCapabilities(in _s2aCapabilities);
+         }
+ 
+         /// <summary>
+@@ -43,7 +79,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <param name="vertexAsCompute">Indicates that the vertex shader will be emulated on a compute shader</param>
+         public void InitializeReservedCounts(bool tfEnabled, bool vertexAsCompute)
+         {
+-            ResourceReservationCounts rrc = new(!_context.Capabilities.SupportsTransformFeedback && tfEnabled, vertexAsCompute);
++            ResourceReservationCounts rrc = new(!TranslationCapabilities.SupportsTransformFeedback && tfEnabled, vertexAsCompute);
+ 
+             _reservedConstantBuffers = rrc.ReservedConstantBuffers;
+             _reservedStorageBuffers = rrc.ReservedStorageBuffers;
+@@ -55,23 +91,23 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             int binding;
+ 
+-            if (_context.Capabilities.Api == TargetApi.Vulkan)
++            if (TranslationCapabilities.Api == TargetApi.Vulkan)
+             {
+-                binding = GetBindingFromIndex(index, _context.Capabilities.MaximumUniformBuffersPerStage, "Uniform buffer");
++                binding = GetBindingFromIndex(index, TranslationCapabilities.MaximumUniformBuffersPerStage, "Uniform buffer");
+             }
+             else
+             {
+                 binding = _resourceCounts.UniformBuffersCount++;
+             }
+ 
+-            return new SetBindingPair(_context.Capabilities.UniformBufferSetIndex, binding + _reservedConstantBuffers);
++            return new SetBindingPair(TranslationCapabilities.UniformBufferSetIndex, binding + _reservedConstantBuffers);
+         }
+ 
+         public SetBindingPair CreateImageBinding(int count, bool isBuffer)
+         {
+             int binding;
+ 
+-            if (_context.Capabilities.Api == TargetApi.Vulkan)
++            if (TranslationCapabilities.Api == TargetApi.Vulkan)
+             {
+                 if (count == 1)
+                 {
+@@ -79,14 +115,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     if (isBuffer)
+                     {
+-                        index += (int)_context.Capabilities.MaximumImagesPerStage;
++                        index += (int)TranslationCapabilities.MaximumImagesPerStage;
+                     }
+ 
+-                    binding = GetBindingFromIndex(index, _context.Capabilities.MaximumImagesPerStage * 2, "Image");
++                    binding = GetBindingFromIndex(index, TranslationCapabilities.MaximumImagesPerStage * 2, "Image");
+                 }
+                 else
+                 {
+-                    binding = (int)GetDynamicBaseIndexDual(_context.Capabilities.MaximumImagesPerStage) + _resourceCounts.ImagesCount++;
++                    binding = (int)GetDynamicBaseIndexDual(TranslationCapabilities.MaximumImagesPerStage) + _resourceCounts.ImagesCount++;
+                 }
+             }
+             else
+@@ -96,35 +132,35 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 _resourceCounts.ImagesCount += count;
+             }
+ 
+-            return new SetBindingPair(_context.Capabilities.ImageSetIndex, binding + _reservedImages);
++            return new SetBindingPair(TranslationCapabilities.ImageSetIndex, binding + _reservedImages);
+         }
+ 
+         public SetBindingPair CreateStorageBufferBinding(int index)
+         {
+             int binding;
+ 
+-            if (_context.Capabilities.Api == TargetApi.Vulkan)
++            if (TranslationCapabilities.Api == TargetApi.Vulkan)
+             {
+-                binding = GetBindingFromIndex(index, _context.Capabilities.MaximumStorageBuffersPerStage, "Storage buffer");
++                binding = GetBindingFromIndex(index, TranslationCapabilities.MaximumStorageBuffersPerStage, "Storage buffer");
+             }
+             else
+             {
+                 binding = _resourceCounts.StorageBuffersCount++;
+             }
+ 
+-            return new SetBindingPair(_context.Capabilities.StorageBufferSetIndex, binding + _reservedStorageBuffers);
++            return new SetBindingPair(TranslationCapabilities.StorageBufferSetIndex, binding + _reservedStorageBuffers);
+         }
+ 
+         /// <summary>S2A（F1）：存储缓冲访存按宿主绑定窗口钳位（只由 Vulkan 渲染器在未启用 robustBufferAccess 时置真）。</summary>
+         public bool QueryHostStorageWindowClamp()
+         {
+-            return _context.Capabilities.S2AStorageWindowClamp;
++            return ComputeTranslationProfile?.StorageWindowClamp ?? TranslationCapabilities.S2AStorageWindowClamp;
+         }
+ 
+         /// <summary>S2A（F1）：越界记录诊断（缺省关，S2A_SSBO_OOB_DIAG=1）。</summary>
+         public bool QueryHostStorageOobRecord()
+         {
+-            return _context.Capabilities.S2AStorageOobRecord;
++            return ComputeTranslationProfile?.StorageOobRecord ?? TranslationCapabilities.S2AStorageOobRecord;
+         }
+ 
+         /// <summary>
+@@ -136,19 +172,19 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             bool vtg = stage is ShaderStage.Vertex or ShaderStage.TessellationControl or ShaderStage.TessellationEvaluation or ShaderStage.Geometry;
+ 
+-            if (!_context.Capabilities.S2AStorageOobRecord || (vtg && !_context.Capabilities.SupportsVertexStoreAndAtomics))
++            if (!TranslationCapabilities.S2AStorageOobRecord || (vtg && !TranslationCapabilities.SupportsVertexStoreAndAtomics))
+             {
+                 return new SetBindingPair(-1, -1);
+             }
+ 
+-            return new SetBindingPair(_context.Capabilities.StorageBufferSetIndex, S2AStorageOobRecord.Binding);
++            return new SetBindingPair(TranslationCapabilities.StorageBufferSetIndex, S2AStorageOobRecord.Binding);
+         }
+ 
+         public SetBindingPair CreateTextureBinding(int count, bool isBuffer)
+         {
+             int binding;
+ 
+-            if (_context.Capabilities.Api == TargetApi.Vulkan)
++            if (TranslationCapabilities.Api == TargetApi.Vulkan)
+             {
+                 if (count == 1)
+                 {
+@@ -156,14 +192,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     if (isBuffer)
+                     {
+-                        index += (int)_context.Capabilities.MaximumTexturesPerStage;
++                        index += (int)TranslationCapabilities.MaximumTexturesPerStage;
+                     }
+ 
+-                    binding = GetBindingFromIndex(index, _context.Capabilities.MaximumTexturesPerStage * 2, "Texture");
++                    binding = GetBindingFromIndex(index, TranslationCapabilities.MaximumTexturesPerStage * 2, "Texture");
+                 }
+                 else
+                 {
+-                    binding = (int)GetDynamicBaseIndexDual(_context.Capabilities.MaximumTexturesPerStage) + _resourceCounts.TexturesCount++;
++                    binding = (int)GetDynamicBaseIndexDual(TranslationCapabilities.MaximumTexturesPerStage) + _resourceCounts.TexturesCount++;
+                 }
+             }
+             else
+@@ -173,7 +209,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 _resourceCounts.TexturesCount += count;
+             }
+ 
+-            return new SetBindingPair(_context.Capabilities.TextureSetIndex, binding + _reservedTextures);
++            return new SetBindingPair(TranslationCapabilities.TextureSetIndex, binding + _reservedTextures);
+         }
+ 
+         private int GetBindingFromIndex(int index, uint maxPerStage, string resourceName)
+@@ -214,75 +250,75 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         public int CreateExtraSet()
+         {
+-            if (_resourceCounts.SetsCount >= _context.Capabilities.MaximumExtraSets)
++            if (_resourceCounts.SetsCount >= TranslationCapabilities.MaximumExtraSets)
+             {
+                 return -1;
+             }
+ 
+-            return _context.Capabilities.ExtraSetBaseIndex + _resourceCounts.SetsCount++;
++            return TranslationCapabilities.ExtraSetBaseIndex + _resourceCounts.SetsCount++;
+         }
+ 
+-        public int QueryHostGatherBiasPrecision() => _context.Capabilities.GatherBiasPrecision;
++        public int QueryHostGatherBiasPrecision() => TranslationCapabilities.GatherBiasPrecision;
+ 
+-        public bool QueryHostReducedPrecision() => _context.Capabilities.ReduceShaderPrecision;
++        public bool QueryHostReducedPrecision() => TranslationCapabilities.ReduceShaderPrecision;
+ 
+-        public bool QueryHostHasFrontFacingBug() => _context.Capabilities.HasFrontFacingBug;
++        public bool QueryHostHasFrontFacingBug() => TranslationCapabilities.HasFrontFacingBug;
+ 
+-        public bool QueryHostHasVectorIndexingBug() => _context.Capabilities.HasVectorIndexingBug;
++        public bool QueryHostHasVectorIndexingBug() => TranslationCapabilities.HasVectorIndexingBug;
+ 
+-        public int QueryHostStorageBufferOffsetAlignment() => _context.Capabilities.StorageBufferOffsetAlignment;
++        public int QueryHostStorageBufferOffsetAlignment() => TranslationCapabilities.StorageBufferOffsetAlignment;
+ 
+-        public int QueryHostSubgroupSize() => _context.Capabilities.ShaderSubgroupSize;
++        public int QueryHostSubgroupSize() => TranslationCapabilities.ShaderSubgroupSize;
+ 
+-        public bool QueryHostSupportsBgraFormat() => _context.Capabilities.SupportsBgraFormat;
++        public bool QueryHostSupportsBgraFormat() => TranslationCapabilities.SupportsBgraFormat;
+ 
+-        public bool QueryHostSupportsFragmentShaderInterlock() => _context.Capabilities.SupportsFragmentShaderInterlock;
++        public bool QueryHostSupportsFragmentShaderInterlock() => TranslationCapabilities.SupportsFragmentShaderInterlock;
+ 
+-        public bool QueryHostSupportsFragmentShaderOrderingIntel() => _context.Capabilities.SupportsFragmentShaderOrderingIntel;
++        public bool QueryHostSupportsFragmentShaderOrderingIntel() => TranslationCapabilities.SupportsFragmentShaderOrderingIntel;
+ 
+-        public bool QueryHostSupportsGeometryShader() => _context.Capabilities.SupportsGeometryShader;
++        public bool QueryHostSupportsGeometryShader() => TranslationCapabilities.SupportsGeometryShader;
+ 
+-        public bool QueryHostSupportsGeometryShaderPassthrough() => _context.Capabilities.SupportsGeometryShaderPassthrough;
++        public bool QueryHostSupportsGeometryShaderPassthrough() => TranslationCapabilities.SupportsGeometryShaderPassthrough;
+ 
+-        public bool QueryHostSupportsImageLoadFormatted() => _context.Capabilities.SupportsImageLoadFormatted;
++        public bool QueryHostSupportsImageLoadFormatted() => TranslationCapabilities.SupportsImageLoadFormatted;
+ 
+-        public bool QueryHostSupportsLayerVertexTessellation() => _context.Capabilities.SupportsLayerVertexTessellation;
++        public bool QueryHostSupportsLayerVertexTessellation() => TranslationCapabilities.SupportsLayerVertexTessellation;
+ 
+-        public bool QueryHostSupportsNonConstantTextureOffset() => _context.Capabilities.SupportsNonConstantTextureOffset;
++        public bool QueryHostSupportsNonConstantTextureOffset() => TranslationCapabilities.SupportsNonConstantTextureOffset;
+ 
+-        public bool QueryHostSupportsScaledVertexFormats() => _context.Capabilities.SupportsScaledVertexFormats;
++        public bool QueryHostSupportsScaledVertexFormats() => TranslationCapabilities.SupportsScaledVertexFormats;
+ 
+-        public bool QueryHostS2AVertexPull() => _context.Capabilities.S2AVertexPull;
++        public bool QueryHostS2AVertexPull() => TranslationCapabilities.S2AVertexPull;
+ 
+-        public bool QueryHostRequiresLinkedVaryingInterface() => _context.Capabilities.RequiresLinkedVaryingInterface;
++        public bool QueryHostRequiresLinkedVaryingInterface() => TranslationCapabilities.RequiresLinkedVaryingInterface;
+ 
+-        public int QueryHostMaximumVertexOutputComponents() => _context.Capabilities.MaximumVertexOutputComponents;
++        public int QueryHostMaximumVertexOutputComponents() => TranslationCapabilities.MaximumVertexOutputComponents;
+ 
+-        public int QueryHostMaximumFragmentInputComponents() => _context.Capabilities.MaximumFragmentInputComponents;
++        public int QueryHostMaximumFragmentInputComponents() => TranslationCapabilities.MaximumFragmentInputComponents;
+ 
+-        public bool QueryHostSupportsSeparateSampler() => _context.Capabilities.SupportsSeparateSampler;
++        public bool QueryHostSupportsSeparateSampler() => TranslationCapabilities.SupportsSeparateSampler;
+ 
+-        public bool QueryHostSupportsShaderBallot() => _context.Capabilities.SupportsShaderBallot;
++        public bool QueryHostSupportsShaderBallot() => TranslationCapabilities.SupportsShaderBallot;
+ 
+-        public bool QueryHostSupportsShaderBarrierDivergence() => _context.Capabilities.SupportsShaderBarrierDivergence;
++        public bool QueryHostSupportsShaderBarrierDivergence() => TranslationCapabilities.SupportsShaderBarrierDivergence;
+ 
+-        public bool QueryHostSupportsShaderFloat64() => _context.Capabilities.SupportsShaderFloat64;
++        public bool QueryHostSupportsShaderFloat64() => TranslationCapabilities.SupportsShaderFloat64;
+ 
+-        public bool QueryHostSupportsShaderNonUniformIndexing() => _context.Capabilities.SupportsShaderNonUniformIndexing;
++        public bool QueryHostSupportsShaderNonUniformIndexing() => TranslationCapabilities.SupportsShaderNonUniformIndexing;
+ 
+-        public bool QueryHostSupportsSnormBufferTextureFormat() => _context.Capabilities.SupportsSnormBufferTextureFormat;
++        public bool QueryHostSupportsSnormBufferTextureFormat() => TranslationCapabilities.SupportsSnormBufferTextureFormat;
+ 
+-        public bool QueryHostSupportsTextureGatherOffsets() => _context.Capabilities.SupportsTextureGatherOffsets;
++        public bool QueryHostSupportsTextureGatherOffsets() => TranslationCapabilities.SupportsTextureGatherOffsets;
+ 
+-        public bool QueryHostSupportsTextureShadowLod() => _context.Capabilities.SupportsTextureShadowLod;
++        public bool QueryHostSupportsTextureShadowLod() => TranslationCapabilities.SupportsTextureShadowLod;
+ 
+-        public bool QueryHostSupportsTransformFeedback() => _context.Capabilities.SupportsTransformFeedback;
++        public bool QueryHostSupportsTransformFeedback() => TranslationCapabilities.SupportsTransformFeedback;
+ 
+-        public bool QueryHostSupportsViewportIndexVertexTessellation() => _context.Capabilities.SupportsViewportIndexVertexTessellation;
++        public bool QueryHostSupportsViewportIndexVertexTessellation() => TranslationCapabilities.SupportsViewportIndexVertexTessellation;
+ 
+-        public bool QueryHostSupportsViewportMask() => _context.Capabilities.SupportsViewportMask;
++        public bool QueryHostSupportsViewportMask() => TranslationCapabilities.SupportsViewportMask;
+ 
+-        public bool QueryHostSupportsDepthClipControl() => _context.Capabilities.SupportsDepthClipControl;
++        public bool QueryHostSupportsDepthClipControl() => TranslationCapabilities.SupportsDepthClipControl;
+ 
+         /// <summary>
+         /// Converts a packed Maxwell texture format to the shader translator texture format.
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 969d2991f62af5a13504c9d5034a4072feabc228..8839019413b99d03bb9a193f7b7c7fe12bb3e1b3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -292,7 +292,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             TranslatorContext translatorContext;
+             try
+             {
+-                translatorContext = DecodeComputeShader(gpuAccessor, _context.Capabilities.Api, gpuVa);
++                translatorContext = DecodeComputeShader(gpuAccessor, GpuAccessorBase.S2ATranslationCapabilities(_context).Api, gpuVa);
+                 _s2aFaults.Forget(gpuVa);
+             }
+             catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch"))
+@@ -309,7 +309,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                 try
+                 {
+-                    translatorContext = DecodeComputeShader(s2aAccessor2, _context.Capabilities.Api, gpuVa);
++                    translatorContext = DecodeComputeShader(s2aAccessor2, GpuAccessorBase.S2ATranslationCapabilities(_context).Api, gpuVa);
+                     specState = s2aSpec2;
+                     S2ADisposeWatches(s2aWatches);
+                     _s2aFaults.Forget(gpuVa);
+@@ -464,7 +464,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             TranslatorContext[] translatorContexts = new TranslatorContext[Constants.ShaderStages + 1];
+             TranslatorContext nextStage = null;
+ 
+-            TargetApi api = context.Capabilities.Api;
++            TargetApi api = GpuAccessorBase.S2ATranslationCapabilities(context).Api;
+ 
+             for (int stageIndex = Constants.ShaderStages - 1; stageIndex >= 0; stageIndex--)
+             {
+@@ -686,7 +686,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     previousStage != null &&
+                     previousStage.LayerOutputWritten &&
+                     stageIndex == 3 &&
+-                    !_context.Capabilities.SupportsLayerVertexTessellation)
++                    !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
+                 {
+                     shaderSources.Add(CreateShaderSource(previousStage.GenerateGeometryPassthrough()));
+                 }
+@@ -730,7 +730,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             // If the host does not support store operations on vertex,
+             // we need to emulate it on a compute shader.
+-            if (!context.Capabilities.SupportsVertexStoreAndAtomics && vertexHasStore)
++            if (!GpuAccessorBase.S2ATranslationCapabilities(context).SupportsVertexStoreAndAtomics && vertexHasStore)
+             {
+                 return true;
+             }
+@@ -749,8 +749,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>True if the geometry shader should be converted to compute, false otherwise</returns>
+         public static bool ShouldConvertGeometryToCompute(GpuContext context, bool geometryHasStore)
+         {
+-            return (!context.Capabilities.SupportsVertexStoreAndAtomics && geometryHasStore) ||
+-                   !context.Capabilities.SupportsGeometryShader;
++            return (!GpuAccessorBase.S2ATranslationCapabilities(context).SupportsVertexStoreAndAtomics && geometryHasStore) ||
++                   !GpuAccessorBase.S2ATranslationCapabilities(context).SupportsGeometryShader;
+         }
+ 
+         /// <summary>
+@@ -839,7 +839,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             _s2aMismatches.Clear();
+             ShaderSpecializationState spec = program.SpecializationState;
+-            spec.S2AVerify(rt, program.Shaders, _context.Capabilities.Api == TargetApi.Vulkan, _context.Capabilities.SupportsQuads, _s2aMismatches);
++            spec.S2AVerify(rt, program.Shaders, GpuAccessorBase.S2ATranslationCapabilities(_context).Api == TargetApi.Vulkan, GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsQuads, _s2aMismatches);
+             int index = spec.S2ADiskIndex;
+             ShaderSpecializationState.S2AReport(_s2aMismatches, index, isCompute, index < S2AShaderCacheGuard.PackPrograms, static line => Console.Error.WriteLine(line));
+             rt.Channel = null;
+@@ -1053,7 +1053,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>The generated translator context</returns>
+         public static TranslatorContext DecodeComputeShader(IGpuAccessor gpuAccessor, TargetApi api, ulong gpuVa)
+         {
+-            TranslationOptions options = CreateTranslationOptions(api, DefaultFlags | TranslationFlags.Compute);
++            TranslationOptions options = CreateTranslationOptions(gpuAccessor, api, DefaultFlags | TranslationFlags.Compute);
+             return Translator.CreateContext(gpuVa, gpuAccessor, options);
+         }
+ 
+@@ -1070,7 +1070,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>The generated translator context</returns>
+         public static TranslatorContext DecodeGraphicsShader(IGpuAccessor gpuAccessor, TargetApi api, TranslationFlags flags, ulong gpuVa)
+         {
+-            TranslationOptions options = CreateTranslationOptions(api, flags);
++            TranslationOptions options = CreateTranslationOptions(gpuAccessor, api, flags);
+             return Translator.CreateContext(gpuVa, gpuAccessor, options);
+         }
+ 
+@@ -1192,8 +1192,15 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <param name="api">Target graphics API</param>
+         /// <param name="flags">Translation flags</param>
+         /// <returns>Translation options</returns>
+-        private static TranslationOptions CreateTranslationOptions(TargetApi api, TranslationFlags flags)
++        private static TranslationOptions CreateTranslationOptions(IGpuAccessor gpuAccessor, TargetApi api, TranslationFlags flags)
+         {
++            ComputeTranslationProfile selected = (gpuAccessor as IComputeTranslationProfileProvider)?.ComputeTranslationProfile;
++            if (selected != null)
++            {
++                if (api != TargetApi.Vulkan) throw new InvalidOperationException("A Vulkan compute profile cannot select another API.");
++                return selected.Options(flags);
++            }
++
+             TargetLanguage lang = GraphicsConfig.EnableSpirvCompilationOnVulkan && api == TargetApi.Vulkan
+                 ? TargetLanguage.Spirv
+                 : TargetLanguage.Glsl;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+index 2ba2d06854c922dfe5fbd9f8eb61e79b9a989f82..45897778cd999faf5b956c02c73c128050e92e76 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+@@ -22,6 +22,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             ResourceStages.Geometry;
+ 
+         private readonly GpuContext _context;
++        private Capabilities TranslationCapabilities => GpuAccessorBase.S2ATranslationCapabilities(_context);
+ 
+         private int _fragmentOutputMap;
+ 
+@@ -49,10 +50,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             _fragmentOutputMap = -1;
+ 
+-            int uniformSetIndex = context.Capabilities.UniformBufferSetIndex;
+-            int storageSetIndex = context.Capabilities.StorageBufferSetIndex;
+-            int textureSetIndex = context.Capabilities.TextureSetIndex;
+-            int imageSetIndex = context.Capabilities.ImageSetIndex;
++            int uniformSetIndex = TranslationCapabilities.UniformBufferSetIndex;
++            int storageSetIndex = TranslationCapabilities.StorageBufferSetIndex;
++            int textureSetIndex = TranslationCapabilities.TextureSetIndex;
++            int imageSetIndex = TranslationCapabilities.ImageSetIndex;
+ 
+             int totalSets = Math.Max(uniformSetIndex, storageSetIndex);
+             totalSets = Math.Max(totalSets, textureSetIndex);
+@@ -71,7 +72,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             AddDescriptor(SupportBufferStages, ResourceType.UniformBuffer, uniformSetIndex, 0, 1);
+             AddUsage(SupportBufferStages, ResourceType.UniformBuffer, uniformSetIndex, 0, 1);
+ 
+-            ResourceReservationCounts rrc = new(!context.Capabilities.SupportsTransformFeedback && tfEnabled, vertexAsCompute);
++            ResourceReservationCounts rrc = new(!TranslationCapabilities.SupportsTransformFeedback && tfEnabled, vertexAsCompute);
+ 
+             _reservedConstantBuffers = rrc.ReservedConstantBuffers;
+             _reservedStorageBuffers = rrc.ReservedStorageBuffers;
+@@ -134,20 +135,20 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 _ => ResourceStages.None,
+             };
+ 
+-            int uniformsPerStage = (int)_context.Capabilities.MaximumUniformBuffersPerStage;
+-            int storagesPerStage = (int)_context.Capabilities.MaximumStorageBuffersPerStage;
+-            int texturesPerStage = (int)_context.Capabilities.MaximumTexturesPerStage;
+-            int imagesPerStage = (int)_context.Capabilities.MaximumImagesPerStage;
++            int uniformsPerStage = (int)TranslationCapabilities.MaximumUniformBuffersPerStage;
++            int storagesPerStage = (int)TranslationCapabilities.MaximumStorageBuffersPerStage;
++            int texturesPerStage = (int)TranslationCapabilities.MaximumTexturesPerStage;
++            int imagesPerStage = (int)TranslationCapabilities.MaximumImagesPerStage;
+ 
+             int uniformBinding = _reservedConstantBuffers + stageIndex * uniformsPerStage;
+             int storageBinding = _reservedStorageBuffers + stageIndex * storagesPerStage;
+             int textureBinding = _reservedTextures + stageIndex * texturesPerStage * 2;
+             int imageBinding = _reservedImages + stageIndex * imagesPerStage * 2;
+ 
+-            int uniformSetIndex = _context.Capabilities.UniformBufferSetIndex;
+-            int storageSetIndex = _context.Capabilities.StorageBufferSetIndex;
+-            int textureSetIndex = _context.Capabilities.TextureSetIndex;
+-            int imageSetIndex = _context.Capabilities.ImageSetIndex;
++            int uniformSetIndex = TranslationCapabilities.UniformBufferSetIndex;
++            int storageSetIndex = TranslationCapabilities.StorageBufferSetIndex;
++            int textureSetIndex = TranslationCapabilities.TextureSetIndex;
++            int imageSetIndex = TranslationCapabilities.ImageSetIndex;
+ 
+             AddDescriptor(stages, ResourceType.UniformBuffer, uniformSetIndex, uniformBinding, uniformsPerStage);
+             AddDescriptor(stages, ResourceType.StorageBuffer, storageSetIndex, storageBinding, storagesPerStage);
+@@ -362,7 +363,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             {
+                 // S2A（F1）：越界记录缓冲。用法不记写：它只在越界分支里写、命令缓冲完成后由渲染器读，
+                 //   不参与 draw 之间的存储缓冲写屏障（ShaderCollection.IncoherentBufferWriteStages）
+-                int storageSetIndex = _context.Capabilities.StorageBufferSetIndex;
++                int storageSetIndex = TranslationCapabilities.StorageBufferSetIndex;
+ 
+                 GetDescriptors(storageSetIndex).Add(new ResourceDescriptor(S2AStorageOobRecord.Binding, 1, ResourceType.StorageBuffer, _s2aOobRecordStages));
+                 GetUsages(storageSetIndex).Add(new ResourceUsage(S2AStorageOobRecord.Binding, 1, ResourceType.StorageBuffer, _s2aOobRecordStages, false));
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index d63adea91bd6a63779c9ee0a2cf74540c3fd93e2..adb2667738bd82a22f060a12160f95da71b9efe8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -27,7 +27,7 @@ using SamplerCreateInfo = Ryujinx.Graphics.GAL.SamplerCreateInfo;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
+-    public sealed class VulkanRenderer : IRenderer, IHostProgramCachePolicy
++    public sealed class VulkanRenderer : IRenderer, IHostProgramCachePolicy, IComputeTranslationProfileProvider
+     {
+         private VulkanInstance _instance;
+         private SurfaceKHR _surface;
+@@ -100,6 +100,55 @@ namespace Ryujinx.Graphics.Vulkan
+         private readonly object _s2aProgramIdentityGate = new();
+         private ProgramBinaryIdentity _s2aProgramBinaryIdentity;
+         private string _s2aHostCacheDiscriminator;
++        private bool _s2aFreezeProgramProfile;
++        private bool _s2aRequestedSpirv;
++        private string _s2aGpuTranslationProducer;
++        private readonly object _s2aProfileOwner = new();
++        private ProgramBinaryProfileSnapshot _s2aProfileSnapshot;
++
++        /// <summary>Android opts in before Initialize; the default retains the v1 cache path.</summary>
++        public void S2AConfigureProgramProfileFreeze(bool requestedSpirv, string gpuTranslationProducer)
++        {
++            if (_initialized || _s2aFreezeProgramProfile)
++                throw new InvalidOperationException("Configure the translation profile once, before device initialization.");
++            _s2aRequestedSpirv = requestedSpirv;
++            _s2aGpuTranslationProducer = gpuTranslationProducer;
++            _s2aFreezeProgramProfile = true;
++        }
++
++        private VulkanProfile S2ASelectedProgramProfile =>
++            (_s2aProfileSnapshot ?? throw new InvalidOperationException("The Vulkan device has no initialized translation profile."))
++                .RequireCurrent(_s2aProfileOwner);
++
++        public ComputeTranslationProfile ComputeTranslationProfile =>
++            _s2aFreezeProgramProfile ? S2ASelectedProgramProfile.ComputeProfile : null;
++
++        public Capabilities FrozenTranslationCapabilities => S2ASelectedProgramProfile.Capabilities;
++
++        // This runs after SetupContext (including TryCreate of the optional OOB recorder),
++        // and before the host may publish capabilities or consume shader cache files.
++        private void S2ASelectProgramProfile()
++        {
++            if (!_s2aFreezeProgramProfile) return;
++            ComputeTranslationProfile selected = Ryujinx.Graphics.GAL.ComputeTranslationProfile.Select(
++                _s2aRequestedSpirv, _physicalDevice.PhysicalDeviceFeatures.RobustBufferAccess,
++                _enabledFeatures.Core.RobustBufferAccess, S2AStorageOob != null);
++            Capabilities capabilities = BuildCapabilities(selected);
++            S2ACompleteProgramProfile(in capabilities, selected);
++        }
++
++        // The query half stays in SetupContext/BuildCapabilities. This commit half publishes
++        // exactly once and is CPU-testable with already captured device facts.
++        private void S2ACompleteProgramProfile(in Capabilities capabilities, ComputeTranslationProfile selected)
++        {
++            if (!_s2aFreezeProgramProfile || _s2aProfileSnapshot != null)
++                throw new InvalidOperationException("The renderer translation profile was not configured or is already frozen.");
++            VulkanProfile profile = VulkanProfile.CreateFrozen(in capabilities, Shader.TargetVulkanVersion,
++                S2ATranslatorClosure(), selected, _s2aGpuTranslationProducer,
++                typeof(ComputeTranslationProfile).Assembly.ManifestModule.ModuleVersionId.ToString("N"));
++            _s2aProfileSnapshot = new ProgramBinaryProfileSnapshot(_s2aProfileOwner, profile);
++        }
++
+         internal long S2AProgramBinaryLoads;
+         internal long S2AProgramBinaryRejects;
+ 
+@@ -112,6 +161,7 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             get
+             {
++                if (_s2aFreezeProgramProfile) _ = S2ASelectedProgramProfile;
+                 string discriminator = _s2aHostCacheDiscriminator;
+                 if (discriminator != null) return discriminator;
+                 ProgramBinaryIdentity identity = S2AProgramBinaryIdentity;
+@@ -128,6 +178,7 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             get
+             {
++                if (_s2aFreezeProgramProfile) return S2ASelectedProgramProfile.Identity;
+                 ProgramBinaryIdentity identity = _s2aProgramBinaryIdentity;
+                 if (identity != null) return identity;
+ 
+@@ -146,6 +197,7 @@ namespace Ryujinx.Graphics.Vulkan
+         // same SPIR-V target, same translator closure.
+         internal VulkanProfile S2ACreateProgramProfile()
+         {
++            if (_s2aFreezeProgramProfile) return S2ASelectedProgramProfile;
+             Capabilities capabilities = GetCapabilities();
+             return VulkanProfile.Create(in capabilities, Shader.TargetVulkanVersion, S2ATranslatorClosure());
+         }
+@@ -709,7 +761,14 @@ namespace Ryujinx.Graphics.Vulkan
+             return BufferManager.GetData(buffer, offset, size);
+         }
+ 
+-        public unsafe Capabilities GetCapabilities()
++        public Capabilities GetCapabilities()
++        {
++            if (!_s2aFreezeProgramProfile) return BuildCapabilities();
++            _ = S2ASelectedProgramProfile;
++            return _s2aProfileSnapshot.Capabilities(_s2aProfileOwner, GetTotalGPUMemory());
++        }
++
++        private unsafe Capabilities BuildCapabilities(ComputeTranslationProfile selected = null)
+         {
+             FormatFeatureFlags compressedFormatFeatureFlags =
+                 FormatFeatureFlags.SampledImageBit |
+@@ -880,8 +939,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 maximumVertexOutputComponents: checked((int)limits.MaxVertexOutputComponents),
+                 maximumFragmentInputComponents: checked((int)limits.MaxFragmentInputComponents),
+                 // S2A（F1）：没开 robustBufferAccess 的设备（只有 NVIDIA 开）上越界存储缓冲访存没有驱动兜底，翻译期按宿主窗口钳位
+-                s2aStorageWindowClamp: !features.RobustBufferAccess,
+-                s2aStorageOobRecord: S2AStorageOob != null);
++                s2aStorageWindowClamp: selected?.StorageWindowClamp ?? !features.RobustBufferAccess,
++                s2aStorageOobRecord: selected?.StorageOobRecord ?? (S2AStorageOob != null));
+         }
+ 
+         private ulong GetTotalGPUMemory()
+@@ -1039,7 +1098,10 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public void Initialize(GraphicsDebugLevel logLevel)
+         {
++            if (_s2aFreezeProgramProfile && _initialized)
++                throw new InvalidOperationException("A rebuilt Vulkan device requires a new renderer/profile owner.");
+             SetupContext(logLevel);
++            S2ASelectProgramProfile();
+ 
+             PrintGpuInformation();
+         }
+@@ -1207,6 +1269,7 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 throw new TimeoutException("Vulkan compile worker did not stop; retain the device and terminate the host.");
+             }
++            _s2aProfileSnapshot?.Retire(_s2aProfileOwner);
+ 
+             // Shader/helper disposal may still observe a canceled background task; it must
+             // not touch the WSI lease after the window starts retiring.

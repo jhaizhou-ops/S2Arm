@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index f352c2e54eacad2c22ad13a6e0b34b2df95d47fc..0ebce7a2662c64979d95055e622004d5ffbcc85d 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -422,6 +422,26 @@ namespace Ryujinx.Memory.Tracking
+             return true;
+         }
+ 
++        /// <summary>
++        /// S2A（#199 收口回写）：GPU 改过、还没回写的子页被读之前发同一个读跟踪事件——客机缺页
++        /// （NxTrack.Touch 读分支）与 GuestMemory 的托管不跟踪读共用这一入口。回写动作在本线程跑完、
++        /// 页恢复可读后才返回；失败原样上抛。S2AReadTouch 置位期间 GPU 层只回写所碰子页（部分回写）。
++        /// </summary>
++        /// <param name="va">读区间起点（游戏地址）</param>
++        /// <param name="size">读区间长度</param>
++        public void S2AReadFlush(ulong va, ulong size)
++        {
++            S2AReadTouch = true;
++            try
++            {
++                VirtualMemoryEvent(va, size, false, precise: false, exemptId: null, guest: true);
++            }
++            finally
++            {
++                S2AReadTouch = false;
++            }
++        }
++
+         /// <summary>
+         /// Reprotect a given virtual region. The virtual memory manager will handle this.
+         /// </summary>

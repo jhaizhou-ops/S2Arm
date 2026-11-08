@@ -1,0 +1,127 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/BitMapStruct.cs b/src/Ryujinx.Graphics.Vulkan/BitMapStruct.cs
+index e1f109dd70f549d5b34e82d779772499af1791d0..d05d0ab1224959810780c0870ca1805a40fe3f73 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BitMapStruct.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BitMapStruct.cs
+@@ -74,7 +74,7 @@ namespace Ryujinx.Graphics.Vulkan
+             _masks = from._masks;
+         }
+ 
+-        public void SignalSet(Action<int, int> action)
++        public void SignalSet<TListener>(ref TListener listener) where TListener : struct, IBitMapListener
+         {
+             // Iterate the set bits in the result, and signal them.
+ 
+@@ -88,7 +88,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     int bit = BitOperations.TrailingZeroCount((ulong)value);
+ 
+-                    action(offset + bit, 1);
++                    listener.BitMapSignal(offset + bit, 1);
+ 
+                     value &= ~(1L << bit);
+                 }
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 2daa048561fe853f0416d1d762e2341f73b9f677..c2f340386e50888a3c0edbf85b630a8de106c026 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -226,57 +226,69 @@ namespace Ryujinx.Graphics.Vulkan
+             return offset < bindingOffset + (int)info.Range && (offset + size) > bindingOffset;
+         }
+ 
+-        internal void Rebind(Auto<DisposableBuffer> buffer, int offset, int size)
++        private readonly struct BufferRebindListener : IBitMapListener
+         {
+-            if (_program == null)
++            private readonly DescriptorSetUpdater _owner;
++            private readonly Auto<DisposableBuffer> _buffer;
++            private readonly int _offset;
++            private readonly int _size;
++            private readonly bool _storage;
++
++            public BufferRebindListener(DescriptorSetUpdater owner, Auto<DisposableBuffer> buffer, int offset, int size, bool storage)
+             {
+-                return;
++                _owner = owner;
++                _buffer = buffer;
++                _offset = offset;
++                _size = size;
++                _storage = storage;
+             }
+ 
+-            // Check stage bindings
+-
+-            _uniformMirrored.Union(_uniformSet).SignalSet((binding, count) =>
++            public void BitMapSignal(int binding, int count)
+             {
++                BufferRef[] refs = _storage ? _owner._storageBufferRefs : _owner._uniformBufferRefs;
++                DescriptorBufferInfo[] infos = _storage ? _owner._storageBuffers : _owner._uniformBuffers;
++
+                 for (int i = 0; i < count; i++)
+                 {
+-                    ref BufferRef bufferRef = ref _uniformBufferRefs[binding];
+-                    if (bufferRef.Buffer == buffer)
++                    ref BufferRef bufferRef = ref refs[binding];
++                    if (bufferRef.Buffer == _buffer)
+                     {
+-                        ref DescriptorBufferInfo info = ref _uniformBuffers[binding];
++                        ref DescriptorBufferInfo info = ref infos[binding];
+                         int bindingOffset = bufferRef.Offset;
+ 
+-                        if (BindingOverlaps(ref info, bindingOffset, offset, size))
++                        if (BindingOverlaps(ref info, bindingOffset, _offset, _size))
+                         {
+-                            _uniformSet.Clear(binding);
+-                            _uniformSetPd[binding] = 0;
+-                            SignalDirty(DirtyFlags.Uniform);
++                            if (_storage)
++                            {
++                                _owner._storageSet.Clear(binding);
++                                _owner.SignalDirty(DirtyFlags.Storage);
++                            }
++                            else
++                            {
++                                _owner._uniformSet.Clear(binding);
++                                _owner._uniformSetPd[binding] = 0;
++                                _owner.SignalDirty(DirtyFlags.Uniform);
++                            }
+                         }
+                     }
+ 
+                     binding++;
+                 }
+-            });
++            }
++        }
+ 
+-            _storageMirrored.Union(_storageSet).SignalSet((binding, count) =>
++        internal void Rebind(Auto<DisposableBuffer> buffer, int offset, int size)
++        {
++            if (_program == null)
+             {
+-                for (int i = 0; i < count; i++)
+-                {
+-                    ref BufferRef bufferRef = ref _storageBufferRefs[binding];
+-                    if (bufferRef.Buffer == buffer)
+-                    {
+-                        ref DescriptorBufferInfo info = ref _storageBuffers[binding];
+-                        int bindingOffset = bufferRef.Offset;
++                return;
++            }
+ 
+-                        if (BindingOverlaps(ref info, bindingOffset, offset, size))
+-                        {
+-                            _storageSet.Clear(binding);
+-                            SignalDirty(DirtyFlags.Storage);
+-                        }
+-                    }
++            BufferRebindListener uniform = new(this, buffer, offset, size, storage: false);
++            _uniformMirrored.Union(_uniformSet).SignalSet(ref uniform);
+ 
+-                    binding++;
+-                }
+-            });
++            BufferRebindListener storage = new(this, buffer, offset, size, storage: true);
++            _storageMirrored.Union(_storageSet).SignalSet(ref storage);
+         }
+ 
+         public void InsertBindingBarriers(CommandBufferScoped cbs)

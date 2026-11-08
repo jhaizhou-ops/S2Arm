@@ -1,0 +1,84 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index b5ad8f8266b39d2e39ee3a00df19245b91dbf40e..280a1813732bea9856ecd32823885d63ebb3cb31 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -113,6 +113,13 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 _pump = new Pump(this, (int)bufferSize);
+                 _samples = _pump.Samples;
++
++                // S2Arm diag: S2A_AUDIO_TAP=1 puts a processing tap on the queue output (runtime/src/audiotap.c) that counts the device
++                // cycles the queue could not fill = real gaps (the hand-back based 断供 count cannot see them, see S2AOutputDiag)
++                if (Environment.GetEnvironmentVariable("S2A_AUDIO_TAP") == "1")
++                {
++                    _diag.AttachTap(_audioQueue);
++                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index f5fe7fd98cde7140b096cd915fd2bd3a30bf2078..9646e9092f5e859990067f5a87ae70e7c1736594 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Audio.Renderer.Dsp;
+ using System;
+ using System.Diagnostics;
+ using System.IO;
++using System.Runtime.InteropServices;
+ using System.Threading;
+ 
+ namespace Ryujinx.Audio.Backends.Apple
+@@ -11,6 +12,9 @@ namespace Ryujinx.Audio.Backends.Apple
+     //   buffers handed back (callbacks), frames submitted / played, starvations (the device played its last buffer and the next one came
+     //   later: that stretch is silence; < 1 s counts as 断供 = a gap in the middle of the stream, longer as 停流 = the stream paused),
+     //   longest starvation, smallest in-flight after a hand-back, longest gap between hand-backs, plus the renderer's dropped periods
++    //   NOTE (10-21): 断供 counts hand-backs that left nothing in flight. AudioQueue takes everything queued at each device IO cycle,
++    //   so with a producer one period ahead that is about once per IO cycle and says nothing about real gaps (acnh on Mac: ~116
++    //   per 10 s with the tap reading 0 short cycles). Real gaps = the tap's "取不够" (S2A_AUDIO_TAP=1, runtime/src/audiotap.c).
+     //   (AudioProcessor skip) and worst period lateness.
+     // - S2A_AUDIO_WAV=<path>: every byte submitted to CoreAudio is copied into a preallocated ring and written by a writer thread to
+     //   <path>.<session>.wav (16-bit PCM header, sizes rewritten after each write so a crashed run still reads); a 断供 stretch is
+@@ -97,6 +101,34 @@ namespace Ryujinx.Audio.Backends.Apple
+             return d;
+         }
+ 
++        // Processing tap counters (runtime/src/audiotap.c): device cycles, cycles the queue could not fill, frames wanted / got
++        private static readonly nint _tapAttach = TapExport("s2a_audio_tap_attach");
++        private static readonly nint _tapStats = TapExport("s2a_audio_tap_stats");
++        private bool _tapOn;
++        private ulong _repTapCalls, _repTapShort, _repTapWant, _repTapGot;
++
++        private static nint TapExport(string name) => NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), name, out nint e) ? e : 0;
++
++        public unsafe void AttachTap(nint queue)
++        {
++            _tapOn = _tapAttach != 0 && ((delegate* unmanaged<nint, int, int>)_tapAttach)(queue, Index) == 0;
++        }
++
++        private unsafe string TapLine()
++        {
++            if (!_tapOn || _tapStats == 0)
++            {
++                return "";
++            }
++
++            ulong* t = stackalloc ulong[4];
++            ((delegate* unmanaged<int, ulong*, void>)_tapStats)(Index, t);
++            ulong calls = t[0] - _repTapCalls, shortCalls = t[1] - _repTapShort, missing = t[2] - t[3] - (_repTapWant - _repTapGot);
++            _repTapCalls = t[0]; _repTapShort = t[1]; _repTapWant = t[2]; _repTapGot = t[3];
++
++            return $"；抽头：周期 {calls} 个、取不够 {shortCalls} 个、缺 {missing} 帧（{missing * 1000.0 / _rate:F1} ms）";
++        }
++
+         public void SetStarted(bool started)
+         {
+             _started = started;
+@@ -346,7 +378,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+                         $"断供 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}{d.TapLine()}");
+ 
+                     d._repCallbacks = cb;
+                     d._repSubmitted = sub;

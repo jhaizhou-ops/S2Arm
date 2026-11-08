@@ -1,0 +1,20 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 5376e9b98fea3e1916b27f079586f95c5fc0905c..cb65cac0b7a809f03967893ff77d280d3f306d76 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -205,6 +205,15 @@ namespace Ryujinx.Graphics.Shader.Translation
+             if (S2AStageIndep && Definitions.Stage == ShaderStage.Vertex) AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);
+         }
+ 
++        /// <summary>S2A：单独翻几何着色器（几何转计算，离线库按几何着色器单独出、配哪个片元都用同一份）：按「下一阶段是片元、读全部 32 个通用输入」定输出接口，
++        /// 与顶点阶段的 S2ASetStandaloneNextFragment 同一口径。上游靠 SetNextStage 拿片元的实际读取：直通型据此转发属性，非直通型给片元读、自己没写的输出补默认值。
++        /// 单独翻时没有下一阶段，两样都是 0：异度神剑3 95bfab6122539993（非直通，4 顶点三角带，只写位置与 1 个分量）记录步长 5，配对的片元读 locn0–9，
++        /// 读取变体（_bgv）的管线建不出、这些几何绘制整笔丢、开场全黑（10-31）</summary>
++        public void S2ASetStandaloneGeometryNextFragment()
++        {
++            if (Definitions.Stage == ShaderStage.Geometry) AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);
++        }
++
+         public void SetNextStage(TranslatorContext nextStage)
+         {
+             bool linked = AttributeUsage.RequiresLinkedVaryingInterface;

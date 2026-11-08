@@ -1,0 +1,44 @@
+diff --git a/src/Ryujinx.HLE/HOS/HorizonFsClient.cs b/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
+index f1ebe1de11180cde7142687ee551e4aef4c997e2..991ebe9075e0a19e2d99feaf3682f66a504372aa 100644
+--- a/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
++++ b/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
+@@ -39,7 +39,10 @@ namespace Ryujinx.HLE.HOS
+         public Result MountSystemData(string mountName, ulong dataId)
+         {
+             // S2Arm: system data as a directory (no firmware NCAs)
+-            if (S2AHooks.SystemDataDir(dataId) is string s2aDir)
++            string s2aDir = S2AHooks.SystemDataDir(dataId);
++            S2AHooks.SystemDataAsked?.Invoke(dataId, "MountSystemData", s2aDir != null);
++
++            if (s2aDir != null)
+             {
+                 using UniqueRef<IFileSystem> dirFsRef = new(new LibHac.FsSystem.LocalFileSystem(s2aDir));
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 74ba547ab068eebe099b84cb633715065f5bda11..75fdcfc0b71b27e712b135cbc41e99fe07d7fee4 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -820,6 +820,8 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+             }
+ 
+             // S2Arm: system data as a directory (no firmware NCAs); falls through to upstream when absent
++            S2AHooks.SystemDataAsked?.Invoke(titleId, "OpenDataStorageByDataId", S2AHooks.SystemDataDir(titleId) != null);
++
+             if (S2AHooks.OpenSystemDataStorage?.Invoke(titleId) is LibHac.Fs.IStorage s2aStorage)
+             {
+                 using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(s2aStorage);
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 2808893e5776f782ca8754fd59f9ed48043ace93..4ecac34fdf6ceb13664d8f22de926fc40cdc435b 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -39,6 +39,10 @@ namespace Ryujinx.HLE
+         public static string SystemDataRoot;
+         public static System.Func<ulong, LibHac.Fs.IStorage> OpenSystemDataStorage;
+ 
++        // A system data archive was asked for (id, entry point "MountSystemData" / "OpenDataStorageByDataId", present under SystemDataRoot):
++        // S2Arm logs it once per id and entry, so a run shows which system data a game needs (pack/sysdata_need.tsv is built from these lines)
++        public static System.Action<ulong, string, bool> SystemDataAsked;
++
+         // Add-on content (DLC) registered by S2A from the game data directory (aoc.tsv + aoc/<idx>/):
+         // OpenAocDataStorage gives the RomFS image of a registered DLC, null when it is licence-only (S2A reports red)
+         public static System.Func<ulong, LibHac.Fs.IStorage> OpenAocDataStorage;

@@ -1,0 +1,73 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index 594a5fa9fc865c98eeef8ebd3ff06ce5a3363669..9ce55bd65a6997ea802e8a9cf072eba4adeb8012 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -6,6 +6,7 @@ using System;
+ using System.Collections.Generic;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
++using System.Threading;
+ using Buffer = Silk.NET.Vulkan.Buffer;
+ using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
+ using Format = Ryujinx.Graphics.GAL.Format;
+@@ -16,6 +17,8 @@ namespace Ryujinx.Graphics.Vulkan
+     class DescriptorSetUpdater
+     {
+         private const ulong StorageBufferMaxMirrorable = 0x2000;
++        private const int S2ANullImageFallbackLogLines = 8;
++        private static int _s2aNullImageFallbackLogs;
+ 
+         // S2A（F1）：存储缓冲集合的绑定号上限要装下越界记录绑定（在各阶段 5 × 16 与保留绑定之上）
+         private const int StorageBufferBindings = S2AStorageOobRecord.Binding + 1;
+@@ -950,6 +953,23 @@ namespace Ryujinx.Graphics.Vulkan
+                             for (int i = 0; i < count; i++)
+                             {
+                                 images[i].ImageView = _imageRefs[binding + i].ImageView?.Get(cbs).Value ?? default;
++
++                                // S2A：空 image view 以 0 描述符写入是 Vulkan 未定义行为（未启用 nullDescriptor 时）。
++                                //   这里与 texture / ImageArray 路径一致，回退到 1×1 dummy（R8G8B8A8_UNORM，带 STORAGE
++                                //   usage），同时计数并在收局汇总行报出——null 绑定本身仍然可见，不是静默兜底。
++                                //   与 9000 / 歧路旅人 II 的 DeviceLost 无关；9000 上本回退命中 0 次。
++                                if (images[i].ImageView.Handle == 0)
++                                {
++                                    images[i].ImageView = _dummyTexture.GetImageView().Get(cbs).Value;
++                                    _gd.S2ANoteNullImageFallback();
++
++                                    int n = Interlocked.Increment(ref _s2aNullImageFallbackLogs);
++                                    if (n <= S2ANullImageFallbackLogLines || (n & (n - 1)) == 0)
++                                    {
++                                        Console.Error.WriteLine(
++                                            $"[s2a] 【黄】null storage image 回退：set={setIndex} binding={binding + i} program={_program.S2AShaderHashes}（第 {n} 次）");
++                                    }
++                                }
+                             }
+ 
+                             tu.Push<DescriptorImageInfo>(images[..count]);
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index e1b7011ddd45711cd22458327831c3aa89265e97..27b36a21544844641990f08130a3b3ffafc1e7f5 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -20,6 +20,7 @@ namespace Ryujinx.Graphics.Vulkan
+         public PipelineLayout PipelineLayout => _plce.PipelineLayout;
+ 
+         public bool HasMinimalLayout { get; }
++
+         public bool UsePushDescriptors { get; }
+         public bool IsCompute { get; }
+         public bool HasTessellationControlShader => (Stages & (1u << 3)) != 0;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 86325763a4bef2f4546ffa637451aabd59e312d9..753b1a6ee5804b39a4f65e95bb46b97eb2589240 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -127,6 +127,11 @@ namespace Ryujinx.Graphics.Vulkan
+         public long QueryTimeouts => Interlocked.Read(ref _queryTimeouts);
+         internal void IncrementQueryTimeouts() => Interlocked.Increment(ref _queryTimeouts);
+ 
++        // S2A：空 storage image view 回退到 1×1 dummy 的次数，并入收局汇总行。
++        private long _s2aNullImageFallbacks;
++        public long S2ANullImageFallbacks => Interlocked.Read(ref _s2aNullImageFallbacks);
++        internal void S2ANoteNullImageFallback() => Interlocked.Increment(ref _s2aNullImageFallbacks);
++
+         /// <summary>
+         /// S2A（Android 拆线程收局）：把一次驱动管线缓存落盘排到编译通道（高优先级，与管线创建串行），不等它；返回该次落盘是否写成的任务，
+         /// 没有编译通道 / 管线 / 通道已在停 = null。释放时照常再存一次

@@ -1,0 +1,558 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+index 43802c34e650ee1f58615d72bfc297f1b80e11b3..ab6d479a0496bf5c851adfc12302b450a6ac83fa 100644
+--- a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
++++ b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+@@ -4,7 +4,7 @@ using System;
+ 
+ namespace Ryujinx.Graphics.Nvdec.FFmpeg.H264
+ {
+-    static class SpsAndPpsReconstruction
++    public static class SpsAndPpsReconstruction
+     {
+         public static Span<byte> Reconstruct(ref H264PictureInfo pictureInfo, byte[] workBuffer)
+         {
+diff --git a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3fe4164837585e294abc31e712165843c684690
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+@@ -0,0 +1,477 @@
++using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.Nvdec.FFmpeg.H264;
++using Ryujinx.Graphics.Video;
++using System;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Graphics.Nvdec.Apple
++{
++    // H.264 硬件解码（苹果 VideoToolbox），替 FFmpeg 后端（S2Arm 不带 FFmpeg）。
++    // 与 FFmpeg 后端同一约定：每次 Decode 交一帧的码流（Annex B），参数集按 nvdec 给的图像信息重建，当场出这一帧（解码序，不重排——
++    // 游戏自己管参考帧与显示序）。解出的帧要 y420 三平面，面直接引用 VideoToolbox 的像素缓冲（锁住只读），交 SurfaceWriter 回写客体内存。
++    // 稳态零托管分配：码流转写缓冲、参数集缓存按需扩容后复用；每帧只有 CoreMedia 的块 / 样本缓冲两个原生对象（用完即放）。
++    // 只在 Host1x 线程上跑（nvdec 设备线程），不碰游戏线程。
++    public sealed unsafe class VideoToolboxH264Decoder : IH264Decoder
++    {
++        public bool IsHardwareAccelerated => true;
++
++        private const int WorkBufferSize = 0x200;
++        private const uint PixelFormatY420 = 0x79343230;   // 'y420'：kCVPixelFormatType_420YpCbCr8Planar（视频范围，样本值原样）
++
++        private readonly byte[] _workBuffer = new byte[WorkBufferSize];
++        private byte[] _avcc = new byte[0x10000];          // 长度前缀格式的切片 NAL
++        private byte[] _sps = Array.Empty<byte>();
++        private byte[] _pps = Array.Empty<byte>();
++        private int _spsLen, _ppsLen;
++
++        private nint _format;    // CMVideoFormatDescriptionRef
++        private nint _session;   // VTDecompressionSessionRef
++        private readonly OutputSlot* _slot = (OutputSlot*)NativeMemory.AllocZeroed((nuint)sizeof(OutputSlot));
++        private bool _failed;
++        private long _frames;
++
++        private struct OutputSlot
++        {
++            public nint ImageBuffer;   // 回调交来的 CVPixelBuffer（已 retain）
++            public int Status;
++        }
++
++        public ISurface CreateSurface(int width, int height) => new VideoToolboxSurface(width, height);
++
++        public bool Decode(ref H264PictureInfo pictureInfo, ISurface output, ReadOnlySpan<byte> bitstream)
++        {
++            if (_failed)
++            {
++                return false;
++            }
++
++            VideoToolboxSurface surface = (VideoToolboxSurface)output;
++            ReadOnlySpan<byte> paramSets = SpsAndPpsReconstruction.Reconstruct(ref pictureInfo, _workBuffer);
++
++            if (!UpdateParameterSets(paramSets))
++            {
++                return false;
++            }
++
++            int avccLen = ToAvcc(bitstream);
++
++            if (avccLen == 0)
++            {
++                return false;
++            }
++
++            fixed (byte* p = _avcc)
++            {
++                nint block = 0, sample = 0;
++                int st = CoreMedia.CMBlockBufferCreateWithMemoryBlock(0, p, (nuint)avccLen, CoreFoundation.AllocatorNull, null, 0, (nuint)avccLen, 0, &block);
++
++                if (st == 0)
++                {
++                    nuint size = (nuint)avccLen;
++                    st = CoreMedia.CMSampleBufferCreateReady(0, block, _format, 1, 0, null, 1, &size, &sample);
++                }
++
++                if (st == 0)
++                {
++                    _slot->ImageBuffer = 0;
++                    _slot->Status = -1;
++                    uint info;
++                    st = VideoToolbox.VTDecompressionSessionDecodeFrame(_session, sample, 0, _slot, &info);
++
++                    if (st == 0)
++                    {
++                        VideoToolbox.VTDecompressionSessionWaitForAsynchronousFrames(_session);
++                    }
++                }
++
++                if (sample != 0)
++                {
++                    CoreFoundation.CFRelease(sample);
++                }
++
++                if (block != 0)
++                {
++                    CoreFoundation.CFRelease(block);
++                }
++
++                if (st != 0 || _slot->Status != 0 || _slot->ImageBuffer == 0)
++                {
++                    Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264 解码失败：提交 {st}，回调 {_slot->Status}，出帧 {(_slot->ImageBuffer != 0 ? "有" : "无")}");
++
++                    if (_slot->ImageBuffer != 0)
++                    {
++                        CoreFoundation.CFRelease(_slot->ImageBuffer);
++                        _slot->ImageBuffer = 0;
++                    }
++
++                    return false;
++                }
++            }
++
++            surface.Attach(_slot->ImageBuffer);   // 引用转给面
++            _slot->ImageBuffer = 0;
++
++            if (_frames++ == 0)
++            {
++                Logger.Info?.Print(LogClass.Nvdec, $"VideoToolbox H.264 首帧解出：{surface.Width}x{surface.Height}，亮度行距 {surface.Stride}，色度行距 {surface.UvStride}");
++            }
++
++            return true;
++        }
++
++        // 参数集变了才重建格式描述；会话不收新格式就重建会话
++        private bool UpdateParameterSets(ReadOnlySpan<byte> annexB)
++        {
++            ReadOnlySpan<byte> sps = default, pps = default;
++            int pos = 0;
++
++            while (NextNal(annexB, ref pos, out ReadOnlySpan<byte> nal))
++            {
++                switch (nal[0] & 0x1F)
++                {
++                    case 7: sps = nal; break;
++                    case 8: pps = nal; break;
++                }
++            }
++
++            if (sps.IsEmpty || pps.IsEmpty)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, "VideoToolbox H.264：重建的参数集缺 SPS / PPS");
++                return false;
++            }
++
++            if (_format != 0 && sps.SequenceEqual(_sps.AsSpan(0, _spsLen)) && pps.SequenceEqual(_pps.AsSpan(0, _ppsLen)))
++            {
++                return true;
++            }
++
++            Store(ref _sps, ref _spsLen, sps);
++            Store(ref _pps, ref _ppsLen, pps);
++
++            nint format;
++            int st;
++
++            fixed (byte* ps = _sps, pp = _pps)
++            {
++                byte** ptrs = stackalloc byte*[2] { ps, pp };
++                nuint* sizes = stackalloc nuint[2] { (nuint)_spsLen, (nuint)_ppsLen };
++                st = CoreMedia.CMVideoFormatDescriptionCreateFromH264ParameterSets(0, 2, ptrs, sizes, 4, &format);
++            }
++
++            if (st != 0)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264：参数集建格式描述失败 {st}");
++                return false;
++            }
++
++            if (_session != 0 && VideoToolbox.VTDecompressionSessionCanAcceptFormatDescription(_session, format) == 0)
++            {
++                DestroySession();
++            }
++
++            if (_format != 0)
++            {
++                CoreFoundation.CFRelease(_format);
++            }
++
++            _format = format;
++
++            return _session != 0 || CreateSession();
++        }
++
++        private bool CreateSession()
++        {
++            nint attrs = CoreFoundation.CFDictionaryCreateMutable(0, 1, CoreFoundation.TypeDictionaryKeyCallBacks, CoreFoundation.TypeDictionaryValueCallBacks);
++            uint fmt = PixelFormatY420;
++            nint num = CoreFoundation.CFNumberCreate(0, 3 /* kCFNumberSInt32Type */, &fmt);
++            CoreFoundation.CFDictionarySetValue(attrs, CoreVideo.PixelBufferPixelFormatTypeKey, num);
++            CoreFoundation.CFRelease(num);
++
++            OutputCallbackRecord cb = new() { Callback = &OnOutput, RefCon = 0 };
++            nint session;
++            int st = VideoToolbox.VTDecompressionSessionCreate(0, _format, 0, attrs, &cb, &session);
++            CoreFoundation.CFRelease(attrs);
++
++            if (st != 0)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264：建解码会话失败 {st}");
++                _failed = true;   // 设备不支持 / 参数不合法：不反复重试刷日志
++                return false;
++            }
++
++            _session = session;
++
++            return true;
++        }
++
++        [UnmanagedCallersOnly]
++        private static void OnOutput(nint decoderRefCon, nint frameRefCon, int status, uint infoFlags, nint imageBuffer, CMTime pts, CMTime duration)
++        {
++            OutputSlot* slot = (OutputSlot*)frameRefCon;
++            slot->Status = status;
++
++            if (status == 0 && imageBuffer != 0)
++            {
++                slot->ImageBuffer = CoreFoundation.CFRetain(imageBuffer);
++            }
++        }
++
++        // Annex B（3 / 4 字节起始码）→ 4 字节大端长度前缀；参数集与分隔符 NAL 不进样本（参数集在格式描述里）
++        private int ToAvcc(ReadOnlySpan<byte> annexB)
++        {
++            int pos = 0, len = 0;
++
++            while (NextNal(annexB, ref pos, out ReadOnlySpan<byte> nal))
++            {
++                int type = nal[0] & 0x1F;
++
++                if (type is 7 or 8 or 9)
++                {
++                    continue;
++                }
++
++                if (len + 4 + nal.Length > _avcc.Length)
++                {
++                    Array.Resize(ref _avcc, Math.Max(_avcc.Length * 2, len + 4 + nal.Length));
++                }
++
++                _avcc[len] = (byte)(nal.Length >> 24);
++                _avcc[len + 1] = (byte)(nal.Length >> 16);
++                _avcc[len + 2] = (byte)(nal.Length >> 8);
++                _avcc[len + 3] = (byte)nal.Length;
++                nal.CopyTo(_avcc.AsSpan(len + 4));
++                len += 4 + nal.Length;
++            }
++
++            return len;
++        }
++
++        // 取下一个 NAL（去掉起始码与尾随的零字节）
++        internal static bool NextNal(ReadOnlySpan<byte> data, ref int pos, out ReadOnlySpan<byte> nal)
++        {
++            nal = default;
++            int start = FindStartCode(data, pos);
++
++            if (start < 0)
++            {
++                pos = data.Length;
++                return false;
++            }
++
++            int next = FindStartCode(data, start);
++            int end = next < 0 ? data.Length : next - 3;
++
++            while (end > start && data[end - 1] == 0)
++            {
++                end--;
++            }
++
++            pos = next < 0 ? data.Length : next - 3;
++
++            if (end <= start)
++            {
++                return NextNal(data, ref pos, out nal);
++            }
++
++            nal = data[start..end];
++
++            return true;
++        }
++
++        // 返回起始码 00 00 01 之后第一个字节的位置；没有则 −1
++        private static int FindStartCode(ReadOnlySpan<byte> data, int from)
++        {
++            for (int i = from; i + 2 < data.Length; i++)
++            {
++                if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
++                {
++                    return i + 3;
++                }
++            }
++
++            return -1;
++        }
++
++        private static void Store(ref byte[] dst, ref int len, ReadOnlySpan<byte> src)
++        {
++            if (dst.Length < src.Length)
++            {
++                dst = new byte[src.Length];
++            }
++
++            src.CopyTo(dst);
++            len = src.Length;
++        }
++
++        private void DestroySession()
++        {
++            if (_session != 0)
++            {
++                VideoToolbox.VTDecompressionSessionInvalidate(_session);
++                CoreFoundation.CFRelease(_session);
++                _session = 0;
++            }
++        }
++
++        public void Dispose()
++        {
++            DestroySession();
++
++            if (_format != 0)
++            {
++                CoreFoundation.CFRelease(_format);
++                _format = 0;
++            }
++
++            NativeMemory.Free(_slot);
++        }
++    }
++
++    // 解出的一帧：引用 VideoToolbox 的像素缓冲（只读锁住），下一次解进这个面或面被丢弃时放掉
++    sealed unsafe class VideoToolboxSurface : ISurface
++    {
++        private nint _buffer;
++        private byte* _y, _u, _v;
++        private int _stride, _uvStride;
++
++        public VideoToolboxSurface(int width, int height)
++        {
++            Width = width;
++            Height = height;
++        }
++
++        public Plane YPlane => new((nint)_y, _stride * Height);
++        public Plane UPlane => new((nint)_u, _uvStride * UvHeight);
++        public Plane VPlane => new((nint)_v, _uvStride * UvHeight);
++
++        public FrameField Field => FrameField.Progressive;
++
++        public int Width { get; private set; }
++        public int Height { get; private set; }
++        public int Stride => _stride;
++        public int UvWidth => (Width + 1) >> 1;
++        public int UvHeight => (Height + 1) >> 1;
++        public int UvStride => _uvStride;
++
++        public void Attach(nint buffer)
++        {
++            Release();
++
++            if (CoreVideo.CVPixelBufferGetPixelFormatType(buffer) != 0x79343230 || CoreVideo.CVPixelBufferGetPlaneCount(buffer) != 3)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264：出帧像素格式 {CoreVideo.CVPixelBufferGetPixelFormatType(buffer):X8} 不是 y420 三平面");
++                CoreFoundation.CFRelease(buffer);
++                return;
++            }
++
++            CoreVideo.CVPixelBufferLockBaseAddress(buffer, 1 /* kCVPixelBufferLock_ReadOnly */);
++            _buffer = buffer;
++            Width = (int)CoreVideo.CVPixelBufferGetWidth(buffer);
++            Height = (int)CoreVideo.CVPixelBufferGetHeight(buffer);
++            _y = (byte*)CoreVideo.CVPixelBufferGetBaseAddressOfPlane(buffer, 0);
++            _u = (byte*)CoreVideo.CVPixelBufferGetBaseAddressOfPlane(buffer, 1);
++            _v = (byte*)CoreVideo.CVPixelBufferGetBaseAddressOfPlane(buffer, 2);
++            _stride = (int)CoreVideo.CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
++            _uvStride = (int)CoreVideo.CVPixelBufferGetBytesPerRowOfPlane(buffer, 1);
++        }
++
++        private void Release()
++        {
++            if (_buffer != 0)
++            {
++                CoreVideo.CVPixelBufferUnlockBaseAddress(_buffer, 1);
++                CoreFoundation.CFRelease(_buffer);
++                _buffer = 0;
++                _y = _u = _v = null;
++                _stride = _uvStride = 0;
++            }
++        }
++
++        public void Dispose() => Release();
++    }
++
++    [StructLayout(LayoutKind.Sequential)]
++    struct CMTime
++    {
++        public long Value;
++        public int Timescale;
++        public uint Flags;
++        public long Epoch;
++    }
++
++    [StructLayout(LayoutKind.Sequential)]
++    unsafe struct OutputCallbackRecord
++    {
++        public delegate* unmanaged<nint, nint, int, uint, nint, CMTime, CMTime, void> Callback;
++        public nint RefCon;
++    }
++
++    static unsafe partial class CoreFoundation
++    {
++        private const string Lib = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
++
++        [LibraryImport(Lib)] public static partial void CFRelease(nint obj);
++        [LibraryImport(Lib)] public static partial nint CFRetain(nint obj);
++        [LibraryImport(Lib)] public static partial nint CFDictionaryCreateMutable(nint allocator, nint capacity, nint keyCallBacks, nint valueCallBacks);
++        [LibraryImport(Lib)] public static partial void CFDictionarySetValue(nint dict, nint key, nint value);
++        [LibraryImport(Lib)] public static partial nint CFNumberCreate(nint allocator, nint type, void* value);
++
++        // 数据符号：回调表取地址，常量对象取变量里的值
++        private static readonly nint _handle = NativeLibrary.Load(Lib);
++        public static readonly nint TypeDictionaryKeyCallBacks = NativeLibrary.GetExport(_handle, "kCFTypeDictionaryKeyCallBacks");
++        public static readonly nint TypeDictionaryValueCallBacks = NativeLibrary.GetExport(_handle, "kCFTypeDictionaryValueCallBacks");
++        public static readonly nint AllocatorNull = *(nint*)NativeLibrary.GetExport(_handle, "kCFAllocatorNull");
++    }
++
++    static unsafe partial class CoreMedia
++    {
++        private const string Lib = "/System/Library/Frameworks/CoreMedia.framework/CoreMedia";
++
++        [LibraryImport(Lib)]
++        public static partial int CMVideoFormatDescriptionCreateFromH264ParameterSets(nint allocator, nuint count, byte** ptrs, nuint* sizes, int nalHeaderLength, nint* format);
++
++        [LibraryImport(Lib)]
++        public static partial int CMBlockBufferCreateWithMemoryBlock(nint allocator, void* memory, nuint blockLength, nint blockAllocator, void* customSource, nuint offset, nuint dataLength, uint flags, nint* block);
++
++        [LibraryImport(Lib)]
++        public static partial int CMSampleBufferCreateReady(nint allocator, nint block, nint format, nint numSamples, nint numTimings, void* timings, nint numSizes, nuint* sizes, nint* sample);
++    }
++
++    static unsafe partial class VideoToolbox
++    {
++        private const string Lib = "/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox";
++
++        [LibraryImport(Lib)]
++        public static partial int VTDecompressionSessionCreate(nint allocator, nint format, nint decoderSpec, nint imageAttrs, OutputCallbackRecord* callback, nint* session);
++
++        [LibraryImport(Lib)]
++        public static partial int VTDecompressionSessionDecodeFrame(nint session, nint sample, uint flags, void* frameRefCon, uint* infoFlags);
++
++        [LibraryImport(Lib)]
++        public static partial int VTDecompressionSessionWaitForAsynchronousFrames(nint session);
++
++        [LibraryImport(Lib)]
++        public static partial byte VTDecompressionSessionCanAcceptFormatDescription(nint session, nint format);
++
++        [LibraryImport(Lib)]
++        public static partial void VTDecompressionSessionInvalidate(nint session);
++    }
++
++    static unsafe partial class CoreVideo
++    {
++        private const string Lib = "/System/Library/Frameworks/CoreVideo.framework/CoreVideo";
++
++        [LibraryImport(Lib)] public static partial int CVPixelBufferLockBaseAddress(nint buffer, ulong flags);
++        [LibraryImport(Lib)] public static partial int CVPixelBufferUnlockBaseAddress(nint buffer, ulong flags);
++        [LibraryImport(Lib)] public static partial nint CVPixelBufferGetBaseAddressOfPlane(nint buffer, nuint plane);
++        [LibraryImport(Lib)] public static partial nuint CVPixelBufferGetBytesPerRowOfPlane(nint buffer, nuint plane);
++        [LibraryImport(Lib)] public static partial nuint CVPixelBufferGetWidth(nint buffer);
++        [LibraryImport(Lib)] public static partial nuint CVPixelBufferGetHeight(nint buffer);
++        [LibraryImport(Lib)] public static partial nuint CVPixelBufferGetPlaneCount(nint buffer);
++        [LibraryImport(Lib)] public static partial uint CVPixelBufferGetPixelFormatType(nint buffer);
++
++        private static readonly nint _handle = NativeLibrary.Load(Lib);
++        public static readonly nint PixelBufferPixelFormatTypeKey = *(nint*)NativeLibrary.GetExport(_handle, "kCVPixelBufferPixelFormatTypeKey");
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
+index 6058f72d661fd620e31cd8d22d727dd2cea4589f..a8772e2642cee4c418e667088c2af0a68fd9b1a1 100644
+--- a/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
+@@ -1,4 +1,3 @@
+-using Ryujinx.Graphics.Nvdec.FFmpeg.H264;
+ using Ryujinx.Graphics.Nvdec.Image;
+ using Ryujinx.Graphics.Nvdec.Types.H264;
+ using Ryujinx.Graphics.Video;
+@@ -25,7 +24,7 @@ namespace Ryujinx.Graphics.Nvdec
+             uint lumaOffset = state.SetPictureLumaOffset[surfaceIndex];
+             uint chromaOffset = state.SetPictureChromaOffset[surfaceIndex];
+ 
+-            Decoder decoder = context.GetH264Decoder();
++            IH264Decoder decoder = context.GetH264Decoder();
+ 
+             ISurface outputSurface = rm.Cache.Get(decoder, 0, 0, width, height);
+ 
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index aaa734a88a4db4cfca538490de1d3248dff5c4cc..8f083ad1f029288b892180f7647ff35421913616 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -1,15 +1,18 @@
++using Ryujinx.Graphics.Nvdec.Apple;
++using Ryujinx.Graphics.Video;
+ using System;
+ 
+ namespace Ryujinx.Graphics.Nvdec
+ {
+     class NvdecDecoderContext : IDisposable
+     {
+-        private FFmpeg.H264.Decoder _h264Decoder;
++        private IH264Decoder _h264Decoder;
+         private FFmpeg.Vp8.Decoder _vp8Decoder;
+ 
+-        public FFmpeg.H264.Decoder GetH264Decoder()
++        // 苹果平台走 VideoToolbox 硬件解码（S2Arm 不带 FFmpeg）
++        public IH264Decoder GetH264Decoder()
+         {
+-            return _h264Decoder ??= new FFmpeg.H264.Decoder();
++            return _h264Decoder ??= OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? new VideoToolboxH264Decoder() : new FFmpeg.H264.Decoder();
+         }
+ 
+         public FFmpeg.Vp8.Decoder GetVp8Decoder()
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs b/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
+index 1afad851f46c19f73c2ffd8a6e36bec8b42be384..52d3d90834452c9d3f7b1e8daee12a1de7f3a76b 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Memory/KTransferMemory.cs
+@@ -62,9 +62,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
+         }
+ 
+         // S2Arm: shadow of a transfer memory created by the game in S2Arm's native layer; game address = host address,
+-        // so services read it in place (no page borrowing, the native layer owns the game's address space)
+-        internal void S2AInitializeForeign(ulong address, ulong size, KMemoryPermission permission)
++        // so services read it in place (no page borrowing, the native layer owns the game's address space).
++        // creator = the game process shadow, so code reading through Creator.CpuMemory (am storages) reaches game memory
++        internal void S2AInitializeForeign(KProcess creator, ulong address, ulong size, KMemoryPermission permission)
+         {
++            _creator = creator;
+             Permission = permission;
+             Address = address;
+             Size = size;

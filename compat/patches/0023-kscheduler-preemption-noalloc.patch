@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+index 330624b2be2628bc0b35e8e3cbe594ef3d0b28c1..3336c5d64ef096eeb03e24bc7d44aea80bb1f656 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+@@ -467,7 +467,9 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+                 nextThread = context.PriorityQueue.Reschedule(prio, core, selectedThread);
+             }
+ 
+-            static KThread FirstSuitableCandidateOrDefault(KernelContext context, int core, KThread selectedThread, KThread nextThread, Predicate<KThread> predicate)
++            // S2Arm: priority + comparison instead of a Predicate: the lambdas captured prio / bestCandidate, so a closure
++            // and delegates were allocated on every call (4 cores every 10 ms on the preemption thread)
++            static KThread FirstSuitableCandidateOrDefault(KernelContext context, int core, KThread selectedThread, KThread nextThread, int priority, bool lowerOnly)
+             {
+                 foreach (KThread suggested in context.PriorityQueue.SuggestedThreads(core))
+                 {
+@@ -487,7 +489,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+                         nextThread == null ||
+                         nextThread.LastScheduledTime >= suggested.LastScheduledTime)
+                     {
+-                        if (predicate(suggested))
++                        if (lowerOnly ? suggested.DynamicPriority < priority : suggested.DynamicPriority == priority)
+                         {
+                             return suggested;
+                         }
+@@ -499,7 +501,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+ 
+             // Select candidate threads that could run on this core.
+             // Only take into account threads that are not yet selected.
+-            KThread dst = FirstSuitableCandidateOrDefault(context, core, selectedThread, nextThread, x => x.DynamicPriority == prio);
++            KThread dst = FirstSuitableCandidateOrDefault(context, core, selectedThread, nextThread, prio, lowerOnly: false);
+ 
+             if (dst != null)
+             {
+@@ -512,7 +514,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+ 
+             if (bestCandidate != null && bestCandidate.DynamicPriority >= prio)
+             {
+-                dst = FirstSuitableCandidateOrDefault(context, core, selectedThread, nextThread, x => x.DynamicPriority < bestCandidate.DynamicPriority);
++                dst = FirstSuitableCandidateOrDefault(context, core, selectedThread, nextThread, bestCandidate.DynamicPriority, lowerOnly: true);
+ 
+                 if (dst != null)
+                 {

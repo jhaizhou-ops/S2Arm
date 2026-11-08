@@ -1,0 +1,519 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 370430aba4d77a964f289354a8a97956f53d1064..40b031f21e8a26425169d57e8f4ac076d46b715a 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -12,6 +12,10 @@
+     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+   </PropertyGroup>
+ 
++  <ItemGroup>
++    <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
++  </ItemGroup>
++
+   <ItemGroup>
+     <EmbeddedResource Include="Effects\Textures\SmaaAreaTexture.bin" />
+     <EmbeddedResource Include="Effects\Textures\SmaaSearchTexture.bin" />
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 9cd8f90d7870ebbaade517c645b31661cea08676..e8418a114e2759895cc19f591f6ab4ec554f94cf 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -1,3 +1,4 @@
++using S2Arm.Backends.Vulkan;
+ using Ryujinx.Common.Configuration;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+@@ -269,8 +270,9 @@ namespace Ryujinx.Graphics.Vulkan
+             return InvalidIndex;
+         }
+ 
+-        internal static Device CreateDevice(Vk api, VulkanPhysicalDevice physicalDevice, uint queueFamilyIndex, uint queueCount)
++        internal static Device CreateDevice(Vk api, VulkanPhysicalDevice physicalDevice, uint queueFamilyIndex, uint queueCount, out DeviceFeatureSnapshot enabledFeatures)
+         {
++            enabledFeatures = null;
+             if (queueCount > QueuesCount)
+             {
+                 queueCount = QueuesCount;
+@@ -392,6 +394,46 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             features2.PNext = &supportedPhysicalDeviceVulkan12Features;
+ 
++            PhysicalDeviceExtendedDynamicStateFeaturesEXT supportedDynamicState = new()
++            {
++                SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
++                PNext = features2.PNext,
++            };
++            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_extended_dynamic_state"))
++            {
++                features2.PNext = &supportedDynamicState;
++            }
++
++            PhysicalDeviceIndexTypeUint8FeaturesEXT supportedIndexType = new()
++            {
++                SType = StructureType.PhysicalDeviceIndexTypeUint8FeaturesExt,
++                PNext = features2.PNext,
++            };
++            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_index_type_uint8"))
++            {
++                features2.PNext = &supportedIndexType;
++            }
++
++            PhysicalDeviceFragmentShaderInterlockFeaturesEXT supportedInterlock = new()
++            {
++                SType = StructureType.PhysicalDeviceFragmentShaderInterlockFeaturesExt,
++                PNext = features2.PNext,
++            };
++            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_fragment_shader_interlock"))
++            {
++                features2.PNext = &supportedInterlock;
++            }
++
++            PhysicalDeviceConditionalRenderingFeaturesEXT supportedConditional = new()
++            {
++                SType = StructureType.PhysicalDeviceConditionalRenderingFeaturesExt,
++                PNext = features2.PNext,
++            };
++            if (physicalDevice.IsDeviceExtensionPresent("VK_EXT_conditional_rendering"))
++            {
++                features2.PNext = &supportedConditional;
++            }
++
+             api.GetPhysicalDeviceFeatures2(physicalDevice.PhysicalDevice, &features2);
+ 
+             PhysicalDeviceFeatures supportedFeatures = features2.Features;
+@@ -418,7 +460,10 @@ namespace Ryujinx.Graphics.Vulkan
+                 ShaderStorageImageWriteWithoutFormat = supportedFeatures.ShaderStorageImageWriteWithoutFormat,
+                 TessellationShader = supportedFeatures.TessellationShader,
+                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
+-                RobustBufferAccess = useRobustBufferAccess,
++                RobustBufferAccess = useRobustBufferAccess && supportedFeatures.RobustBufferAccess,
++                TextureCompressionAstcLdr = supportedFeatures.TextureCompressionAstcLdr,
++                TextureCompressionBC = supportedFeatures.TextureCompressionBC,
++                TextureCompressionEtc2 = supportedFeatures.TextureCompressionEtc2,
+                 SampleRateShading = supportedFeatures.SampleRateShading,
+             };
+ 
+@@ -471,10 +516,24 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 SType = StructureType.PhysicalDeviceExtendedDynamicStateFeaturesExt,
+                 PNext = pExtendedFeatures,
+-                ExtendedDynamicState = physicalDevice.IsDeviceExtensionPresent(ExtExtendedDynamicState.ExtensionName),
++                ExtendedDynamicState = supportedDynamicState.ExtendedDynamicState,
+             };
+ 
+-            pExtendedFeatures = &featuresExtendedDynamicState;
++            if (physicalDevice.IsDeviceExtensionPresent(ExtExtendedDynamicState.ExtensionName))
++            {
++                pExtendedFeatures = &featuresExtendedDynamicState;
++            }
++
++            PhysicalDeviceConditionalRenderingFeaturesEXT featuresConditional = new()
++            {
++                SType = StructureType.PhysicalDeviceConditionalRenderingFeaturesExt,
++                PNext = pExtendedFeatures,
++                ConditionalRendering = supportedConditional.ConditionalRendering,
++            };
++            if (physicalDevice.IsDeviceExtensionPresent(ExtConditionalRendering.ExtensionName))
++            {
++                pExtendedFeatures = &featuresConditional;
++            }
+ 
+             PhysicalDeviceVulkan11Features featuresVk11 = new()
+             {
+@@ -508,7 +567,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     SType = StructureType.PhysicalDeviceIndexTypeUint8FeaturesExt,
+                     PNext = pExtendedFeatures,
+-                    IndexTypeUint8 = true,
++                    IndexTypeUint8 = supportedIndexType.IndexTypeUint8,
+                 };
+ 
+                 pExtendedFeatures = &featuresIndexU8;
+@@ -522,7 +581,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     SType = StructureType.PhysicalDeviceFragmentShaderInterlockFeaturesExt,
+                     PNext = pExtendedFeatures,
+-                    FragmentShaderPixelInterlock = true,
++                    FragmentShaderPixelInterlock = supportedInterlock.FragmentShaderPixelInterlock,
+                 };
+ 
+                 pExtendedFeatures = &featuresFragmentShaderInterlock;
+@@ -593,31 +652,39 @@ namespace Ryujinx.Graphics.Vulkan
+             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();
+ 
+             nint* ppEnabledExtensions = stackalloc nint[enabledExtensions.Length];
+-
+-            for (int i = 0; i < enabledExtensions.Length; i++)
++            int allocatedNames = 0;
++            try
+             {
+-                ppEnabledExtensions[i] = Marshal.StringToHGlobalAnsi(enabledExtensions[i]);
+-            }
+-
+-            DeviceCreateInfo deviceCreateInfo = new()
+-            {
+-                SType = StructureType.DeviceCreateInfo,
+-                PNext = pExtendedFeatures,
+-                QueueCreateInfoCount = 1,
+-                PQueueCreateInfos = &queueCreateInfo,
+-                PpEnabledExtensionNames = (byte**)ppEnabledExtensions,
+-                EnabledExtensionCount = (uint)enabledExtensions.Length,
+-                PEnabledFeatures = &features,
+-            };
++                for (; allocatedNames < enabledExtensions.Length; allocatedNames++)
++                {
++                    ppEnabledExtensions[allocatedNames] = Marshal.StringToHGlobalAnsi(enabledExtensions[allocatedNames]);
++                }
+ 
+-            api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out Device device).ThrowOnError();
++                DeviceCreateInfo deviceCreateInfo = new()
++                {
++                    SType = StructureType.DeviceCreateInfo,
++                    PNext = pExtendedFeatures,
++                    QueueCreateInfoCount = 1,
++                    PQueueCreateInfos = &queueCreateInfo,
++                    PpEnabledExtensionNames = (byte**)ppEnabledExtensions,
++                    EnabledExtensionCount = (uint)enabledExtensions.Length,
++                    PEnabledFeatures = &features,
++                };
+ 
+-            for (int i = 0; i < enabledExtensions.Length; i++)
++                // Copy the actual request, not a second physical-device query. Nothing is
++                // published as enabled until creation has succeeded.
++                DeviceFeatureSnapshot requestedFeatures = DeviceFeatureSnapshot.Capture(in deviceCreateInfo);
++                api.CreateDevice(physicalDevice.PhysicalDevice, in deviceCreateInfo, null, out Device device).ThrowOnError();
++                enabledFeatures = requestedFeatures;
++                return device;
++            }
++            finally
+             {
+-                Marshal.FreeHGlobal(ppEnabledExtensions[i]);
++                for (int i = 0; i < allocatedNames; i++)
++                {
++                    Marshal.FreeHGlobal(ppEnabledExtensions[i]);
++                }
+             }
+-
+-            return device;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 62fa4b4cae7d516d6dec3c461620a5afe7a77ac1..7543d90cb61d84799eef287128c95d12bd66b05b 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1,4 +1,5 @@
+ using Gommon;
++using S2Arm.Backends.Vulkan;
+ using Ryujinx.Common.Configuration;
+ using Ryujinx.Common.Helper;
+ using Ryujinx.Common.Logging;
+@@ -27,6 +28,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private SurfaceKHR _surface;
+         private VulkanPhysicalDevice _physicalDevice;
+         private Device _device;
++        private DeviceFeatureSnapshot _enabledFeatures;
+         private WindowBase _window;
+ 
+         private bool _initialized;
+@@ -202,7 +204,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 SType = StructureType.PhysicalDeviceBlendOperationAdvancedPropertiesExt,
+             };
+ 
+-            bool supportsBlendOperationAdvanced = _physicalDevice.IsDeviceExtensionPresent("VK_EXT_blend_operation_advanced");
++            bool supportsBlendOperationAdvanced = _enabledFeatures.HasExtension("VK_EXT_blend_operation_advanced");
+ 
+             if (supportsBlendOperationAdvanced)
+             {
+@@ -210,7 +212,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 properties2.PNext = &propertiesBlendOperationAdvanced;
+             }
+ 
+-            bool supportsTransformFeedback = _physicalDevice.IsDeviceExtensionPresent(ExtTransformFeedback.ExtensionName);
++            bool supportsTransformFeedback = _enabledFeatures.HasExtension(ExtTransformFeedback.ExtensionName);
+ 
+             PhysicalDeviceTransformFeedbackPropertiesEXT propertiesTransformFeedback = new()
+             {
+@@ -228,7 +230,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 SType = StructureType.PhysicalDevicePortabilitySubsetPropertiesKhr,
+             };
+ 
+-            bool supportsPushDescriptors = _physicalDevice.IsDeviceExtensionPresent(KhrPushDescriptor.ExtensionName);
++            bool supportsPushDescriptors = _enabledFeatures.HasExtension(KhrPushDescriptor.ExtensionName);
+ 
+             PhysicalDevicePushDescriptorPropertiesKHR propertiesPushDescriptor = new()
+             {
+@@ -241,99 +243,20 @@ namespace Ryujinx.Graphics.Vulkan
+                 properties2.PNext = &propertiesPushDescriptor;
+             }
+ 
++            bool supportsDepthClipControl = _enabledFeatures.DepthClipControl;
++            bool supportsAttachmentFeedbackLoop = _enabledFeatures.AttachmentFeedbackLoopLayout;
++            bool supportsDynamicAttachmentFeedbackLoop = _enabledFeatures.AttachmentFeedbackLoopDynamicState;
++
+             PhysicalDeviceFeatures2 features2 = new()
+             {
+                 SType = StructureType.PhysicalDeviceFeatures2,
+             };
+-
+-            PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT featuresPrimitiveTopologyListRestart = new()
+-            {
+-                SType = StructureType.PhysicalDevicePrimitiveTopologyListRestartFeaturesExt,
+-            };
+-
+-            PhysicalDeviceRobustness2FeaturesEXT featuresRobustness2 = new()
+-            {
+-                SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+-            };
+-
+-            PhysicalDeviceShaderFloat16Int8FeaturesKHR featuresShaderInt8 = new()
+-            {
+-                SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+-            };
+-
+-            PhysicalDeviceCustomBorderColorFeaturesEXT featuresCustomBorderColor = new()
+-            {
+-                SType = StructureType.PhysicalDeviceCustomBorderColorFeaturesExt,
+-            };
+-
+-            PhysicalDeviceDepthClipControlFeaturesEXT featuresDepthClipControl = new()
+-            {
+-                SType = StructureType.PhysicalDeviceDepthClipControlFeaturesExt,
+-            };
+-
+-            PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT featuresAttachmentFeedbackLoop = new()
+-            {
+-                SType = StructureType.PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesExt,
+-            };
+-
+-            PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT featuresDynamicAttachmentFeedbackLoop = new()
+-            {
+-                SType = StructureType.PhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesExt,
+-            };
+-
+             PhysicalDevicePortabilitySubsetFeaturesKHR featuresPortabilitySubset = new()
+             {
+                 SType = StructureType.PhysicalDevicePortabilitySubsetFeaturesKhr,
+             };
+ 
+-            if (_physicalDevice.IsDeviceExtensionPresent("VK_EXT_primitive_topology_list_restart"))
+-            {
+-                features2.PNext = &featuresPrimitiveTopologyListRestart;
+-            }
+-
+-            if (_physicalDevice.IsDeviceExtensionPresent("VK_EXT_robustness2"))
+-            {
+-                featuresRobustness2.PNext = features2.PNext;
+-                features2.PNext = &featuresRobustness2;
+-            }
+-
+-            if (_physicalDevice.IsDeviceExtensionPresent("VK_KHR_shader_float16_int8"))
+-            {
+-                featuresShaderInt8.PNext = features2.PNext;
+-                features2.PNext = &featuresShaderInt8;
+-            }
+-
+-            if (_physicalDevice.IsDeviceExtensionPresent("VK_EXT_custom_border_color"))
+-            {
+-                featuresCustomBorderColor.PNext = features2.PNext;
+-                features2.PNext = &featuresCustomBorderColor;
+-            }
+-
+-            bool supportsDepthClipControl = _physicalDevice.IsDeviceExtensionPresent("VK_EXT_depth_clip_control");
+-
+-            if (supportsDepthClipControl)
+-            {
+-                featuresDepthClipControl.PNext = features2.PNext;
+-                features2.PNext = &featuresDepthClipControl;
+-            }
+-
+-            bool supportsAttachmentFeedbackLoop = _physicalDevice.IsDeviceExtensionPresent("VK_EXT_attachment_feedback_loop_layout");
+-
+-            if (supportsAttachmentFeedbackLoop)
+-            {
+-                featuresAttachmentFeedbackLoop.PNext = features2.PNext;
+-                features2.PNext = &featuresAttachmentFeedbackLoop;
+-            }
+-
+-            bool supportsDynamicAttachmentFeedbackLoop = _physicalDevice.IsDeviceExtensionPresent("VK_EXT_attachment_feedback_loop_dynamic_state");
+-
+-            if (supportsDynamicAttachmentFeedbackLoop)
+-            {
+-                featuresDynamicAttachmentFeedbackLoop.PNext = features2.PNext;
+-                features2.PNext = &featuresDynamicAttachmentFeedbackLoop;
+-            }
+-
+-            bool usePortability = _physicalDevice.IsDeviceExtensionPresent("VK_KHR_portability_subset");
++            bool usePortability = _enabledFeatures.HasExtension("VK_KHR_portability_subset");
+ 
+             if (usePortability)
+             {
+@@ -345,7 +268,10 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             Api.GetPhysicalDeviceProperties2(_physicalDevice.PhysicalDevice, &properties2);
+-            Api.GetPhysicalDeviceFeatures2(_physicalDevice.PhysicalDevice, &features2);
++            if (usePortability)
++            {
++                Api.GetPhysicalDeviceFeatures2(_physicalDevice.PhysicalDevice, &features2);
++            }
+ 
+             PortabilitySubsetFlags portabilityFlags = PortabilitySubsetFlags.None;
+             uint vertexBufferAlignment = 1;
+@@ -360,9 +286,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 portabilityFlags |= featuresPortabilitySubset.SamplerMipLodBias ? 0 : PortabilitySubsetFlags.NoLodBias;
+             }
+ 
+-            bool supportsCustomBorderColor = _physicalDevice.IsDeviceExtensionPresent("VK_EXT_custom_border_color") &&
+-                                             featuresCustomBorderColor.CustomBorderColors &&
+-                                             featuresCustomBorderColor.CustomBorderColorWithoutFormat;
++            bool supportsCustomBorderColor = _enabledFeatures.HasExtension("VK_EXT_custom_border_color") &&
++                                             _enabledFeatures.CustomBorderColors &&
++                                             _enabledFeatures.CustomBorderColorWithoutFormat;
+ 
+             ref PhysicalDeviceProperties properties = ref properties2.Properties;
+ 
+@@ -434,38 +360,38 @@ namespace Ryujinx.Graphics.Vulkan
+                 properties.Limits.FramebufferStencilSampleCounts;
+ 
+             Capabilities = new HardwareCapabilities(
+-                _physicalDevice.IsDeviceExtensionPresent("VK_EXT_index_type_uint8"),
++                _enabledFeatures.IndexTypeUint8,
+                 supportsCustomBorderColor,
+                 supportsBlendOperationAdvanced,
+                 propertiesBlendOperationAdvanced.AdvancedBlendCorrelatedOverlap,
+                 propertiesBlendOperationAdvanced.AdvancedBlendNonPremultipliedSrcColor,
+                 propertiesBlendOperationAdvanced.AdvancedBlendNonPremultipliedDstColor,
+-                _physicalDevice.IsDeviceExtensionPresent(KhrDrawIndirectCount.ExtensionName),
+-                _physicalDevice.IsDeviceExtensionPresent("VK_EXT_fragment_shader_interlock"),
+-                _physicalDevice.IsDeviceExtensionPresent("VK_NV_geometry_shader_passthrough"),
+-                features2.Features.ShaderFloat64,
+-                featuresShaderInt8.ShaderInt8,
+-                _physicalDevice.IsDeviceExtensionPresent("VK_EXT_shader_stencil_export"),
+-                features2.Features.ShaderStorageImageMultisample,
+-                _physicalDevice.IsDeviceExtensionPresent(ExtConditionalRendering.ExtensionName),
+-                _physicalDevice.IsDeviceExtensionPresent(ExtExtendedDynamicState.ExtensionName),
+-                features2.Features.MultiViewport && !(IsMoltenVk && Vendor == Vendor.Amd), // Workaround for AMD on MoltenVK issue
+-                featuresRobustness2.NullDescriptor || IsMoltenVk,
++                _enabledFeatures.HasExtension(KhrDrawIndirectCount.ExtensionName) && _enabledFeatures.Vulkan12.DrawIndirectCount,
++                _enabledFeatures.FragmentShaderPixelInterlock,
++                _enabledFeatures.HasExtension("VK_NV_geometry_shader_passthrough"),
++                _enabledFeatures.Core.ShaderFloat64,
++                _enabledFeatures.Vulkan12.ShaderInt8,
++                _enabledFeatures.HasExtension("VK_EXT_shader_stencil_export"),
++                _enabledFeatures.Core.ShaderStorageImageMultisample,
++                _enabledFeatures.ConditionalRendering,
++                _enabledFeatures.ExtendedDynamicState,
++                _enabledFeatures.Core.MultiViewport && !(IsMoltenVk && Vendor == Vendor.Amd), // Workaround for AMD on MoltenVK issue
++                _enabledFeatures.NullDescriptor || IsMoltenVk,
+                 supportsPushDescriptors,
+                 IsMoltenVk ? 16 : propertiesPushDescriptor.MaxPushDescriptors, // Prevents vertex explosions on MoltenVK.
+-                featuresPrimitiveTopologyListRestart.PrimitiveTopologyListRestart,
+-                featuresPrimitiveTopologyListRestart.PrimitiveTopologyPatchListRestart,
+-                supportsTransformFeedback,
+-                propertiesTransformFeedback.TransformFeedbackQueries,
+-                features2.Features.OcclusionQueryPrecise,
+-                _physicalDevice.PhysicalDeviceFeatures.PipelineStatisticsQuery,
+-                _physicalDevice.PhysicalDeviceFeatures.GeometryShader,
+-                _physicalDevice.PhysicalDeviceFeatures.TessellationShader,
+-                _physicalDevice.IsDeviceExtensionPresent("VK_NV_viewport_array2"),
+-                _physicalDevice.IsDeviceExtensionPresent(ExtExternalMemoryHost.ExtensionName),
+-                supportsDepthClipControl && featuresDepthClipControl.DepthClipControl,
+-                supportsAttachmentFeedbackLoop && featuresAttachmentFeedbackLoop.AttachmentFeedbackLoopLayout,
+-                supportsDynamicAttachmentFeedbackLoop && featuresDynamicAttachmentFeedbackLoop.AttachmentFeedbackLoopDynamicState,
++                _enabledFeatures.PrimitiveTopologyListRestart,
++                _enabledFeatures.PrimitiveTopologyPatchListRestart,
++                supportsTransformFeedback && _enabledFeatures.TransformFeedback,
++                _enabledFeatures.TransformFeedback && propertiesTransformFeedback.TransformFeedbackQueries,
++                _enabledFeatures.Core.OcclusionQueryPrecise,
++                _enabledFeatures.Core.PipelineStatisticsQuery,
++                _enabledFeatures.Core.GeometryShader,
++                _enabledFeatures.Core.TessellationShader,
++                _enabledFeatures.HasExtension("VK_NV_viewport_array2"),
++                _enabledFeatures.HasExtension(ExtExternalMemoryHost.ExtensionName),
++                supportsDepthClipControl && _enabledFeatures.DepthClipControl,
++                supportsAttachmentFeedbackLoop && _enabledFeatures.AttachmentFeedbackLoopLayout,
++                supportsDynamicAttachmentFeedbackLoop && _enabledFeatures.AttachmentFeedbackLoopDynamicState,
+                 propertiesSubgroup.SubgroupSize,
+                 supportedSampleCounts,
+                 portabilityFlags,
+@@ -514,7 +440,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             uint queueFamilyIndex = VulkanInitialization.FindSuitableQueueFamily(Api, _physicalDevice, _surface, out uint maxQueueCount);
+ 
+-            _device = VulkanInitialization.CreateDevice(Api, _physicalDevice, queueFamilyIndex, maxQueueCount);
++            _device = VulkanInitialization.CreateDevice(Api, _physicalDevice, queueFamilyIndex, maxQueueCount, out _enabledFeatures);
+ 
+             if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrSwapchain swapchainApi))
+             {
+@@ -725,18 +651,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 Format.Astc12x10Srgb,
+                 Format.Astc12x12Srgb);
+ 
+-            PhysicalDeviceVulkan12Features featuresVk12 = new()
+-            {
+-                SType = StructureType.PhysicalDeviceVulkan12Features,
+-            };
+-
+-            PhysicalDeviceFeatures2 features2 = new()
+-            {
+-                SType = StructureType.PhysicalDeviceFeatures2,
+-                PNext = &featuresVk12,
+-            };
+-
+-            Api.GetPhysicalDeviceFeatures2(_physicalDevice.PhysicalDevice, &features2);
++            PhysicalDeviceFeatures features = _enabledFeatures.Core;
++            PhysicalDeviceVulkan12Features featuresVk12 = _enabledFeatures.Vulkan12;
+ 
+             PhysicalDeviceLimits limits = _physicalDevice.PhysicalDeviceProperties.Limits;
+             QueueFamilyProperties mainQueueProperties = _physicalDevice.QueueFamilyProperties[QueueFamilyIndex];
+@@ -762,11 +678,11 @@ namespace Ryujinx.Graphics.Vulkan
+                 hasVectorIndexingBug: IsQualcommProprietary,
+                 needsFragmentOutputSpecialization: IsMoltenVk,
+                 reduceShaderPrecision: IsMoltenVk,
+-                supportsAstcCompression: features2.Features.TextureCompressionAstcLdr && supportsAstcFormats,
+-                supportsBc123Compression: supportsBc123CompressionFormat,
+-                supportsBc45Compression: supportsBc45CompressionFormat,
+-                supportsBc67Compression: supportsBc67CompressionFormat,
+-                supportsEtc2Compression: supportsEtc2CompressionFormat,
++                supportsAstcCompression: features.TextureCompressionAstcLdr && supportsAstcFormats,
++                supportsBc123Compression: features.TextureCompressionBC && supportsBc123CompressionFormat,
++                supportsBc45Compression: features.TextureCompressionBC && supportsBc45CompressionFormat,
++                supportsBc67Compression: features.TextureCompressionBC && supportsBc67CompressionFormat,
++                supportsEtc2Compression: features.TextureCompressionEtc2 && supportsEtc2CompressionFormat,
+                 supports3DTextureCompression: true,
+                 supportsBgraFormat: true,
+                 supportsR4G4Format: false,
+@@ -774,14 +690,14 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsScaledVertexFormats: FormatCapabilities.SupportsScaledVertexFormats(),
+                 supportsSnormBufferTextureFormat: true,
+                 supports5BitComponentFormat: supports5BitComponentFormat,
+-                supportsSparseBuffer: features2.Features.SparseBinding && mainQueueProperties.QueueFlags.HasFlag(QueueFlags.SparseBindingBit),
++                supportsSparseBuffer: features.SparseBinding && mainQueueProperties.QueueFlags.HasFlag(QueueFlags.SparseBindingBit),
+                 supportsBlendEquationAdvanced: Capabilities.SupportsBlendEquationAdvanced,
+                 supportsFragmentShaderInterlock: Capabilities.SupportsFragmentShaderInterlock,
+                 supportsFragmentShaderOrderingIntel: false,
+                 supportsGeometryShader: Capabilities.SupportsGeometryShader,
+                 supportsGeometryShaderPassthrough: Capabilities.SupportsGeometryShaderPassthrough,
+                 supportsTransformFeedback: Capabilities.SupportsTransformFeedback,
+-                supportsImageLoadFormatted: features2.Features.ShaderStorageImageReadWithoutFormat,
++                supportsImageLoadFormatted: features.ShaderStorageImageReadWithoutFormat,
+                 supportsLayerVertexTessellation: featuresVk12.ShaderOutputLayer,
+                 supportsMismatchingViewFormat: true,
+                 supportsCubemapView: !IsAmdGcn,
+@@ -795,13 +711,13 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsShaderNonUniformIndexing:
+                     featuresVk12.ShaderSampledImageArrayNonUniformIndexing &&
+                     featuresVk12.ShaderStorageImageArrayNonUniformIndexing,
+-                supportsTextureGatherOffsets: features2.Features.ShaderImageGatherExtended,
++                supportsTextureGatherOffsets: features.ShaderImageGatherExtended,
+                 supportsTextureShadowLod: false,
+-                supportsVertexStoreAndAtomics: features2.Features.VertexPipelineStoresAndAtomics,
++                supportsVertexStoreAndAtomics: features.VertexPipelineStoresAndAtomics,
+                 supportsViewportIndexVertexTessellation: featuresVk12.ShaderOutputViewportIndex,
+                 supportsViewportMask: Capabilities.SupportsViewportArray2,
+                 supportsViewportSwizzle: false,
+-                supportsIndirectParameters: true,
++                supportsIndirectParameters: Capabilities.SupportsIndirectParameters,
+                 supportsDepthClipControl: Capabilities.SupportsDepthClipControl,
+                 uniformBufferSetIndex: PipelineBase.UniformSetIndex,
+                 storageBufferSetIndex: PipelineBase.StorageSetIndex,

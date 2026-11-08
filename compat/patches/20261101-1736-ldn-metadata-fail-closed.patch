@@ -1,0 +1,140 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index 7954f2c6efd6246447b82ed65f40527d11140c9d..89bfeef187a6ef35440f58751f4920a16a4c8c5d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -37,6 +37,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         private DisconnectReason _disconnectReason;
+         private ResultCode _nifmResultCode;
+         private bool _unavailableReported;
++        private bool _metadataMissingReported;
+ 
+         private AccessPoint _accessPoint;
+         private Station _station;
+@@ -58,13 +59,18 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             return !IsDevelopment ? SecurityMode.Retail : securityMode;
+         }
+ 
+-        // S2Arm: the process metadata the nacp checks below read can be absent
+-        // (native games without a kernel-side process entry, synthetic fixtures).
+-        // Every lookup degrades through this helper instead of dereferencing null.
+-        private static bool TryGetControlProperty(ServiceCtx context, out ApplicationControlProperty controlProperty)
++        // S2Arm: the process metadata the nacp checks below read can be absent (a game
++        // whose process entry was never registered). A missing entry is an environment
++        // defect, not a valid state: report it once and let every caller fail closed.
++        private bool TryGetControlProperty(ServiceCtx context, out ApplicationControlProperty controlProperty)
+         {
+             var processResult = context.Device.Processes.GetProcess(context.ClientProcessId);
+             controlProperty = processResult?.ApplicationControlProperties ?? default;
++            if (processResult == null && !_metadataMissingReported)
++            {
++                _metadataMissingReported = true;
++                S2AHooks.Red?.Invoke("ldn: caller process metadata missing, reporting failure");
++            }
+             return processResult != null;
+         }
+ 
+@@ -73,8 +79,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+             if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
+             {
+-                // S2Arm: no declared LocalCommunicationId list to check against.
+-                return true;
++                return false;
+             }
+ 
+             foreach (ulong localCommunicationId in controlProperty.LocalCommunicationId)
+@@ -459,10 +464,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                                 if (scanFilter.NetworkId.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+                                 {
+                                     // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                                    if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                                    if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
+                                     {
+-                                        scanFilter.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                                        return ResultCode.InvalidObject;
+                                     }
++                                    scanFilter.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
+                                 }
+ 
+                                 RefreshOpenNetworkClient(context);
+@@ -648,10 +654,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             if (networkConfig.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+             {
+                 // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
+                 {
+-                    networkConfig.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                    return ResultCode.InvalidObject;
+                 }
++                networkConfig.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
+             }
+ 
+             bool isLocalCommunicationIdValid = CheckLocalCommunicationIdPermission(context, (ulong)networkConfig.IntentId.LocalCommunicationId);
+@@ -1012,10 +1019,11 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             if (networkInfo.NetworkId.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+             {
+                 // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
+                 {
+-                    networkInfo.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                    return ResultCode.InvalidObject;
+                 }
++                networkInfo.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
+             }
+ 
+             bool isLocalCommunicationIdValid = CheckLocalCommunicationIdPermission(context, (ulong)networkInfo.NetworkId.IntentId.LocalCommunicationId);
+@@ -1271,6 +1279,27 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         {
+             S2ANetworkClientServer = null;
+ 
++            if (mode == MultiplayerMode.Disabled)
++            {
++                // S2Arm: local wireless discovery / multiplayer is unavailable. Return
++                // the service's own result code and report once, instead of handing a
++                // client forward whose later calls dereference missing game metadata.
++                if (!_unavailableReported)
++                {
++                    _unavailableReported = true;
++                    S2AHooks.Red?.Invoke("ldn: local wireless unavailable, reporting DeviceNotAvailable");
++                }
++                return ResultCode.DeviceNotAvailable;
++            }
++
++            // TODO: Call nn::arp::GetApplicationLaunchProperty here when implemented.
++            // S2Arm: read the metadata before constructing the client: a missing process
++            // entry must fail the call without leaving a half-created client behind.
++            if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++            {
++                return ResultCode.InvalidState;
++            }
++
+             switch (mode)
+             {
+                 case MultiplayerMode.LdnRyu:
+@@ -1299,23 +1328,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 case MultiplayerMode.LdnMitm:
+                     NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                     break;
+-                case MultiplayerMode.Disabled:
+-                    // S2Arm: local wireless discovery / multiplayer is unavailable. Return
+-                    // the service's own result code and report once, instead of handing a
+-                    // client forward whose later calls dereference missing game metadata.
+-                    if (!_unavailableReported)
+-                    {
+-                        _unavailableReported = true;
+-                        S2AHooks.Red?.Invoke("ldn: local wireless unavailable, reporting DeviceNotAvailable");
+-                    }
+-                    return ResultCode.DeviceNotAvailable;
+             }
+ 
+-            // TODO: Call nn::arp::GetApplicationLaunchProperty here when implemented.
+-            if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
+-            {
+-                NetworkClient.SetGameVersion(controlProperty.DisplayVersion);
+-            }
++            NetworkClient.SetGameVersion(controlProperty.DisplayVersion);
+ 
+             return ResultCode.Success;
+         }

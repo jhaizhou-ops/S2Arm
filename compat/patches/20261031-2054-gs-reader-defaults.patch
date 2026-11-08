@@ -1,0 +1,69 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index cb65cac0b7a809f03967893ff77d280d3f306d76..51d3a6f9ea3a0975ded2f611560450ebadb46443 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -208,12 +208,20 @@ namespace Ryujinx.Graphics.Shader.Translation
+         /// <summary>S2A：单独翻几何着色器（几何转计算，离线库按几何着色器单独出、配哪个片元都用同一份）：按「下一阶段是片元、读全部 32 个通用输入」定输出接口，
+         /// 与顶点阶段的 S2ASetStandaloneNextFragment 同一口径。上游靠 SetNextStage 拿片元的实际读取：直通型据此转发属性，非直通型给片元读、自己没写的输出补默认值。
+         /// 单独翻时没有下一阶段，两样都是 0：异度神剑3 95bfab6122539993（非直通，4 顶点三角带，只写位置与 1 个分量）记录步长 5，配对的片元读 locn0–9，
+-        /// 读取变体（_bgv）的管线建不出、这些几何绘制整笔丢、开场全黑（10-31）</summary>
++        /// 读取变体（_bgv）的管线建不出、这些几何绘制整笔丢、开场全黑（10-31）。
++        /// 非直通型（异度神剑3 131 支里 129 支）只记它自己写的输出，片元可能读、它没写的 32 个通用输出由读取变体按缺省值 (0, 0, 0, 1) 直接给（S2AReaderDefaultsUnwritten）：
++        /// 补进记录的话每个发射顶点要多存 128 字常数（95bfab6122539993 记录步长 5 → 133），场景帧几千笔几何绘制、每帧 GPU 1.5–3.3 秒、帧临时缓冲攒爆（10-31）。
++        /// 直通型照旧按「片元读全部 32 个」转发（转发的是输入的值，只能进记录）</summary>
+         public void S2ASetStandaloneGeometryNextFragment()
+         {
+-            if (Definitions.Stage == ShaderStage.Geometry) AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);
++            if (Definitions.Stage != ShaderStage.Geometry) return;
++            if (Definitions.GpPassthrough) AttributeUsage.MergeAllGenericInputsForFragment(true);
++            else S2AReaderDefaultsUnwritten = true;
+         }
+ 
++        /// <summary>S2A：读取变体（GenerateVertexPassthroughForCompute）对记录里没有的通用输出 0–31 输出缺省值 (0, 0, 0, 1)（S2ASetStandaloneGeometryNextFragment）</summary>
++        public bool S2AReaderDefaultsUnwritten { get; private set; }
++
+         public void SetNextStage(TranslatorContext nextStage)
+         {
+             bool linked = AttributeUsage.RequiresLinkedVaryingInterface;
+@@ -721,6 +729,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             Operand baseOffset = context.IMultiply(vertexIndex, Const(reservations.OutputSizePerInvocation));
+ 
++            int userOutputs = 0;   // generic output locations taken from the record (S2AReaderDefaultsUnwritten)
++
+             foreach ((IoDefinition ioDefinition, int inputOffset) in reservations.Offsets)
+             {
+                 if (ioDefinition.StorageKind != StorageKind.Output)
+@@ -735,6 +745,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 {
+                     context.Store(StorageKind.Output, ioDefinition.IoVariable, null, Const(ioDefinition.Location), Const(ioDefinition.Component), value);
+                     attributeUsage.SetOutputUserAttribute(ioDefinition.Location);
++                    userOutputs |= 1 << ioDefinition.Location;
+                 }
+                 else if (ResourceReservations.IsVectorOrArrayVariable(ioDefinition.IoVariable))
+                 {
+@@ -746,6 +757,24 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 }
+             }
+ 
++            if (S2AReaderDefaultsUnwritten)
++            {
++                for (int location = 0; location < 32; location++)
++                {
++                    if ((userOutputs & (1 << location)) != 0)
++                    {
++                        continue;
++                    }
++
++                    for (int c = 0; c < 4; c++)
++                    {
++                        context.Store(StorageKind.Output, IoVariable.UserDefined, null, Const(location), Const(c), c == 3 ? ConstF(1f) : ConstF(0f));
++                    }
++
++                    attributeUsage.SetOutputUserAttribute(location);
++                }
++            }
++
+             Operation[] operations = context.GetOperations();
+             ControlFlowGraph cfg = ControlFlowGraph.Create(operations);
+             Function function = new Function(cfg.Blocks, "main", false, 0, 0);

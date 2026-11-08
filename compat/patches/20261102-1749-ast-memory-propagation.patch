@@ -1,0 +1,227 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index e2fca6ed75457f8f6b1358f64296325ae4626370..0f26674dc778269e3db2443248cb64d3227a96d2 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -1,3 +1,4 @@
++// S2Arm: preserve mutable-memory read ordering and effectful expression definitions (#1414).
+ using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+ using System.Collections.Generic;
+ using System.Linq;
+@@ -17,6 +18,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+             if (!context.DebugMode)
+             {
+                 AstBlockVisitor visitor = new(mainBlock);
++                MemoryPropagation memoryPropagation = null;
+ 
+                 foreach (IAstNode node in visitor.Visit())
+                 {
+@@ -31,7 +33,13 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+ 
+                         if (propVar.Defs.Count == 1 && isWorthPropagating)
+                         {
+-                            PropagateExpression(propVar, assignment.Source);
++                            int effects = GetMemoryEffects(assignment.Source);
++                            if ((effects & MemoryEffect) == 0 &&
++                                ((effects & MutableRead) == 0 ||
++                                    (memoryPropagation ??= new(mainBlock)).CanPropagate(assignment, propVar)))
++                            {
++                                PropagateExpression(propVar, assignment.Source);
++                            }
+                         }
+ 
+                         if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0)
+@@ -47,6 +55,194 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+             RemoveEmptyBlocks(mainBlock);
+         }
+ 
++        // S2Arm (#1414): expressions are evaluated where they are used, not where
++        // their former local was assigned. Keep writes/calls at their definition,
++        // and only move mutable reads along paths with no intervening memory effect.
++        private const int MutableRead = 1;
++        private const int MemoryEffect = 2;
++
++        private static int GetMemoryEffects(IAstNode node)
++        {
++            if (node is not AstOperation operation)
++            {
++                return 0;
++            }
++
++            Instruction inst = operation.Inst & Instruction.Mask;
++            int effects = 0;
++            if (inst == Instruction.ImageLoad ||
++                (inst == Instruction.Load && operation.StorageKind is not
++                    (StorageKind.ConstantBuffer or StorageKind.Input or StorageKind.InputPerPatch)))
++            {
++                effects |= MutableRead;
++            }
++
++            if (inst.IsAtomic() || inst is Instruction.ImageAtomic or Instruction.Call or
++                Instruction.Store or Instruction.ImageStore or Instruction.Barrier or
++                Instruction.MemoryBarrier or Instruction.GroupMemoryBarrier)
++            {
++                effects |= MemoryEffect;
++            }
++
++            for (int index = 0; index < operation.SourcesCount; index++)
++            {
++                effects |= GetMemoryEffects(operation.GetSource(index));
++            }
++
++            return effects;
++        }
++
++        private static bool ContainsOperand(IAstNode node, AstOperand operand)
++        {
++            if (node == operand)
++            {
++                return true;
++            }
++
++            if (node is AstOperation operation)
++            {
++                for (int index = 0; index < operation.SourcesCount; index++)
++                {
++                    if (ContainsOperand(operation.GetSource(index), operand))
++                    {
++                        return true;
++                    }
++                }
++            }
++
++            return false;
++        }
++
++        private sealed class MemoryPropagation
++        {
++            private readonly Dictionary<IAstNode, IAstNode[]> _successors = new();
++
++            public MemoryPropagation(AstBlock mainBlock)
++            {
++                AddBlock(mainBlock, null, null, null);
++            }
++
++            // Build execution edges, not AstBlockVisitor's lexical DFS order.
++            // A block node denotes evaluation of its condition. Else bodies have
++            // no condition; loop conditions have explicit backedges and exits.
++            private IAstNode AddBlock(AstBlock block, IAstNode next, IAstNode loopExit, IAstNode loopContinue)
++            {
++                IAstNode alternative = null;
++                foreach (IAstNode node in block.Reverse())
++                {
++                    if (node is AstBlock child)
++                    {
++                        switch (child.Type)
++                        {
++                            case AstBlockType.Else:
++                                alternative = AddBlock(child, next, loopExit, loopContinue);
++                                break;
++                            case AstBlockType.If:
++                            case AstBlockType.ElseIf:
++                                _successors[child] = [AddBlock(child, next, loopExit, loopContinue), alternative ?? next];
++                                if (child.Type == AstBlockType.ElseIf)
++                                {
++                                    alternative = child;
++                                }
++                                else
++                                {
++                                    next = child;
++                                    alternative = null;
++                                }
++                                break;
++                            case AstBlockType.While:
++                            case AstBlockType.DoWhile:
++                                IAstNode body = AddBlock(child, child, next, child);
++                                _successors[child] = [body, next];
++                                next = child.Type == AstBlockType.While ? child : body;
++                                break;
++                        }
++                    }
++                    else
++                    {
++                        Instruction inst = node is AstOperation operation ? operation.Inst & Instruction.Mask : 0;
++                        _successors[node] = inst switch
++                        {
++                            Instruction.LoopBreak => [loopExit],
++                            Instruction.LoopContinue => [loopContinue],
++                            Instruction.Return or Instruction.Discard => [],
++                            _ => [next],
++                        };
++                        next = node;
++                    }
++                }
++
++                return next;
++            }
++
++            public bool CanPropagate(AstAssignment definition, AstOperand operand)
++            {
++                Queue<(IAstNode Node, bool Dirty)> pending = new();
++                HashSet<(IAstNode Node, bool Dirty)> visited = new();
++                foreach (IAstNode next in _successors[definition])
++                {
++                    pending.Enqueue((next, false));
++                }
++
++                while (pending.TryDequeue(out var state))
++                {
++                    IAstNode node = state.Node;
++                    // Re-executing the definition refreshes the read, so writes
++                    // from a preceding iteration cannot taint that new value.
++                    if (node == null || node == definition || !visited.Add(state))
++                    {
++                        continue;
++                    }
++
++                    bool dirty = state.Dirty;
++                    // Earlier propagation can remove assignments. Their edges
++                    // stay valid, but their obsolete expression is not executed.
++                    if (node.Parent != null)
++                    {
++                        IAstNode expression = node switch
++                        {
++                            AstAssignment assignment => assignment.Source,
++                            AstBlock block => block.Condition,
++                            _ => node,
++                        };
++                        int effects = GetMemoryEffects(expression);
++                        if (ContainsOperand(expression, operand))
++                        {
++                            // Root Store/Call effects happen after evaluating their
++                            // operands. Nested effects have backend-dependent operand
++                            // order, so do not move reads into those expressions.
++                            int nestedEffects = 0;
++                            if (node is AstOperation operation)
++                            {
++                                for (int index = 0; index < operation.SourcesCount; index++)
++                                {
++                                    nestedEffects |= GetMemoryEffects(operation.GetSource(index));
++                                }
++                            }
++                            else
++                            {
++                                nestedEffects = effects;
++                            }
++
++                            if (dirty || (nestedEffects & MemoryEffect) != 0)
++                            {
++                                return false;
++                            }
++                        }
++
++                        dirty |= (effects & MemoryEffect) != 0;
++                    }
++
++                    foreach (IAstNode next in _successors[node])
++                    {
++                        pending.Enqueue((next, dirty));
++                    }
++                }
++
++                return true;
++            }
++        }
++
+         private static bool IsWorthPropagating(IAstNode source)
+         {
+             if (source is not AstOperation srcOp)

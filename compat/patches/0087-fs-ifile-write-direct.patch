@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
+index 0ea57f5a46337f99482cd2719f5e0aa597ff2b95..d4e5d1221cb33b0d3b11d7ff9756c9a7f48c9df1 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFile.cs
+@@ -4,6 +4,7 @@ using LibHac.Fs;
+ using LibHac.Sf;
+ using Ryujinx.Common;
+ using Ryujinx.Memory;
++using System;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+ {
+@@ -49,9 +50,8 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+             long offset = context.RequestData.ReadInt64();
+             long size = context.RequestData.ReadInt64();
+ 
+-            byte[] data = new byte[context.Request.SendBuff[0].Size];
+-
+-            context.Memory.Read(position, data);
++            // S2A：直接从客体内存读（GetSpan 正常模式即客体内存指针），不按写入长度另开托管数组（iPhone 低区地址只剩几百 MB，大写入会 OOM）
++            ReadOnlySpan<byte> data = context.Memory.GetSpan(position, (int)context.Request.SendBuff[0].Size);
+ 
+             return (ResultCode)_baseFile.Get.Write(offset, new InBuffer(data), size, writeOption).Value;
+         }

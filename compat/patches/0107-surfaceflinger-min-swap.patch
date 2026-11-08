@@ -1,0 +1,62 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index 182152b52f7f71bd3987a59407bfd91a0b0fa258..caa84967b9e124c672c82b84d2ae1a91fa460304 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -13,6 +13,17 @@ using System.Threading;
+ 
+ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ {
++    /// <summary>S2A：合成节拍的宿主接口（SurfaceFlinger 本身是 internal）</summary>
++    public static class S2AFramePacing
++    {
++        /// <summary>交换间隔下限（宿主按测试契约 S2A_FPS 设：60 Hz 下 30 帧 = 2）。合成按 max(游戏的交换间隔, 下限) 隔几个 vsync 取一帧，
++        /// 游戏照常每个 vsync 收到事件，取不到空缓冲就等——从生产端限住出帧，不出「算完就扔」的帧。游戏交换间隔 0（关 vsync）与 Unbounded 不受影响。缺省 1 = 原样。</summary>
++        public static int MinSwapInterval = 1;
++
++        /// <summary>生效的交换间隔变了时调（参数 = 每帧秒数，0 = 不限），宿主据此设出图最短显示间隔，让上屏节拍与合成节拍一致</summary>
++        public static Action<float> FrameIntervalChanged;
++    }
++
+     class SurfaceFlinger : IConsumerListener, IDisposable
+     {
+         private readonly Switch _device;
+@@ -33,6 +44,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+         private int _swapInterval;
+         private int _swapIntervalDelay;
+ 
++        private static int S2AEffective(int swapInterval) => swapInterval == 0 ? 0 : Math.Max(swapInterval, S2AFramePacing.MinSwapInterval);
++
++        // S2A：已通知宿主的生效交换间隔（-1 = 还没通知过：游戏第一帧合成时必通知一次）
++        private int _s2aNotified = -1;
++
+         private readonly Lock _lock = new();
+ 
+         public long RenderLayerId { get; private set; }
+@@ -89,7 +105,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private void UpdateSwapInterval(int swapInterval)
+         {
+-            _swapInterval = swapInterval;
++            _swapInterval = S2AEffective(swapInterval);
+ 
+             // If the swap interval is 0, Game VSync is disabled.
+             if (_swapInterval == 0)
+@@ -387,11 +403,17 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                         UpdateSwapInterval(_device.VSyncMode == VSyncMode.Unbounded ? 0 : item.SwapInterval);
+                         _vSyncMode = _device.VSyncMode;
+                     }
+-                    else if (item.SwapInterval != _swapInterval || _device.TargetVSyncInterval != _targetVSyncInterval)
++                    else if (S2AEffective(item.SwapInterval) != _swapInterval || _device.TargetVSyncInterval != _targetVSyncInterval)
+                     {
+                         UpdateSwapInterval(item.SwapInterval);
+                     }
+ 
++                    if (_s2aNotified != _swapInterval && S2AFramePacing.FrameIntervalChanged is { } s2aCb)
++                    {
++                        _s2aNotified = _swapInterval;
++                        s2aCb(_swapInterval == 0 ? 0f : (float)_swapInterval / _device.TargetVSyncInterval);
++                    }
++
+                     PostFrameBuffer(layer, item);
+                 }
+                 else if (acquireStatus is not Status.NoBufferAvailaible and not Status.InvalidOperation)

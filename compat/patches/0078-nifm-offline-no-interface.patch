@@ -1,0 +1,27 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+index dd4efce6ee9ec9c3e15c4f8efa9df34ec8c4b391..b8a791134a6f5cb3f5d39e032cf68093f703a3f8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+@@ -133,7 +133,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+         // GetInternetConnectionStatus() -> nn::nifm::detail::sf::InternetConnectionStatus
+         public ResultCode GetInternetConnectionStatus(ServiceCtx context)
+         {
+-            if (!NetworkInterface.GetIsNetworkAvailable())
++            if (!context.Device.Configuration.EnableInternetAccess || !NetworkInterface.GetIsNetworkAvailable())
+             {
+                 return ResultCode.NoInternetConnection;
+             }
+@@ -166,9 +166,12 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: without internet access the console is offline — no current network profile / IP / IP config
++        // (a real offline console returns NoInternetConnection here; reporting the host's IP made Diablo II try Battle.net
++        // authentication, fail and bounce back to the title screen forever)
+         private (IPInterfaceProperties, UnicastIPAddressInformation) GetLocalInterface(ServiceCtx context)
+         {
+-            if (!NetworkInterface.GetIsNetworkAvailable())
++            if (!context.Device.Configuration.EnableInternetAccess || !NetworkInterface.GetIsNetworkAvailable())
+             {
+                 return (null, null);
+             }

@@ -1,0 +1,319 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 3bffdb8d91dc9cd93caa094ef11e867ec39b54b1..7da262dbce7bad2a09c2ec2c06858bd5095c9bb8 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -24,6 +24,8 @@ namespace Ryujinx.Audio.Backends.Apple
+         // 安静游戏凑不够时 StartFallbackMilliseconds 后照常开播。
+         private const int PrimeMilliseconds = 64;
+         private const long StartFallbackMilliseconds = 100;
++        // S2Arm (11-02 太鼓爆音): 判断设备真断的容差：新数据到达比设备交还晚的调度抖动（太鼓 Mac / iPhone 归零后 0.0–3.0 ms 就有新数据）
++        private const int ClockToleranceMilliseconds = 5;
+ 
+         private readonly AppleHardwareDeviceDriver _driver;
+         // S2Arm: queued buffers as (identifier, sample count) in a ring under _queueLock, instead of ConcurrentQueue<AppleAudioBuffer>:
+@@ -399,11 +401,27 @@ namespace Ryujinx.Audio.Backends.Apple
+             public Pump(AppleHardwareDeviceSession s, int bufferBytes)
+                 // S2Arm (10-22 杂音): 起播前预充 PrimeMilliseconds 的在途下限（约 3 个游戏缓冲），凑够才让设备开播
+                 : base(NumBuffers, bufferBytes, s._bytesPerFrame, s._bytesPerFrame * (int)s.RequestedSampleRate,
+-                       (long)s._bytesPerFrame * s.RequestedSampleRate * PrimeMilliseconds / 1000)
++                       (long)s._bytesPerFrame * s.RequestedSampleRate * PrimeMilliseconds / 1000,
++                       (long)s.RequestedSampleRate * ClockToleranceMilliseconds / 1000)
+             {
+                 _s = s;
+             }
+ 
++            // S2Arm (11-02 太鼓爆音): 设备播放时钟 = 队列时间线的 sample time（缓冲不带时间戳时首尾相接排在这条时间线上）；队列没在播 / 取不到返回 MinValue
++            protected override unsafe long DeviceClock()
++            {
++                nint q = _s._audioQueue;
++
++                if (q == nint.Zero)
++                {
++                    return long.MinValue;
++                }
++
++                AudioTimeStamp ts;
++
++                return AudioQueueGetCurrentTime(q, nint.Zero, &ts, nint.Zero) == 0 ? (long)ts.SampleTime : long.MinValue;
++            }
++
+             protected override Span<byte> SlotData(int slot)
+             {
+                 AudioQueueBuffer* buffer = (AudioQueueBuffer*)_s._audioQueueBuffers[slot];
+@@ -427,7 +445,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+             // S2Arm (10-23 马车8 杂音): 欠载后补静音垫。这里在游戏的 AppendBuffer 线程上，只记数（零分配，服务层零分配单测守着）；
+             //   行由 S2AOutputDiag 的 10 秒汇报线程打
+-            protected override void OnCushion(int bytes, long zeroTicks) => _s._diag.OnCushion(bytes / _s._bytesPerFrame, zeroTicks);
++            protected override void OnCushion(int bytes, long zeroTicks, long lateFrames) => _s._diag.OnCushion(bytes / _s._bytesPerFrame, zeroTicks, lateFrames);
+         }
+ 
+         private void OutputCallback(nint userData, nint audioQueue, nint bufferPtr)
+@@ -629,6 +647,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _started = false;
+                 _diag.SetStarted(false);
+                 AudioQueuePause(_audioQueue);
++                _pump.ResetClock();   // 暂停期间播放时钟怎么走不确定：续播后重新学交还相位
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+index ea2a7867ab1a2be6b870d0b399efb328d1db1a51..d4295fb328dbcce459ca623c4b36df36cfcddb9f 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+@@ -69,6 +69,17 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
+         internal static partial int AudioQueuePause(nint audioQueue);
+ 
++        // S2Arm (11-02): AudioTimeStamp（CoreAudioBaseTypes.h，64 字节）；只读 mSampleTime
++        [StructLayout(LayoutKind.Explicit, Size = 64)]
++        internal struct AudioTimeStamp
++        {
++            [FieldOffset(0)]
++            public double SampleTime;
++        }
++
++        [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")] // 平台例外：苹果音频后端本身（AudioQueue 播放时钟），同文件其余导入原样
++        internal static unsafe partial int AudioQueueGetCurrentTime(nint audioQueue, nint timeline, AudioTimeStamp* timeStamp, nint discontinuity);
++
+         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
+         internal static partial int AudioQueueStop(nint audioQueue, [MarshalAs(UnmanagedType.I1)] bool immediate);
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 9be80feb71f18657598bb210169b410bb7a64a7a..6a54159c87a4775dcba4f68547742132f38a48ab 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -167,11 +167,12 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _repCallbacks, _repSubmitted, _repPlayed, _repUnderruns, _repPauses;
+         // 欠载补垫（DeviceBufferPump.OnCushion，游戏线程上调）：只做原子记数，10 秒汇报时打一行
+         private int _cushions, _repCushions, _lastCushionFrames;
+-        private long _lastCushionZeroTicks;
+-        public void OnCushion(int frames, long zeroTicks)
++        private long _lastCushionZeroTicks, _lastCushionLate;
++        public void OnCushion(int frames, long zeroTicks, long lateFrames)
+         {
+             Volatile.Write(ref _lastCushionFrames, frames);
+             Volatile.Write(ref _lastCushionZeroTicks, zeroTicks);
++            Volatile.Write(ref _lastCushionLate, lateFrames);
+             Interlocked.Increment(ref _cushions);
+         }
+ 
+@@ -570,7 +571,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     int cu = Volatile.Read(ref d._cushions);
+                     if (cu != d._repCushions)
+                     {
+-                        Console.Error.WriteLine($"[声] 输出 #{d.Index} 10 秒：中途欠载补垫 {cu - d._repCushions} 次（最近一次在途归零 {Volatile.Read(ref d._lastCushionZeroTicks) * 1000.0 / Stopwatch.Frequency:F1} ms 后才有新数据，先补 {Volatile.Read(ref d._lastCushionFrames) * 1000.0 / d._rate:F0} ms 静音重建缓冲垫）");
++                        Console.Error.WriteLine($"[声] 输出 #{d.Index} 10 秒：中途欠载补垫 {cu - d._repCushions} 次（最近一次在途归零 {Volatile.Read(ref d._lastCushionZeroTicks) * 1000.0 / Stopwatch.Frequency:F1} ms 后才有新数据、设备播放时钟已越过已交声音末尾 {Volatile.Read(ref d._lastCushionLate) * 1000.0 / d._rate:F1} ms，先补 {Volatile.Read(ref d._lastCushionFrames) * 1000.0 / d._rate:F0} ms 静音重建缓冲垫）");
+                         d._repCushions = cu;
+                     }
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index a61c939c4f418c0a4c0105bd4ec61fcf7e68183c..67decb0fd86c1060056062ec9943519b86997571 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -36,12 +36,20 @@ namespace Ryujinx.Audio.Backends.Common
+         //   延迟不累加（下一次卡顿先吃掉这块垫子）；归零超过 1 秒（游戏自己停了）不补。缺省开（10-23 马车8 测试机1 同包 A/B 后翻缺省），S2A_AUDIO_CUSHION=0 关
+         private static readonly bool _cushionOn = Environment.GetEnvironmentVariable("S2A_AUDIO_CUSHION") != "0";
+         private long _zeroSince;   // 在途归零的时刻（Stopwatch；0 = 没归零 / 已补过）
+-        // S2Arm (审计 P1-26): 垫只补给「提前供数」的流——上一段（两次归零之间）有过「在途还有真实样本时又交了新样本」。
+-        //   单缓冲客人（视频经 AudioOut 一次交 1024 帧、等这块播完才交下一块）两次归零之间从不提前交，归零是它自己的节奏不是卡顿：
+-        //   给它补垫，每块前都插一段静音（21 ms 声音 + 50 ms 空白反复），垫还推迟这块的完成、让它下一次照样归零
+-        private long _sampleInFlight;   // 在途字节里真实样本的部分（不含垫）
+-        private bool _aheadSinceZero;   // 上次归零以来有过提前供数
+-        private bool _cushionAllowed;   // 这次归零之前那一段有过提前供数（归零时取 _aheadSinceZero）
++        // S2Arm (11-02 太鼓爆音): 补垫只看设备播放时钟，不看在途记账。在途归零 ≠ 设备断了：设备（AudioQueue）把缓冲拷进自己的渲染缓冲就交还，
++        //   交还时离真正播完还有约一个设备周期（Mac 实测交还时播放时钟比缓冲末尾早 620–750 帧）。按完成节奏供数的客人（太鼓：2 块 256 帧，
++        //   交还一块马上补一块）每个设备周期都会让在途归零、0.1 ms 后就有新数据，设备其实没断；旧规则每次补 50 ms 静音，每 64 ms 只剩
++        //   512 帧真声音（10 秒补垫 157 次 = 爆音、不连贯）。审计 P1-26 的「提前供数」判据挡住了单缓冲客人，挡不住双缓冲的。
++        //   现在：设备每交还一块，记「播放时钟 − 这块在设备时间线上的末尾」（设备正常交还时的相位，最近 ClockWindow 次的最大值 = 基线）；
++        //   归零后有新数据时，播放时钟越过已交声音末尾的量超出基线 + 容差，才是设备真的断了（卡顿吃光了垫），才补垫。
++        //   AudioQueue 的时间线：缓冲不带时间戳时首尾相接（第 k 块从前面各块帧数之和开始），迟到的部分直接丢掉、播放时钟照走（11-02 Mac 小程序实测）
++        private const int ClockWindow = 64;
++        private const int ClockMinSamples = 8;
++        private readonly long[] _slotEnd;          // 每个槽在设备时间线上的末尾（帧）
++        private long _endFrames;                   // 已交设备的总帧数 = 设备时间线上已交声音的末尾
++        private readonly long[] _clockPhase = new long[ClockWindow];   // 交还时「播放时钟 − 这块末尾」（帧）
++        private int _clockN, _clockW;
++        private readonly long _clockTolFrames;     // 判断断口的容差（帧）：新数据到达与交还之间的调度抖动
+         // S2Arm (审计 P1-27): 设备停 / 重建期间不交缓冲（Restart）。交缓冲只在本泵锁下，设备仍持有的缓冲不会被再交一次
+         private bool _suspended;
+ 
+@@ -56,13 +64,15 @@ namespace Ryujinx.Audio.Backends.Common
+         /// </summary>
+         public bool PrimedForStart => Volatile.Read(ref _primed) != 0;
+ 
+-        protected DeviceBufferPump(int slots, int slotBytes, int bytesPerFrame, int maxCopiedBytes, long primeFloorBytes = 0)
++        protected DeviceBufferPump(int slots, int slotBytes, int bytesPerFrame, int maxCopiedBytes, long primeFloorBytes = 0, long clockTolFrames = 0)
+         {
+             _slotBytes = slotBytes / bytesPerFrame * bytesPerFrame;
+             _bytesPerFrame = bytesPerFrame;
+             _free = new int[slots];
+             _filled = new int[slots];
+             _sampleBytes = new int[slots];
++            _slotEnd = new long[slots];
++            _clockTolFrames = clockTolFrames;
+ 
+             for (int i = slots - 1; i >= 0; i--)
+             {
+@@ -97,12 +107,66 @@ namespace Ryujinx.Audio.Backends.Common
+         }
+ 
+         /// <summary>
+-        /// S2Arm: a cushion of <paramref name="bytes"/> bytes of silence was submitted after an underrun (under the pump lock).
++        /// S2Arm: a cushion of <paramref name="bytes"/> bytes of silence was submitted after an underrun (under the pump lock);
++        /// <paramref name="lateFrames"/>: how far the device clock had run past the end of the submitted audio, beyond its normal hand-back phase.
+         /// </summary>
+-        protected virtual void OnCushion(int bytes, long zeroTicks)
++        protected virtual void OnCushion(int bytes, long zeroTicks, long lateFrames)
+         {
+         }
+ 
++        /// <summary>
++        /// S2Arm: the device's playback clock in frames, on the timeline the submitted buffers occupy back to back
++        /// (AudioQueue: sample time of the queue's timeline); long.MinValue when unknown (no cushion is ever added then).
++        /// </summary>
++        protected virtual long DeviceClock() => long.MinValue;
++
++        /// <summary>
++        /// S2Arm: the device clock was paused, restarted or rebuilt: relearn its hand-back phase before judging gaps by it.
++        /// </summary>
++        public void ResetClock()
++        {
++            lock (_lock)
++            {
++                _clockN = 0;
++                _clockW = 0;
++            }
++        }
++
++        // Under _lock. Frames the device clock is past the end of everything submitted, beyond the most it is past a buffer's end
++        // when that buffer is handed back normally (≤ 0 = the device has not run dry); long.MinValue when there is no clock / no baseline yet
++        private long DeviceLateLocked()
++        {
++            if (_clockN < ClockMinSamples)
++            {
++                return long.MinValue;
++            }
++
++            long now = DeviceClock();
++
++            if (now == long.MinValue)
++            {
++                return long.MinValue;
++            }
++
++            long baseline = long.MinValue;
++            int n = Math.Min(_clockN, ClockWindow);
++
++            for (int i = 0; i < n; i++)
++            {
++                baseline = Math.Max(baseline, _clockPhase[i]);
++            }
++
++            return now - _endFrames - baseline;
++        }
++
++        // Under _lock: slot goes to the device, ending at _endFrames on its timeline
++        private void SubmitLocked(int slot, int bytes)
++        {
++            _endFrames += bytes / _bytesPerFrame;
++            _slotEnd[slot] = _endFrames;
++            Submit(slot, bytes);
++        }
++
+         /// <summary>
+         /// Move queued samples into free pool buffers and submit them.
+         /// </summary>
+@@ -110,8 +174,6 @@ namespace Ryujinx.Audio.Backends.Common
+         {
+             lock (_lock)
+             {
+-                bool ahead = _sampleInFlight > 0;
+-
+                 while (_freeCount > 0 && !_suspended)
+                 {
+                     int n = Math.Min(Samples.Length, _slotBytes) / _bytesPerFrame * _bytesPerFrame;
+@@ -121,13 +183,14 @@ namespace Ryujinx.Audio.Backends.Common
+                         return;
+                     }
+ 
+-                    // S2Arm: 欠载后先补一块静音重建缓冲垫（见 _cushionOn）
+-                    if (_cushionOn && _primed != 0 && _zeroSince != 0 && _cushionAllowed && Interlocked.Read(ref _inFlightBytes) == 0 && _freeCount > 1)
++                    // S2Arm: 欠载后先补一块静音重建缓冲垫（见 _cushionOn）；只在设备播放时钟证明真断了时补（见 _slotEnd）
++                    if (_cushionOn && _primed != 0 && _zeroSince != 0 && Interlocked.Read(ref _inFlightBytes) == 0 && _freeCount > 1)
+                     {
+                         long zt = Stopwatch.GetTimestamp() - _zeroSince;
+                         _zeroSince = 0;
++                        long late = zt < Stopwatch.Frequency ? DeviceLateLocked() : long.MinValue;
+ 
+-                        if (zt < Stopwatch.Frequency)
++                        if (late != long.MinValue && late > _clockTolFrames)
+                         {
+                             int z = (int)Math.Min(_primeFloorBytes, _slotBytes) / _bytesPerFrame * _bytesPerFrame;
+ 
+@@ -138,8 +201,8 @@ namespace Ryujinx.Audio.Backends.Common
+                                 _filled[cs] = z;
+                                 _sampleBytes[cs] = 0;
+                                 Interlocked.Add(ref _inFlightBytes, z);
+-                                OnCushion(z, zt);
+-                                Submit(cs, z);
++                                OnCushion(z, zt, late);
++                                SubmitLocked(cs, z);
+                             }
+                         }
+                     }
+@@ -150,8 +213,6 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                     _filled[slot] = read;
+                     _sampleBytes[slot] = read;
+-                    _sampleInFlight += read;
+-                    _aheadSinceZero |= ahead;
+                     long inFlight = Interlocked.Add(ref _inFlightBytes, read);
+ 
+                     // S2Arm: 在途凑够下限即可起播；闩锁后不再回退（一次欠载不该让后续重新 pre-roll）
+@@ -160,7 +221,7 @@ namespace Ryujinx.Audio.Backends.Common
+                         Volatile.Write(ref _primed, 1);
+                     }
+ 
+-                    Submit(slot, read);
++                    SubmitLocked(slot, read);
+                 }
+             }
+         }
+@@ -230,7 +291,7 @@ namespace Ryujinx.Audio.Backends.Common
+             }
+ 
+             Interlocked.Add(ref _inFlightBytes, -totalBytes);
+-            _sampleInFlight -= sampleBytes;
++            _clockN = _clockW = 0;   // 设备停了 / 重建了：时间线从头算，重新学交还相位
+ 
+             return sampleBytes;
+         }
+@@ -254,14 +315,24 @@ namespace Ryujinx.Audio.Backends.Common
+                 _sampleBytes[slot] = 0;
+                 _filled[slot] = 0;
+                 _free[_freeCount++] = slot;
+-                _sampleInFlight -= sampleBytes;
+                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+ 
++                if (bytes > 0 && !_suspended)
++                {
++                    // S2Arm: 设备正常交还时的相位（播放时钟 − 这块末尾），判断断口的基线（停 / 重建设备期间不读：队列可能正在销毁，停完反正重学）
++                    long clock = DeviceClock();
++
++                    if (clock != long.MinValue)
++                    {
++                        _clockPhase[_clockW] = clock - _slotEnd[slot];
++                        _clockW = (_clockW + 1) % ClockWindow;
++                        _clockN++;
++                    }
++                }
++
+                 if (inFlight == 0 && bytes > 0)
+                 {
+                     _zeroSince = Stopwatch.GetTimestamp();
+-                    _cushionAllowed = _aheadSinceZero;
+-                    _aheadSinceZero = false;
+                 }
+ 
+                 OnReturned(bytes, inFlight);

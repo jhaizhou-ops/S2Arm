@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 3bf02f54debc3ed8f2aff3b747a22276d080de95..01fb3883e8326dc9e53a89ebb3bc7118949fefbc 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -365,6 +365,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="stage">Buffer stage that triggered the modification</param>
+         public void SignalModified(ulong address, ulong size, BufferStage stage)
+         {
++            if (ModTrace.On) ModTrace.Note(address, size, stage);
++
+             EnsureRangeList();
+ 
+             TryQueueBackingChange(stage);
+@@ -1061,4 +1063,35 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             DecrementReferenceCount();
+         }
+     }
++
++    // S2A 诊断（帧率能耗线 10-22，缺省关）：S2A_MOD_TRACE=<lo>-<hi>（十六进制客体地址）时，落在区间里的「GPU 改过」按来源阶段计次，每 10 秒打一行。
++    // 查塞尔达游戏线程每帧 CPU 写 GPU 改过的页（先回写等同步号约 10 ms/帧）：这段内存是谁标成 GPU 改过的
++    internal static class ModTrace
++    {
++        public static readonly bool On;
++        static readonly ulong _lo, _hi;
++        static readonly long[] _n = new long[256], _b = new long[256];
++        static long _last;
++        static ModTrace()
++        {
++            string v = Environment.GetEnvironmentVariable("S2A_MOD_TRACE");
++            if (string.IsNullOrEmpty(v)) return;
++            string[] p = v.Split('-');
++            if (p.Length != 2) return;
++            _lo = Convert.ToUInt64(p[0].Replace("0x", ""), 16); _hi = Convert.ToUInt64(p[1].Replace("0x", ""), 16);
++            On = _hi > _lo;
++            _last = System.Diagnostics.Stopwatch.GetTimestamp();
++        }
++        public static void Note(ulong address, ulong size, BufferStage stage)
++        {
++            if (address + size <= _lo || address >= _hi) return;
++            Interlocked.Increment(ref _n[(byte)stage]); Interlocked.Add(ref _b[(byte)stage], (long)size);
++            long now = System.Diagnostics.Stopwatch.GetTimestamp();
++            if (now - _last < System.Diagnostics.Stopwatch.Frequency * 10) return;
++            _last = now;
++            var sb = new System.Text.StringBuilder($"[modtrace] {_lo:x}-{_hi:x} 累计 GPU 改过按来源（阶段 / 存储读写位）：");
++            for (int i = 0; i < 256; i++) if (_n[i] != 0) sb.Append($" {(BufferStage)(i & 0x3f)}{((i & 0xc0) == 0x80 ? "+存储写" : (i & 0xc0) == 0xc0 ? "+存储原子" : (i & 0xc0) == 0x40 ? "+存储读" : "")}×{_n[i]}（{_b[i] / 1024} KB）");
++            Console.Error.WriteLine(sb.ToString());
++        }
++    }
+ }

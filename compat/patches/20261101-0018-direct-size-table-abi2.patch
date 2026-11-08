@@ -1,0 +1,368 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 8db4bc271a8fbd1187821bc1bdf64c06899308a5..4f076e7b9c42cea3fe625d8c26d1a119d88d9826 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -28,7 +28,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         //   +5（10-21 画面·着色器线）：顶点输入按原始位读（宿主顶点自取，翻译结果不随属性类型变，补丁 vattr-raw）
+         // Invalidate host programs emitted before explicit SSBO permissions and linked Vulkan interfaces.
+         // This is compiler identity, independent of package source keys and device capability identity.
+-        internal const uint CodeGenVersion = 7354 + 7;
++        // +8: SupportBuffer's unconditional shader declaration grows to 3776 bytes
++        // with ABI2 member 12. Re-translate old host binaries rather than assuming
++        // that every backend treats the added uniform-block member as compatible.
++        internal const uint CodeGenVersion = 7354 + 8;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 72ec3df3fec6ba23a645db9ef8f889ed83ee6adf..a0f1294aeb0b2e9c6b4bce834ab9f2ea82273fb0 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -17,6 +17,9 @@ namespace Ryujinx.Graphics.Shader
+ 
+     public interface IGpuAccessor : ILogger
+     {
++        // Direct-render ABI opt-in. Generic producers retain their existing helpers.
++        bool QueryHostSupportsTextureSizeTable() => false;
++
+         /// <summary>S2A（直连离线几何）：顶点阶段输出按固定捕获布局给几何当计算跑（见 ResourceReservations.FillGeometryInputMap）。只有直连翻译器答真，通用模式缺省假。</summary>
+         bool QueryGeometryInputFixed() => false;
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj b/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj
+index cfb188dafa1fc52e3947e5de1a13feabf09204fc..728c35abb9193f290e3e408c888d264b22391d1e 100644
+--- a/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj
++++ b/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj
+@@ -15,4 +15,7 @@
+     <EmbeddedResource Include="CodeGen\Glsl\HelperFunctions\SwizzleAdd.glsl" />
+   </ItemGroup>
+ 
++  <ItemGroup>
++    <InternalsVisibleTo Include="dsh_cmp" /> <!-- S2A：直连对拍 / ABI2 资产工具（graphics/tools/direct/tests/dsh_cmp、tests/direct_resolution_assets）直接用 IR 内部类；b69a78a71 起 S2A.Dsh 改引本工程，原先随源码编进 S2A.Dsh 的可见性不再覆盖 -->
++  </ItemGroup>
+ </Project>
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index 4c6e758b8c118881f69a795664dbd0e7eb891de2..1cbc7610c91ceaef72f23482025e1a02986c3443 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -29,11 +29,13 @@ namespace Ryujinx.Graphics.Shader
+         S2APoint,
+         S2AWiden,   // S2A：宽屏边缘外推参数（见 SupportBuffer.S2AWiden）
+         RenderScaleY,   // S2A：分辨率纵向倍率；宽屏只覆盖原 RenderScale 的横向值
++        TextureSizes,
+     }
+ 
+     public struct SupportBuffer
+     {
+         public const int Binding = 0;
++        public const int TextureSizeTableAbi = 2;
+ 
+         public static readonly int FieldSize;
+         public static readonly int RequiredSize;
+@@ -51,6 +53,7 @@ namespace Ryujinx.Graphics.Shader
+         public static readonly int S2APointOffset;
+         public static readonly int S2AWidenOffset;
+         public static readonly int RenderScaleYOffset;
++        public static readonly int TextureSizesOffset;
+ 
+         public const int FragmentIsBgraCount = 8;
+         // One for the render target, 64 for the textures, and 8 for the images.
+@@ -81,6 +84,7 @@ namespace Ryujinx.Graphics.Shader
+             S2APointOffset = OffsetOf(ref instance, ref instance.S2APoint);
+             S2AWidenOffset = OffsetOf(ref instance, ref instance.S2AWiden);
+             RenderScaleYOffset = OffsetOf(ref instance, ref instance.RenderScaleY);
++            TextureSizesOffset = OffsetOf(ref instance, ref instance.TextureSizes);
+             S2ARegistry = S2AMakeRegistry();
+             S2ACheckLayout();
+         }
+@@ -105,6 +109,7 @@ namespace Ryujinx.Graphics.Shader
+             ("s2a_widen.z：横向收缩量（浮点位；原尺寸居中层全宽视口 + 收缩 1/k）", S2AWidenOffset + 8, 4, "画幅线 SpirvEdgePush"),
+             ("s2a_widen.w：原画框外推的 pad（浮点位；0 = 关，SpirvExtrap 片元平移 / 插值外推、SpirvEdgePush 写 location 31）", S2AWidenOffset + 12, 4, "画幅线 SpirvExtrap"),
+             ("render_scale_y：纵向分辨率倍率，沿用逐纹理黑名单", RenderScaleYOffset, FieldSize * RenderScaleMaxCount, "画幅线 分辨率倍率"),
++            ("texture_sizes：视图逻辑及物理宽高，ABI 2", TextureSizesOffset, FieldSize * RenderScaleMaxCount, "直连分辨率 ABI 2"),
+         ];
+ 
+         private static void S2ACheckLayout()
+@@ -142,6 +147,7 @@ namespace Ryujinx.Graphics.Shader
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_point"),
+                 new StructureField(AggregateType.Vector4 | AggregateType.S32, "s2a_widen"),
+                 new StructureField(AggregateType.Array | AggregateType.FP32, "render_scale_y", RenderScaleMaxCount),
++                new StructureField(AggregateType.Array | AggregateType.Vector4 | AggregateType.S32, "texture_sizes", RenderScaleMaxCount),
+             ]);
+         }
+ 
+@@ -176,5 +182,8 @@ namespace Ryujinx.Graphics.Shader
+         // 包装层逐次绘制写；RenderScaleY 更新使连续上传区间经过这里时，包装层跟踪并在下次绘制恢复参数。s2a_flags 整个归 0042 / 0044。
+         public Vector4<int> S2AWiden;
+         public Array73<Vector4<float>> RenderScaleY;
++        // ABI 2, byte 2608: logical view width/height, physical view width/height.
++        // Entry zero is the fragment target's selected mip; zero entries use legacy helpers.
++        public Array73<Vector4<int>> TextureSizes;
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
+index f74a098ba5af90afc04627aedfdd9723e251613a..360e1652d6ca9f55bbe5109e33e3448f19ae5713 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionManager.cs
+@@ -80,6 +80,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 HelperFunctionName.TextureSizeUnscale => GenerateTextureSizeUnscaleFunction(),
+                 HelperFunctionName.TexelFetchScaleY => GenerateTexelFetchScaleFunction(true),
+                 HelperFunctionName.TextureSizeUnscaleY => GenerateTextureSizeUnscaleFunction(true),
++                HelperFunctionName.TexelFetchScaleExact => GenerateTextureScaleExactFunction(false),
++                HelperFunctionName.TextureSizeExact => GenerateTextureScaleExactFunction(true),
+                 _ => throw new ArgumentException($"Invalid function name {functionName}"),
+             };
+         }
+@@ -436,6 +438,96 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, y ? "TextureSizeUnscaleY" : "TextureSizeUnscale", true, 2, 0);
+         }
+ 
++        private Function GenerateTextureScaleExactFunction(bool sizeQuery)
++        {
++            // Fetch's fifth argument identifies this ABI to the SPIR-V analyzer;
++            // queries already carry a tagged physical-size result as argument zero.
++            EmitterContext context = new();
++            Operand input = Argument(0), sampler = Argument(1), component = Argument(2), lod = Argument(3);
++            Operand tableIndex = context.IAdd(Const(1), sampler);
++            Operand logical = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.TextureSizes), tableIndex, component);
++            Operand legacy = Label();
++            context.BranchIfTrue(legacy, context.ICompareEqual(logical, Const(0)));
++            Operand physical = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.TextureSizes), tableIndex, context.IAdd(component, Const(2)));
++            context.BranchIfTrue(legacy, context.ICompareEqual(physical, Const(0)));
++
++            // A texture view's level zero is the base of this table, even when its
++            // parent storage starts at a non-zero mip. Clamp before shifting: SPIR-V
++            // shifts by >=32 are undefined, and every remaining mip has size one.
++            lod = context.IMinimumU32(context.IMaximumS32(lod, Const(0)), Const(31));
++            Operand logicalMip = context.IMaximumU32(context.ShiftRightU32(logical, lod), Const(1));
++            if (sizeQuery)
++            {
++                context.Return(logicalMip);
++            }
++            else
++            {
++                Operand physicalMip = context.IMaximumU32(context.ShiftRightU32(physical, lod), Const(1));
++                // Preserve every integer, including negative/out-of-range coordinates,
++                // before phase, float conversion, or a potentially overflowing product.
++                Operand scaled = Label();
++                context.BranchIfFalse(scaled, context.ICompareEqual(physicalMip, logicalMip));
++                context.Return(input);
++                context.MarkLabel(scaled);
++                if (_stage == ShaderStage.Fragment)
++                {
++                    Operand targetLogical = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.TextureSizes), Const(0), component);
++                    Operand targetPhysical = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.TextureSizes), Const(0), context.IAdd(component, Const(2)));
++                    Operand divisorX = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), Const(0));
++                    Operand divisorY = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScaleY), Const(0));
++                    Operand divisor = context.ConditionalSelect(context.ICompareEqual(component, Const(1)), divisorY, divisorX);
++                    Operand targetRatio = context.FPDivide(context.IConvertS32ToFP32(targetPhysical), context.IConvertS32ToFP32(targetLogical));
++                    Operand targetKnown = context.BitwiseAnd(context.ICompareNotEqual(targetLogical, Const(0)), context.ICompareNotEqual(targetPhysical, Const(0)));
++                    Operand divisorMatchesTarget = context.BitwiseAnd(targetKnown, context.FPCompareEqual(divisor, targetRatio));
++                    Operand sameRatio = context.ICompareEqual(context.IMultiply(physicalMip, targetLogical), context.IMultiply(targetPhysical, logicalMip));
++                    Operand scaleX = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), tableIndex);
++                    Operand scaleY = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScaleY), tableIndex);
++                    Operand scale = context.ConditionalSelect(context.ICompareEqual(component, Const(1)), scaleY, scaleX);
++                    // PAGE/KEEP may intentionally use a different F. Retain only
++                    // their legacy signed-scale phase, never the base-level input
++                    // multiplier: source coordinates always use the selected mip.
++                    Operand phaseEnabled = context.ConditionalSelect(divisorMatchesTarget, sameRatio, context.FPCompareLess(scale, ConstF(0f)));
++                    Operand noPhase = Label();
++                    context.BranchIfFalse(noPhase, phaseEnabled);
++                    // ABI 2 compares the selected source mip to the selected
++                    // target mip (entry zero is already the selected mip). The
++                    // existing fragment divisor must not be applied again.
++                    Operand ratio = context.FPDivide(context.IConvertS32ToFP32(physicalMip), context.IConvertS32ToFP32(logicalMip));
++                    Operand frag = context.Load(StorageKind.Input, IoVariable.FragmentCoord, null, component);
++                    Operand phaseDivisor = context.ConditionalSelect(divisorMatchesTarget, ratio, context.FPAbsolute(scale));
++                    Operand phase = context.FPModulo(frag, phaseDivisor);
++                    context.Return(context.FP32ConvertToS32(context.FPAdd(context.FPMultiply(context.IConvertS32ToFP32(input), ratio), phase)));
++                    context.MarkLabel(noPhase);
++                }
++                // Integer mapping avoids both odd-mip size recovery and float
++                // quotient rounding. In-range Metal coordinates fit the 32-bit product.
++                Operand product = context.IMultiply(input, physicalMip);
++                context.Return(context.Add(Instruction.Divide, Local(), product, logicalMip));
++            }
++
++            context.MarkLabel(legacy);
++            Operand result = Local();
++            HelperFunctionName xName = sizeQuery ? HelperFunctionName.TextureSizeUnscale : HelperFunctionName.TexelFetchScale;
++            HelperFunctionName yName = sizeQuery ? HelperFunctionName.TextureSizeUnscaleY : HelperFunctionName.TexelFetchScaleY;
++            Operand legacyY = Label();
++            context.BranchIfTrue(legacyY, context.ICompareEqual(component, Const(1)));
++            void CallLegacy(HelperFunctionName name)
++            {
++                int helper = GetOrCreateFunctionId(name);
++                Operand[] args = sizeQuery || _stage != ShaderStage.Fragment
++                    ? [Const(helper), input, sampler]
++                    : [Const(helper), input, sampler, component];
++                context.Add(new Operation(Instruction.Call, 0, result, args));
++                context.Return(result);
++            }
++            CallLegacy(xName);
++            context.MarkLabel(legacyY);
++            // The old non-fragment convention used RenderScale for both axes.
++            CallLegacy(_stage == ShaderStage.Fragment ? yName : xName);
++            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks,
++                sizeQuery ? "TextureSizeExact" : "TexelFetchScaleExact", true, sizeQuery ? 4 : 5, 0);
++        }
++
+         private Operand GetScaleIndex(EmitterContext context, Operand index)
+         {
+             switch (_stage)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
+index ca0392d3cbbd067946460a351e22c46b0c49993d..ad82e0e81a60bd415f853ae2570666085d53fc3e 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/HelperFunctionName.cs
+@@ -18,5 +18,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         TextureSizeUnscale,
+         TexelFetchScaleY,
+         TextureSizeUnscaleY,
++        TexelFetchScaleExact,
++        TextureSizeExact,
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index c093f2f6cdb08529e7171788481e95f4d81c70dd..e5d8a1446cc8a5e53367c6aca07bb70c3cc35667 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -26,8 +26,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                         throw new InvalidOperationException("Separate texture and sampler must both be indexed arrays.");
+                     }
+                 }
+-                node = InsertTexelFetchScale(context.Hfm, node, context.ResourceManager, context.Stage);
+-                node = InsertTextureSizeUnscale(context.Hfm, node, context.ResourceManager, context.Stage);
++                bool exactSizeTable = context.GpuAccessor.QueryHostSupportsTextureSizeTable();
++                node = InsertTexelFetchScale(context.Hfm, node, context.ResourceManager, context.Stage, exactSizeTable);
++                node = InsertTextureSizeUnscale(context.Hfm, node, context.ResourceManager, context.Stage, exactSizeTable);
+ 
+                 if (texOp.Inst == Instruction.TextureSample)
+                 {
+@@ -49,7 +50,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             HelperFunctionManager hfm,
+             LinkedListNode<INode> node,
+             ResourceManager resourceManager,
+-            ShaderStage stage)
++            ShaderStage stage,
++            bool exactSizeTable = false)
+         {
+             TextureOperation texOp = (TextureOperation)node.Value;
+ 
+@@ -66,7 +68,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 stage.SupportsRenderScale &&
+                 TypeSupportsScale(texOp.Type))
+             {
+-                int functionId = hfm.GetOrCreateFunctionId(HelperFunctionName.TexelFetchScale);
++                int functionId = hfm.GetOrCreateFunctionId(exactSizeTable ? HelperFunctionName.TexelFetchScaleExact : HelperFunctionName.TexelFetchScale);
+                 int samplerIndex = isImage
+                     ? resourceManager.GetTextureDescriptors(includeArrays: false).Length + resourceManager.FindImageDescriptorIndex(new(texOp.Set, texOp.Binding))
+                     : resourceManager.FindTextureDescriptorIndex(new(texOp.Set, texOp.Binding));
+@@ -74,14 +76,26 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 int coordsCount = texOp.Type.Dimensions;
+                 int coordsIndex = isBindless ? 1 : 0;
+ 
++                int lodIndex = coordsIndex + coordsCount
++                    + ((texOp.Type & SamplerType.Array) != 0 ? 1 : 0)
++                    + ((texOp.Type & SamplerType.Shadow) != 0 ? 1 : 0)
++                    + ((texOp.Flags & TextureFlags.Derivatives) != 0 ? coordsCount * 2 : 0);
++                // A multisample operand is a sample index, never a mip level.
++                Operand lod = exactSizeTable && !isImage && (texOp.Type & SamplerType.Multisample) == 0 && (texOp.Flags & TextureFlags.LodLevel) != 0
++                    ? texOp.GetSource(lodIndex) : Const(0);
++
+                 for (int index = 0; index < coordsCount; index++)
+                 {
+-                    int componentFunctionId = index == 1 && stage == ShaderStage.Fragment
++                    int componentFunctionId = !exactSizeTable && index == 1 && stage == ShaderStage.Fragment
+                         ? hfm.GetOrCreateFunctionId(HelperFunctionName.TexelFetchScaleY) : functionId;
+                     Operand scaledCoord = Local();
+                     Operand[] callArgs;
+ 
+-                    if (stage == ShaderStage.Fragment)
++                    if (exactSizeTable)
++                    {
++                        callArgs = [Const(functionId), texOp.GetSource(coordsIndex + index), Const(samplerIndex), Const(index), lod, Const(SupportBuffer.TextureSizeTableAbi)];
++                    }
++                    else if (stage == ShaderStage.Fragment)
+                     {
+                         callArgs = [Const(componentFunctionId), texOp.GetSource(coordsIndex + index), Const(samplerIndex), Const(index)
+                         ];
+@@ -104,7 +118,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             HelperFunctionManager hfm,
+             LinkedListNode<INode> node,
+             ResourceManager resourceManager,
+-            ShaderStage stage)
++            ShaderStage stage,
++            bool exactSizeTable = false)
+         {
+             TextureOperation texOp = (TextureOperation)node.Value;
+ 
+@@ -118,11 +133,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 stage.SupportsRenderScale &&
+                 TypeSupportsScale(texOp.Type))
+             {
+-                int functionId = hfm.GetOrCreateFunctionId(HelperFunctionName.TextureSizeUnscale);
++                int functionId = hfm.GetOrCreateFunctionId(exactSizeTable ? HelperFunctionName.TextureSizeExact : HelperFunctionName.TextureSizeUnscale);
+                 int samplerIndex = resourceManager.FindTextureDescriptorIndex(new(texOp.Set, texOp.Binding));
+ 
+                 for (int index = texOp.DestsCount - 1; index >= 0; index--)
+                 {
++                    // Queries may return width/height together with array layers,
++                    // depth, or the number of mip levels. Only W/H use this ABI.
++                    if (exactSizeTable && texOp.Index + index >= 2)
++                    {
++                        continue;
++                    }
++
+                     Operand dest = texOp.GetDest(index);
+ 
+                     Operand unscaledSize = Local();
+@@ -140,9 +162,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                         }
+                     }
+ 
+-                    int componentFunctionId = index == 1 && stage == ShaderStage.Fragment
++                    int componentFunctionId = !exactSizeTable && index == 1 && stage == ShaderStage.Fragment
+                         ? hfm.GetOrCreateFunctionId(HelperFunctionName.TextureSizeUnscaleY) : functionId;
+-                    Operand[] callArgs = [Const(componentFunctionId), dest, Const(samplerIndex)];
++                    Operand lod = exactSizeTable && (texOp.Type & SamplerType.Multisample) == 0 ? texOp.GetSource(0) : Const(0);
++                    Operand[] callArgs = exactSizeTable
++                        ? [Const(functionId), dest, Const(samplerIndex), Const(texOp.Index + index), lod]
++                        : [Const(componentFunctionId), dest, Const(samplerIndex)];
+ 
+                     node.List.AddAfter(node, new Operation(Instruction.Call, 0, unscaledSize, callArgs));
+                 }
+@@ -177,7 +202,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+             if (gpuAccessor.QueryS2ARuntimeState() && !intCoords && SupportBuffer.S2ATexUnnormBit(texOp.Binding) >= 0)
+             {
+-                return S2AInsertCoordNormalizationRuntime(hfm, node, resourceManager, stage, texOp);
++                return S2AInsertCoordNormalizationRuntime(hfm, node, resourceManager, stage, texOp, gpuAccessor.QueryHostSupportsTextureSizeTable());
+             }
+ 
+             // S2A：整数坐标（texelFetch 一类）不做归一化换算，不用查——原版先查后返回，查询白白进特化状态，核对时按这张贴图的归一化位判不符重翻
+@@ -225,7 +250,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+                 texOp.SetSource(index, coordNormalized);
+ 
+-                InsertTextureSizeUnscale(hfm, textureSizeNode, resourceManager, stage);
++                InsertTextureSizeUnscale(hfm, textureSizeNode, resourceManager, stage, gpuAccessor.QueryHostSupportsTextureSizeTable());
+             }
+ 
+             return node;
+@@ -233,7 +258,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+         // S2A：坐标是否归一化运行时化——支持缓冲 s2a_flags.yzw 按贴图绑定号一位（Gpu 层逐次绑定按贴图描述符填，置位 = 非归一化坐标），
+         // 除数 = 置位 ? 贴图尺寸 : 1。不查询 QueryTextureCoordNormalized（不进特化状态、匹配不比），一份客体代码一个程序
+-        private static LinkedListNode<INode> S2AInsertCoordNormalizationRuntime(HelperFunctionManager hfm, LinkedListNode<INode> node, ResourceManager resourceManager, ShaderStage stage, TextureOperation texOp)
++        private static LinkedListNode<INode> S2AInsertCoordNormalizationRuntime(HelperFunctionManager hfm, LinkedListNode<INode> node, ResourceManager resourceManager, ShaderStage stage, TextureOperation texOp, bool exactSizeTable)
+         {
+             int pos = SupportBuffer.S2ATexUnnormBit(texOp.Binding);
+             Operand lane = Local(), shifted = Local(), bit = Local(), on = Local();
+@@ -257,7 +282,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 node.List.AddBefore(node, new Operation(Instruction.FP32 | Instruction.Divide, coordNormalized, texOp.GetSource(index), divisor));
+                 texOp.SetSource(index, coordNormalized);
+ 
+-                InsertTextureSizeUnscale(hfm, textureSizeNode, resourceManager, stage);
++                InsertTextureSizeUnscale(hfm, textureSizeNode, resourceManager, stage, exactSizeTable);
+             }
+ 
+             return node;

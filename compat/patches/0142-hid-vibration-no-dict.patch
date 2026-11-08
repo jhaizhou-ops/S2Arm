@@ -1,0 +1,53 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index 21a4222a2d89d6aeca23cc695e4f9b64a5e62714..c5f8e9785f6dda896d89827f42c096a400225b16 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -624,7 +624,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+ 
+         public void UpdateRumbleQueue(PlayerIndex index, Dictionary<byte, VibrationValue> dualVibrationValues)
+         {
+-            if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
++            if (RumbleQueues.ContainsKey(index))
+             {
+                 if (!dualVibrationValues.TryGetValue(0, out VibrationValue leftVibrationValue))
+                 {
+@@ -636,6 +636,21 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+                     rightVibrationValue = _neutralVibrationValue;
+                 }
+ 
++                UpdateRumbleQueue(index, leftVibrationValue, rightVibrationValue);
++            }
++        }
++
++        // S2Arm: one vibration value at one position (IHidServer.SendVibrationValue), without the per-call dictionary
++        // (10-21 d2r: ~70 calls per second, 232 B each, half of the game threads' remaining service allocations)
++        public void UpdateRumbleQueue(PlayerIndex index, byte position, VibrationValue vibrationValue)
++        {
++            UpdateRumbleQueue(index, position == 0 ? vibrationValue : _neutralVibrationValue, position == 1 ? vibrationValue : _neutralVibrationValue);
++        }
++
++        private void UpdateRumbleQueue(PlayerIndex index, VibrationValue leftVibrationValue, VibrationValue rightVibrationValue)
++        {
++            if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
++            {
+                 if (!LastVibrationValues.TryGetValue(index, out (VibrationValue, VibrationValue) dualVibrationValue) || !leftVibrationValue.Equals(dualVibrationValue.Item1) || !rightVibrationValue.Equals(dualVibrationValue.Item2))
+                 {
+                     currentQueue.Enqueue((leftVibrationValue, rightVibrationValue));
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 08e2a2d68321f0fa75256f41a06eb4a8d60560eb..e435febab7bece7de81edd8b2e23664444350362 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -1249,12 +1249,7 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ #pragma warning restore IDE0059
+ 
+-            Dictionary<byte, VibrationValue> dualVibrationValues = new()
+-            {
+-                [deviceHandle.Position] = vibrationValue,
+-            };
+-
+-            context.Device.Hid.Npads.UpdateRumbleQueue((PlayerIndex)deviceHandle.PlayerId, dualVibrationValues);
++            context.Device.Hid.Npads.UpdateRumbleQueue((PlayerIndex)deviceHandle.PlayerId, deviceHandle.Position, vibrationValue);   // S2Arm: no per-call dictionary
+ 
+             return ResultCode.Success;
+         }

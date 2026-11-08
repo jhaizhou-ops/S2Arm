@@ -1,0 +1,422 @@
+diff --git a/src/Ryujinx.Common/AsyncWorkQueue.cs b/src/Ryujinx.Common/AsyncWorkQueue.cs
+index f7577ab2ef65a4991552875fe308a4f66c080df1..835ec5135513af8e0af15c892de12376b00aa38f 100644
+--- a/src/Ryujinx.Common/AsyncWorkQueue.cs
++++ b/src/Ryujinx.Common/AsyncWorkQueue.cs
+@@ -90,6 +90,17 @@ namespace Ryujinx.Common
+             return _queue.TryAdd(workItem, timeout);
+         }
+ 
++        // Stop accepting work, finish every queued item, and retain the queue
++        // on timeout so its still-running worker never sees disposed state.
++        public void CompleteAndDrain(int timeoutMilliseconds)
++        {
++            _queue.CompleteAdding();
++            if (!_workerThread.Join(timeoutMilliseconds))
++                throw new TimeoutException($"后台队列 {_workerThread.Name} 未排空；仍持有会话资源");
++            _queue.Dispose();
++            _cts.Dispose();
++        }
++
+         public void Dispose()
+         {
+             _queue.CompleteAdding();
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index 45c2f84e7663b65a73a20751269764b52dbd196c..da728a07b7c409f229f7db29643aab352f41db59 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -1638,6 +1638,30 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+         }
+ 
++        // Only after the GPU producer joined. Run outstanding compiler work on
++        // the encoder, so pending cache saves can finish before their owners die.
++        public unsafe void S2AAdvanceProgramsForShutdown(int timeoutMilliseconds)
++        {
++            long end = Environment.TickCount64 + timeoutMilliseconds;
++            S2ADrainForShutdown(timeoutMilliseconds);
++            New<ActionCommand>()->Set(Ref<Action>(Programs.ProcessQueue));
++            QueueCommand();
++            S2ADrainForShutdown((int)Math.Max(0, end - Environment.TickCount64));
++        }
++
++        /// <summary>Drain queued destruction while the encoder still owns all resources.</summary>
++        public void S2ADrainForShutdown(int timeoutMilliseconds)
++        {
++            long end = Environment.TickCount64 + timeoutMilliseconds;
++            SpinWait wait = new();
++            while (Volatile.Read(ref _commandCount) != 0)
++            {
++                if (!Volatile.Read(ref _running)) throw new InvalidOperationException("编码线程已停，仍有资源释放命令未执行");
++                if (Environment.TickCount64 >= end) throw new TimeoutException("图形资源释放命令未排空；旧渲染器不能释放");
++                wait.SpinOnce();
++            }
++        }
++
+         public void Dispose()
+         {
+             GC.SuppressFinalize(this);
+@@ -1682,6 +1706,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             _galWorkAvailable.Dispose();
+             _invokeRun.Dispose();
+             _interruptRun.Dispose();
++            _s2aGpuDone?.Dispose();
++            _s2aBackendDone?.Dispose();
+ 
+             Sync.Dispose();
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index 459a2aa5a8c202372a01a6d6bbe86cc952a37b13..59ea7b2cc9a11da180f1743e3528a873f2dcb417 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -369,6 +369,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         /// <summary>
+         /// Disposes of resources used for GPFifo command processing.
+         /// </summary>
+-        public void Dispose() => _event.Dispose();
++        public void Dispose()
++        {
++            while (_commandBufferQueue.TryDequeue(out CommandBuffer commandBuffer))
++                if (commandBuffer.PooledWords) ArrayPool<int>.Shared.Return(commandBuffer.Words);
++            _prevChannelProcessor = null;
++            _event.Dispose();
++        }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 407b004f96d0bd57c5692b628acba192d417f5b1..2ffe1937fe5c0ff41a7ee55926129d55bfcdf339 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -31,6 +31,8 @@ namespace Ryujinx.Graphics.Gpu
+         /// Host renderer.
+         /// </summary>
+         public IRenderer Renderer { get; }
++        /// <summary>Host drains queued destruction and joins its encoder before renderer disposal.</summary>
++        public Action S2ABeforeRendererDispose { get; set; }
+ 
+         /// <summary>
+         /// 平台可选的正常上下文读取：只向租出的目标复制 guest 字节，不回写、不解除源页保护。
+@@ -636,6 +638,10 @@ namespace Ryujinx.Graphics.Gpu
+         public void Dispose()
+         {
+             _s2aSyncpt.CompleteAdding();
++            if (_s2aSyncptThread != null && !_s2aSyncptThread.Join(3000))
++                throw new TimeoutException("GPU 同步点线程未停止；不能释放旧会话");
++            _s2aSyncpt.Dispose();
++            ShaderCache.S2AResetSession();
+             GPFifo.Dispose();
+             HostInitalized.Dispose();
+             _gpuReadyEvent.Dispose();
+@@ -653,7 +659,15 @@ namespace Ryujinx.Graphics.Gpu
+ 
+             RunDeferredActions();
+ 
++            S2ABeforeRendererDispose?.Invoke();
++            S2ABeforeRendererDispose = null;
+             Renderer.Dispose();
++            Shader.S2ASeen.Close();
++            Shader.DiskCache.S2AShaderCacheGuard.ResetSession();
++            MemoryManager.S2AResetSession();
++            S2AGameSync.ResetSession();
++            SyncActions.Clear(); SyncpointActions.Clear();
++            ShaderCacheStateChanged = null;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index 19edb80d71fe025ce0a7bd29cfe12ef951ebdb83..e75de846158543227a2b7400fd71803ed86ed874 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -331,6 +331,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+         // 同一页只登记一次（原生层也会去重，这里省掉每次信号量写的跨语言调用与加锁）
+         private static ulong _s2aLastMarkedPage = ulong.MaxValue;
++        internal static void S2AResetSession() => _s2aLastMarkedPage = ulong.MaxValue;
+ 
+         internal static void S2AMarkReadFlush(ulong address, ulong size)
+         {
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 0240a6e8ee5f13531e44b632688b0d195440d5ec..75ba9116e0e4bfa0be72d65a6f48fef8062b6ec9 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -11,6 +11,7 @@
+     <InternalsVisibleTo Include="S2A.SpecTest" />
+     <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+     <InternalsVisibleTo Include="S2A.SeenTest" /> <!-- S2A：双轨覆盖率 seen 记录单测（graphics/tools/direct/tests/seen） -->
++    <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs b/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs
+index 9bc0c08697a58b323ba66dedc9ae6b2267ceb8ac..75ba698e496aa978fb742bc09fd32c5603a15123 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs
+@@ -57,6 +57,26 @@ namespace Ryujinx.Graphics.Gpu
+         private static ulong[] _rA = new ulong[64], _rS = new ulong[64], _rN = new ulong[64];
+         private static int _rn;
+ 
++        // All guest/service callbacks and GPU workers must have stopped before this reset.
++        // Retiring a session drops its addresses and handles without reprotecting freed guest memory.
++        internal static void ResetSession()
++        {
++            lock (_lock)
++            {
++                Array.Clear(_val);
++                Array.Clear(_sync);
++                Array.Clear(_n);
++                Interlocked.Exchange(ref _g, 0);
++                Array.Clear(_pend);
++                Array.Clear(_pendSync);
++                _pendN = 0;
++                Array.Clear(_rA);
++                Array.Clear(_rS);
++                Array.Clear(_rN);
++                _rn = 0;
++            }
++        }
++
+         internal static unsafe void ServeRange(ulong addr, ulong size, ulong needed)
+         {
+             if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect != null)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
+index 8b6c412db3f24a5b43406783033bb1a474b38e5a..6b7b52b665bac0f8a4ef86cfc275a59417ea117b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using System;
+ using System.IO;
++using System.Threading;
+ 
+ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ {
+@@ -73,6 +74,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private readonly GpuContext _context;
+         private readonly DiskCacheHostStorage _hostStorage;
+         private readonly AsyncWorkQueue<CacheFileOperationTask> _fileWriterWorkerQueue;
++        private Exception _writeFailure;
+ 
+         /// <summary>
+         /// Creates a new background disk cache writer.
+@@ -103,10 +105,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     }
+                     catch (DiskCacheLoadException diskCacheLoadException)
+                     {
++                        Interlocked.CompareExchange(ref _writeFailure, diskCacheLoadException, null);
+                         Logger.Error?.Print(LogClass.Gpu, $"Error writing shader to disk cache. {diskCacheLoadException.Message}");
+                     }
+                     catch (IOException ioException)
+                     {
++                        Interlocked.CompareExchange(ref _writeFailure, ioException, null);
+                         Logger.Error?.Print(LogClass.Gpu, $"Error writing shader to disk cache. {ioException.Message}");
+                     }
+ 
+@@ -133,7 +137,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         {
+             if (disposing)
+             {
+-                _fileWriterWorkerQueue.Dispose();
++                _fileWriterWorkerQueue.CompleteAndDrain(10000);
++                if (_writeFailure != null)
++                    throw new IOException("着色器缓存写盘失败；会话退休未完成", _writeFailure);
+             }
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 2cc564c8c7f47f2926c6bdd877632d87c952f430..8db4bc271a8fbd1187821bc1bdf64c06899308a5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -36,6 +36,32 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private readonly string _basePath;
+         private static bool _s2aHostPathLogged;
+         private static int _s2aHostWrites;
++        private System.Threading.Thread _s2aWarmThread;
++        private volatile bool _s2aWarmStop;
++
++        internal void S2AStopWarm()
++        {
++            _s2aWarmStop = true;
++            if (_s2aWarmThread != null && !_s2aWarmThread.Join(3000))
++                throw new TimeoutException("着色器预热线程未停止；仍持有旧渲染器");
++            _s2aWarmThread = null;
++            lock (_lazyLock) _s2aPre.Clear();
++        }
++
++        // After warm and writer threads have joined and shader programs were
++        // disposed, no lazy materialization can read these session handles.
++        internal void S2ACloseSession()
++        {
++            lock (_lazyLock)
++            {
++                _lazySharedData?.Dispose(); _lazySharedData = null;
++                _lazyHostToc?.Dispose(); _lazyHostToc = null;
++                _lazyHostData?.Dispose(); _lazyHostData = null;
++                _s2aGuest = null;
++                _s2aPre.Clear();
++            }
++            lock (_s2aPendingLink) _s2aPendingLink.Clear();
++        }
+ 
+         public bool CacheEnabled => !string.IsNullOrEmpty(_basePath);
+ 
+@@ -567,17 +593,16 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private void S2AWarmStart(GpuContext context, S2ALazyProgram[] list)
+         {
+             IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
+-
+             if (renderer is IHostProgramCachePolicy { DisableHostProgramPrefetch: true })
+             {
+                 // S1: this backend loads versioned program records on demand through its single
+                 // compile lane. The old "load, wait, dispose" prefetch would create and drop
+-                // host programs that no draw can reuse and is not joined by the renderer's stop
+-                // order. Backends without the policy (Apple NxGal) keep the prefetch unchanged.
++                // host programs that no draw can reuse. Backends without the policy (Apple
++                // NxGal) keep the prefetch, joined before the renderer is retired.
+                 S2AShaderCacheGuard.Report(0, "宿主程序预读关闭（S1：按需加载，不后台载入/释放）");
+                 return;
+             }
+-            System.Threading.Thread th = new(() =>
++            _s2aWarmThread = new(() =>
+             {
+                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                 // 本线程托管分配（含解压临时缓冲）：预读挂在程序上的常驻量的上界
+@@ -586,6 +611,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 long bytes = 0;
+                 foreach (S2ALazyProgram lazy in list)
+                 {
++                    if (_s2aWarmStop) break;
+                     if (lazy == null) { none++; continue; }
+                     byte[] hostCode;
+                     CachedShaderStage[] shaders;
+@@ -618,7 +644,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 Console.Error.WriteLine($"[gal] 提前热程序：表 {list.Length} 个，预读缓存并载入宿主 {ok}、转计算只预读 {vtg}、失败 {fail}、缓存里没有 {none}、已先被实化 {late}，宿主二进制 {bytes >> 10} KB，本线程托管分配 {(GC.GetAllocatedBytesForCurrentThread() - a0) >> 10} KB，后台用时 {ms:0} ms");
+             })
+             { IsBackground = true, Name = "S2A.ShaderWarm", Priority = System.Threading.ThreadPriority.BelowNormal };
+-            th.Start();
++            _s2aWarmThread.Start();
+         }
+ 
+         // S2Arm: read-only handles kept for materializing lazily indexed programs (opened on first use, live for the session)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+index 923482d313a1825c69200eeb0f04c77352ed141a..34fe5f8a14af62321e3c59df921d3fee6fd0b089 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -38,6 +38,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// </summary>
+         public static string WarmList;
+ 
++        public static void ResetSession()
++        {
++            _discarded = 0;
++            PackPrograms = 0;
++            WarmList = null;
++        }
++
+         internal static void Report(int count, string reason)
+         {
+             System.Threading.Interlocked.Add(ref _discarded, count);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2ASeen.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2ASeen.cs
+index f04278a4f4810eebb77b94b04b8590b409d67b88..83963d4f24ca3b32de1609aac3bb0ae0441b641d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2ASeen.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2ASeen.cs
+@@ -21,6 +21,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         private static StreamWriter _out;
+         private static int _keys, _misses;
+ 
++        public static void Close()
++        {
++            lock (_lock)
++            {
++                _out?.Dispose(); _out = null;
++                _map = null; _codes = null; _written = null;
++                _keys = 0; _misses = 0;
++            }
++        }
++
+         /// <summary>开始记：table = guest_key.tsv，seenPath = Documents/wire/&lt;程序号&gt;/seen_shaders.tsv（已有行读进来去重）。返回错误说明，成功返回 null</summary>
+         public static string Open(string table, string seenPath)
+         {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs
+index aa15c8925d773ce54fc1e94edf50c2813c21e0ab..c91ce2313f581997a51cd1f4a5e0b84d233b7b34 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs
+@@ -124,7 +124,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+     ///
+     /// 报红去重仍由两个调用方各自的集合（上限 64 组）负责，与此处无关。
+     /// </summary>
+-    internal sealed class S2AShaderFaultCache
++    internal sealed class S2AShaderFaultCache : IDisposable
+     {
+         /// <summary>负缓存条目上限（报红仍限 64 组）。</summary>
+         public const int Capacity = 4096;
+@@ -144,6 +144,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         private readonly object _lock = new();
+         private long _seq;
+ 
++        public void Dispose()
++        {
++            lock (_lock)
++            {
++                foreach (Entry entry in _compute.Values) DisposeAll(entry);
++                foreach (Entry entry in _graphics.Values) DisposeAll(entry);
++                _compute.Clear(); _graphics.Clear();
++            }
++        }
++
+         /// <summary>计算着色器：命中（仍然有效）返回要抛的消息，否则 null。</summary>
+         public string Check(ulong gpuVa, IS2AFaultHost host)
+         {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index b9168aca60f919db101fba5b0a1177e469aa0a89..eab71e734bed8cde923d6a5304d8804362aa92aa 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -1052,6 +1052,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         private static readonly Dictionary<(CachedShaderStage, ulong, MemoryManager), S2ACodeCheck> _s2aCodeChecks = new();
+ 
++        internal static void S2AResetSession()
++        {
++            lock (_s2aCodeChecks)
++            {
++                foreach (S2ACodeCheck check in _s2aCodeChecks.Values) check.Handle.Dispose();
++                _s2aCodeChecks.Clear();
++            }
++            lock (_s2aMissCounts) _s2aMissCounts.Clear();
++        }
++
+         /// <summary>
+         /// Decode the binary Maxwell shader code to a translator context.
+         /// </summary>
+@@ -1222,6 +1232,24 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public void Dispose()
+         {
++            _diskCacheHostStorage?.S2AStopWarm();
++            // The stopped GPU producer can leave ready/compiling programs in
++            // its save queue. Let the live encoder finish them before closing
++            // the writer; no new producer may enter during this stage.
++            long saveDeadline = Environment.TickCount64 + 10000;
++            while (_programsToSaveQueue.Count != 0)
++            {
++                int remaining = (int)Math.Max(0, saveDeadline - Environment.TickCount64);
++                if (remaining == 0) throw new TimeoutException("待保存的着色器编译未完成；保留程序和缓存句柄");
++                if (_context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer threaded)
++                    threaded.S2AAdvanceProgramsForShutdown(remaining);
++                ProcessShaderCacheQueue();
++                if (_programsToSaveQueue.Count != 0) System.Threading.Thread.Sleep(1);
++            }
++            // Writer tasks still inspect CachedShaderProgram and guest code.
++            // Finish them before disposing either program or lazy file owners.
++            _cacheWriter?.Dispose();
++            _s2aFaults.Dispose();
+             foreach (CachedShaderProgram program in _graphicsShaderCache.GetPrograms())
+             {
+                 program.Dispose();
+@@ -1232,7 +1260,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 program.Dispose();
+             }
+ 
+-            _cacheWriter?.Dispose();
++            _diskCacheHostStorage?.S2ACloseSession();
+         }
+     }
+ }

@@ -1,0 +1,169 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index d8e7ed585791d4a2f1eb394609920d8c1347f717..b8a67644f68e8b20dbcd1653717c3713b12ae8b2 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -368,6 +368,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             while (true)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("声音诊断"); // S2Arm: per-thread allocation accounting
+                 Thread.Sleep(10_000);
+ 
+                 long skipped = Interlocked.Exchange(ref AudioProcessor.S2ASkippedPeriods, 0);
+diff --git a/src/Ryujinx.Common/Logging/Targets/AsyncLogTargetWrapper.cs b/src/Ryujinx.Common/Logging/Targets/AsyncLogTargetWrapper.cs
+index 63cc63fec5eb0c3854af78b97514118f22d3fdc2..c00096dd645907162d49245cdf3354b4e1202192 100644
+--- a/src/Ryujinx.Common/Logging/Targets/AsyncLogTargetWrapper.cs
++++ b/src/Ryujinx.Common/Logging/Targets/AsyncLogTargetWrapper.cs
+@@ -50,6 +50,8 @@ namespace Ryujinx.Common.Logging.Targets
+             {
+                 while (!_messageQueue.IsCompleted)
+                 {
++                    S2AThreadAlloc.Tick("日志"); // S2Arm: per-thread allocation accounting
++
+                     try
+                     {
+                         LogEventArgs item = _messageQueue.Take();
+diff --git a/src/Ryujinx.Common/PreciseSleep/NanosleepPool.cs b/src/Ryujinx.Common/PreciseSleep/NanosleepPool.cs
+index 3569dd968b85d1bdd8ebd8bf66babbb096d1c009..33e655b41e04b9e3ae8212fe7669577bbf15f5b7 100644
+--- a/src/Ryujinx.Common/PreciseSleep/NanosleepPool.cs
++++ b/src/Ryujinx.Common/PreciseSleep/NanosleepPool.cs
+@@ -70,6 +70,7 @@ namespace Ryujinx.Common.PreciseSleep
+ 
+                 while (_running)
+                 {
++                    S2AThreadAlloc.Tick("精确睡眠池"); // S2Arm: per-thread allocation accounting
+                     Nanosleep.Sleep(_nanoseconds);
+ 
+                     _parent.Signal(this);
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index c1a59bfce3c0e331bf9b6861a34aa4741e27a975..292090b5ec3809a4d968c42e228ac9a776552fbe 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -239,6 +239,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+             while (_running)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("渲染·编码"); // S2Arm: per-thread allocation accounting (Metal encoding thread, S2A.GPU)
+                 _galWorkAvailable.Wait();
+                 _galWorkAvailable.Reset();
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs b/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
+index c24648c65e449beeca39a5833de62d2b5109879e..294ffc168ad6bd1d9c22f17fde3696e650709b86 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
+@@ -92,6 +92,8 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+             {
+                 while (_keepRunning)
+                 {
++                    Ryujinx.Common.S2AThreadAlloc.Tick("内核计时"); // S2Arm: per-thread allocation accounting (HLE.TimeManager)
++
+                     lock (_context.CriticalSection.Lock)
+                     {
+                         Interlocked.Exchange(ref _enforceWakeupFromSpinWait, 0);
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+index 3336c5d64ef096eeb03e24bc7d44aea80bb1f656..e83673e8d436417bcbee4eb288d94470f3528a8a 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Threading/KScheduler.cs
+@@ -443,6 +443,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
+         {
+             while (context.Running)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick("内核抢占"); // S2Arm: per-thread allocation accounting (HLE.PreemptionThread)
+                 context.CriticalSection.Enter();
+ 
+                 for (int core = 0; core < CpuCoresCount; core++)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+index c5f8e9785f6dda896d89827f42c096a400225b16..0b0a46913dec161e105886ffa6f38644731a4327 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/NpadDevices.cs
+@@ -647,6 +647,16 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             UpdateRumbleQueue(index, position == 0 ? vibrationValue : _neutralVibrationValue, position == 1 ? vibrationValue : _neutralVibrationValue);
+         }
+ 
++        // S2Arm: a left / right pair where a missing side is neutral (IHidServer.SendVibrationValues groups, without the per-group
++        // dictionary; same result as the dictionary overload above)
++        public void UpdateRumbleQueue(PlayerIndex index, bool hasLeft, VibrationValue left, bool hasRight, VibrationValue right)
++        {
++            if (RumbleQueues.ContainsKey(index))
++            {
++                UpdateRumbleQueue(index, hasLeft ? left : _neutralVibrationValue, hasRight ? right : _neutralVibrationValue);
++            }
++        }
++
+         private void UpdateRumbleQueue(PlayerIndex index, VibrationValue leftVibrationValue, VibrationValue rightVibrationValue)
+         {
+             if (RumbleQueues.TryGetValue(index, out ConcurrentQueue<(VibrationValue, VibrationValue)> currentQueue))
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index e435febab7bece7de81edd8b2e23664444350362..2064c18a9dfd1a94fdaa138a0fae398ddcbedbbb 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -1317,38 +1317,59 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ #pragma warning restore IDE0059
+ 
+-            byte[] vibrationDeviceHandleBuffer = new byte[context.Request.PtrBuff[0].Size];
++            // S2Arm: zero allocation (10-22 mhrise: ~170 calls per second, 320 B each = the game threads' largest steady allocation):
++            // the two small arrays are read onto the stack, and each group (same player, at most two positions) is kept in locals
++            // instead of a dictionary per group. Same grouping and the same values reach the rumble queue as before.
++            ulong handleSize = context.Request.PtrBuff[0].Size, valueSize = context.Request.PtrBuff[1].Size;
++            Span<byte> vibrationDeviceHandleBuffer = handleSize <= 512 ? stackalloc byte[(int)handleSize] : new byte[handleSize];
+ 
+             context.Memory.Read(context.Request.PtrBuff[0].Position, vibrationDeviceHandleBuffer);
+ 
+-            byte[] vibrationValueBuffer = new byte[context.Request.PtrBuff[1].Size];
++            Span<byte> vibrationValueBuffer = valueSize <= 2048 ? stackalloc byte[(int)valueSize] : new byte[valueSize];
+ 
+             context.Memory.Read(context.Request.PtrBuff[1].Position, vibrationValueBuffer);
+ 
+-            Span<VibrationDeviceHandle> deviceHandles = MemoryMarshal.Cast<byte, VibrationDeviceHandle>(new Span<byte>(vibrationDeviceHandleBuffer));
+-            Span<VibrationValue> vibrationValues = MemoryMarshal.Cast<byte, VibrationValue>(new Span<byte>(vibrationValueBuffer));
++            Span<VibrationDeviceHandle> deviceHandles = MemoryMarshal.Cast<byte, VibrationDeviceHandle>(vibrationDeviceHandleBuffer);
++            Span<VibrationValue> vibrationValues = MemoryMarshal.Cast<byte, VibrationValue>(vibrationValueBuffer);
+ 
+             if (!deviceHandles.IsEmpty && vibrationValues.Length == deviceHandles.Length)
+             {
+-                Dictionary<byte, VibrationValue> dualVibrationValues = new();
+                 PlayerIndex currentIndex = (PlayerIndex)deviceHandles[0].PlayerId;
++                // The group's distinct positions: a dictionary keyed by position counted distinct keys and kept the last value per key
++                bool has0 = false, has1 = false, hasOther = false;
++                VibrationValue v0 = default, v1 = default;
+ 
+                 for (int deviceCounter = 0; deviceCounter < deviceHandles.Length; deviceCounter++)
+                 {
+                     PlayerIndex index = (PlayerIndex)deviceHandles[deviceCounter].PlayerId;
+                     byte position = deviceHandles[deviceCounter].Position;
++                    int count = (has0 ? 1 : 0) + (has1 ? 1 : 0) + (hasOther ? 1 : 0);
+ 
+-                    if (index != currentIndex || dualVibrationValues.Count == 2)
++                    if (index != currentIndex || count == 2)
+                     {
+-                        context.Device.Hid.Npads.UpdateRumbleQueue(currentIndex, dualVibrationValues);
+-                        dualVibrationValues = new Dictionary<byte, VibrationValue>();
++                        context.Device.Hid.Npads.UpdateRumbleQueue(currentIndex, has0, v0, has1, v1);
++                        has0 = has1 = hasOther = false;
++                    }
++
++                    if (position == 0)
++                    {
++                        has0 = true;
++                        v0 = vibrationValues[deviceCounter];
++                    }
++                    else if (position == 1)
++                    {
++                        has1 = true;
++                        v1 = vibrationValues[deviceCounter];
++                    }
++                    else
++                    {
++                        hasOther = true;
+                     }
+ 
+-                    dualVibrationValues[position] = vibrationValues[deviceCounter];
+                     currentIndex = index;
+                 }
+ 
+-                context.Device.Hid.Npads.UpdateRumbleQueue(currentIndex, dualVibrationValues);
++                context.Device.Hid.Npads.UpdateRumbleQueue(currentIndex, has0, v0, has1, v1);
+             }
+ 
+             return ResultCode.Success;

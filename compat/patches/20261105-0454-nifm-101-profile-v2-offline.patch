@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+index 73fab2da0db70180d63c8eb03fa04285e5d4715f..fee509a756d68ba104bfd886b8ccc3a9d7b36ab8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+@@ -101,6 +101,23 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(101)]
++        // GetCurrentNetworkProfile (Switch 2 SDK, nn::nifm::GetCurrentNetworkProfile(NetworkProfileDataV2*)) -> buffer<nn::nifm::detail::sf::NetworkProfileDataV2, 0x1a, 0x1b4>
++        // S2Arm: wire format from the Zelda OoT (Switch 2) sdk proxy (C buffer fixed 0x1b4, no in-data, no pid). Without internet access the console has no
++        //   current network: same reply as command 5 (NoInternetConnection; SDK GetCurrentProxySetting passes it up, the game skips the proxy).
++        //   With internet access the V2 layout (0x1b4 vs V1 0x17c) is not known: reported red, never a made-up profile.
++        public ResultCode GetCurrentNetworkProfileV2(ServiceCtx context)
++        {
++            (IPInterfaceProperties interfaceProperties, UnicastIPAddressInformation unicastAddress) = GetLocalInterface(context);
++
++            if (interfaceProperties == null || unicastAddress == null)
++            {
++                return ResultCode.NoInternetConnection;
++            }
++
++            throw new NotImplementedException("IGeneralService 命令 101 GetCurrentNetworkProfile（V2）：联网时 NetworkProfileDataV2（0x1b4 字节）的布局不知道");
++        }
++
+         [CommandCmif(12)]
+         // GetCurrentIpAddress() -> nn::nifm::IpV4Address
+         public ResultCode GetCurrentIpAddress(ServiceCtx context)

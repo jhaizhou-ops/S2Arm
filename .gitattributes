@@ -1,0 +1,32 @@
+# 换行一律 LF（11-06 总指挥派 Windows端到端线）：天眼手工 git clone 撞 core.autocrlf=true，翻译器源码被转 CRLF、指纹对不上锁，直连假红。
+#   .sh / .py / .cs 在 Windows 被转 CRLF 都会坏，所以整仓强制：文本文件检出一律 LF，不看克隆机的 core.autocrlf；二进制由 git 按内容判（含 NUL 即二进制）不转。
+#   下面 -text 的是入库时就是 CRLF / 混合换行的读数与原样文件：保持入库字节不动（renormalize 后 diff 为空），检出也不转。
+* text=auto eol=lf
+android/gradlew.bat -text
+tests/metal_prof/*.tsv -text
+tests/visual/resolution_unit/LoadFailureCheck.cs -text
+tests/probes/vtx32/读数_1019.txt -text
+docs/研究/Metal越界_iphone_读数_1019.txt -text
+docs/研究/免费账号_探针/读数_1019/*.log -text
+docs/研究/零分配与跨界_微基准/iphone_读数_1019.txt -text
+
+# 只往末尾追加的记录文件：两支各自在末尾追加时 git 合并两边都保留（10-22 总指挥：列车被 docs/坑记录.md 末尾追加冲突退回 5 次）
+docs/坑记录.md merge=union
+# 10-25 总指挥：docs/性能与开发测试经验.md 近 15 次改动 130 行增、3 行删，基本只追加；当天 nvn/fill-all、direct/lib-pack、gl/digimon-dev 都被它的末尾追加冲突退回
+docs/性能与开发测试经验.md merge=union
+# Ryujinx 补丁登记（10-28 总指挥梳理步 10）：series 与改动清单都只在末尾追加（compat/patch_new.sh），补丁名带生成时刻不会撞；
+#   两支并行各加一条时合并两边都留，不再冲突、不再要列车续号。顺序冲突（两支补丁改同一文件）由门禁 compat/verify.sh 整套重放核
+compat/patches/series merge=union
+compat/改动清单.md merge=union
+# 安卓实施进度 ChangeLog：只追加（文件头「维护规则」第 3 条），两支各追加一条时两边都留
+android/docs/CHANGELOG.md merge=union
+# 情报索引：各篇情报只在末尾追加一行（10-28 总指挥：#802–#833 九支 + 三支退回都撞在索引.md 末尾追加上）
+docs/研究/情报/索引.md merge=union
+# 共享位置登记表（10-30 列车线：行独立、顺序无关、键 = 路径）：两支各加一行直接并；同一路径两行内容不一致由 tools/shared_path_lint.py 报红
+tools/shared_paths.tsv merge=union
+# 直连逐函数金样（11-05 总指挥）：各支只往末尾追加用例，tess-mode-gl 三次、#1469 一次撞冲突被退回；两边都留。
+#   合坏（同一用例两个期望 / 坏行）由 tests/dsh_fn_golden_lint_test.sh（tools/golden_lint.py）拦，红行带行号按新增行归因
+graphics/tools/direct/tests/dsh_fn_golden.jsonl merge=union
+# 按款登记表（11-06 总指挥：两批普查收批都登记同一款，后合的整支冲突退回）：按行键合并，同键取日期新的、同日取正在合入的一支（后一批）。
+#   合并器 tools/reglist_merge.py，列车启动时登记 merge.s2a-reglist.driver；没登记合并器的克隆退回普通文本合并（照旧可能冲突）
+docs/名单_*/*.tsv merge=s2a-reglist

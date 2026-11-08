@@ -1,0 +1,69 @@
+diff --git a/src/Ryujinx.Common/Collections/TreeDictionary.cs b/src/Ryujinx.Common/Collections/TreeDictionary.cs
+index ef818167df04c9241ee20adfbf902e7981690d0c..b9e3175df31df8c4a79e06458269a90d1382d11e 100644
+--- a/src/Ryujinx.Common/Collections/TreeDictionary.cs
++++ b/src/Ryujinx.Common/Collections/TreeDictionary.cs
+@@ -59,9 +59,12 @@ namespace Ryujinx.Common.Collections
+         {
+             ArgumentNullException.ThrowIfNull(key);
+ 
+-            if (Delete(key) != null)
++            Node<TKey, TValue> removed = Delete(key);
++
++            if (removed != null)
+             {
+                 Count--;
++                Recycle(removed);
+             }
+         }
+ 
+@@ -258,6 +261,41 @@ namespace Ryujinx.Common.Collections
+         /// <param name="key">Key of the node to insert</param>
+         /// <param name="value">Value of the node to insert</param>
+         /// <returns>The inserted Node</returns>
++        // S2Arm: removed nodes are kept on a free list and reused by later inserts, so a steady add/remove pattern (nvhost-as
++        // address space map/unmap every frame) does not allocate. Nodes are never exposed outside the dictionary.
++        private Node<TKey, TValue> _free;
++
++        private Node<TKey, TValue> NewNode(TKey key, TValue value, Node<TKey, TValue> parent)
++        {
++            Node<TKey, TValue> node = _free;
++
++            if (node == null)
++            {
++                return new Node<TKey, TValue>(key, value, parent);
++            }
++
++            _free = node.Right;
++            node.Key = key;
++            node.Value = value;
++            node.Parent = parent;
++            node.Right = null;
++            node.Color = true;
++
++            return node;
++        }
++
++        private void Recycle(Node<TKey, TValue> node)
++        {
++            node.Key = default;
++            node.Value = default;
++            node.Parent = null;
++            node.Left = null;
++            node.Predecessor = null;
++            node.Successor = null;
++            node.Right = _free;
++            _free = node;
++        }
++
+         private Node<TKey, TValue> BSTInsert(TKey key, TValue value)
+         {
+             Node<TKey, TValue> parent = null;
+@@ -282,7 +320,7 @@ namespace Ryujinx.Common.Collections
+                 }
+             }
+ 
+-            Node<TKey, TValue> newNode = new(key, value, parent);
++            Node<TKey, TValue> newNode = NewNode(key, value, parent);
+             if (parent == null)
+             {
+                 Root = newNode;

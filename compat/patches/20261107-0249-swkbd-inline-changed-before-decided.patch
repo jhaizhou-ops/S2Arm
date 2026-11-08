@@ -1,0 +1,56 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index dbdf6966d0998c17bee388c76badd26792f4a4ee..71b4288f532ff342460460eee555ce3df899679d 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -586,12 +586,17 @@ namespace Ryujinx.HLE.HOS.Applets
+                                     return;
+                                 }
+ 
+-                                PushUpdatedState(text, text.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                                PushHostAnswer(text, ok);
+                             }
+                         }, TaskScheduler.Default);
+                     }
+                     break;
+                 case InlineKeyboardRequest.Finalize:
++                    if (_headless)
++                    {
++                        Logger.Info?.Print(LogClass.ServiceAm, $"Inline keyboard Finalize in state {_backgroundState}");
++                    }
++
+                     // S2Arm: the game closes the keyboard: the host's text input goes away with it
+                     DismissHostInput();
+                     // Destroy the frontend.
+@@ -608,6 +613,23 @@ namespace Ryujinx.HLE.HOS.Applets
+             }
+         }
+ 
++        // S2Arm: the host's answer to the inline keyboard arrives whole (system text input / unattended answer). A real keyboard reports
++        //   every edit as ChangedString before the decision, and a game may keep its text from those replies and take DecidedEnter only
++        //   as "done": GRID Autosport (iPhone, 11-07) left its name fields at the default / empty with DecidedEnter alone and filled them
++        //   once the final text was reported first. The V1 form is sent even when the game asked for V2 (UseChangedStringV2), as the
++        //   rest of this applet does (see PushChangedString). Called with _lock held
++        private void PushHostAnswer(string text, bool ok)
++        {
++            bool changed = ok && IsKeyboardActive();
++            if (changed)
++            {
++                PushChangedString(text, (uint)text.Length, _backgroundState);
++            }
++
++            Logger.Info?.Print(LogClass.ServiceAm, $"S2A 软键盘：交回游戏{(ok ? "确定" : "取消")}「{text}」（状态 {_backgroundState}，编码 {(_encoding == Encoding.UTF8 ? "UTF-8" : "UTF-16")}，先报改字 {(changed ? "是" : "否")}）");
++            PushUpdatedState(text, text.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++        }
++
+         // S2Arm: inline keyboard answered by the host's system text input (IAsyncTextInput). Called with _lock held (Calc)
+         private bool BeginInlineInput(IAsyncTextInput input, SoftwareKeyboardUIArgs args, int min, int max)
+         {
+@@ -627,7 +649,7 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                         _hostInput = null;
+                         string value = FitLength((ok ? text : null) ?? initial, min, max);
+-                        PushUpdatedState(value, value.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                        PushHostAnswer(value, ok);
+                     }
+                 }, TaskScheduler.Default);
+             });

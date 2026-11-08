@@ -1,0 +1,99 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index 42a0bd9af6c130a7416e41828a74fd1a766bca5d..eb9c123146fad4dd1789fcb80b00143a707fca3f 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -72,6 +72,12 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public IRenderer BaseRenderer => _baseRenderer;
+ 
++        /// <summary>S2A：起 GPU 线程的方式（名字, 线程体）。空 = Ryujinx 原样 new Thread。宿主设成「原生线程 + 调度档 USER_INTERACTIVE」：
++        /// .NET 起的线程 QoS 未指定、之后再设返回 EPERM（旧库 10-19 实测），iPhone 上会约一半时间落能效核。</summary>
++        public static Action<string, Action> S2AStartThread;
++
++        private ManualResetEventSlim _s2aGpuDone, _s2aBackendDone;
++
+         public bool PreferThreading => _baseRenderer.PreferThreading;
+ 
+         public ThreadedRenderer(IRenderer renderer)
+@@ -105,12 +111,48 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+             _backendThread = Thread.CurrentThread;
+ 
+-            _gpuThread = new Thread(gpuLoop)
++            if (S2AStartThread != null)
++            {
++                // S2A：线程体里取 Thread.CurrentThread（原生线程挂进运行时后同样有 Thread 对象，IsGpuThread 照用）
++                // 原生线程不一定能被 Thread.Join（NativeAOT 外部挂入的线程），Dispose 改等这两个事件
++                _s2aGpuDone = new ManualResetEventSlim(false);
++                _s2aBackendDone = new ManualResetEventSlim(false);
++                using ManualResetEventSlim started = new(false);
++                S2AStartThread("GPU.MainThread", () =>
++                {
++                    _gpuThread = Thread.CurrentThread;
++                    started.Set();
++                    try
++                    {
++                        gpuLoop();
++                    }
++                    finally
++                    {
++                        _s2aGpuDone.Set();
++                    }
++                });
++                started.Wait();
++
++                try
++                {
++                    RenderLoop();
++                }
++                finally
++                {
++                    _s2aBackendDone.Set();
++                }
++
++                return;
++            }
++            else
+             {
+-                Name = "GPU.MainThread",
+-            };
++                _gpuThread = new Thread(gpuLoop)
++                {
++                    Name = "GPU.MainThread",
++                };
+ 
+-            _gpuThread.Start();
++                _gpuThread.Start();
++            }
+ 
+             RenderLoop();
+         }
+@@ -534,14 +576,23 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             _running = false;
+             _galWorkAvailable.Set();
+ 
+-            if (_gpuThread is { IsAlive: true })
++            if (_s2aBackendDone != null)
+             {
+-                _gpuThread.Join();
++                // S2A：线程由 S2AStartThread 原生起，等线程体结束的事件而不是 Join
++                _s2aGpuDone.Wait();
++                _s2aBackendDone.Wait();
+             }
+-            
+-            if (_backendThread is { IsAlive: true })
++            else
+             {
+-                _backendThread.Join();
++                if (_gpuThread is { IsAlive: true })
++                {
++                    _gpuThread.Join();
++                }
++
++                if (_backendThread is { IsAlive: true })
++                {
++                    _backendThread.Join();
++                }
+             }
+ 
+             // Dispose the renderer.

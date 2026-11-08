@@ -1,0 +1,340 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index d569344e12bb8ac19e2808f2381a18f98bf35f16..92d9700a71a153378c67b31a4deb7ab15553c00b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -276,9 +276,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         public void DispatchCalls()
+         {
+             // Use this opportunity to also dispose any pending channels that were closed.
+-            long s2aT = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（段）
++            long s2aT = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0; // S2A：渲染线程分配拆账（段）
+             _context.RunDeferredActions();
+-            if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0003, t - s2aT); s2aT = t; }
++            if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_0003, t - s2aT); s2aT = t; }
+ 
+             // Process command buffers.
+             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
+@@ -297,7 +297,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+ 
+                 ReadOnlySpan<int> words = entry.Fetch(entry.Processor.MemoryManager, flushCommandBuffer);
+-                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0001, t - s2aT); s2aT = t; }
++                if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_0001, t - s2aT); s2aT = t; }
+ 
+                 // If we are changing the current channel,
+                 // we need to force all the host state to be updated.
+@@ -308,7 +308,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+ 
+                 entry.Processor.Process(entry.EntryAddress, words);
+-                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0002, t - s2aT); s2aT = t; }
++                if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_0002, t - s2aT); s2aT = t; }
+ 
+                 // S2Arm: the snapshot is not referenced after processing (the replay cache keeps operations, not words)
+                 if (entry.PooledWords)
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+index d676f33f3fafb19c66e084ec949c5ac665d5a97e..a410e0ab925091a17d62a7dcd7b6399d55f47d0a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+@@ -331,12 +331,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+             if (S2AAllocTrace.On) S2AAllocTrace.Raw(_s2aSegs.ContainsKey(key) ? 0x40_0005 : 0x40_0007, 1); // S2A：拆账诊断（覆盖已有键 / 新键）
+ 
+-            long s2aR0 = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（段）
++            long s2aR0 = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0; // S2A：渲染线程分配拆账（段）
+             CollectionsMarshal.AsSpan(_s2aRecBuf).CopyTo(_s2aArena.AsSpan(_s2aArenaPos, nOps));
+             if (S2ASegCorrupt && nOps > 0) _s2aArena[_s2aArenaPos].Index ^= 1; // S2A：核对器正对照（故意改坏记录）
+             _s2aSegs[key] = new S2ASeg { Len = commandBuffer.Length, Start = start, End = _state, OpStart = _s2aArenaPos, OpCount = nOps };
+             _s2aArenaPos += nOps;
+-            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0004, GC.GetAllocatedBytesForCurrentThread() - s2aR0);
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0004, S2AAllocTrace.Now() - s2aR0);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index 513aea65cd101358976bb52a77fdda16a63f9de4..680298f8c53836d9ac2e3eb1520a9f44b51b0f5d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -86,11 +86,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+             {
+                 _executionPending = false;
+                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();   // S2A：宏执行计时（定「要不要预编」用，见 S2AMacroAot.Account）
+-                long s2aA = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：拆账诊断——哪种宏引擎在执行中分配（每种只报第一次）
++                long s2aA = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;   // S2A：拆账诊断——哪种宏引擎在执行中分配（每种只报第一次）
+                 _executionEngine?.Execute(code[Position..], state, _argument);
+                 if (S2AAllocTrace.On)
+                 {
+-                    long d = GC.GetAllocatedBytesForCurrentThread() - s2aA;   // 只在有分配时才拼标签（诊断自己不能每次执行都分配：10-20 第一版每次插值字符串，污染读数）
++                    long d = S2AAllocTrace.Now() - s2aA;   // 只在有分配时才拼标签（诊断自己不能每次执行都分配：10-20 第一版每次插值字符串，污染读数）
+                     S2AAllocTrace.Raw(0x60_0000 | (_executionEngine is MacroHLE ? (int)_hleFunction : 0xff), d);   // 按 HLE 函数累计（0xff = 非 HLE 引擎）
+                     if (d > 0 && S2AAllocTrace.FirstSeen(_executionEngine?.GetType(), (int)_hleFunction)) Console.Error.WriteLine($"[分配·宏] {_executionEngine?.GetType().Name}/{_hleFunction} 位置 {Position} 一次执行分配 {d} B");
+                 }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
+index 7a0c917103aebdf47f489c84d9ba59d499da36c8..bb0377cf26dd1f1d2c7e4c0d698187616017d65a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
+@@ -171,9 +171,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 // S2A：渲染线程分配拆账（3D 状态更新按组，键 0x50_00 | 组号，名字见 S2AAllocTrace）
+                 if (S2AAllocTrace.On)
+                 {
+-                    long s2aA = GC.GetAllocatedBytesForCurrentThread();
++                    long s2aA = S2AAllocTrace.Now();
+                     _callbacks[groupIndex]();
+-                    S2AAllocTrace.Raw(0x50_0000 | groupIndex, GC.GetAllocatedBytesForCurrentThread() - s2aA);
++                    S2AAllocTrace.Raw(0x50_0000 | groupIndex, S2AAllocTrace.Now() - s2aA);
+                 }
+                 else
+                 {
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 298db8cea5e61adff8de1265f614c8d00588139d..60e6369fd888665ce87d81c1bade1497319b5e30 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -1474,7 +1474,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 : _state.State.SamplerPoolState.MaximumId;
+ 
+             CachedShaderProgram gs;
+-            long s2aGs = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：渲染线程分配拆账（取图形程序合计）
++            long s2aGs = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;   // S2A：渲染线程分配拆账（取图形程序合计）
+             try
+             {
+                 gs = shaderCache.GetGraphicsShader(
+@@ -1510,7 +1510,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 throw new InvalidOperationException(sb.ToString(), e);
+             }
+ 
+-            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000c, GC.GetAllocatedBytesForCurrentThread() - s2aGs);
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000c, S2AAllocTrace.Now() - s2aGs);
+ 
+             // Consume the modified flag for spec state so that it isn't checked again.
+             _currentSpecState.SetShader(gs);
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 819c1599e662dd819d34f71360acc5e72e5f36fb..211eeb5f0886a84840001bed2632a7ecdd968b05 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -12,7 +12,48 @@ namespace Ryujinx.Graphics.Gpu
+     /// </summary>
+     public static class S2AAllocTrace
+     {
+-        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++        public static readonly bool AllocOn = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++
++        // S2A_GPU_TIME=1（帧率能耗线 10-23，马车8 进赛道首帧 GPU 模拟线程 233 ms 里约 107 ms 无分段）：同一套打点改记耗时（Stopwatch 刻度），
++        // 每次上屏结算本帧：本帧墙钟超过 S2A_GPU_TIME_MS（缺省 50）就打本帧各段耗时排行（[耗时·渲染] 行，全打不截断）。与 S2A_ALLOC_TRACE 互斥（同开时按耗时）
++        public static readonly bool TimeOn = Environment.GetEnvironmentVariable("S2A_GPU_TIME") == "1";
++        public static readonly bool On = AllocOn || TimeOn;
++        private static readonly long _slowTicks = (long.TryParse(Environment.GetEnvironmentVariable("S2A_GPU_TIME_MS"), out long ms) ? ms : 50) * Stopwatch.Frequency / 1000;
++        private static readonly Dictionary<int, (long Bytes, long Calls)> _fr = new();
++        private static long _frStart, _frNo;
++
++        /// <summary>打点取值：耗时模式取时间戳，否则取本线程已分配字节</summary>
++        public static long Now() => TimeOn ? Stopwatch.GetTimestamp() : GC.GetAllocatedBytesForCurrentThread();
++
++        /// <summary>上屏时调（Window.Present 末尾）：耗时模式下结算本帧，慢帧打排行</summary>
++        public static void FrameEnd()
++        {
++            if (!TimeOn)
++            {
++                return;
++            }
++
++            long now = Stopwatch.GetTimestamp();
++            _frNo++;
++
++            lock (_acc)
++            {
++                if (_frStart != 0 && now - _frStart >= _slowTicks)
++                {
++                    double f = 1000.0 / Stopwatch.Frequency;
++                    long disp = _fr.Where(kv => kv.Key >> 20 < 4).Sum(kv => kv.Value.Bytes);
++                    Console.Error.WriteLine($"[耗时·渲染] 第 {_frNo} 次上屏 帧墙钟 {(now - _frStart) * f:F1} ms：GPFIFO 分派（最外层）合计 {disp * f:F1} ms；各段（包含式，可重叠）：");
++                    foreach (var kv in _fr.OrderByDescending(kv => kv.Value.Bytes))
++                    {
++                        Console.Error.WriteLine($"[耗时·渲染]   {Name(kv.Key)}：{kv.Value.Bytes * f:F2} ms / {kv.Value.Calls} 次");
++                    }
++                }
++
++                _fr.Clear();
++            }
++
++            _frStart = now;
++        }
+ 
+         private static readonly Dictionary<int, (long Bytes, long Calls)> _acc = new();
+         private static int _depth;
+@@ -30,7 +71,7 @@ namespace Ryujinx.Graphics.Gpu
+                 return -1;
+             }
+ 
+-            return GC.GetAllocatedBytesForCurrentThread();
++            return Now();
+         }
+ 
+         public static void End(int key, long a0)
+@@ -47,13 +88,9 @@ namespace Ryujinx.Graphics.Gpu
+                 return;
+             }
+ 
+-            long d = GC.GetAllocatedBytesForCurrentThread() - a0;
++            long d = Now() - a0;
+ 
+-            if (d > 0)
+-            {
+-                _acc.TryGetValue(key, out var v);
+-                _acc[key] = (v.Bytes + d, v.Calls + 1);
+-            }
++            Raw(key, d);
+ 
+             long now = Stopwatch.GetTimestamp();
+ 
+@@ -75,8 +112,17 @@ namespace Ryujinx.Graphics.Gpu
+         {
+             if (bytes > 0)
+             {
+-                _acc.TryGetValue(key, out var v);
+-                _acc[key] = (v.Bytes + bytes, v.Calls + 1);
++                lock (_acc)
++                {
++                    _acc.TryGetValue(key, out var v);
++                    _acc[key] = (v.Bytes + bytes, v.Calls + 1);
++
++                    if (TimeOn)
++                    {
++                        _fr.TryGetValue(key, out var w);
++                        _fr[key] = (w.Bytes + bytes, w.Calls + 1);
++                    }
++                }
+             }
+         }
+ 
+@@ -88,13 +134,13 @@ namespace Ryujinx.Graphics.Gpu
+                 return;
+             }
+ 
+-            long t = GC.GetAllocatedBytesForCurrentThread();
++            long t = Now();
+             Raw(key, t - a);
+             a = t;
+         }
+ 
+         /// <summary>段首取本线程已分配字节（On 关时 0）</summary>
+-        public static long Mark() => On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++        public static long Mark() => On ? Now() : 0;
+ 
+         private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调", "着色器·取图形程序合计（快路径 + 查缓存 + 现翻）", "着色器·查缓存 + 按需实化", "着色器·首次命中核对", "着色器·按需实化整段（读缓存 + 解压 + 建宿主程序）", "着色器·按需实化里建宿主程序（渲染器 LoadProgramBinary：着色器包 / 离线库查找）",
+             "绘制·提交绑定·存储缓冲 UpdateStorageBuffers", "绘制·提交绑定·贴图 TextureManager.CommitGraphicsBindings", "绘制·提交绑定·缓冲 BufferManager.CommitGraphicsBindings",
+@@ -135,6 +181,11 @@ namespace Ryujinx.Graphics.Gpu
+         private static void Dump()
+         {
+             // 段、状态组、宏引擎与资源子项都是包含式计数，不重复进入分派累计。
++            if (TimeOn)
++            {
++                return;   // 耗时模式只按慢帧打（FrameEnd），不打全局累计
++            }
++
+             long total = _acc.Where(kv => kv.Key >> 20 < 4).Sum(kv => kv.Value.Bytes);
+             Console.Error.WriteLine($"[分配·渲染] GPFIFO 分派累计 {total} B（前 20，字节 / 有分配的调用次数）：");
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index b35c0afc46c175951f5c24e137034147b80fd551..567f4e12002415c9d5624714192e3bb2969a09a4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -550,14 +550,14 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <returns>The program, or null if it can't be used (then compiled on demand like an uncached shader)</returns>
+         internal CachedShaderProgram S2AMaterialize(S2ALazyProgram lazy)
+         {
+-            long s2aM = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：分配拆账（按需实化整段）
++            long s2aM = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;   // S2A：分配拆账（按需实化整段）
+             try
+             {
+                 return S2AMaterializeCore(lazy);
+             }
+             finally
+             {
+-                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000f, GC.GetAllocatedBytesForCurrentThread() - s2aM);
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000f, S2AAllocTrace.Now() - s2aM);
+             }
+         }
+ 
+@@ -609,9 +609,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     }
+ 
+                     bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+-                    long s2aL = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++                    long s2aL = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;
+                     IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+-                    if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, GC.GetAllocatedBytesForCurrentThread() - s2aL);
++                    if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, S2AAllocTrace.Now() - s2aL);
+ 
+                     if (hostProgram.CheckProgramLink(true) != ProgramLinkStatus.Success)
+                     {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 84107ca33092fff915b3c11137574e369bd63e19..c3e5473ddcdc0a1339d85cf19054a8c348f56cd5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -343,23 +343,23 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             CachedGraphicsGuestCode cachedGuestCode;
+ 
+             // S2A：同上（计算着色器那段）。拆账（S2A_ALLOC_TRACE）：查缓存 + 按需实化 / 首次命中核对分开记
+-            long s2aF = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++            long s2aF = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;
+             while (_graphicsShaderCache.TryFind(channel, ref poolState, ref graphicsState, addresses, out gpShaders, out cachedGuestCode))
+             {
+-                long s2aV = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++                long s2aV = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;
+                 bool s2aBad = gpShaders.SpecializationState.S2ANeedsVerify &&
+                     !S2AVerify(gpShaders, channel, ref poolState, samplerPoolMaximumId, isCompute: false, graphicsState, default, state.TfEnable ? GetTransformFeedbackDescriptors(ref state) : null);
+-                if (S2AAllocTrace.On) { long v = GC.GetAllocatedBytesForCurrentThread() - s2aV; S2AAllocTrace.Raw(0x40_000e, v); s2aF += v; }
++                if (S2AAllocTrace.On) { long v = S2AAllocTrace.Now() - s2aV; S2AAllocTrace.Raw(0x40_000e, v); s2aF += v; }
+                 if (s2aBad)
+                 {
+                     continue;
+                 }
+ 
+                 _gpPrograms[addresses] = gpShaders;
+-                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, GC.GetAllocatedBytesForCurrentThread() - s2aF);
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, S2AAllocTrace.Now() - s2aF);
+                 return gpShaders;
+             }
+-            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, GC.GetAllocatedBytesForCurrentThread() - s2aF);
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, S2AAllocTrace.Now() - s2aF);
+ 
+             S2ALogMiss(isCompute: false);
+             TransformFeedbackDescriptor[] transformFeedbackDescriptors = GetTransformFeedbackDescriptors(ref state);
+diff --git a/src/Ryujinx.Graphics.Gpu/Window.cs b/src/Ryujinx.Graphics.Gpu/Window.cs
+index 34c69bdede81ddd6c728209621d236ca68c9e4af..f3aa427e3601bc387867017edd3d674ca3130ab8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Window.cs
++++ b/src/Ryujinx.Graphics.Gpu/Window.cs
+@@ -231,16 +231,16 @@ namespace Ryujinx.Graphics.Gpu
+ 
+             if (_frameQueue.TryDequeue(out PresentationTexture pt))
+             {
+-                long s2aA = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0; // S2A：渲染线程分配拆账（上屏各步）
++                long s2aA = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0; // S2A：渲染线程分配拆账（上屏各步）
+                 pt.AcquireCallback(_context, pt.UserObj);
+-                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0008, t - s2aA); s2aA = t; }
++                if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_0008, t - s2aA); s2aA = t; }
+ 
+                 Image.Texture texture = pt.Cache.FindOrCreateTexture(null, TextureSearchFlags.WithUpscale, pt.Info, 0, range: pt.Range);
+ 
+                 pt.Cache.Tick();
+ 
+                 texture.SynchronizeMemory();
+-                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_0009, t - s2aA); s2aA = t; }
++                if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_0009, t - s2aA); s2aA = t; }
+ 
+                 ImageCrop crop = new(
+                     (int)(pt.Crop.Left * texture.ScaleFactor),
+@@ -274,10 +274,11 @@ namespace Ryujinx.Graphics.Gpu
+                 }
+ 
+                 _context.Renderer.Window.Present(texture.HostTexture, crop, swapBuffersCallback);
+-                if (S2AAllocTrace.On) { long t = GC.GetAllocatedBytesForCurrentThread(); S2AAllocTrace.Raw(0x40_000a, t - s2aA); s2aA = t; }
++                if (S2AAllocTrace.On) { long t = S2AAllocTrace.Now(); S2AAllocTrace.Raw(0x40_000a, t - s2aA); s2aA = t; }
+ 
+                 pt.ReleaseCallback(pt.UserObj);
+-                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000b, GC.GetAllocatedBytesForCurrentThread() - s2aA);
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000b, S2AAllocTrace.Now() - s2aA);
++                S2AAllocTrace.FrameEnd();   // S2A_GPU_TIME：结算本帧耗时、慢帧打排行
+             }
+         }
+ 

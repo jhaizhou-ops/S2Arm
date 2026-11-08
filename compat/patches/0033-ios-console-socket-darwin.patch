@@ -1,0 +1,79 @@
+diff --git a/src/Ryujinx.Common/Logging/Targets/ConsoleLogTarget.cs b/src/Ryujinx.Common/Logging/Targets/ConsoleLogTarget.cs
+index 391cc5131f9c82219476853b5e724f5c0b3a97c5..b3989e21c3ee82ab9c9f03ed8a13c3f7a6ed7585 100644
+--- a/src/Ryujinx.Common/Logging/Targets/ConsoleLogTarget.cs
++++ b/src/Ryujinx.Common/Logging/Targets/ConsoleLogTarget.cs
+@@ -9,6 +9,9 @@ namespace Ryujinx.Common.Logging.Targets
+ 
+         private readonly string _name;
+ 
++        // S2Arm: console colors throw PlatformNotSupportedException on iOS / tvOS / Android / browser
++        private static readonly bool _colors = !(OperatingSystem.IsIOS() || OperatingSystem.IsTvOS() || OperatingSystem.IsAndroid() || OperatingSystem.IsBrowser());
++
+         string ILogTarget.Name { get => _name; }
+ 
+         private static ConsoleColor GetLogColor(LogLevel level) => level switch
+@@ -30,6 +33,12 @@ namespace Ryujinx.Common.Logging.Targets
+ 
+         public void Log(object sender, LogEventArgs args)
+         {
++            if (!_colors)
++            {
++                Console.WriteLine(_formatter.Format(args));
++                return;
++            }
++
+             Console.ForegroundColor = GetLogColor(args.Level);
+             Console.WriteLine(_formatter.Format(args));
+             Console.ResetColor();
+@@ -38,7 +47,11 @@ namespace Ryujinx.Common.Logging.Targets
+         public void Dispose()
+         {
+             GC.SuppressFinalize(this);
+-            Console.ResetColor();
++
++            if (_colors)
++            {
++                Console.ResetColor();
++            }
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+index c29af43da859dff72628c895c8234565fbc1e01a..05963e4387cd19af1cb09027583625b310a0221c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/LdnMitm/LanDiscovery.cs
+@@ -321,7 +321,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator.LdnMitm
+                 // NOTE: Linux won't receive any broadcast packets if the socket is not bound to the broadcast address.
+                 //       Windows only works if bound to localhost or the local address.
+                 //       See this discussion: https://stackoverflow.com/questions/13666789/receiving-udp-broadcast-packets-on-linux
+-                if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
++                if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+                 {
+                     _udp2 = new LdnProxyUdpServer(_protocol, LocalBroadcastAddr, DefaultPort);
+                 }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/Types/IpAddressSetting.cs b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/Types/IpAddressSetting.cs
+index 4fa674de998c839d2dc8b4ff4b0f51ad22e708f6..359c9b75e20cf5136ff65184ef1cf65700da937b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/Types/IpAddressSetting.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/Types/IpAddressSetting.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService.Types
+ 
+         public IpAddressSetting(IPInterfaceProperties interfaceProperties, UnicastIPAddressInformation unicastIPAddressInformation)
+         {
+-            IsDhcpEnabled = OperatingSystem.IsMacOS() || interfaceProperties.DhcpServerAddresses.Count != 0;
++            IsDhcpEnabled = OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || interfaceProperties.DhcpServerAddresses.Count != 0;
+             Address = new IpV4Address(unicastIPAddressInformation.Address);
+             IPv4Mask = new IpV4Address(unicastIPAddressInformation.IPv4Mask);
+             GatewayAddress = (interfaceProperties.GatewayAddresses.Count == 0) ? new IpV4Address() : new IpV4Address(interfaceProperties.GatewayAddresses[0].Address);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+index 018bb8f14c8eeef850177dabc8534f9afff8c943..5fb223869907be45d684bf80e4abb79ed9e7c74e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+@@ -284,7 +284,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+ 
+         public static LinuxError ConvertError(WsaError errorCode)
+         {
+-            if (OperatingSystem.IsMacOS())
++            if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+             {
+                 if (_errorMapMacOs.TryGetValue((int)errorCode, out LinuxError errno))
+                 {

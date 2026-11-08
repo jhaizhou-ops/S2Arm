@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Pctl/ParentalControlServiceFactory/IParentalControlService.cs b/src/Ryujinx.HLE/HOS/Services/Pctl/ParentalControlServiceFactory/IParentalControlService.cs
+index 5e4f415fba2d84606d520e5bee62c7e8353cbe5e..02a4ed124b356d000a3d707600f7c41a1cf463e0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Pctl/ParentalControlServiceFactory/IParentalControlService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Pctl/ParentalControlServiceFactory/IParentalControlService.cs
+@@ -151,6 +151,24 @@ namespace Ryujinx.HLE.HOS.Services.Pctl.ParentalControlServiceFactory
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(1101)] // Switch 2
++        // CheckAgcPermissionUnderMinimumAge(nn::account::Uid) -> u8
++        // S2Arm: wire format from the Zelda OoT (Switch 2) sdk proxy (in-data Uid 0x10, no pid, reply one byte; the SDK aborts on a failing result).
++        //   The byte is a status the game names in its play report: 0 "success", 1 "nsa_unavailable", 2 "pairing_not_active", 3 "restricted", else "unknown".
++        //   Parental controls are not set on this console (_restrictionEnabled), so the under-minimum-age check does not apply: 0.
++        //   With restrictions on, the real answer depends on the user's age setting, which is not known here: reported red.
++        public ResultCode CheckAgcPermissionUnderMinimumAge(ServiceCtx context)
++        {
++            if (_restrictionEnabled)
++            {
++                throw new NotImplementedException("IParentalControlService 命令 1101 CheckAgcPermissionUnderMinimumAge：开了家长控制时按年龄设定的答案不知道");
++            }
++
++            context.ResponseData.Write((byte)0);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(1061)] // 4.0.0+
+         // ConfirmStereoVisionRestrictionConfigurable()
+         public ResultCode ConfirmStereoVisionRestrictionConfigurable(ServiceCtx context)

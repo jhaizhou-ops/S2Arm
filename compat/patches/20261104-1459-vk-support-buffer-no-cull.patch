@@ -1,0 +1,98 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index a342b883931e8f74946e624309d4a2b9c4b0798b..60935c9c777c08cc1695c3bb1a71407a57733566 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -14,6 +14,7 @@
+     <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+     <InternalsVisibleTo Include="S2A.SeenTest" /> <!-- S2A：双轨覆盖率 seen 记录单测（graphics/tools/direct/tests/seen） -->
+     <InternalsVisibleTo Include="S2A.GpuShortCacheTest" /> <!-- S2A：贴图短缓存重复描述符单测（tests/gpu_shortcache，#1364） -->
++    <InternalsVisibleTo Include="S2A.VkLayoutStageTest" /> <!-- S2A：着色器描述符阶段位单测（tests/vk_layout_stages，#199） -->
+     <InternalsVisibleTo Include="S2A.PsoWarmGateTest" /> <!-- S2A：加载屏预热后端门控 / 总预算单测（tests/pso_warm_gate） -->
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+     <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 6dd26eb25908aea38aeb3dc2b6b179c765ff8520..59d8044076fa53deb7163e3c618ddb0f32b98a14 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -34,7 +34,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // +9: VTG texel-buffer image declarations now use the sampler's declared
+         // sampled type instead of unconditional FP32; host binaries translated
+         // with the old declaration must be re-translated.
+-        internal const uint CodeGenVersion = 7354 + 9;
++        // +10: SPIR-V output changes (gl_PerVertex no longer declares gl_CullDistance) and
++        // the support-buffer descriptor stage mask now covers VTG. Old host caches must be
++        // re-translated; offline shader packages baked with the old codegen must be re-baked.
++        internal const uint CodeGenVersion = 7354 + 10;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+index 4ee25a9b6c3945543c50e8a378bedfb721c13d2e..dd41867b77afed6891919d918d152b6fd7d8839d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+@@ -10,13 +10,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+     /// </summary>
+     class ShaderInfoBuilder
+     {
+-        // S2A（VUID-07988）：support_buffer 全阶段可见 —— 几何 / 细分着色器也静态用它，缺位会被 VVL 报阶段不符
++        // S2A（VUID-07988）：支持缓冲在每个 VTG 阶段都可能被读（运行时深度重映射 / 视口变换 / 越界钳位等），
++        //   几何 / 细分着色器也静态用它，阶段位少写会让 GS / Tess 声明并使用的绑定在管线布局里不可见
++        //   （VUID-VkGraphicsPipelineCreateInfo-layout-07988），按 VtgStages 口径统一给全。
+         private const ResourceStages SupportBufferStages =
+             ResourceStages.Compute |
+-            ResourceStages.Vertex |
+-            ResourceStages.TessellationControl |
+-            ResourceStages.TessellationEvaluation |
+-            ResourceStages.Geometry |
++            VtgStages |
+             ResourceStages.Fragment;
+ 
+         private const ResourceStages VtgStages =
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 0d38a3f717993fe5836baa454b5d9c22cb5fa80d..acc2ab480d8eb0b94f1a9b78c702cd39ddfaaca6 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -440,7 +440,6 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                         context.MemberDecorate(perVertexInputStructType, 0, Decoration.PassthroughNV);
+                         context.MemberDecorate(perVertexInputStructType, 1, Decoration.PassthroughNV);
+                         context.MemberDecorate(perVertexInputStructType, 2, Decoration.PassthroughNV);
+-                        context.MemberDecorate(perVertexInputStructType, 3, Decoration.PassthroughNV);
+                     }
+                 }
+ 
+@@ -483,21 +482,22 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         private static SpvInstruction CreatePerVertexStructType(CodeGenContext context, out int components)
+         {
+-            const int positionLength = 4, clipLength = 8, cullLength = 1;
+-            components = positionLength + 1 + clipLength + cullLength;
++            const int positionLength = 4, clipLength = 8;
++            // 预算沿用旧口径（含已删除的 CullDistance 1 个分量），不改变接口准入。
++            components = positionLength + 1 + clipLength + 1;
+             SpvInstruction vec4FloatType = context.TypeVector(context.TypeFP32(), positionLength);
+             SpvInstruction floatType = context.TypeFP32();
+             SpvInstruction array8FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), clipLength));
+-            SpvInstruction array1FloatType = context.TypeArray(context.TypeFP32(), context.Constant(context.TypeU32(), cullLength));
+ 
+-            SpvInstruction perVertexStructType = context.TypeStruct(true, vec4FloatType, floatType, array8FloatType, array1FloatType);
++            // gl_CullDistance 从未被翻译器使用；声明它会与 ClipDistance[8] 相加超出
++            // maxCombinedClipAndCullDistances（8E/9000 均为 8），直接不声明。
++            SpvInstruction perVertexStructType = context.TypeStruct(true, vec4FloatType, floatType, array8FloatType);
+ 
+             context.Name(perVertexStructType, "gl_PerVertex");
+ 
+             context.MemberName(perVertexStructType, 0, "gl_Position");
+             context.MemberName(perVertexStructType, 1, "gl_PointSize");
+             context.MemberName(perVertexStructType, 2, "gl_ClipDistance");
+-            context.MemberName(perVertexStructType, 3, "gl_CullDistance");
+ 
+             context.Decorate(perVertexStructType, Decoration.Block);
+ 
+@@ -509,7 +509,6 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             context.MemberDecorate(perVertexStructType, 0, Decoration.BuiltIn, (LiteralInteger)BuiltIn.Position);
+             context.MemberDecorate(perVertexStructType, 1, Decoration.BuiltIn, (LiteralInteger)BuiltIn.PointSize);
+             context.MemberDecorate(perVertexStructType, 2, Decoration.BuiltIn, (LiteralInteger)BuiltIn.ClipDistance);
+-            context.MemberDecorate(perVertexStructType, 3, Decoration.BuiltIn, (LiteralInteger)BuiltIn.CullDistance);
+ 
+             return perVertexStructType;
+         }

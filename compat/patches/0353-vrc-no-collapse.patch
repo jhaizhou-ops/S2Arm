@@ -1,0 +1,97 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index e696f0e8276a844c246e27961059cb5f18fa5385..7818c5c82859badfd21ddc362c99b0b04b58b14d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -342,7 +342,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             ulong alignmentMask = SparseBufferAlignmentSize - 1;
+ 
+-            if (_context.Capabilities.SupportsSparseBuffer)
++            // S2A（银河2 崩溃根修 10-28）：VirtualRangeCache 不再把不对齐的多段压成一段，这里接住——
++            // 稀疏缓冲只收 64 KB 对齐的段；不对齐的走拷贝式，并按真实分段建（对齐外扩会让 FindOffset 对不上请求区间）
++            bool sparseAligned = VirtualRangeCache.IsSparseAligned(range);
++
++            if (_context.Capabilities.SupportsSparseBuffer && sparseAligned)
+             {
+                 BufferRange[] storages = new BufferRange[range.Count];
+ 
+@@ -381,7 +385,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 {
+                     MemoryRange subRange = range.GetSubRange(i);
+ 
+-                    if (subRange.Address != MemoryManager.PteUnmapped)
++                    if (!sparseAligned)
++                    {
++                        alignedSubRanges[i] = subRange;
++                    }
++                    else if (subRange.Address != MemoryManager.PteUnmapped)
+                     {
+                         ulong endAddress = subRange.Address + subRange.Size;
+ 
+@@ -1008,7 +1016,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 }
+             }
+ 
+-            if (write && buffer != null && !_context.Capabilities.SupportsSparseBuffer)
++            if (write && buffer != null && !buffer.IsSparse)
+             {
+                 buffer.AddModifiedRegion(range, ++_virtualModifiedSequenceNumber);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MultiRangeBuffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/MultiRangeBuffer.cs
+index 7252b5404a767f629e2170b1addedb4e0a35e7f4..776e179b81a7dbbf6d1950bbdbeacfdff08a9b4e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MultiRangeBuffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MultiRangeBuffer.cs
+@@ -22,6 +22,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// </summary>
+         public MultiRange Range { get; }
+ 
++        /// <summary>
++        /// S2A：是否稀疏缓冲（宿主直接映射各段）。否则是拷贝式（数据经物理依赖拷进拷出）——后端支持稀疏时，
++        /// 不满足 64 KB 对齐的多段也走拷贝式，写记账要按缓冲本身判，不能按后端能力判
++        /// </summary>
++        public bool IsSparse { get; }
++
+         /// <summary>
+         /// Ever increasing counter value indicating when the buffer was modified relative to other buffers.
+         /// </summary>
+@@ -93,6 +99,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             _context = context;
+             Range = range;
++            IsSparse = true;
+             Handle = context.Renderer.CreateBufferSparse(storages);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
+index bb6733623a4da1073e52fc9d1cfc63f0d3c91c28..ecf24ffc71a6d2540ac6091044c0cfa52456c482 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/VirtualRangeCache.cs
+@@ -165,15 +165,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+             _virtualRanges.Lock.ExitWriteLock();
+ 
+-            // If the range is not properly aligned for sparse mapping,
+-            // let's just force it to a single range.
+-            // This might cause issues in some applications that uses sparse
+-            // mappings.
+-            if (!IsSparseAligned(range))
+-            {
+-                range = new MultiRange(range.GetSubRange(0).Address, size);
+-            }
+-
++            // S2A（银河2 崩溃根修 10-28）：上游在这里把不满足 64 KB 稀疏对齐的多段压成「第一段起点 + 总长」的一段。
++            // 我们的物理地址就是游戏真实内存，压段后缓冲间拷贝 / 清缓冲 / 缓冲回写跨映射线性续写，盖掉第一段之后的游戏对象
++            // （银河2 0x610 字节拷贝跨两个句柄，后 0x240 字节写进句柄 A 之后的对象）。改为一律返回真实分段；
++            // 不对齐的多段由 BufferCache.CreateMultiRangeBuffer 走拷贝式多段缓冲（按真实分段建，不需要稀疏对齐）
+             return found;
+         }
+ 
+@@ -183,7 +178,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// </summary>
+         /// <param name="range">Range to check</param>
+         /// <returns>True if the range is valid for sparse mapping, false otherwise</returns>
+-        private static bool IsSparseAligned(MultiRange range)
++        internal static bool IsSparseAligned(MultiRange range)
+         {
+             if (range.Count == 1)
+             {

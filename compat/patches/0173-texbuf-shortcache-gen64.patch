@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+index 9dd05557dfbd298f53bdda62789d7e918591bc37..4db07c791d4a2900002fa8bf012ba4d039d073c8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+@@ -63,6 +63,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+         // 贴图缓冲（TextureBuffer，只是缓冲上的视图、不占自己的存储）留满 16 代，其余照上游留 2 代（放进第 2 个要删的集合）。
+         // 八方2 每帧换贴图缓冲描述符、同一描述符隔 3–16 代才回来，两代接不住、每帧新建约 10 张（GPU 模拟线程约 11 KB/帧分配）；
+         // Mac 实测 16 代新建 −78%、MARK 后 60 秒 gen0 4 → 1，Metal 已分配不变（op2_alloc r7 / r12）。S2A_SHORT_CACHE_GEN 覆盖代数（A/B 用，2 = 上游）
++        // 10-23 原生层线改缺省 64：真机八方2 稳态贴图缓冲全部死于短缓存到期（Mac 诊断 268/268 走 ProcessShortCache），描述符隔 17–64 代回来的仍要新建；
++        //   同口径真机局（octopath2_1023015440_1 → _1023071215_2，只差 GEN 16 → 64）：每帧分配 6575 → 3898 B、GC 单帧最长 17.5 → 0 ms、新建贴图 6126 → 2679 张。
++        //   命中仍要整个描述符（含地址）相等且失效序号未变，不会读到旧数据；代价是多留住几百个极小的缓冲视图对象。上限放到 256
+         private static readonly int _shortCacheGenerations = S2AShortCacheGenerations();
+         private readonly HashSet<ShortTextureCacheEntry>[] _shortCacheGens;
+         private int _shortCacheBuilder;
+@@ -338,7 +341,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private static int S2AShortCacheGenerations()
+         {
+-            return int.TryParse(System.Environment.GetEnvironmentVariable("S2A_SHORT_CACHE_GEN"), out int n) && n >= 2 && n <= 64 ? n : 16;
++            return int.TryParse(System.Environment.GetEnvironmentVariable("S2A_SHORT_CACHE_GEN"), out int n) && n >= 2 && n <= 256 ? n : 64;
+         }
+ 
+         public IEnumerator<Texture> GetEnumerator()

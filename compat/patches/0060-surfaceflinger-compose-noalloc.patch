@@ -1,0 +1,164 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
+index d63bcaa14ad6e5288b7c20dea4dbcf1fa4e38e7e..adfc150852c8b722c8413793d069e865bf5d67fe 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferItemConsumer.cs
+@@ -7,6 +7,10 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+     {
+         private readonly GpuContext _gpuContext;
+ 
++        // S2Arm: acquired copies are recycled on ReleaseBuffer (the compositor acquires one per frame; each copy carries a
++        // ~0x170-byte graphic buffer pointer). Accessed under Lock.
++        private readonly System.Collections.Generic.Stack<BufferItem> _acquiredPool = new();
++
+         public BufferItemConsumer(Switch device,
+             BufferQueueConsumer consumer,
+             uint consumerUsage,
+@@ -48,7 +52,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 }
+ 
+                 // Make sure to clone the object to not temper the real instance.
+-                bufferItem = (BufferItem)tmp.Clone();
++                bufferItem = _acquiredPool.Count != 0 ? _acquiredPool.Pop() : new BufferItem();
++                bufferItem.CopyFrom(tmp);
+ 
+                 // S2Arm: the queue's instance is not referenced after the copy (ConsumerBase only read it)
+                 Consumer.RecycleBufferItem(tmp);
+@@ -75,6 +80,12 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                     result = ReleaseBufferLocked(bufferItem.Slot, ref bufferItem.GraphicBuffer);
+                 }
+ 
++                // S2Arm: the caller drops the item after releasing it
++                if (_acquiredPool.Count < BufferSlotArray.NumBufferSlots)
++                {
++                    _acquiredPool.Push(bufferItem);
++                }
++
+                 return result;
+             }
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index 9717781758c1263968becf28eef5e9858525216e..09d102cfa333ef423f217f48e118e3be6c6b7d83 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -56,12 +56,27 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             public BufferItem Item;
+         }
+ 
++        // S2Arm: per-frame callback objects created once (method groups and the fence lambda allocated a delegate per frame),
++        // callback information recycled after the release callback. The pool is shared by the compositor and the GPU thread.
++        private readonly Action<GpuContext, object> _acquireBufferCallback;
++        private readonly Action<object> _releaseBufferCallback;
++        private readonly Action<Ryujinx.Graphics.Gpu.Synchronization.SyncpointWaiterHandle> _frameReadyCallback;
++        private readonly Stack<TextureCallbackInformation> _callbackInfoPool = new();
++
+         public SurfaceFlinger(Switch device)
+         {
+             _device = device;
+             _layers = new Dictionary<long, Layer>();
+             RenderLayerId = 0;
+ 
++            _acquireBufferCallback = AcquireBuffer;
++            _releaseBufferCallback = ReleaseBuffer;
++            _frameReadyCallback = _ =>
++            {
++                _device.Gpu.Window.SignalFrameReady();
++                _device.Gpu.GPFifo.Interrupt();
++            };
++
+             _composerThread = new Thread(HandleComposition)
+             {
+                 Name = "SurfaceFlinger.Composer",
+@@ -445,11 +460,15 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 aspectRatio.ToFloatX(),
+                 aspectRatio.ToFloatY());
+ 
+-            TextureCallbackInformation textureCallbackInformation = new()
++            TextureCallbackInformation textureCallbackInformation;
++
++            lock (_callbackInfoPool)
+             {
+-                Layer = layer,
+-                Item = item,
+-            };
++                textureCallbackInformation = _callbackInfoPool.Count != 0 ? _callbackInfoPool.Pop() : new TextureCallbackInformation();
++            }
++
++            textureCallbackInformation.Layer = layer;
++            textureCallbackInformation.Item = item;
+ 
+             if (_device.Gpu.Window.EnqueueFrameThreadSafe(
+                 layer.Owner,
+@@ -462,8 +481,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 format,
+                 bytesPerPixel,
+                 crop,
+-                AcquireBuffer,
+-                ReleaseBuffer,
++                _acquireBufferCallback,
++                _releaseBufferCallback,
+                 textureCallbackInformation))
+             {
+                 if (item.Fence.FenceCount == 0)
+@@ -473,11 +492,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 }
+                 else
+                 {
+-                    item.Fence.RegisterCallback(_device.Gpu, (x) =>
+-                    {
+-                        _device.Gpu.Window.SignalFrameReady();
+-                        _device.Gpu.GPFifo.Interrupt();
+-                    });
++                    item.Fence.RegisterCallback(_device.Gpu, _frameReadyCallback);
+                 }
+             }
+             else
+@@ -496,6 +511,17 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             AndroidFence fence = AndroidFence.NoFence;
+ 
+             information.Layer.Consumer.ReleaseBuffer(information.Item, ref fence);
++
++            information.Layer = null;
++            information.Item = null;
++
++            lock (_callbackInfoPool)
++            {
++                if (_callbackInfoPool.Count < BufferSlotArray.NumBufferSlots)
++                {
++                    _callbackInfoPool.Push(information);
++                }
++            }
+         }
+ 
+         private void AcquireBuffer(GpuContext ignored, object obj)
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/BufferItem.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/BufferItem.cs
+index dc752daa3e5374c81cebd6267c9575118649c6dd..7c30128eb828afba29f48bf50fc452c6c062bd9e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/BufferItem.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/Types/BufferItem.cs
+@@ -38,6 +38,27 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             Crop.MakeInvalid();
+         }
+ 
++        /// <summary>
++        /// S2Arm: <see cref="Clone"/> into an existing instance (same fields; the rest back to the constructor defaults).
++        /// </summary>
++        public void CopyFrom(BufferItem other)
++        {
++            Transform = other.Transform;
++            ScalingMode = other.ScalingMode;
++            Timestamp = 0;
++            IsAutoTimestamp = other.IsAutoTimestamp;
++            FrameNumber = other.FrameNumber;
++            Slot = other.Slot;
++            IsDroppable = other.IsDroppable;
++            AcquireCalled = other.AcquireCalled;
++            TransformToDisplayInverse = other.TransformToDisplayInverse;
++            SwapInterval = other.SwapInterval;
++            Fence = other.Fence;
++            Crop = other.Crop;
++
++            GraphicBuffer.Set(other.GraphicBuffer);
++        }
++
+         public object Clone()
+         {
+             BufferItem item = new()

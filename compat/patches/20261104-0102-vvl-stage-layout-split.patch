@@ -1,0 +1,65 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 7975a1dae7963569f8e2e9744530ff9c82c06dc2..a342b883931e8f74946e624309d4a2b9c4b0798b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -16,6 +16,7 @@
+     <InternalsVisibleTo Include="S2A.GpuShortCacheTest" /> <!-- S2A：贴图短缓存重复描述符单测（tests/gpu_shortcache，#1364） -->
+     <InternalsVisibleTo Include="S2A.PsoWarmGateTest" /> <!-- S2A：加载屏预热后端门控 / 总预算单测（tests/pso_warm_gate） -->
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
++    <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+index 45897778cd999faf5b956c02c73c128050e92e76..4ee25a9b6c3945543c50e8a378bedfb721c13d2e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderInfoBuilder.cs
+@@ -10,9 +10,13 @@ namespace Ryujinx.Graphics.Gpu.Shader
+     /// </summary>
+     class ShaderInfoBuilder
+     {
++        // S2A（VUID-07988）：support_buffer 全阶段可见 —— 几何 / 细分着色器也静态用它，缺位会被 VVL 报阶段不符
+         private const ResourceStages SupportBufferStages =
+             ResourceStages.Compute |
+             ResourceStages.Vertex |
++            ResourceStages.TessellationControl |
++            ResourceStages.TessellationEvaluation |
++            ResourceStages.Geometry |
+             ResourceStages.Fragment;
+ 
+         private const ResourceStages VtgStages =
+@@ -135,12 +139,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 _ => ResourceStages.None,
+             };
+ 
+-            int uniformsPerStage = (int)TranslationCapabilities.MaximumUniformBuffersPerStage;
+             int storagesPerStage = (int)TranslationCapabilities.MaximumStorageBuffersPerStage;
+             int texturesPerStage = (int)TranslationCapabilities.MaximumTexturesPerStage;
+             int imagesPerStage = (int)TranslationCapabilities.MaximumImagesPerStage;
+ 
+-            int uniformBinding = _reservedConstantBuffers + stageIndex * uniformsPerStage;
+             int storageBinding = _reservedStorageBuffers + stageIndex * storagesPerStage;
+             int textureBinding = _reservedTextures + stageIndex * texturesPerStage * 2;
+             int imageBinding = _reservedImages + stageIndex * imagesPerStage * 2;
+@@ -150,7 +152,20 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             int textureSetIndex = TranslationCapabilities.TextureSetIndex;
+             int imageSetIndex = TranslationCapabilities.ImageSetIndex;
+ 
+-            AddDescriptor(stages, ResourceType.UniformBuffer, uniformSetIndex, uniformBinding, uniformsPerStage);
++            // S2A（VUID-03017/03023）：UBO 只声明着色器实际占用的绑定，不再每级 18 个全占
++            //   —— 全占会把每级 UBO 数推到设备 maxPerStageDescriptorUniformBuffers 之上（9000 = 36）。
++            //   support_buffer（set=uniformSetIndex, binding=0）构造函数已声明，跳过。
++            foreach (BufferDescriptor buffer in info.CBuffers)
++            {
++                if (buffer.Flags.HasFlag(BufferUsageFlags.S2AOobRecord) ||
++                    (buffer.Set == uniformSetIndex && buffer.Binding == 0))
++                {
++                    continue;
++                }
++
++                AddDescriptor(stages, ResourceType.UniformBuffer, buffer.Set, buffer.Binding, 1);
++            }
++
+             AddDescriptor(stages, ResourceType.StorageBuffer, storageSetIndex, storageBinding, storagesPerStage);
+             AddDualDescriptor(stages, ResourceType.TextureAndSampler, ResourceType.BufferTexture, textureSetIndex, textureBinding, texturesPerStage);
+             AddDualDescriptor(stages, ResourceType.Image, ResourceType.BufferImage, imageSetIndex, imageBinding, imagesPerStage);

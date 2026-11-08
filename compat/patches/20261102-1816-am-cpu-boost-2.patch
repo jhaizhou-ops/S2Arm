@@ -1,0 +1,14 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+index 6a601b0f8f2d37028f0aa73796e21a15ef92f6b8..75f91b0af9227f968b5fccdc0b89a6b5b1653c31 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+@@ -280,7 +280,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+         {
+             uint cpuBoostMode = context.RequestData.ReadUInt32();
+ 
+-            if (cpuBoostMode > 1)
++            // S2Arm：0 关 / 1 加速 / 2 省电（CpuBoostMode.ConservePower）都合法；上游只放行 ≤1，Pokopia（Switch 2 SDK）起局设 2 被回 InvalidParameters → Break 2128-0506
++            if (cpuBoostMode > 2)
+             {
+                 return ResultCode.InvalidParameters;
+             }

@@ -1,0 +1,43 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+index f2c192c3fd4a53857cfa088c660c8e76e2db993e..c6af5ed5e3ebda5e059529ec23dcf14459442f67 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+@@ -519,10 +519,38 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+             return commandBuffer;
+         }
+ 
++        // S2Arm: the increment command buffer only depends on the syncpoint id (fixed per channel) and the WFI flag, and the
++        // GPU only reads it, so one array per variant is shared by every submission (was a new array per SubmitGpfifo)
++        private int[] _s2aIncrementWfi, _s2aIncrementNoWfi;
++        private uint _s2aIncrementId;
++
+         private int[] CreateIncrementCommandBuffer(ref NvFence fence, SubmitGpfifoFlags flags)
+         {
+             bool hasWfi = !flags.HasFlag(SubmitGpfifoFlags.SuppressWfi);
+ 
++            if (_s2aIncrementId != fence.Id || (hasWfi ? _s2aIncrementWfi : _s2aIncrementNoWfi) == null)
++            {
++                if (_s2aIncrementId != fence.Id)
++                {
++                    _s2aIncrementWfi = _s2aIncrementNoWfi = null;
++                    _s2aIncrementId = fence.Id;
++                }
++
++                if (hasWfi)
++                {
++                    _s2aIncrementWfi = BuildIncrementCommandBuffer(ref fence, hasWfi);
++                }
++                else
++                {
++                    _s2aIncrementNoWfi = BuildIncrementCommandBuffer(ref fence, hasWfi);
++                }
++            }
++
++            return hasWfi ? _s2aIncrementWfi : _s2aIncrementNoWfi;
++        }
++
++        private static int[] BuildIncrementCommandBuffer(ref NvFence fence, bool hasWfi)
++        {
+             int[] commandBuffer;
+ 
+             int offset = 0;

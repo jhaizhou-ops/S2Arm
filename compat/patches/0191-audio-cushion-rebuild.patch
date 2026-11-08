@@ -1,0 +1,129 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 8b8fcc76704b81708563a40c04fc0bda3883dfa7..bff240d6b784a2e140843fc72dec7b1f44b0dfe2 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -74,6 +74,16 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _lastHealTicks;
+         private int _heals;
+         private bool _testStallDone;
++        private int _cushions;
++        // 测试钩子：S2A_AUDIO_TEST_PRODUCER_STALL_AT=<秒>:<毫秒> —— 开播后到点在送声音的入口（QueueBuffer）睡一次，模拟 GC 停顿卡住生产方、吃光缓冲垫
++        private static readonly (int AtS, int Ms) _testProdStall = ParseProdStall(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_PRODUCER_STALL_AT"));
++        private bool _testProdStallDone;
++        private static (int, int) ParseProdStall(string v)
++        {
++            if (string.IsNullOrEmpty(v)) return (0, 0);
++            string[] p = v.Split(':');
++            return p.Length == 2 && int.TryParse(p[0], out int a) && int.TryParse(p[1], out int m) ? (a, m) : (0, 0);
++        }
+         private static readonly int _testNoteAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_NOTE_AT"), out int n) ? n : 0;
+         private static readonly int _testResetAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_RESET_AT"), out int r) ? r : 0;
+         private bool _testNoteDone, _testResetDone;
+@@ -364,6 +374,13 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+ 
+             protected override void OnReturned(int bytes, long inFlightAfter) => _s._diag.OnReturned(bytes, inFlightAfter);
++
++            // S2Arm (10-23 马车8 杂音): 欠载后补静音垫，每次打一行（罕见事件）
++            protected override void OnCushion(int bytes, long zeroTicks)
++            {
++                int n = Interlocked.Increment(ref _s._cushions);
++                Console.Error.WriteLine($"[声] 输出 #{_s._diag.Index}：中途欠载（在途归零 {zeroTicks * 1000.0 / Stopwatch.Frequency:F1} ms 后才有新数据）→ 先补 {bytes / _s._bytesPerFrame * 1000.0 / _s.RequestedSampleRate:F0} ms 静音重建缓冲垫（第 {n} 次）");
++            }
+         }
+ 
+         private void OutputCallback(nint userData, nint audioQueue, nint bufferPtr)
+@@ -463,6 +480,13 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         public override void QueueBuffer(AudioBuffer buffer)
+         {
++            if (_testProdStall.AtS > 0 && !_testProdStallDone && _started && Stopwatch.GetTimestamp() - _startTicks >= (long)_testProdStall.AtS * Stopwatch.Frequency)
++            {
++                _testProdStallDone = true;
++                Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 开播后第 {_testProdStall.AtS} 秒生产方停 {_testProdStall.Ms} ms（模拟 GC 停顿）");
++                Thread.Sleep(_testProdStall.Ms);
++            }
++
+             _samples.Enqueue(buffer);
+             ulong sampleCount = GetSampleCount(buffer);
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index d1eddc8adeec87345c0040e47f9dc68b4a55dddd..5fad6dac11e27e64d3004554b25df093721c4ea0 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Audio.Common;
+ using System;
++using System.Diagnostics;
+ using System.Threading;
+ 
+ namespace Ryujinx.Audio.Backends.Common
+@@ -28,6 +29,12 @@ namespace Ryujinx.Audio.Backends.Common
+         // 这样一开声就有深度，不会每个游戏缓冲边界掐边欠载（输出端每 21.3 ms 插静音 = 宽频噪声）。0 = 不设下限（旧行为）。
+         private readonly long _primeFloorBytes;
+         private int _primed;   // 0/1，Volatile：在途首次达下限后置 1，之后一直 1（PrimedForStart）
++        // S2Arm (10-23 马车8 杂音): 欠载后重建缓冲垫。开播后连续播放中途在途归零（一次 GC 停顿 / 渲染卡顿吃光了缓冲垫），
++        //   游戏之后按实时节奏产出，产多少播多少，垫子永远补不回来：设备从此零余量播，每个 IO 周期都差一点（实测每秒约 42 次
++        //   ≤4.8 ms 断口，就是杂音），直到收局。所以归零后 1 秒内再有数据，先补一块预充深度的静音再送：一次短停顿换回缓冲深度。
++        //   延迟不累加（下一次卡顿先吃掉这块垫子）；归零超过 1 秒（游戏自己停了）不补。缺省开（10-23 马车8 测试机1 同包 A/B 后翻缺省），S2A_AUDIO_CUSHION=0 关
++        private static readonly bool _cushionOn = Environment.GetEnvironmentVariable("S2A_AUDIO_CUSHION") != "0";
++        private long _zeroSince;   // 在途归零的时刻（Stopwatch；0 = 没归零 / 已补过）
+ 
+         /// <summary>
+         /// Queued samples not yet submitted to the device.
+@@ -79,6 +86,13 @@ namespace Ryujinx.Audio.Backends.Common
+         {
+         }
+ 
++        /// <summary>
++        /// S2Arm: a cushion of <paramref name="bytes"/> bytes of silence was submitted after an underrun (under the pump lock).
++        /// </summary>
++        protected virtual void OnCushion(int bytes, long zeroTicks)
++        {
++        }
++
+         /// <summary>
+         /// Move queued samples into free pool buffers and submit them.
+         /// </summary>
+@@ -95,6 +109,29 @@ namespace Ryujinx.Audio.Backends.Common
+                         return;
+                     }
+ 
++                    // S2Arm: 欠载后先补一块静音重建缓冲垫（见 _cushionOn）
++                    if (_cushionOn && _primed != 0 && _zeroSince != 0 && Interlocked.Read(ref _inFlightBytes) == 0 && _freeCount > 1)
++                    {
++                        long zt = Stopwatch.GetTimestamp() - _zeroSince;
++                        _zeroSince = 0;
++
++                        if (zt < Stopwatch.Frequency)
++                        {
++                            int z = (int)Math.Min(_primeFloorBytes, _slotBytes) / _bytesPerFrame * _bytesPerFrame;
++
++                            if (z > 0)
++                            {
++                                int cs = _free[--_freeCount];
++                                SlotData(cs)[..z].Clear();
++                                _filled[cs] = z;
++                                Interlocked.Add(ref _inFlightBytes, z);
++                                OnCushion(z, zt);
++                                Submit(cs, z);
++                            }
++                        }
++                    }
++
++                    _zeroSince = 0;
+                     int slot = _free[--_freeCount];
+                     int read = Samples.Read(SlotData(slot)[..n]);
+ 
+@@ -171,6 +208,11 @@ namespace Ryujinx.Audio.Backends.Common
+                 _free[_freeCount++] = slot;
+                 long inFlight = Interlocked.Add(ref _inFlightBytes, -bytes);
+ 
++                if (inFlight == 0 && bytes > 0)
++                {
++                    _zeroSince = Stopwatch.GetTimestamp();
++                }
++
+                 OnReturned(bytes, inFlight);
+ 
+                 return bytes;

@@ -1,0 +1,80 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+index ff7b82a5d63f851c14b237e5970ddcedd6f5cea7..90774ba334bbaf67230eb778fc1e12f3baa08c1d 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/SoftwareKeyboardApplet.cs
+@@ -59,6 +59,10 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         private IDynamicTextInputHandler _dynamicTextInputHandler = null;
+         private SoftwareKeyboardRenderer _keyboardRenderer = null;
++
++        // S2Arm: headless host (no UI theme) — no on-screen keyboard; when the game shows the inline keyboard,
++        // the text comes from the host's input dialog policy (same as the foreground keyboard) and is submitted at once
++        private bool _headless;
+         private NpadReader _npads = null;
+         private bool _canAcceptController = false;
+         private KeyboardInputMode _inputMode = KeyboardInputMode.ControllerAndKeyboard;
+@@ -93,11 +97,13 @@ namespace Ryujinx.HLE.HOS.Applets
+                     _keyboardBackgroundInitialize = MemoryMarshal.Read<SoftwareKeyboardInitialize>(keyboardConfig);
+                     _backgroundState = InlineKeyboardState.Uninitialized;
+ 
++                    _headless = _device.UIHandler != null && _device.UIHandler.HostUITheme == null;
++
+                     if (_device.UIHandler == null)
+                     {
+                         Logger.Error?.Print(LogClass.ServiceAm, "GUI Handler is not set, software keyboard applet will not work properly");
+                     }
+-                    else
++                    else if (!_headless)
+                     {
+                         // Create a text handler that converts keyboard strokes to strings.
+                         _dynamicTextInputHandler = _device.UIHandler.CreateDynamicTextInputHandler();
+@@ -458,8 +464,8 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                     if (updateText)
+                     {
+-                        _dynamicTextInputHandler.SetText(_textValue, _cursorBegin);
+-                        _keyboardRenderer.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
++                        _dynamicTextInputHandler?.SetText(_textValue, _cursorBegin);
++                        _keyboardRenderer?.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
+                     }
+ 
+                     if ((newCalc.Flags & KeyboardCalcFlags.MustShow) != 0)
+@@ -473,6 +479,14 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+                     // Send the response to the Calc
+                     _interactiveSession.Push(InlineResponses.Default(_backgroundState));
++
++                    if (_headless && _backgroundState == InlineKeyboardState.Shown)
++                    {
++                        SoftwareKeyboardUIArgs args = new() { KeyboardMode = KeyboardMode.Default, InitialText = _textValue, StringLengthMax = MaxUiTextSize };
++                        bool ok = _device.UIHandler.DisplayInputDialog(args, out string text);
++                        text ??= _textValue ?? string.Empty;
++                        PushUpdatedState(text, text.Length, ok ? KeyboardResult.Accept : KeyboardResult.Cancel);
++                    }
+                     break;
+                 case InlineKeyboardRequest.Finalize:
+                     // Destroy the frontend.
+@@ -491,6 +505,11 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         private void ActivateFrontend()
+         {
++            if (_headless)
++            {
++                return;
++            }
++
+             Logger.Debug?.Print(LogClass.ServiceAm, "Activating software keyboard frontend");
+ 
+             _inputMode = KeyboardInputMode.ControllerAndKeyboard;
+@@ -510,6 +529,11 @@ namespace Ryujinx.HLE.HOS.Applets
+ 
+         private void DeactivateFrontend()
+         {
++            if (_headless)
++            {
++                return;
++            }
++
+             Logger.Debug?.Print(LogClass.ServiceAm, "Deactivating software keyboard frontend");
+ 
+             _inputMode = KeyboardInputMode.ControllerAndKeyboard;

@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+index 6c294adf6b8d7c1514a86aeb3f8a0dc57e9484ef..9474a86043da8ca6758ea3772afe6d3e02bd6683 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+@@ -15,6 +15,7 @@ namespace Ryujinx.Graphics.Nvdec
+     static class Vp9Decoder
+     {
+         private static readonly Decoder _decoder = new();
++        private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take this (managed) VP9 path
+ 
+         public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
+         {
+@@ -61,6 +62,12 @@ namespace Ryujinx.Graphics.Nvdec
+             if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+             {
+                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
++
++                if (!_s2aLogged)
++                {
++                    _s2aLogged = true;
++                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"VP9（Ryujinx 托管解码器）首帧解出：{pictureInfo.CurrentFrameSize.Width}x{pictureInfo.CurrentFrameSize.Height}");
++                }
+             }
+ 
+             WriteBackwardUpdates(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, ref info.BackwardUpdateCounts);

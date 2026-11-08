@@ -1,0 +1,94 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index f6cf04e03e594dd22d47cba22c0eead40192be62..c5a28f5ad5e95c9851dd8d7ed24903ef6f72bbb3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -780,9 +780,32 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// Signal that a texture in the group has been modified by the GPU.
+         /// </summary>
+         /// <param name="texture">The texture that has been modified</param>
++        // S2A（帧率能耗线 10-23）：GPU 写了这组贴图（渲染目标绑定 / 图像存储写 / 拷贝）→ 整组内存登记成定向读时回写页（每组一次）。
++        // 写跟踪缺省只拦写不拦读，游戏读渲染目标里 GPU 画了、还没回写的字节拿到旧值：塞尔达站立贴地读的就是渲染目标（16×1 / 16×3 R16G16B16A16Float 等，
++        // Mac 同存档诊断局：游戏真读到 GPU 改过子页的贴图全部是渲染目标写的）。登记后游戏读先回写，同 Ryujinx 原版
++        private bool _s2aReadFlushMarked;
++
++        private void S2AMarkReadFlushOnce()
++        {
++            if (_s2aReadFlushMarked)
++            {
++                return;
++            }
++
++            _s2aReadFlushMarked = true;
++            MultiRange range = Storage.Range;
++
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange sub = range.GetSubRange(i);
++                Ryujinx.Graphics.Gpu.Memory.MemoryManager.S2AMarkReadFlush(sub.Address, sub.Size);
++            }
++        }
++
+         public void SignalModified(Texture texture)
+         {
+             ModifiedSequence = _context.GetModifiedSequence();
++            S2AMarkReadFlushOnce();
+ 
+             ClearIncompatibleOverlaps(texture);
+ 
+@@ -810,6 +833,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             ModifiedSequence = _context.GetModifiedSequence();
+ 
++            if (bound)
++            {
++                S2AMarkReadFlushOnce();
++            }
++
+             ClearIncompatibleOverlaps(texture);
+             
+             EvaluateRelevantHandles(texture, _signalModifyingCallback, out _, bound);
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index 7f462e52b75933af54ce9c5ba81c685536a6f427..5f7f93043242af230e31b1ac1dfbab6e4df7552f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -365,6 +365,17 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="address">The start address of the modified region</param>
+         /// <param name="size">The size of the modified region</param>
+         /// <param name="stage">Buffer stage that triggered the modification</param>
++        private bool _s2aReadFlushMarked;
++
++        private void S2AMarkReadFlushOnce()
++        {
++            if (!_s2aReadFlushMarked)
++            {
++                _s2aReadFlushMarked = true;
++                MemoryManager.S2AMarkReadFlush(Address, Size);
++            }
++        }
++
+         public void SignalModified(ulong address, ulong size, BufferStage stage)
+         {
+             if (ModTrace.On) ModTrace.Note(address, size, stage);
+@@ -375,6 +386,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             _modifiedRanges.SignalModified(address, size);
+ 
++            // S2A（帧率能耗线 10-23）：GPU 写了缓冲 → 整个缓冲登记成定向读时回写页（每个缓冲对象一次）。写跟踪缺省只拦写不拦读，
++            // 游戏读 GPU 改过、还没回写的缓冲字节拿到旧值：塞尔达 shader 存储写（StorageWrite）的结果被游戏读，站立时脚陷进地里、碎草不画
++            // （10-23 jhz 实机；Mac 同存档只开全局 READFLUSH 即正常）。登记后游戏读到这些页上 GPU 改过的子页先回写，同 Ryujinx 原版语义；
++            // 没有 GPU 改过子页的页不设不可读，只登记不花钱
++            S2AMarkReadFlushOnce();
++
+             if (!_syncActionRegistered)
+             {
+                 _context.RegisterSyncAction(this);
+@@ -496,6 +513,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 EnsureRangeList();
+ 
+                 _modifiedRanges.InheritRanges(from._modifiedRanges, RegisterRangeAction);
++
++                // S2A：继承来的「GPU 改过」也要登记定向读时回写（合并 / 拆分出的新缓冲没经过 SignalModified；10-23 塞尔达 Compute 缓冲漏登记 6 次）
++                S2AMarkReadFlushOnce();
+             }
+ 
+             if (from._dirtyStart != ulong.MaxValue)

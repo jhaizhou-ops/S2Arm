@@ -1,0 +1,171 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs
+index 4f98a8fb5ec5a8d55cbf8d9701075f83a3b09911..fad13867eab154892ed5bdebe02c062ab00b816f 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs
+@@ -144,6 +144,26 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             float b1 = denominatorSpan[0];
+             float b2 = denominatorSpan[1];
+ 
++            // S2Arm: 快路径同上（状态放局部变量）；运算与顺序同原循环
++            if (S2ADspFast.On)
++            {
++                float s0 = state.State0, s1 = state.State1;
++
++                for (int i = 0; i < sampleCount; i++)
++                {
++                    float input = inputBuffer[i];
++                    float output = input * a0 + s0;
++
++                    s0 = input * a1 + output * b1 + s1;
++                    s1 = input * a2 + output * b2;
++
++                    outputBuffer[i] = output;
++                }
++
++                state.State0 = s0; state.State1 = s1;
++                return;
++            }
++
+             for (int i = 0; i < sampleCount; i++)
+             {
+                 float input = inputBuffer[i];
+@@ -285,6 +305,30 @@ namespace Ryujinx.Audio.Renderer.Dsp
+                 float b1 = denominatorSpan[0];
+                 float b2 = denominatorSpan[1];
+ 
++                // S2Arm: 快路径（S2A_AUDIO_DSP_FAST=1）把状态放进局部变量逐样本推进、末尾写回；运算与顺序同下方原循环，输出一致。
++                //   原循环每个样本经 ref 读写 4 个状态字段（输出缓冲可能与状态别名，编译器不能放寄存器）
++                if (S2ADspFast.On)
++                {
++                    float s0 = state.State0, s1 = state.State1, s2 = state.State2, s3 = state.State3;
++                    ReadOnlySpan<float> src = stageIndex != 0 ? outputBuffer : inputBuffer;
++
++                    for (int i = 0; i < sampleCount; i++)
++                    {
++                        float input = src[i];
++                        float output = input * a0 + s0 * a1 + s1 * a2 + s2 * b1 + s3 * b2;
++
++                        s1 = s0;
++                        s0 = input;
++                        s3 = s2;
++                        s2 = output;
++
++                        outputBuffer[i] = output;
++                    }
++
++                    state.State0 = s0; state.State1 = s1; state.State2 = s2; state.State3 = s3;
++                    continue;
++                }
++
+                 for (int i = 0; i < sampleCount; i++)
+                 {
+                     float input = stageIndex != 0 ? outputBuffer[i] : inputBuffer[i];
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/DataSourceHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/DataSourceHelper.cs
+index 9e4e0489049b0c8c7a6e2f49475090a68846db28..1ae3aa32d354da665f5c1fd34e86d353392c6fc3 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/DataSourceHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/DataSourceHelper.cs
+@@ -42,6 +42,9 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             };
+         }
+ 
++        // S2Arm: SkipLocalsInit 让下面 32 KB 的 stackalloc 不再隐式清零；清零改为显式：快路径关时整块清（与原行为一致），
++        //   开时只清会被读到的前段（重采样最多读到 音高保留段 + 本轮解码数 + 滤波抽头，见下方注释），其余从不被读。
++        [SkipLocalsInit]
+         public static void ProcessWaveBuffers(IVirtualMemoryManager memoryManager, Span<float> outputBuffer, ref WaveBufferInformation info, Span<WaveBuffer> wavebuffers, ref VoiceState voiceState, uint targetSampleRate, int sampleCount)
+         {
+             const int TempBufferSize = 0x3F00;
+@@ -60,6 +63,17 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             int totalNeededSize = (int)MathF.Truncate(fraction + sampleRateRatio * sampleCount);
+ 
++            // 读到的最远位置：每轮从 0 开始写 音高保留段（pitchMaxLength）+ 本轮解码数（≤ totalNeededSize），重采样再往后最多读滤波抽头数（≤ 8）；
++            //   留 32 个余量。totalNeededSize 为负或超长时下面整段不进，照样整块清，行为不变。
++            if (!S2ADspFast.On || totalNeededSize < 0 || totalNeededSize + pitchMaxLength + 32 > TempBufferSize)
++            {
++                tempBuffer.Clear();
++            }
++            else
++            {
++                tempBuffer[..(totalNeededSize + pitchMaxLength + 32)].Clear();
++            }
++
+             if (totalNeededSize + pitchMaxLength <= TempBufferSize && totalNeededSize >= 0)
+             {
+                 int sourceSampleCountToProcess = sampleCount;
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs b/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
+index 0de34101e969561c38735462fa27574ddccf01eb..be00d1b2fcf907e16cc0897b9ac309191c4a347a 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs
+@@ -2,6 +2,7 @@ using System;
+ using System.Linq;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.Intrinsics;
++using System.Runtime.Intrinsics.Arm;
+ using System.Runtime.Intrinsics.X86;
+ using Ryujinx.Audio.Renderer.Parameter;
+ 
+@@ -389,7 +390,45 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             // TODO: REV8 fast path (when needPitch == false the input index progression is constant + we need SIMD)
+ 
+-            if (Sse41.IsSupported)
++            // S2Arm: ARM 快路径（S2A_AUDIO_DSP_FAST=1）。与下方标量路径逐样本一致：下标 / 小数推进照标量逐个算，
++            //   乘积逐项算（不融合乘加），4×4 转置后按标量的求和顺序 ((x0+x1)+x2)+x3 相加，舍入用就近取偶（= Math.Round 缺省）。
++            if (S2ADspFast.On && AdvSimd.Arm64.IsSupported)
++            {
++                fixed (short* pInput = inputBuffer)
++                fixed (float* pOutput = outputBuffer, pParameters = parameters)
++                {
++                    for (; i < (sampleCount & ~3); i += 4)
++                    {
++                        int b0 = (int)(fraction * 128) * 4; int x0 = inputBufferIndex;
++                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
++                        int b1 = (int)(fraction * 128) * 4; int x1 = inputBufferIndex;
++                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
++                        int b2 = (int)(fraction * 128) * 4; int x2 = inputBufferIndex;
++                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
++                        int b3 = (int)(fraction * 128) * 4; int x3 = inputBufferIndex;
++                        fraction += ratio; inputBufferIndex += (int)fraction; fraction -= (int)fraction;
++
++                        Vector128<float> m0 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x0))), AdvSimd.LoadVector128(pParameters + b0));
++                        Vector128<float> m1 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x1))), AdvSimd.LoadVector128(pParameters + b1));
++                        Vector128<float> m2 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x2))), AdvSimd.LoadVector128(pParameters + b2));
++                        Vector128<float> m3 = AdvSimd.Multiply(AdvSimd.ConvertToSingle(AdvSimd.SignExtendWideningLower(AdvSimd.LoadVector64(pInput + x3))), AdvSimd.LoadVector128(pParameters + b3));
++
++                        // 转置：c_k = (m0[k], m1[k], m2[k], m3[k])
++                        Vector128<ulong> t0 = AdvSimd.Arm64.ZipLow(m0, m1).AsUInt64();
++                        Vector128<ulong> t1 = AdvSimd.Arm64.ZipHigh(m0, m1).AsUInt64();
++                        Vector128<ulong> t2 = AdvSimd.Arm64.ZipLow(m2, m3).AsUInt64();
++                        Vector128<ulong> t3 = AdvSimd.Arm64.ZipHigh(m2, m3).AsUInt64();
++                        Vector128<float> c0 = AdvSimd.Arm64.ZipLow(t0, t2).AsSingle();
++                        Vector128<float> c1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsSingle();
++                        Vector128<float> c2 = AdvSimd.Arm64.ZipLow(t1, t3).AsSingle();
++                        Vector128<float> c3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsSingle();
++
++                        Vector128<float> sum = AdvSimd.Add(AdvSimd.Add(AdvSimd.Add(c0, c1), c2), c3);
++                        AdvSimd.Store(pOutput + i, AdvSimd.RoundToNearest(sum));
++                    }
++                }
++            }
++            else if (Sse41.IsSupported)
+             {
+                 if (ratio == 1f)
+                 {
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d06c712a752efb805b91b041559f4e2b0ff7133f
+--- /dev/null
++++ b/src/Ryujinx.Audio/Renderer/Dsp/S2ADspFast.cs
+@@ -0,0 +1,12 @@
++using System;
++
++namespace Ryujinx.Audio.Renderer.Dsp
++{
++    // S2Arm (10-23 塞尔达分层账：C# 前三热点全是音频 DSP)：ARM 上的音频 DSP 快路径开关。
++    //   S2A_AUDIO_DSP_FAST=1 开（缺省关，测试机2 同包 A/B 达标后翻缺省）。快路径与原路径逐样本输出一致（同运算、同求和顺序、同舍入），
++    //   只去掉 ARM 上的多余开销：重采样走标量（SSE 快路径只认 x86）、每次 32 KB 栈缓冲清零、双二阶滤波器状态逐样本经引用读写。
++    internal static class S2ADspFast
++    {
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_AUDIO_DSP_FAST") == "1";
++    }
++}

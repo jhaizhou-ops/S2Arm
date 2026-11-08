@@ -1,0 +1,1488 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Effects/FxaaPostProcessingEffect.cs b/src/Ryujinx.Graphics.Vulkan/Effects/FxaaPostProcessingEffect.cs
+deleted file mode 100644
+index e5701862414c3098dab17e967306cd0f8cb0ffcb..0000000000000000000000000000000000000000
+--- a/src/Ryujinx.Graphics.Vulkan/Effects/FxaaPostProcessingEffect.cs
++++ /dev/null
+@@ -1,87 +0,0 @@
+-using Ryujinx.Common;
+-using Ryujinx.Graphics.GAL;
+-using Ryujinx.Graphics.Shader;
+-using Ryujinx.Graphics.Shader.Translation;
+-using Silk.NET.Vulkan;
+-using System;
+-using SamplerCreateInfo = Ryujinx.Graphics.GAL.SamplerCreateInfo;
+-
+-namespace Ryujinx.Graphics.Vulkan.Effects
+-{
+-    internal class FxaaPostProcessingEffect : IPostProcessingEffect
+-    {
+-        private readonly VulkanRenderer _renderer;
+-        private ISampler _samplerLinear;
+-        private ShaderCollection _shaderProgram;
+-
+-        private readonly PipelineHelperShader _pipeline;
+-        private TextureView _texture;
+-
+-        public FxaaPostProcessingEffect(VulkanRenderer renderer, Device device)
+-        {
+-            _renderer = renderer;
+-            _pipeline = new PipelineHelperShader(renderer, device);
+-
+-            Initialize();
+-        }
+-
+-        public void Dispose()
+-        {
+-            _shaderProgram.Dispose();
+-            _pipeline.Dispose();
+-            _samplerLinear.Dispose();
+-            _texture?.Dispose();
+-        }
+-
+-        private void Initialize()
+-        {
+-            _pipeline.Initialize();
+-
+-            byte[] shader = EmbeddedResources.Read("Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.spv");
+-
+-            ResourceLayout resourceLayout = new ResourceLayoutBuilder()
+-                .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 2)
+-                .Add(ResourceStages.Compute, ResourceType.TextureAndSampler, 1)
+-                .Add(ResourceStages.Compute, ResourceType.Image, 0, true).Build();
+-
+-            _samplerLinear = _renderer.CreateSampler(SamplerCreateInfo.Create(MinFilter.Linear, MagFilter.Linear));
+-
+-            _shaderProgram = _renderer.CreateProgramWithMinimalLayout([
+-                new ShaderSource(shader, ShaderStage.Compute, TargetLanguage.Spirv)
+-            ], resourceLayout);
+-        }
+-
+-        public TextureView Run(TextureView view, CommandBufferScoped cbs, int width, int height)
+-        {
+-            if (_texture == null || _texture.Width != view.Width || _texture.Height != view.Height)
+-            {
+-                _texture?.Dispose();
+-                _texture = _renderer.CreateTexture(view.Info) as TextureView;
+-            }
+-
+-            _pipeline.SetCommandBuffer(cbs);
+-            _pipeline.SetProgram(_shaderProgram);
+-            _pipeline.SetTextureAndSampler(ShaderStage.Compute, 1, view, _samplerLinear);
+-
+-            ReadOnlySpan<float> resolutionBuffer = [view.Width, view.Height];
+-            int rangeSize = resolutionBuffer.Length * sizeof(float);
+-            using ScopedTemporaryBuffer buffer = _renderer.BufferManager.ReserveOrCreate(_renderer, cbs, rangeSize);
+-
+-            buffer.Holder.SetDataUnchecked(buffer.Offset, resolutionBuffer);
+-
+-            _pipeline.SetUniformBuffers([new BufferAssignment(2, buffer.Range)]);
+-
+-            int dispatchX = BitUtils.DivRoundUp(view.Width, IPostProcessingEffect.LocalGroupSize);
+-            int dispatchY = BitUtils.DivRoundUp(view.Height, IPostProcessingEffect.LocalGroupSize);
+-
+-            _pipeline.SetImage(ShaderStage.Compute, 0, _texture.GetView(FormatTable.ConvertRgba8SrgbToUnorm(view.Info.Format)));
+-            _pipeline.DispatchCompute(dispatchX, dispatchY, 1);
+-
+-            _pipeline.ComputeBarrier();
+-
+-            _pipeline.Finish();
+-
+-            return _texture;
+-        }
+-    }
+-}
+diff --git a/src/Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.glsl b/src/Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.glsl
+deleted file mode 100644
+index f197c64ca1770cbe63c6a4e13ab85f2956384a25..0000000000000000000000000000000000000000
+--- a/src/Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.glsl
++++ /dev/null
+@@ -1,1177 +0,0 @@
+-/*============================================================================
+-
+-
+-                    NVIDIA FXAA 3.11 by TIMOTHY LOTTES
+-
+-
+-------------------------------------------------------------------------------
+-COPYRIGHT (C) 2010, 2011 NVIDIA CORPORATION. ALL RIGHTS RESERVED.
+-------------------------------------------------------------------------------
+-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED
+-*AS IS* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS
+-OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF
+-MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. IN NO EVENT SHALL NVIDIA
+-OR ITS SUPPLIERS BE LIABLE FOR ANY SPECIAL, INCIDENTAL, INDIRECT, OR
+-CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR
+-LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS INFORMATION,
+-OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR INABILITY TO USE
+-THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+-DAMAGES.
+-
+-------------------------------------------------------------------------------
+-                           INTEGRATION CHECKLIST
+-------------------------------------------------------------------------------
+-(1.)
+-In the shader source, setup defines for the desired configuration.
+-When providing multiple shaders (for different presets),
+-simply setup the defines differently in multiple files.
+-Example,
+-
+-  #define FXAA_PC 1
+-  #define FXAA_HLSL_5 1
+-  #define FXAA_QUALITY_PRESET 12
+-
+-Or,
+-
+-  #define FXAA_360 1
+-  
+-Or,
+-
+-  #define FXAA_PS3 1
+-  
+-Etc.
+-
+-(2.)
+-Then include this file,
+-
+-  #include "Fxaa3_11.h"
+-
+-(3.)
+-Then call the FXAA pixel shader from within your desired shader.
+-Look at the FXAA Quality FxaaPixelShader() for docs on inputs.
+-As for FXAA 3.11 all inputs for all shaders are the same 
+-to enable easy porting between platforms.
+-
+-  return FxaaPixelShader(...);
+-
+-(4.)
+-Insure pass prior to FXAA outputs RGBL (see next section).
+-Or use,
+-
+-  #define FXAA_GREEN_AS_LUMA 1
+-
+-(5.)
+-Setup engine to provide the following constants
+-which are used in the FxaaPixelShader() inputs,
+-
+-  FxaaFloat2 fxaaQualityRcpFrame,
+-  FxaaFloat4 fxaaConsoleRcpFrameOpt,
+-  FxaaFloat4 fxaaConsoleRcpFrameOpt2,
+-  FxaaFloat4 fxaaConsole360RcpFrameOpt2,
+-  FxaaFloat fxaaQualitySubpix,
+-  FxaaFloat fxaaQualityEdgeThreshold,
+-  FxaaFloat fxaaQualityEdgeThresholdMin,
+-  FxaaFloat fxaaConsoleEdgeSharpness,
+-  FxaaFloat fxaaConsoleEdgeThreshold,
+-  FxaaFloat fxaaConsoleEdgeThresholdMin,
+-  FxaaFloat4 fxaaConsole360ConstDir
+-
+-Look at the FXAA Quality FxaaPixelShader() for docs on inputs.
+-
+-(6.)
+-Have FXAA vertex shader run as a full screen triangle,
+-and output "pos" and "fxaaConsolePosPos" 
+-such that inputs in the pixel shader provide,
+-
+-  // {xy} = center of pixel
+-  FxaaFloat2 pos,
+-
+-  // {xy_} = upper left of pixel
+-  // {_zw} = lower right of pixel
+-  FxaaFloat4 fxaaConsolePosPos,
+-
+-(7.)
+-Insure the texture sampler(s) used by FXAA are set to bilinear filtering.
+-
+-
+-------------------------------------------------------------------------------
+-                    INTEGRATION - RGBL AND COLORSPACE
+-------------------------------------------------------------------------------
+-FXAA3 requires RGBL as input unless the following is set, 
+-
+-  #define FXAA_GREEN_AS_LUMA 1
+-
+-In which case the engine uses green in place of luma,
+-and requires RGB input is in a non-linear colorspace.
+-
+-RGB should be LDR (low dynamic range).
+-Specifically do FXAA after tonemapping.
+-
+-RGB data as returned by a texture fetch can be non-linear,
+-or linear when FXAA_GREEN_AS_LUMA is not set.
+-Note an "sRGB format" texture counts as linear,
+-because the result of a texture fetch is linear data.
+-Regular "RGBA8" textures in the sRGB colorspace are non-linear.
+-
+-If FXAA_GREEN_AS_LUMA is not set,
+-luma must be stored in the alpha channel prior to running FXAA.
+-This luma should be in a perceptual space (could be gamma 2.0).
+-Example pass before FXAA where output is gamma 2.0 encoded,
+-
+-  color.rgb = ToneMap(color.rgb); // linear color output
+-  color.rgb = sqrt(color.rgb);    // gamma 2.0 color output
+-  return color;
+-
+-To use FXAA,
+-
+-  color.rgb = ToneMap(color.rgb);  // linear color output
+-  color.rgb = sqrt(color.rgb);     // gamma 2.0 color output
+-  color.a = dot(color.rgb, FxaaFloat3(0.299, 0.587, 0.114)); // compute luma
+-  return color;
+-
+-Another example where output is linear encoded,
+-say for instance writing to an sRGB formated render target,
+-where the render target does the conversion back to sRGB after blending,
+-
+-  color.rgb = ToneMap(color.rgb); // linear color output
+-  return color;
+-
+-To use FXAA,
+-
+-  color.rgb = ToneMap(color.rgb); // linear color output
+-  color.a = sqrt(dot(color.rgb, FxaaFloat3(0.299, 0.587, 0.114))); // compute luma
+-  return color;
+-
+-Getting luma correct is required for the algorithm to work correctly.
+-
+-
+-------------------------------------------------------------------------------
+-                          BEING LINEARLY CORRECT?
+-------------------------------------------------------------------------------
+-Applying FXAA to a framebuffer with linear RGB color will look worse.
+-This is very counter intuitive, but happends to be true in this case.
+-The reason is because dithering artifacts will be more visiable 
+-in a linear colorspace.
+-
+-
+-------------------------------------------------------------------------------
+-                             COMPLEX INTEGRATION
+-------------------------------------------------------------------------------
+-Q. What if the engine is blending into RGB before wanting to run FXAA?
+-
+-A. In the last opaque pass prior to FXAA,
+-   have the pass write out luma into alpha.
+-   Then blend into RGB only.
+-   FXAA should be able to run ok
+-   assuming the blending pass did not any add aliasing.
+-   This should be the common case for particles and common blending passes.
+-
+-A. Or use FXAA_GREEN_AS_LUMA.
+-
+-============================================================================*/
+-
+-#version 430 core
+-
+-layout(local_size_x = 16, local_size_y = 16) in;
+-layout(rgba8, binding = 0, set = 3) uniform image2D imgOutput;
+-
+-layout(binding = 1, set = 2) uniform sampler2D inputImage;
+-layout(binding = 2) uniform invResolution
+-{
+-    vec2 invResolution_data;
+-};
+-
+-#define FXAA_QUALITY_PRESET 12
+-#define FXAA_GREEN_AS_LUMA 1
+-#define FXAA_PC 1
+-#define FXAA_GLSL_130 1
+-
+-
+-/*============================================================================
+-
+-                             INTEGRATION KNOBS
+-
+-/*==========================================================================*/
+-#ifndef FXAA_PC
+-    //
+-    // FXAA Quality
+-    // The high quality PC algorithm.
+-    //
+-    #define FXAA_PC 0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_GLSL_120
+-    #define FXAA_GLSL_120 0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_GLSL_130
+-    #define FXAA_GLSL_130 0
+-#endif
+-/*==========================================================================*/
+-#ifndef FXAA_GREEN_AS_LUMA
+-    //
+-    // For those using non-linear color,
+-    // and either not able to get luma in alpha, or not wanting to,
+-    // this enables FXAA to run using green as a proxy for luma.
+-    // So with this enabled, no need to pack luma in alpha.
+-    //
+-    // This will turn off AA on anything which lacks some amount of green.
+-    // Pure red and blue or combination of only R and B, will get no AA.
+-    //
+-    // Might want to lower the settings for both,
+-    //    fxaaConsoleEdgeThresholdMin
+-    //    fxaaQualityEdgeThresholdMin
+-    // In order to insure AA does not get turned off on colors 
+-    // which contain a minor amount of green.
+-    //
+-    // 1 = On.
+-    // 0 = Off.
+-    //
+-    #define FXAA_GREEN_AS_LUMA 0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_EARLY_EXIT
+-    //
+-    // Controls algorithm's early exit path.
+-    // On PS3 turning this ON adds 2 cycles to the shader.
+-    // On 360 turning this OFF adds 10ths of a millisecond to the shader.
+-    // Turning this off on console will result in a more blurry image.
+-    // So this defaults to on.
+-    //
+-    // 1 = On.
+-    // 0 = Off.
+-    //
+-    #define FXAA_EARLY_EXIT 1
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_DISCARD
+-    //
+-    // Only valid for PC OpenGL currently.
+-    // Probably will not work when FXAA_GREEN_AS_LUMA = 1.
+-    //
+-    // 1 = Use discard on pixels which don't need AA.
+-    //     For APIs which enable concurrent TEX+ROP from same surface.
+-    // 0 = Return unchanged color on pixels which don't need AA.
+-    //
+-    #define FXAA_DISCARD 0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_FAST_PIXEL_OFFSET
+-    //
+-    // Used for GLSL 120 only.
+-    //
+-    // 1 = GL API supports fast pixel offsets
+-    // 0 = do not use fast pixel offsets
+-    //
+-    #ifdef GL_EXT_gpu_shader4
+-        #define FXAA_FAST_PIXEL_OFFSET 1
+-    #endif
+-    #ifdef GL_NV_gpu_shader5
+-        #define FXAA_FAST_PIXEL_OFFSET 1
+-    #endif
+-    #ifdef GL_ARB_gpu_shader5
+-        #define FXAA_FAST_PIXEL_OFFSET 1
+-    #endif
+-    #ifndef FXAA_FAST_PIXEL_OFFSET
+-        #define FXAA_FAST_PIXEL_OFFSET 0
+-    #endif
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#ifndef FXAA_GATHER4_ALPHA
+-    //
+-    // 1 = API supports gather4 on alpha channel.
+-    // 0 = API does not support gather4 on alpha channel.
+-    //
+-    #if (FXAA_HLSL_5 == 1)
+-        #define FXAA_GATHER4_ALPHA 1
+-    #endif
+-    #ifdef GL_ARB_gpu_shader5
+-        #define FXAA_GATHER4_ALPHA 1
+-    #endif
+-    #ifdef GL_NV_gpu_shader5
+-        #define FXAA_GATHER4_ALPHA 1
+-    #endif
+-    #ifndef FXAA_GATHER4_ALPHA
+-        #define FXAA_GATHER4_ALPHA 0
+-    #endif
+-#endif
+-
+-/*============================================================================
+-                        FXAA QUALITY - TUNING KNOBS
+-------------------------------------------------------------------------------
+-NOTE the other tuning knobs are now in the shader function inputs!
+-============================================================================*/
+-#ifndef FXAA_QUALITY_PRESET
+-    //
+-    // Choose the quality preset.
+-    // This needs to be compiled into the shader as it effects code.
+-    // Best option to include multiple presets is to 
+-    // in each shader define the preset, then include this file.
+-    // 
+-    // OPTIONS
+-    // -----------------------------------------------------------------------
+-    // 10 to 15 - default medium dither (10=fastest, 15=highest quality)
+-    // 20 to 29 - less dither, more expensive (20=fastest, 29=highest quality)
+-    // 39       - no dither, very expensive 
+-    //
+-    // NOTES
+-    // -----------------------------------------------------------------------
+-    // 12 = slightly faster then FXAA 3.9 and higher edge quality (default)
+-    // 13 = about same speed as FXAA 3.9 and better than 12
+-    // 23 = closest to FXAA 3.9 visually and performance wise
+-    //  _ = the lowest digit is directly related to performance
+-    // _  = the highest digit is directly related to style
+-    // 
+-    #define FXAA_QUALITY_PRESET 12
+-#endif
+-
+-
+-/*============================================================================
+-
+-                           FXAA QUALITY - PRESETS
+-
+-============================================================================*/
+-
+-/*============================================================================
+-                     FXAA QUALITY - MEDIUM DITHER PRESETS
+-============================================================================*/
+-#if (FXAA_QUALITY_PRESET == 10)
+-    #define FXAA_QUALITY_PS 3
+-    #define FXAA_QUALITY_P0 1.5
+-    #define FXAA_QUALITY_P1 3.0
+-    #define FXAA_QUALITY_P2 12.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 11)
+-    #define FXAA_QUALITY_PS 4
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 3.0
+-    #define FXAA_QUALITY_P3 12.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 12)
+-    #define FXAA_QUALITY_PS 5
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 4.0
+-    #define FXAA_QUALITY_P4 12.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 13)
+-    #define FXAA_QUALITY_PS 6
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 4.0
+-    #define FXAA_QUALITY_P5 12.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 14)
+-    #define FXAA_QUALITY_PS 7
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 4.0
+-    #define FXAA_QUALITY_P6 12.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 15)
+-    #define FXAA_QUALITY_PS 8
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 4.0
+-    #define FXAA_QUALITY_P7 12.0
+-#endif
+-
+-/*============================================================================
+-                     FXAA QUALITY - LOW DITHER PRESETS
+-============================================================================*/
+-#if (FXAA_QUALITY_PRESET == 20)
+-    #define FXAA_QUALITY_PS 3
+-    #define FXAA_QUALITY_P0 1.5
+-    #define FXAA_QUALITY_P1 2.0
+-    #define FXAA_QUALITY_P2 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 21)
+-    #define FXAA_QUALITY_PS 4
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 22)
+-    #define FXAA_QUALITY_PS 5
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 23)
+-    #define FXAA_QUALITY_PS 6
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 24)
+-    #define FXAA_QUALITY_PS 7
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 3.0
+-    #define FXAA_QUALITY_P6 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 25)
+-    #define FXAA_QUALITY_PS 8
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 4.0
+-    #define FXAA_QUALITY_P7 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 26)
+-    #define FXAA_QUALITY_PS 9
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 2.0
+-    #define FXAA_QUALITY_P7 4.0
+-    #define FXAA_QUALITY_P8 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 27)
+-    #define FXAA_QUALITY_PS 10
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 2.0
+-    #define FXAA_QUALITY_P7 2.0
+-    #define FXAA_QUALITY_P8 4.0
+-    #define FXAA_QUALITY_P9 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 28)
+-    #define FXAA_QUALITY_PS 11
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 2.0
+-    #define FXAA_QUALITY_P7 2.0
+-    #define FXAA_QUALITY_P8 2.0
+-    #define FXAA_QUALITY_P9 4.0
+-    #define FXAA_QUALITY_P10 8.0
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_QUALITY_PRESET == 29)
+-    #define FXAA_QUALITY_PS 12
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.5
+-    #define FXAA_QUALITY_P2 2.0
+-    #define FXAA_QUALITY_P3 2.0
+-    #define FXAA_QUALITY_P4 2.0
+-    #define FXAA_QUALITY_P5 2.0
+-    #define FXAA_QUALITY_P6 2.0
+-    #define FXAA_QUALITY_P7 2.0
+-    #define FXAA_QUALITY_P8 2.0
+-    #define FXAA_QUALITY_P9 2.0
+-    #define FXAA_QUALITY_P10 4.0
+-    #define FXAA_QUALITY_P11 8.0
+-#endif
+-
+-/*============================================================================
+-                     FXAA QUALITY - EXTREME QUALITY
+-============================================================================*/
+-#if (FXAA_QUALITY_PRESET == 39)
+-    #define FXAA_QUALITY_PS 12
+-    #define FXAA_QUALITY_P0 1.0
+-    #define FXAA_QUALITY_P1 1.0
+-    #define FXAA_QUALITY_P2 1.0
+-    #define FXAA_QUALITY_P3 1.0
+-    #define FXAA_QUALITY_P4 1.0
+-    #define FXAA_QUALITY_P5 1.5
+-    #define FXAA_QUALITY_P6 2.0
+-    #define FXAA_QUALITY_P7 2.0
+-    #define FXAA_QUALITY_P8 2.0
+-    #define FXAA_QUALITY_P9 2.0
+-    #define FXAA_QUALITY_P10 4.0
+-    #define FXAA_QUALITY_P11 8.0
+-#endif
+-
+-
+-
+-/*============================================================================
+-
+-                                API PORTING
+-
+-============================================================================*/
+-#if (FXAA_GLSL_120 == 1) || (FXAA_GLSL_130 == 1)
+-    #define FxaaBool bool
+-    #define FxaaDiscard discard
+-    #define FxaaFloat float
+-    #define FxaaFloat2 vec2
+-    #define FxaaFloat3 vec3
+-    #define FxaaFloat4 vec4
+-    #define FxaaHalf float
+-    #define FxaaHalf2 vec2
+-    #define FxaaHalf3 vec3
+-    #define FxaaHalf4 vec4
+-    #define FxaaInt2 ivec2
+-    #define FxaaSat(x) clamp(x, 0.0, 1.0)
+-    #define FxaaTex sampler2D
+-#else
+-    #define FxaaBool bool
+-    #define FxaaDiscard clip(-1)
+-    #define FxaaFloat float
+-    #define FxaaFloat2 float2
+-    #define FxaaFloat3 float3
+-    #define FxaaFloat4 float4
+-    #define FxaaHalf half
+-    #define FxaaHalf2 half2
+-    #define FxaaHalf3 half3
+-    #define FxaaHalf4 half4
+-    #define FxaaSat(x) saturate(x)
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_GLSL_120 == 1)
+-    // Requires,
+-    //  #version 120
+-    // And at least,
+-    //  #extension GL_EXT_gpu_shader4 : enable
+-    //  (or set FXAA_FAST_PIXEL_OFFSET 1 to work like DX9)
+-    #define FxaaTexTop(t, p) texture2DLod(t, p, 0.0)
+-    #if (FXAA_FAST_PIXEL_OFFSET == 1)
+-        #define FxaaTexOff(t, p, o, r) texture2DLodOffset(t, p, 0.0, o)
+-    #else
+-        #define FxaaTexOff(t, p, o, r) texture2DLod(t, p + (o * r), 0.0)
+-    #endif
+-    #if (FXAA_GATHER4_ALPHA == 1)
+-        // use #extension GL_ARB_gpu_shader5 : enable
+-        #define FxaaTexAlpha4(t, p) textureGather(t, p, 3)
+-        #define FxaaTexOffAlpha4(t, p, o) textureGatherOffset(t, p, o, 3)
+-        #define FxaaTexGreen4(t, p) textureGather(t, p, 1)
+-        #define FxaaTexOffGreen4(t, p, o) textureGatherOffset(t, p, o, 1)
+-    #endif
+-#endif
+-/*--------------------------------------------------------------------------*/
+-#if (FXAA_GLSL_130 == 1)
+-    // Requires "#version 130" or better
+-    #define FxaaTexTop(t, p) textureLod(t, p, 0.0)
+-    #define FxaaTexOff(t, p, o, r) textureLodOffset(t, p, 0.0, o)
+-    #if (FXAA_GATHER4_ALPHA == 1)
+-        // use #extension GL_ARB_gpu_shader5 : enable
+-        #define FxaaTexAlpha4(t, p) textureGather(t, p, 3)
+-        #define FxaaTexOffAlpha4(t, p, o) textureGatherOffset(t, p, o, 3)
+-        #define FxaaTexGreen4(t, p) textureGather(t, p, 1)
+-        #define FxaaTexOffGreen4(t, p, o) textureGatherOffset(t, p, o, 1)
+-    #endif
+-#endif
+-
+-
+-/*============================================================================
+-                   GREEN AS LUMA OPTION SUPPORT FUNCTION
+-============================================================================*/
+-#if (FXAA_GREEN_AS_LUMA == 0)
+-    FxaaFloat FxaaLuma(FxaaFloat4 rgba) { return rgba.w; }
+-#else
+-    FxaaFloat FxaaLuma(FxaaFloat4 rgba) { return rgba.y; }
+-#endif    
+-
+-
+-
+-
+-/*============================================================================
+-
+-                             FXAA3 QUALITY - PC
+-
+-============================================================================*/
+-#if (FXAA_PC == 1)
+-/*--------------------------------------------------------------------------*/
+-FxaaFloat4 FxaaPixelShader(
+-    //
+-    // Use noperspective interpolation here (turn off perspective interpolation).
+-    // {xy} = center of pixel
+-    FxaaFloat2 pos,
+-    //
+-    // Used only for FXAA Console, and not used on the 360 version.
+-    // Use noperspective interpolation here (turn off perspective interpolation).
+-    // {xy_} = upper left of pixel
+-    // {_zw} = lower right of pixel
+-    FxaaFloat4 fxaaConsolePosPos,
+-    //
+-    // Input color texture.
+-    // {rgb_} = color in linear or perceptual color space
+-    // if (FXAA_GREEN_AS_LUMA == 0)
+-    //     {__a} = luma in perceptual color space (not linear)
+-    FxaaTex tex,
+-    //
+-    // Only used on the optimized 360 version of FXAA Console.
+-    // For everything but 360, just use the same input here as for "tex".
+-    // For 360, same texture, just alias with a 2nd sampler.
+-    // This sampler needs to have an exponent bias of -1.
+-    FxaaTex fxaaConsole360TexExpBiasNegOne,
+-    //
+-    // Only used on the optimized 360 version of FXAA Console.
+-    // For everything but 360, just use the same input here as for "tex".
+-    // For 360, same texture, just alias with a 3nd sampler.
+-    // This sampler needs to have an exponent bias of -2.
+-    FxaaTex fxaaConsole360TexExpBiasNegTwo,
+-    //
+-    // Only used on FXAA Quality.
+-    // This must be from a constant/uniform.
+-    // {x_} = 1.0/screenWidthInPixels
+-    // {_y} = 1.0/screenHeightInPixels
+-    FxaaFloat2 fxaaQualityRcpFrame,
+-    //
+-    // Only used on FXAA Console.
+-    // This must be from a constant/uniform.
+-    // This effects sub-pixel AA quality and inversely sharpness.
+-    //   Where N ranges between,
+-    //     N = 0.50 (default)
+-    //     N = 0.33 (sharper)
+-    // {x__} = -N/screenWidthInPixels  
+-    // {_y_} = -N/screenHeightInPixels
+-    // {_z_} =  N/screenWidthInPixels  
+-    // {__w} =  N/screenHeightInPixels 
+-    FxaaFloat4 fxaaConsoleRcpFrameOpt,
+-    //
+-    // Only used on FXAA Console.
+-    // Not used on 360, but used on PS3 and PC.
+-    // This must be from a constant/uniform.
+-    // {x__} = -2.0/screenWidthInPixels  
+-    // {_y_} = -2.0/screenHeightInPixels
+-    // {_z_} =  2.0/screenWidthInPixels  
+-    // {__w} =  2.0/screenHeightInPixels 
+-    FxaaFloat4 fxaaConsoleRcpFrameOpt2,
+-    //
+-    // Only used on FXAA Console.
+-    // Only used on 360 in place of fxaaConsoleRcpFrameOpt2.
+-    // This must be from a constant/uniform.
+-    // {x__} =  8.0/screenWidthInPixels  
+-    // {_y_} =  8.0/screenHeightInPixels
+-    // {_z_} = -4.0/screenWidthInPixels  
+-    // {__w} = -4.0/screenHeightInPixels 
+-    FxaaFloat4 fxaaConsole360RcpFrameOpt2,
+-    //
+-    // Only used on FXAA Quality.
+-    // This used to be the FXAA_QUALITY_SUBPIX define.
+-    // It is here now to allow easier tuning.
+-    // Choose the amount of sub-pixel aliasing removal.
+-    // This can effect sharpness.
+-    //   1.00 - upper limit (softer)
+-    //   0.75 - default amount of filtering
+-    //   0.50 - lower limit (sharper, less sub-pixel aliasing removal)
+-    //   0.25 - almost off
+-    //   0.00 - completely off
+-    FxaaFloat fxaaQualitySubpix,
+-    //
+-    // Only used on FXAA Quality.
+-    // This used to be the FXAA_QUALITY_EDGE_THRESHOLD define.
+-    // It is here now to allow easier tuning.
+-    // The minimum amount of local contrast required to apply algorithm.
+-    //   0.333 - too little (faster)
+-    //   0.250 - low quality
+-    //   0.166 - default
+-    //   0.125 - high quality 
+-    //   0.063 - overkill (slower)
+-    FxaaFloat fxaaQualityEdgeThreshold,
+-    //
+-    // Only used on FXAA Quality.
+-    // This used to be the FXAA_QUALITY_EDGE_THRESHOLD_MIN define.
+-    // It is here now to allow easier tuning.
+-    // Trims the algorithm from processing darks.
+-    //   0.0833 - upper limit (default, the start of visible unfiltered edges)
+-    //   0.0625 - high quality (faster)
+-    //   0.0312 - visible limit (slower)
+-    // Special notes when using FXAA_GREEN_AS_LUMA,
+-    //   Likely want to set this to zero.
+-    //   As colors that are mostly not-green
+-    //   will appear very dark in the green channel!
+-    //   Tune by looking at mostly non-green content,
+-    //   then start at zero and increase until aliasing is a problem.
+-    FxaaFloat fxaaQualityEdgeThresholdMin,
+-    // 
+-    // Only used on FXAA Console.
+-    // This used to be the FXAA_CONSOLE_EDGE_SHARPNESS define.
+-    // It is here now to allow easier tuning.
+-    // This does not effect PS3, as this needs to be compiled in.
+-    //   Use FXAA_CONSOLE_PS3_EDGE_SHARPNESS for PS3.
+-    //   Due to the PS3 being ALU bound,
+-    //   there are only three safe values here: 2 and 4 and 8.
+-    //   These options use the shaders ability to a free *|/ by 2|4|8.
+-    // For all other platforms can be a non-power of two.
+-    //   8.0 is sharper (default!!!)
+-    //   4.0 is softer
+-    //   2.0 is really soft (good only for vector graphics inputs)
+-    FxaaFloat fxaaConsoleEdgeSharpness,
+-    //
+-    // Only used on FXAA Console.
+-    // This used to be the FXAA_CONSOLE_EDGE_THRESHOLD define.
+-    // It is here now to allow easier tuning.
+-    // This does not effect PS3, as this needs to be compiled in.
+-    //   Use FXAA_CONSOLE_PS3_EDGE_THRESHOLD for PS3.
+-    //   Due to the PS3 being ALU bound,
+-    //   there are only two safe values here: 1/4 and 1/8.
+-    //   These options use the shaders ability to a free *|/ by 2|4|8.
+-    // The console setting has a different mapping than the quality setting.
+-    // Other platforms can use other values.
+-    //   0.125 leaves less aliasing, but is softer (default!!!)
+-    //   0.25 leaves more aliasing, and is sharper
+-    FxaaFloat fxaaConsoleEdgeThreshold,
+-    //
+-    // Only used on FXAA Console.
+-    // This used to be the FXAA_CONSOLE_EDGE_THRESHOLD_MIN define.
+-    // It is here now to allow easier tuning.
+-    // Trims the algorithm from processing darks.
+-    // The console setting has a different mapping than the quality setting.
+-    // This only applies when FXAA_EARLY_EXIT is 1.
+-    // This does not apply to PS3, 
+-    // PS3 was simplified to avoid more shader instructions.
+-    //   0.06 - faster but more aliasing in darks
+-    //   0.05 - default
+-    //   0.04 - slower and less aliasing in darks
+-    // Special notes when using FXAA_GREEN_AS_LUMA,
+-    //   Likely want to set this to zero.
+-    //   As colors that are mostly not-green
+-    //   will appear very dark in the green channel!
+-    //   Tune by looking at mostly non-green content,
+-    //   then start at zero and increase until aliasing is a problem.
+-    FxaaFloat fxaaConsoleEdgeThresholdMin,
+-    //    
+-    // Extra constants for 360 FXAA Console only.
+-    // Use zeros or anything else for other platforms.
+-    // These must be in physical constant registers and NOT immedates.
+-    // Immedates will result in compiler un-optimizing.
+-    // {xyzw} = float4(1.0, -1.0, 0.25, -0.25)
+-    FxaaFloat4 fxaaConsole360ConstDir
+-) {
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat2 posM;
+-    posM.x = pos.x;
+-    posM.y = pos.y;
+-    #if (FXAA_GATHER4_ALPHA == 1)
+-        #if (FXAA_DISCARD == 0)
+-            FxaaFloat4 rgbyM = FxaaTexTop(tex, posM);
+-            #if (FXAA_GREEN_AS_LUMA == 0)
+-                #define lumaM rgbyM.w
+-            #else
+-                #define lumaM rgbyM.y
+-            #endif
+-        #endif
+-        #if (FXAA_GREEN_AS_LUMA == 0)
+-            FxaaFloat4 luma4A = FxaaTexAlpha4(tex, posM);
+-            FxaaFloat4 luma4B = FxaaTexOffAlpha4(tex, posM, FxaaInt2(-1, -1));
+-        #else
+-            FxaaFloat4 luma4A = FxaaTexGreen4(tex, posM);
+-            FxaaFloat4 luma4B = FxaaTexOffGreen4(tex, posM, FxaaInt2(-1, -1));
+-        #endif
+-        #if (FXAA_DISCARD == 1)
+-            #define lumaM luma4A.w
+-        #endif
+-        #define lumaE luma4A.z
+-        #define lumaS luma4A.x
+-        #define lumaSE luma4A.y
+-        #define lumaNW luma4B.w
+-        #define lumaN luma4B.z
+-        #define lumaW luma4B.x
+-    #else
+-        FxaaFloat4 rgbyM = FxaaTexTop(tex, posM);
+-        #if (FXAA_GREEN_AS_LUMA == 0)
+-            #define lumaM rgbyM.w
+-        #else
+-            #define lumaM rgbyM.y
+-        #endif
+-        FxaaFloat lumaS = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2( 0, 1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaE = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2( 1, 0), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaN = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2( 0,-1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaW = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2(-1, 0), fxaaQualityRcpFrame.xy));
+-    #endif
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat maxSM = max(lumaS, lumaM);
+-    FxaaFloat minSM = min(lumaS, lumaM);
+-    FxaaFloat maxESM = max(lumaE, maxSM);
+-    FxaaFloat minESM = min(lumaE, minSM);
+-    FxaaFloat maxWN = max(lumaN, lumaW);
+-    FxaaFloat minWN = min(lumaN, lumaW);
+-    FxaaFloat rangeMax = max(maxWN, maxESM);
+-    FxaaFloat rangeMin = min(minWN, minESM);
+-    FxaaFloat rangeMaxScaled = rangeMax * fxaaQualityEdgeThreshold;
+-    FxaaFloat range = rangeMax - rangeMin;
+-    FxaaFloat rangeMaxClamped = max(fxaaQualityEdgeThresholdMin, rangeMaxScaled);
+-    FxaaBool earlyExit = range < rangeMaxClamped;
+-/*--------------------------------------------------------------------------*/
+-    if(earlyExit)
+-        #if (FXAA_DISCARD == 1)
+-            FxaaDiscard;
+-        #else
+-            return rgbyM;
+-        #endif
+-/*--------------------------------------------------------------------------*/
+-    #if (FXAA_GATHER4_ALPHA == 0)
+-        FxaaFloat lumaNW = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2(-1,-1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaSE = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2( 1, 1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaNE = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2( 1,-1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaSW = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2(-1, 1), fxaaQualityRcpFrame.xy));
+-    #else
+-        FxaaFloat lumaNE = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2(1, -1), fxaaQualityRcpFrame.xy));
+-        FxaaFloat lumaSW = FxaaLuma(FxaaTexOff(tex, posM, FxaaInt2(-1, 1), fxaaQualityRcpFrame.xy));
+-    #endif
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat lumaNS = lumaN + lumaS;
+-    FxaaFloat lumaWE = lumaW + lumaE;
+-    FxaaFloat subpixRcpRange = 1.0/range;
+-    FxaaFloat subpixNSWE = lumaNS + lumaWE;
+-    FxaaFloat edgeHorz1 = (-2.0 * lumaM) + lumaNS;
+-    FxaaFloat edgeVert1 = (-2.0 * lumaM) + lumaWE;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat lumaNESE = lumaNE + lumaSE;
+-    FxaaFloat lumaNWNE = lumaNW + lumaNE;
+-    FxaaFloat edgeHorz2 = (-2.0 * lumaE) + lumaNESE;
+-    FxaaFloat edgeVert2 = (-2.0 * lumaN) + lumaNWNE;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat lumaNWSW = lumaNW + lumaSW;
+-    FxaaFloat lumaSWSE = lumaSW + lumaSE;
+-    FxaaFloat edgeHorz4 = (abs(edgeHorz1) * 2.0) + abs(edgeHorz2);
+-    FxaaFloat edgeVert4 = (abs(edgeVert1) * 2.0) + abs(edgeVert2);
+-    FxaaFloat edgeHorz3 = (-2.0 * lumaW) + lumaNWSW;
+-    FxaaFloat edgeVert3 = (-2.0 * lumaS) + lumaSWSE;
+-    FxaaFloat edgeHorz = abs(edgeHorz3) + edgeHorz4;
+-    FxaaFloat edgeVert = abs(edgeVert3) + edgeVert4;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat subpixNWSWNESE = lumaNWSW + lumaNESE;
+-    FxaaFloat lengthSign = fxaaQualityRcpFrame.x;
+-    FxaaBool horzSpan = edgeHorz >= edgeVert;
+-    FxaaFloat subpixA = subpixNSWE * 2.0 + subpixNWSWNESE;
+-/*--------------------------------------------------------------------------*/
+-    if(!horzSpan) lumaN = lumaW;
+-    if(!horzSpan) lumaS = lumaE;
+-    if(horzSpan) lengthSign = fxaaQualityRcpFrame.y;
+-    FxaaFloat subpixB = (subpixA * (1.0/12.0)) - lumaM;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat gradientN = lumaN - lumaM;
+-    FxaaFloat gradientS = lumaS - lumaM;
+-    FxaaFloat lumaNN = lumaN + lumaM;
+-    FxaaFloat lumaSS = lumaS + lumaM;
+-    FxaaBool pairN = abs(gradientN) >= abs(gradientS);
+-    FxaaFloat gradient = max(abs(gradientN), abs(gradientS));
+-    if(pairN) lengthSign = -lengthSign;
+-    FxaaFloat subpixC = FxaaSat(abs(subpixB) * subpixRcpRange);
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat2 posB;
+-    posB.x = posM.x;
+-    posB.y = posM.y;
+-    FxaaFloat2 offNP;
+-    offNP.x = (!horzSpan) ? 0.0 : fxaaQualityRcpFrame.x;
+-    offNP.y = ( horzSpan) ? 0.0 : fxaaQualityRcpFrame.y;
+-    if(!horzSpan) posB.x += lengthSign * 0.5;
+-    if( horzSpan) posB.y += lengthSign * 0.5;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat2 posN;
+-    posN.x = posB.x - offNP.x * FXAA_QUALITY_P0;
+-    posN.y = posB.y - offNP.y * FXAA_QUALITY_P0;
+-    FxaaFloat2 posP;
+-    posP.x = posB.x + offNP.x * FXAA_QUALITY_P0;
+-    posP.y = posB.y + offNP.y * FXAA_QUALITY_P0;
+-    FxaaFloat subpixD = ((-2.0)*subpixC) + 3.0;
+-    FxaaFloat lumaEndN = FxaaLuma(FxaaTexTop(tex, posN));
+-    FxaaFloat subpixE = subpixC * subpixC;
+-    FxaaFloat lumaEndP = FxaaLuma(FxaaTexTop(tex, posP));
+-/*--------------------------------------------------------------------------*/
+-    if(!pairN) lumaNN = lumaSS;
+-    FxaaFloat gradientScaled = gradient * 1.0/4.0;
+-    FxaaFloat lumaMM = lumaM - lumaNN * 0.5;
+-    FxaaFloat subpixF = subpixD * subpixE;
+-    FxaaBool lumaMLTZero = lumaMM < 0.0;
+-/*--------------------------------------------------------------------------*/
+-    lumaEndN -= lumaNN * 0.5;
+-    lumaEndP -= lumaNN * 0.5;
+-    FxaaBool doneN = abs(lumaEndN) >= gradientScaled;
+-    FxaaBool doneP = abs(lumaEndP) >= gradientScaled;
+-    if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P1;
+-    if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P1;
+-    FxaaBool doneNP = (!doneN) || (!doneP);
+-    if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P1;
+-    if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P1;
+-/*--------------------------------------------------------------------------*/
+-    if(doneNP) {
+-        if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-        if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-        if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-        if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-        doneN = abs(lumaEndN) >= gradientScaled;
+-        doneP = abs(lumaEndP) >= gradientScaled;
+-        if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P2;
+-        if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P2;
+-        doneNP = (!doneN) || (!doneP);
+-        if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P2;
+-        if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P2;
+-/*--------------------------------------------------------------------------*/
+-        #if (FXAA_QUALITY_PS > 3)
+-        if(doneNP) {
+-            if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-            if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-            if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-            if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-            doneN = abs(lumaEndN) >= gradientScaled;
+-            doneP = abs(lumaEndP) >= gradientScaled;
+-            if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P3;
+-            if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P3;
+-            doneNP = (!doneN) || (!doneP);
+-            if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P3;
+-            if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P3;
+-/*--------------------------------------------------------------------------*/
+-            #if (FXAA_QUALITY_PS > 4)
+-            if(doneNP) {
+-                if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                doneN = abs(lumaEndN) >= gradientScaled;
+-                doneP = abs(lumaEndP) >= gradientScaled;
+-                if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P4;
+-                if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P4;
+-                doneNP = (!doneN) || (!doneP);
+-                if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P4;
+-                if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P4;
+-/*--------------------------------------------------------------------------*/
+-                #if (FXAA_QUALITY_PS > 5)
+-                if(doneNP) {
+-                    if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                    if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                    if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                    if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                    doneN = abs(lumaEndN) >= gradientScaled;
+-                    doneP = abs(lumaEndP) >= gradientScaled;
+-                    if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P5;
+-                    if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P5;
+-                    doneNP = (!doneN) || (!doneP);
+-                    if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P5;
+-                    if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P5;
+-/*--------------------------------------------------------------------------*/
+-                    #if (FXAA_QUALITY_PS > 6)
+-                    if(doneNP) {
+-                        if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                        if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                        if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                        if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                        doneN = abs(lumaEndN) >= gradientScaled;
+-                        doneP = abs(lumaEndP) >= gradientScaled;
+-                        if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P6;
+-                        if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P6;
+-                        doneNP = (!doneN) || (!doneP);
+-                        if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P6;
+-                        if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P6;
+-/*--------------------------------------------------------------------------*/
+-                        #if (FXAA_QUALITY_PS > 7)
+-                        if(doneNP) {
+-                            if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                            if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                            if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                            if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                            doneN = abs(lumaEndN) >= gradientScaled;
+-                            doneP = abs(lumaEndP) >= gradientScaled;
+-                            if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P7;
+-                            if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P7;
+-                            doneNP = (!doneN) || (!doneP);
+-                            if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P7;
+-                            if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P7;
+-/*--------------------------------------------------------------------------*/
+-    #if (FXAA_QUALITY_PS > 8)
+-    if(doneNP) {
+-        if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-        if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-        if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-        if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-        doneN = abs(lumaEndN) >= gradientScaled;
+-        doneP = abs(lumaEndP) >= gradientScaled;
+-        if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P8;
+-        if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P8;
+-        doneNP = (!doneN) || (!doneP);
+-        if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P8;
+-        if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P8;
+-/*--------------------------------------------------------------------------*/
+-        #if (FXAA_QUALITY_PS > 9)
+-        if(doneNP) {
+-            if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-            if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-            if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-            if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-            doneN = abs(lumaEndN) >= gradientScaled;
+-            doneP = abs(lumaEndP) >= gradientScaled;
+-            if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P9;
+-            if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P9;
+-            doneNP = (!doneN) || (!doneP);
+-            if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P9;
+-            if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P9;
+-/*--------------------------------------------------------------------------*/
+-            #if (FXAA_QUALITY_PS > 10)
+-            if(doneNP) {
+-                if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                doneN = abs(lumaEndN) >= gradientScaled;
+-                doneP = abs(lumaEndP) >= gradientScaled;
+-                if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P10;
+-                if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P10;
+-                doneNP = (!doneN) || (!doneP);
+-                if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P10;
+-                if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P10;
+-/*--------------------------------------------------------------------------*/
+-                #if (FXAA_QUALITY_PS > 11)
+-                if(doneNP) {
+-                    if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                    if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                    if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                    if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                    doneN = abs(lumaEndN) >= gradientScaled;
+-                    doneP = abs(lumaEndP) >= gradientScaled;
+-                    if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P11;
+-                    if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P11;
+-                    doneNP = (!doneN) || (!doneP);
+-                    if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P11;
+-                    if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P11;
+-/*--------------------------------------------------------------------------*/
+-                    #if (FXAA_QUALITY_PS > 12)
+-                    if(doneNP) {
+-                        if(!doneN) lumaEndN = FxaaLuma(FxaaTexTop(tex, posN.xy));
+-                        if(!doneP) lumaEndP = FxaaLuma(FxaaTexTop(tex, posP.xy));
+-                        if(!doneN) lumaEndN = lumaEndN - lumaNN * 0.5;
+-                        if(!doneP) lumaEndP = lumaEndP - lumaNN * 0.5;
+-                        doneN = abs(lumaEndN) >= gradientScaled;
+-                        doneP = abs(lumaEndP) >= gradientScaled;
+-                        if(!doneN) posN.x -= offNP.x * FXAA_QUALITY_P12;
+-                        if(!doneN) posN.y -= offNP.y * FXAA_QUALITY_P12;
+-                        doneNP = (!doneN) || (!doneP);
+-                        if(!doneP) posP.x += offNP.x * FXAA_QUALITY_P12;
+-                        if(!doneP) posP.y += offNP.y * FXAA_QUALITY_P12;
+-/*--------------------------------------------------------------------------*/
+-                    }
+-                    #endif
+-/*--------------------------------------------------------------------------*/
+-                }
+-                #endif
+-/*--------------------------------------------------------------------------*/
+-            }
+-            #endif
+-/*--------------------------------------------------------------------------*/
+-        }
+-        #endif
+-/*--------------------------------------------------------------------------*/
+-    }
+-    #endif
+-/*--------------------------------------------------------------------------*/
+-                        }
+-                        #endif
+-/*--------------------------------------------------------------------------*/
+-                    }
+-                    #endif
+-/*--------------------------------------------------------------------------*/
+-                }
+-                #endif
+-/*--------------------------------------------------------------------------*/
+-            }
+-            #endif
+-/*--------------------------------------------------------------------------*/
+-        }
+-        #endif
+-/*--------------------------------------------------------------------------*/
+-    }
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat dstN = posM.x - posN.x;
+-    FxaaFloat dstP = posP.x - posM.x;
+-    if(!horzSpan) dstN = posM.y - posN.y;
+-    if(!horzSpan) dstP = posP.y - posM.y;
+-/*--------------------------------------------------------------------------*/
+-    FxaaBool goodSpanN = (lumaEndN < 0.0) != lumaMLTZero;
+-    FxaaFloat spanLength = (dstP + dstN);
+-    FxaaBool goodSpanP = (lumaEndP < 0.0) != lumaMLTZero;
+-    FxaaFloat spanLengthRcp = 1.0/spanLength;
+-/*--------------------------------------------------------------------------*/
+-    FxaaBool directionN = dstN < dstP;
+-    FxaaFloat dst = min(dstN, dstP);
+-    FxaaBool goodSpan = directionN ? goodSpanN : goodSpanP;
+-    FxaaFloat subpixG = subpixF * subpixF;
+-    FxaaFloat pixelOffset = (dst * (-spanLengthRcp)) + 0.5;
+-    FxaaFloat subpixH = subpixG * fxaaQualitySubpix;
+-/*--------------------------------------------------------------------------*/
+-    FxaaFloat pixelOffsetGood = goodSpan ? pixelOffset : 0.0;
+-    FxaaFloat pixelOffsetSubpix = max(pixelOffsetGood, subpixH);
+-    if(!horzSpan) posM.x += pixelOffsetSubpix * lengthSign;
+-    if( horzSpan) posM.y += pixelOffsetSubpix * lengthSign;
+-    #if (FXAA_DISCARD == 1)
+-        return FxaaTexTop(tex, posM);
+-    #else
+-        return FxaaFloat4(FxaaTexTop(tex, posM).xyz, lumaM);
+-    #endif
+-}
+-/*==========================================================================*/
+-#endif
+-
+-vec4 mainImage(vec2 fragCoord)
+-{
+-    vec2 rcpFrame = 1./invResolution_data.xy;
+-  	vec2 uv2 = fragCoord.xy / invResolution_data.xy;
+-
+-    float fxaaQualitySubpix = 0.75;  // [0..1], default 0.75
+-    float fxaaQualityEdgeThreshold = 0.166;  // [0.125..0.33], default 0.166
+-    float fxaaQualityEdgeThresholdMin = 0.02;//0.0625; // ?
+-    vec4 dummy4 =  vec4(0.0,0.0,0.0,0.0);
+-    float dummy1 = 0.0;
+-
+-    vec4 col = FxaaPixelShader(uv2, dummy4,
+-                                    inputImage, inputImage, inputImage,
+-                                    rcpFrame, dummy4, dummy4, dummy4,
+-                                    fxaaQualitySubpix, fxaaQualityEdgeThreshold,
+-                                    fxaaQualityEdgeThresholdMin,
+-                                    dummy1, dummy1, dummy1, dummy4);
+-
+-    vec4 fragColor = vec4( col.xyz, 1. );
+-
+-    return fragColor;
+-}
+-
+-void main()
+-{
+-    ivec2 loc = ivec2(gl_GlobalInvocationID.x * 4, gl_GlobalInvocationID.y * 4);
+-    for(int i = 0; i < 4; i++)
+-    {
+-        for(int j = 0; j < 4; j++)
+-        {
+-            ivec2 texelCoord = ivec2(loc.x + i, loc.y + j);
+-            vec4 outColor = mainImage(texelCoord + vec2(0.5));
+-            imageStore(imgOutput, texelCoord, outColor);
+-        }
+-    }
+-}
+\ No newline at end of file
+diff --git a/src/Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.spv b/src/Ryujinx.Graphics.Vulkan/Effects/Shaders/Fxaa.spv
+deleted file mode 100644
+index b466bcb659d56d910d30aac5d781d27b8ff1313f..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 25012
+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
+
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 94a886928e250cd5ccd01ef59acabf4293ccc913..8c51de2f46808a441c6aaf369203dafc030c1b08 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -29,7 +29,6 @@
+     <EmbeddedResource Include="Effects\Shaders\AreaScaling.spv" />
+     <EmbeddedResource Include="Effects\Shaders\FsrScaling.spv" />
+     <EmbeddedResource Include="Effects\Shaders\FsrSharpening.spv" />
+-    <EmbeddedResource Include="Effects\Shaders\Fxaa.spv" />
+     <EmbeddedResource Include="Effects\Shaders\SmaaBlend.spv" />
+     <EmbeddedResource Include="Effects\Shaders\SmaaEdge.spv" />
+     <EmbeddedResource Include="Effects\Shaders\SmaaNeighbour.spv" />
+diff --git a/src/Ryujinx.Graphics.Vulkan/Window.cs b/src/Ryujinx.Graphics.Vulkan/Window.cs
+index eb8d433bef15bb4891ed37b6927ba34e2c3f2efa..93195368af199a4e15ca801b4dbcb9adbb93fc13 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Window.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Window.cs
+@@ -524,19 +524,16 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 switch (_currentAntiAliasing)
+                 {
+-                    case AntiAliasing.Fxaa:
+-                        _effect?.Dispose();
+-                        _effect = new FxaaPostProcessingEffect(_gd, _device);
+-                        break;
+                     case AntiAliasing.None:
+                         _effect?.Dispose();
+                         _effect = null;
+                         break;
++                    case AntiAliasing.Fxaa: // S2Arm: no FXAA (NVIDIA FXAA 3.11 carries no license grant); drawn as SMAA Medium
+                     case AntiAliasing.SmaaLow:
+                     case AntiAliasing.SmaaMedium:
+                     case AntiAliasing.SmaaHigh:
+                     case AntiAliasing.SmaaUltra:
+-                        int quality = _currentAntiAliasing - AntiAliasing.SmaaLow;
++                        int quality = (_currentAntiAliasing == AntiAliasing.Fxaa ? AntiAliasing.SmaaMedium : _currentAntiAliasing) - AntiAliasing.SmaaLow;
+                         if (_effect is SmaaPostProcessingEffect smaa)
+                         {
+                             smaa.Quality = quality;

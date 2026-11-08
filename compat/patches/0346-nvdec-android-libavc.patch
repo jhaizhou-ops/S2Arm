@@ -1,0 +1,128 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+index ab6d479a0496bf5c851adfc12302b450a6ac83fa..ed405f21b4d2b075ac30d1e8192647e1c039b435 100644
+--- a/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
++++ b/src/Ryujinx.Graphics.Nvdec.FFmpeg/H264/SpsAndPpsReconstruction.cs
+@@ -75,7 +75,7 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg.H264
+ 
+             writer.WriteBit(pictureInfo.EntropyCodingModeFlag);
+             writer.WriteBit(pictureInfo.PicOrderPresentFlag);
+-            writer.WriteUe(0); // Num slice groups minus 1
++            writer.WriteUe(0); // Num slice groups minus 1: Nvdec metadata carries no FMO map, so one slice group is reconstructed
+             writer.WriteUe(pictureInfo.NumRefIdxL0ActiveMinus1);
+             writer.WriteUe(pictureInfo.NumRefIdxL1ActiveMinus1);
+             writer.WriteBit(pictureInfo.WeightedPredFlag);
+@@ -142,7 +142,7 @@ namespace Ryujinx.Graphics.Nvdec.FFmpeg.H264
+             3 + 1 * 4, 3 + 2 * 4, 2 + 3 * 4, 3 + 3 * 4
+         ];
+ 
+-        private static void WriteScalingList(ref H264BitStreamWriter writer, IArray<byte> list)
++        private static void WriteScalingList<T>(ref H264BitStreamWriter writer, T list) where T : unmanaged, IArray<byte>
+         {
+             ReadOnlySpan<byte> scan = list.Length == 16 ? ZigZagScan : ZigZagDirect;
+ 
+diff --git a/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
+index a8772e2642cee4c418e667088c2af0a68fd9b1a1..cf97204e62331007cf0cfb1ba2d8741fc98e00f0 100644
+--- a/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/H264Decoder.cs
+@@ -28,29 +28,34 @@ namespace Ryujinx.Graphics.Nvdec
+ 
+             ISurface outputSurface = rm.Cache.Get(decoder, 0, 0, width, height);
+ 
+-            if (decoder.Decode(ref info, outputSurface, bitstream))
++            try
+             {
+-                if (outputSurface.Field == FrameField.Progressive)
++                if (decoder.Decode(ref info, outputSurface, bitstream))
+                 {
+-                    SurfaceWriter.Write(
+-                        rm.MemoryManager,
+-                        outputSurface,
+-                        lumaOffset + pictureInfo.LumaFrameOffset,
+-                        chromaOffset + pictureInfo.ChromaFrameOffset);
+-                }
+-                else
+-                {
+-                    SurfaceWriter.WriteInterlaced(
+-                        rm.MemoryManager,
+-                        outputSurface,
+-                        lumaOffset + pictureInfo.LumaTopFieldOffset,
+-                        chromaOffset + pictureInfo.ChromaTopFieldOffset,
+-                        lumaOffset + pictureInfo.LumaBottomFieldOffset,
+-                        chromaOffset + pictureInfo.ChromaBottomFieldOffset);
++                    if (outputSurface.Field == FrameField.Progressive)
++                    {
++                        SurfaceWriter.Write(
++                            rm.MemoryManager,
++                            outputSurface,
++                            lumaOffset + pictureInfo.LumaFrameOffset,
++                            chromaOffset + pictureInfo.ChromaFrameOffset);
++                    }
++                    else
++                    {
++                        SurfaceWriter.WriteInterlaced(
++                            rm.MemoryManager,
++                            outputSurface,
++                            lumaOffset + pictureInfo.LumaTopFieldOffset,
++                            chromaOffset + pictureInfo.ChromaTopFieldOffset,
++                            lumaOffset + pictureInfo.LumaBottomFieldOffset,
++                            chromaOffset + pictureInfo.ChromaBottomFieldOffset);
++                    }
+                 }
+             }
+-
+-            rm.Cache.Put(outputSurface);
++            finally
++            {
++                rm.Cache.Put(outputSurface);
++            }
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index c300f318d67671b80d05e455e47cf70a4908087b..f4b9be120442345c9507d537f2cfb60dd5a78019 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -1,6 +1,8 @@
+ using Ryujinx.Graphics.Nvdec.Apple;
++using Ryujinx.Graphics.Nvdec.Android;
+ using Ryujinx.Graphics.Video;
+ using System;
++using System.Runtime.InteropServices;
+ 
+ namespace Ryujinx.Graphics.Nvdec
+ {
+@@ -9,16 +11,31 @@ namespace Ryujinx.Graphics.Nvdec
+         private IH264Decoder _h264Decoder;
+         private IVp8Decoder _vp8Decoder;
+ 
+-        // 苹果平台走 VideoToolbox 硬件解码（S2Arm 不带 FFmpeg）
++        // linux-bionic RID selection derives from ha7rock's #359 media commit
++        // 4337d98e7541c5194c991fcedd5c0be761fbd6de; IsAndroid is false in that AOT RID.
++        internal enum Backend { Unavailable, Apple, Android }
++        internal static Backend SelectBackend(bool apple, bool android, string rid) => apple ? Backend.Apple :
++            android || rid == "linux-bionic" || rid.StartsWith("linux-bionic-", StringComparison.Ordinal) ? Backend.Android : Backend.Unavailable;
++        private static Backend PlatformBackend => SelectBackend(OperatingSystem.IsMacOS() || OperatingSystem.IsIOS(), OperatingSystem.IsAndroid(), RuntimeInformation.RuntimeIdentifier);
+         public IH264Decoder GetH264Decoder()
+         {
+-            return _h264Decoder ??= OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? new VideoToolboxH264Decoder() : new FFmpeg.H264.Decoder();
++            return _h264Decoder ??= PlatformBackend switch
++            {
++                Backend.Apple => new VideoToolboxH264Decoder(),
++                Backend.Android => new AvcH264Decoder(),
++                _ => new UnavailableH264Decoder(),
++            };
+         }
+ 
+         // 苹果平台的 VP8 走 libvpx（静态链进宿主，S2Arm 不带 FFmpeg；VideoToolbox 不解 VP8）
+         public IVp8Decoder GetVp8Decoder()
+         {
+-            return _vp8Decoder ??= OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? new Vpx.VpxVp8Decoder() : new FFmpeg.Vp8.Decoder();
++            return _vp8Decoder ??= PlatformBackend switch
++            {
++                Backend.Apple => new Vpx.VpxVp8Decoder(),
++                Backend.Android => new AndroidVp8Decoder(),
++                _ => new UnavailableVp8Decoder(),
++            };
+         }
+ 
+         public void Dispose()

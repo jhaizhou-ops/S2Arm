@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+index 2dc2ee694f81aec18ae10976d6fc7b03dc6ca8a1..79272ca1edd4d3cd2cf6eb6f03ff355f167075d2 100644
+--- a/src/Ryujinx.Common/S2AThreadAlloc.cs
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -21,6 +21,7 @@ namespace Ryujinx.Common
+             public string Name;
+             public long Bytes;
+             public long Rounds;
++            public bool IsPart;   // S2Arm: a Part (subset of some thread's bytes): listed, but left out of Total so it is not counted twice
+         }
+ 
+         private static readonly List<Slot> _slots = new();
+@@ -80,7 +81,7 @@ namespace Ryujinx.Common
+ 
+                 if (s == null)
+                 {
+-                    s = new Slot { Name = name };
++                    s = new Slot { Name = name, IsPart = true };
+                     _slots.Add(s);
+                 }
+ 
+@@ -114,7 +115,7 @@ namespace Ryujinx.Common
+         {
+             lock (_slots)
+             {
+-                return _slots.Sum(s => s.Bytes);
++                return _slots.Where(s => !s.IsPart).Sum(s => s.Bytes);
+             }
+         }
+ 

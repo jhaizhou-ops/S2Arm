@@ -1,0 +1,96 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index 1ceb095be3880b82e50dc95f5ac4bb9ecd04f428..d5e6699cff166206b30ef57c4047abe1fac41bad 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -58,8 +58,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+                 }
+                 else
+                 {
+-                    // S2A：没有 JIT（NativeAOT）时先按代码内容查离线编译表，命中用编好的方法，否则照旧解释器
+-                    _executionEngine = S2AMacroAot.TryCreate(code[Position..]) ?? new MacroInterpreter();
++                    // S2A：没有 JIT（NativeAOT）时先按代码内容查离线编译表，命中用编好的方法；表外的报红计数后走解释器
++                    _executionEngine = S2AMacroAot.Create(code[Position..]);
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+index 6d2660d5f22c06f9c8905c912f21e13b31d0b568..f6e4eca09040f8b08d32c32926accfe5ac0d20b6 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+@@ -20,8 +20,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+     /// <summary>S2A: 离线编好的宏程序入口。</summary>
+     delegate void S2AMacroFn(MacroJitContext ctx, IDeviceState state, int arg0, ref S2AMacroRegs regs);
+ 
+-    /// <summary>S2A: 离线编译表与程序范围判定。</summary>
+-    static partial class S2AMacroAot
++    /// <summary>S2A: 离线编译表与程序范围判定。公开：生成器（graphics/tools/macrogen）用 Hash / Analyze 与运行时同一口径。</summary>
++    public static partial class S2AMacroAot
+     {
+         internal sealed class Entry
+         {
+@@ -186,12 +186,54 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+             return Table.TryGetValue(Hash(prog), out Entry entry) && prog.SequenceEqual(entry.Code) ? entry : null;
+         }
+ 
+-        /// <summary>Macro.StartExecution 建执行引擎时调用（只在 EnableMacroJit 为假时）：命中返回离线编版本，否则 null（照旧解释器）。</summary>
+-        public static IMacroEE TryCreate(ReadOnlySpan<int> code)
++        /// <summary>Macro.StartExecution 建执行引擎时调用（只在 EnableMacroJit 为假时）：命中返回离线编版本，否则记表外、返回解释器。</summary>
++        internal static IMacroEE Create(ReadOnlySpan<int> code)
+         {
+             Entry entry = Lookup(code);
+ 
+-            return entry == null ? null : new S2AMacroAotEE(entry);
++            if (entry != null)
++            {
++                return new S2AMacroAotEE(entry);
++            }
++
++            ReportMiss(code);
++
++            return new MacroInterpreter();
++        }
++
++        // 表外的宏：每支（按代码哈希）首次出现报红一行并计数，不静默；设了 S2A_MACRO_DUMP=<目录> 时导出 <哈希>.mme（小端 int32 字），
++        // 供 graphics/tools/macrogen 重生成本表（出包流程按游戏收）。只在 GPU 线程上调；去重表只在首次出现时分配
++        private static readonly HashSet<ulong> _missed = new();
++        private static readonly string _dumpDir = Environment.GetEnvironmentVariable("S2A_MACRO_DUMP");
++
++        /// <summary>表外、走解释器的宏程序支数（健康表 / 单测读）。</summary>
++        public static int MissCount => _missed.Count;
++
++        internal static void ReportMiss(ReadOnlySpan<int> code)
++        {
++            int len = Analyze(code, out string reason);
++            ReadOnlySpan<int> prog = len > 0 ? code[..len] : code[..Math.Min(code.Length, 64)];
++            ulong h = Hash(prog);
++
++            if (!_missed.Add(h))
++            {
++                return;
++            }
++
++            Console.Error.WriteLine($"[gal] 【红】宏未离线编：程序 {h:x16}（{prog.Length} 字），走解释器{(reason != null ? "；不可编：" + reason : "")}（表外第 {_missed.Count} 支）");
++
++            if (!string.IsNullOrEmpty(_dumpDir) && len > 0)
++            {
++                try
++                {
++                    System.IO.Directory.CreateDirectory(_dumpDir);
++                    System.IO.File.WriteAllBytes(System.IO.Path.Combine(_dumpDir, $"{h:x16}.mme"), System.Runtime.InteropServices.MemoryMarshal.AsBytes(prog).ToArray());
++                }
++                catch (Exception e)
++                {
++                    Console.Error.WriteLine($"[gal] 【红】宏导出失败：{e.Message}");
++                }
++            }
+         }
+     }
+ 
+@@ -224,6 +266,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+ 
+             if (_entry == null)
+             {
++                S2AMacroAot.ReportMiss(code);
+                 (_interp ??= new MacroInterpreter(_ctx.Fifo)).Execute(code, state, arg0);
+                 return;
+             }

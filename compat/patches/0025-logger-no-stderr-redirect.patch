@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Common/Logging/Logger.cs b/src/Ryujinx.Common/Logging/Logger.cs
+index 6bfa9b1aac4940a80aa79ec44da13439b43647f7..82710540070a811543909de3bf9770e05ce30e65 100644
+--- a/src/Ryujinx.Common/Logging/Logger.cs
++++ b/src/Ryujinx.Common/Logging/Logger.cs
+@@ -147,7 +147,10 @@ namespace Ryujinx.Common.Logging
+             Info = new Log(LogLevel.Info);
+             Trace = new Log(LogLevel.Trace);
+ 
+-            _stdErrAdapter = new StdErrAdapter();
++            // S2Arm: do not redirect the process's fd 2 into a pipe read back by the logger: the native layer logs to
++            // stderr and the test layer matches its contract lines literally (the adapter re-prefixed them), and lines
++            // still in the pipe were lost on abort
++            _stdErrAdapter = null;
+         }
+ 
+         public static void RestartTime()
+@@ -215,7 +218,7 @@ namespace Ryujinx.Common.Logging
+         {
+             Updated = null;
+ 
+-            _stdErrAdapter.Dispose();
++            _stdErrAdapter?.Dispose();
+ 
+             foreach (ILogTarget target in _logTargets)
+             {

@@ -1,0 +1,36 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 2696f331e90434025965c235dd5f503224f00767..793782b971bf632def2ccb1917e9759d03c63496 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -34,6 +34,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private const string SharedDataFileName = "shared.data";
+ 
+         private readonly string _basePath;
++        private static bool _s2aHostPathLogged;
+ 
+         public bool CacheEnabled => !string.IsNullOrEmpty(_basePath);
+ 
+@@ -1236,6 +1237,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             {
+                 tocFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostTocFileName(context), writable: true);
+                 dataFileStream ??= DiskCacheCommon.OpenFile(_basePath, GetHostDataFileName(context), writable: true);
++                if (!_s2aHostPathLogged)
++                {
++                    _s2aHostPathLogged = true;
++                    Console.Error.WriteLine($"[vkpb] 宿主缓存路径：base={_basePath} toc={Path.GetFullPath(GetHostTocFileName(context))}");
++                }
+                 TocHeader header = new();
+                 tocFileStream.Seek(0, SeekOrigin.Begin);
+                 BinarySerializer headerReader = new(tocFileStream);
+@@ -1244,9 +1250,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     header.Timestamp != timestamp)
+                 {
+                     // S2A 诊断：宿主 TOC 身份不符会清空整份宿主缓存；统计旧/新时间戳与长度。
+-                    Console.Error.WriteLine($"[vkpb] 宿主 TOC 重置：{Path.GetFileName(tocFileStream.Name)} " +
++                    Console.Error.WriteLine($"[vkpb] 宿主 TOC 重置：{tocFileStream.Name} " +
+                         $"旧 ts={header.Timestamp:x} 新 ts={timestamp:x} toc={tocFileStream.Length} data={dataFileStream.Length} " +
+-                        $"程序 {programIndex}");
++                        $"程序 {programIndex} base={_basePath}");
+                     CreateToc(tocFileStream, ref header, TochMagic, CodeGenVersion, timestamp);
+                     dataFileStream.SetLength(0);
+                 }

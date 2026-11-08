@@ -1,0 +1,103 @@
+diff --git a/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs b/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
+index c2bdac7f54bc99e4e2ce961bf4a1dd16587d92db..c50a89afcdc6148c6f8babeb4df7e121e6163c97 100644
+--- a/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
++++ b/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
+@@ -4,9 +4,12 @@ using LibHac.Common;
+ using LibHac.FsSrv.Impl;
+ using LibHac.Loader;
+ using LibHac.Ncm;
++using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.FileSystem;
+ using Ryujinx.HLE.HOS.Services.Arp;
+ using System;
++using System.Collections.Generic;
++using System.Runtime.ExceptionServices;
+ 
+ namespace Ryujinx.HLE.HOS
+ {
+@@ -75,30 +78,67 @@ namespace Ryujinx.HLE.HOS
+             ApplicationClient = Server.CreateHorizonClient(new ProgramLocation(programId, StorageId.BuiltInUser), npdm.FsAccessControlData, npdm.FsAccessControlDescriptor);
+         }
+ 
++        // S2Arm: detach ownership before cleanup; failures must not replay releases.
+         public void Dispose()
+         {
+             if (RyujinxClient == null) return;
+-            // The embedded LibHac Horizon is per Switch. Upstream process shutdown did not
+-            // dispose these clients or the VFS's FileSystemServer; normal shutdown must close their
+-            // mounted file systems before disposing the server's caches and storage devices.
+-            ApplicationClient?.Dispose();
+-            AccountClient?.Dispose();
+-            AmClient?.Dispose();
+-            NsClient?.Dispose();
+-            PmClient?.Dispose();
+-            SdbClient?.Dispose();
+-            if (BcatClient != null)
++
++            HorizonClient application = ApplicationClient;
++            HorizonClient account = AccountClient;
++            HorizonClient am = AmClient;
++            HorizonClient ns = NsClient;
++            HorizonClient pm = PmClient;
++            HorizonClient sdb = SdbClient;
++            HorizonClient bcat = BcatClient;
++            HorizonClient ryujinx = RyujinxClient;
++            HorizonClient fs = FsClient;
++            SharedRef<LibHacIReader> arpReader = SharedRef<LibHacIReader>.CreateMove(ref _arpIReader);
++            ApplicationClient = AccountClient = AmClient = BcatClient = FsClient = NsClient = PmClient = SdbClient = RyujinxClient = null;
++            Server = null;
++
++            List<Exception> failures = null;
++            void Cleanup(Action action)
++            {
++                try
++                {
++                    action();
++                }
++                catch (Exception exception)
++                {
++                    (failures ??= new List<Exception>()).Add(exception);
++                }
++            }
++
++            void Unregister(HorizonClient client, string name)
++            {
++                Result result = client.Sm.UnregisterService(name);
++                if (result.IsFailure())
++                    Logger.Warning?.Print(LogClass.ServiceFs, $"LibHac service unregister failed: {name}, result=0x{result.Value:X8}");
++            }
++
++            // Close every owned client even when an earlier unregister/dispose fails.
++            // Mounted file systems still close before the VFS server client.
++            Cleanup(() => application?.Dispose());
++            Cleanup(() => account?.Dispose());
++            Cleanup(() => am?.Dispose());
++            Cleanup(() => ns?.Dispose());
++            Cleanup(() => pm?.Dispose());
++            Cleanup(() => sdb?.Dispose());
++            if (bcat != null)
+             {
+                 foreach (string name in new[] { "bcat:u", "bcat:s", "bcat:m", "bcat:a" })
+-                    BcatClient.Sm.UnregisterService(name).ThrowIfFailure();
+-                BcatClient.Dispose();
++                    Cleanup(() => Unregister(bcat, name));
++                Cleanup(bcat.Dispose);
+             }
+-            RyujinxClient.Sm.UnregisterService("arp:r").ThrowIfFailure();
+-            _arpIReader.Destroy();
+-            RyujinxClient.Dispose();
+-            FsClient?.Dispose();
+-            ApplicationClient = AccountClient = AmClient = BcatClient = FsClient = NsClient = PmClient = SdbClient = RyujinxClient = null;
+-            Server = null;
++            Cleanup(() => Unregister(ryujinx, "arp:r"));
++            Cleanup(() => arpReader.Destroy());
++            Cleanup(ryujinx.Dispose);
++            Cleanup(() => fs?.Dispose());
++
++            if (failures?.Count == 1)
++                ExceptionDispatchInfo.Capture(failures[0]).Throw();
++            if (failures != null)
++                throw new AggregateException("LibHac Horizon cleanup failed.", failures);
+         }
+ 
+         private static AccessControlBits.Bits AccountFsPermissions => AccessControlBits.Bits.SystemSaveData |

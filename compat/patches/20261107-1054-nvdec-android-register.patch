@@ -1,0 +1,75 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index 3b83f060c993befdb1fd71ed739b584d6d958841..55d4fafb690fb61cf235a9299adaecbbe927f555 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -1,7 +1,5 @@
+-using Ryujinx.Graphics.Nvdec.Android;
+ using Ryujinx.Graphics.Video;
+ using System;
+-using System.Runtime.InteropServices;
+ 
+ namespace Ryujinx.Graphics.Nvdec
+ {
+@@ -10,29 +8,15 @@ namespace Ryujinx.Graphics.Nvdec
+         private IH264Decoder _h264Decoder;
+         private IVp8Decoder _vp8Decoder;
+ 
+-        // linux-bionic RID selection derives from ha7rock's #359 media commit
+-        // 4337d98e7541c5194c991fcedd5c0be761fbd6de; IsAndroid is false in that AOT RID.
+-        internal enum Backend { Unavailable, Apple, Android }
+-        internal static Backend SelectBackend(bool apple, bool android, string rid) => apple ? Backend.Apple :
+-            android || rid == "linux-bionic" || rid.StartsWith("linux-bionic-", StringComparison.Ordinal) ? Backend.Android : Backend.Unavailable;
+-        private static Backend PlatformBackend => SelectBackend(OperatingSystem.IsMacOS() || OperatingSystem.IsIOS(), OperatingSystem.IsAndroid(), RuntimeInformation.RuntimeIdentifier);
++        // 解码器一律由平台装配登记进 S2AVideoDecoders（苹果 AppleVideo、安卓 AndroidVideo）；没登记落到 Unavailable
+         public IH264Decoder GetH264Decoder()
+         {
+-            return _h264Decoder ??= S2AVideoDecoders.CreateH264() ?? PlatformBackend switch
+-            {
+-                Backend.Android => new AvcH264Decoder(),
+-                _ => new UnavailableH264Decoder(),
+-            };
++            return _h264Decoder ??= S2AVideoDecoders.CreateH264() ?? new UnavailableH264Decoder();
+         }
+ 
+-        // 苹果的 H.264（VideoToolbox，platform/apple/cs/video）与 VP8（共用的 Vpx.VpxVp8Decoder）都由苹果装配登记进 S2AVideoDecoders；没登记落到 Unavailable
+         public IVp8Decoder GetVp8Decoder()
+         {
+-            return _vp8Decoder ??= S2AVideoDecoders.CreateVp8() ?? PlatformBackend switch
+-            {
+-                Backend.Android => new AndroidVp8Decoder(),
+-                _ => new UnavailableVp8Decoder(),
+-            };
++            return _vp8Decoder ??= S2AVideoDecoders.CreateVp8() ?? new UnavailableVp8Decoder();
+         }
+ 
+         public void Dispose()
+diff --git a/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj b/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj
+index 228620c52d02bf2b118da966a9ad15cf7ca5dba0..d020ae50ea144b9c9beda1d225ad8a7f7b39b0b6 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj
++++ b/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj
+@@ -5,12 +5,6 @@
+     <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+   </PropertyGroup>
+ 
+-  <ItemGroup>
+-    <!-- Transitional source links preserve the existing Nvdec assembly and selection. -->
+-    <Compile Include="../../../../android/cs/video/AvcH264Decoder.cs" />
+-    <Compile Include="../../../../android/cs/video/AndroidVp8Decoder.cs" />
+-  </ItemGroup>
+-
+   <ItemGroup>
+     <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+     <ProjectReference Include="..\Ryujinx.Graphics.Device\Ryujinx.Graphics.Device.csproj" />
+diff --git a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+index e7ddabe4b8ddfa45f996eee22839aa5d788a7f6d..83a3bed462c736e6989794ebf716ef066f5d15db 100644
+--- a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
++++ b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+@@ -7,7 +7,7 @@ namespace Ryujinx.Graphics.Nvdec
+     // S2Arm 平台 adapter（10-30 边界设计 P1，接口约定见 #1069）：视频解码器由平台装配登记工厂，Nvdec 不再按操作系统选实现。
+     //   平台装配在 Host.Boot 之前设一次，之后只读；工厂在 Nvdec 设备线程上、每个解码上下文第一次要解码器时调一次，返回新实例，
+     //   解码器归 NvdecDecoderContext（它 Dispose 时释放）。工厂不许抛异常：抛了报红一次、当没登记处理。
+-    //   苹果已登记（platform/apple/cs/video，S2A.Apple.Video.AppleVideo.Register）；安卓没登记时 NvdecDecoderContext 仍按系统选安卓实现（安卓迁出后删，见 #1069）
++    //   苹果已登记（platform/apple/cs/video，S2A.Apple.Video.AppleVideo.Register）；安卓已登记（android/cs/video，S2A.Android.Video.AndroidVideo.Register）；没登记一律 Unavailable
+     public static class S2AVideoDecoders
+     {
+         public static Func<IH264Decoder> H264 { get; set; }

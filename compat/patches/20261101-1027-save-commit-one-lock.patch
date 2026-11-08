@@ -1,0 +1,74 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+index 4023f19b1664cb758442ad16565b40851a8f8931..e4e6edd01cb415f77fbeb227062b08d2d9c13c94 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -133,6 +133,8 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         private SharedRef<ISaveDataFileSystem> _base;
+         private readonly string _dir;
++        // 改这棵存档的所有入口（建 / 删 / 改名文件与目录、以写模式打开）和提交、回滚共用这一把锁：提交的「没有开着的写模式文件」检查和整个
++        //   克隆 + 交换都在锁内，别的线程改不进来（11-01 全量审计 P0-2：原先只有提交 / 回滚持锁，提交克隆到一半时别的线程增删改，换上的是新旧混合，下次挂载照样克隆它）
+         private readonly object _lock = new();
+         private static int _commits;
+         private int _openWritable;   // files open for writing: a commit with one open is refused, as LibHac's journaled commit does
+@@ -394,6 +396,19 @@ namespace Ryujinx.HLE.FileSystem
+         }
+ 
+         protected override Result DoOpenFile(ref UniqueRef<IFile> outFile, ref readonly Path path, OpenMode mode)
++        {
++            if ((mode & OpenMode.Write) == 0)
++            {
++                return _base.Get.OpenFile(ref outFile, in path, mode);
++            }
++
++            lock (_lock)   // 写模式：打开与计数在锁内，提交检查计数时不会有刚打开、还没计上的
++            {
++                return OpenWritableLocked(ref outFile, in path, mode);
++            }
++        }
++
++        private Result OpenWritableLocked(ref UniqueRef<IFile> outFile, ref readonly Path path, OpenMode mode)
+         {
+             using UniqueRef<IFile> file = new();
+             Result result = _base.Get.OpenFile(ref file.Ref, in path, mode);
+@@ -403,15 +418,8 @@ namespace Ryujinx.HLE.FileSystem
+                 return result;
+             }
+ 
+-            if ((mode & OpenMode.Write) != 0)
+-            {
+-                Interlocked.Increment(ref _openWritable);
+-                outFile.Reset(new WritableFile(ref file.Ref, this));
+-            }
+-            else
+-            {
+-                outFile.Set(ref file.Ref);
+-            }
++            Interlocked.Increment(ref _openWritable);
++            outFile.Reset(new WritableFile(ref file.Ref, this));
+ 
+             return Result.Success;
+         }
+@@ -448,14 +456,14 @@ namespace Ryujinx.HLE.FileSystem
+             }
+         }
+ 
+-        protected override Result DoCreateFile(ref readonly Path path, long size, CreateFileOptions option) => _base.Get.CreateFile(in path, size, option);
+-        protected override Result DoDeleteFile(ref readonly Path path) => _base.Get.DeleteFile(in path);
+-        protected override Result DoCreateDirectory(ref readonly Path path) => _base.Get.CreateDirectory(in path);
+-        protected override Result DoDeleteDirectory(ref readonly Path path) => _base.Get.DeleteDirectory(in path);
+-        protected override Result DoDeleteDirectoryRecursively(ref readonly Path path) => _base.Get.DeleteDirectoryRecursively(in path);
+-        protected override Result DoCleanDirectoryRecursively(ref readonly Path path) => _base.Get.CleanDirectoryRecursively(in path);
+-        protected override Result DoRenameFile(ref readonly Path currentPath, ref readonly Path newPath) => _base.Get.RenameFile(in currentPath, in newPath);
+-        protected override Result DoRenameDirectory(ref readonly Path currentPath, ref readonly Path newPath) => _base.Get.RenameDirectory(in currentPath, in newPath);
++        protected override Result DoCreateFile(ref readonly Path path, long size, CreateFileOptions option) { lock (_lock) return _base.Get.CreateFile(in path, size, option); }
++        protected override Result DoDeleteFile(ref readonly Path path) { lock (_lock) return _base.Get.DeleteFile(in path); }
++        protected override Result DoCreateDirectory(ref readonly Path path) { lock (_lock) return _base.Get.CreateDirectory(in path); }
++        protected override Result DoDeleteDirectory(ref readonly Path path) { lock (_lock) return _base.Get.DeleteDirectory(in path); }
++        protected override Result DoDeleteDirectoryRecursively(ref readonly Path path) { lock (_lock) return _base.Get.DeleteDirectoryRecursively(in path); }
++        protected override Result DoCleanDirectoryRecursively(ref readonly Path path) { lock (_lock) return _base.Get.CleanDirectoryRecursively(in path); }
++        protected override Result DoRenameFile(ref readonly Path currentPath, ref readonly Path newPath) { lock (_lock) return _base.Get.RenameFile(in currentPath, in newPath); }
++        protected override Result DoRenameDirectory(ref readonly Path currentPath, ref readonly Path newPath) { lock (_lock) return _base.Get.RenameDirectory(in currentPath, in newPath); }
+         protected override Result DoGetEntryType(out DirectoryEntryType entryType, ref readonly Path path) => _base.Get.GetEntryType(out entryType, in path);
+         protected override Result DoGetFreeSpaceSize(out long freeSpace, ref readonly Path path) => _base.Get.GetFreeSpaceSize(out freeSpace, in path);
+         protected override Result DoGetTotalSpaceSize(out long totalSpace, ref readonly Path path) => _base.Get.GetTotalSpaceSize(out totalSpace, in path);

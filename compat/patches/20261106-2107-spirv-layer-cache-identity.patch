@@ -1,0 +1,20 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index 8c42b18fc63c9fc1cb1fea9bc70db7d1fe43671d..f7d389c1721ba9e0f360caabaef52f8793fe47ea 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -109,10 +109,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             {
+                 writer.Write("s2a-spirv-15-layer-output");
+             }
+-            if (usesSpirv && (capabilities.S2ASpirvLayerExt || capabilities.S2ASpirvLayerNv))
++            // The old emitter already used EXT unconditionally. Keep that key when
++            // EXT is actually the chosen legacy route; rotate the key when the new
++            // route instead selects NV or rejects output. Core 1.5 is keyed above.
++            if (usesSpirv && !capabilities.S2ASpirv15 && !capabilities.S2ASpirvLayerExt)
+             {
+-                writer.Write("s2a-spirv-layer-extension");
+-                writer.Write(capabilities.S2ASpirvLayerExt);
++                writer.Write("s2a-spirv-layer-legacy-route");
+                 writer.Write(capabilities.S2ASpirvLayerNv);
+             }
+             writer.Flush();

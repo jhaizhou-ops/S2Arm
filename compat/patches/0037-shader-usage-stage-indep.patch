@@ -1,0 +1,359 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 4cd9c1d5c8d284c64599c66cd97f570453ac4c85..faa7c859487ad23fc4be022f025b2bae21f52823 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -5,6 +5,10 @@
+     <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+   </PropertyGroup>
+ 
++  <ItemGroup>
++    <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器（graphics/tools/shbake）用磁盘缓存与特化状态内部类型 -->
++  </ItemGroup>
++
+   <ItemGroup>
+     <ProjectReference Include="..\Ryujinx.Cpu\Ryujinx.Cpu.csproj" />
+     <ProjectReference Include="..\Ryujinx.Graphics.Device\Ryujinx.Graphics.Device.csproj" />
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+index 3c7664b77a95ccff4b29538dbfaddd194398c71c..b38589030be363e7ec102f639e9aa644a92e1510 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheGpuAccessor.cs
+@@ -58,6 +58,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
++        public void S2AReportStateUse(bool a2cRead, uint attrReadMask) => _newSpecState.S2ARecordUsage(a2cRead, attrReadMask);   // S2A：翻译读过的特化状态记进新状态（缓存匹配只比读过的）
++
+         /// <inheritdoc/>
+         public uint ConstantBuffer1Read(int offset)
+         {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index 847ce2a117f64df8d495d4dd77af160798b85073..f2c24a94759e4f004f29f7e8eed7175dfe9604d5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -103,6 +103,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             return MemoryMarshal.Cast<byte, ulong>(_channel.MemoryManager.GetSpan(address, size));
+         }
+ 
++        public void S2AReportStateUse(bool a2cRead, uint attrReadMask) => _state.SpecializationState?.S2ARecordUsage(a2cRead, attrReadMask);   // S2A
++
+         /// <inheritdoc/>
+         public int QueryComputeLocalSizeX() => _state.ComputeState.LocalSizeX;
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index abe5c9840ef49bf5d6010b8ba79969cb45e135aa..8c3308f93a271f97b97a1e90b920c52f5e443e5d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -34,9 +34,38 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             TransformFeedback = 1 << 3,
+             TextureArrayFromBuffer = 1 << 4,
+             TextureArrayFromPool = 1 << 5,
++            S2AUsageTracked = 1 << 8,   // S2A：翻译时记了读过哪些状态（S2ARecordUsage）；没有这位的旧条目照原版全比
++            S2AA2cRead = 1 << 9,
+         }
+ 
+         private QueriedStateFlags _queriedState;
++        private uint _s2aAttrRead;   // S2A：翻译时读过类型的顶点属性位置
++
++        /// <summary>S2A：记下翻译实际读过的状态（访问器在 TranslatorContext.Translate 结尾调）；多阶段累加</summary>
++        public void S2ARecordUsage(bool a2cRead, uint attrReadMask)
++        {
++            _queriedState |= QueriedStateFlags.S2AUsageTracked | (a2cRead ? QueriedStateFlags.S2AA2cRead : 0);
++            _s2aAttrRead |= attrReadMask;
++        }
++
++        /// <summary>S2A：使用记录只读（离线批量翻译补变体用）：有无记录 / a2c 抖动是否读过 / 读过类型的属性位置</summary>
++        public bool S2AUsageTracked => (_queriedState & QueriedStateFlags.S2AUsageTracked) != 0;
++        public bool S2AA2cRead => (_queriedState & QueriedStateFlags.S2AA2cRead) != 0;
++        public uint S2AAttrRead => _s2aAttrRead;
++
++        /// <summary>S2A：序列化时去掉使用记录（缓存合并按「客体代码 + 特化状态」去重用：同一程序有无记录算同一条）</summary>
++        public void S2AWriteWithoutUsage(ref BinarySerializer dataWriter)
++        {
++            QueriedStateFlags q = _queriedState; uint m = _s2aAttrRead;
++            _queriedState &= ~(QueriedStateFlags.S2AUsageTracked | QueriedStateFlags.S2AA2cRead); _s2aAttrRead = 0;
++            try { Write(ref dataWriter); } finally { _queriedState = q; _s2aAttrRead = m; }
++        }
++
++        /// <summary>S2A：把另一份（同一程序再翻时记录的）使用记录并进来（离线批量翻译写盘用继承条目的状态时）</summary>
++        public void S2AMergeUsage(ShaderSpecializationState other)
++        {
++            if ((other._queriedState & QueriedStateFlags.S2AUsageTracked) != 0) S2ARecordUsage((other._queriedState & QueriedStateFlags.S2AA2cRead) != 0, other._s2aAttrRead);
++        }
+         private bool _compute;
+         private byte _constantBufferUsePerStage;
+ 
+@@ -556,7 +585,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             bool thisA2cDitherEnable = GraphicsState.AlphaToCoverageEnable && GraphicsState.AlphaToCoverageDitherEnable;
+             bool otherA2cDitherEnable = graphicsState.AlphaToCoverageEnable && graphicsState.AlphaToCoverageDitherEnable;
+ 
+-            if (otherA2cDitherEnable != thisA2cDitherEnable)
++            bool s2aTracked = (_queriedState & QueriedStateFlags.S2AUsageTracked) != 0;   // S2A：有使用记录就只比翻译读过的
++
++            if ((!s2aTracked || (_queriedState & QueriedStateFlags.S2AA2cRead) != 0) && otherA2cDitherEnable != thisA2cDitherEnable)
+             {
+                 return false;
+             }
+@@ -585,6 +616,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 
+                 for (int index = 0; index < attributeTypesSpan.Length; index++)
+                 {
++                    if (s2aTracked && (_s2aAttrRead & (1u << index)) == 0) continue;   // S2A：翻译没读过这个位置的类型
+                     AttributeType lType = FilterAttributeType(channel, attributeTypesSpan[index]);
+                     AttributeType rType = FilterAttributeType(channel, gAttributeTypesSpan[index]);
+ 
+@@ -596,9 +628,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             }
+             else
+             {
+-                if (!graphicsState.AttributeTypes.AsSpan().SequenceEqual(GraphicsState.AttributeTypes.AsSpan()))
++                Span<AttributeType> s2aL = graphicsState.AttributeTypes.AsSpan(), s2aR = GraphicsState.AttributeTypes.AsSpan();
++                for (int index = 0; index < s2aL.Length; index++)
+                 {
+-                    return false;
++                    if (s2aTracked && (_s2aAttrRead & (1u << index)) == 0) continue;   // S2A：翻译没读过这个位置的类型
++                    if (s2aL[index] != s2aR[index]) return false;
+                 }
+             }
+ 
+@@ -962,6 +996,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 }
+             }
+ 
++            if ((specState._queriedState & QueriedStateFlags.S2AUsageTracked) != 0) dataReader.Read(ref specState._s2aAttrRead);   // S2A：有使用记录才多一个 uint（旧条目照旧可读）
++
+             return specState;
+         }
+ 
+@@ -1058,6 +1094,64 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     dataWriter.Write(ref length);
+                 }
+             }
++
++            if ((_queriedState & QueriedStateFlags.S2AUsageTracked) != 0) dataWriter.Write(ref _s2aAttrRead);   // S2A
++        }
++
++        // S2A: 离线批量翻译（ryu_judge --shbake，10-19）统计已有缓存里的缺省值用：只读导出纹理登记与查询标记
++        internal byte S2ACbUsePerStage => _constantBufferUsePerStage;
++        internal IEnumerable<(int Stage, int Handle, int Slot, uint Format, bool Srgb, TextureTarget Target, bool Norm, int Queried)> S2ATextures()
++        {
++            foreach (var kv in _textureSpecialization)
++            {
++                TextureSpecializationState t = kv.Value.Value;
++                yield return (kv.Key.StageIndex, kv.Key.Handle, kv.Key.CbufSlot, t.Format, t.FormatSrgb, t.TextureTarget, t.CoordNormalized, (int)t.QueriedFlags);
++            }
++        }
++        internal IEnumerable<(bool IsSampler, int Length)> S2AArrayFromPool()
++        {
++            foreach (var kv in _textureArrayFromPoolSpecialization) yield return (kv.Key, kv.Value);
++        }
++        internal IEnumerable<(int Stage, int Slot, int Length)> S2AArrayFromBuffer()
++        {
++            foreach (var kv in _textureArrayFromBufferSpecialization) yield return (kv.Key.StageIndex, kv.Key.CbufSlot, kv.Value);
++        }
++
++        // S2A: 特化评估记录（渲染线 10-18，只读，不改逻辑）：把本程序进键的全部状态按「字段=值」写成一行，供 S2ASpecLog 落盘统计
++        internal string S2ADescribe()
++        {
++            var sb = new System.Text.StringBuilder();
++            if (_compute)
++            {
++                ref GpuChannelComputeState c = ref ComputeState;
++                sb.Append($"local={c.LocalSizeX}x{c.LocalSizeY}x{c.LocalSizeZ}\tsmem={c.SharedMemorySize}\tlmem={c.LocalMemorySize}\tunaligned={c.HasUnalignedStorageBuffer}");
++            }
++            else
++            {
++                ref GpuChannelGraphicsState g = ref GraphicsState;
++                sb.Append($"early_z={g.EarlyZForce}\ttopology={g.Topology}\ttess={g.TessellationMode.Packed}\ta2c={g.AlphaToCoverageEnable}\ta2c_dither={g.AlphaToCoverageDitherEnable}");
++                sb.Append($"\tvp_disable={g.ViewportTransformDisable}\tdepth_mode={g.DepthMode}\tprog_psize={g.ProgramPointSizeEnable}\tpsize={g.PointSize}");
++                sb.Append($"\talpha_test={g.AlphaTestEnable}\talpha_op={g.AlphaTestCompare}\talpha_ref={g.AlphaTestReference}");
++                sb.Append("\tattr=");
++                for (int i = 0; i < 32; i++) sb.Append((int)g.AttributeTypes[i]).Append(i < 31 ? "," : "");
++                sb.Append("\tfout=");
++                for (int i = 0; i < 8; i++) sb.Append((int)g.FragmentOutputTypes[i]).Append(i < 7 ? "," : "");
++                sb.Append($"\tcbdp={g.HasConstantBufferDrawParameters}\tunaligned={g.HasUnalignedStorageBuffer}\tdual_src={g.DualSourceBlendEnable}\tyneg={g.YNegateEnabled}");
++                sb.Append($"\ttfb={(TransformFeedbackDescriptors?.Length ?? 0)}");
++            }
++            sb.Append("\ttex=");
++            foreach (var kv in _textureSpecialization)
++            {
++                TextureSpecializationState t = kv.Value.Value;
++                sb.Append($"{kv.Key.StageIndex}:{kv.Key.Handle:X}:{kv.Key.CbufSlot}=");
++                if ((t.QueriedFlags & QueriedTextureStateFlags.TextureFormat) != 0) sb.Append($"f{t.Format}{(t.FormatSrgb ? "s" : "")}");
++                if ((t.QueriedFlags & QueriedTextureStateFlags.SamplerType) != 0) sb.Append($"t{(int)t.TextureTarget}");
++                if ((t.QueriedFlags & QueriedTextureStateFlags.CoordNormalized) != 0) sb.Append($"n{(t.CoordNormalized ? 1 : 0)}");
++                sb.Append(';');
++            }
++            sb.Append($"\tarr_buf={_textureArrayFromBufferSpecialization.Count}\tarr_pool={_textureArrayFromPoolSpecialization.Count}");
++            sb.Append((_queriedState & QueriedStateFlags.S2AUsageTracked) != 0 ? $"\tused=a2c:{((_queriedState & QueriedStateFlags.S2AA2cRead) != 0 ? 1 : 0)},attr:{_s2aAttrRead:X8}" : "\tused=无记录");   // S2A：翻译读过的状态（缓存匹配只比这些）
++            return sb.ToString();
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 77953df05bcaad04a46651226bd1ac81099f0ec1..a612c4b1bee8caf5deea05ee5b2a115960bc29bf 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -498,5 +498,8 @@ namespace Ryujinx.Graphics.Shader
+         {
+             // Only useful when recording information for a disk shader cache.
+         }
++    
++        /// <summary>S2A：翻译结束时报这次实际读过的特化状态（a2c 抖动、读过类型的顶点属性位置掩码）；缺省不记（匹配退回原版全比）</summary>
++        void S2AReportStateUse(bool a2cRead, uint attrReadMask) { }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs b/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
+index 5504ef4ed64c968ebbb1865123c5a70e6db6f8a0..346112a972e7a0578b1c73c0f8cb6aefbdfb5e66 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/AttributeUsage.cs
+@@ -88,6 +88,16 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+         }
+ 
++        /// <summary>S2A（10-19 出包线，阶段独立翻译）：当作下一阶段（片元）读全部 32 个通用输入的全部分量——顶点没写的输出补默认值（与原「片元读、顶点没写」同一处理），
++        /// 顶点翻译结果不再随配对的片元变化，可单独翻、单独进离线库；片元用固定功能属性时调用方仍走原合并</summary>
++        public void MergeAllGenericInputsForFragment(bool gpPassthrough)
++        {
++            NextInputAttributesComponents = UInt128.MaxValue;
++            NextUsedInputAttributesPerPatch = new HashSet<int>();
++            NextUsesFixedFuncAttributes = false;
++            MergeOutputUserAttributes(gpPassthrough, -1, Array.Empty<int>());
++        }
++
+         private void MergeOutputUserAttributes(bool gpPassthrough, int mask, IEnumerable<int> perPatch)
+         {
+             _nextUsedInputAttributes = mask;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+index 62dd9e2e76f7572ab46f761beb1c218b9299b036..b93b63dc13a264d5eb2db34961cf476eb0c9aa94 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -591,7 +591,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         private void GenerateAlphaToCoverageDitherDiscard()
+         {
+             // If the feature is disabled, or alpha is not written, then we're done.
+-            if (!TranslatorContext.Definitions.AlphaToCoverageDitherEnable || (TranslatorContext.Definitions.OmapTargets & 8) == 0)
++            if ((TranslatorContext.Definitions.OmapTargets & 8) == 0 || !TranslatorContext.Definitions.AlphaToCoverageDitherEnable)   // S2A：先看写不写 alpha，不写就不读 a2c 抖动（匹配时才能不比它）
+             {
+                 return;
+             }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index c11e658128f76f9424fa34d861b9c13ddec478e9..b5c6ec5445507d096b2f0fa43459c6d6733a4232 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -19,7 +19,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public TessPatchType TessPatchType => _graphicsState.TessPatchType;
+         public TessSpacing TessSpacing => _graphicsState.TessSpacing;
+ 
+-        public bool AlphaToCoverageDitherEnable => _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable;
++        // S2A（10-19 出包线）：记下这次翻译实际读了哪些特化状态，缓存匹配只比读过的（ShaderSpecializationState.MatchesGraphics）；原版无条件比 a2c 抖动与全部 32 个属性类型，
++        // 同一份翻译结果因没读过的字段不同而未命中、运行时现翻（动森首局现翻 8 支：代码全同，只差 a2c_dither / 未用位置的属性类型）
++        public bool S2AA2cRead;
++        public uint S2AAttrRead;
++        public bool AlphaToCoverageDitherEnable { get { S2AA2cRead = true; return _graphicsState.AlphaToCoverageEnable && _graphicsState.AlphaToCoverageDitherEnable; } }
+         public bool ViewportTransformDisable => _graphicsState.ViewportTransformDisable;
+ 
+         public bool DepthMode => _graphicsState.DepthMode;
+@@ -307,6 +311,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             if (Stage == ShaderStage.Vertex && !isOutput)
+             {
++                S2AAttrRead |= 1u << location;
+                 type |= _graphicsState.AttributeTypes[location].AsAggregate(SupportsScaledVertexFormats);
+             }
+             else
+@@ -319,21 +324,25 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public AttributeType GetAttributeType(int location)
+         {
++            S2AAttrRead |= 1u << location;
+             return _graphicsState.AttributeTypes[location];
+         }
+ 
+         public bool IsAttributeSint(int location)
+         {
++            S2AAttrRead |= 1u << location;
+             return (_graphicsState.AttributeTypes[location] & ~AttributeType.AnyPacked) == AttributeType.Sint;
+         }
+ 
+         public bool IsAttributePacked(int location)
+         {
++            S2AAttrRead |= 1u << location;
+             return _graphicsState.AttributeTypes[location].HasFlag(AttributeType.Packed);
+         }
+ 
+         public bool IsAttributePackedRgb10A2Signed(int location)
+         {
++            S2AAttrRead |= 1u << location;
+             return _graphicsState.AttributeTypes[location].HasFlag(AttributeType.PackedRgb10A2Signed);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index c7c5629474ecc60a7275747bbffa227704ee5c73..a1ad66b5fa2bb1a0782b860e5260de91b54e464d 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -174,12 +174,28 @@ namespace Ryujinx.Graphics.Shader.Translation
+             Definitions.LastInVertexPipeline = true;
+         }
+ 
++        // S2A：阶段独立翻译（缺省开；S2A_STAGE_INDEP=0 关，A/B 用——烘焙与运行时必须同一取值）
++        public static bool S2AStageIndep = Environment.GetEnvironmentVariable("S2A_STAGE_INDEP") != "0";
++
++        /// <summary>S2A：单独翻译顶点阶段（离线批量翻译里没配上片元的顶点）：按「下一阶段是片元、读全部通用输入」处理，结果与配任何片元时相同</summary>
++        public void S2ASetStandaloneNextFragment()
++        {
++            if (S2AStageIndep && Definitions.Stage == ShaderStage.Vertex) AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);
++        }
++
+         public void SetNextStage(TranslatorContext nextStage)
+         {
+-            AttributeUsage.MergeFromtNextStage(
+-                Definitions.GpPassthrough,
+-                nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr),
+-                nextStage.AttributeUsage);
++            if (S2AStageIndep && nextStage.Definitions.Stage == ShaderStage.Fragment && !nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr))
++            {
++                AttributeUsage.MergeAllGenericInputsForFragment(Definitions.GpPassthrough);   // S2A：顶点输出接口不看片元实际读哪些（见 AttributeUsage）
++            }
++            else
++            {
++                AttributeUsage.MergeFromtNextStage(
++                    Definitions.GpPassthrough,
++                    nextStage._program.UsedFeatures.HasFlag(FeatureFlags.FixedFuncAttr),
++                    nextStage.AttributeUsage);
++            }
+ 
+             // We don't consider geometry shaders using the geometry shader passthrough feature
+             // as being the last because when this feature is used, it can't actually modify any of the outputs,
+@@ -208,9 +224,14 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             FunctionCode[] code = EmitShader(this, resourceManager, _program, asCompute, initializeOutputs: true, out _);
+ 
+-            return Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);
++            ShaderProgram s2aProgram = Translate(code, resourceManager, _program.UsedFeatures, _program.ClipDistancesWritten, asCompute);
++            S2AReportStateUse();
++            return s2aProgram;
+         }
+ 
++        // S2A：把这次翻译读过的特化状态报给访问器（写进特化状态，缓存匹配只比读过的）
++        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse(Definitions.S2AA2cRead, Definitions.S2AAttrRead);
++
+         public ShaderProgram Translate(TranslatorContext other, bool asCompute = false)
+         {
+             ResourceManager resourceManager = CreateResourceManager(asCompute);
+@@ -227,12 +248,15 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+             code = Combine(otherCode, code, aStart);
+ 
+-            return Translate(
++            ShaderProgram s2aProgram = Translate(
+                 code,
+                 resourceManager,
+                 _program.UsedFeatures | other._program.UsedFeatures,
+                 (byte)(_program.ClipDistancesWritten | other._program.ClipDistancesWritten),
+                 asCompute);
++            S2AReportStateUse();
++            other.S2AReportStateUse();
++            return s2aProgram;
+         }
+ 
+         private ShaderProgram Translate(FunctionCode[] functions, ResourceManager resourceManager, FeatureFlags usedFeatures, byte clipDistancesWritten, bool asCompute)

@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index 9e1972f8e09ff4644dcfa25894bdf47ca80eb3a8..d9eb867311cec2112d934597a845c8fdc3345554 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -35,6 +35,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+         public event EventHandler<UnmapEventArgs> MemoryUnmapped;
+ 
++        /// <summary>
++        /// S2A: 映射代数号，每次 Map / Unmap 改完页表后加一（GPU 地址到物理地址的翻译可能变了）。
++        /// 读者先读它（Volatile.Read）再翻译：读到的代数号不变 ⇒ 翻译结果不变。常量缓冲重复绑定判别、着色器代码免比较用。
++        /// </summary>
++        public int S2AMapGen;
++
+         /// <summary>
+         /// Physical memory where the virtual memory is mapped into.
+         /// </summary>
+@@ -377,6 +383,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     SetPte(va + offset, PackPte(pa + offset, kind));
+                 }
+ 
++                System.Threading.Interlocked.Increment(ref S2AMapGen); // S2A：页表改完再加，读者见新代数号时必见新页表
++
+                 RunRemapActions(e);
+             }
+         }
+@@ -399,6 +407,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     SetPte(va + offset, PteUnmapped);
+                 }
+ 
++                System.Threading.Interlocked.Increment(ref S2AMapGen); // S2A
++
+                 RunRemapActions(e);
+             }
+         }

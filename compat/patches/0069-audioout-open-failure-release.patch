@@ -1,0 +1,44 @@
+diff --git a/src/Ryujinx.Audio/Output/AudioOutputManager.cs b/src/Ryujinx.Audio/Output/AudioOutputManager.cs
+index 4e29717436b27cfbb9c2eb219e4b3077c6057a90..3a22cf082a9cfd9a7834395c5328c8838d1de524 100644
+--- a/src/Ryujinx.Audio/Output/AudioOutputManager.cs
++++ b/src/Ryujinx.Audio/Output/AudioOutputManager.cs
+@@ -193,11 +193,28 @@ namespace Ryujinx.Audio.Output
+ 
+             _sessionsBufferEvents[sessionId].Clear();
+ 
+-            IHardwareDeviceSession deviceSession = _deviceDriver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, memoryManager, sampleFormat, parameter.SampleRate, parameter.ChannelCount);
++            // S2Arm: release the session id (and the device session) when opening throws, and the device session when
++            // Initialize fails. Upstream leaked both, so a game retrying a failing OpenAudioOut ran out of session ids
++            // (IndexOutOfRange after 12 attempts).
++            IHardwareDeviceSession deviceSession = null;
++            AudioOutputSystem audioOut;
++            ResultCode result;
++
++            try
++            {
++                deviceSession = _deviceDriver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, memoryManager, sampleFormat, parameter.SampleRate, parameter.ChannelCount);
++
++                audioOut = new(this, _lock, deviceSession, _sessionsBufferEvents[sessionId]);
+ 
+-            AudioOutputSystem audioOut = new(this, _lock, deviceSession, _sessionsBufferEvents[sessionId]);
++                result = audioOut.Initialize(inputDeviceName, sampleFormat, ref parameter, sessionId);
++            }
++            catch
++            {
++                deviceSession?.Dispose();
++                ReleaseSessionId(sessionId);
+ 
+-            ResultCode result = audioOut.Initialize(inputDeviceName, sampleFormat, ref parameter, sessionId);
++                throw;
++            }
+ 
+             if (result == ResultCode.Success)
+             {
+@@ -216,6 +233,7 @@ namespace Ryujinx.Audio.Output
+             }
+             else
+             {
++                deviceSession.Dispose();
+                 ReleaseSessionId(sessionId);
+ 
+                 obj = null;

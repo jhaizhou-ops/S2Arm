@@ -1,0 +1,227 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+index 6c3046900c26c4fd71477696546f04938d04a717..8284d39666e721d0124355a818fb0ff32bc47a8d 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Apple/VideoToolboxH264Decoder.cs
+@@ -35,6 +35,18 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+         // failure the session is dropped and frames are skipped until the next IDR, repeating the last good picture meanwhile
+         private bool _waitIdr;
+         private nint _last;      // last good picture (CVPixelBuffer, retained)
++        // S2Arm: samples decoded since the last IDR (length-prefixed, back to back). When the session goes away, a fresh one is fed this
++        // run again (outputs dropped) and decodes the current frame at once, instead of waiting for the next IDR with a frozen picture
++        // (#495: Silksong cutscene video stayed on one picture for seconds after 30 s in the background). Capped; over the cap, or with no IDR
++        // seen yet, a failure falls back to waiting for the next IDR
++        private const int GopCap = 16 << 20;
++        private byte[] _gop = new byte[0x40000];
++        private int[] _gopEnds = new int[64];
++        private int _gopLen, _gopCount;
++        private bool _gopValid;
++        // S2Arm: diagnostic — S2A_VT_FAULT_FRAME=<n> invalidates the session (handle kept) after the n-th decoded picture, so the next frame
++        // fails with kVTInvalidSessionErr exactly as after iOS background; lets the recovery path be exercised on a Mac
++        private static readonly long FaultFrame = long.TryParse(Environment.GetEnvironmentVariable("S2A_VT_FAULT_FRAME"), out long f) ? f : -1;
+ 
+         private struct OutputSlot
+         {
+@@ -78,14 +90,78 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+                 return false;
+             }
+ 
+-            fixed (byte* p = _avcc)
++            bool idr = HasIdr(bitstream);
++            int st = Submit(_avcc, avccLen);
++
++            if (st != 0 && (idr || _gopValid))
++            {
++                int failed = st;
++
++                // 这一帧是 IDR：新会话直接重解；否则先重喂上一个 IDR 起的帧补齐参考
++                if (idr ? Recreate() : Replay())
++                {
++                    st = Submit(_avcc, avccLen);
++                }
++
++                if (st == 0)
++                {
++                    Logger.Info?.Print(LogClass.Nvdec, $"VideoToolbox H.264：解码失败 {failed}（会话失效）后重建会话{(idr ? "，重解这一帧 IDR" : $"，重喂上一个 IDR 起的 {_gopCount} 帧")}接着解");
++                }
++            }
++
++            if (st != 0)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264 解码失败：{st}；丢掉会话，等下一个 IDR（其间重复上一张好图）");
++                DestroySession();
++                _gopValid = false;
++                _waitIdr = true;
++
++                return RepeatLast(surface);
++            }
++
++            Remember(idr, avccLen);
++
++            if (_last != 0)
++            {
++                CoreFoundation.CFRelease(_last);
++            }
++
++            _last = CoreFoundation.CFRetain(_slot->ImageBuffer);
++            surface.Attach(_slot->ImageBuffer);   // 引用转给面
++            _slot->ImageBuffer = 0;
++
++            if (_frames == FaultFrame)
++            {
++                VideoToolbox.VTDecompressionSessionInvalidate(_session);
++                Logger.Info?.Print(LogClass.Nvdec, $"VideoToolbox H.264：诊断开关 S2A_VT_FAULT_FRAME，第 {_frames} 帧后作废会话（保留句柄）");
++            }
++
++            if (_frames++ == 0)
++            {
++                Logger.Info?.Print(LogClass.Nvdec, $"VideoToolbox H.264 首帧解出：{surface.Width}x{surface.Height}，亮度行距 {surface.Stride}，色度行距 {surface.UvStride}");
++            }
++
++            return true;
++        }
++
++        // 提交一个样本、同步等出帧：0 = 成功（像素缓冲在 _slot），否则提交 / 回调状态（没出帧记 -1）。失败时不留像素缓冲
++        private int Submit(byte[] data, int len, int offset = 0)
++        {
++            if (_session == 0 && !CreateSession())
++            {
++                return -1;
++            }
++
++            int st;
++
++            fixed (byte* p = data)
+             {
+                 nint block = 0, sample = 0;
+-                int st = CoreMedia.CMBlockBufferCreateWithMemoryBlock(0, p, (nuint)avccLen, CoreFoundation.AllocatorNull, null, 0, (nuint)avccLen, 0, &block);
++                st = CoreMedia.CMBlockBufferCreateWithMemoryBlock(0, p + offset, (nuint)len, CoreFoundation.AllocatorNull, null, 0, (nuint)len, 0, &block);
+ 
+                 if (st == 0)
+                 {
+-                    nuint size = (nuint)avccLen;
++                    nuint size = (nuint)len;
+                     st = CoreMedia.CMSampleBufferCreateReady(0, block, _format, 1, 0, null, 1, &size, &sample);
+                 }
+ 
+@@ -99,6 +175,7 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+                     if (st == 0)
+                     {
+                         VideoToolbox.VTDecompressionSessionWaitForAsynchronousFrames(_session);
++                        st = _slot->Status != 0 ? _slot->Status : _slot->ImageBuffer == 0 ? -1 : 0;
+                     }
+                 }
+ 
+@@ -111,39 +188,79 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+                 {
+                     CoreFoundation.CFRelease(block);
+                 }
++            }
+ 
+-                if (st != 0 || _slot->Status != 0 || _slot->ImageBuffer == 0)
+-                {
+-                    Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264 解码失败：提交 {st}，回调 {_slot->Status}，出帧 {(_slot->ImageBuffer != 0 ? "有" : "无")}；丢掉会话，等下一个 IDR（其间重复上一张好图）");
++            if (st != 0 && _slot->ImageBuffer != 0)
++            {
++                CoreFoundation.CFRelease(_slot->ImageBuffer);
++                _slot->ImageBuffer = 0;
++            }
+ 
+-                    if (_slot->ImageBuffer != 0)
+-                    {
+-                        CoreFoundation.CFRelease(_slot->ImageBuffer);
+-                        _slot->ImageBuffer = 0;
+-                    }
++            return st;
++        }
+ 
+-                    DestroySession();
+-                    _waitIdr = true;
++        private bool Recreate()
++        {
++            DestroySession();
+ 
+-                    return RepeatLast(surface);
++            return CreateSession();
++        }
++
++        // 新会话重喂上一个 IDR 起解过的帧，出的图丢掉；全部成功才算接上
++        private bool Replay()
++        {
++            if (!Recreate())
++            {
++                return false;
++            }
++
++            for (int i = 0, start = 0; i < _gopCount; start = _gopEnds[i++])
++            {
++                if (Submit(_gop, _gopEnds[i] - start, start) != 0)
++                {
++                    return false;
+                 }
++
++                CoreFoundation.CFRelease(_slot->ImageBuffer);
++                _slot->ImageBuffer = 0;
+             }
+ 
+-            if (_last != 0)
++            return true;
++        }
++
++        // 解成功的样本记进「上一个 IDR 起」的序列：IDR 重新开始；没见过 IDR 或超上限就不记（失败时退回等 IDR）
++        private void Remember(bool idr, int len)
++        {
++            if (idr)
+             {
+-                CoreFoundation.CFRelease(_last);
++                _gopLen = _gopCount = 0;
++                _gopValid = true;
+             }
+ 
+-            _last = CoreFoundation.CFRetain(_slot->ImageBuffer);
+-            surface.Attach(_slot->ImageBuffer);   // 引用转给面
+-            _slot->ImageBuffer = 0;
++            if (!_gopValid)
++            {
++                return;
++            }
+ 
+-            if (_frames++ == 0)
++            if (_gopLen + len > GopCap)
+             {
+-                Logger.Info?.Print(LogClass.Nvdec, $"VideoToolbox H.264 首帧解出：{surface.Width}x{surface.Height}，亮度行距 {surface.Stride}，色度行距 {surface.UvStride}");
++                _gopValid = false;
++                return;
+             }
+ 
+-            return true;
++            if (_gopLen + len > _gop.Length)
++            {
++                Array.Resize(ref _gop, Math.Max(_gop.Length * 2, _gopLen + len));
++            }
++
++            if (_gopCount == _gopEnds.Length)
++            {
++                Array.Resize(ref _gopEnds, _gopEnds.Length * 2);
++            }
++
++            Buffer.BlockCopy(_avcc, 0, _gop, _gopLen, len);
++            _gopLen += len;
++            _gopEnds[_gopCount++] = _gopLen;
+         }
+ 
+         private bool RepeatLast(VideoToolboxSurface surface)
+@@ -196,11 +313,13 @@ namespace Ryujinx.Graphics.Nvdec.Apple
+ 
+             if (_format != 0 && sps.SequenceEqual(_sps.AsSpan(0, _spsLen)) && pps.SequenceEqual(_pps.AsSpan(0, _ppsLen)))
+             {
+-                return true;
++                // S2Arm: the session may have been dropped after a failure while the parameter sets stayed the same
++                return _session != 0 || CreateSession();
+             }
+ 
+             Store(ref _sps, ref _spsLen, sps);
+             Store(ref _pps, ref _ppsLen, pps);
++            _gopValid = false;   // 参数集换了，旧序列不能再重喂；下一个 IDR 重新开始记
+ 
+             nint format;
+             int st;

@@ -1,0 +1,618 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 707b44b132e8bf292073d8a3df5b3a76f03f952c..6f5ca10f06fa06f645c0798fceac9026e1cbe432 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -80,6 +80,47 @@ namespace Ryujinx.Audio.Backends.Apple
+             }
+         }
+ 
++        // S2Arm (10-23 声音停了自愈): iOS 上重新激活音频会话（系统打断 / 路由切换后队列要在激活的会话上才能再开播）。
++        //   AppleHardwareDeviceSession 的停播看门狗调；非 iOS 返回 true 不做事。objc 指针首次取后缓存，之后调用不分配
++        private static nint _avSession, _selSetActive, _msgSend;
++
++        internal unsafe bool S2AReactivateSession()
++        {
++            if (!OperatingSystem.IsIOS())
++            {
++                return true;
++            }
++
++            try
++            {
++                if (_avSession == 0)
++                {
++                    NativeLibrary.Load("/System/Library/Frameworks/AVFAudio.framework/AVFAudio");
++                    nint objc = NativeLibrary.Load("/usr/lib/libobjc.A.dylib");
++                    var getClass = (delegate* unmanaged<byte*, nint>)NativeLibrary.GetExport(objc, "objc_getClass");
++                    var selReg = (delegate* unmanaged<byte*, nint>)NativeLibrary.GetExport(objc, "sel_registerName");
++                    _msgSend = NativeLibrary.GetExport(objc, "objc_msgSend");
++                    nint cls, selShared;
++
++                    fixed (byte* p = "AVAudioSession\0"u8) cls = getClass(p);
++                    fixed (byte* p = "sharedInstance\0"u8) selShared = selReg(p);
++                    fixed (byte* p = "setActive:error:\0"u8) _selSetActive = selReg(p);
++
++                    _avSession = ((delegate* unmanaged<nint, nint, nint>)_msgSend)(cls, selShared);
++                }
++
++                nint err = 0;
++
++                return ((delegate* unmanaged<nint, nint, byte, nint*, byte>)_msgSend)(_avSession, _selSetActive, 1, &err) != 0;
++            }
++            catch (Exception e)
++            {
++                Console.Error.WriteLine($"[声] 【红】重新激活音频会话失败：{e.Message}");
++
++                return false;
++            }
++        }
++
+         private bool TestSurroundSupport()
+         {
+             try
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 398b1d16d537f2d2c999f1f8ba4975933e824f20..8b8fcc76704b81708563a40c04fc0bda3883dfa7 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -60,6 +60,24 @@ namespace Ryujinx.Audio.Backends.Apple
+         // S2Arm: underrun counters / S2A_AUDIO_WAV capture, see S2AOutputDiag
+         private readonly S2AOutputDiag _diag;
+ 
++        // S2Arm (10-23 jhz 塞尔达「杂音后没声」): 输出流自愈。开着播、在途有数据，设备却超过 StallMs 不回调 = 设备停了
++        //   （系统停了队列：会话被打断 / 路由切换 / 媒体服务重置……，我们不会收到任何通知，之前就此永久没声）：
++        //   iOS 重新激活音频会话 → 同步停队列 → 收回在途缓冲 → 重新排进去 → 开播。看门狗线程每 250 ms 查一次已登记会话。
++        //   S2A_AUDIO_HEAL=0 关（同包 A/B）；S2A_AUDIO_TEST_STALL_AT=<秒>：开播后到点暂停一次队列（模拟系统停播，测试用）
++        private const int StallMs = 1000;
++        private const int HealBackoffMs = 2000;
++        private static readonly bool _healOn = Environment.GetEnvironmentVariable("S2A_AUDIO_HEAL") != "0";
++        private static readonly int _testStallAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_STALL_AT"), out int s) ? s : 0;
++        private static readonly AppleHardwareDeviceSession[] _watched = new AppleHardwareDeviceSession[8];
++        private static int _watchdogStarted;
++        private long _lastCallbackTicks;
++        private long _lastHealTicks;
++        private int _heals;
++        private bool _testStallDone;
++        private static readonly int _testNoteAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_NOTE_AT"), out int n) ? n : 0;
++        private static readonly int _testResetAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_RESET_AT"), out int r) ? r : 0;
++        private bool _testNoteDone, _testResetDone;
++
+         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+         private delegate void AudioQueueOutputCallback(
+             nint userData,
+@@ -83,47 +101,236 @@ namespace Ryujinx.Audio.Backends.Apple
+             _gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
+ 
+             SetupAudioQueue();
++            S2AWatch(this, true);
+         }
+ 
+-        private void SetupAudioQueue()
++        // S2Arm: 登记 / 注销看门狗（固定 8 槽，看门狗线程扫数组不分配）
++        private static void S2AWatch(AppleHardwareDeviceSession s, bool add)
++        {
++            lock (_watched)
++            {
++                for (int i = 0; i < _watched.Length; i++)
++                {
++                    if (add ? _watched[i] == null : _watched[i] == s)
++                    {
++                        _watched[i] = add ? s : null;
++                        break;
++                    }
++                }
++            }
++
++            if (add && Interlocked.Exchange(ref _watchdogStarted, 1) == 0)
++            {
++                new Thread(S2AWatchdogLoop) { IsBackground = true, Name = "S2A.AudioHeal" }.Start();
++            }
++        }
++
++        private static void S2AWatchdogLoop()
++        {
++            S2AAudioNotes.Install();
++
++            while (true)
++            {
++                Thread.Sleep(250);
++
++                long now = Stopwatch.GetTimestamp();
++                int notes = S2AAudioNotes.TakePending();
++
++                for (int i = 0; i < _watched.Length; i++)
++                {
++                    AppleHardwareDeviceSession s = Volatile.Read(ref _watched[i]);
++
++                    if (s == null)
++                    {
++                        continue;
++                    }
++
++                    s.S2ATestHooks(now);
++
++                    // 主路径：系统通知。中断结束 → 重新激活 + 重启；媒体服务重置 → 重建队列
++                    if ((notes & (S2AAudioNotes.Ended | S2AAudioNotes.Reset)) != 0)
++                    {
++                        s.S2ARecover((notes & S2AAudioNotes.Reset) != 0 ? "系统通知：媒体服务重置" : "系统通知：中断结束", (notes & S2AAudioNotes.Reset) != 0, now, false);
++                    }
++                    else
++                    {
++                        s.S2ACheckStall(now);
++                    }
++                }
++            }
++        }
++
++        // 测试钩子（缺省全关）：S2A_AUDIO_TEST_STALL_AT 外部停队列（只能靠兜底接）；S2A_AUDIO_TEST_NOTE_AT 模拟一次中断
++        //   （投递 began → 像系统那样停队列 → 投递 ended，走主路径）；S2A_AUDIO_TEST_RESET_AT 投递一次媒体服务重置
++        private void S2ATestHooks(long now)
++        {
++            if (!_started || !_queueRunning)
++            {
++                return;
++            }
++
++            long since = now - _startTicks;
++
++            if (_testStallAtS > 0 && !_testStallDone && since >= (long)_testStallAtS * Stopwatch.Frequency)
++            {
++                _testStallDone = true;
++                int rc = AudioQueuePause(_audioQueue);
++                Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 开播后第 {_testStallAtS} 秒外部暂停输出队列（不发任何通知，模拟系统悄悄停播），rc={rc}");
++            }
++
++            if (_testNoteAtS > 0 && !_testNoteDone && since >= (long)_testNoteAtS * Stopwatch.Frequency)
++            {
++                _testNoteDone = true;
++                Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 开播后第 {_testNoteAtS} 秒模拟中断（投递 began → 停队列 → 投递 ended）");
++                S2AAudioNotes.PostForTest("AVAudioSessionInterruptionNotification", 1);
++                AudioQueuePause(_audioQueue);
++                S2AAudioNotes.PostForTest("AVAudioSessionInterruptionNotification", 0);
++            }
++
++            if (_testResetAtS > 0 && !_testResetDone && since >= (long)_testResetAtS * Stopwatch.Frequency)
++            {
++                _testResetDone = true;
++                Console.Error.WriteLine($"[声] 测试钩子：输出 #{_diag.Index} 开播后第 {_testResetAtS} 秒模拟媒体服务重置");
++                S2AAudioNotes.PostForTest("AVAudioSessionMediaServicesWereResetNotification", -1);
++            }
++        }
++
++        // 兜底：开着播、在途有数据，设备却超过 StallMs 不回调。每次触发都打【红】，带上最近一条系统通知，免得悄悄盖住别的毛病
++        private void S2ACheckStall(long now)
++        {
++            if (!_started || !_queueRunning)
++            {
++                return;
++            }
++
++            long stall = now - Volatile.Read(ref _lastCallbackTicks);
++
++            if (stall < (long)StallMs * Stopwatch.Frequency / 1000 || _pump.InFlightBytes == 0)
++            {
++                return;
++            }
++
++            if (!_healOn)
++            {
++                if (_heals++ == 0)
++                {
++                    Console.Error.WriteLine($"[声] 【红】输出 #{_diag.Index}：设备 {stall * 1000 / Stopwatch.Frequency} ms 没有回调（在途 {_pump.InFlightBytes / _bytesPerFrame} 帧），自愈已关（S2A_AUDIO_HEAL=0）");
++                }
++
++                return;
++            }
++
++            // 系统中断期间（见过 began、没见 ended）声音在别人手里，重启多半失败：拉长间隔，不刷屏
++            int backoff = S2AAudioNotes.Interrupted ? HealBackoffMs * 5 : HealBackoffMs;
++
++            if (now - _lastHealTicks < (long)backoff * Stopwatch.Frequency / 1000)
++            {
++                return;
++            }
++
++            S2ARecover($"兜底：设备 {stall * 1000 / Stopwatch.Frequency} ms 没有回调{(S2AAudioNotes.Interrupted ? "（系统中断中）" : "")}，最近系统通知 {S2AAudioNotes.Last}", false, now, true);
++        }
++
++        // 恢复输出流：iOS 重新激活会话 → 同步停队列（重置时重建）→ 收回在途 → 重新排进去 → 开播
++        private void S2ARecover(string why, bool rebuild, long now, bool red)
+         {
++            if (!_healOn)
++            {
++                Console.Error.WriteLine($"[声] {why}；自愈已关（S2A_AUDIO_HEAL=0），不处理");
++
++                return;
++            }
++
+             lock (_lock)
+             {
+-                AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(
+-                    RequestedSampleFormat,
+-                    RequestedSampleRate,
+-                    RequestedChannelCount);
++                if (_audioQueue == nint.Zero)
++                {
++                    return;
++                }
+ 
+-                nint callbackPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
+-                nint userData = GCHandle.ToIntPtr(_gcHandle);
++                _lastHealTicks = now;
++                long inFlightFrames = _pump.InFlightBytes / _bytesPerFrame;
++                bool active = _driver.S2AReactivateSession();
++                int stopRc = AudioQueueStop(_audioQueue, true);
++                int reclaimed = _pump.ReclaimAll();
+ 
+-                int result = AudioQueueNewOutput(
+-                    ref format,
+-                    callbackPtr,
+-                    userData,
+-                    nint.Zero,
+-                    nint.Zero,
+-                    0,
+-                    out _audioQueue);
++                // 收回的缓冲没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），不然游戏那侧的队列永远等不到完成
++                if (reclaimed > 0)
++                {
++                    ProcessPlayedSamples(reclaimed);
++                }
+ 
+-                if (result != 0)
++                int newRc = 0;
++
++                if (rebuild)
+                 {
+-                    throw new InvalidOperationException($"AudioQueueNewOutput failed: {result}");
++                    AudioQueueDispose(_audioQueue, true);
++                    newRc = CreateQueue();
+                 }
+ 
+-                uint framesPerBuffer = RequestedSampleRate * BufferMilliseconds / 1000;
+-                uint bufferSize = framesPerBuffer * (uint)_bytesPerFrame;
++                int startRc = -1;
+ 
+-                for (int i = 0; i < NumBuffers; i++)
++                // 游戏自己停着播（Stop）就只恢复好队列，等它 Start
++                if (_started && newRc == 0)
+                 {
+-                    AudioQueueAllocateBuffer(_audioQueue, bufferSize, out _audioQueueBuffers[i]);
++                    _pump.Pump();
++                    startRc = AudioQueueStart(_audioQueue, nint.Zero);
++                    _queueRunning = startRc == 0;
+                 }
++                else
++                {
++                    _queueRunning = false;
++                }
++
++                Volatile.Write(ref _lastCallbackTicks, Stopwatch.GetTimestamp());
++
++                Console.Error.WriteLine($"[声] {(red ? "【红】" : "")}输出 #{_diag.Index}：{why}（在途 {inFlightFrames} 帧）→ {(rebuild ? "重建" : "重启")}输出队列（第 {++_heals} 次）：" +
++                    $"{(OperatingSystem.IsIOS() ? $"重新激活音频会话 {(active ? "成功" : "失败")}、" : "")}停队列 rc={stopRc}、收回 {reclaimed / _bytesPerFrame} 帧" +
++                    $"{(rebuild ? $"、新建队列 rc={newRc}" : "")}、重新开播 rc={startRc}{(startRc == 0 ? "" : "（没开播：游戏停着或开播失败，下一笔声音到时再试）")}");
++            }
++        }
+ 
+-                _pump = new Pump(this, (int)bufferSize);
++        private void SetupAudioQueue()
++        {
++            lock (_lock)
++            {
++                int result = CreateQueue();
++
++                if (result != 0)
++                {
++                    throw new InvalidOperationException($"AudioQueueNewOutput failed: {result}");
++                }
++
++                _pump = new Pump(this, (int)BufferBytes);
+                 _samples = _pump.Samples;
+             }
+         }
+ 
++        private uint BufferBytes => RequestedSampleRate * BufferMilliseconds / 1000 * (uint)_bytesPerFrame;
++
++        // S2Arm: 建 AudioQueue 和它的 32 个缓冲（起会话与媒体服务重置后重建共用）。缓冲放回同一个数组：泵按槽号取，换队列不用换泵
++        private int CreateQueue()
++        {
++            AudioStreamBasicDescription format = AppleHardwareDeviceDriver.GetAudioFormat(RequestedSampleFormat, RequestedSampleRate, RequestedChannelCount);
++            nint callbackPtr = Marshal.GetFunctionPointerForDelegate(_callbackDelegate);
++            nint userData = GCHandle.ToIntPtr(_gcHandle);
++            int result = AudioQueueNewOutput(ref format, callbackPtr, userData, nint.Zero, nint.Zero, 0, out _audioQueue);
++
++            if (result != 0)
++            {
++                _audioQueue = nint.Zero;
++
++                return result;
++            }
++
++            for (int i = 0; i < NumBuffers; i++)
++            {
++                AudioQueueAllocateBuffer(_audioQueue, BufferBytes, out _audioQueueBuffers[i]);
++            }
++
++            return 0;
++        }
++
+         // S2Arm: the device side of DeviceBufferPump: pool buffer i is _audioQueueBuffers[i]
+         private sealed unsafe class Pump : DeviceBufferPump
+         {
+@@ -162,6 +369,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         private void OutputCallback(nint userData, nint audioQueue, nint bufferPtr)
+         {
+             Ryujinx.Common.S2AThreadAlloc.Tick("CoreAudio 回调"); // S2Arm: per-thread allocation accounting
++            Volatile.Write(ref _lastCallbackTicks, Stopwatch.GetTimestamp()); // S2Arm: 停播看门狗（S2ACheckStall）
+ 
+             if (bufferPtr == nint.Zero)
+                 return;
+@@ -303,6 +511,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _startTicks = Stopwatch.GetTimestamp();
+                 _pump.Pump();
+ 
++                Volatile.Write(ref _lastCallbackTicks, _startTicks); // S2Arm: 停播看门狗从开播时刻起算
++
+                 if (_queueRunning)
+                 {
+                     // 从 Stop 的暂停恢复：队列已预充过，直接续播
+@@ -333,6 +543,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (_pump.PrimedForStart)
+             {
+                 _queueRunning = true;
++                Volatile.Write(ref _lastCallbackTicks, Stopwatch.GetTimestamp()); // S2Arm: 停播看门狗从真开播起算
+                 AudioQueueStart(_audioQueue, nint.Zero);
+             }
+         }
+@@ -372,6 +583,7 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             if (disposing)
+             {
++                S2AWatch(this, false);
+                 Stop();
+ 
+                 if (_audioQueue != nint.Zero)
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AAudioNotes.cs b/src/Ryujinx.Audio.Backends.Apple/S2AAudioNotes.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c7113426bd8d1554ef31584fca34658dc7e82b72
+--- /dev/null
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AAudioNotes.cs
+@@ -0,0 +1,179 @@
++using System;
++using System.Runtime.InteropServices;
++using System.Threading;
++
++namespace Ryujinx.Audio.Backends.Apple
++{
++    // S2Arm (10-23 jhz 塞尔达「杂音后没声」): 接 iOS 音频会话的系统通知，作为输出流恢复的主路径
++    //   （AppleHardwareDeviceSession 的「1 秒零回调」只当兜底）。
++    //   - AVAudioSessionInterruptionNotification：began = 系统收走了声音（来电 / Siri / 别的 App 独占……），队列被系统停了；
++    //     ended = 交还：要重新激活会话、重启队列（不处理就永久没声）。
++    //   - AVAudioSessionMediaServicesWereResetNotification：媒体服务进程重启，旧队列全部作废：重建队列。
++    //   - AVAudioSessionRouteChangeNotification：路由切换（耳机插拔 / 蓝牙），AudioQueue 一般自己跟过去；只记下来，
++    //     若真停了由兜底接住，兜底那行会带上「最近一条系统通知」。
++    // 注册方式：运行时建一个 ObjC 观察者类，方法实现指向本类的 UnmanagedCallersOnly 函数，按名字注册到 NSNotificationCenter。
++    //   通知名就是字符串，Mac 上同样能注册、能投递（测试钩子 S2A_AUDIO_TEST_NOTE_AT 用 postNotificationName 走真实注册路径）。
++    // 回调只置标志（可能在任意线程上投递），重新激活 / 重启由看门狗线程做。
++    internal static unsafe class S2AAudioNotes
++    {
++        public const int Began = 1, Ended = 2, Reset = 4, Route = 8;
++
++        private static int _pending;
++        private static int _interrupted;
++        private static string _last = "无";
++        private static int _installed;
++
++        private static nint _msgSend, _center, _observer;
++        private static delegate* unmanaged<byte*, nint> _getClass;
++        private static delegate* unmanaged<byte*, nint> _selReg;
++        private static delegate* unmanaged<nint> _poolPush;
++        private static delegate* unmanaged<nint, void> _poolPop;
++
++        public static string Last => Volatile.Read(ref _last);
++        public static bool Interrupted => Volatile.Read(ref _interrupted) != 0;
++        public static int TakePending() => Interlocked.Exchange(ref _pending, 0);
++
++        private static nint Sel(string s)
++        {
++            byte[] b = System.Text.Encoding.UTF8.GetBytes(s + "\0");
++            fixed (byte* p = b) return _selReg(p);
++        }
++
++        private static nint Cls(string s)
++        {
++            byte[] b = System.Text.Encoding.UTF8.GetBytes(s + "\0");
++            fixed (byte* p = b) return _getClass(p);
++        }
++
++        private static nint Str(string s)
++        {
++            byte[] b = System.Text.Encoding.UTF8.GetBytes(s + "\0");
++            fixed (byte* p = b) return ((delegate* unmanaged<nint, nint, byte*, nint>)_msgSend)(Cls("NSString"), Sel("stringWithUTF8String:"), p);
++        }
++
++        private static string Utf8(nint nsString)
++        {
++            if (nsString == 0) return "";
++            byte* p = ((delegate* unmanaged<nint, nint, byte*>)_msgSend)(nsString, Sel("UTF8String"));
++            return p == null ? "" : Marshal.PtrToStringUTF8((nint)p) ?? "";
++        }
++
++        public static void Install()
++        {
++            if (Interlocked.Exchange(ref _installed, 1) != 0)
++            {
++                return;
++            }
++
++            try
++            {
++                nint objc = NativeLibrary.Load("/usr/lib/libobjc.A.dylib");
++                NativeLibrary.Load("/System/Library/Frameworks/Foundation.framework/Foundation");
++                _getClass = (delegate* unmanaged<byte*, nint>)NativeLibrary.GetExport(objc, "objc_getClass");
++                _selReg = (delegate* unmanaged<byte*, nint>)NativeLibrary.GetExport(objc, "sel_registerName");
++                _msgSend = NativeLibrary.GetExport(objc, "objc_msgSend");
++                _poolPush = (delegate* unmanaged<nint>)NativeLibrary.GetExport(objc, "objc_autoreleasePoolPush");
++                _poolPop = (delegate* unmanaged<nint, void>)NativeLibrary.GetExport(objc, "objc_autoreleasePoolPop");
++                var allocPair = (delegate* unmanaged<nint, byte*, nint, nint>)NativeLibrary.GetExport(objc, "objc_allocateClassPair");
++                var regPair = (delegate* unmanaged<nint, void>)NativeLibrary.GetExport(objc, "objc_registerClassPair");
++                var addMethod = (delegate* unmanaged<nint, nint, nint, byte*, byte>)NativeLibrary.GetExport(objc, "class_addMethod");
++
++                nint cls;
++                fixed (byte* n = "S2AAudioNoteObserver\0"u8) cls = allocPair(Cls("NSObject"), n, 0);
++                nint sel = Sel("s2aNote:");
++                fixed (byte* t = "v@:@\0"u8) addMethod(cls, sel, (nint)(delegate* unmanaged<nint, nint, nint, void>)&OnNote, t);
++                regPair(cls);
++
++                nint obj = ((delegate* unmanaged<nint, nint, nint>)_msgSend)(cls, Sel("alloc"));
++                _observer = ((delegate* unmanaged<nint, nint, nint>)_msgSend)(obj, Sel("init"));
++                _center = ((delegate* unmanaged<nint, nint, nint>)_msgSend)(Cls("NSNotificationCenter"), Sel("defaultCenter"));
++
++                nint pool = _poolPush();
++
++                foreach (string name in new[] { "AVAudioSessionInterruptionNotification", "AVAudioSessionMediaServicesWereResetNotification", "AVAudioSessionRouteChangeNotification" })
++                {
++                    ((delegate* unmanaged<nint, nint, nint, nint, nint, nint, void>)_msgSend)(_center, Sel("addObserver:selector:name:object:"), _observer, sel, Str(name), 0);
++                }
++
++                _poolPop(pool);
++                Console.Error.WriteLine("[声] 系统音频通知已接（中断开始 / 结束、媒体服务重置、路由切换）");
++            }
++            catch (Exception e)
++            {
++                Console.Error.WriteLine($"[声] 【红】系统音频通知没接上：{e.Message}（只剩 1 秒零回调兜底）");
++            }
++        }
++
++        [UnmanagedCallersOnly]
++        private static void OnNote(nint self, nint cmd, nint note)
++        {
++            nint pool = _poolPush();
++
++            try
++            {
++                string name = Utf8(((delegate* unmanaged<nint, nint, nint>)_msgSend)(note, Sel("name")));
++                string text;
++                int bit;
++
++                if (name.Contains("Interruption"))
++                {
++                    nint info = ((delegate* unmanaged<nint, nint, nint>)_msgSend)(note, Sel("userInfo"));
++                    nint num = info == 0 ? 0 : ((delegate* unmanaged<nint, nint, nint, nint>)_msgSend)(info, Sel("objectForKey:"), Str("AVAudioSessionInterruptionTypeKey"));
++                    ulong type = num == 0 ? 0 : ((delegate* unmanaged<nint, nint, ulong>)_msgSend)(num, Sel("unsignedIntegerValue"));
++
++                    if (type == 1)
++                    {
++                        bit = Began;
++                        text = "中断开始";
++                        Volatile.Write(ref _interrupted, 1);
++                    }
++                    else
++                    {
++                        bit = Ended;
++                        text = "中断结束";
++                        Volatile.Write(ref _interrupted, 0);
++                    }
++                }
++                else if (name.Contains("MediaServicesWereReset"))
++                {
++                    bit = Reset;
++                    text = "媒体服务重置";
++                    Volatile.Write(ref _interrupted, 0);
++                }
++                else
++                {
++                    bit = Route;
++                    text = "路由切换";
++                }
++
++                Volatile.Write(ref _last, $"{text}（{DateTime.Now:HH:mm:ss.fff}）");
++                Interlocked.Or(ref _pending, bit);
++                Console.Error.WriteLine($"[声] 系统通知：{text}");
++            }
++            catch (Exception e)
++            {
++                Console.Error.WriteLine($"[声] 【红】系统通知处理异常：{e.Message}");
++            }
++            finally
++            {
++                _poolPop(pool);
++            }
++        }
++
++        // 测试钩子：投递一条模拟通知（走 NSNotificationCenter 真实投递，观察者同步收到）。interruptionType：1 began / 0 ended / -1 不带 userInfo
++        public static void PostForTest(string name, int interruptionType)
++        {
++            nint pool = _poolPush();
++            nint info = 0;
++
++            if (interruptionType >= 0)
++            {
++                nint num = ((delegate* unmanaged<nint, nint, ulong, nint>)_msgSend)(Cls("NSNumber"), Sel("numberWithUnsignedInteger:"), (ulong)interruptionType);
++                info = ((delegate* unmanaged<nint, nint, nint, nint, nint>)_msgSend)(Cls("NSDictionary"), Sel("dictionaryWithObject:forKey:"), num, Str("AVAudioSessionInterruptionTypeKey"));
++            }
++
++            ((delegate* unmanaged<nint, nint, nint, nint, nint, void>)_msgSend)(_center, Sel("postNotificationName:object:userInfo:"), Str(name), 0, info);
++            _poolPop(pool);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 919e42d8e93603064c60b1909f5893c882841898..c5a979e4b703772ecd881c52f5b0ebfeb89ad085 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -392,6 +392,13 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                     if (cb == d._repCallbacks && sub == d._repSubmitted)
+                     {
++                        // S2Arm (10-23): 播过声、开着播，却 10 秒零回调零交设备 = 设备停了 / 没声音。之前这里直接跳过，「完全没声」在日志里一行都不留。
++                        //   只对播过声的会话报（cb > 0）：游戏开着却从没送过声音的会话（动森 #1）不算
++                        if (d._started && cb > 0)
++                        {
++                            Console.Error.WriteLine($"[声] 【红】输出 #{d.Index} 10 秒：播过声、开着播，这 10 秒回调 0 次、交设备 0 帧（设备停了或游戏不再送声音）");
++                        }
++
+                         continue;
+                     }
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index fd61a3991cec22b0853abd813fca4f5e523dbdc3..d1eddc8adeec87345c0040e47f9dc68b4a55dddd 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -121,6 +121,37 @@ namespace Ryujinx.Audio.Backends.Common
+             Volatile.Write(ref _primed, 1);
+         }
+ 
++        /// <summary>
++        /// S2Arm (10-23 声音停了自愈): the device was stopped and will never hand the in-flight buffers back (system stopped the
++        /// queue, then we stopped it synchronously): put every in-flight buffer back into the pool.
++        /// </summary>
++        /// <returns>The bytes those buffers held (dropped, never played)</returns>
++        public int ReclaimAll()
++        {
++            lock (_lock)
++            {
++                int total = 0;
++
++                for (int slot = 0; slot < _filled.Length; slot++)
++                {
++                    int bytes = _filled[slot];
++
++                    if (bytes == 0)
++                    {
++                        continue;
++                    }
++
++                    _filled[slot] = 0;
++                    _free[_freeCount++] = slot;
++                    total += bytes;
++                }
++
++                Interlocked.Add(ref _inFlightBytes, -total);
++
++                return total;
++            }
++        }
++
+         /// <summary>
+         /// The device handed pool buffer <paramref name="slot"/> back.
+         /// </summary>

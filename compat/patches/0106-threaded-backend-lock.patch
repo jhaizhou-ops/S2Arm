@@ -1,0 +1,248 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+index e33b58745fbf9d46ce0df35d4d65cf7c64ecce06..356756a54f923b15d1d6226c11ad8d08fa958bce 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+@@ -1,6 +1,7 @@
+ using Ryujinx.Common.Memory;
+ using Ryujinx.Graphics.GAL.Multithreading.Commands.Texture;
+ using Ryujinx.Graphics.GAL.Multithreading.Model;
++using System.Threading;
+ 
+ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ {
+@@ -54,8 +55,19 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+                 // Scaled copy can happen on another thread for a res scale flush.
+                 ThreadedHelpers.SpinUntilNonNull(ref Base);
+                 ThreadedHelpers.SpinUntilNonNull(ref dest.Base);
+-
+-                Base.CopyTo(dest.Base, srcRegion, dstRegion, linearFilter);
++                Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
++
++                // S2A：等到对象建好之后持渲染线程锁调下层（见 ThreadedRenderer._s2aBaseLock）
++                _renderer.S2AEnterBase();
++
++                try
++                {
++                    Base.CopyTo(dest.Base, srcRegion, dstRegion, linearFilter);
++                }
++                finally
++                {
++                    _renderer.S2AExitBase();
++                }
+             }
+         }
+ 
+@@ -81,8 +93,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             else
+             {
+                 ThreadedHelpers.SpinUntilNonNull(ref Base);
+-
+-                return Base.GetData();
++                Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
++
++                _renderer.S2AEnterBase();
++
++                try
++                {
++                    return Base.GetData();
++                }
++                finally
++                {
++                    _renderer.S2AExitBase();
++                }
+             }
+         }
+ 
+@@ -99,8 +121,18 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             else
+             {
+                 ThreadedHelpers.SpinUntilNonNull(ref Base);
+-
+-                return Base.GetData(layer, level);
++                Interlocked.Increment(ref ThreadedRenderer.S2AOffThreadCalls);
++
++                _renderer.S2AEnterBase();
++
++                try
++                {
++                    return Base.GetData(layer, level);
++                }
++                finally
++                {
++                    _renderer.S2AExitBase();
++                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index eb9c123146fad4dd1789fcb80b00143a707fca3f..fd1a589df9fe8094b6047f13f58e76bb2fe68536 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -78,6 +78,48 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         private ManualResetEventSlim _s2aGpuDone, _s2aBackendDone;
+ 
++        /// <summary>S2A：下层渲染器（录像 / 宽屏 / NxGal 的 C# 层）按单线程写，由渲染线程独占：渲染线程每批命令持这把锁执行（命令之间有人等就让）；
++        /// 非 GPU 线程直调下层的分支（建贴图、读缓冲、贴图读回 / 缩放拷贝）先等对象建好（自旋在锁外，否则等的就是持锁的渲染线程），再持同一把锁调。
++        /// GPU 线程直调的同步 / 计数入口不持锁：下层对它们是无状态透传，NxGal C 层有导出入口全局锁、计数表与录像器各自有锁。</summary>
++        private readonly Lock _s2aBaseLock = new();
++        private int _s2aWaiters;
++
++        /// <summary>S2A：非 GPU 线程进下层前拿渲染线程锁。渲染线程每条命令之间看到有人在等就让出（S2AYieldBase），
++        /// 等的时长 ≤ 一条命令，不是一整批（忙时一批能连着执行整帧的命令；10-21 动森 Mac 一局这条路走 4425 次，多是游戏线程读回 GPU 数据）</summary>
++        internal void S2AEnterBase()
++        {
++            Interlocked.Increment(ref _s2aWaiters);
++            _s2aBaseLock.Enter();
++            Interlocked.Decrement(ref _s2aWaiters);
++        }
++
++        internal void S2AExitBase() => _s2aBaseLock.Exit();
++
++        // 渲染线程（持锁、深度 1）在两条命令之间调：放锁，等在等的线程都拿到过锁，再拿回
++        private void S2AYieldBase()
++        {
++            _s2aBaseLock.Exit();
++            SpinWait wait = new();
++
++            while (Volatile.Read(ref _s2aWaiters) != 0)
++            {
++                wait.SpinOnce();
++            }
++
++            _s2aBaseLock.Enter();
++        }
++
++        /// <summary>S2A：非 GPU 线程直调下层的次数（收局日志报，判这条路实际走没走）</summary>
++        public static long S2AOffThreadCalls;
++
++        /// <summary>S2A：收局停渲染线程。GPU 线程已退出、命令队列已排空（FlushThreadedCommands）之后调：放倒 RenderLoop，RunLoop 返回。
++        /// 不释放下层渲染器（与不套本层时的收局一致）；之后照样可以 Dispose。</summary>
++        public void S2AStopBackend()
++        {
++            _running = false;
++            _galWorkAvailable.Set();
++        }
++
+         public bool PreferThreading => _baseRenderer.PreferThreading;
+ 
+         public ThreadedRenderer(IRenderer renderer)
+@@ -166,35 +208,44 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+                 _galWorkAvailable.Wait();
+                 _galWorkAvailable.Reset();
+ 
+-                if (Volatile.Read(ref _interruptAction) != null)
++                // S2A：一批命令持一次锁，命令之间有线程在等就让出（见 _s2aBaseLock、S2AEnterBase）
++                lock (_s2aBaseLock)
+                 {
+-                    _interruptAction();
+-                    _interruptRun.Set();
++                    if (Volatile.Read(ref _interruptAction) != null)
++                    {
++                        _interruptAction();
++                        _interruptRun.Set();
+ 
+-                    Interlocked.Exchange(ref _interruptAction, null);
+-                }
++                        Interlocked.Exchange(ref _interruptAction, null);
++                    }
+ 
+-                // The other thread can only increase the command count.
+-                // We can assume that if it is above 0, it will stay there or get higher.
++                    // The other thread can only increase the command count.
++                    // We can assume that if it is above 0, it will stay there or get higher.
+ 
+-                while (Volatile.Read(ref _commandCount) > 0 && Volatile.Read(ref _interruptAction) == null)
+-                {
+-                    int commandPtr = _consumerPtr;
++                    while (Volatile.Read(ref _commandCount) > 0 && Volatile.Read(ref _interruptAction) == null)
++                    {
++                        int commandPtr = _consumerPtr;
+ 
+-                    Span<byte> command = new(_commandQueue, commandPtr * _elementSize, _elementSize);
++                        Span<byte> command = new(_commandQueue, commandPtr * _elementSize, _elementSize);
+ 
+-                    // Run the command.
++                        // Run the command.
+ 
+-                    CommandHelper.RunCommand(command, this, _baseRenderer);
++                        CommandHelper.RunCommand(command, this, _baseRenderer);
+ 
+-                    if (Interlocked.CompareExchange(ref _invokePtr, -1, commandPtr) == commandPtr)
+-                    {
+-                        _invokeRun.Set();
+-                    }
++                        if (Interlocked.CompareExchange(ref _invokePtr, -1, commandPtr) == commandPtr)
++                        {
++                            _invokeRun.Set();
++                        }
++
++                        _consumerPtr = (_consumerPtr + 1) % QueueCount;
+ 
+-                    _consumerPtr = (_consumerPtr + 1) % QueueCount;
++                        Interlocked.Decrement(ref _commandCount);
+ 
+-                    Interlocked.Decrement(ref _commandCount);
++                        if (Volatile.Read(ref _s2aWaiters) != 0)
++                        {
++                            S2AYieldBase();
++                        }
++                    }
+                 }
+             }
+         }
+@@ -307,6 +358,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+             else
+             {
++                // S2A：动作本身不持锁（里面经本层对象调下层，各自在等到对象建好后持锁）
++                Interlocked.Increment(ref S2AOffThreadCalls);
+                 _baseRenderer.BackgroundContextAction(action, true);
+             }
+         }
+@@ -391,10 +444,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+             else
+             {
+-                ThreadedTexture texture = new(this, info)
++                ThreadedTexture texture = new(this, info);
++                Interlocked.Increment(ref S2AOffThreadCalls);
++
++                // S2A：持锁建（宽屏包装层建贴图时登记放宽表，与渲染线程同一份状态）
++                S2AEnterBase();
++
++                try
+                 {
+-                    Base = _baseRenderer.CreateTexture(info),
+-                };
++                    texture.Base = _baseRenderer.CreateTexture(info);
++                }
++                finally
++                {
++                    S2AExitBase();
++                }
+ 
+                 return texture;
+             }
+@@ -426,7 +489,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             }
+             else
+             {
+-                return _baseRenderer.GetBufferData(Buffers.MapBufferBlocking(buffer), offset, size);
++                // S2A：先等缓冲在渲染线程上建好（锁外），再持锁读
++                BufferHandle mapped = Buffers.MapBufferBlocking(buffer);
++                Interlocked.Increment(ref S2AOffThreadCalls);
++
++                S2AEnterBase();
++
++                try
++                {
++                    return _baseRenderer.GetBufferData(mapped, offset, size);
++                }
++                finally
++                {
++                    S2AExitBase();
++                }
+             }
+         }
+ 

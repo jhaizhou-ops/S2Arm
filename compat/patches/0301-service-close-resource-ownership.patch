@@ -1,0 +1,814 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 6f5ca10f06fa06f645c0798fceac9026e1cbe432..257429aac0422f7ee5b920f8434e7633a94b4dab 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -21,6 +21,8 @@ namespace Ryujinx.Audio.Backends.Apple
+         private readonly ManualResetEvent _pauseEvent;
+         private readonly ConcurrentDictionary<AppleHardwareDeviceSession, byte> _sessions;
+         private readonly bool _supportSurroundConfiguration;
++        private readonly object _sessionLock = new();
++        private bool _disposed;
+ 
+         public float Volume { get; set; }
+ 
+@@ -180,26 +182,30 @@ namespace Ryujinx.Audio.Backends.Apple
+         public IHardwareDeviceSession OpenDeviceSession(Direction direction, IVirtualMemoryManager memoryManager,
+             SampleFormat sampleFormat, uint sampleRate, uint channelCount)
+         {
+-            if (channelCount == 0)
++            lock (_sessionLock)
+             {
+-                channelCount = 2;
+-            }
++                ObjectDisposedException.ThrowIf(_disposed, this);
++                if (channelCount == 0)
++                {
++                    channelCount = 2;
++                }
+ 
+-            if (sampleRate == 0)
+-            {
+-                sampleRate = Constants.TargetSampleRate;
+-            }
++                if (sampleRate == 0)
++                {
++                    sampleRate = Constants.TargetSampleRate;
++                }
+ 
+-            if (direction != Direction.Output)
+-            {
+-                throw new NotImplementedException("Input direction is currently not implemented on Apple backend!");
+-            }
++                if (direction != Direction.Output)
++                {
++                    throw new NotImplementedException("Input direction is currently not implemented on Apple backend!");
++                }
+ 
+-            AppleHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
++                AppleHardwareDeviceSession session = new(this, memoryManager, sampleFormat, sampleRate, channelCount);
+ 
+-            _sessions.TryAdd(session, 0);
++                _sessions.TryAdd(session, 0);
+ 
+-            return session;
++                return session;
++            }
+         }
+ 
+         internal bool Unregister(AppleHardwareDeviceSession session)
+@@ -259,12 +265,18 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             if (disposing)
+             {
+-                foreach (AppleHardwareDeviceSession session in _sessions.Keys)
++                lock (_sessionLock)
+                 {
+-                    session.Dispose();
+-                }
++                    if (_disposed) return;
++                    foreach (AppleHardwareDeviceSession session in _sessions.Keys)
++                    {
++                        session.Dispose();
++                    }
+ 
+-                _pauseEvent.Dispose();
++                    _updateRequiredEvent.Dispose();
++                    _pauseEvent.Dispose();
++                    _disposed = true;
++                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 7a036a224d2ec3513630ce59b6261178ce593a41..183d48ed6dc6ddffd9576c9d8a9b232891c1a4e0 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -41,7 +41,10 @@ namespace Ryujinx.Audio.Backends.Apple
+         private readonly ManualResetEvent _updateRequiredEvent;
+ 
+         private readonly AudioQueueOutputCallback _callbackDelegate;
+-        private readonly GCHandle _gcHandle;
++        // Free must clear the actual field: calling it on a readonly GCHandle frees
++        // a defensive copy, leaving a stale slot that another object can reuse.
++        private GCHandle _gcHandle;
++        private bool _disposed;
+ 
+         private nint _audioQueue;
+         private readonly nint[] _audioQueueBuffers = new nint[NumBuffers];
+@@ -145,6 +148,9 @@ namespace Ryujinx.Audio.Backends.Apple
+                 long now = Stopwatch.GetTimestamp();
+                 int notes = S2AAudioNotes.TakePending();
+ 
++                // Removing a session during Dispose waits for a watchdog pass that already
++                // selected it, so it cannot recover or touch a disposed AudioQueue.
++                lock (_watched)
+                 for (int i = 0; i < _watched.Length; i++)
+                 {
+                     AppleHardwareDeviceSession s = Volatile.Read(ref _watched[i]);
+@@ -639,19 +645,30 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             if (disposing)
+             {
++                // Match the watchdog's lock order (_watched, then _lock), and wait
++                // for a pass that already selected this session before closing it.
+                 S2AWatch(this, false);
+-                Stop();
+-
+-                if (_audioQueue != nint.Zero)
++                lock (_lock)
+                 {
+-                    AudioQueueStop(_audioQueue, true);
+-                    AudioQueueDispose(_audioQueue, true);
+-                    _audioQueue = nint.Zero;
+-                }
++                    if (_disposed) return;
++                    Stop();
++                    _queueRunning = false;
+ 
+-                if (_gcHandle.IsAllocated)
+-                {
+-                    _gcHandle.Free();
++                    if (_audioQueue != nint.Zero)
++                    {
++                        AudioQueueStop(_audioQueue, true);
++                        int result = AudioQueueDispose(_audioQueue, true);
++                        if (result != 0)
++                            throw new InvalidOperationException($"AudioQueueDispose failed: {result}; callback handle retained");
++                        _audioQueue = nint.Zero;
++                    }
++
++                    // Synchronous queue disposal completes callbacks before their
++                    // handle is released. A repeated Dispose cannot free a reused slot.
++                    if (_gcHandle.IsAllocated) _gcHandle.Free();
++                    _diag.Dispose();
++                    _driver.Unregister(this);
++                    _disposed = true;
+                 }
+             }
+         }
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 1b6a3f270f6afdf4857b3b889f93c7dfbbee3b24..9be80feb71f18657598bb210169b410bb7a64a7a 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -94,6 +94,21 @@ namespace Ryujinx.Audio.Backends.Apple
+         private static int _nextIndex = -1;
+         private static int _reporterStarted;
+         private static readonly string _wavBase = DocPath(Environment.GetEnvironmentVariable("S2A_AUDIO_WAV"));
++        private readonly ManualResetEventSlim _closed = new(false);
++        private Thread _writer;
++        private int _disposed;
++
++        public void Dispose()
++        {
++            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
++            _started = false;
++            lock (_all)
++                for (int i = 0; i < _all.Length; i++)
++                    if (ReferenceEquals(_all[i], this)) Volatile.Write(ref _all[i], null);
++            _closed.Set();
++            _writer?.Join();
++            _closed.Dispose();
++        }
+ 
+         // A relative S2A_AUDIO_WAV lands in Documents, same rule as frames.tsv (graphics/metal/cs NxColdStart.Doc): S2A_DOCS if set,
+         // else the app container's Documents on iOS (the process' working directory there is not writable: 10-22 a relative name
+@@ -186,7 +201,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _ring = new byte[bytesPerFrame * rate * 4];
+                 _cbEv = new Ev[EvCap];
+                 _enqEv = new Ev[EvCap];
+-                new Thread(WriterLoop) { IsBackground = true, Name = $"S2A.AudioWav.{index}" }.Start();
++                _writer = new Thread(WriterLoop) { IsBackground = true, Name = $"S2A.AudioWav.{index}" };
++                _writer.Start();
+             }
+         }
+ 
+@@ -195,9 +211,14 @@ namespace Ryujinx.Audio.Backends.Apple
+             int index = Interlocked.Increment(ref _nextIndex);
+             S2AOutputDiag d = new(index, bytesPerFrame, channels, rate, bitsPerSample);
+ 
+-            if (index < MaxSessions)
++            lock (_all)
+             {
+-                Volatile.Write(ref _all[index], d);
++                for (int slot = 0; slot < MaxSessions; slot++)
++                    if (_all[slot] == null)
++                    {
++                        Volatile.Write(ref _all[slot], d);
++                        break;
++                    }
+             }
+ 
+             if (Interlocked.Exchange(ref _reporterStarted, 1) == 0)
+@@ -416,7 +437,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 while (true)
+                 {
+-                    Thread.Sleep(100);
++                    bool closing = _closed.Wait(100);
+ 
+                     long er = _cbEvR; DrainEv(tw, _cbEv, ref er, Volatile.Read(ref _cbEvW), 'c'); Volatile.Write(ref _cbEvR, er);
+                     er = _enqEvR; DrainEv(tw, _enqEv, ref er, Volatile.Read(ref _enqEvW), 'q'); Volatile.Write(ref _enqEvR, er);
+@@ -427,6 +448,7 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                     if (written == read)
+                     {
++                        if (closing) break;
+                         continue;
+                     }
+ 
+@@ -446,6 +468,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     WriteHeader(fs, dataBytes);
+                     fs.Seek(0, SeekOrigin.End);
+                     fs.Flush();
++                    if (closing) break;
+                 }
+             }
+             catch (Exception e)
+diff --git a/src/Ryujinx.Common/S2AShutdown.cs b/src/Ryujinx.Common/S2AShutdown.cs
+index d58021eb01dcc3062c14bde96889d45d5aecc6e7..12e38c369e6948c723b0172be08a837f0dcebe7a 100644
+--- a/src/Ryujinx.Common/S2AShutdown.cs
++++ b/src/Ryujinx.Common/S2AShutdown.cs
+@@ -25,6 +25,17 @@ namespace Ryujinx.Common
+         /// </summary>
+         public static bool Requested => _requested;
+ 
++        // Only after all callers from the previous game have returned. Wakers are process-wide
++        // monitor notifications registered by static constructors and must survive another game.
++        public static void Reset()
++        {
++            lock (_wakers)
++            {
++                Event.Reset();
++                _requested = false;
++            }
++        }
++
+         /// <summary>
+         /// Signaled once shutdown was requested (for waits on wait handles).
+         /// </summary>
+@@ -35,17 +46,16 @@ namespace Ryujinx.Common
+         /// </summary>
+         public static void OnRequest(Action wake)
+         {
++            bool requested;
+             lock (_wakers)
+             {
+-                if (!_requested)
+-                {
+-                    _wakers.Add(wake);
+-
+-                    return;
+-                }
++                // Static constructors run once. Even a monitor first initialized during
++                // shutdown needs to be registered for subsequent game sessions.
++                _wakers.Add(wake);
++                requested = _requested;
+             }
+ 
+-            wake();
++            if (requested) wake();
+         }
+ 
+         public static void Request()
+diff --git a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+index 58a44e2b98ee2cf344bfdc1add9c637719148da7..32afd88a6c876be34bc27f946da1f8af43023e94 100644
+--- a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
++++ b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+@@ -19,7 +19,9 @@ using System;
+ using System.Buffers.Text;
+ using System.Collections.Concurrent;
+ using System.Collections.Generic;
++using System.Diagnostics.CodeAnalysis;
+ using System.IO;
++using System.Reflection;
+ using System.Runtime.CompilerServices;
+ using Path = System.IO.Path;
+ 
+@@ -39,6 +41,11 @@ namespace Ryujinx.HLE.FileSystem
+         private readonly ConcurrentDictionary<ulong, Stream> _romFsByPid;
+ 
+         private static bool _isInitialized = false;
++        private FileSystemServer _fsServer;
++        private FileSystemBufferManager _fsBufferManager;
++        private readonly object _disposeLock = new();
++        private bool _disposed;
++        private Exception _disposeFailure;
+ 
+         public static VirtualFileSystem CreateInstance()
+         {
+@@ -194,7 +201,7 @@ namespace Ryujinx.HLE.FileSystem
+             }
+ 
+             fsServerClient = horizon.CreatePrivilegedHorizonClient();
+-            FileSystemServer fsServer = new(fsServerClient);
++            FileSystemServer fsServer = _fsServer = new(fsServerClient);
+ 
+             RandomDataGenerator randomGenerator = Random.Shared.NextBytes;
+ 
+@@ -220,6 +227,40 @@ namespace Ryujinx.HLE.FileSystem
+             };
+ 
+             FileSystemServerInitializer.InitializeWithConfig(fsServerClient, fsServer, fsServerConfig);
++            _fsBufferManager = GetFsBufferManager(fsServer);
++        }
++
++        // Ryujinx.LibHac 0.21.0-alpha.133 pins a 14 MiB heap, but its server Dispose
++        // does not dispose the buffer manager. Keep that actual owner until our clients
++        // and server have stopped. Package upgrades must rerun the NativeAOT lifecycle test.
++        [DynamicDependency("Globals", typeof(FileSystemServer))]
++        [DynamicDependency("FileSystemProxyImpl", "LibHac.FsSrv.FileSystemServerGlobals", "LibHac")]
++        [DynamicDependency("SaveDataFileSystemServiceImpl", "LibHac.FsSrv.FileSystemProxyImplGlobals", "LibHac")]
++        [DynamicDependency("_config", typeof(SaveDataFileSystemServiceImpl))]
++        private static FileSystemBufferManager GetFsBufferManager(FileSystemServer server)
++        {
++            Type globalsType = Type.GetType("LibHac.FsSrv.FileSystemServerGlobals, LibHac", throwOnError: true);
++            Type proxyType = Type.GetType("LibHac.FsSrv.FileSystemProxyImplGlobals, LibHac", throwOnError: true);
++            object globals = ReadLibHacField(typeof(FileSystemServer).GetField("Globals", BindingFlags.Instance | BindingFlags.NonPublic), server, globalsType);
++            object proxy = ReadLibHacField(globalsType.GetField("FileSystemProxyImpl", BindingFlags.Instance | BindingFlags.Public), globals, proxyType);
++            object service = ReadLibHacField(proxyType.GetField("SaveDataFileSystemServiceImpl", BindingFlags.Instance | BindingFlags.Public), proxy, typeof(SaveDataFileSystemServiceImpl));
++            object config = ReadLibHacField(typeof(SaveDataFileSystemServiceImpl).GetField("_config", BindingFlags.Instance | BindingFlags.NonPublic), service, typeof(SaveDataFileSystemServiceImpl.Configuration));
++            IBufferManager buffer = ((SaveDataFileSystemServiceImpl.Configuration)config).BufferManager;
++            return buffer?.GetType() == typeof(FileSystemBufferManager)
++                ? (FileSystemBufferManager)buffer
++                : throw new InvalidOperationException("LibHac BufferManager type changed; update the lifecycle ownership integration.");
++        }
++
++        private static object ReadLibHacField(FieldInfo field, object owner, Type expectedType)
++        {
++            if (field == null || field.FieldType != expectedType || field.DeclaringType != owner.GetType())
++            {
++                throw new InvalidOperationException("LibHac private ownership layout changed; update the lifecycle integration.");
++            }
++
++            object value = field.GetValue(owner);
++            return value?.GetType() == expectedType ? value
++                : throw new InvalidOperationException($"LibHac ownership field {field.Name} is null or has an unexpected type.");
+         }
+ 
+         public void ReloadKeySet()
+@@ -666,14 +707,49 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         protected virtual void Dispose(bool disposing)
+         {
+-            if (disposing)
++            if (!disposing)
++            {
++                return;
++            }
++
++            lock (_disposeLock)
+             {
+-                foreach (Stream stream in _romFsByPid.Values)
++                if (_disposed)
++                {
++                    return;
++                }
++
++                if (_disposeFailure != null)
++                {
++                    throw new InvalidOperationException("File system disposal previously failed; retained owners require diagnosis.", _disposeFailure);
++                }
++
++                try
++                {
++                    foreach (Stream stream in _romFsByPid.Values)
++                    {
++                        stream.Close();
++                    }
++
++                    _romFsByPid.Clear();
++                    _fsServer?.Dispose();
++                    // Switch disposes LibHacHorizonManager (all clients) before reaching VFS.
++                    // MemoryHandle.Dispose inside this manager must run exactly once.
++                    _fsBufferManager?.Dispose();
++                }
++                catch (Exception error)
+                 {
+-                    stream.Close();
++                    // LibHac cleanup may have partially released mutable MemoryHandles.
++                    // Preserve owners and the failure; never retry a possible double free.
++                    _disposeFailure = error;
++                    throw;
+                 }
+ 
+-                _romFsByPid.Clear();
++                _fsBufferManager = null;
++                _fsServer = null;
++                _disposed = true;
++                // S2Arm recreates the file system together with the Switch after a game ends.
++                _isInitialized = false;
+             }
+         }
+     }
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Common/KSynchronizationObject.cs b/src/Ryujinx.HLE/HOS/Kernel/Common/KSynchronizationObject.cs
+index fba8d05903c0a28bab668fe68204c3d446b23191..23cfba7d5897e4057dfb5ebe1fcfaebbbfb14112 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Common/KSynchronizationObject.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Common/KSynchronizationObject.cs
+@@ -26,6 +26,8 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+         public void RemoveWaitingThread(LinkedListNode<KThread> node)
+         {
+             WaitingThreads.Remove(node);
++            // The pool survives sessions; a returned node must not retain its old thread and kernel.
++            node.Value = null;
+             _nodePool.Release(node);
+         }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs b/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
+index 294ffc168ad6bd1d9c22f17fde3696e650709b86..cd3524f9b09a5c00a3d21f77be78bac35eaaa604 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/Common/KTimeManager.cs
+@@ -24,8 +24,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+ 
+         private readonly KernelContext _context;
+         private readonly List<WaitingObject> _waitingObjects;
+-        private IPreciseSleepEvent _waitEvent;
+-        private bool _keepRunning;
++        private readonly IPreciseSleepEvent _waitEvent;
++        private readonly Thread _thread;
++        private readonly object _disposeLock = new();
++        private volatile bool _keepRunning;
++        private bool _disposed;
+         private long _enforceWakeupFromSpinWait;
+ 
+         private const long NanosecondsPerSecond = 1000000000L;
+@@ -35,14 +38,15 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+         {
+             _context = context;
+             _waitingObjects = [];
++            _waitEvent = PreciseSleepHelper.CreateEvent();
+             _keepRunning = true;
+ 
+-            Thread work = new(WaitAndCheckScheduledObjects)
++            _thread = new Thread(WaitAndCheckScheduledObjects)
+             {
+                 Name = "HLE.TimeManager",
+             };
+ 
+-            work.Start();
++            _thread.Start();
+         }
+ 
+         public void ScheduleFutureInvocation(IKFutureSchedulerObject schedulerObj, long timeout)
+@@ -88,48 +92,46 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+         {
+             WaitingObject next;
+ 
+-            using (_waitEvent = PreciseSleepHelper.CreateEvent())
++            while (_keepRunning)
+             {
+-                while (_keepRunning)
++                Ryujinx.Common.S2AThreadAlloc.Tick("内核计时"); // S2Arm: per-thread allocation accounting (HLE.TimeManager)
++
++                lock (_context.CriticalSection.Lock)
+                 {
+-                    Ryujinx.Common.S2AThreadAlloc.Tick("内核计时"); // S2Arm: per-thread allocation accounting (HLE.TimeManager)
++                    Interlocked.Exchange(ref _enforceWakeupFromSpinWait, 0);
++                    if (!_keepRunning) break;
+ 
+-                    lock (_context.CriticalSection.Lock)
+-                    {
+-                        Interlocked.Exchange(ref _enforceWakeupFromSpinWait, 0);
++                    next = GetNextWaitingObject();
++                }
+ 
+-                        next = GetNextWaitingObject();
+-                    }
++                if (next != null)
++                {
++                    long timePoint = PerformanceCounter.ElapsedTicks;
+ 
+-                    if (next != null)
++                    if (next.TimePoint > timePoint)
+                     {
+-                        long timePoint = PerformanceCounter.ElapsedTicks;
+-
+-                        if (next.TimePoint > timePoint)
++                        if (!_waitEvent.SleepUntil(next.TimePoint))
+                         {
+-                            if (!_waitEvent.SleepUntil(next.TimePoint))
+-                            {
+-                                PreciseSleepHelper.SpinWaitUntilTimePoint(next.TimePoint, ref _enforceWakeupFromSpinWait);
+-                            }
++                            PreciseSleepHelper.SpinWaitUntilTimePoint(next.TimePoint, ref _enforceWakeupFromSpinWait);
+                         }
++                    }
+ 
+-                        bool timeUp = PerformanceCounter.ElapsedTicks >= next.TimePoint;
++                    bool timeUp = PerformanceCounter.ElapsedTicks >= next.TimePoint;
+ 
+-                        if (timeUp)
++                    if (timeUp)
++                    {
++                        lock (_context.CriticalSection.Lock)
+                         {
+-                            lock (_context.CriticalSection.Lock)
++                            if (_keepRunning && _waitingObjects.Remove(next))
+                             {
+-                                if (_waitingObjects.Remove(next))
+-                                {
+-                                    next.Object.TimeUp();
+-                                }
++                                next.Object.TimeUp();
+                             }
+                         }
+                     }
+-                    else
+-                    {
+-                        _waitEvent.Sleep();
+-                    }
++                }
++                else
++                {
++                    _waitEvent.Sleep();
+                 }
+             }
+         }
+@@ -194,8 +196,26 @@ namespace Ryujinx.HLE.HOS.Kernel.Common
+ 
+         public void Dispose()
+         {
+-            _keepRunning = false;
+-            _waitEvent?.Signal();
++            if (_thread == Thread.CurrentThread)
++            {
++                throw new InvalidOperationException("Cannot dispose the kernel timer from its callback thread.");
++            }
++
++            lock (_disposeLock)
++            {
++                if (_disposed) return;
++                _keepRunning = false;
++                Interlocked.Exchange(ref _enforceWakeupFromSpinWait, 1);
++                _waitEvent.Signal();
++                if (!_thread.Join(3000))
++                {
++                    throw new TimeoutException("HLE.TimeManager did not stop within 3 seconds; kernel resources must remain alive.");
++                }
++
++                // The caller owns the event until the worker has stopped using it.
++                _waitEvent.Dispose();
++                _disposed = true;
++            }
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Kernel/KernelContext.cs b/src/Ryujinx.HLE/HOS/Kernel/KernelContext.cs
+index 7e2e9caccaa4350b627d388ecfccf4ce587c4f7a..53a7cc2347e04735ce835dd64153e7d32ea1c425 100644
+--- a/src/Ryujinx.HLE/HOS/Kernel/KernelContext.cs
++++ b/src/Ryujinx.HLE/HOS/Kernel/KernelContext.cs
+@@ -20,7 +20,10 @@ namespace Ryujinx.HLE.HOS.Kernel
+ 
+         public bool KernelInitialized { get; }
+ 
+-        public bool Running { get; private set; }
++        private volatile bool _running;
++        private Thread _preemptionThread;
++
++        public bool Running => _running;
+ 
+         public Switch Device { get; }
+         public MemoryBlock Memory { get; }
+@@ -65,7 +68,7 @@ namespace Ryujinx.HLE.HOS.Kernel
+             Memory = memory;
+             KScheduler.CpuCoresCount = device.CpuCoresCount;
+ 
+-            Running = true;
++            _running = true;
+ 
+             Syscall = new Syscall(this);
+ 
+@@ -117,7 +120,8 @@ namespace Ryujinx.HLE.HOS.Kernel
+                 KScheduler.PreemptionThreadLoop(this);
+             }
+ 
+-            new Thread(PreemptionThreadStart) { Name = "HLE.PreemptionThread" }.Start();
++            _preemptionThread = new Thread(PreemptionThreadStart) { Name = "HLE.PreemptionThread" };
++            _preemptionThread.Start();
+         }
+ 
+         public void CommitMemory(ulong address, ulong size)
+@@ -148,14 +152,24 @@ namespace Ryujinx.HLE.HOS.Kernel
+ 
+         public void Dispose()
+         {
+-            Running = false;
++            if (_preemptionThread == Thread.CurrentThread)
++            {
++                throw new InvalidOperationException("Cannot dispose the kernel from its preemption thread.");
++            }
++
++            _running = false;
++            // Switch.Dispose releases Memory after System.Dispose returns.
++            // Both kernel workers must actually leave their callbacks before that boundary.
++            TimeManager.Dispose();
++            if (!_preemptionThread.Join(3000))
++            {
++                throw new TimeoutException("HLE.PreemptionThread did not stop within 3 seconds; kernel resources must remain alive.");
++            }
+ 
+             for (int i = 0; i < KScheduler.CpuCoresCount; i++)
+             {
+                 Schedulers[i].Dispose();
+             }
+-
+-            TimeManager.Dispose();
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs b/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
+index 41911183faad0422b995de1b6a57d406d16dbe07..c2bdac7f54bc99e4e2ce961bf4a1dd16587d92db 100644
+--- a/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
++++ b/src/Ryujinx.HLE/HOS/LibHacHorizonManager.cs
+@@ -10,7 +10,7 @@ using System;
+ 
+ namespace Ryujinx.HLE.HOS
+ {
+-    public class LibHacHorizonManager
++    public class LibHacHorizonManager : IDisposable
+     {
+         private LibHac.Horizon Server { get; set; }
+ 
+@@ -75,6 +75,32 @@ namespace Ryujinx.HLE.HOS
+             ApplicationClient = Server.CreateHorizonClient(new ProgramLocation(programId, StorageId.BuiltInUser), npdm.FsAccessControlData, npdm.FsAccessControlDescriptor);
+         }
+ 
++        public void Dispose()
++        {
++            if (RyujinxClient == null) return;
++            // The embedded LibHac Horizon is per Switch. Upstream process shutdown did not
++            // dispose these clients or the VFS's FileSystemServer; normal shutdown must close their
++            // mounted file systems before disposing the server's caches and storage devices.
++            ApplicationClient?.Dispose();
++            AccountClient?.Dispose();
++            AmClient?.Dispose();
++            NsClient?.Dispose();
++            PmClient?.Dispose();
++            SdbClient?.Dispose();
++            if (BcatClient != null)
++            {
++                foreach (string name in new[] { "bcat:u", "bcat:s", "bcat:m", "bcat:a" })
++                    BcatClient.Sm.UnregisterService(name).ThrowIfFailure();
++                BcatClient.Dispose();
++            }
++            RyujinxClient.Sm.UnregisterService("arp:r").ThrowIfFailure();
++            _arpIReader.Destroy();
++            RyujinxClient.Dispose();
++            FsClient?.Dispose();
++            ApplicationClient = AccountClient = AmClient = BcatClient = FsClient = NsClient = PmClient = SdbClient = RyujinxClient = null;
++            Server = null;
++        }
++
+         private static AccessControlBits.Bits AccountFsPermissions => AccessControlBits.Bits.SystemSaveData |
+                                                                       AccessControlBits.Bits.GameCard |
+                                                                       AccessControlBits.Bits.SaveDataMeta |
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs b/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs
+index ad3bccbc987a1ba3f47d9dac91b3d417745613c8..3f9c0dfc1f75bfc7e23723064c67f6a3d36df97f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/S2ASaveShare.cs
+@@ -23,6 +23,17 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+         private static readonly object _lock = new();
+         private static readonly Dictionary<string, Entry> _open = new();
+ 
++        internal static void CloseAll()
++        {
++            lock (_lock)
++            {
++                // All IPC has returned. Release retained mounts before closing the clients
++                // and server; uncommitted working state must not become a fabricated Commit.
++                foreach (Entry entry in _open.Values) entry.FileSystem.Destroy();
++                _open.Clear();
++            }
++        }
++
+         public static string Key(SaveDataSpaceId spaceId, in SaveDataAttribute attribute)
+         {
+             ReadOnlySpan<byte> raw = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref System.Runtime.CompilerServices.Unsafe.AsRef(in attribute), 1));
+diff --git a/src/Ryujinx.HLE/PerformanceStatistics.cs b/src/Ryujinx.HLE/PerformanceStatistics.cs
+index 84b9eb05b01c1a09906e3919ebbee1b00d2c95c2..9ad4d2c9e23e48f4730b880b70253969d0a5ce53 100644
+--- a/src/Ryujinx.HLE/PerformanceStatistics.cs
++++ b/src/Ryujinx.HLE/PerformanceStatistics.cs
+@@ -1,13 +1,11 @@
+ using Ryujinx.Common;
++using System;
+ using System.Threading;
+-using System.Timers;
+ 
+ namespace Ryujinx.HLE
+ {
+-    public class PerformanceStatistics
++    public class PerformanceStatistics : IDisposable
+     {
+-        private readonly Switch _device;
+-
+         private const int FrameTypeGame = 0;
+         private const int PercentTypeFifo = 0;
+ 
+@@ -28,12 +26,13 @@ namespace Ryujinx.HLE
+ 
+         private readonly double _ticksToSeconds;
+ 
+-        private readonly System.Timers.Timer _resetTimer;
++        private readonly Timer _resetTimer;
++        private readonly object _disposeLock = new();
++        private ManualResetEvent _resetTimerStopped;
++        private bool _disposed;
+ 
+-        public PerformanceStatistics(Switch device)
++        public PerformanceStatistics()
+         {
+-            _device = device;
+-
+             _frameRate = new double[1];
+             _accumulatedFrameTime = new double[1];
+             _previousFrameTime = new double[1];
+@@ -46,22 +45,56 @@ namespace Ryujinx.HLE
+             _framesRendered = new long[1];
+             _percentTime = new double[1];
+ 
+-            _resetTimer = new(750);
+-
+-            _resetTimer.Elapsed += ResetTimerElapsed;
+-            _resetTimer.AutoReset = true;
+-
+-            _resetTimer.Start();
+-
+             _ticksToSeconds = 1.0 / PerformanceCounter.TicksPerSecond;
++            _resetTimer = new Timer(ResetTimerElapsed, null, 750, 750);
+         }
+ 
+-        private void ResetTimerElapsed(object sender, ElapsedEventArgs e)
++        private void ResetTimerElapsed(object state)
+         {
+             CalculateFrameRate(FrameTypeGame);
+             CalculateAveragePercent(PercentTypeFifo);
+         }
+ 
++        public void Dispose()
++        {
++            // S2A: stop scheduling and drain queued/in-flight callbacks before retiring the session.
++            // A timed-out drain keeps its original notification event alive for a later retry.
++            long deadline = Environment.TickCount64 + 3000;
++            if (!Monitor.TryEnter(_disposeLock, 3000))
++            {
++                throw new TimeoutException("统计计时器正在关停，不能释放旧会话");
++            }
++
++            try
++            {
++                if (_disposed) return;
++
++                if (_resetTimerStopped == null)
++                {
++                    ManualResetEvent stopped = new(false);
++                    if (!_resetTimer.Dispose(stopped))
++                    {
++                        stopped.Dispose();
++                        throw new InvalidOperationException("统计计时器未能登记关停通知");
++                    }
++
++                    _resetTimerStopped = stopped;
++                }
++
++                if (!_resetTimerStopped.WaitOne((int)Math.Max(0, deadline - Environment.TickCount64)))
++                {
++                    throw new TimeoutException("统计计时器回调 3 秒内未退出，不能释放旧会话");
++                }
++
++                _resetTimerStopped.Dispose();
++                _disposed = true;
++            }
++            finally
++            {
++                Monitor.Exit(_disposeLock);
++            }
++        }
++
+         private void CalculateFrameRate(int frameType)
+         {
+             double frameRate = 0;
+diff --git a/src/Ryujinx.HLE/Switch.cs b/src/Ryujinx.HLE/Switch.cs
+index 29524dff1e2ecc015e4a8c6fdbb4b51d8a185e4b..158213f9679bfce96b281279e172fb11560218c4 100644
+--- a/src/Ryujinx.HLE/Switch.cs
++++ b/src/Ryujinx.HLE/Switch.cs
+@@ -91,7 +91,7 @@ namespace Ryujinx.HLE
+             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
+             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
+             System            = new HOS.Horizon(this);
+-            Statistics        = new PerformanceStatistics(this);
++            Statistics        = new PerformanceStatistics();
+             Hid               = new Hid(this, System.HidStorage);
+             Processes         = new ProcessLoader(this);
+             TamperMachine     = new TamperMachine();
+@@ -187,9 +187,12 @@ namespace Ryujinx.HLE
+         {
+             if (disposing)
+             {
++                Statistics.Dispose();
+                 Processes.ClearAllProcesses();
+                 System.Dispose();
+                 AudioDeviceDriver.Dispose();
++                HOS.Services.Fs.S2ASaveShare.CloseAll();
++                System.LibHacHorizonManager.Dispose();
+                 FileSystem.Dispose();
+                 Memory.Dispose();
+                 Debugger?.Dispose();

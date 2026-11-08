@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+index cdf413c595b9f6aeed2c4098c374773c2a2afb00..30b2045cad64d2675b5d960a24a0d39f8e01fec8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+@@ -70,10 +70,21 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 }
+ 
+                 // A latched overflow has no valid result ever: it already counted and
+-                // reported once at BeginSegment. Drop the event — no result, no guest
+-                // callback — so it cannot head-block the queue and re-report per retry.
++                // reported once at BeginSegment. Complete the event without retrying so it
++                // cannot head-block the queue and re-report per retry.
++                // S2A（审计 #1534 P1-60）：仍照常回调——客人在等这个地址被写上，原先不回调就一直等、遮挡 / 条件渲染停在旧值。
++                //   本次查询记 0（累计值不加），不标 Invalid：SemaphoreUpdater.OnResult 见 Invalid 就不写客内存
+                 if (_counter.Overflowed)
+                 {
++                    if (ClearCounter)
++                    {
++                        result = 0;
++                    }
++
++                    _result = result;
++
++                    _queue.S2ADeliverResult(OnResult, this, result);
++
+                     Dispose();
+                     return true;
+                 }

@@ -1,0 +1,107 @@
+S2Arm
+Copyright 2026 S2Arm contributors
+
+Licensed under the Apache License, Version 2.0. The license text is the file
+named LICENSE in the root of this repository.
+
+本文件只记分发时要留着的归属。逐项的版本、来源、是否打进 Mac 启动器 .app
+或 iPhone IPA，见 THIRD_PARTY_LICENSES.md 与 docs/第三方依赖.md。
+第三方文件里的版权声明和许可全文仍以各目录里的 LICENSE 为准。
+
+---
+
+Ryujinx（compat/tree，以及 graphics/vulkan/wsi）
+Copyright (c) Ryujinx Team and Contributors
+MIT License. 许可全文：compat/tree/LICENSE.txt
+
+直连图形层部分代码（graphics/nvn，以及 compat 中标注「Ported (MIT, Copyright (c) 2026 seedds …)」的文件）
+Copyright (c) 2026 seedds
+MIT License. 许可全文：graphics/nvn/LICENSE
+
+ns2pro-bridge（runtime/ns2pro）
+Copyright 见 runtime/ns2pro/LICENSE（DanielZhangyc 等）
+MIT License.
+
+Vulkan-Headers 1.4.363（graphics/nvn/third_party/vulkan-headers）
+Copyright 2015-2026 The Khronos Group Inc.
+Apache-2.0 OR MIT. 许可全文：该目录 LICENSE.md
+
+SPIRV-Cross，标签 vulkan-sdk-1.4.363.0（graphics/third_party/spirv_cross，以及打进 .app 的命令行）
+Apache-2.0. Copyright 见该目录各文件头（Arm、Hans-Kristian Arntzen、The Brenwill Workshop 等）
+许可全文：graphics/third_party/spirv_cross/LICENSE
+
+bcdec（graphics/nvn/third_party/bcdec）
+Copyright (c) 2022 Sergii Kudlai
+MIT License 或 The Unlicense，二选一。许可全文：graphics/nvn/third_party/bcdec/LICENSE
+
+nvn_bcdec.c / nvn_bcdec.h，及 nvn_mtl.m 中的移植部分
+Copyright (c) 2026 MacNativeGames contributors
+MIT License. 来源 https://github.com/ly05010419/MacNativeGames 提交 84eebcd0985c
+许可全文：graphics/nvn/third_party/macnativegames/LICENSE
+
+nvn.h（graphics/nvn/gfx/nvn/include/nvn.h）
+Copyright (c) h1k421
+MIT License. 声明在文件头。
+
+D3D11 固定功能细分器（graphics/metal/gal_tess_d3d.h）
+Copyright (c) Microsoft Corporation，经 Mesa 的 tessellator 带入
+MIT License. 声明在文件头。
+
+SMAA 着色器（graphics/metal/shaders/aa_*.metal）
+Copyright (C) Jorge Jimenez 等，版权与声明全文见 graphics/metal/shaders/AA-LICENSE.txt。
+MIT License.
+
+LumaDock 移植（launchers/macos、pack/jobs 中对应部分）
+Copyright (c) 2026 LumaDock contributors
+Copyright (c) 2026 jhaizhou (derived portions)
+MIT License. 全文：launchers/macos/LICENSE.LumaDock.txt，以及 launchers/macos/README.md
+
+LibHac 0.21.0-alpha.133（compat/packages 内 nupkg）
+MIT License（Copyright (c) 2018 Alex Barney），内含 hactool（ISC License，Copyright (c) 2018, SciresM）与 XTSSharp 的声明，全文以包内 LICENSE 为准。
+
+deko3d 纹理布局算法（移植于 graphics/nvn/gfx/nvn/nvn_tex.c）
+Copyright (C) 2018-2020 fincs
+zlib License. 本仓库对其做了移植与改动，声明见该文件第 2 行。
+
+IANA tzdata / tzcode 2026f（生成进资源包系统数据）
+公有领域；个别文件为 BSD-3-Clause，随数据附带。
+
+ZstdSharp.Port 0.8.8（compat/packages 内 nupkg）
+MIT License.
+
+Noto 字体（构建时生成，不入库）
+SIL Open Font License 1.1. 说明：pack/fonts/LICENSES.md
+Unihan（仅生成字体时使用）：Unicode License v3.
+
+Capstone、LZ4
+构建改写器时下载，许可副本在 runtime/rewriter/LICENSES/。
+capstone BSD-3-Clause（LLVM 派生部分另为 LLVM Release License，全文 runtime/rewriter/LICENSES/capstone-llvm.txt），LZ4 BSD-2-Clause.
+打进 .app 的 Python 包 capstone 5.0.7、lz4 4.4.5 用同一份许可。
+
+Python 3.12、NumPy
+PSF License（Python）、BSD-3-Clause（NumPy）。随 Mac .app 的 Runtime 分发。
+
+.NET 运行时
+MIT License. 随 Mac .app 的 Runtime 分发时带上 dotnet 的 LICENSE.txt 与 ThirdPartyNotices.txt。
+
+SPIRV-Tools、glslang、zstd 命令行
+随 Mac .app 的 Runtime/bin 分发。SPIRV-Tools 为 Apache-2.0，zstd 为 BSD-3-Clause，
+glslang 的许可以其 LICENSE.txt 为准（BSD-3-Clause 等）。构建时把许可文本拷进 Runtime/licenses。
+
+Runtime/lib 里随 Python、zstd、bash 带上的动态库（Homebrew 构建时的版本）
+OpenSSL（Apache-2.0）、liblzma / xz（0BSD）、lz4（BSD-2-Clause）、SQLite（公有领域）、mpdecimal（BSD-2-Clause）、ncurses（X11 风格）。
+
+GNU bash
+GPL-3.0-or-later. 只作为独立程序放在 Runtime/bin/bash，不与 S2Arm 链接。
+许可全文在构建时拷入 Runtime/licenses/bash-COPYING.txt。
+对应源码的取得方式写在 launchers/macos/runtime_source_offer.txt，并一并拷入 Runtime/licenses。
+
+timeout（tools/bin/timeout，perl 实现）
+Copyright 2026 S2Arm contributors
+Apache-2.0. 构建 Runtime 时拷成 Runtime/bin/timeout，代替原先打进 .app 的 GNU coreutils timeout。coreutils 不再打进 .app。
+
+dmsh_xlate_bin 里的预编译程序集
+见 translator/dmsh_xlate_bin/NOTICE.md。
+
+Gradle Wrapper（android/gradle/wrapper，Gradle 9.8.1）
+Apache-2.0. 只用于安卓构建，不进 .app / IPA。

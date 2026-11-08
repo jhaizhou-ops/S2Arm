@@ -1,0 +1,62 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs
+index 2f3988119965a5a026e4f2eb0f341a89a9cd06f4..9d286024ea93411178dec8bf3999a5cf8b4ba760 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs
+@@ -325,6 +325,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         {
+             srcA = context.INegate(srcA, avgMode == AvgMode.NegA);
+             srcB = context.INegate(srcB, avgMode == AvgMode.NegB);
++            Operand poCarry = PlusOne(context, ref srcB, avgMode);
+ 
+             Operand res = context.IAdd(srcA, srcB);
+ 
+@@ -334,6 +335,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             }
+ 
+             SetIaddFlags(context, res, srcA, srcB, writeCC, extended);
++            SetPlusOneCarry(context, poCarry, writeCC);
+ 
+             // TODO: SAT.
+ 
+@@ -470,10 +472,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             srcA = context.INegate(srcA, avgMode == AvgMode.NegA);
+             srcB = context.INegate(srcB, avgMode == AvgMode.NegB);
++            Operand poCarry = PlusOne(context, ref srcB, avgMode);
+ 
+             Operand res = context.IAdd(srcA, srcB);
+ 
+             SetIaddFlags(context, res, srcA, srcB, writeCC, false);
++            SetPlusOneCarry(context, poCarry, writeCC);
+ 
+             context.Copy(GetDest(rd), res);
+         }
+@@ -662,6 +666,28 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             context.Copy(GetDest(rd), res);
+         }
+ 
++        // S2A（#1339）：AvgMode.PlusOne（.PO，取负两位同时置位）= A + B + 1，两个源都不取负（nvdisasm 显示 IADD.PO R, R, R 不带取负；Mesa NAK sm50.rs：两源都带取负时硬件编成 iadd.po）。
++        //   原实现没有这一支，.PO 被静默忽略、少加 1（#1339 lavapipe 读回）。+1 并进 B：B + 1 回绕（B = 0xffffffff）时那一位进位单独记，SetPlusOneCarry 并进 CF
++        private static Operand PlusOne(EmitterContext context, ref Operand srcB, AvgMode avgMode)
++        {
++            if (avgMode != AvgMode.PlusOne)
++            {
++                return null;
++            }
++
++            srcB = context.IAdd(srcB, Const(1));
++
++            return context.ICompareEqual(srcB, Const(0));
++        }
++
++        private static void SetPlusOneCarry(EmitterContext context, Operand poCarry, bool setCC)
++        {
++            if (setCC && poCarry != null)
++            {
++                context.Copy(GetCF(), context.BitwiseOr(GetCF(), poCarry));
++            }
++        }
++
+         private static void SetIaddFlags(EmitterContext context, Operand res, Operand srcA, Operand srcB, bool setCC, bool extended)
+         {
+             if (!setCC)

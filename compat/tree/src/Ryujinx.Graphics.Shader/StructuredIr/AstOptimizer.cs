@@ -1,0 +1,379 @@
+// S2Arm: preserve mutable-memory read ordering and effectful expression definitions (#1414).
+using Ryujinx.Graphics.Shader.IntermediateRepresentation;
+using System.Collections.Generic;
+using System.Linq;
+
+using static Ryujinx.Graphics.Shader.StructuredIr.AstHelper;
+
+namespace Ryujinx.Graphics.Shader.StructuredIr
+{
+    // S2Arm (#1429 acceptance): per-thread count of definitions kept in place
+    // only because of the #1414 memory-order rule. Translation of one shader
+    // runs on one thread, so callers take the count right after translating it.
+    public static class AstMemoryOrderStats
+    {
+        [System.ThreadStatic] internal static int Kept;
+
+        public static int Take()
+        {
+            int kept = Kept;
+            Kept = 0;
+            return kept;
+        }
+    }
+
+    static class AstOptimizer
+    {
+        public static void Optimize(StructuredProgramContext context)
+        {
+            AstBlock mainBlock = context.CurrentFunction.MainBlock;
+
+            // When debug mode is enabled, we disable expression propagation
+            // (this makes comparison with the disassembly easier).
+            if (!context.DebugMode)
+            {
+                AstBlockVisitor visitor = new(mainBlock);
+                MemoryPropagation memoryPropagation = null;
+
+                foreach (IAstNode node in visitor.Visit())
+                {
+                    if (node is AstAssignment assignment && assignment.Destination is AstOperand propVar)
+                    {
+                        // S2Arm: preserve addressable locals used as SPIR-V call arguments.
+                        // StructuredProgram creates these temporaries for GetLocalPointer;
+                        // propagating even a constant would remove that pointer boundary.
+                        bool isCallArgument = propVar.Uses.Any(use => use is AstOperation { Inst: Instruction.Call });
+                        bool isWorthPropagating = !isCallArgument &&
+                            (propVar.Uses.Count == 1 || IsWorthPropagating(assignment.Source));
+
+                        if (propVar.Defs.Count == 1 && isWorthPropagating)
+                        {
+                            int effects = GetMemoryEffects(assignment.Source);
+                            if ((effects & MemoryEffect) == 0 &&
+                                ((effects & MutableRead) == 0 ||
+                                    (memoryPropagation ??= new(mainBlock)).CanPropagate(assignment, propVar)))
+                            {
+                                PropagateExpression(propVar, assignment.Source);
+                            }
+                            else if (propVar.Uses.Count > 0)
+                            {
+                                // Only branch where #1414 changes output: the old code propagated here.
+                                AstMemoryOrderStats.Kept++;
+                            }
+                        }
+
+                        // S2Arm 11-07: a dead local is removed together with its assignment, so only when the source has no side
+                        // effect. An atomic / call whose result is unused (image atomic OR into a write-log bitmap, SURED.OR) was
+                        // dropped with it once DebugMode no longer skipped this loop (ampere_isa_test: 5 of 85 red).
+                        if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0 &&
+                            (GetMemoryEffects(assignment.Source) & MemoryEffect) == 0)
+                        {
+                            visitor.Block.Remove(assignment);
+
+                            context.CurrentFunction.Locals.Remove(propVar);
+                        }
+                    }
+                }
+            }
+
+            RemoveEmptyBlocks(mainBlock);
+        }
+
+        // S2Arm (#1414): expressions are evaluated where they are used, not where
+        // their former local was assigned. Keep writes/calls at their definition,
+        // and only move mutable reads along paths with no intervening memory effect.
+        private const int MutableRead = 1;
+        private const int MemoryEffect = 2;
+
+        private static int GetMemoryEffects(IAstNode node)
+        {
+            if (node is not AstOperation operation)
+            {
+                return 0;
+            }
+
+            Instruction inst = operation.Inst & Instruction.Mask;
+            int effects = 0;
+            if (inst == Instruction.ImageLoad ||
+                (inst == Instruction.Load && operation.StorageKind is not
+                    (StorageKind.ConstantBuffer or StorageKind.Input or StorageKind.InputPerPatch)))
+            {
+                effects |= MutableRead;
+            }
+
+            if (inst.IsAtomic() || inst is Instruction.ImageAtomic or Instruction.Call or
+                Instruction.Store or Instruction.ImageStore or Instruction.Barrier or
+                Instruction.MemoryBarrier or Instruction.GroupMemoryBarrier)
+            {
+                effects |= MemoryEffect;
+            }
+
+            for (int index = 0; index < operation.SourcesCount; index++)
+            {
+                effects |= GetMemoryEffects(operation.GetSource(index));
+            }
+
+            return effects;
+        }
+
+        private static bool ContainsOperand(IAstNode node, AstOperand operand)
+        {
+            if (node == operand)
+            {
+                return true;
+            }
+
+            if (node is AstOperation operation)
+            {
+                for (int index = 0; index < operation.SourcesCount; index++)
+                {
+                    if (ContainsOperand(operation.GetSource(index), operand))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private sealed class MemoryPropagation
+        {
+            private readonly Dictionary<IAstNode, IAstNode[]> _successors = new();
+            // S2Arm 11-07: per-node memory-effect bits, computed once. A node's expression only changes when PropagateExpression
+            // replaces an operand by a source with no MemoryEffect (Optimize only propagates such sources), so whether it writes
+            // memory never changes; recomputing it at every node of every query was quadratic (geometry emulation, DebugMode off:
+            // 1.3-2.1 GB per shader). Queue / visited set are reused across queries.
+            private readonly Dictionary<IAstNode, (bool Mem, bool NestedMem)> _effects = new();
+            private readonly Queue<(IAstNode Node, bool Dirty)> _pending = new();
+            private readonly HashSet<(IAstNode Node, bool Dirty)> _visited = new();
+
+            private static IAstNode ExpressionOf(IAstNode node) => node switch
+            {
+                AstAssignment assignment => assignment.Source,
+                AstBlock block => block.Condition,
+                _ => node,
+            };
+
+            private (bool Mem, bool NestedMem) Effects(IAstNode node)
+            {
+                if (!_effects.TryGetValue(node, out var e))
+                {
+                    bool mem = (GetMemoryEffects(ExpressionOf(node)) & MemoryEffect) != 0;
+                    bool nested = mem;
+                    if (node is AstOperation operation)
+                    {
+                        nested = false;
+                        for (int index = 0; index < operation.SourcesCount && !nested; index++)
+                        {
+                            nested = (GetMemoryEffects(operation.GetSource(index)) & MemoryEffect) != 0;
+                        }
+                    }
+                    _effects[node] = e = (mem, nested);
+                }
+                return e;
+            }
+
+            public MemoryPropagation(AstBlock mainBlock)
+            {
+                AddBlock(mainBlock, null, null, null);
+            }
+
+            // Build execution edges, not AstBlockVisitor's lexical DFS order.
+            // A block node denotes evaluation of its condition. Else bodies have
+            // no condition; loop conditions have explicit backedges and exits.
+            private IAstNode AddBlock(AstBlock block, IAstNode next, IAstNode loopExit, IAstNode loopContinue)
+            {
+                IAstNode alternative = null;
+                foreach (IAstNode node in block.Reverse())
+                {
+                    if (node is AstBlock child)
+                    {
+                        switch (child.Type)
+                        {
+                            case AstBlockType.Else:
+                                alternative = AddBlock(child, next, loopExit, loopContinue);
+                                break;
+                            case AstBlockType.If:
+                            case AstBlockType.ElseIf:
+                                _successors[child] = [AddBlock(child, next, loopExit, loopContinue), alternative ?? next];
+                                if (child.Type == AstBlockType.ElseIf)
+                                {
+                                    alternative = child;
+                                }
+                                else
+                                {
+                                    next = child;
+                                    alternative = null;
+                                }
+                                break;
+                            case AstBlockType.While:
+                            case AstBlockType.DoWhile:
+                                IAstNode body = AddBlock(child, child, next, child);
+                                _successors[child] = [body, next];
+                                next = child.Type == AstBlockType.While ? child : body;
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        Instruction inst = node is AstOperation operation ? operation.Inst & Instruction.Mask : 0;
+                        _successors[node] = inst switch
+                        {
+                            Instruction.LoopBreak => [loopExit],
+                            Instruction.LoopContinue => [loopContinue],
+                            Instruction.Return or Instruction.Discard => [],
+                            _ => [next],
+                        };
+                        next = node;
+                    }
+                }
+
+                return next;
+            }
+
+            public bool CanPropagate(AstAssignment definition, AstOperand operand)
+            {
+                // Same answer as walking every (node, dirty) state from the definition and failing at a use reached dirty or with a
+                // nested memory effect: containment is only looked up where it can change the answer, and a node already reached
+                // dirty is not walked again clean (the dirty walk reaches every use the clean one would, and fails there)
+                Queue<(IAstNode Node, bool Dirty)> pending = _pending; HashSet<(IAstNode Node, bool Dirty)> visited = _visited;
+                pending.Clear(); visited.Clear();
+                foreach (IAstNode next in _successors[definition])
+                {
+                    pending.Enqueue((next, false));
+                }
+
+                while (pending.TryDequeue(out var state))
+                {
+                    IAstNode node = state.Node;
+                    // Re-executing the definition refreshes the read, so writes
+                    // from a preceding iteration cannot taint that new value.
+                    if (node == null || node == definition || (!state.Dirty && visited.Contains((node, true))) || !visited.Add(state))
+                    {
+                        continue;
+                    }
+
+                    bool dirty = state.Dirty;
+                    // Earlier propagation can remove assignments. Their edges
+                    // stay valid, but their obsolete expression is not executed.
+                    if (node.Parent != null)
+                    {
+                        var (mem, nestedMem) = Effects(node);
+                        // Root Store/Call effects happen after evaluating their
+                        // operands. Nested effects have backend-dependent operand
+                        // order, so do not move reads into those expressions.
+                        if ((dirty || nestedMem) && ContainsOperand(ExpressionOf(node), operand))
+                        {
+                            return false;
+                        }
+
+                        dirty |= mem;
+                    }
+
+                    foreach (IAstNode next in _successors[node])
+                    {
+                        pending.Enqueue((next, dirty));
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        private static bool IsWorthPropagating(IAstNode source)
+        {
+            if (source is not AstOperation srcOp)
+            {
+                return false;
+            }
+
+            if (!InstructionInfo.IsUnary(srcOp.Inst))
+            {
+                return false;
+            }
+
+            return srcOp.GetSource(0) is AstOperand || srcOp.Inst == Instruction.Copy;
+        }
+
+        private static void PropagateExpression(AstOperand propVar, IAstNode source)
+        {
+            IAstNode[] uses = propVar.Uses.ToArray();
+
+            foreach (IAstNode useNode in uses)
+            {
+                if (useNode is AstBlock useBlock)
+                {
+                    useBlock.Condition = source;
+                }
+                else if (useNode is AstOperation useOperation)
+                {
+                    for (int srcIndex = 0; srcIndex < useOperation.SourcesCount; srcIndex++)
+                    {
+                        if (useOperation.GetSource(srcIndex) == propVar)
+                        {
+                            useOperation.SetSource(srcIndex, source);
+                        }
+                    }
+                }
+                else if (useNode is AstAssignment useAssignment)
+                {
+                    useAssignment.Source = source;
+                }
+            }
+        }
+
+        private static void RemoveEmptyBlocks(AstBlock mainBlock)
+        {
+            Queue<AstBlock> pending = new();
+
+            pending.Enqueue(mainBlock);
+
+            while (pending.TryDequeue(out AstBlock block))
+            {
+                foreach (IAstNode node in block)
+                {
+                    if (node is AstBlock childBlock)
+                    {
+                        pending.Enqueue(childBlock);
+                    }
+                }
+
+                AstBlock parent = block.Parent;
+
+                if (parent == null)
+                {
+                    continue;
+                }
+
+                AstBlock nextBlock = Next(block) as AstBlock;
+
+                bool hasElse = nextBlock != null && nextBlock.Type == AstBlockType.Else;
+
+                bool isIf = block.Type == AstBlockType.If;
+
+                if (block.Count == 0)
+                {
+                    if (isIf)
+                    {
+                        if (hasElse)
+                        {
+                            nextBlock.TurnIntoIf(InverseCond(block.Condition));
+                        }
+
+                        parent.Remove(block);
+                    }
+                    else if (block.Type == AstBlockType.Else)
+                    {
+                        parent.Remove(block);
+                    }
+                }
+                // S2Arm 11-07: upstream turned "else { if (c) {...} [else {...}] }" into an ElseIf block here. The SPIR-V generator
+                // (SpirvGenerator BlockEntered) only takes an immediately following Else as the false target of an If and emits no branch
+                // into an ElseIf block, so the else-if arm became unreachable and was dropped. With DebugMode on every Else holds comment
+                // nodes and never got rewritten; with it off, propagation empties the Else and the arm vanished (BotW skinning vertex shader
+                // 0068dfb7db3baf9a kept bone 0 of 4). ElseIf only prettifies GLSL; the nested else { if } has the same meaning, so keep it.
+            }
+        }
+    }
+}

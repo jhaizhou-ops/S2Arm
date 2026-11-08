@@ -1,0 +1,126 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index f759be056e019eb9648922a4eee5753cf3240af1..64c5cbd0dfb938ed7b155aa3a5575eae25232f50 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -39,6 +39,11 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+         private ManualResetEvent _pauseEvent;
+ 
++        // S2Arm（能耗，帧率能耗线 10-20）：S2A_AUDIO_INLINE=1 时 DSP 在调用方（AudioRendererManager 线程）上同步做，不起 AudioProcessor.Worker、不走信箱。
++        // 原两线程是严格同步交接（管理线程 Signal 后即 Wait 到 RenderEnd，无并行），同步执行顺序不变；
++        // 测试机1 线程表：两条线程合计约 1.9 万运行段/秒（每段 2.5–7.6 µs），设计每 5 ms 一次交接
++        private static readonly bool S2AInline = Environment.GetEnvironmentVariable("S2A_AUDIO_INLINE") == "1";
++
+         public AudioProcessor()
+         {
+         }
+@@ -74,6 +79,12 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             _lastTime = PerformanceCounter.ElapsedNanoseconds;
+             _pauseEvent = deviceDriver.GetPauseEvent();
+ 
++            if (S2AInline)
++            {
++                Console.Error.WriteLine("[S2A 声音] S2A_AUDIO_INLINE=1：DSP 在管理线程同步执行（不起 AudioProcessor.Worker）");
++                return;
++            }
++
+             StartThread();
+ 
+             _mailbox.SendMessage(MailboxMessage.Start);
+@@ -86,6 +97,16 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+         public void Stop()
+         {
++            if (S2AInline)
++            {
++                foreach (IHardwareDevice d in OutputDevices)
++                {
++                    d.Dispose();
++                }
++
++                return;
++            }
++
+             _mailbox.SendMessage(MailboxMessage.Stop);
+ 
+             if (_mailbox.ReceiveResponse() != MailboxMessage.Stop)
+@@ -121,12 +142,19 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+         public void Signal()
+         {
++            if (S2AInline)
++            {
++                _pauseEvent?.WaitOne();
++                Render();
++                return;
++            }
++
+             _mailbox.SendMessage(MailboxMessage.RenderStart);
+         }
+ 
+         public void Wait()
+         {
+-            if (_mailbox.ReceiveResponse() != MailboxMessage.RenderEnd)
++            if (!S2AInline && _mailbox.ReceiveResponse() != MailboxMessage.RenderEnd)
+             {
+                 throw new InvalidOperationException("Audio Processor Wait response was invalid!");
+             }
+@@ -204,26 +232,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+                 if (message == MailboxMessage.RenderStart)
+                 {
+-                    long startTicks = PerformanceCounter.ElapsedNanoseconds;
+-
+-                    for (int i = 0; i < _sessionCommandList.Length; i++)
+-                    {
+-                        if (_sessionCommandList[i] != null)
+-                        {
+-                            _sessionCommandList[i].CommandList.Process(OutputDevices[i]);
+-                            _sessionCommandList[i].CommandList.Dispose();
+-                            _sessionCommandList[i] = null;
+-                        }
+-                    }
+-
+-                    long endTicks = PerformanceCounter.ElapsedNanoseconds;
+-
+-                    long elapsedTime = endTicks - startTicks;
+-
+-                    if (Constants.AudioProcessorMaxUpdateTime < elapsedTime)
+-                    {
+-                        Logger.Debug?.Print(LogClass.AudioRenderer, $"DSP too slow (exceeded by {elapsedTime - Constants.AudioProcessorMaxUpdateTime}ns)");
+-                    }
++                    Render();
+ 
+                     _mailbox.SendResponse(MailboxMessage.RenderEnd);
+                 }
+@@ -233,6 +242,30 @@ namespace Ryujinx.Audio.Renderer.Dsp
+             _mailbox.SendResponse(MailboxMessage.Stop);
+         }
+ 
++        private void Render()
++        {
++            long startTicks = PerformanceCounter.ElapsedNanoseconds;
++
++            for (int i = 0; i < _sessionCommandList.Length; i++)
++            {
++                if (_sessionCommandList[i] != null)
++                {
++                    _sessionCommandList[i].CommandList.Process(OutputDevices[i]);
++                    _sessionCommandList[i].CommandList.Dispose();
++                    _sessionCommandList[i] = null;
++                }
++            }
++
++            long endTicks = PerformanceCounter.ElapsedNanoseconds;
++
++            long elapsedTime = endTicks - startTicks;
++
++            if (Constants.AudioProcessorMaxUpdateTime < elapsedTime)
++            {
++                Logger.Debug?.Print(LogClass.AudioRenderer, $"DSP too slow (exceeded by {elapsedTime - Constants.AudioProcessorMaxUpdateTime}ns)");
++            }
++        }
++
+         public void Dispose()
+         {
+             GC.SuppressFinalize(this);

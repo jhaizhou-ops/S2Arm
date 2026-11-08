@@ -1,0 +1,112 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index bd2f2114d44205e58e2b952ca6d782b219836704..f9253aadd2d0c4833668bf8058892cf940e64bf0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -578,7 +578,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+             else
+             {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = true;   // S2A 拦写模拟：这次设 None 是缓冲登记的（缓冲担保）
+                 _memoryTracking.RegisterAction(_externalFlushDelegate);
++                Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = false;
+                 SynchronizeMemory(Address, Size);
+             }
+ 
+@@ -587,7 +589,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         
+         void SyncRangeAction(ulong address, ulong size)
+         {
++            Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = true;   // S2A 拦写模拟：同上
+             _memoryTrackingGranular.RegisterAction(address, size, _externalFlushDelegate);
++            Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = false;
+             SynchronizeMemory(address, size);
+         }
+ 
+@@ -609,6 +613,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+                 void RegisterRangeAction(ulong address, ulong size)
+                 {
++                    Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = true;   // S2A 拦写模拟：同上
+                     if (_useGranular)
+                     {
+                         _memoryTrackingGranular.RegisterAction(address, size, _externalFlushDelegate);
+@@ -617,6 +622,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     {
+                         _memoryTracking.RegisterAction(_externalFlushDelegate);
+                     }
++                    Ryujinx.Memory.Tracking.MemoryTracking.S2ABufferNone = false;
+                 }
+ 
+                 EnsureRangeList();
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+index 547d61f7396788b26950f2799e3f099b4a3b753e..700bc6d8de4439568e14d839b8f0a03e678f07db 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+@@ -154,6 +154,27 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// </summary>
+         /// <param name="address">Start address of the modified region</param>
+         /// <param name="size">Size of the modified region in bytes</param>
++        /// <summary>
++        /// S2A（帧率能耗线 10-24，拦写模拟）：每新增一段修改区间（SignalModified 及其拆分、继承、迁移都经这里）就在宿主写跟踪的字节表里置位（超集）
++        /// </summary>
++        public override unsafe void Add(BufferModifiedRange item)
++        {
++            base.Add(item);
++
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AModSet != null)
++            {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2AModSet(item.Address, item.Size);
++            }
++        }
++
++        private static unsafe void S2AModClear(ulong address, ulong size)
++        {
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AModClear != null)
++            {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2AModClear(address, size);
++            }
++        }
++
+         public void SignalModified(ulong address, ulong size)
+         {
+             ulong endAddress = address + size;
+@@ -401,6 +422,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                         }
+ 
+                         RangeActionWithMigration(clampAddress, clampEnd - clampAddress, waitSync, _flushAction);
++                        S2AModClear(clampAddress, clampEnd - clampAddress);   // S2A 拦写模拟：这段已回写进游戏内存、已移出修改区间
+                     }
+                 }
+ 
+@@ -611,6 +633,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             ulong endAddress = address + size;
+             Lock.EnterWriteLock();
++            S2AModClear(address, size);   // S2A 拦写模拟：这段之后不再算 GPU 改过（写锁内：别的回写进不来）
+             (BufferModifiedRange first, BufferModifiedRange last) = FindOverlapsAsNodes(address, size);
+             
+             if (first is null)
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index f0ffa07f80424a715c33eb111737d93ca759d329..4f6e43efce3707978f1fb57be70ef51efcb7a094 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -35,6 +35,19 @@ namespace Ryujinx.Memory.Tracking
+         /// </summary>
+         public static unsafe delegate*<ulong, ulong, int, void> S2AReprotect;
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-24，拦写模拟，docs/研究/拦写模拟.md）：缓冲登记回写动作（RegisterAction）期间为真（Buffer 置、本线程）。
++        /// 宿主写跟踪据此把这次「GPU 改过」（None）记成缓冲担保；不带它的 None（贴图等）记成污染，永不模拟
++        /// </summary>
++        [ThreadStatic] public static bool S2ABufferNone;
++
++        /// <summary>
++        /// S2A（拦写模拟）：GPU 改过的字节表（宿主写跟踪 s2a_track_mod_set / mod_clear，NxTrack.Init 设）。
++        /// BufferModifiedRangeList 每新增一段修改区间置位、一段回写完成或 Clear 后清位；为空时不调
++        /// </summary>
++        public static unsafe delegate*<ulong, ulong, void> S2AModSet;
++        public static unsafe delegate*<ulong, ulong, void> S2AModClear;
++
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 

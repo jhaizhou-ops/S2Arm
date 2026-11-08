@@ -1,0 +1,347 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index a0a57676279964adf45258a5b7fd7d85b88ec242..5b705148f7c703b2b78fd0b249bdbeb61fa17a85 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -107,6 +107,11 @@ namespace Ryujinx.Graphics.GAL
+         //   输出代码不同 → 计入宿主缓存能力身份与 program profile（为假时字节与改前相同）。
+         public readonly bool SupportsImageStoreFormatted;
+ 
++        // The Vulkan target supports SPIR-V 1.5. This is part of shader cache identity.
++        public readonly bool S2ASpirv15;
++        public readonly bool S2ASpirvLayerExt;
++        public readonly bool S2ASpirvLayerNv;
++
+         public Capabilities(
+             TargetApi api,
+             string vendorName,
+@@ -178,8 +183,14 @@ namespace Ryujinx.Graphics.GAL
+             bool s2aStorageOobRecord = false,
+             Format[] unsupportedUniformTexelBufferFormats = null,
+             bool supportsGeometryShaderOcclusionQuery = false,
+-            bool supportsImageStoreFormatted = false)
++            bool supportsImageStoreFormatted = false,
++            bool s2aSpirv15 = false,
++            bool s2aSpirvLayerExt = false,
++            bool s2aSpirvLayerNv = false)
+         {
++            S2ASpirv15 = s2aSpirv15;
++            S2ASpirvLayerExt = s2aSpirvLayerExt;
++            S2ASpirvLayerNv = s2aSpirvLayerNv;
+             SupportsGeometryShaderOcclusionQuery = supportsGeometryShaderOcclusionQuery;
+             UnsupportedUniformTexelBufferFormats = unsupportedUniformTexelBufferFormats;
+             SupportsImageStoreFormatted = supportsImageStoreFormatted;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index 96f281de05095759a2831592e0cbe50db0233313..8c42b18fc63c9fc1cb1fea9bc70db7d1fe43671d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -105,6 +105,16 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             {
+                 writer.Write("s2a-store-without-format");
+             }
++            if (usesSpirv && capabilities.S2ASpirv15)
++            {
++                writer.Write("s2a-spirv-15-layer-output");
++            }
++            if (usesSpirv && (capabilities.S2ASpirvLayerExt || capabilities.S2ASpirvLayerNv))
++            {
++                writer.Write("s2a-spirv-layer-extension");
++                writer.Write(capabilities.S2ASpirvLayerExt);
++                writer.Write(capabilities.S2ASpirvLayerNv);
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+index 5145ae48b0b48d9f5ab07de5f83b46eb815f2bfc..5f59ed538be37ae71a246f493d55cc2204ec5bec 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessorBase.cs
+@@ -34,6 +34,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+         public Capabilities FrozenTranslationCapabilities => TranslationCapabilities;
+ 
++        public bool QueryHostSupportsSpirv15() => TranslationCapabilities.S2ASpirv15;
++        public bool QueryHostSpirvLayerExt() => TranslationCapabilities.S2ASpirvLayerExt;
++        public bool QueryHostSpirvLayerNv() => TranslationCapabilities.S2ASpirvLayerNv;
++
+         public ComputeTranslationProfile ComputeTranslationProfile
+         {
+             get
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs
+index 3f80c2ae0145e19d143dec39ac7755d6066298a5..8ec66991aef50abb8c7e35c344dbea3250689ed0 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs
+@@ -12,10 +12,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+     partial class CodeGenContext : Module
+     {
+-        private const uint SpirvVersionMajor = 1;
+-        private const uint SpirvVersionMinor = 3;
+-        private const uint SpirvVersionRevision = 0;
+-        private const uint SpirvVersionPacked = (SpirvVersionMajor << 16) | (SpirvVersionMinor << 8) | SpirvVersionRevision;
++        private const uint Spirv13 = 0x00010300;
++        private const uint Spirv15 = 0x00010500;
++
++        private static bool UseSpirv15(StructuredProgramInfo info, CodeGenParameters parameters) =>
++            parameters.TargetApi == TargetApi.Vulkan && parameters.HostCapabilities.SupportsSpirv15 &&
++            parameters.Definitions.Stage is ShaderStage.Vertex or ShaderStage.TessellationControl or ShaderStage.TessellationEvaluation &&
++            (info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.Layer)) ||
++             info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportIndex)));
++
++        public bool IsSpirv15 { get; }
++        private readonly List<Instruction> _s2aGlobals = [];
++
++        public new void AddGlobalVariable(Instruction variable)
++        {
++            base.AddGlobalVariable(variable);
++            _s2aGlobals.Add(variable);
++        }
+ 
+         public StructuredProgramInfo Info { get; }
+ 
+@@ -88,8 +101,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             StructuredProgramInfo info,
+             CodeGenParameters parameters,
+             GeneratorPool<Instruction> instPool,
+-            GeneratorPool<LiteralInteger> integerPool) : base(SpirvVersionPacked, instPool, integerPool)
++            GeneratorPool<LiteralInteger> integerPool) : base(UseSpirv15(info, parameters) ? Spirv15 : Spirv13, instPool, integerPool)
+         {
++            IsSpirv15 = UseSpirv15(info, parameters);
+             WasNonUniformAccessDeclared = false;
+ 
+             Info = info;
+@@ -149,6 +163,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+         public Instruction[] GetMainInterface()
+         {
++            if (IsSpirv15)
++            {
++                // SPIR-V 1.4+ lists all globals used by the entry point, not only I/O.
++                return _s2aGlobals.ToArray();
++            }
++
+             List<Instruction> mainInterface = [];
+ 
+             mainInterface.AddRange(Inputs.Values);
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index d0dd1da3d44de5be9738aecf31484e5fc0d52198..635230215f90723f2466dbb1ae864ff8ee7e59fb 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -127,7 +127,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                 if (decoratedTypes.Add(structType))
+                 {
+-                    context.Decorate(structType, isBuffer ? Decoration.BufferBlock : Decoration.Block);
++                    context.Decorate(structType, isBuffer && !context.IsSpirv15 ? Decoration.BufferBlock : Decoration.Block);
+ 
+                     for (int fieldIndex = 0; fieldIndex < structFieldOffsets.Length; fieldIndex++)
+                     {
+@@ -135,8 +135,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                     }
+                 }
+ 
+-                SpvInstruction pointerType = context.TypePointer(StorageClass.Uniform, structType);
+-                SpvInstruction variable = context.Variable(pointerType, StorageClass.Uniform);
++                StorageClass storageClass = isBuffer && context.IsSpirv15 ? StorageClass.StorageBuffer : StorageClass.Uniform;
++                SpvInstruction pointerType = context.TypePointer(storageClass, structType);
++                SpvInstruction variable = context.Variable(pointerType, storageClass);
+ 
+                 context.Name(variable, buffer.Name);
+                 context.Decorate(variable, Decoration.DescriptorSet, (LiteralInteger)setIndex);
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index dd03cce0f1a7bbcd20ddaea8a3e07e8ee7d5c41e..baf8ce99ca8823c14251c00ebf7476c38db26171 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1884,7 +1884,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                         : context.Properties.StorageBuffers[bindingIndex.Value];
+                     StructureField field = buffer.Type.Fields[fieldIndex.Value];
+ 
+-                    storageClass = StorageClass.Uniform;
++                    storageClass = storageKind == StorageKind.StorageBuffer && context.IsSpirv15
++                        ? StorageClass.StorageBuffer : StorageClass.Uniform;
+                     varType = field.Type & AggregateType.ElementTypeMask;
+                     baseObj = storageKind == StorageKind.ConstantBuffer
+                         ? context.ConstantBuffers[bindingIndex.Value]
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+index bb75ec8f3b97c6d2a9412796c9ae5ed842ee2298..2b4981a335bc2a430d65a64901cf4c4d97627763 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -117,8 +117,41 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.Layer)) ||
+                 context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportIndex))))
+             {
+-                context.AddExtension("SPV_EXT_shader_viewport_index_layer");
+-                context.AddCapability(Capability.ShaderViewportIndexLayerEXT);
++                if (context.IsSpirv15)
++                {
++                    if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.Layer)))
++                    {
++                        if (!context.HostCapabilities.LayerOutput)
++                        {
++                            throw new NotSupportedException("ShaderLayer output is not enabled on this host.");
++                        }
++                        context.AddCapability(Capability.ShaderLayer);
++                    }
++                    if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportIndex)))
++                    {
++                        if (!context.HostCapabilities.ViewportOutput)
++                        {
++                            throw new NotSupportedException("ShaderViewportIndex output is not enabled on this host.");
++                        }
++                        context.AddCapability(Capability.ShaderViewportIndex);
++                    }
++                }
++                else
++                {
++                    if (context.HostCapabilities.SpirvLayerExt)
++                    {
++                        context.AddExtension("SPV_EXT_shader_viewport_index_layer");
++                    }
++                    else if (context.HostCapabilities.SpirvLayerNv)
++                    {
++                        context.AddExtension("SPV_NV_viewport_array2");
++                    }
++                    else
++                    {
++                        throw new NotSupportedException("No enabled SPIR-V Layer/ViewportIndex output route.");
++                    }
++                    context.AddCapability(Capability.ShaderViewportIndexLayerEXT);
++                }
+             }
+ 
+             if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportMask)))
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 803fcc451c6091e558962be8ab64d2fc04f3ab07..8a9c846233478ecf1da327457a9c1b0295a3c47c 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -17,6 +17,9 @@ namespace Ryujinx.Graphics.Shader
+ 
+     public interface IGpuAccessor : ILogger
+     {
++        bool QueryHostSupportsSpirv15() => false;
++        bool QueryHostSpirvLayerExt() => false;
++        bool QueryHostSpirvLayerNv() => false;
+         // Direct-render ABI opt-in. Generic producers retain their existing helpers.
+         bool QueryHostSupportsTextureSizeTable() => false;
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/HostCapabilities.cs b/src/Ryujinx.Graphics.Shader/Translation/HostCapabilities.cs
+index bfd85c158148fdc2cbca3573074160a01ca0036b..cde064fdf60c4e47971e4564d3cdefb125fd6b87 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/HostCapabilities.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/HostCapabilities.cs
+@@ -12,6 +12,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public readonly bool SupportsShaderNonUniformIndexing;
+         public readonly bool SupportsTextureShadowLod;
+         public readonly bool SupportsViewportMask;
++        public readonly bool SupportsSpirv15;
++        public readonly bool SpirvLayerExt;
++        public readonly bool SpirvLayerNv;
++        public readonly bool LayerOutput;
++        public readonly bool ViewportOutput;
+ 
+         public HostCapabilities(
+             bool reducedPrecision,
+@@ -23,7 +28,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+             bool supportsShaderFloat64,
+             bool supportsShaderNonUniformIndexing,
+             bool supportsTextureShadowLod,
+-            bool supportsViewportMask)
++            bool supportsViewportMask,
++            bool supportsSpirv15,
++            bool spirvLayerExt,
++            bool spirvLayerNv,
++            bool layerOutput,
++            bool viewportOutput)
+         {
+             ReducedPrecision = reducedPrecision;
+             SupportsFragmentShaderInterlock = supportsFragmentShaderInterlock;
+@@ -35,6 +45,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+             SupportsShaderNonUniformIndexing = supportsShaderNonUniformIndexing;
+             SupportsTextureShadowLod = supportsTextureShadowLod;
+             SupportsViewportMask = supportsViewportMask;
++            SupportsSpirv15 = supportsSpirv15;
++            SpirvLayerExt = spirvLayerExt;
++            SpirvLayerNv = spirvLayerNv;
++            LayerOutput = layerOutput;
++            ViewportOutput = viewportOutput;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 9e6c23e8fa60343f0229b226a291269464abfe0a..e1fc109ce895340af07a1d3be5b6cfd752d5b0c5 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -561,7 +561,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 GpuAccessor.QueryHostSupportsShaderFloat64(),
+                 GpuAccessor.QueryHostSupportsShaderNonUniformIndexing(),
+                 GpuAccessor.QueryHostSupportsTextureShadowLod(),
+-                GpuAccessor.QueryHostSupportsViewportMask());
++                GpuAccessor.QueryHostSupportsViewportMask(),
++                GpuAccessor.QueryHostSupportsSpirv15(),
++                GpuAccessor.QueryHostSpirvLayerExt(),
++                GpuAccessor.QueryHostSpirvLayerNv(),
++                GpuAccessor.QueryHostSupportsLayerVertexTessellation(),
++                GpuAccessor.QueryHostSupportsViewportIndexVertexTessellation());
+ 
+             CodeGenParameters parameters = new CodeGenParameters(attributeUsage, definitions, resourceManager.Properties, hostCapabilities, GpuAccessor, Options.TargetApi);
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 628a51bd6ecae124543e3d971147dd6ada46ec80..da42766586e4a9db7bd21b7fe658802061d9cf94 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -818,6 +818,13 @@ namespace Ryujinx.Graphics.Vulkan
+             if (hasUniformBufferStandardLayout) enabledExtensions = enabledExtensions.Append("VK_KHR_uniform_buffer_standard_layout").ToArray();
+             if (has8BitStorage) enabledExtensions = enabledExtensions.Append("VK_KHR_8bit_storage").ToArray();
+             if (hasFloat16Int8) enabledExtensions = enabledExtensions.Append("VK_KHR_shader_float16_int8").ToArray();
++            // Vulkan 1.1 requires the legacy extension for its combined Layer/Viewport capability.
++            // Vulkan 1.2 uses the queried core feature bits and SPIR-V 1.5 instead.
++            if (!hasVulkan12 && physicalDevice.IsDeviceExtensionPresent("VK_EXT_shader_viewport_index_layer") &&
++                !enabledExtensions.Contains("VK_EXT_shader_viewport_index_layer"))
++            {
++                enabledExtensions = enabledExtensions.Append("VK_EXT_shader_viewport_index_layer").ToArray();
++            }
+             PhysicalDeviceSwapchainMaintenance1FeaturesEXT enabledSwapchainMaintenance = new();
+             if (canQuerySwapchainMaintenance && supportedSwapchainMaintenance.SwapchainMaintenance1)
+             {
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 88984e2e9da1bbf240bbdc6d6fea27eb55551331..fa046921391074775603ad1a5d30c2496a87b716 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1008,10 +1008,14 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             PhysicalDeviceFeatures features = _enabledFeatures.Core;
+             PhysicalDeviceVulkan12Features featuresVk12 = _enabledFeatures.Vulkan12;
+-            // The current SPIR-V emitter uses the combined ShaderViewportIndexLayerEXT
+-            // capability. Its core-feature path requires both enabled bits, even when
+-            // a particular guest shader writes only one of the two built-ins.
+-            bool supportsLayerViewportOutput = featuresVk12.ShaderOutputLayer && featuresVk12.ShaderOutputViewportIndex;
++            // SPIR-V 1.5 has separate capabilities; on 1.1, an enabled legacy
++            // extension authorizes both outputs with its combined capability.
++            bool hostVulkan12 = _physicalDevice.PhysicalDeviceProperties.ApiVersion >= Vk.Version12.Value;
++            bool legacyLayerOutput = !hostVulkan12 &&
++                (_enabledFeatures.HasExtension("VK_EXT_shader_viewport_index_layer") ||
++                 _enabledFeatures.HasExtension("VK_NV_viewport_array2"));
++            bool supportsLayerOutput = featuresVk12.ShaderOutputLayer || legacyLayerOutput;
++            bool supportsViewportOutput = featuresVk12.ShaderOutputViewportIndex || legacyLayerOutput;
+ 
+             PhysicalDeviceLimits limits = _physicalDevice.PhysicalDeviceProperties.Limits;
+             QueueFamilyProperties mainQueueProperties = _physicalDevice.QueueFamilyProperties[QueueFamilyIndex];
+@@ -1059,7 +1063,10 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsTransformFeedback: Capabilities.SupportsTransformFeedback,
+                 supportsImageLoadFormatted: features.ShaderStorageImageReadWithoutFormat,
+                 supportsImageStoreFormatted: features.ShaderStorageImageWriteWithoutFormat,
+-                supportsLayerVertexTessellation: supportsLayerViewportOutput,
++                s2aSpirv15: hostVulkan12,
++                s2aSpirvLayerExt: _enabledFeatures.HasExtension("VK_EXT_shader_viewport_index_layer"),
++                s2aSpirvLayerNv: _enabledFeatures.HasExtension("VK_NV_viewport_array2"),
++                supportsLayerVertexTessellation: supportsLayerOutput,
+                 supportsMismatchingViewFormat: true,
+                 supportsCubemapView: !IsAmdGcn,
+                 supportsNonConstantTextureOffset: false,
+@@ -1075,7 +1082,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsTextureGatherOffsets: features.ShaderImageGatherExtended,
+                 supportsTextureShadowLod: false,
+                 supportsVertexStoreAndAtomics: features.VertexPipelineStoresAndAtomics,
+-                supportsViewportIndexVertexTessellation: supportsLayerViewportOutput,
++                supportsViewportIndexVertexTessellation: supportsViewportOutput,
+                 supportsViewportMask: Capabilities.SupportsViewportArray2,
+                 supportsViewportSwizzle: false,
+                 supportsIndirectParameters: Capabilities.SupportsIndirectParameters,

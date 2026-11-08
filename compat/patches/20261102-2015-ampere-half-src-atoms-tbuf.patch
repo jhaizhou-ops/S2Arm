@@ -1,0 +1,156 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+index e4392e5a076696d2a77639f024e1a42ce2c0c11e..12ea4be7c44039289d66370140b01a07ec4d7c29 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+@@ -452,17 +452,25 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         // ---- packed halves ----
+ 
+         // A half-pair operand's two lanes after its swizzle (0 as is, 2 low twice, 3 high twice; 1 the high half of a scalar), abs / neg applied.
++        // S2Arm: the swizzle is 2 bits, as Maxwell's HalfSwizzle: 0 the pair, 1 a 32-bit float used for both lanes, 2 the low half twice, 3 the high half twice
++        // (Eden-NS2 lowers the same field to Maxwell's swizzle unchanged); the reference port read 1 as the high half (no register operand of Pokopia's 343,862 sampled half-pair
++        // instructions has 1).
++        // An immediate is always a pair; a constant buffer word takes its swizzle (Eden: bits 60..61 for it too)
+         private static Operand[] AHalfLanes(EmitterContext context, ASrc s, int swizzle)
+         {
+             Operand v = AGet(context, s);
+             Operand lo, hi;
+ 
+-            if (s.Kind == AKind.Imm || s.Kind == AKind.Cbuf || swizzle == 0)
++            if (s.Kind == AKind.Imm || swizzle == 0)
+             {
+                 lo = context.UnpackHalf2x16Low(v);
+                 hi = context.UnpackHalf2x16High(v);
+             }
+-            else if (swizzle is 1 or 3)
++            else if (swizzle == 1)
++            {
++                lo = hi = v;
++            }
++            else if (swizzle == 3)
+             {
+                 lo = hi = context.UnpackHalf2x16High(v);
+             }
+@@ -483,7 +491,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             bool bIn32 = x.Form is 1 or 4 or 5 or 6;
+             ASrc slot32 = bIn32 ? b : c;
+             ASrc slot64 = bIn32 ? c : b;
+-            slot32 = slot32.WithMods(x.Bit(63), x.Bit(62));
++            slot32 = slot32.Kind == AKind.Imm ? slot32 : slot32.WithMods(x.Bit(63), x.Bit(62));   // S2Arm: an immediate fills 32..63, its top bits are no modifiers (Eden-NS2: none for immediates)
+             slot64 = slot64.WithMods(x.Bit(84), x.Bit(83));
+ 
+             Operand[] ha = AHalfLanes(context, a, x.Bits(74, 76));
+@@ -519,10 +527,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             ASet(context, x, context.PackHalf2x16(context.FPSaturate(lo, sat), context.FPSaturate(hi, sat)));
+         }
+ 
++        // S2Arm: the second source of the two-source HADD2 / HMUL2 is the C slot's in forms 2, 3, 7 (an immediate or constant buffer word there), as ASecond takes it for
++        // the float ops; AHalfSrcs orders the three sources for HFMA2, where B is then the register at 64. the reference port took that register for HADD2 too: Pokopia's
++        // HADD2 Rd, Ra, 1.5 (form 2) read R(64..71) instead of 1.5, and a blur shader's loop counter never reached its limit (GPU timeout, run m19)
++        private static (Operand[] A, Operand[] B) AHalfTwo(EmitterContext context, AmpereOp x)
++        {
++            (Operand[] a, Operand[] b, Operand[] c) = AHalfSrcs(context, x);
++
++            return (a, x.Form is 1 or 4 or 5 or 6 ? b : c);
++        }
++
+         public static void AHadd2(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
++            (Operand[] a, Operand[] b) = AHalfTwo(context, x);
+ 
+             AHalfResult(context, x, context.FPAdd(a[0], b[0]), context.FPAdd(a[1], b[1]));
+         }
+@@ -530,7 +548,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         public static void AHmul2(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
++            (Operand[] a, Operand[] b) = AHalfTwo(context, x);
+ 
+             AHalfResult(context, x, context.FPMultiply(a[0], b[0]), context.FPMultiply(a[1], b[1]));
+         }
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index df0cb49500839c7a52de8ac186967c471168d116..35a79218afe5003fb305e556d566ddfb6fb36d96 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -38,6 +38,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             x(0x988, InstName.Sts, AStLocalShared, N, writesRd: false);
+             x(0x38c, InstName.Atoms, AAtoms, N);
+             x(0x38d, InstName.Atoms, AAtomsCas, N);
++            x(0xf8c, InstName.Atoms, AAtomsPopcInc, N);
+             x(0x992, InstName.Membar, AMembar, N, writesRd: false);
+             x(0x9ab, InstName.Membar, AErrbar, N, writesRd: false);
+ 
+@@ -329,6 +330,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             ASet(context, x, res);
+         }
+ 
++        // S2Arm: ATOMS.POPC.INC.32 [Ra + offset] (0xf8c): every active lane adds 1 to the shared word (the hardware adds the active lanes' count once, the same sum);
++        // address as ATOMS (stride at 78..79, byte offset at 40..64). Only the form with no result (Rd = RZ) is seen (Pokopia compute 82e0a667bfbe74e7; Eden-NS2 lowers it the
++        // same way, one shared atomic add of 1 per lane); a result would be each lane's own old value plus its rank among the active lanes, not emitted, so that form fails
++        public static void AAtomsPopcInc(EmitterContext context)
++        {
++            AmpereOp x = new(context.CurrOp);
++
++            if (x.Rd != RegisterConsts.RegisterZeroIndex)
++            {
++                throw AFail(context, "ATOMS.POPC.INC with a result");
++            }
++
++            Operand ra = x.Ra >= RegisterConsts.RegisterZeroIndex ? Const(0) : AStride(context, x, Register(x.Ra, RegisterType.Gpr));
++            Operand offset = context.ShiftRightU32(context.IAdd(ra, Const((int)x.SignedField(40, 64))), Const(2));
++
++            EmitAtomicOp(context, StorageKind.SharedMemory, AtomOp.Add, AtomSize.U32, Const(context.ResourceManager.SharedMemoryId), offset, Const(1));
++        }
++
+         // MEMBAR: the order of this thread's memory operations
+         public static void AMembar(EmitterContext context)
+         {
+@@ -779,9 +798,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     sources.Add(Const(x.Bits(87, 89)));
+                 }
+ 
++                // S2Arm: a buffer texture's texelFetch is TLD.LZ on a 1D target, as a real 1D texture's is; the descriptor decides. Taken as a buffer unless the answer table
++                // names a 1D texture (it used to need the table to say "buffer", and with no table Pokopia's histogram buffer was declared texture1d and read 0): of Pokopia's
++                // 369,741 texture instructions 144,577 are TLD.LZ 1D (in 3,435 shaders) and not one is any other 1D form (no TEX / TLD.LL / array 1D), so its 1D accesses are buffers
+                 if (opcode == 0xb66 && type == SamplerType.Texture1D && lod == 1 && !offset)
+                 {
+-                    if (context.TranslatorContext.GpuAccessor.QuerySamplerType(handle) == SamplerType.TextureBuffer)
++                    SamplerType asked = context.TranslatorContext.GpuAccessor.QuerySamplerType(handle);
++
++                    if (asked == SamplerType.TextureBuffer || (asked & SamplerType.Mask) != SamplerType.Texture1D)
+                     {
+                         type = SamplerType.TextureBuffer;
+                         sources.RemoveAt(sources.Count - 1);
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
+index 31bcd67755e11bd1f3f810df341379fa70cfaf43..3ebee7d28b6af6be28682cd26111a9bc78a72645 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereTensor.cs
+@@ -329,7 +329,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         public static void AHsetp2(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
++            (Operand[] a, Operand[] b) = AHalfTwo(context, x);   // S2Arm: two sources (AHalfTwo)
+ 
+             Operand lo = GetFPComparison(context, (FComp)x.Bits(76, 80), a[0], b[0]);
+             Operand hi = GetFPComparison(context, (FComp)x.Bits(76, 80), a[1], b[1]);
+@@ -351,7 +351,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         public static void AHset2(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
++            (Operand[] a, Operand[] b) = AHalfTwo(context, x);   // S2Arm: two sources (AHalfTwo)
+             Operand p = APred(context, x, 87, 90);
+             BoolOp bop = (BoolOp)x.Bits(69, 71);
+             Operand res = Const(0);
+@@ -376,7 +376,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 throw AFail(context, "HMNMX2 .F32 / .NAN / .XORSIGN / .BF16");
+             }
+ 
+-            (Operand[] a, Operand[] b, _) = AHalfSrcs(context, x);
++            (Operand[] a, Operand[] b) = AHalfTwo(context, x);   // S2Arm: two sources (AHalfTwo)
+             Operand p = APred(context, x, 87, 90);
+             Operand[] r = new Operand[2];
+ 

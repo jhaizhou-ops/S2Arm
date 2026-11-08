@@ -1,0 +1,110 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 18122423dffc74850d62dcc179006f156e39614d..1b6a3f270f6afdf4857b3b889f93c7dfbbee3b24 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -28,6 +28,47 @@ namespace Ryujinx.Audio.Backends.Apple
+     // Called by the pump under its lock (one writer at a time).
+     internal sealed class S2AOutputDiag
+     {
++        // S2Arm (10-27 #495 音频恢复计时)：t_audio 的时钟。mach_absolute_time 与 native / gfx 侧的 clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
++        //   同一时基（都从开机起、不含睡眠），换算 ns = ticks * numer / denom（arm64 numer/denom = 125/3，x86_64 = 1/1）。
++        //   这里输出 ms：t_audio_ms = ticks * numer / denom / 1e6（内部取到 µs，日志带三位小数）。取不到时基
++        //   （非 Apple 平台 / 单测）就返回 0，打点自动跳过，行为不变。
++        [DllImport("libc", EntryPoint = "mach_absolute_time")]
++        private static extern ulong MachAbsoluteTime();
++
++        [DllImport("libc", EntryPoint = "mach_timebase_info")]
++        private static extern int MachTimebase(out MachTimebaseInfo info);
++
++        [StructLayout(LayoutKind.Sequential)]
++        private struct MachTimebaseInfo
++        {
++            public uint Numer;
++            public uint Denom;
++        }
++
++        private static readonly double MsPerTick = InitMsPerTick();
++
++        private static double InitMsPerTick()
++        {
++            try
++            {
++                if (MachTimebase(out MachTimebaseInfo tb) == 0 && tb.Numer != 0 && tb.Denom != 0)
++                {
++                    return (double)tb.Numer / tb.Denom / 1_000_000.0;
++                }
++            }
++            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException)
++            {
++                // 非 Apple 平台（单测 / 别的宿主）：没有 mach 时钟，t_audio 不打
++            }
++
++            return 0;
++        }
++
++        /// <summary>
++        /// Absolute now in µs on the mach_absolute_time clock (same source as the native side's CLOCK_UPTIME_RAW), 0 when unavailable.
++        /// </summary>
++        private static long MachUs() => MsPerTick > 0 ? (long)(MachAbsoluteTime() * MsPerTick * 1000.0) : 0;
++
+         // S2Arm (10-25 开发浮层)：每 10 秒把本会话累计真缺口（ms）与本窗渲染丢周期交给宿主（runtime/src/hud.c）。没有宿主库（单测 / 别的宿主）就不报
+         [System.Runtime.InteropServices.DllImport("s2a_native")] private static extern void s2a_hud_audio(int session, long gapMsTotal, long skipped);
+         private static bool _hudGone;
+@@ -95,6 +136,12 @@ namespace Ryujinx.Audio.Backends.Apple
+         private int _latW, _latR;
+         private long _latMin = long.MaxValue, _latMax, _latSum, _latN;
+         private long _lastCallbackTicks;
++        // S2Arm (10-27 #495 音频恢复计时)：空档（回调间隔 ≥ GapMs）之后第一笔成功回调的绝对时刻（mach µs，日志按 ms 打）与该次空档长度（ticks）。
++        //   只在恢复时写一次，由 reporter 线程打一行后清 seq（不每 10 秒刷）；回调线程只写字段，不分配、不做 IO。
++        private const int GapMs = 500;
++        private static readonly long GapTicks = GapMs * Stopwatch.Frequency / 1000;
++        private long _recoverUs, _recoverGapTicks;
++        private int _recoverSeq, _repRecoverSeq;
+         // Hand-back that left nothing in flight (0: not starving)
+         private long _starveSince;
+         private bool _started;
+@@ -246,9 +293,20 @@ namespace Ryujinx.Audio.Backends.Apple
+         {
+             long now = Stopwatch.GetTimestamp();
+ 
+-            if (_lastCallbackTicks != 0 && now - _lastCallbackTicks > _maxGapTicks)
++            long gapTicks = _lastCallbackTicks == 0 ? 0 : now - _lastCallbackTicks;
++
++            if (gapTicks > _maxGapTicks)
++            {
++                _maxGapTicks = gapTicks;
++            }
++
++            if (gapTicks >= GapTicks)
+             {
+-                _maxGapTicks = now - _lastCallbackTicks;
++                // S2Arm (10-27 #495 音频恢复计时)：这一段静了 ≥ GapMs，本笔回调 = 设备重新出声的瞬间。记绝对时刻供与
++                //   回前台 / 首帧等 native 打点对齐（同一时钟基准），空档长度一并留下，免得靠 10 秒窗口里的最大间隔反推
++                Volatile.Write(ref _recoverGapTicks, gapTicks);
++                Volatile.Write(ref _recoverUs, MachUs());
++                Interlocked.Increment(ref _recoverSeq);
+             }
+ 
+             _lastCallbackTicks = now;
+@@ -441,6 +499,21 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                     long cb = d._callbacks, sub = d._framesSubmitted, pl = d._framesPlayed, und = d._underruns, pau = d._pauses, gap = d._gapFrames;
+ 
++                    // S2Arm (10-27 #495)：空档恢复只打一次（seq 变了才打），不等聚合行、也不会每 10 秒重复。
++                    //   值本身是恢复瞬间的时刻，与打点延迟无关：按 t_audio 与 native 打点对齐，不是按日志出现顺序
++                    int rs = Volatile.Read(ref d._recoverSeq);
++
++                    if (rs != d._repRecoverSeq)
++                    {
++                        d._repRecoverSeq = rs;
++                        long ru = Volatile.Read(ref d._recoverUs);
++
++                        if (ru > 0)
++                        {
++                            Console.Error.WriteLine($"[声] 输出 #{d.Index} 恢复：t_audio={ru / 1000.0:F3} ms，空档 {Volatile.Read(ref d._recoverGapTicks) * 1000.0 / Stopwatch.Frequency:F0} ms（空档后首次成功回调；mach_absolute_time 基准 = native CLOCK_UPTIME_RAW）");
++                        }
++                    }
++
+                     if (cb == d._repCallbacks && sub == d._repSubmitted)
+                     {
+                         // S2Arm (10-23): 播过声、开着播，却 10 秒零回调零交设备 = 设备停了 / 没声音。之前这里直接跳过，「完全没声」在日志里一行都不留。

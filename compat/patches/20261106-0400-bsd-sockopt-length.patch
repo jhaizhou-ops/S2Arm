@@ -1,0 +1,80 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 37886c0cd0218fd0a862fd2d1982a400236eb8bf..3e558d43600080923558f7701ed273890e745aa9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -926,7 +926,12 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 }
+             }
+ 
+-            return WriteBsdResult(context, 0, errno);
++            ResultCode resultCode = WriteBsdResult(context, 0, errno);
++
++            // S2Arm: the reply's third field is the option length (games pass it on to SetSockOpt; it used to be left 0)
++            context.ResponseData.Write(errno == LinuxError.SUCCESS ? WinSockHelper.GetSocketOptionLength(option, level, (int)bufferSize) : 0);
++
++            return resultCode;
+         }
+ 
+         [CommandCmif(18)]
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+index 9cc3b76e1506e0d997d873cee8dab5b0ee8281fe..7f612d216426219f5452fdde9c214a4a3a108156 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+@@ -436,6 +436,12 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                     return LinuxError.EOPNOTSUPP;
+                 }
+ 
++                // S2Arm: a value shorter than the option is EINVAL, as on the console (it used to throw out of the service command for a 0-byte value)
++                if (optionValue.Length < WinSockHelper.SetSocketOptionMinLength(option, level))
++                {
++                    return LinuxError.EINVAL;
++                }
++
+                 int value = optionValue.Length >= 4 ? MemoryMarshal.Read<int>(optionValue) : MemoryMarshal.Read<byte>(optionValue);
+ 
+                 if (level == SocketOptionLevel.Socket && option == BsdSocketOption.SoLinger)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+index 61443c8c46f2880b0728484bd7a669819cfc58f5..87d9e5a1c4d9e8f8d8861093e08934c4905f383c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/WinSockHelper.cs
+@@ -339,6 +339,40 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             return table.TryGetValue(option, out name);
+         }
+ 
++        // S2Arm: option value lengths of the FreeBSD stack Horizon's bsd runs on. -1 = variable (the content decides).
++        private static int OptionLength(BsdSocketOption option, SocketOptionLevel level)
++        {
++            return (level, option) switch
++            {
++                (SocketOptionLevel.Socket, BsdSocketOption.SoLinger) => 8,                                       // struct linger
++                (SocketOptionLevel.Socket, BsdSocketOption.SoSndTimeo or BsdSocketOption.SoRcvTimeo) => 16,      // struct timeval (64-bit)
++                (SocketOptionLevel.Socket, BsdSocketOption.SoAcceptFilter) => -1,
++                (SocketOptionLevel.IP, BsdSocketOption.IpOptions) => -1,
++                (SocketOptionLevel.IP, BsdSocketOption.IpAddMembership or BsdSocketOption.IpDropMembership) => 8,   // struct ip_mreq
++                (SocketOptionLevel.IP, BsdSocketOption.IpAddSourceMembership or BsdSocketOption.IpDropSourceMembership) => 12,   // struct ip_mreq_source
++                _ => sizeof(int),
++            };
++        }
++
++        // S2Arm: getsockopt hands back optlen = min(buffer, option length) (sooptcopyout); IP_MULTICAST_TTL / LOOP answer one u_char into a one-byte buffer
++        public static int GetSocketOptionLength(BsdSocketOption option, SocketOptionLevel level, int bufferLength)
++        {
++            int length = OptionLength(option, level);
++
++            return length < 0 ? bufferLength : Math.Min(bufferLength, length);
++        }
++
++        // S2Arm: setsockopt with a value shorter than the option is EINVAL (sooptcopyin minlen); IP_MULTICAST_TTL / LOOP also take one u_char
++        public static int SetSocketOptionMinLength(BsdSocketOption option, SocketOptionLevel level)
++        {
++            if (level == SocketOptionLevel.IP && option is BsdSocketOption.IpMulticastTtl or BsdSocketOption.IpMulticastLoop)
++            {
++                return sizeof(byte);
++            }
++
++            return Math.Max(OptionLength(option, level), 0);
++        }
++
+         public static LinuxError ValidateSocketOption(BsdSocketOption option, SocketOptionLevel level, bool write)
+         {
+             Dictionary<BsdSocketOption, OptionDir> table = level switch

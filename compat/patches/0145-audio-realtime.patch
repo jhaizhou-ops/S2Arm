@@ -1,0 +1,140 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+index b6364df55e5e94cbe53594ffee3eb436d487c38d..2ab20e5ca9119e37c2dddb95e27338a09c6444cd 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs
+@@ -42,7 +42,8 @@ namespace Ryujinx.Audio.Renderer.Dsp
+         // S2Arm（能耗，帧率能耗线 10-20）：S2A_AUDIO_INLINE=1 时 DSP 在调用方（AudioRendererManager 线程）上同步做，不起 AudioProcessor.Worker、不走信箱。
+         // 原两线程是严格同步交接（管理线程 Signal 后即 Wait 到 RenderEnd，无并行），同步执行顺序不变；
+         // 测试机1 线程表：两条线程合计约 1.9 万运行段/秒（每段 2.5–7.6 µs），设计每 5 ms 一次交接
+-        private static readonly bool S2AInline = Environment.GetEnvironmentVariable("S2A_AUDIO_INLINE") == "1";
++        // 10-22 起缺省开（杂音：两线程每周期一次交接，负载下交接等调度 27–34 ms，渲染器整批丢周期）；S2A_AUDIO_INLINE=0 退回上游两线程
++        private static readonly bool S2AInline = Environment.GetEnvironmentVariable("S2A_AUDIO_INLINE") != "0";
+ 
+         // S2Arm: diagnostics read (and reset) by the output backend's reporter: periods dropped by the catch-up skip below, and the
+         // worst lateness of a period start (how long after its due time the loop got to it)
+@@ -86,7 +87,7 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             if (S2AInline)
+             {
+-                Console.Error.WriteLine("[S2A 声音] S2A_AUDIO_INLINE=1：DSP 在管理线程同步执行（不起 AudioProcessor.Worker）");
++                Console.Error.WriteLine("[S2A 声音] DSP 在管理线程同步执行（不起 AudioProcessor.Worker；S2A_AUDIO_INLINE=0 退回两线程）");
+                 return;
+             }
+ 
+@@ -230,6 +231,9 @@ namespace Ryujinx.Audio.Renderer.Dsp
+ 
+             Logger.Info?.Print(LogClass.AudioRenderer, "Starting audio processor");
+ 
++            // S2Arm: real-time like the manager thread (see Ryujinx.Common.S2ARealtime); only used with S2A_AUDIO_INLINE=0
++            S2ARealtime.Promote("声音 DSP 线程", Constants.AudioProcessorMaxUpdateTimeTarget, Constants.AudioProcessorMaxUpdateTimeTarget / 2, Constants.AudioProcessorMaxUpdateTimeTarget);
++
+             while (true)
+             {
+                 Ryujinx.Common.S2AThreadAlloc.Tick("声音 DSP"); // S2Arm: per-thread allocation accounting
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+index d2b6d2ee2a9107e898b1fcc433a54c4cbf3886f1..3b32470ddd98c19d613c0c70fd5066b45d0a7b5a 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+@@ -233,6 +233,12 @@ namespace Ryujinx.Audio.Renderer.Server
+         private void SendCommands()
+         {
+             Logger.Info?.Print(LogClass.AudioRenderer, "Starting audio renderer");
++
++            // S2Arm: this thread runs the 5 ms period loop (and the DSP itself when inline, the default): real-time scheduling,
++            // budget half a period (render ≤ 3 ms on Mac at the worst seen), see Ryujinx.Common.S2ARealtime
++            long period = Ryujinx.Audio.Constants.AudioProcessorMaxUpdateTimeTarget;
++            Ryujinx.Common.S2ARealtime.Promote("声音渲染线程", period, period / 2, period);
++
+             Processor.Wait();
+ 
+             while (_isRunning)
+diff --git a/src/Ryujinx.Common/S2ARealtime.cs b/src/Ryujinx.Common/S2ARealtime.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..054f9907a7b1337443b82dafab5285383924e679
+--- /dev/null
++++ b/src/Ryujinx.Common/S2ARealtime.cs
+@@ -0,0 +1,84 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Common
++{
++    /// <summary>
++    /// S2Arm: real-time (time-constraint) scheduling for the calling thread on Apple platforms.
++    /// </summary>
++    /// <remarks>
++    /// The audio renderer must hand a 5 ms period to the device every 5 ms. Its threads were plain .NET threads (QoS default) while the
++    /// game threads run user-interactive, so under load they were not scheduled for tens of ms at a time: 10-22 acnh on Mac, the loop
++    /// was 27–34 ms late at each catch-up (thread handoff and preempted renders, not the work itself: render ≤ 3 ms), the processor
++    /// dropped up to 946 periods per 10 s and the device played that much silence (crackle on iPhone too). CoreAudio's own IO threads
++    /// use this policy; a thread that overruns its computation budget is demoted by the kernel, so a bug cannot starve the system.
++    /// </remarks>
++    public static partial class S2ARealtime
++    {
++        private const int ThreadTimeConstraintPolicy = 2;
++        private const uint ThreadTimeConstraintPolicyCount = 4;
++
++        [StructLayout(LayoutKind.Sequential)]
++        private struct TimeConstraintPolicy
++        {
++            public uint Period;
++            public uint Computation;
++            public uint Constraint;
++            public int Preemptible;
++        }
++
++        [StructLayout(LayoutKind.Sequential)]
++        private struct MachTimebaseInfo
++        {
++            public uint Numer;
++            public uint Denom;
++        }
++
++        [LibraryImport("libc")]
++        private static partial uint mach_thread_self();
++
++        [LibraryImport("libc")]
++        private static partial int mach_port_deallocate(uint task, uint name);
++
++        [LibraryImport("libc")]
++        private static partial int thread_policy_set(uint thread, int flavor, ref TimeConstraintPolicy policy, uint count);
++
++        [LibraryImport("libc")]
++        private static partial int mach_timebase_info(out MachTimebaseInfo info);
++
++        [LibraryImport("libc")]
++        private static partial uint task_self_trap();
++
++        /// <summary>
++        /// Make the calling thread real-time: every <paramref name="periodNs"/> it needs up to <paramref name="computationNs"/> of CPU,
++        /// done within <paramref name="constraintNs"/>. Returns the kernel result (0 = applied); does nothing off Apple platforms.
++        /// </summary>
++        public static int Promote(string who, long periodNs, long computationNs, long constraintNs)
++        {
++            if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsIOS())
++            {
++                return -1;
++            }
++
++            mach_timebase_info(out MachTimebaseInfo tb);
++
++            uint Ticks(long ns) => (uint)(ns * tb.Denom / tb.Numer);
++
++            TimeConstraintPolicy p = new()
++            {
++                Period = Ticks(periodNs),
++                Computation = Ticks(computationNs),
++                Constraint = Ticks(constraintNs),
++                Preemptible = 1,
++            };
++
++            uint self = mach_thread_self();
++            int rc = thread_policy_set(self, ThreadTimeConstraintPolicy, ref p, ThreadTimeConstraintPolicyCount);
++            mach_port_deallocate(task_self_trap(), self);
++
++            Console.Error.WriteLine($"[S2A 声音] {who}：实时调度{(rc == 0 ? "已设" : $"没设上（rc {rc}）")}（周期 {periodNs / 1e6:F1} ms、计算 {computationNs / 1e6:F1} ms、期限 {constraintNs / 1e6:F1} ms）");
++
++            return rc;
++        }
++    }
++}

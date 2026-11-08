@@ -1,0 +1,64 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index a58c0bacc0092a3746bb4add6aa9371d769e19ce..c1a59bfce3c0e331bf9b6861a34aa4741e27a975 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -202,6 +202,37 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             RenderLoop();
+         }
+ 
++        // S2A：编码线程（本 RenderLoop 所在线程，渲染器 C# 全在这里跑）托管分配按命令类型拆账。S2A_ALLOC_TRACE=1 开，关着只多一次静态布尔判断；
++        // 每 20 秒打一次前 20（[分配·编码线程]），按这段时间的上屏命令数折每帧。口径同 GPU 模拟线程的 S2AAllocTrace（Gpu 层，本层引用不到）
++        private static readonly bool S2AAllocOn = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++        private readonly long[] _s2aAllocB = new long[256], _s2aAllocN = new long[256];
++        private long _s2aAllocNext;
++
++        private void S2AAllocDump()
++        {
++            long now = Stopwatch.GetTimestamp();
++            if (_s2aAllocNext == 0) { _s2aAllocNext = now + Stopwatch.Frequency * 20; return; }
++            if (now < _s2aAllocNext) return;
++            _s2aAllocNext = now + Stopwatch.Frequency * 20;
++            long frames = _s2aPresents, total = 0;
++            _s2aPresents = 0;
++            int[] idx = new int[256];
++            for (int i = 0; i < 256; i++) { idx[i] = i; total += _s2aAllocB[i]; }
++            Array.Sort(idx, (a, b) => _s2aAllocB[b].CompareTo(_s2aAllocB[a]));
++            System.Text.StringBuilder sb = new();
++            sb.Append($"[分配·编码线程] 近 20 秒 上屏 {frames} 次：合计 {total} B（每帧 {(frames > 0 ? total / frames : total)} B）");
++            for (int k = 0; k < 20 && _s2aAllocB[idx[k]] > 0; k++)
++            {
++                int t = idx[k];
++                sb.Append($"；{(CommandType)t} {_s2aAllocB[t]} B / {_s2aAllocN[t]} 次");
++            }
++            Console.Error.WriteLine(sb.ToString());
++            Array.Clear(_s2aAllocB);
++            Array.Clear(_s2aAllocN);
++        }
++
++        private long _s2aPresents;
++
+         public void RenderLoop()
+         {
+             // Power through the render queue until the Gpu thread work is done.
+@@ -233,7 +264,20 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+                         // Run the command.
+ 
+-                        CommandHelper.RunCommand(command, this, _baseRenderer);
++                        if (S2AAllocOn)
++                        {
++                            int s2aType = command[^1];
++                            long s2aA = GC.GetAllocatedBytesForCurrentThread();
++                            CommandHelper.RunCommand(command, this, _baseRenderer);
++                            long s2aD = GC.GetAllocatedBytesForCurrentThread() - s2aA;
++                            if (s2aD > 0) { _s2aAllocB[s2aType] += s2aD; _s2aAllocN[s2aType]++; }
++                            if (s2aType == (int)CommandType.WindowPresent) _s2aPresents++;
++                            S2AAllocDump();
++                        }
++                        else
++                        {
++                            CommandHelper.RunCommand(command, this, _baseRenderer);
++                        }
+ 
+                         if (Interlocked.CompareExchange(ref _invokePtr, -1, commandPtr) == commandPtr)
+                         {

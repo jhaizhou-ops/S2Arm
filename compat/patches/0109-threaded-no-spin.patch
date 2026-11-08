@@ -1,0 +1,17 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index fd1a589df9fe8094b6047f13f58e76bb2fe68536..0a7f0aaa6bde55b2b2f00f786075b19d04bf07f1 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -135,8 +135,10 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             Sync = new SyncMap();
+             Programs = new ProgramQueue(renderer);
+ 
+-            _galWorkAvailable = new ManualResetEventSlim(false);
+-            _invokeRun = new ManualResetEventSlim();
++            // S2A：两个等待事件不自旋（SpinCount 0，直接睡）。.NET 缺省阻塞前先自旋约 35 轮（Thread.Yield / Sleep(0)）：渲染线程每排空一次队列就空转一阵，
++            // 10-21 Mac 暗黑3 采样渲染线程忙的时间里 36% 是这段自旋（2163 / 6627 ms）；手机上纯属能耗
++            _galWorkAvailable = new ManualResetEventSlim(false, 0);
++            _invokeRun = new ManualResetEventSlim(false, 0);
+             _interruptRun = new AutoResetEvent(false);
+             _spanPool = new CircularSpanPool(this, SpanPoolBytes);
+             SpanPool = _spanPool;

@@ -1,0 +1,220 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.FFmpeg/Vp8/Decoder.cs b/src/Ryujinx.Graphics.Nvdec.FFmpeg/Vp8/Decoder.cs
+index 0733e385b6ffcbabceb757665eaff9ed38ce9ed5..821ce95c1e05f3cdd5c88df44cb3bb09f57a9437 100644
+--- a/src/Ryujinx.Graphics.Nvdec.FFmpeg/Vp8/Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec.FFmpeg/Vp8/Decoder.cs
+@@ -4,7 +4,7 @@ using System;
+ 
+ namespace Ryujinx.Graphics.Nvdec.FFmpeg.Vp8
+ {
+-    public sealed class Decoder : IDecoder
++    public sealed class Decoder : IVp8Decoder
+     {
+         public bool IsHardwareAccelerated => false;
+ 
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index 8f083ad1f029288b892180f7647ff35421913616..c300f318d67671b80d05e455e47cf70a4908087b 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -7,7 +7,7 @@ namespace Ryujinx.Graphics.Nvdec
+     class NvdecDecoderContext : IDisposable
+     {
+         private IH264Decoder _h264Decoder;
+-        private FFmpeg.Vp8.Decoder _vp8Decoder;
++        private IVp8Decoder _vp8Decoder;
+ 
+         // 苹果平台走 VideoToolbox 硬件解码（S2Arm 不带 FFmpeg）
+         public IH264Decoder GetH264Decoder()
+@@ -15,9 +15,10 @@ namespace Ryujinx.Graphics.Nvdec
+             return _h264Decoder ??= OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? new VideoToolboxH264Decoder() : new FFmpeg.H264.Decoder();
+         }
+ 
+-        public FFmpeg.Vp8.Decoder GetVp8Decoder()
++        // 苹果平台的 VP8 走 libvpx（静态链进宿主，S2Arm 不带 FFmpeg；VideoToolbox 不解 VP8）
++        public IVp8Decoder GetVp8Decoder()
+         {
+-            return _vp8Decoder ??= new FFmpeg.Vp8.Decoder();
++            return _vp8Decoder ??= OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() ? new Vpx.VpxVp8Decoder() : new FFmpeg.Vp8.Decoder();
+         }
+ 
+         public void Dispose()
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp8Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vp8Decoder.cs
+index 3d2543c49fec7266e539e2db46e127dac0b841c6..fbced7c59e6cdaa4fe831533e4292a7e79c8e12a 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp8Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp8Decoder.cs
+@@ -1,4 +1,3 @@
+-using Ryujinx.Graphics.Nvdec.FFmpeg.Vp8;
+ using Ryujinx.Graphics.Nvdec.Image;
+ using Ryujinx.Graphics.Nvdec.Types.Vp8;
+ using Ryujinx.Graphics.Video;
+@@ -13,7 +12,7 @@ namespace Ryujinx.Graphics.Nvdec
+             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
+             ReadOnlySpan<byte> bitstream = rm.MemoryManager.DeviceGetSpan(state.SetInBufBaseOffset, (int)pictureInfo.VLDBufferSize);
+ 
+-            Decoder decoder = context.GetVp8Decoder();
++            IVp8Decoder decoder = context.GetVp8Decoder();
+ 
+             ISurface outputSurface = rm.Cache.Get(decoder, 0, 0, pictureInfo.FrameWidth, pictureInfo.FrameHeight);
+ 
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp8Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp8Decoder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d14a8932562aedca703fa32f8cb02dc3b43a1642
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp8Decoder.cs
+@@ -0,0 +1,142 @@
++using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.Video;
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Graphics.Nvdec.Vpx
++{
++    // S2Arm：VP8 走 libvpx（静态链进宿主，services/vpx：libvpx + C 垫片 s2a_vp8.c），不带 FFmpeg（暗黑2 片头是 VP8，原先缺 libavutil 起局即崩）。
++    // 帧头补法同 FFmpeg 版（Nvdec 只给出压缩数据，未压缩帧头由 PictureInfo 还原）；参考帧由 libvpx 自己管。
++    // 输出面直接引用 libvpx 本帧的三个平面：Vp8Decoder 解完立即 SurfaceWriter 回写，下次解码前不再使用。
++    public sealed unsafe partial class VpxVp8Decoder : IVp8Decoder
++    {
++        private const string Lib = "s2a_vpx";
++
++        [LibraryImport(Lib)] private static partial nint s2a_vp8_open();
++        [LibraryImport(Lib)] private static partial int s2a_vp8_decode(nint h, byte* data, uint len, byte** planes, int* strides, int* wh);
++        [LibraryImport(Lib)] private static partial void s2a_vp8_close(nint h);
++
++        private nint _handle;
++        private byte[] _frame = new byte[0x10000];
++
++        public bool IsHardwareAccelerated => false;
++
++        public ISurface CreateSurface(int width, int height) => new VpxSurface(width, height);
++
++        public bool Decode(ref Vp8PictureInfo pictureInfo, ISurface output, ReadOnlySpan<byte> bitstream)
++        {
++            if (_handle == 0)
++            {
++                _handle = s2a_vp8_open();
++
++                if (_handle == 0)
++                {
++                    Logger.Error?.Print(LogClass.Nvdec, "libvpx：VP8 解码器打不开");
++                    return false;
++                }
++            }
++
++            int uncompHeaderSize = pictureInfo.KeyFrame ? 10 : 3;
++            int len = bitstream.Length + uncompHeaderSize;
++
++            if (_frame.Length < len)
++            {
++                _frame = new byte[len * 2];
++            }
++
++            Span<byte> frame = _frame.AsSpan(0, len);
++            frame[..uncompHeaderSize].Clear();
++
++            uint firstPartSizeShifted = pictureInfo.FirstPartSize << 5;
++
++            frame[0] = (byte)(pictureInfo.KeyFrame ? 0 : 1);
++            frame[0] |= (byte)((pictureInfo.Version & 7) << 1);
++            frame[0] |= 1 << 4;
++            frame[0] |= (byte)firstPartSizeShifted;
++            frame[1] |= (byte)(firstPartSizeShifted >> 8);
++            frame[2] |= (byte)(firstPartSizeShifted >> 16);
++
++            if (pictureInfo.KeyFrame)
++            {
++                frame[3] = 0x9d;
++                frame[4] = 0x01;
++                frame[5] = 0x2a;
++                frame[6] = (byte)pictureInfo.FrameWidth;
++                frame[7] = (byte)((pictureInfo.FrameWidth >> 8) & 0x3F);
++                frame[8] = (byte)pictureInfo.FrameHeight;
++                frame[9] = (byte)((pictureInfo.FrameHeight >> 8) & 0x3F);
++            }
++
++            bitstream.CopyTo(frame[uncompHeaderSize..]);
++
++            byte** planes = stackalloc byte*[3];
++            int* strides = stackalloc int[3];
++            int* wh = stackalloc int[2];
++            int rc;
++
++            fixed (byte* p = frame)
++            {
++                rc = s2a_vp8_decode(_handle, p, (uint)len, planes, strides, wh);
++            }
++
++            if (rc != 0)
++            {
++                if (rc < 0)
++                {
++                    Logger.Error?.Print(LogClass.Nvdec, $"libvpx：VP8 解码失败（{len} 字节，关键帧 {pictureInfo.KeyFrame}）");
++                }
++
++                return false;
++            }
++
++            ((VpxSurface)output).Attach(planes[0], planes[1], planes[2], strides[0], strides[1], wh[0], wh[1]);
++            return true;
++        }
++
++        public void Dispose()
++        {
++            s2a_vp8_close(_handle);
++            _handle = 0;
++        }
++    }
++
++    sealed unsafe class VpxSurface : ISurface
++    {
++        private byte* _y, _u, _v;
++        private int _stride, _uvStride;
++
++        public VpxSurface(int width, int height)
++        {
++            Width = width;
++            Height = height;
++        }
++
++        public Plane YPlane => new((nint)_y, _stride * Height);
++        public Plane UPlane => new((nint)_u, _uvStride * UvHeight);
++        public Plane VPlane => new((nint)_v, _uvStride * UvHeight);
++
++        public FrameField Field => FrameField.Progressive;
++
++        public int Width { get; private set; }
++        public int Height { get; private set; }
++        public int Stride => _stride;
++        public int UvWidth => (Width + 1) >> 1;
++        public int UvHeight => (Height + 1) >> 1;
++        public int UvStride => _uvStride;
++
++        public void Attach(byte* y, byte* u, byte* v, int stride, int uvStride, int width, int height)
++        {
++            _y = y;
++            _u = u;
++            _v = v;
++            _stride = stride;
++            _uvStride = uvStride;
++            Width = width;
++            Height = height;
++        }
++
++        public void Dispose()
++        {
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Video/IVp8Decoder.cs b/src/Ryujinx.Graphics.Video/IVp8Decoder.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..395d6d0d03eb8750c6218cafcc4c77b2e9145095
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Video/IVp8Decoder.cs
+@@ -0,0 +1,9 @@
++using System;
++
++namespace Ryujinx.Graphics.Video
++{
++    public interface IVp8Decoder : IDecoder
++    {
++        bool Decode(ref Vp8PictureInfo pictureInfo, ISurface output, ReadOnlySpan<byte> bitstream);
++    }
++}

@@ -1,0 +1,74 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+index 9a385334db01a1786a428f25c6167a3917e8c4d3..c68b24bff29c9afb07174a06ec7ffc155296f5dc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+@@ -280,6 +280,25 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: a console without network has no DNS server, but the resolver still answers the names that need none:
++        // "localhost" from its hosts table (127.0.0.1) and numeric address literals, which gethostbyname (inet_aton) and
++        // getaddrinfo (numeric host) parse before any query — a game binding its own local server to "0.0.0.0" resolves it offline.
++        // Null: the name needs a DNS query, which fails offline.
++        private static IPHostEntry OfflineHostEntry(string host)
++        {
++            if (host == "localhost")
++            {
++                return new IPHostEntry { HostName = host, AddressList = [IPAddress.Loopback], Aliases = [] };
++            }
++
++            if (IPAddress.TryParse(host, out IPAddress address))
++            {
++                return new IPHostEntry { HostName = host, AddressList = [address], Aliases = [] };
++            }
++
++            return null;
++        }
++
+         private static ResultCode GetHostByNameRequestImpl(
+             ServiceCtx context,
+             ulong inputBufferPosition,
+@@ -293,7 +312,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+             string host = MemoryHelper.ReadAsciiString(context.Memory, inputBufferPosition, (int)inputBufferSize);
+             bool offline = !context.Device.Configuration.EnableInternetAccess;
+ 
+-            if (host != "localhost" && offline)
++            if (offline && OfflineHostEntry(host) == null)
+             {
+                 Logger.Info?.Print(LogClass.ServiceSfdnsres, $"Guest network access disabled, DNS Blocked: {host}");
+ 
+@@ -345,9 +364,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+ 
+                     try
+                     {
+-                        // S2Arm: offline, "localhost" is the console's own loopback address — answered here, not by the host's resolver
++                        // S2Arm: offline, names that need no DNS server are answered here, not by the host's resolver (OfflineHostEntry)
+                         hostEntry = offline
+-                            ? new IPHostEntry { HostName = host, AddressList = [IPAddress.Loopback], Aliases = [] }
++                            ? OfflineHostEntry(targetHost) ?? throw new SocketException((int)SocketError.HostNotFound)
+                             : DnsMitmResolver.Instance.ResolveAddress(targetHost);
+                     }
+                     catch (SocketException exception)
+@@ -517,7 +536,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+             string host = MemoryHelper.ReadAsciiString(context.Memory, context.Request.SendBuff[0].Position, (long)context.Request.SendBuff[0].Size);
+             string service = MemoryHelper.ReadAsciiString(context.Memory, context.Request.SendBuff[1].Position, (long)context.Request.SendBuff[1].Size);
+ 
+-            if (!context.Device.Configuration.EnableInternetAccess)
++            bool offline = !context.Device.Configuration.EnableInternetAccess;
++
++            if (offline && OfflineHostEntry(host) == null)
+             {
+                 Logger.Info?.Print(LogClass.ServiceSfdnsres, $"Guest network access disabled, DNS Blocked: {host}");
+ 
+@@ -574,7 +595,10 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+ 
+                     try
+                     {
+-                        hostEntry = DnsMitmResolver.Instance.ResolveAddress(targetHost);
++                        // S2Arm: offline, names that need no DNS server are answered here, not by the host's resolver (OfflineHostEntry)
++                        hostEntry = offline
++                            ? OfflineHostEntry(targetHost) ?? throw new SocketException((int)SocketError.HostNotFound)
++                            : DnsMitmResolver.Instance.ResolveAddress(targetHost);
+                     }
+                     catch (SocketException exception)
+                     {

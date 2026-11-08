@@ -1,0 +1,277 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index 0cf1f306d99089974881c631b26cd11471d971be..1ceb095be3880b82e50dc95f5ac4bb9ecd04f428 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -58,7 +58,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+                 }
+                 else
+                 {
+-                    _executionEngine = new MacroInterpreter();
++                    // S2A：没有 JIT（NativeAOT）时先按代码内容查离线编译表，命中用编好的方法，否则照旧解释器
++                    _executionEngine = S2AMacroAot.TryCreate(code[Position..]) ?? new MacroInterpreter();
+                 }
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs
+index 707265184cf71c6d4b7bc33b6cf394fc158d9aaa..0eae8a0b17a39944e924db37463550e1c1817c1b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs
+@@ -32,9 +32,16 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+         /// <summary>
+         /// Creates a new instance of the macro code interpreter.
+         /// </summary>
+-        public MacroInterpreter()
++        public MacroInterpreter() : this(new Queue<FifoWord>())
+         {
+-            Fifo = new Queue<FifoWord>();
++        }
++
++        /// <summary>
++        /// S2A: 用给定的参数队列建解释器（离线编宏引擎回退解释器时与它共用同一队列）。
++        /// </summary>
++        internal MacroInterpreter(Queue<FifoWord> fifo)
++        {
++            Fifo = fifo;
+ 
+             _gprs = new int[8];
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d2660d5f22c06f9c8905c912f21e13b31d0b568
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+@@ -0,0 +1,234 @@
++// S2A: 本文件为 S2A 新增（非 Ryujinx 原版）。宏（MME）程序离线编译：NativeAOT 没有 Reflection.Emit（MacroJit 用不了），
++// 改为事先把游戏上传的宏程序翻成 C# 静态方法（旧库 ryu_judge --macrogen 生成 S2AMacroTable.g.cs），运行时按代码内容查表，命中就跑编好的方法，
++// 否则照旧 MacroInterpreter。语义以 MacroInterpreter 为准（AOT 下原本就走它）：生成器只编「与解释器逐条等价可静态确定」的程序，
++// 其余（延迟槽 / 退出槽里是分支、跳转目标越界、非法操作码、程序尾超出宏内存）一律不编、回解释器。
++// 旧库 10-19 precise 口径双算核对：宏离线编 9542 万次执行与解释器读写序列 / 退出寄存器 / 参数队列 0 不一致。
++using Ryujinx.Graphics.Device;
++using System;
++using System.Collections.Generic;
++
++namespace Ryujinx.Graphics.Gpu.Engine.MME
++{
++    /// <summary>S2A: 宏程序退出时的寄存器状态（生成的方法签名带它；r0 恒 0 不记）。</summary>
++    struct S2AMacroRegs
++    {
++        public int R1, R2, R3, R4, R5, R6, R7;
++        public bool Carry;
++        public int MethAddr, MethIncr;
++    }
++
++    /// <summary>S2A: 离线编好的宏程序入口。</summary>
++    delegate void S2AMacroFn(MacroJitContext ctx, IDeviceState state, int arg0, ref S2AMacroRegs regs);
++
++    /// <summary>S2A: 离线编译表与程序范围判定。</summary>
++    static partial class S2AMacroAot
++    {
++        internal sealed class Entry
++        {
++            public readonly int[] Code;
++            public readonly S2AMacroFn Fn;
++
++            public Entry(int[] code, S2AMacroFn fn)
++            {
++                Code = code;
++                Fn = fn;
++            }
++        }
++
++        private static Dictionary<ulong, Entry> _table;
++
++        /// <summary>生成文件（S2AMacroTable.g.cs）实现：把全部离线编好的程序登记进表。没有生成文件时表为空。</summary>
++        static partial void Register(Dictionary<ulong, Entry> table);
++
++        private static Dictionary<ulong, Entry> Table
++        {
++            get
++            {
++                if (_table == null)
++                {
++                    Dictionary<ulong, Entry> t = new();
++                    Register(t);
++                    _table = t;
++                }
++
++                return _table;
++            }
++        }
++
++        /// <summary>
++        /// 程序范围与可编性。范围照 MacroJitCompiler.Compile 收集分支目标那一遍：从头扫到第一个「带退出标志且不小于已见最远分支目标」的字 E，
++        /// 程序 = [0, E+1]（E+1 是退出后照硬件再执行的那一条），长度 E+2；解释器执行 E+1 时还会预取 E+2，所以要求 E+2 仍在宏内存内。
++        /// 返回长度（找不到 E 或越界返回 -1）；reason 为 null 表示可编。
++        /// </summary>
++        public static int Analyze(ReadOnlySpan<int> code, out string reason)
++        {
++            int lastTarget = 0;
++            int e = -1;
++
++            for (int i = 0; i < code.Length; i++)
++            {
++                int op = code[i];
++
++                if ((op & 7) == 7)
++                {
++                    int target = i + (op >> 14);
++
++                    if (lastTarget < target)
++                    {
++                        lastTarget = target;
++                    }
++                }
++
++                if ((op & 0x80) != 0 && i >= lastTarget)
++                {
++                    e = i;
++                    break;
++                }
++            }
++
++            if (e < 0 || e + 2 >= code.Length)
++            {
++                reason = "no_end";
++                return -1;
++            }
++
++            reason = null;
++
++            for (int p = 0; p <= e + 1; p++)
++            {
++                int op = code[p];
++                bool branch = (op & 7) == 7;
++
++                if (!branch)
++                {
++                    if (!ValidAlu(op))
++                    {
++                        reason ??= $"invalid_op@{p}";
++                    }
++
++                    if (p <= e && (op & 0x80) != 0 && (code[p + 1] & 7) == 7)
++                    {
++                        reason ??= $"branch_in_exit_slot@{p + 1}";
++                    }
++
++                    continue;
++                }
++
++                if (p > e)
++                {
++                    continue; // E+1 是分支：只在被当作槽执行时才有影响，那时上面 / 下面已判不可编
++                }
++
++                int t = p + (op >> 14);
++
++                if (t < 0 || t > e)
++                {
++                    reason ??= $"target_out@{p}";
++                }
++
++                if ((op & 0x20) == 0 && (code[p + 1] & 7) == 7)
++                {
++                    reason ??= $"branch_in_delay_slot@{p + 1}";
++                }
++
++                if ((op & 0x80) != 0 && (code[p + 1] & 7) == 7)
++                {
++                    reason ??= $"branch_in_exit_slot@{p + 1}";
++                }
++            }
++
++            return e + 2;
++        }
++
++        private static bool ValidAlu(int op)
++        {
++            switch (op & 7)
++            {
++                case 0:
++                    int sub = (op >> 17) & 0x1f;
++                    return sub <= 3 || (sub >= 8 && sub <= 12);
++                case 1:
++                case 2:
++                case 3:
++                case 4:
++                case 5:
++                    return true;
++                default:
++                    return false;
++            }
++        }
++
++        /// <summary>按字 FNV-1a 64 位（表里还存全文，命中时逐字比，哈希只用来查）。</summary>
++        public static ulong Hash(ReadOnlySpan<int> words)
++        {
++            ulong h = 0xcbf29ce484222325UL;
++
++            foreach (int w in words)
++            {
++                h = (h ^ (uint)w) * 0x100000001b3UL;
++            }
++
++            return (h ^ (ulong)words.Length) * 0x100000001b3UL;
++        }
++
++        /// <summary>按代码内容查离线编译表；命中返回 Entry。</summary>
++        internal static Entry Lookup(ReadOnlySpan<int> code)
++        {
++            int len = Analyze(code, out string reason);
++
++            if (len < 0 || reason != null)
++            {
++                return null;
++            }
++
++            ReadOnlySpan<int> prog = code[..len];
++
++            return Table.TryGetValue(Hash(prog), out Entry entry) && prog.SequenceEqual(entry.Code) ? entry : null;
++        }
++
++        /// <summary>Macro.StartExecution 建执行引擎时调用（只在 EnableMacroJit 为假时）：命中返回离线编版本，否则 null（照旧解释器）。</summary>
++        public static IMacroEE TryCreate(ReadOnlySpan<int> code)
++        {
++            Entry entry = Lookup(code);
++
++            return entry == null ? null : new S2AMacroAotEE(entry);
++        }
++    }
++
++    /// <summary>
++    /// S2A: 离线编版本的执行引擎。每次执行前核对宏内存里的程序仍与编时相同（游戏不换起始地址只改代码时，解释器读的是新代码；
++    /// 这里同样跟着走：不同就按新代码重查表，查不到用同一参数队列的解释器）。
++    /// </summary>
++    sealed class S2AMacroAotEE : IMacroEE
++    {
++        private readonly MacroJitContext _ctx = new();
++        private S2AMacroAot.Entry _entry;
++        private MacroInterpreter _interp;
++        private S2AMacroRegs _regs;
++
++        public Queue<FifoWord> Fifo => _ctx.Fifo;
++
++        public S2AMacroAotEE(S2AMacroAot.Entry entry)
++        {
++            _entry = entry;
++        }
++
++        public void Execute(ReadOnlySpan<int> code, IDeviceState state, int arg0)
++        {
++            int[] snap = _entry?.Code;
++
++            if (snap == null || code.Length < snap.Length || !code[..snap.Length].SequenceEqual(snap))
++            {
++                _entry = S2AMacroAot.Lookup(code);
++            }
++
++            if (_entry == null)
++            {
++                (_interp ??= new MacroInterpreter(_ctx.Fifo)).Execute(code, state, arg0);
++                return;
++            }
++
++            _entry.Fn(_ctx, state, arg0, ref _regs);
++        }
++    }
++}

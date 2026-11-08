@@ -1,0 +1,108 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index 5fcdbf5d078596f2bfa4a18ac2b977f5195b9a66..0c911066f3ea00e9e930b8af22f265d63d93232a 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -37,6 +37,11 @@ namespace Ryujinx.Graphics.GAL
+         public readonly bool SupportsFragmentShaderInterlock;
+         public readonly bool SupportsFragmentShaderOrderingIntel;
+         public readonly bool SupportsGeometryShader;
++        // S2A（#1456）：设备指纹级运行时探测结论（capprobe 结果文件 gs_occlusion）。
++        //   通用 Vulkan 建设备时读文件得出；为假时 SupportsGeometryShader 已被同一
++        //   文件压成假（原值 && 本位）。Apple Metal 能力表恒为假、从不读文件——
++        //   Metal 没有 GS+遮挡查询组合可探。
++        public readonly bool SupportsGeometryShaderOcclusionQuery;
+         public readonly bool SupportsGeometryShaderPassthrough;
+         public readonly bool SupportsTransformFeedback;
+         public readonly bool SupportsImageLoadFormatted;
+@@ -166,8 +171,10 @@ namespace Ryujinx.Graphics.GAL
+             int maximumFragmentInputComponents = 0,
+             bool s2aStorageWindowClamp = false,
+             bool s2aStorageOobRecord = false,
+-            Format[] unsupportedUniformTexelBufferFormats = null)
++            Format[] unsupportedUniformTexelBufferFormats = null,
++            bool supportsGeometryShaderOcclusionQuery = false)
+         {
++            SupportsGeometryShaderOcclusionQuery = supportsGeometryShaderOcclusionQuery;
+             UnsupportedUniformTexelBufferFormats = unsupportedUniformTexelBufferFormats;
+             S2AStorageWindowClamp = s2aStorageWindowClamp;
+             S2AStorageOobRecord = s2aStorageWindowClamp && s2aStorageOobRecord;
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index ec3a2ecdedadb08d21d4d883b0667354487350d1..b2bdb538ab5bf6c67b202404d74b5b21876eb06c 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -13,12 +13,15 @@
+   </PropertyGroup>
+ 
+   <ItemGroup>
++    <!-- S2A：graphics/vulkan/core/tests 的宿主机测试读写 GsOcclusionQuerySupport 注入缝（#1456） -->
++    <InternalsVisibleTo Include="DeviceFeatures.Tests" />
+     <InternalsVisibleTo Include="S2A.VvlClampTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ClampBufferRange 内部类型 -->
+   </ItemGroup>
+ 
+   <ItemGroup>
+     <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
+     <Compile Include="../../../../graphics/vulkan/core/DriverQuirks.cs" Link="S2Arm/DriverQuirks.cs" />
++    <Compile Include="../../../../graphics/vulkan/core/GsOcclusionQuerySupport.cs" Link="S2Arm/GsOcclusionQuerySupport.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/ProgramBinary*.cs" Link="S2Arm/ProgramCache/%(Filename)%(Extension)" />
+     <Compile Include="../../../../graphics/vulkan/cache/VulkanProfile.cs" Link="S2Arm/ProgramCache/VulkanProfile.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/CompileWorker.cs" Link="S2Arm/ProgramCache/CompileWorker.cs" />
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 665db96d9586b828e8c54d2eac93cebf4de85a27..209ac05ebe7615592d1a47a1a566e918c6b931d4 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -314,15 +314,6 @@ namespace Ryujinx.Graphics.Vulkan
+                     $"driverID={(hasDriverProperties ? driverProperties.DriverID.ToString() : "unavailable")}, " +
+                     $"driverVersion={properties.DriverVersion} (0x{properties.DriverVersion:X8}, {DriverQuirks.FormatVersion(properties.DriverVersion)}), " +
+                     $"driverInfo={driverInfo}, disabled={quirks.Disabled}, forced={quirks.Forced}");
+-                if (quirks.Disabled.HasFlag(DisabledDriverFeatures.GeometryShader))
+-                {
+-                    Logger.Warning?.Print(LogClass.Gpu,
+-                        $"命中 Mali GS + occlusion 缺陷规避：vendor=0x{properties.VendorID:X}, " +
+-                        $"driverID={(hasDriverProperties ? driverProperties.DriverID.ToString() : "unavailable")}, " +
+-                        $"driverVersion={properties.DriverVersion} (0x{properties.DriverVersion:X8}, " +
+-                        $"{DriverQuirks.FormatVersion(properties.DriverVersion)}), driverInfo={driverInfo}，" +
+-                        $"改走 GS-as-compute（SupportsGeometryShader=false）");
+-                }
+             }
+ 
+             PhysicalDeviceFeatures2 features2 = new()
+@@ -541,13 +532,26 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             PhysicalDeviceFeatures supportedFeatures = features2.Features;
+ 
++            // #1456: the runtime probe's capability bit — gs_occlusion judged
++            // "supported" in the capprobe result file permits the GS+occlusion
++            // combination; a missing/unreadable file and every other verdict
++            // route geometry through the #1469 GS-as-compute path.
++            bool gsOcclusionQuery = GsOcclusionQuerySupport.Supported();
++            if (supportedFeatures.GeometryShader && !gsOcclusionQuery)
++            {
++                Logger.Warning?.Print(LogClass.Gpu,
++                    "GS + occlusion probe verdict is not supported (known-bad, probe failure, " +
++                    "runtime-lost writeback, or no result file); falling back to GS-as-compute " +
++                    "(SupportsGeometryShader=false)");
++            }
++
+             PhysicalDeviceFeatures features = new()
+             {
+                 DepthBiasClamp = supportedFeatures.DepthBiasClamp,
+                 DepthClamp = supportedFeatures.DepthClamp,
+                 DualSrcBlend = supportedFeatures.DualSrcBlend,
+                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
+-                GeometryShader = supportedFeatures.GeometryShader && !quirks.Disabled.HasFlag(DisabledDriverFeatures.GeometryShader),
++                GeometryShader = supportedFeatures.GeometryShader && gsOcclusionQuery,
+                 ImageCubeArray = supportedFeatures.ImageCubeArray,
+                 IndependentBlend = supportedFeatures.IndependentBlend,
+                 LogicOp = supportedFeatures.LogicOp,
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 886161a77572db015f112f042cd715e5ccd4de00..7c550e7201f4b2d8c069509041562e14fc15dc31 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1051,6 +1051,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsFragmentShaderInterlock: Capabilities.SupportsFragmentShaderInterlock,
+                 supportsFragmentShaderOrderingIntel: false,
+                 supportsGeometryShader: Capabilities.SupportsGeometryShader,
++                supportsGeometryShaderOcclusionQuery: GsOcclusionQuerySupport.Supported(),
+                 supportsGeometryShaderPassthrough: Capabilities.SupportsGeometryShaderPassthrough,
+                 supportsTransformFeedback: Capabilities.SupportsTransformFeedback,
+                 supportsImageLoadFormatted: features.ShaderStorageImageReadWithoutFormat,

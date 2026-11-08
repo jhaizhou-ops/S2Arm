@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index d89552be82b7d58e3b7597b3dd5042efd73cc74b..6f0c11a25994ece837da5afe7d81c95c968473cf 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -86,6 +86,24 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _queriedState |= other._queriedState & (QueriedStateFlags.S2AUsageTracked | QueriedStateFlags.S2AUsageV2 | QueriedStateFlags.S2AReadMask);
+             _s2aAttrRead |= other._s2aAttrRead;
+         }
++        /// <summary>
++        /// S2A（10-23 画面·着色器线）：继承条目的贴图查询记录按这次再翻实际查过的收窄——每个贴图的查询位与 <paramref name="other"/>（同客体代码用当前翻译器再翻的状态）同键的查询位取交，对方没登记的贴图查询位清零。
++        /// 参照缓存（上游社区缓存 / 旧版本局）的翻译器总查「坐标是否归一化」，当前翻译器把它运行时化（Ryujinx 0044）、不再查：原样继承会把旧查询连值带进包，
++        /// 运行时描述符不同就判不符重翻（暗黑2 包 10559 个程序 4052 个带它，jhz 实机 5 次首遇现编 0.6–1.4 s）。代码不随没查的字段变，匹配也不该比它。返回清掉的查询位数。
++        /// </summary>
++        public int S2ATrimTextureQueries(ShaderSpecializationState other)
++        {
++            int n = 0;
++            foreach (KeyValuePair<TextureKey, Box<TextureSpecializationState>> kv in _textureSpecialization)
++            {
++                QueriedTextureStateFlags keep = other._textureSpecialization.TryGetValue(kv.Key, out Box<TextureSpecializationState> o) ? o.Value.QueriedFlags : 0;
++                QueriedTextureStateFlags drop = kv.Value.Value.QueriedFlags & ~keep;
++                if (drop == 0) continue;
++                kv.Value.Value.QueriedFlags &= keep;
++                n += System.Numerics.BitOperations.PopCount((uint)drop);
++            }
++            return n;
++        }
+         private bool _compute;
+         private byte _constantBufferUsePerStage;
+ 

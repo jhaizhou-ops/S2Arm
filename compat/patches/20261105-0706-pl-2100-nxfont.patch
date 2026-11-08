@@ -1,0 +1,171 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/IFontService.cs b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/IFontService.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..01f462ce4b6417c21e398f5261f25667bb827ac6
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/IFontService.cs
+@@ -0,0 +1,55 @@
++using Ryujinx.HLE.HOS.Services.Sdb.Pl.Types;
++using System;
++
++namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
++{
++    // S2Arm：Switch 2 nn::pl::sharedresource::detail::IFontService，pl:u 2100 RequestLoadNxFont 回出的对象：按类型回 Nx（Switch 1）共享字体在游戏传输内存里的偏移 / 长度。
++    //   线上格式取自塞尔达时之笛（0400486024DEC000）sdk 客户端代理：命令 0 与 pl:u 2010 共用同一个发送助手（0x5a4f40），格式相同；
++    //   命令 1 与 pl:u 2020 共用发送助手 0x5a5070。客户端 nn::pl::GetBuiltInFontData(BuiltInFontDataNx*, …)（0x5a3bb0）把地址算成「传输内存首址 + 描述里的偏移」
++    class IFontService : IpcService
++    {
++        private readonly uint[] _offsets = new uint[(int)SharedFontType.Count];
++        private readonly uint[] _sizes = new uint[(int)SharedFontType.Count];
++
++        // 偏移 / 长度在写传输内存的同一时刻取下（之后共享字体管理器换局重建也不影响这块已写好的内存）
++        public IFontService(SharedFontManager fonts)
++        {
++            for (SharedFontType type = 0; type < SharedFontType.Count; type++)
++            {
++                _offsets[(int)type] = (uint)fonts.GetSharedMemoryAddressOffset(type);
++                _sizes[(int)type] = (uint)fonts.GetFontSize(type);
++            }
++        }
++
++        [CommandCmif(0)]
++        // GetBuiltInFontData(u8 type, b8 option) -> (b8 available, nn::pl::BuiltInFontDescriptor {u8 type, u8 flags, u16, u32 offset, u32 size})
++        public ResultCode GetBuiltInFontData(ServiceCtx context)
++        {
++            byte type = context.RequestData.ReadByte();
++
++            // 客户端 GetBuiltInFontDataSet(Nx)（0x5a3c7c）把条数截到 7，比共享字体 6 类多一类（Ounce 版 0x5a391c 截到 6）；第 7 类是什么、真机对没有的类型回什么，都不知道
++            if (type >= _offsets.Length)
++            {
++                throw new NotImplementedException($"pl IFontService 0 GetBuiltInFontData：Nx 字体类型 {type} 我方没有（只有共享字体 0–5），真机回什么不知道");
++            }
++
++            context.ResponseData.Write(true);
++            context.ResponseData.Write((byte)0);
++            context.ResponseData.Write((ushort)0);
++            context.ResponseData.Write(type);
++            context.ResponseData.Write((byte)0);
++            context.ResponseData.Write((ushort)0);
++            context.ResponseData.Write(_offsets[type]);
++            context.ResponseData.Write(_sizes[type]);
++
++            return ResultCode.Success;
++        }
++
++        [CommandCmif(1)]
++        // GetBuiltInFontDataSet(u64 language_code, b8 option, buffer<u8 type, 5> types, buffer<descriptor, 6> out) -> (b8 available, s32 count)
++        public ResultCode GetBuiltInFontDataSet(ServiceCtx context)
++        {
++            throw new NotImplementedException("pl IFontService 1 GetBuiltInFontDataSet：按语言码与入参类型表挑选、排序字体的规则不知道");
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
+index c446383e17d0bbbba7016557d59aa0b917c10025..cd5aa43b48258e039f5754db17f5e1c53fb84ac0 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
+@@ -1,7 +1,9 @@
+ using Ryujinx.HLE.HOS.Ipc;
++using Ryujinx.HLE.HOS.Kernel.Memory;
+ using Ryujinx.HLE.HOS.Services.Sdb.Pl.Types;
+ using Ryujinx.Horizon.Common;
+ using System;
++using System.IO;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+ {
+@@ -168,6 +170,50 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm：2100（switchbrew 名 OpenFont）。游戏把自己分配的缓冲建成传输内存递来（时之笛 main 0x3782c20：0x1300000 字节、0x1000 对齐；
++        //   sdk nn::pl::RequestLoadNxFont 0x5a3ab0 建传输内存时自己只留读权限），服务把 Nx（Switch 1）共享字体写进去，回 IFontService 按类型取偏移 / 长度。
++        //   线上格式（sdk 发送助手 0x5a5220）：非域、复制句柄 1 个、数据 u8 @0（时之笛恒 0，含义不知道）、u32 长度 @4（sdk 恒传 0x1300000）；回出对象。sdk 失败即 AbortImpl。
++        //   传输内存里的排法客户端不直接读，只按 IFontService 回的偏移取：这里照共享内存的排法写（每个字体 8 字节头 + 解密后的 TTF 正文），偏移与命令 3 同口径。
++        //   首字节非 0、句柄不是传输内存、字体放不下：真机回什么不知道，报红
++        [CommandCmif(2100)] // Switch 2
++        // RequestLoadNxFont(u8, u32 size, handle<copy, transfer_memory>) -> object<nn::pl::sharedresource::detail::IFontService>
++        public ResultCode RequestLoadNxFont(ServiceCtx context)
++        {
++            byte mode = context.RequestData.ReadByte();
++            context.RequestData.BaseStream.Seek(3, SeekOrigin.Current);
++            uint size = context.RequestData.ReadUInt32();
++            int handle = context.Request.HandleDesc.ToCopy[0];
++
++            try
++            {
++                if (mode != 0)
++                {
++                    throw new NotImplementedException($"pl:u 2100 RequestLoadNxFont：首字节 {mode} 的含义不知道（时之笛恒传 0）");
++                }
++
++                KTransferMemory transferMemory = context.Process.HandleTable.GetObject<KTransferMemory>(handle)
++                    ?? throw new NotImplementedException($"pl:u 2100 RequestLoadNxFont：句柄 0x{handle:X} 不是传输内存，真机回什么不知道");
++
++                SharedFontManager fonts = context.Device.System.SharedFontManager;
++                ReadOnlySpan<byte> region = fonts.GetFontRegion();
++
++                if (size > transferMemory.Size || (ulong)region.Length > size)
++                {
++                    throw new NotImplementedException($"pl:u 2100 RequestLoadNxFont：请求长 0x{size:X}、传输内存长 0x{transferMemory.Size:X}、字体共 0x{region.Length:X}，放不下时真机回什么不知道");
++                }
++
++                context.Memory.Write(transferMemory.Address, region);
++
++                MakeObject(context, new IFontService(fonts));
++            }
++            finally
++            {
++                context.Device.System.KernelContext.Syscall.CloseHandle(handle);
++            }
++
++            return ResultCode.Success;
++        }
++
+         private bool AddFontToOrderOfPriorityList(ServiceCtx context, SharedFontType fontType, uint offset)
+         {
+             ulong typesPosition = context.Request.ReceiveBuff[0].Position;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
+index 4dd57dd63649ba6296dc82ff897a0efd12c84a91..8ae3e21aeaddafe3577163672e8e19456522f16e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
+@@ -15,6 +15,7 @@ using System;
+ using System.Buffers.Binary;
+ using System.Collections.Generic;
+ using System.IO;
++using System.Runtime.InteropServices;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+ {
+@@ -39,6 +40,7 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+         }
+ 
+         private Dictionary<SharedFontType, FontInfo> _fontData;
++        private uint _fontEnd; // S2Arm：字体区已用长度（最后一个字体正文的末尾）
+ 
+         public SharedFontManager(Switch device, SharedMemoryStorage storage)
+         {
+@@ -167,6 +169,8 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+                     throw new InvalidSystemResourceException("The sum of all fonts size exceed the shared memory size. " +
+                                                              $"Please make sure that the fonts don't exceed {Horizon.FontSize} bytes in total. (actual size: {fontOffset} bytes).");
+                 }
++
++                _fontEnd = fontOffset;
+             }
+         }
+ 
+@@ -194,6 +198,15 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+             return _fontData[fontType].Offset + 8;
+         }
+ 
++        // S2Arm：pl:u 2100 RequestLoadNxFont 把字体区 [0, 已用长度) 原样写进游戏递来的传输内存：每个字体 8 字节头 + 解密后的正文，
++        //   正文偏移 / 长度与 GetSharedMemoryAddressOffset / GetFontSize 同口径
++        public ReadOnlySpan<byte> GetFontRegion()
++        {
++            EnsureInitialized(_device.System.ContentManager);
++
++            return MemoryMarshal.CreateReadOnlySpan(ref _storage.GetRef<byte>(0), (int)_fontEnd);
++        }
++
+         private byte[] DecryptFont(Stream bfttfStream)
+         {
+             static uint KXor(uint data) => data ^ FontKey;

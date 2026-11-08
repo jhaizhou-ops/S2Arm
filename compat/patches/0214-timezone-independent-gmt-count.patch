@@ -1,0 +1,13 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZone.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZone.cs
+index dfacc817026efce303f80823670f72f13f1e6d54..0eb131e2cb8f539f57f9f7fe48a4a52d28639ed4 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZone.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZone.cs
+@@ -1038,7 +1038,7 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+ 
+                 for (int i = 0; i < outRules.TypeCount; i++)
+                 {
+-                    if (ttisSTDCount == 0)
++                    if (ttisGMTCount == 0)
+                     {
+                         outRules.Ttis[i].IsGMT = false;
+                     }

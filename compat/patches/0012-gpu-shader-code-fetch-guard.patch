@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index 393584bd461f7f71d7af87f94a2d355f9ea89888..847ce2a117f64df8d495d4dd77af160798b85073 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -79,9 +79,25 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             Logger.Warning?.Print(LogClass.Gpu, $"Shader translator: {message}");
+         }
+ 
++        // S2A：着色器取码安全阀。着色器地址落在未映射处，或一直解不到 EXIT 时，原版会把读到的全零当指令一直解下去
++        // （旧库实测 2 分钟吃到 67 GB）。未映射或一个阶段取码超过 S2AMaxShaderCodePages 页（1 MB）即抛异常报红。
++        private const int S2AMaxShaderCodePages = 256;
++        private System.Collections.Generic.HashSet<ulong> _s2aCodePages;
++
+         /// <inheritdoc/>
+         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
+         {
++            if (!_channel.MemoryManager.IsMapped(address))
++            {
++                throw new InvalidOperationException($"S2A: shader code fetch from unmapped GPU VA 0x{address:X}");
++            }
++
++            _s2aCodePages ??= new System.Collections.Generic.HashSet<ulong>();
++            if (_s2aCodePages.Add(address >> 12) && _s2aCodePages.Count > S2AMaxShaderCodePages)
++            {
++                throw new InvalidOperationException($"S2A: shader code fetch exceeded {S2AMaxShaderCodePages} pages (at GPU VA 0x{address:X})");
++            }
++
+             int size = Math.Max(minimumSize, 0x1000 - (int)(address & 0xfff));
+ 
+             return MemoryMarshal.Cast<byte, ulong>(_channel.MemoryManager.GetSpan(address, size));

@@ -1,0 +1,1152 @@
+diff --git a/src/Ryujinx.Graphics.GAL/IHostProgramCachePolicy.cs b/src/Ryujinx.Graphics.GAL/IHostProgramCachePolicy.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1c50e7da72ac1a309df1a3ff1026c563270aa7ae
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/IHostProgramCachePolicy.cs
+@@ -0,0 +1,23 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// Optional renderer policy for the shared GPU host cache. Backends that do not implement
++    /// it keep the historical prefetch behavior; this is not a capability bit and does not
++    /// grant any shader semantics.
++    /// </summary>
++    public interface IHostProgramCachePolicy
++    {
++        /// <summary>
++        /// True when host-cache prefetch would create renderer program objects that no draw can
++        /// reuse, or when the backend must load its versioned program records on demand.
++        /// </summary>
++        bool DisableHostProgramPrefetch { get; }
++
++        /// <summary>
++        /// Optional bounded ASCII token identifying this backend's program-record profile.
++        /// The shared cache appends it to host file names so a changed profile never reuses
++        /// or keeps appending to another profile's host file. Null/empty keeps the legacy name.
++        /// </summary>
++        string HostProgramCacheDiscriminator { get; }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/IProgramBinaryLoadFailure.cs b/src/Ryujinx.Graphics.GAL/IProgramBinaryLoadFailure.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f5d48a17ef48584fc81f3ab3751db455ff32c1cd
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/IProgramBinaryLoadFailure.cs
+@@ -0,0 +1,13 @@
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// Marks a program object returned from a host program record that could not be used.
++    /// The GPU shader cache turns this into an on-demand translation before the program is
++    /// bound; it is not a renderer capability and grants no shader semantics.
++    /// </summary>
++    public interface IProgramBinaryLoadFailure
++    {
++        /// <summary>Typed reason, or null when the record is still being processed.</summary>
++        string ProgramBinaryLoadFailure { get; }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/SetProgramCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/SetProgramCommand.cs
+index 7f1d845b814226d4b3c88e7c015d899935d59214..fb6563cb0f96a117c181a4931caaa52e0a026bb6 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/SetProgramCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/SetProgramCommand.cs
+@@ -19,6 +19,15 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands
+ 
+             threaded.Programs.WaitForProgram(program);
+ 
++            if (program.Base is IProgramBinaryLoadFailure failure &&
++                failure.ProgramBinaryLoadFailure is string reason)
++            {
++                // Android uses the direct renderer, where the lazy materializer handles this
++                // before wrapping. A threaded backend reaches this point after its deferred
++                // create; fail precisely instead of casting a placeholder to a ShaderCollection.
++                throw new System.InvalidOperationException($"Rejected host program reached SetProgram: {reason}");
++            }
++
+             renderer.Pipeline.SetProgram(program.Base);
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+index 51fdc61ac31a65b7c26a56a46dcfa772b2a26a99..0377ec136fc768e3a998b3814589d92888a26d5e 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+@@ -3,7 +3,7 @@ using Ryujinx.Graphics.GAL.Multithreading.Model;
+ 
+ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ {
+-    class ThreadedProgram : IProgram
++    class ThreadedProgram : IProgram, IProgramBinaryLoadFailure
+     {
+         private readonly ThreadedRenderer _renderer;
+ 
+@@ -34,6 +34,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             _renderer = renderer;
+         }
+ 
++        string IProgramBinaryLoadFailure.ProgramBinaryLoadFailure =>
++            (Base as IProgramBinaryLoadFailure)?.ProgramBinaryLoadFailure;
++
+         private TableRef<T> Ref<T>(T reference)
+         {
+             return new TableRef<T>(_renderer, reference);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index ab6c846e250e4e7fe5e29f869d3c664ebeeb8768..de76b044141e10c6752566b16d1235f3de33701d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -249,7 +249,15 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             // Legacy host files have no effective-capability identity and are deliberately not
+             // trusted. Guest/shared records remain usable for on-demand translation. The same
+             // identity is used by ShBake and runtime (including NxGal, which reports Vulkan).
+-            return $"{apiName}_{vendorName}_bin_{HostCacheCapabilities.GetIdentity(context.Capabilities)}";
++            string name = $"{apiName}_{vendorName}_bin_{HostCacheCapabilities.GetIdentity(context.Capabilities)}";
++            string discriminator = GetHostCacheDiscriminator(context);
++            return string.IsNullOrEmpty(discriminator) ? name : $"{name}_{discriminator}";
++        }
++
++        private static string GetHostCacheDiscriminator(GpuContext context)
++        {
++            IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
++            return renderer is IHostProgramCachePolicy policy ? policy.HostProgramCacheDiscriminator : null;
+         }
+ 
+         /// <summary>
+@@ -551,6 +559,16 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private void S2AWarmStart(GpuContext context, S2ALazyProgram[] list)
+         {
+             IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
++
++            if (renderer is IHostProgramCachePolicy { DisableHostProgramPrefetch: true })
++            {
++                // S1: this backend loads versioned program records on demand through its single
++                // compile lane. The old "load, wait, dispose" prefetch would create and drop
++                // host programs that no draw can reuse and is not joined by the renderer's stop
++                // order. Backends without the policy (Apple NxGal) keep the prefetch unchanged.
++                S2AShaderCacheGuard.Report(0, "宿主程序预读关闭（S1：按需加载，不后台载入/释放）");
++                return;
++            }
+             System.Threading.Thread th = new(() =>
+             {
+                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+@@ -776,6 +794,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+         private CachedShaderProgram S2AMaterializeCore(S2ALazyProgram lazy)
+         {
++            ShaderSpecializationState specState;
++            byte[] hostCode;
++            CachedShaderStage[] shaders;
++
++            // The lazy lock protects only the shared cache streams and the pre-read handoff.
++            // Renderer/program creation runs outside it so a slow driver call cannot block
++            // another materialization or the cache writer.
+             lock (_lazyLock)
+             {
+                 try
+@@ -789,28 +814,6 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     {
+                         (specState, hostCode, shaders) = S2AReadParts(lazy);
+                     }
+-
+-                    if (hostCode == null)
+-                    {
+-                        S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 缺主机代码（按需实化）");
+-                        return null;
+-                    }
+-
+-                    // S2A：顶点 / 几何转计算的程序是复合二进制（图形 / 顶点计算 / 几何计算三个宿主程序 + 保留布局，S2AVtg）：分段建、不翻译
+-                    if (!lazy.IsCompute && S2AVtg.IsPacked(hostCode))
+-                    {
+-                        return S2AMaterializeVtg(lazy, hostCode, shaders, specState);
+-                    }
+-
+-                    bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+-                    long s2aL = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;
+-                    IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+-                    if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, S2AAllocTrace.Now() - s2aL);
+-
+-                    // S2A：来自磁盘缓存（含出包种入的包内条目）：首次命中时按运行时真值核对全部翻译读过的字段（ShaderCache.S2AVerify）
+-                    specState.S2AMarkLoaded(lazy.ProgramIndex);
+-
+-                    return S2APendLink(new CachedShaderProgram(hostProgram, specState, shaders), lazy.ProgramIndex);
+                 }
+                 catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
+                 {
+@@ -818,6 +821,48 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     return null;
+                 }
+             }
++
++            if (hostCode == null)
++            {
++                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 缺主机代码（按需实化）");
++                return null;
++            }
++
++            // S2A：顶点 / 几何转计算的程序是复合二进制（图形 / 顶点计算 / 几何计算三个宿主程序 + 保留布局，S2AVtg）：分段建、不翻译
++            if (!lazy.IsCompute && S2AVtg.IsPacked(hostCode))
++            {
++                return S2AMaterializeVtg(lazy, hostCode, shaders, specState);
++            }
++
++            bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
++            long s2aL = S2AAllocTrace.On ? S2AAllocTrace.Now() : 0;
++            IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, S2AAllocTrace.Now() - s2aL);
++
++            // A rejected VKPB record must become an on-demand translation before any draw can
++            // bind it; the deferred link queue is too late (SetProgram requires ShaderCollection).
++            if (HostProgramRejected(hostProgram, lazy.ProgramIndex, out string rejectReason))
++            {
++                hostProgram.Dispose();
++                return null;
++            }
++
++            // S2A：来自磁盘缓存（含出包种入的包内条目）：首次命中时按运行时真值核对全部翻译读过的字段（ShaderCache.S2AVerify）
++            specState.S2AMarkLoaded(lazy.ProgramIndex);
++
++            return S2APendLink(new CachedShaderProgram(hostProgram, specState, shaders), lazy.ProgramIndex);
++        }
++
++        private static bool HostProgramRejected(IProgram program, int programIndex, out string reason)
++        {
++            reason = (program as IProgramBinaryLoadFailure)?.ProgramBinaryLoadFailure;
++            if (reason == null)
++            {
++                return false;
++            }
++
++            S2AShaderCacheGuard.Report(1, $"程序 {programIndex} 主机记录拒绝（{reason}），改为按需翻译");
++            return true;
+         }
+ 
+         /// <summary>S2A：着色器信息读写（转计算复合二进制里的直通顶点信息用同一格式，S2AVtg）。</summary>
+@@ -839,6 +884,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+ 
+             CachedShaderProgram program = S2AVtg.Load(lazy.Context, vtg, shaders, specState);
++
++            if (program == null)
++            {
++                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 转计算宿主记录拒绝，改为按需翻译");
++                return null;
++            }
++
+             lazy.Storage.S2APendLink(program, lazy.ProgramIndex);
+ 
+             int n = System.Threading.Interlocked.Increment(ref _s2aVtgMaterialized);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index 55ce67f853e3cb7865e9ad9b059fa21078b3cb16..39f5b4adac5da8f0c5732c7430278119cf4de74c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -289,21 +289,39 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+             IProgram hostProgram = context.Renderer.LoadProgramBinary(u.Graphics, hasFragmentShader, none);
+ 
++            if (hostProgram is IProgramBinaryLoadFailure { ProgramBinaryLoadFailure: not null })
++            {
++                hostProgram.Dispose();
++                return null;
++            }
++
+             ShaderProgramInfo vertexInfo = shaders[1].Info;
+-            ShaderAsCompute vertexAsCompute = new(
+-                context.Renderer.LoadProgramBinary(u.Vertex, false, none),
+-                vertexInfo,
+-                u.VertexReservations);
++            IProgram vertexHost = context.Renderer.LoadProgramBinary(u.Vertex, false, none);
+ 
++            if (vertexHost is IProgramBinaryLoadFailure { ProgramBinaryLoadFailure: not null })
++            {
++                hostProgram.Dispose();
++                vertexHost.Dispose();
++                return null;
++            }
++
++            ShaderAsCompute vertexAsCompute = new(vertexHost, vertexInfo, u.VertexReservations);
+             ShaderAsCompute geometryAsCompute = null;
+ 
+             if (u.Geometry != null)
+             {
+                 ShaderProgramInfo geometryInfo = shaders[4].Info;
+-                geometryAsCompute = new(
+-                    context.Renderer.LoadProgramBinary(u.Geometry, false, none),
+-                    geometryInfo,
+-                    u.GeometryReservations);
++                IProgram geometryHost = context.Renderer.LoadProgramBinary(u.Geometry, false, none);
++
++                if (geometryHost is IProgramBinaryLoadFailure { ProgramBinaryLoadFailure: not null })
++                {
++                    hostProgram.Dispose();
++                    vertexHost.Dispose();
++                    geometryHost.Dispose();
++                    return null;
++                }
++
++                geometryAsCompute = new(geometryHost, geometryInfo, u.GeometryReservations);
+             }
+ 
+             return new CachedShaderProgram(hostProgram, vertexAsCompute, geometryAsCompute, specState, shaders) { S2APassthroughInfo = u.PassthroughInfo };
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index 0172b5b56460496ba293f08a15d87bfa49c3ac73..ba87d638de361b47b8553d21e25abb5bcd70dac2 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -1,6 +1,7 @@
+ using Ryujinx.Common.Memory;
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Shader;
++using S2Arm.Backends.Vulkan.ProgramCache;
+ using Silk.NET.Vulkan;
+ using System;
+ using System.Collections.Generic;
+@@ -8,6 +9,7 @@ using System.Linq;
+ using System.Numerics;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
++using System.Threading.Tasks;
+ using BlendOp = Silk.NET.Vulkan.BlendOp;
+ using Buffer = Silk.NET.Vulkan.Buffer;
+ using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
+@@ -32,6 +34,11 @@ namespace Ryujinx.Graphics.Vulkan
+         protected readonly Device Device;
+         public readonly PipelineCache PipelineCache;
+ 
++        private readonly bool _s2aOwnsPipelineCache;
++        private readonly PipelineCacheIdentity _s2aPipelineCacheIdentity;
++        private readonly string _s2aPipelineCachePath;
++        private bool _s2aDisposed;
++
+         public readonly AutoFlushCounter AutoFlush;
+         public readonly Action EndRenderPassDelegate;
+ 
+@@ -96,7 +103,7 @@ namespace Ryujinx.Graphics.Vulkan
+         public ulong DrawCount { get; private set; }
+         public bool RenderPassActive { get; private set; }
+ 
+-        public unsafe PipelineBase(VulkanRenderer gd, Device device)
++        public unsafe PipelineBase(VulkanRenderer gd, Device device, PipelineCache? sharedCache = null)
+         {
+             Gd = gd;
+             Device = device;
+@@ -104,12 +111,57 @@ namespace Ryujinx.Graphics.Vulkan
+             AutoFlush = new AutoFlushCounter(gd);
+             EndRenderPassDelegate = EndRenderPass;
+ 
+-            PipelineCacheCreateInfo pipelineCacheCreateInfo = new()
++            _s2aOwnsPipelineCache = !sharedCache.HasValue;
++            if (sharedCache.HasValue)
+             {
+-                SType = StructureType.PipelineCacheCreateInfo,
+-            };
++                // Helper pipelines share the main device cache. One VkPipelineCache, one
++                // compile lane, one persistence file; helper results are not overwritten.
++                PipelineCache = sharedCache.Value;
++            }
++            else
++            {
++                _s2aPipelineCachePath = gd.S2APipelineCachePath;
++                _s2aPipelineCacheIdentity = S2ACacheIdentity(gd);
++
++                byte[] initialData = null;
++                string readError = null;
++                if (_s2aPipelineCachePath != null &&
++                    PipelineCacheFile.TryRead(_s2aPipelineCachePath, _s2aPipelineCacheIdentity, out byte[] cached, out readError))
++                {
++                    initialData = cached;
++                    Console.Error.WriteLine($"[vkpipe] 导入驱动管线缓存 {cached.Length} 字节");
++                }
++                else if (_s2aPipelineCachePath != null)
++                {
++                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存未导入：{readError}");
++                }
+ 
+-            gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
++                PipelineCacheCreateInfo pipelineCacheCreateInfo = new()
++                {
++                    SType = StructureType.PipelineCacheCreateInfo,
++                };
++
++                if (initialData != null)
++                {
++                    fixed (byte* pInitialData = initialData)
++                    {
++                        pipelineCacheCreateInfo.InitialDataSize = (nuint)initialData.Length;
++                        pipelineCacheCreateInfo.PInitialData = pInitialData;
++                        Result result = gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache);
++                        if (result.IsError)
++                        {
++                            Console.Error.WriteLine($"[vkpipe] 导入的驱动缓存被拒（{result}），改用空缓存");
++                            pipelineCacheCreateInfo.InitialDataSize = 0;
++                            pipelineCacheCreateInfo.PInitialData = null;
++                            gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
++                        }
++                    }
++                }
++                else
++                {
++                    gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache).ThrowOnError();
++                }
++            }
+ 
+             _descriptorSetUpdater = new DescriptorSetUpdater(gd, device);
+             _vertexBufferUpdater = new VertexBufferUpdater(gd);
+@@ -1791,10 +1843,82 @@ namespace Ryujinx.Graphics.Vulkan
+             Gd.TransformFeedbackApi.CmdEndTransformFeedback(CommandBuffer, 0, 0, null, null);
+         }
+ 
++        private static unsafe PipelineCacheIdentity S2ACacheIdentity(VulkanRenderer gd)
++        {
++            PhysicalDeviceProperties properties = gd.PhysicalDevice.PhysicalDeviceProperties;
++            byte[] uuid = new byte[16];
++            for (int i = 0; i < uuid.Length; i++)
++                uuid[i] = properties.PipelineCacheUuid[i];
++            return new PipelineCacheIdentity(properties.VendorID, properties.DeviceID, properties.DriverVersion,
++                properties.ApiVersion, uuid, PipelineCacheFile.Schema, PipelineCacheFile.Backend);
++        }
++
++        private unsafe void S2ASavePipelineCache()
++        {
++            if (!_s2aOwnsPipelineCache || _s2aPipelineCachePath == null)
++                return;
++
++            nuint size = 0;
++            Result result = Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref size, null);
++            if (result.IsError || size == 0 || size > PipelineCacheFile.MaximumBytes)
++            {
++                Console.Error.WriteLine($"[vkpipe] 驱动缓存大小查询失败：{result} size={size}");
++                return;
++            }
++
++            byte[] data = new byte[(int)size];
++            fixed (byte* pData = data)
++            {
++                result = Gd.Api.GetPipelineCacheData(Device, PipelineCache, ref size, pData);
++            }
++
++            if (result == Result.Incomplete)
++            {
++                // Bounded retry: do not persist bytes whose receipt was not verified.
++                Console.Error.WriteLine("[vkpipe] 驱动缓存读取不完整（VK_INCOMPLETE），本次不保存");
++                return;
++            }
++            if (result.IsError || size > (nuint)data.Length)
++            {
++                Console.Error.WriteLine($"[vkpipe] 驱动缓存读取失败：{result} size={size}");
++                return;
++            }
++
++            // Snapshotting uses the driver cache (owner only, after the compile lane stopped);
++            // the file write uses no device object. Bound the stop-path wait so the host's
++            // shutdown deadline still applies; a late write leaves the previous file intact
++            // because the writer uses temp + atomic rename.
++            byte[] snapshot = data.AsSpan(0, (int)size).ToArray();
++            PipelineCacheIdentity identity = _s2aPipelineCacheIdentity;
++            string path = _s2aPipelineCachePath;
++            Task save = Task.Run(() =>
++            {
++                if (PipelineCacheFile.TryWriteAtomic(path, identity, snapshot, out string error))
++                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存已保存 {snapshot.Length} 字节");
++                else
++                    Console.Error.WriteLine($"[vkpipe] 驱动管线缓存保存失败：{error}");
++            });
++
++            try
++            {
++                if (!save.Wait(1000))
++                    Console.Error.WriteLine("[vkpipe] 驱动缓存写盘仍在后台（退出期限已到，旧文件保留）");
++            }
++            catch (AggregateException e)
++            {
++                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存写盘异常：{e.GetBaseException().Message}");
++            }
++        }
++
+         protected virtual void Dispose(bool disposing)
+         {
+-            if (disposing)
++            if (disposing && !_s2aDisposed)
+             {
++                _s2aDisposed = true;
++
++                if (_s2aOwnsPipelineCache)
++                    S2ASavePipelineCache();
++
+                 _nullRenderPass?.Dispose();
+                 _newState.Dispose();
+                 _descriptorSetUpdater.Dispose();
+@@ -1812,9 +1936,12 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 Pipeline?.Dispose();
+ 
+-                unsafe
++                if (_s2aOwnsPipelineCache)
+                 {
+-                    Gd.Api.DestroyPipelineCache(Device, PipelineCache, null);
++                    unsafe
++                    {
++                        Gd.Api.DestroyPipelineCache(Device, PipelineCache, null);
++                    }
+                 }
+             }
+         }
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineHelperShader.cs b/src/Ryujinx.Graphics.Vulkan/PipelineHelperShader.cs
+index b9074dfdbaddcf3ff61b1c6d28a52b49d4138a72..c9cfecde76e6b807c1a8a18ce2d9c99b7aedc5e3 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineHelperShader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineHelperShader.cs
+@@ -4,7 +4,7 @@ namespace Ryujinx.Graphics.Vulkan
+ {
+     class PipelineHelperShader : PipelineBase
+     {
+-        public PipelineHelperShader(VulkanRenderer gd, Device device) : base(gd, device)
++        public PipelineHelperShader(VulkanRenderer gd, Device device) : base(gd, device, gd.PipelineInternal.PipelineCache)
+         {
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index 0c779b694b430f8b3ed5129162f44aad604aaa83..fbd8488f4d1b1816d0c27b84e6d89948b7056209 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -327,7 +327,34 @@ namespace Ryujinx.Graphics.Vulkan
+             DepthMode = true;
+         }
+ 
+-        public unsafe Auto<DisposablePipeline> CreateComputePipeline(
++        public Auto<DisposablePipeline> CreateComputePipeline(
++            VulkanRenderer gd,
++            Device device,
++            ShaderCollection program,
++            PipelineCache cache)
++        {
++            // Hits stay on the owner: a warmed pipeline must not queue behind an unrelated
++            // driver compilation. Only a real create enters the single compile lane.
++            if (program.TryGetComputePipeline(ref SpecializationData, out Auto<DisposablePipeline> existing))
++            {
++                return existing;
++            }
++
++            return CreateComputePipelineSlow(gd, device, program, cache);
++        }
++
++        private Auto<DisposablePipeline> CreateComputePipelineSlow(
++            VulkanRenderer gd,
++            Device device,
++            ShaderCollection program,
++            PipelineCache cache)
++        {
++            // Keep the capturing closure out of the cache-hit path.
++            PipelineState state = this;
++            return gd.S2ARunDriver(() => state.CreateComputePipelineCore(gd, device, program, cache));
++        }
++
++        private unsafe Auto<DisposablePipeline> CreateComputePipelineCore(
+             VulkanRenderer gd,
+             Device device,
+             ShaderCollection program,
+@@ -378,7 +405,36 @@ namespace Ryujinx.Graphics.Vulkan
+             return pipeline;
+         }
+ 
+-        public unsafe Auto<DisposablePipeline> CreateGraphicsPipeline(
++        public Auto<DisposablePipeline> CreateGraphicsPipeline(
++            VulkanRenderer gd,
++            Device device,
++            ShaderCollection program,
++            PipelineCache cache,
++            RenderPass renderPass,
++            bool throwOnError = false)
++        {
++            if (program.TryGetGraphicsPipeline(ref Internal, out Auto<DisposablePipeline> existing))
++            {
++                return existing;
++            }
++
++            return CreateGraphicsPipelineSlow(gd, device, program, cache, renderPass, throwOnError);
++        }
++
++        private Auto<DisposablePipeline> CreateGraphicsPipelineSlow(
++            VulkanRenderer gd,
++            Device device,
++            ShaderCollection program,
++            PipelineCache cache,
++            RenderPass renderPass,
++            bool throwOnError)
++        {
++            // Keep the capturing closure out of the cache-hit path.
++            PipelineState state = this;
++            return gd.S2ARunDriver(() => state.CreateGraphicsPipelineCore(gd, device, program, cache, renderPass, throwOnError));
++        }
++
++        private unsafe Auto<DisposablePipeline> CreateGraphicsPipelineCore(
+             VulkanRenderer gd,
+             Device device,
+             ShaderCollection program,
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 4ec62429cc1badfe1c0862cad68efb2dc029d1a3..81a8a17599e426831bd4754eb10ed7e3126792fa 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -14,6 +14,10 @@
+ 
+   <ItemGroup>
+     <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
++    <Compile Include="../../../../graphics/vulkan/cache/ProgramBinary*.cs" Link="S2Arm/ProgramCache/%(Filename)%(Extension)" />
++    <Compile Include="../../../../graphics/vulkan/cache/CompileWorker.cs" Link="S2Arm/ProgramCache/CompileWorker.cs" />
++    <Compile Include="../../../../graphics/vulkan/cache/PipelineCacheFile.cs" Link="S2Arm/ProgramCache/PipelineCacheFile.cs" />
++    <Compile Include="../../../../graphics/vulkan/cache/FailedProgram.cs" Link="S2Arm/ProgramCache/FailedProgram.cs" />
+     <Compile Include="../../../../graphics/vulkan/wsi/*.cs" Link="S2Arm/Wsi/%(Filename)%(Extension)" />
+   </ItemGroup>
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shader.cs b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+index 2b429171723b391786070dc0c853f9442933a35e..c687573166dba624d7f5256b298f18b7af204bfb 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Shader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+@@ -1,6 +1,7 @@
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Shader;
++using S2Arm.Backends.Vulkan.ProgramCache;
+ using Silk.NET.Shaderc;
+ using Silk.NET.Vulkan;
+ using System;
+@@ -21,6 +22,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private readonly Vk _api;
+         private readonly Device _device;
+         private readonly ShaderStageFlags _stage;
++        private readonly CompileWorker _s2aWorker;
+ 
+         private bool _disposed;
+         private ShaderModule _module;
+@@ -31,45 +33,50 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public readonly Task CompileTask;
+ 
+-        public unsafe Shader(Vk api, Device device, ShaderSource shaderSource)
++        public Shader(VulkanRenderer gd, Device device, ShaderSource shaderSource)
+         {
+-            _api = api;
++            _api = gd.Api;
+             _device = device;
++            _s2aWorker = gd.S2ACompileWorker;
+ 
+             CompileStatus = ProgramLinkStatus.Incomplete;
+ 
+             _stage = shaderSource.Stage.Convert();
+ 
+-            CompileTask = Task.Run(() =>
++            CompileTask = _s2aWorker == null
++                ? Task.Run(() => CreateModule(shaderSource))
++                : _s2aWorker.Run(() => { CreateModule(shaderSource); return true; });
++        }
++
++        private unsafe void CreateModule(ShaderSource shaderSource)
++        {
++            byte[] spirv = shaderSource.BinaryCode;
++
++            if (spirv == null)
+             {
+-                byte[] spirv = shaderSource.BinaryCode;
++                spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
+ 
+                 if (spirv == null)
+                 {
+-                    spirv = GlslToSpirv(shaderSource.Code, shaderSource.Stage);
++                    CompileStatus = ProgramLinkStatus.Failure;
+ 
+-                    if (spirv == null)
+-                    {
+-                        CompileStatus = ProgramLinkStatus.Failure;
+-
+-                        return;
+-                    }
++                    return;
+                 }
++            }
+ 
+-                fixed (byte* pCode = spirv)
++            fixed (byte* pCode = spirv)
++            {
++                ShaderModuleCreateInfo shaderModuleCreateInfo = new()
+                 {
+-                    ShaderModuleCreateInfo shaderModuleCreateInfo = new()
+-                    {
+-                        SType = StructureType.ShaderModuleCreateInfo,
+-                        CodeSize = (uint)spirv.Length,
+-                        PCode = (uint*)pCode,
+-                    };
+-
+-                    api.CreateShaderModule(device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
+-                }
++                    SType = StructureType.ShaderModuleCreateInfo,
++                    CodeSize = (uint)spirv.Length,
++                    PCode = (uint*)pCode,
++                };
++
++                _api.CreateShaderModule(_device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
++            }
+ 
+-                CompileStatus = ProgramLinkStatus.Success;
+-            });
++            CompileStatus = ProgramLinkStatus.Success;
+         }
+ 
+         private unsafe static byte[] GlslToSpirv(string glsl, ShaderStage stage)
+@@ -140,9 +147,15 @@ namespace Ryujinx.Graphics.Vulkan
+             };
+         }
+ 
+-        public void WaitForCompile()
++        public void WaitForCompile(Action pump)
+         {
+-            CompileTask.Wait();
++            if (_s2aWorker == null)
++            {
++                CompileTask.Wait();
++                return;
++            }
++
++            _s2aWorker.Wait(CompileTask, pump);
+         }
+ 
+         public unsafe void Dispose()
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index fae87edba889948377bc1c6ac621346a4339ddf6..37e6e765883199f945320531de564a98f0181ea6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
++using S2Arm.Backends.Vulkan.ProgramCache;
+ using Silk.NET.Vulkan;
+ using System;
+ using System.Collections.Generic;
+@@ -63,6 +64,16 @@ namespace Ryujinx.Graphics.Vulkan
+         private readonly Task _compileTask;
+         private bool _firstBackgroundUse;
+ 
++        // VKPB snapshot: sources and GAL metadata as seen when the program was created. It is
++        // never reconstructed from VkShaderModule or the current pipeline state.
++        private readonly ShaderSource[] _s2aSources;
++        private readonly ResourceLayout _s2aLayout;
++        private ProgramPipelineState _s2aState;
++        private bool _s2aHasState;
++        private bool _s2aCanSave;
++        private byte[] _s2aBinary;
++        private bool _s2aDisposed;
++
+         public ShaderCollection(
+             VulkanRenderer gd,
+             Device device,
+@@ -93,7 +104,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             for (int i = 0; i < shaders.Length; i++)
+             {
+-                Shader shader = new(gd.Api, device, shaders[i]);
++                Shader shader = new(gd, device, shaders[i]);
+ 
+                 stages |= 1u << shader.StageFlags switch
+                 {
+@@ -139,6 +150,18 @@ namespace Ryujinx.Graphics.Vulkan
+             // Updating buffer texture bindings using template updates crashes the Adreno driver on Windows.
+             UpdateTexturesWithoutTemplate = gd.IsQualcommProprietary && usesBufferTextures;
+ 
++            _s2aSources = new ShaderSource[shaders.Length];
++            _s2aCanSave = !isMinimal && specDescription == null;
++            for (int i = 0; i < shaders.Length; i++)
++            {
++                ShaderSource source = shaders[i];
++                _s2aCanSave &= source.BinaryCode != null;
++                _s2aSources[i] = new ShaderSource(source.Code,
++                    source.BinaryCode == null ? null : (byte[])source.BinaryCode.Clone(),
++                    source.Stage, source.Language);
++            }
++            _s2aLayout = resourceLayout;
++
+             _compileTask = Task.CompletedTask;
+             _firstBackgroundUse = false;
+         }
+@@ -152,6 +175,8 @@ namespace Ryujinx.Graphics.Vulkan
+             bool fromCache) : this(gd, device, sources, resourceLayout)
+         {
+             _state = state;
++            _s2aState = state;
++            _s2aHasState = true;
+ 
+             _compileTask = BackgroundCompilation();
+             _firstBackgroundUse = !fromCache;
+@@ -461,7 +486,16 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private async Task BackgroundCompilation()
+         {
+-            await Task.WhenAll(_shaders.Select(shader => shader.CompileTask));
++            try
++            {
++                await Task.WhenAll(_shaders.Select(shader => shader.CompileTask)).ConfigureAwait(false);
++            }
++            catch (Exception e) when (e is OperationCanceledException or VulkanException)
++            {
++                LinkStatus = ProgramLinkStatus.Failure;
++                Logger.Error?.PrintMsg(LogClass.Gpu, $"Background module compilation failed: {e.Message}");
++                return;
++            }
+ 
+             if (Array.Exists(_shaders, shader => shader.CompileStatus == ProgramLinkStatus.Failure))
+             {
+@@ -472,14 +506,18 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             try
+             {
+-                if (IsCompute)
+-                {
+-                    CreateBackgroundComputePipeline();
+-                }
+-                else
+-                {
+-                    CreateBackgroundGraphicsPipeline();
+-                }
++                // Pipeline creation is a driver call: keep it on the single compile lane. The
++                // module tasks above have completed before this item, so the lane cannot wait
++                // on work queued behind it.
++                CompileWorker worker = _gd.S2ACompileWorker;
++                Task create = worker == null
++                    ? Task.Run(() => { CreateBackgroundPipeline(); return true; })
++                    : worker.Run(() => { CreateBackgroundPipeline(); return true; });
++                await create.ConfigureAwait(false);
++            }
++            catch (OperationCanceledException)
++            {
++                LinkStatus = ProgramLinkStatus.Failure;
+             }
+             catch (VulkanException e)
+             {
+@@ -489,6 +527,18 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        private void CreateBackgroundPipeline()
++        {
++            if (IsCompute)
++            {
++                CreateBackgroundComputePipeline();
++            }
++            else
++            {
++                CreateBackgroundGraphicsPipeline();
++            }
++        }
++
+         private void EnsureShadersReady()
+         {
+             if (!_initialized)
+@@ -590,8 +640,10 @@ namespace Ryujinx.Graphics.Vulkan
+                     {
+                         if (blocking)
+                         {
+-                            // Wait for this shader to finish compiling.
+-                            shader.WaitForCompile();
++                            // Wait for this shader to finish compiling; the owner keeps
++                            // servicing the window lease/stop events while the single
++                            // compile lane runs the driver call.
++                            shader.WaitForCompile(_gd.S2AWaitPump);
+ 
+                             if (shader.CompileStatus != ProgramLinkStatus.Success)
+                             {
+@@ -609,7 +661,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     if (blocking)
+                     {
+-                        _compileTask.Wait();
++                        _gd.S2AWaitForTask(_compileTask);
+ 
+                         if (LinkStatus == ProgramLinkStatus.Failure)
+                         {
+@@ -630,7 +682,49 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public byte[] GetBinary()
+         {
+-            return null;
++            // GLSL-only backends and minimal/helper layouts are outside VKPB v1. Returning
++            // null keeps the existing "not persisted" behavior instead of writing empty bytes.
++            if (!_s2aCanSave)
++            {
++                return null;
++            }
++
++            byte[] binary = _s2aBinary;
++            if (binary != null)
++            {
++                return binary;
++            }
++
++            ProgramBinaryStageSpecialization[] specializations = new ProgramBinaryStageSpecialization[_s2aSources.Length];
++            for (int i = 0; i < specializations.Length; i++)
++            {
++                specializations[i] = new ProgramBinaryStageSpecialization(
++                    Array.Empty<ProgramBinarySpecializationEntry>(), Array.Empty<byte>());
++            }
++
++            ShaderInfo info = _s2aHasState
++                ? new ShaderInfo(0, _s2aLayout, _s2aState)
++                : new ShaderInfo(0, _s2aLayout);
++
++            ProgramBinary recipe = new(
++                _gd.S2AProgramBinaryIdentity,
++                new ProgramBinaryOptions(false, false, false),
++                _s2aSources,
++                info,
++                specializations);
++
++            if (!ProgramBinaryCodec.TryEncode(recipe, out binary, out string error))
++            {
++                // A legal program may still be outside VKPB v1's persisted stage set (for
++                // example a vertex-only pipeline). Keep running it and do not poison the
++                // background cache writer with an exception.
++                _s2aCanSave = false;
++                Console.Error.WriteLine($"[vkpb] 程序不写入记录（{error}）");
++                return null;
++            }
++
++            _s2aBinary = binary;
++            return binary;
+         }
+ 
+         public DescriptorSetTemplate GetPushDescriptorTemplate(long updateMask)
+@@ -720,8 +814,54 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         protected virtual void Dispose(bool disposing)
+         {
+-            if (disposing)
++            if (disposing && !_s2aDisposed)
+             {
++                _s2aDisposed = true;
++
++                // Active module/pipeline jobs own the VkShaderModule and pipelines. A partial
++                // VTG load can dispose a valid part before its background job finishes; wait
++                // for that job first. A timed-out driver call retains the objects (leak) and
++                // the host stop policy terminates; never destroy a module under a running job.
++                bool quiesced = true;
++                try
++                {
++                    _gd.S2AWaitForTask(_compileTask);
++                }
++                catch (TimeoutException)
++                {
++                    quiesced = false;
++                }
++                catch (Exception)
++                {
++                    // Canceled/faulted module or pipeline task: the worker has already joined
++                    // or the task completed before it could touch the module.
++                }
++
++                if (quiesced)
++                {
++                    foreach (Shader shader in _shaders)
++                    {
++                        try
++                        {
++                            shader.WaitForCompile(_gd.S2AWaitPump);
++                        }
++                        catch (TimeoutException)
++                        {
++                            quiesced = false;
++                            break;
++                        }
++                        catch (Exception)
++                        {
++                        }
++                    }
++                }
++
++                if (!quiesced)
++                {
++                    Console.Error.WriteLine("[vkpb] 程序编译未在期限内退出，保留顶点/管线对象交宿主终止");
++                    return;
++                }
++
+                 if (!_gd.Shaders.Remove(this))
+                 {
+                     return;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 0fbab27190956fb22d62d3db6979be9ac3200deb..c1a0bcc40a37098a936211bac1c2c32c2e676fac 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1,5 +1,6 @@
+ using Gommon;
+ using S2Arm.Backends.Vulkan;
++using S2Arm.Backends.Vulkan.ProgramCache;
+ using Ryujinx.Common.Configuration;
+ using Ryujinx.Common.Helper;
+ using Ryujinx.Common.Logging;
+@@ -14,15 +15,18 @@ using Silk.NET.Vulkan.Extensions.KHR;
+ using System;
+ using System.Collections.Generic;
+ using System.Runtime.InteropServices;
++using System.Security.Cryptography;
++using System.Text;
+ using System.Text.RegularExpressions;
+ using System.Threading;
++using System.Threading.Tasks;
+ using Format = Ryujinx.Graphics.GAL.Format;
+ using PrimitiveTopology = Ryujinx.Graphics.GAL.PrimitiveTopology;
+ using SamplerCreateInfo = Ryujinx.Graphics.GAL.SamplerCreateInfo;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
+-    public sealed class VulkanRenderer : IRenderer
++    public sealed class VulkanRenderer : IRenderer, IHostProgramCachePolicy
+     {
+         private VulkanInstance _instance;
+         private SurfaceKHR _surface;
+@@ -81,6 +85,72 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private PipelineFull _pipeline;
+ 
++        // Android shader/pipeline cache lane. The owner pumps S2AWaitPump while the single
++        // worker executes a driver call; the host sets the pump to the WSI lease poll.
++        internal CompileWorker S2ACompileWorker { get; set; }
++        internal Action S2AWaitPump { get; set; }
++        internal string S2APipelineCachePath { get; set; }
++        private readonly object _s2aProgramIdentityGate = new();
++        private ProgramBinaryIdentity _s2aProgramBinaryIdentity;
++        private string _s2aHostCacheDiscriminator;
++        internal long S2AProgramBinaryLoads;
++        internal long S2AProgramBinaryRejects;
++
++        // Host-cache policy: VKPB records are loaded on demand through this renderer's single
++        // compile lane. The shared GPU cache does not create/drop host programs in the
++        // background for this backend; Apple backends leave the interface unimplemented.
++        public bool DisableHostProgramPrefetch => true;
++
++        public string HostProgramCacheDiscriminator
++        {
++            get
++            {
++                string discriminator = _s2aHostCacheDiscriminator;
++                if (discriminator != null) return discriminator;
++                ProgramBinaryIdentity identity = S2AProgramBinaryIdentity;
++                discriminator = Convert.ToHexStringLower(SHA256.HashData(Encoding.ASCII.GetBytes(
++                    $"{identity.Scheme}|{identity.ProfileKey}|{identity.TranslationKey}|{identity.BindingAbi}")));
++                _s2aHostCacheDiscriminator = discriminator;
++                return discriminator;
++            }
++        }
++
++        internal VulkanPhysicalDevice PhysicalDevice => _physicalDevice;
++
++        internal ProgramBinaryIdentity S2AProgramBinaryIdentity
++        {
++            get
++            {
++                ProgramBinaryIdentity identity = _s2aProgramBinaryIdentity;
++                if (identity != null) return identity;
++
++                lock (_s2aProgramIdentityGate)
++                {
++                    identity = _s2aProgramBinaryIdentity;
++                    if (identity != null) return identity;
++                    Capabilities capabilities = GetCapabilities();
++                    string closure = typeof(ShaderProgram).Assembly.ManifestModule.ModuleVersionId.ToString("N") +
++                        ":" + typeof(VulkanRenderer).Assembly.ManifestModule.ModuleVersionId.ToString("N");
++                    identity = ProgramBinaryProfile.Create(in capabilities, Shader.TargetVulkanVersion, closure);
++                    _s2aProgramBinaryIdentity = identity;
++                    return identity;
++                }
++            }
++        }
++
++        internal T S2ARunDriver<T>(Func<T> work)
++        {
++            CompileWorker worker = S2ACompileWorker;
++            return worker == null ? work() : worker.RunInline(work, S2AWaitPump);
++        }
++
++        internal void S2AWaitForTask(Task task)
++        {
++            CompileWorker worker = S2ACompileWorker;
++            if (worker == null) task.Wait();
++            else worker.Wait(task, S2AWaitPump);
++        }
++
+         internal HelperShader HelperShader { get; private set; }
+         internal PipelineFull PipelineInternal => _pipeline;
+ 
+@@ -428,6 +498,8 @@ namespace Ryujinx.Graphics.Vulkan
+             BufferManager = new BufferManager(this, _device);
+ 
+             SyncManager = new SyncManager(this, _device);
++            // One renderer-owned lane for every shader-module and pipeline driver call.
++            S2ACompileWorker = new CompileWorker();
+             _pipeline = new PipelineFull(this, _device);
+             _pipeline.Initialize();
+ 
+@@ -1012,7 +1084,47 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public IProgram LoadProgramBinary(byte[] programBinary, bool isFragment, ShaderInfo info)
+         {
+-            throw new NotImplementedException();
++            _ = info; // VKPB restores ShaderInfo from the record; the disk-cache default is empty.
++
++            if (programBinary == null || programBinary.Length == 0)
++            {
++                S2AReportProgramBinaryReject("EMPTY: no program bytes");
++                return new FailedProgram("EMPTY");
++            }
++
++            if (!ProgramBinaryCodec.TryDecode(programBinary, S2AProgramBinaryIdentity,
++                out ProgramBinary binary, out string error))
++            {
++                S2AReportProgramBinaryReject(error);
++                return new FailedProgram(error);
++            }
++
++            bool recordHasFragment = Array.Exists(binary.Sources, source => source.Stage == ShaderStage.Fragment);
++            if (isFragment != recordHasFragment)
++            {
++                S2AReportProgramBinaryReject(
++                    $"STAGE: caller fragment flag {isFragment} does not match the program record");
++                return new FailedProgram("STAGE");
++            }
++
++            Interlocked.Increment(ref S2AProgramBinaryLoads);
++
++            // Compute programs carry a default pipeline state in the current CreateProgram
++            // path; graphics programs without state were created without background compile.
++            if (binary.Info.State.HasValue)
++            {
++                return new ShaderCollection(this, _device, binary.Sources, binary.Info.ResourceLayout,
++                    binary.Info.State.Value, fromCache: true);
++            }
++
++            return new ShaderCollection(this, _device, binary.Sources, binary.Info.ResourceLayout);
++        }
++
++        private void S2AReportProgramBinaryReject(string error)
++        {
++            long count = Interlocked.Increment(ref S2AProgramBinaryRejects);
++            if (count <= 8 || (count & (count - 1)) == 0)
++                Console.Error.WriteLine($"[vkpb] 程序记录拒绝 #{count}：{error}");
+         }
+ 
+         public void WaitSync(ulong id)
+@@ -1049,9 +1161,24 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             if (!_initialized)
+             {
++                S2ACompileWorker?.Stop(1_000);
+                 return;
+             }
+ 
++            // Stop the single compile lane before any pipeline cache is snapshotted or any
++            // Vulkan object (window, pipeline cache, shaders, device) is released. A timed-out
++            // driver call retains the device and is reported by the host instead of being
++            // destroyed under a running worker.
++            CompileWorker worker = S2ACompileWorker;
++            if (worker != null && !worker.Stop(30_000))
++            {
++                throw new TimeoutException("Vulkan compile worker did not stop; retain the device and terminate the host.");
++            }
++
++            // Shader/helper disposal may still observe a canceled background task; it must
++            // not touch the WSI lease after the window starts retiring.
++            S2AWaitPump = null;
++
+             // A leased window must prove retirement before any of its borrowed resources go away.
+             // Dispose may fail closed; in that case the host retains the renderer until process exit.
+             if (WindowFactory != null)

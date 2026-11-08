@@ -1,0 +1,62 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+index bed5d387b10545acc2324f72fc173412624d2cb0..247ed931b40ababc07637db7ad7449a139e740f5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/BufferQueueProducer.cs
+@@ -852,7 +852,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             return Core.GetWaitBufferFreeEvent();
+         }
+ 
+-        public override Status GetBufferHistory(int bufferHistoryCount, out Span<BufferInfo> bufferInfos)
++        public override Status GetBufferHistory(int bufferHistoryCount, ref Span<BufferInfo> bufferInfos)
+         {
+             if (bufferHistoryCount <= 0)
+             {
+@@ -863,20 +863,18 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+             lock (Core.Lock)
+             {
+-                bufferHistoryCount = Math.Min(bufferHistoryCount, Core.BufferHistory.Length);
+-
+-                BufferInfo[] result = new BufferInfo[bufferHistoryCount];
++                bufferHistoryCount = Math.Min(Math.Min(bufferHistoryCount, Core.BufferHistory.Length), bufferInfos.Length);
+ 
+                 uint position = Core.BufferHistoryPosition;
+ 
+                 for (uint i = 0; i < bufferHistoryCount; i++)
+                 {
+-                    result[i] = Core.BufferHistory[(position - i) % Core.BufferHistory.Length];
++                    bufferInfos[(int)i] = Core.BufferHistory[(position - i) % Core.BufferHistory.Length];
+ 
+                     position--;
+                 }
+ 
+-                bufferInfos = result;
++                bufferInfos = bufferInfos[..bufferHistoryCount];
+ 
+                 return Status.Success;
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+index 8038f1b562cc489f0899eba5a02527f051c8dcc1..577d52cbeacaa2871d456b21884c7c8efacf0a7b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/IGraphicBufferProducer.cs
+@@ -255,7 +255,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 case TransactionCode.GetBufferHistory:
+                     int bufferHistoryCount = inputParcel.ReadInt32();
+ 
+-                    status = GetBufferHistory(bufferHistoryCount, out Span<BufferInfo> bufferInfos);
++                    // S2Arm: filled into a stack buffer (the history ring holds BufferQueueCore.BufferHistoryArraySize entries) instead of a new array
++                    //   per call (10-26 Witcher 3 direct: the game asks for the history every frame, 248 B each, the only per-frame allocation left)
++                    Span<BufferInfo> bufferInfos = stackalloc BufferInfo[BufferQueueCore.BufferHistoryArraySize];
++
++                    status = GetBufferHistory(bufferHistoryCount, ref bufferInfos);
+ 
+                     outputParcel.WriteStatus(status);
+ 
+@@ -300,6 +304,6 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         public abstract Status SetPreallocatedBuffer(int slot, AndroidStrongPointer<GraphicBuffer> graphicBuffer);
+ 
+-        public abstract Status GetBufferHistory(int bufferHistoryCount, out Span<BufferInfo> bufferInfos);
++        public abstract Status GetBufferHistory(int bufferHistoryCount, ref Span<BufferInfo> bufferInfos);   // S2Arm: fills the caller's span and shortens it to what was written
+     }
+ }

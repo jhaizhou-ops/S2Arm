@@ -1,0 +1,88 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- S2A：graphics/vulkan/core/tests 的宿主机测试读写 GsOcclusionQuerySupport 注入缝（#1456） -->
+    <InternalsVisibleTo Include="DeviceFeatures.Tests" />
+    <InternalsVisibleTo Include="S2A.VvlClampTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ClampBufferRange 内部类型 -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
+    <Compile Include="../../../../graphics/vulkan/core/DriverQuirks.cs" Link="S2Arm/DriverQuirks.cs" />
+    <Compile Include="../../../../graphics/vulkan/core/GsOcclusionQuerySupport.cs" Link="S2Arm/GsOcclusionQuerySupport.cs" />
+    <Compile Include="../../../../graphics/vulkan/cache/ProgramBinary*.cs" Link="S2Arm/ProgramCache/%(Filename)%(Extension)" />
+    <Compile Include="../../../../graphics/vulkan/cache/VulkanProfile.cs" Link="S2Arm/ProgramCache/VulkanProfile.cs" />
+    <Compile Include="../../../../graphics/vulkan/cache/CompileWorker.cs" Link="S2Arm/ProgramCache/CompileWorker.cs" />
+    <Compile Include="../../../../graphics/vulkan/cache/PipelineCacheFile.cs" Link="S2Arm/ProgramCache/PipelineCacheFile.cs" />
+    <Compile Include="../../../../graphics/vulkan/cache/FailedProgram.cs" Link="S2Arm/ProgramCache/FailedProgram.cs" />
+    <Compile Include="../../../../graphics/vulkan/wsi/*.cs" Link="S2Arm/Wsi/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Effects\Textures\SmaaAreaTexture.bin" />
+    <EmbeddedResource Include="Effects\Textures\SmaaSearchTexture.bin" />
+    <EmbeddedResource Include="Effects\Shaders\AreaScaling.spv" />
+    <EmbeddedResource Include="Effects\Shaders\FsrScaling.spv" />
+    <EmbeddedResource Include="Effects\Shaders\FsrSharpening.spv" />
+    <EmbeddedResource Include="Effects\Shaders\SmaaBlend.spv" />
+    <EmbeddedResource Include="Effects\Shaders\SmaaEdge.spv" />
+    <EmbeddedResource Include="Effects\Shaders\SmaaNeighbour.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ChangeBufferStride.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorBlitClearAlphaFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorBlitFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorBlitMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorBlitVertex.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorClearFFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorClearSIFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorClearUIFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorClearVertex.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorCopyShorteningCompute.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorCopyToNonMsCompute.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorCopyWideningCompute.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorDrawToMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ColorDrawToMsVertex.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ConvertD32S8ToD24S8.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ConvertIndexBuffer.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\ConvertIndirectData.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthBlitFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthBlitMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthDrawToMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthDrawToNonMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthStencilClearFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\StencilBlitFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\StencilBlitMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\StencilDrawToMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\StencilDrawToNonMsFragment.spv" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Silk.NET.Shaderc" ExcludeAssets="native" />
+    <PackageReference Include="Silk.NET.Vulkan" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
+    <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.GAL\Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="S2A.VvlSyncTest" /> <!-- 附件访问状态的独立宿主回归 -->
+    <InternalsVisibleTo Include="S2A.VvlTexelTest" /> <!-- texel 视图对齐影子副本的宿主回归 -->
+    <InternalsVisibleTo Include="S2A.VvlFilterTest" /> <!-- 采样器线性滤波降级的宿主回归 -->
+  </ItemGroup>
+
+</Project>

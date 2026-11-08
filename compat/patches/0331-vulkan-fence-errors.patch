@@ -1,0 +1,114 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+index 700bc6d8de4439568e14d839b8f0a03e678f07db..f7732cf41bcdfdbcc11ef9128acadeff7e866f13 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+@@ -459,48 +459,56 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+             
+             Lock.EnterWriteLock();
+-            // We use the non-span method here because the array is partially modified by the code, which would invalidate a span.
+-            BufferModifiedRange[] overlaps = FindOverlapsAsArray(address, size, out int rangeCount);
+-
+-            if (rangeCount == 0)
++            try
+             {
+-                Lock.ExitWriteLock();
+-                
+-                return;
+-            }
++                // We use the non-span method here because the array is partially modified by the code, which would invalidate a span.
++                BufferModifiedRange[] overlaps = FindOverlapsAsArray(address, size, out int rangeCount);
++                try
++                {
++                    if (rangeCount == 0)
++                    {
++                        return;
++                    }
+ 
+-            // First, determine which syncpoint to wait on.
+-            // This is the latest syncpoint that is not equal to the current sync.
++                    // First, determine which syncpoint to wait on.
++                    // This is the latest syncpoint that is not equal to the current sync.
+ 
+-            long highestDiff = long.MinValue;
++                    long highestDiff = long.MinValue;
+ 
+-            for (int i = 0; i < rangeCount; i++)
+-            {
+-                BufferModifiedRange overlap = overlaps![i];
++                    for (int i = 0; i < rangeCount; i++)
++                    {
++                        BufferModifiedRange overlap = overlaps![i];
++
++                        long diff = (long)(overlap.SyncNumber - currentSync);
+ 
+-                long diff = (long)(overlap.SyncNumber - currentSync);
++                        if (diff < 0 && diff > highestDiff)
++                        {
++                            highestDiff = diff;
++                        }
++                    }
+ 
+-                if (diff < 0 && diff > highestDiff)
++                    if (highestDiff == long.MinValue)
++                    {
++                        return;
++                    }
++
++                    // Wait for the syncpoint. Failed waits must not clear modified ranges.
++                    _context.Renderer.WaitSync(currentSync + (ulong)highestDiff);
++
++                    RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
++                }
++                finally
+                 {
+-                    highestDiff = diff;
++                    if (overlaps != null)
++                    {
++                        ArrayPool<BufferModifiedRange>.Shared.Return(overlaps);
++                    }
+                 }
+             }
+-
+-            if (highestDiff == long.MinValue)
++            finally
+             {
+                 Lock.ExitWriteLock();
+-                
+-                return;
+             }
+-
+-            // Wait for the syncpoint.
+-            _context.Renderer.WaitSync(currentSync + (ulong)highestDiff);
+-
+-            RemoveRangesAndFlush(overlaps, rangeCount, highestDiff, currentSync, address, endAddress);
+-            
+-            ArrayPool<BufferModifiedRange>.Shared.Return(overlaps!);
+-            
+-            Lock.ExitWriteLock();
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs b/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
+index 9d682bab2b26caa7f830d9427060662fb6b1f160..15f052221a8e8876ae6d2dda3d751c07b81f9ef0 100644
+--- a/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
++++ b/src/Ryujinx.Graphics.Vulkan/FenceHelper.cs
+@@ -9,12 +9,16 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public static bool AnySignaled(Vk api, Device device, ReadOnlySpan<Fence> fences, ulong timeout = 0)
+         {
+-            return api.WaitForFences(device, (uint)fences.Length, fences, false, timeout) == Result.Success;
++            Result result = api.WaitForFences(device, (uint)fences.Length, fences, false, timeout);
++            result.ThrowOnError();
++            return result == Result.Success;
+         }
+ 
+         public static bool AllSignaled(Vk api, Device device, ReadOnlySpan<Fence> fences, ulong timeout = 0)
+         {
+-            return api.WaitForFences(device, (uint)fences.Length, fences, true, timeout) == Result.Success;
++            Result result = api.WaitForFences(device, (uint)fences.Length, fences, true, timeout);
++            result.ThrowOnError();
++            return result == Result.Success;
+         }
+ 
+         public static void WaitAllIndefinitely(Vk api, Device device, ReadOnlySpan<Fence> fences)

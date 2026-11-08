@@ -1,0 +1,91 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
+index 0a4837b47b00533266e9fac33c7ad64f0447d571..669969e08ee76761ef667672e62bae35e514ce6a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/ApplicationDisplayService/AndroidSurfaceComposerClient.cs
+@@ -6,10 +6,10 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService.ApplicationDisplayService
+         public static (ulong, ulong) GetDisplayInfo(ServiceCtx context, ulong displayId = 0)
+         {
+             // TODO: This need to be REd, it should returns the driver resolution and more.
+-            // S2Arm: width follows the host screen aspect (S2ADisplay); height unchanged
++            // S2Arm: width / height follow the host screen aspect (S2ADisplay: wider screen widens, taller screen lengthens)
+             ulong height = context.Device.System.State.DockedMode ? 1080UL : 720UL;
+ 
+-            return (S2ADisplay.Width(height), height);
++            return (S2ADisplay.Width(height), S2ADisplay.Height(height));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
+index c49ec3ffe38c74a3b6f6f04a22249adc6dc139d9..e7fcd2c34b61338dd4367c0c84153cfe38a35feb 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Vi/RootService/IApplicationDisplayService.cs
+@@ -54,12 +54,12 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
+                 _displayInfo.Add(displayInfo);
+             }
+ 
+-            // S2Arm: display widths follow the host screen aspect (S2ADisplay); heights unchanged
+-            AddDisplayInfo("Default", true, 1, S2ADisplay.Width(1080), 1080);
+-            AddDisplayInfo("External", true, 1, S2ADisplay.Width(1080), 1080);
++            // S2Arm: display sizes follow the host screen aspect (S2ADisplay: wider screen widens, taller screen lengthens)
++            AddDisplayInfo("Default", true, 1, S2ADisplay.Width(1080), S2ADisplay.Height(1080));
++            AddDisplayInfo("External", true, 1, S2ADisplay.Width(1080), S2ADisplay.Height(1080));
+             AddDisplayInfo("Edid", true, 1, 0, 0);
+-            AddDisplayInfo("Internal", true, 1, S2ADisplay.Width(1080), 1080);
+-            AddDisplayInfo("Null", false, 0, S2ADisplay.Width(1080), 1080);
++            AddDisplayInfo("Internal", true, 1, S2ADisplay.Width(1080), S2ADisplay.Height(1080));
++            AddDisplayInfo("Null", false, 0, S2ADisplay.Width(1080), S2ADisplay.Height(1080));
+         }
+ 
+         [CommandCmif(100)]
+@@ -223,11 +223,11 @@ namespace Ryujinx.HLE.HOS.Services.Vi.RootService
+             // NOTE: Returns ResultCode.InvalidArguments if width and height pointer are null, doesn't occur in our case.
+ 
+             // NOTE: Values are hardcoded in original service.
+-            // S2Arm: width follows the host screen aspect (S2ADisplay); the original hardcodes 1280x720
+-            ulong width = S2ADisplay.Width(720);
+-            S2ADisplay.Report("vi.IApplicationDisplayService.GetDisplayResolution", width, 720);
++            // S2Arm: size follows the host screen aspect (S2ADisplay); the original hardcodes 1280x720
++            ulong width = S2ADisplay.Width(720), height = S2ADisplay.Height(720);
++            S2ADisplay.Report("vi.IApplicationDisplayService.GetDisplayResolution", width, height);
+             context.ResponseData.Write(width);  // Width
+-            context.ResponseData.Write(720UL);  // Height
++            context.ResponseData.Write(height); // Height
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/S2ADisplay.cs b/src/Ryujinx.HLE/S2ADisplay.cs
+index b4b541d114f626fff209168fd71112b48959d603..4efa776f8e1f1daff0a9ce2bcfbef4eb0693c3da 100644
+--- a/src/Ryujinx.HLE/S2ADisplay.cs
++++ b/src/Ryujinx.HLE/S2ADisplay.cs
+@@ -4,7 +4,10 @@ using System.Collections.Concurrent;
+ namespace Ryujinx.HLE
+ {
+     // S2Arm: display resolution reported to the game follows the host screen's aspect ratio (native widescreen, the game
+-    // computes its own frustum). Height is unchanged (1080 docked / 720 handheld); width = round(height × aspect / 2) × 2.
++    // computes its own frustum). Wider than 16:9: height unchanged (1080 docked / 720 handheld), width = round(height × aspect / 2) × 2.
++    // Narrower than 16:9 (taller: iPhone Duo inner screen, iPad): width unchanged, height = round(height × ScaleY / 2) × 2, ScaleY = native
++    //   s2a_screen_h / 1080 (the same height the widen core and the tall render targets use: 720 → 900 / 1080 → 1350 at 1.422).
++    //   Before 11-05 a taller screen reported the original 16:9 size, so tall layer 1 never existed.
+     // Aspect comes from the host: S2Arm sets it at S2A_Init from the native layer's screen width (s2a_screen_w / 1080, the single
+     // source shared with the widescreen patch points and the GAL widen wrapper); default 16:9, which reproduces the original 1920 / 1280.
+     public static class S2ADisplay
+@@ -18,8 +21,19 @@ namespace Ryujinx.HLE
+             set => _aspect = value > 0 ? value : 16.0 / 9.0;
+         }
+ 
++        private static double _scaleY = 1.0;
++
++        // Taller screen: height scale over 16:9 (native s2a_screen_h / 1080); 1 = not taller
++        public static double ScaleY
++        {
++            get => _scaleY;
++            set => _scaleY = value > 1 ? value : 1.0;
++        }
++
+         public static ulong Width(ulong height) => (ulong)Math.Round(height * _aspect / 2) * 2;
+ 
++        public static ulong Height(ulong height) => (ulong)Math.Round(height * _scaleY / 2) * 2;
++
+         // First query per interface logs one line (the widescreen loop checks whether the game reads it at all)
+         public static void Report(string where, ulong width, ulong height)
+         {

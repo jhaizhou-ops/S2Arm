@@ -1,0 +1,701 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 747b524d99daa451afa4c0f815434c23dfb3100f..c2650319baacd4b048fb9416dc906345d5e98e4a 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -73,7 +73,7 @@ namespace Ryujinx.Graphics.Gpu
+         {
+             if (S2ASyncptImmediate)
+             {
+-                Synchronization.IncrementSyncpoint(syncpointId);
++                S2AGameSync.Record(syncpointId, Synchronization.IncrementSyncpoint(syncpointId), SyncNumber - 1);
+                 return;
+             }
+ 
+@@ -91,7 +91,7 @@ namespace Ryujinx.Graphics.Gpu
+             foreach ((uint id, ulong sync) in _s2aSyncpt.GetConsumingEnumerable())
+             {
+                 Renderer.WaitSync(sync);
+-                Synchronization.IncrementSyncpoint(id);
++                S2AGameSync.Record(id, Synchronization.IncrementSyncpoint(id), sync);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 4ff5ea35b907c9e48f1343388059687526a7d67d..3760c146758fa432fb4d865266f6a062095dc5c7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -709,8 +709,55 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// If the buffer does not exist, this method will create it.
+         /// </summary>
+         /// <param name="handle">Handle of the texture group to flush slices of</param>
++        // S2A 部分回写：条件全满足才做（否则返回 false，照旧整张回写）。见 Ryujinx.Graphics.Texture.S2APartialLayout
++        private bool S2ATryPartialFlush(TextureGroupHandle handle, ulong address, ulong size, out ulong pAddr, out ulong pSize)
++        {
++            pAddr = pSize = 0;
++            TextureInfo info = Storage.Info;
++            int bpp = info.FormatInfo.BytesPerPixel;
++
++            if (_flushBuffer == BufferHandle.Null || _flushBufferImported || info.Target != Target.Texture2D || info.Levels != 1 || info.GetSlices() != 1 ||
++                info.IsLinear || info.FormatInfo.BlockWidth != 1 || info.FormatInfo.BlockHeight != 1 || info.GobBlocksInTileX != 1 || info.GobBlocksInZ != 1 ||
++                handle.BaseSlice != 0 || handle.SliceCount != 1 || Storage.Range.Count != 1 || Storage.Size < 0x10000 ||
++                (info.Width * bpp) % 16 != 0 || (bpp & (bpp - 1)) != 0 || bpp > 16)
++            {
++                return false;
++            }
++
++            ulong baseAddr = Storage.Range.GetSubRange(0).Address;
++
++            if (address < baseAddr)
++            {
++                return false;
++            }
++
++            int texSize = (int)Storage.Size;
++            int off = (int)(address - baseAddr) & ~0xFFF;
++            int end = Math.Min(texSize, (int)((address + size - baseAddr + 0xFFF) & ~0xFFFUL));
++            int len = end - off;
++
++            if (len <= 0 || len > texSize / 8 || (len & 511) != 0 ||
++                !S2APartialLayout.RowRange(off, len, info.Width, info.Height, bpp, info.GobBlocksInY, out int rowMin, out int rowMax))
++            {
++                return false;
++            }
++
++            int stride = S2APartialLayout.HostStride(info.Width, bpp);
++
++            using PinnedSpan<byte> data = _context.Renderer.GetBufferData(_flushBuffer, _allOffsets[0] + rowMin * stride, (rowMax - rowMin + 1) * stride);
++            using WritableRegion region = _physicalMemory.GetWritableRegion(Storage.Range.Slice((ulong)off, (ulong)len), false);
++
++            S2APartialLayout.Write(region.Memory.Span, off, info.Width, info.Height, bpp, info.GobBlocksInY, data.Get(), rowMin, stride);
++            S2APartialFlush.Count++;
++            pAddr = baseAddr + (ulong)off;
++            pSize = (ulong)len;
++
++            return true;
++        }
++
+         public void FlushIntoBuffer(TextureGroupHandle handle)
+         {
++            if (S2ATexFlushStat.On) System.Threading.Interlocked.Increment(ref S2ATexFlushStat.Prefill);
+             // Ensure that the buffer exists.
+ 
+             if (_flushBufferInvalid && _flushBuffer != BufferHandle.Null)
+@@ -1794,6 +1841,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             bool isGpuThread = _context.IsGpuThread();
+ 
+             if (S2ATexFlushTrace.On) S2ATexFlushTrace.Note(isGpuThread, Storage.Info, address, size);
++            if (S2ATexFlushStat.On) S2ATexFlushStat.NoteOffset(Storage.Info, Storage.Range.GetSubRange(0).Address, address, size, (int)Storage.Size);
+ 
+             if (isGpuThread)
+             {
+@@ -1801,9 +1849,27 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 handle.Modified = false;
+             }
+ 
++            bool s2aRead = Ryujinx.Memory.Tracking.MemoryTracking.S2AReadTouch;   // 游戏代码读缺页触发（NxTrack.Touch）：可只回写所碰子页
++
++            // S2A（帧率能耗线 10-23）：游戏读、而它还没在 CPU 上等过这批 GPU 结果（要等的宿主同步号 > 游戏已确认的 G）：按 Switch 语义读到的就是内存现值
++            // （GPU 写到哪算哪），不阻塞、不回写——放开所碰子页让这次读用现内存，回写动作保留、其余照拦；游戏等到之后（G 前进）或 GPU 再写时整段设回
++            if (s2aRead && !isGpuThread && S2AUnsyncNoWait.On && Memory.Buffer.S2AGpuReadFlush && handle.S2ANeededSync > S2AGameSync.G)
++            {
++                ulong subA = address & ~0xFFFUL, subE = (address + Math.Max(size, 1) + 0xFFF) & ~0xFFFUL;
++                RegionHandle.S2AKeepAction = true;
++                handle.Modified = true;
++                handle.S2AServeUnsynced(subA, subE - subA);
++                S2AUnsyncNoWait.Count++;
++
++                return;
++            }
++
+             _context.Renderer.BackgroundContextAction(() =>
+             {
++                long s2aT0 = S2ATexFlushStat.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
++                bool s2aUnsynced = S2ATexFlushStat.On && !isGpuThread && handle.S2ANeededSync > S2AGameSync.G;
+                 bool inBuffer = !isGpuThread && handle.Sync(_context);
++                long s2aT1 = S2ATexFlushStat.On ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+ 
+                 Storage.SignalModifiedDirty();
+ 
+@@ -1815,10 +1881,23 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+                 }
+ 
++                // S2A 部分回写（帧率能耗线 10-23）：游戏读、数据已在回写缓冲 → 只把所碰子页从缓冲转块线性写回，「GPU 改过」保持、离开跟踪锁后重新登记
++                if (s2aRead && inBuffer && S2APartialFlush.On && Memory.Buffer.S2AGpuReadFlush && S2ATryPartialFlush(handle, address, size, out ulong pAddr, out ulong pSize))
++                {
++                    handle.Modified = true;
++                    RegionHandle.S2AKeepAction = true;
++                    handle.S2APartialDone(pAddr, pSize);
++                    if (S2ATexFlushStat.On) S2ATexFlushStat.Note(Storage.Info, true, false, s2aT1 - s2aT0, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT1, partial: true, unsynced: s2aUnsynced);
++
++                    return;
++                }
++
+                 if (TextureCompatibility.CanTextureFlush(Storage.Info, _context.Capabilities) && !(inBuffer && _flushBufferImported))
+                 {
+                     FlushSliceRange(false, handle.BaseSlice, handle.BaseSlice + handle.SliceCount, inBuffer, Storage.GetFlushTexture());
+                 }
++
++                if (S2ATexFlushStat.On) S2ATexFlushStat.Note(Storage.Info, inBuffer, isGpuThread, s2aT1 - s2aT0, System.Diagnostics.Stopwatch.GetTimestamp() - s2aT1, unsynced: s2aUnsynced);
+             });
+         }
+ 
+@@ -1879,5 +1958,70 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+         }
+     }
+-}
+ 
++    // S2A 诊断（帧率能耗线 10-23，缺省关）：S2A_TEXFLUSH_STAT=1 时贴图回写按（格式 尺寸｜从回写缓冲拷 / 临时向 GPU 读回｜GPU 线程 / 其他线程）分账：次数、等同步耗时、拷贝耗时；
++    // 另计提前拷进回写缓冲（FlushIntoBuffer）次数。每 10 秒全打（不截断）。用来定「预先回写」做哪种
++    internal static class S2ATexFlushStat
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_TEXFLUSH_STAT") == "1";
++        public static long Prefill;
++        private static readonly System.Collections.Generic.Dictionary<string, (long N, long Wait, long Copy)> _acc = new();
++        private static long _next;
++
++        // 触发回写的访问在贴图里的偏移（按 4 KB 子页）：每张贴图（格式 尺寸 地址）统计前 16 个子页 × 次数，看游戏碰的是整张还是几片
++        private static readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<long, long>> _off = new();
++        public static void NoteOffset(TextureInfo info, ulong baseAddr, ulong address, ulong size, int texSize)
++        {
++            string key = $"{info.FormatInfo.Format} {info.Width}x{info.Height} 块高 {info.GobBlocksInY} 基址 {baseAddr:x} 大小 {texSize:x}";
++            long sub = ((long)address - (long)baseAddr) >> 12;
++            lock (_acc)
++            {
++                if (!_off.TryGetValue(key, out var d)) _off[key] = d = new();
++                d.TryGetValue(sub, out long n); d[sub] = n + 1;
++            }
++        }
++
++        public static long UnsyncN, UnsyncWait, SyncN, SyncWait;
++
++        public static void Note(TextureInfo info, bool inBuffer, bool gpuThread, long wait, long copy, bool partial = false, bool unsynced = false)
++        {
++            if (!gpuThread) { if (unsynced) { UnsyncN++; UnsyncWait += wait; } else { SyncN++; SyncWait += wait; } }
++            string key = $"{info.FormatInfo.Format} {info.Width}x{info.Height}｜{(partial ? "部分回写" : inBuffer ? "从回写缓冲拷" : "临时读回")}｜{(gpuThread ? "GPU 线程" : unsynced ? "其他线程·游戏未同步" : "其他线程·游戏已同步")}";
++            lock (_acc)
++            {
++                _acc.TryGetValue(key, out var v);
++                _acc[key] = (v.N + 1, v.Wait + wait, v.Copy + copy);
++                long now = System.Diagnostics.Stopwatch.GetTimestamp();
++                if (now < _next) return;
++                _next = now + System.Diagnostics.Stopwatch.Frequency * 10;
++                double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
++                long n = 0, w = 0, c = 0; foreach (var x in _acc.Values) { n += x.N; w += x.Wait; c += x.Copy; }
++                System.Console.Error.WriteLine($"[贴图回写账] 累计 {n} 次：等同步 {w * f:F0} ms、拷贝 {c * f:F0} ms；提前拷进回写缓冲 {System.Threading.Interlocked.Read(ref Prefill)} 次；部分回写 {S2APartialFlush.Count} 次；游戏未同步 {UnsyncN} 次 等 {UnsyncWait * f:F0} ms / 已同步 {SyncN} 次 等 {SyncWait * f:F0} ms；未同步放行不回写 贴图 {S2AUnsyncNoWait.Count} / 缓冲 {S2AUnsyncNoWait.BufCount} 次");
++                foreach (var kv in System.Linq.Enumerable.OrderByDescending(_acc, kv => kv.Value.Wait + kv.Value.Copy))
++                    System.Console.Error.WriteLine($"[贴图回写账]   {kv.Key}：{kv.Value.N} 次 等 {kv.Value.Wait * f:F1} ms 拷 {kv.Value.Copy * f:F1} ms");
++                foreach (var kv in _off)
++                {
++                    long tot = 0; foreach (var x in kv.Value.Values) tot += x;
++                    if (tot < 50) continue;
++                    var sb = new System.Text.StringBuilder();
++                    foreach (var x in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(kv.Value, x => x.Value), 16)) sb.Append($" 子页 {x.Key}×{x.Value}");
++                    System.Console.Error.WriteLine($"[贴图回写触发] {kv.Key}：共 {tot} 次、不同子页 {kv.Value.Count} 个；{sb}");
++                }
++            }
++        }
++    }
++
++    // S2A 部分回写的开关（S2A_PARTIAL_FLUSH=0 关，A/B 用）
++    internal static class S2APartialFlush
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_PARTIAL_FLUSH") != "0";
++        public static long Count;
++    }
++
++    // S2A 游戏没等过就读不阻塞（S2A_UNSYNC_NOWAIT=0 关；整体随 Buffer.S2AGpuReadFlush，缺省关）
++    internal static class S2AUnsyncNoWait
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_UNSYNC_NOWAIT") != "0";
++        public static long Count, BufCount;
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroupHandle.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroupHandle.cs
+index 1f2ee1a47eab5e795a13dd1aba8b01339576dd96..4f81f5fc5d959577435a98deddf2f720b4010ee5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroupHandle.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroupHandle.cs
+@@ -313,6 +313,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         public void SignalModified(GpuContext context)
+         {
+             Modified = true;
++            S2APartialRearm();
+ 
+             // If this handle has any copy dependencies, notify the other handle that a copy needs to be performed.
+ 
+@@ -405,6 +406,51 @@ namespace Ryujinx.Graphics.Gpu.Image
+             Interlocked.Exchange(ref _actionRegistered, 0);
+         }
+ 
++        // S2A 部分回写：只回写了所碰子页、回写动作留着（RegionHandle.S2AKeepAction），回写过的子页在写跟踪层放开了。
++        // GPU 再写这个句柄时（SignalModified）把整段在写跟踪层设回「GPU 改过」——RegionHandle 自己一直是 None，Ryujinx 不会再发改保护
++        private bool _s2aPartial;
++
++        // S2A 诊断：这次回写要等的宿主同步号（同 Sync 里的口径）
++        internal ulong S2ANeededSync => _registeredBufferGuestSync != ulong.MaxValue ? _registeredBufferGuestSync : _registeredSync;
++
++        internal unsafe void S2APartialDone(ulong address, ulong size)
++        {
++            Interlocked.Exchange(ref _actionRegistered, 1);   // 动作没撤（FlushAction 开头清过登记标记）
++            _s2aPartial = true;
++
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect != null)
++            {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect(address, size, (int)Ryujinx.Memory.MemoryPermission.Read);
++            }
++        }
++
++        // 游戏没等过就读：不回写、放开所碰子页，等 G 推过要等的同步号（S2AGameSync.Observe）或 GPU 再写时整段设回
++        internal unsafe void S2AServeUnsynced(ulong address, ulong size)
++        {
++            S2APartialDone(address, size);
++            S2AGameSync.Pend(this, S2ANeededSync);
++        }
++
++        internal void S2AUnsyncRearm() => S2APartialRearm();
++
++        private unsafe void S2APartialRearm()
++        {
++            if (!_s2aPartial)
++            {
++                return;
++            }
++
++            _s2aPartial = false;
++
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect != null)
++            {
++                foreach (RegionHandle h in Handles)
++                {
++                    Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect(h.Address, h.Size, (int)Ryujinx.Memory.MemoryPermission.None);
++                }
++            }
++        }
++
+         /// <summary>
+         /// Action to perform before a sync number is registered after modification.
+         /// This action will copy the texture data to the flush buffer if this texture
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index f32fa451b7f9817ba6088d1f1f6853cfe5426f34..80391aebbcfa0cb3f8827446ca3d60e4980bd494 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -389,6 +389,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             TryQueueBackingChange(stage);
+ 
+             _modifiedRanges.SignalModified(address, size);
++            S2AGameSync.RearmOverlap(address, size);   // S2A：GPU 又写了这段，未同步放行过的子页设回拦截
+ 
+             // S2A（帧率能耗线 10-23）：GPU 写了缓冲 → 整个缓冲登记成定向读时回写页（每个缓冲对象一次）。写跟踪缺省只拦写不拦读，
+             // 游戏读 GPU 改过、还没回写的缓冲字节拿到旧值：塞尔达 shader 存储写（StorageWrite）的结果被游戏读，站立时脚陷进地里、碎草不画
+@@ -793,6 +794,23 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="size">Size in bytes</param>
+         public void ExternalFlush(ulong address, ulong size)
+         {
++            // S2A（帧率能耗线 10-23）：游戏读、它还没在 CPU 上等过这段 GPU 结果（要等的同步号 > 游戏已确认的 G）：按 Switch 语义读内存现值，不阻塞、不回写；
++            // 回写动作保留、只放开所碰子页，G 推过或 GPU 再写这段时设回（S2AGameSync）。随 S2A_GPU_READFLUSH（缺省关）
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReadTouch && S2AGpuReadFlush && Image.S2AUnsyncNoWait.On && _modifiedRanges != null)
++            {
++                ulong subA = address & ~0xFFFUL, subE = (address + Math.Max(size, 1) + 0xFFF) & ~0xFFFUL;
++                ulong need = _modifiedRanges.S2AMaxSync(subA, subE - subA);
++
++                if (need != 0 && need > S2AGameSync.G)
++                {
++                    Ryujinx.Memory.Tracking.RegionHandle.S2AKeepAction = true;
++                    S2AGameSync.ServeRange(subA, subE - subA, need);
++                    Image.S2AUnsyncNoWait.BufCount++;
++
++                    return;
++                }
++            }
++
+             _context.Renderer.BackgroundContextAction(() =>
+             {
+                 BufferModifiedRangeList ranges = _modifiedRanges;
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+index aef04abc6b89a9ca09c0537dcfa78ab5384d9bd6..547d61f7396788b26950f2799e3f099b4a3b753e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferModifiedRangeList.cs
+@@ -307,6 +307,30 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="address">Start address to query</param>
+         /// <param name="size">Size to query</param>
+         /// <returns>True if a range exists in the specified region, false otherwise</returns>
++        /// <summary>S2A：这段里要等的最大同步号（同 WaitForAndFlushRanges 的口径：只算已登记、小于当前同步号的；没有返回 0）</summary>
++        public ulong S2AMaxSync(ulong address, ulong size)
++        {
++            if (_migrationTarget != null)
++            {
++                return _migrationTarget.S2AMaxSync(address, size);
++            }
++
++            ulong current = _context.SyncNumber, m = 0;
++            Lock.EnterReadLock();
++
++            foreach (BufferModifiedRange r in FindOverlapsAsSpan(address, size))
++            {
++                if (r.SyncNumber < current && r.SyncNumber > m)
++                {
++                    m = r.SyncNumber;
++                }
++            }
++
++            Lock.ExitReadLock();
++
++            return m;
++        }
++
+         public bool HasRange(ulong address, ulong size)
+         {
+             Lock.EnterReadLock();
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs b/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bc0c08697a58b323ba66dedc9ae6b2267ceb8ac
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/S2AGameSync.cs
+@@ -0,0 +1,158 @@
++// S2A: 本文件为 S2A 新增（非 Ryujinx 原版）。
++using System;
++using System.Threading;
++
++namespace Ryujinx.Graphics.Gpu
++{
++    /// <summary>
++    /// S2A「游戏已确认的 GPU 进度」（帧率能耗线 10-23）：游戏在 CPU 上等 GPU 走 nvhost-ctrl 同步点等待（NVN nvnSyncWait / 事件等待），
++    /// 等到值的那一刻起才算「同步过」到这个同步点。这里把（同步点，值）映射到推进时的宿主同步号，游戏确认一个值就把 G 推到对应宿主同步号。
++    /// 回写时要等的宿主同步号 > G = 游戏还没等过这批 GPU 结果（Switch 上此时 CPU 读到的是内存现值、不阻塞）。
++    /// 记录在同步点推进处（GpuContext.S2AIncrementSyncpointAfterHostSync），确认在 NvHostCtrl 当场到值与 NvHostEvent 到值回调
++    /// </summary>
++    public static class S2AGameSync
++    {
++        private const int Ids = 192, Ring = 64;
++        private static readonly uint[,] _val = new uint[Ids, Ring];
++        private static readonly ulong[,] _sync = new ulong[Ids, Ring];
++        private static readonly int[] _n = new int[Ids];
++        private static readonly object _lock = new();
++        private static long _g;
++
++        /// <summary>游戏已确认的最大宿主同步号（没确认过任何同步点 = 0）</summary>
++        public static ulong G => (ulong)Interlocked.Read(ref _g);
++
++        public static void Record(uint id, uint value, ulong hostSync)
++        {
++            if (id >= Ids) return;
++            lock (_lock)
++            {
++                int k = _n[id]++ % Ring;
++                _val[id, k] = value;
++                _sync[id, k] = hostSync;
++            }
++        }
++
++        // 游戏没等过就读、按 Switch 语义放行（不回写）的贴图句柄：G 推过它们要等的同步号时整段设回「GPU 改过」，游戏醒来再读就走正常回写
++        private static Image.TextureGroupHandle[] _pend = new Image.TextureGroupHandle[64];
++        private static ulong[] _pendSync = new ulong[64];
++        private static int _pendN;
++
++        internal static void Pend(Image.TextureGroupHandle h, ulong needed)
++        {
++            lock (_lock)
++            {
++                if (_pendN == _pend.Length)
++                {
++                    Array.Resize(ref _pend, _pendN * 2);
++                    Array.Resize(ref _pendSync, _pendN * 2);
++                }
++
++                _pend[_pendN] = h;
++                _pendSync[_pendN++] = needed;
++            }
++        }
++
++        // 缓冲：未同步放行过的子页段（地址、长度、要等的同步号）
++        private static ulong[] _rA = new ulong[64], _rS = new ulong[64], _rN = new ulong[64];
++        private static int _rn;
++
++        internal static unsafe void ServeRange(ulong addr, ulong size, ulong needed)
++        {
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect != null)
++            {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect(addr, size, (int)Ryujinx.Memory.MemoryPermission.Read);
++            }
++
++            lock (_lock)
++            {
++                if (_rn == _rA.Length)
++                {
++                    Array.Resize(ref _rA, _rn * 2); Array.Resize(ref _rS, _rn * 2); Array.Resize(ref _rN, _rn * 2);
++                }
++
++                _rA[_rn] = addr; _rS[_rn] = size; _rN[_rn++] = needed;
++            }
++        }
++
++        // 设回：重叠 [ovA, ovA+ovS)（ovS > 0）或要等的同步号 ≤ upTo 的段，在写跟踪层设回「GPU 改过」（None）。不分配（设回时才建一次小数组）
++        private static unsafe void RearmWhere(ulong ovA, ulong ovS, ulong upTo)
++        {
++            ulong[] a = null, s = null; int k = 0;
++            lock (_lock)
++            {
++                for (int i = 0; i < _rn; )
++                {
++                    bool hit = ovS != 0 ? _rA[i] < ovA + ovS && ovA < _rA[i] + _rS[i] : _rN[i] <= upTo;
++
++                    if (hit)
++                    {
++                        a ??= new ulong[_rn]; s ??= new ulong[_rn];
++                        a[k] = _rA[i]; s[k++] = _rS[i];
++                        _rn--; _rA[i] = _rA[_rn]; _rS[i] = _rS[_rn]; _rN[i] = _rN[_rn];
++                    }
++                    else i++;
++                }
++            }
++
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect != null)
++            {
++                for (int i = 0; i < k; i++)
++                {
++                    Ryujinx.Memory.Tracking.MemoryTracking.S2AReprotect(a[i], s[i], (int)Ryujinx.Memory.MemoryPermission.None);
++                }
++            }
++        }
++
++        internal static void RearmOverlap(ulong addr, ulong size)
++        {
++            if (Volatile.Read(ref _rn) == 0) return;
++            RearmWhere(addr, size, 0);
++        }
++
++        public static void Observe(uint id, uint value)
++        {
++            if (id >= Ids) return;
++            ulong best = 0;
++            lock (_lock)
++            {
++                int n = Math.Min(_n[id], Ring);
++                for (int i = 0; i < n; i++)
++                {
++                    // 同步点值按 32 位回绕比较：已到值 = value - v >= 0
++                    if ((int)(value - _val[id, i]) >= 0 && _sync[id, i] > best) best = _sync[id, i];
++                }
++            }
++            long cur;
++            do { cur = Interlocked.Read(ref _g); if ((ulong)cur >= best) return; } while (Interlocked.CompareExchange(ref _g, (long)best, cur) != cur);
++
++            // G 前进：放行过的句柄里要等的同步号已被游戏确认的，整段设回（在唤醒游戏之前，调用方同步调本函数）
++            Image.TextureGroupHandle[] due = null; int nd = 0;
++            lock (_lock)
++            {
++                for (int i = 0; i < _pendN; )
++                {
++                    if (_pendSync[i] <= best)
++                    {
++                        due ??= new Image.TextureGroupHandle[_pendN];
++                        due[nd++] = _pend[i];
++                        _pend[i] = _pend[--_pendN];
++                        _pendSync[i] = _pendSync[_pendN];
++                        _pend[_pendN] = null;
++                    }
++                    else i++;
++                }
++            }
++
++            for (int i = 0; i < nd; i++)
++            {
++                due[i].S2AUnsyncRearm();
++            }
++
++            if (Volatile.Read(ref _rn) != 0)
++            {
++                RearmWhere(0, 0, best);
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Texture/S2APartialLayout.cs b/src/Ryujinx.Graphics.Texture/S2APartialLayout.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e07a7a4e5509f3d4254830054e6dd0e6bb2aec1
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Texture/S2APartialLayout.cs
+@@ -0,0 +1,91 @@
++// S2A: 本文件为 S2A 新增（非 Ryujinx 原版）。
++using System;
++using static Ryujinx.Graphics.Texture.BlockLinearConstants;
++
++namespace Ryujinx.Graphics.Texture
++{
++    /// <summary>
++    /// S2A 部分回写（帧率能耗线 10-23）：游戏只读 GPU 渲染目标的一个 4 KB 子页时，只把这一段从线性宿主数据转成块线性写回，
++    /// 不整张转换（塞尔达 1920×1080 每次 8.4 MB、约 6 ms）。只处理单层、单级、块高 Z 为 1、GobBlocksInTileX 为 1、非压缩的 2D 块线性贴图；
++    /// 偏移与 LayoutConverter.ConvertLinearToBlockLinear 第 0 级完全一致（含小高度时块高减半、宿主行距 4 字节对齐），单测逐字节对照。
++    /// </summary>
++    public static class S2APartialLayout
++    {
++        /// <summary>第 0 级实际块高（GOB 数）：同 ConvertLinearToBlockLinear 的减半规则</summary>
++        public static int MipGobBlocksInY(int height, int gobBlocksInY)
++        {
++            int g = gobBlocksInY;
++
++            while (height <= (g >> 1) * GobHeight && g != 1)
++            {
++                g >>= 1;
++            }
++
++            return g;
++        }
++
++        /// <summary>宿主线性数据行距（字节）：同 ConvertLinearToBlockLinear（4 字节对齐）</summary>
++        public static int HostStride(int width, int bpp) => (width * bpp + LayoutConverter.HostStrideAlignment - 1) & ~(LayoutConverter.HostStrideAlignment - 1);
++
++        /// <summary>块线性字节区间 [off, off+len)（512 字节对齐）用到的源行范围 [rowMin, rowMax]；没有落在图像内的行返回 false</summary>
++        public static bool RowRange(int off, int len, int width, int height, int bpp, int gobBlocksInY, out int rowMin, out int rowMax)
++        {
++            int gobH = MipGobBlocksInY(height, gobBlocksInY);
++            int blocksPerRow = AlignUp(width, GobStride / bpp) * bpp / GobStride;
++            rowMin = int.MaxValue;
++            rowMax = -1;
++
++            for (int g = off / GobSize; g < (off + len) / GobSize; g++)
++            {
++                int y0 = GobY(g, blocksPerRow, gobH) * GobHeight;
++
++                if (y0 >= height)
++                {
++                    continue;
++                }
++
++                rowMin = Math.Min(rowMin, y0);
++                rowMax = Math.Max(rowMax, Math.Min(height - 1, y0 + GobHeight - 1));
++            }
++
++            return rowMax >= 0;
++        }
++
++        /// <summary>
++        /// 把线性源（从第 srcRow0 行起、行距 srcStride）里落在块线性区间 [off, off+dst.Length) 的像素写进 dst（dst[0] 对应偏移 off）。
++        /// 图像外的填充字节不动。off、dst.Length 须 512 字节对齐；宽 × 每像素字节须是 16 的倍数（调用方先判）
++        /// </summary>
++        public static void Write(Span<byte> dst, int off, int width, int height, int bpp, int gobBlocksInY, ReadOnlySpan<byte> src, int srcRow0, int srcStride)
++        {
++            int gobH = MipGobBlocksInY(height, gobBlocksInY);
++            int blocksPerRow = AlignUp(width, GobStride / bpp) * bpp / GobStride;
++            int rowBytes = width * bpp;
++
++            for (int g = off / GobSize; g < (off + dst.Length) / GobSize; g++)
++            {
++                int rem = g % (blocksPerRow * gobH);
++                int x0 = rem / gobH * GobStride;
++                int y0 = GobY(g, blocksPerRow, gobH) * GobHeight;
++                int gobBase = g * GobSize - off;
++
++                for (int y = 0; y < GobHeight && y0 + y < height; y++)
++                {
++                    for (int xs = 0; xs < GobStride && x0 + xs < rowBytes; xs += 16)
++                    {
++                        int d = gobBase + (xs >> 5 << 8) + (y >> 1 << 6) + ((xs & 31) >> 4 << 5) + ((y & 1) << 4);
++                        src.Slice((y0 + y - srcRow0) * srcStride + x0 + xs, 16).CopyTo(dst.Slice(d, 16));
++                    }
++                }
++            }
++        }
++
++        private static int GobY(int g, int blocksPerRow, int gobH)
++        {
++            int blockRowGobs = blocksPerRow * gobH;
++
++            return g / blockRowGobs * gobH + g % blockRowGobs % gobH;
++        }
++
++        private static int AlignUp(int v, int a) => (v + a - 1) / a * a;
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+index d1e98ac76780e275c3f1d0e353eb5aa916eb8b8b..6fafb4aeff00dad45805d8037740b3290fdcc542 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+@@ -349,6 +349,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+             if (_device.System.HostSyncpoint.IsSyncpointExpired(fence.Id, fence.Value))
+             {
+                 value = _device.System.HostSyncpoint.ReadSyncpointMinValue(fence.Id);
++                Ryujinx.Graphics.Gpu.S2AGameSync.Observe(fence.Id, fence.Value);   // S2A：游戏确认到这个同步点值
+ 
+                 return NvInternalResult.Success;
+             }
+@@ -360,6 +361,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+             if (_device.System.HostSyncpoint.IsSyncpointExpired(fence.Id, fence.Value))
+             {
+                 value = newCachedSyncpointValue;
++                Ryujinx.Graphics.Gpu.S2AGameSync.Observe(fence.Id, fence.Value);   // S2A：游戏确认到这个同步点值
+ 
+                 return NvInternalResult.Success;
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+index a9ce0ef044fbbc5b9eb922cf294ed78f1be6ae9b..82bcff840aa892794fe94dd61867570cbf5fff61 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+@@ -92,6 +92,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+                 }
+ 
+                 ResetFailingState();
++                Ryujinx.Graphics.Gpu.S2AGameSync.Observe(Fence.Id, Fence.Value);   // S2A：游戏等的同步点到值（之后唤醒游戏）
+ 
+                 Signal();
+             }
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index a429ab2bebb31a8b9ba541fb6e55d8bf052a159e..f0ffa07f80424a715c33eb111737d93ca759d329 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -22,6 +22,19 @@ namespace Ryujinx.Memory.Tracking
+         /// </summary>
+         public static unsafe delegate*<ulong, byte*, int, void> S2AReadUntracked;
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-23，部分回写）：本线程正在处理的跟踪事件是游戏代码的读缺页（NxTrack.Touch 设、只在它的调用期间为真）。
++        /// GPU 层据此对读只回写所碰子页（写要整张回写：写过的贴图要重传）
++        /// </summary>
++        [ThreadStatic]
++        public static bool S2AReadTouch;
++
++        /// <summary>
++        /// S2A（部分回写）：直接改写跟踪层（graphics/track）对一段游戏内存的保护意图，不经 RegionHandle（NxTrack.Init 设 → s2a_track_reprotect）。
++        /// 部分回写后只放开被回写的子页（Read）、GPU 再写这张贴图时整段设回（None）；RegionHandle 自己的保护全程不撤（见 RegionHandle.S2AKeepAction）
++        /// </summary>
++        public static unsafe delegate*<ulong, ulong, int, void> S2AReprotect;
++
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 
+diff --git a/src/Ryujinx.Memory/Tracking/RegionHandle.cs b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+index f52f6d77779057dc99b5beb73a511bbd4092a829..13a6c6cddd99b32f46e1e9e8831579d2e8ce27d6 100644
+--- a/src/Ryujinx.Memory/Tracking/RegionHandle.cs
++++ b/src/Ryujinx.Memory/Tracking/RegionHandle.cs
+@@ -260,6 +260,10 @@ namespace Ryujinx.Memory.Tracking
+         /// <param name="size">Size of the region affected in bytes</param>
+         /// <param name="write">Whether the region was written to or read</param>
+         /// <param name="handleIterable">Reference to the handles being iterated, in case the list needs to be copied</param>
++        /// <summary>S2A 部分回写：回写动作在本线程执行期间置真 = 动作执行完不撤（见 Signal）</summary>
++        [ThreadStatic]
++        public static bool S2AKeepAction;
++
+         internal void Signal(ulong address, ulong size, bool write, ref IList<RegionHandle> handleIterable)
+         {
+             // If this handle was already unmapped (even if just partially),
+@@ -290,11 +294,18 @@ namespace Ryujinx.Memory.Tracking
+                 {
+                     lock (PreActionLock)
+                     {
++                        S2AKeepAction = false;
+                         _preAction?.Invoke(maxAddress, minEndAddress - maxAddress);
+ 
+                         // The action is removed after it returns, to ensure that the null check above succeeds when
+                         // it's still in progress rather than continuing and possibly missing a required data flush.
+-                        Interlocked.Exchange(ref _preAction, null);
++                        // S2A：动作只回写了所碰的一段（部分回写）时置 S2AKeepAction：动作保留、保护保持 None，其余部分照旧拦（不留放开再登记的窗口）
++                        if (!S2AKeepAction)
++                        {
++                            Interlocked.Exchange(ref _preAction, null);
++                        }
++
++                        S2AKeepAction = false;
+                     }
+                 }
+                 finally

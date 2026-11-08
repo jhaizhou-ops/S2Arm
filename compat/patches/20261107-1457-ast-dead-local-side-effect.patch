@@ -1,0 +1,17 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index 30cfea31ca69dfa3402aff8586a0ef8106320447..8f7e61267ede4d5074b5e82fd9c8f8f78fced844 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -62,7 +62,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                             }
+                         }
+ 
+-                        if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0)
++                        // S2Arm 11-07: a dead local is removed together with its assignment, so only when the source has no side
++                        // effect. An atomic / call whose result is unused (image atomic OR into a write-log bitmap, SURED.OR) was
++                        // dropped with it once DebugMode no longer skipped this loop (ampere_isa_test: 5 of 85 red).
++                        if (propVar.Type == OperandType.LocalVariable && propVar.Uses.Count == 0 &&
++                            (GetMemoryEffects(assignment.Source) & MemoryEffect) == 0)
+                         {
+                             visitor.Block.Remove(assignment);
+ 

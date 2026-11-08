@@ -1,0 +1,90 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+index 1c4077b33055a57f8f144c315e46acefcaed8e95..e99906d1fbf648776dc9bea604f353140d9f874d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+@@ -273,6 +273,33 @@ namespace Ryujinx.HLE.HOS.Services.Ro
+             return ResultCode.InsufficientAddressSpace;
+         }
+ 
++        private static unsafe ResultCode S2AMapNro(NroInfo info, out ulong nroMappedAddress)
++        {
++            ulong mapped = 0;
++            int rc;
++
++            fixed (byte* hash = info.Hash)
++            {
++                rc = S2AHooks.NroMap(hash, info.NroSize, info.BssSize, &mapped);
++            }
++
++            nroMappedAddress = mapped;
++
++            switch (rc)
++            {
++                case 0:
++                    return ResultCode.Success;
++                case 3:
++                    return ResultCode.AlreadyLoaded;
++                case 4:
++                    S2AHooks.Red?.Invoke($"ro LoadNro: module table full ({Convert.ToHexString(info.Hash)[..8]}…)");
++                    return ResultCode.InsufficientAddressSpace;
++                default:
++                    S2AHooks.Red?.Invoke($"ro LoadNro: native map failed rc={rc} ({Convert.ToHexString(info.Hash)[..8]}…, size {info.NroSize:x}, bss {info.BssSize:x})");
++                    return ResultCode.InvalidNro;
++            }
++        }
++
+         private bool CanAddGuardRegionsInProcess(KProcess process, ulong baseAddress, ulong size)
+         {
+             KPageTableBase memMgr = process.MemoryManager;
+@@ -410,6 +437,11 @@ namespace Ryujinx.HLE.HOS.Services.Ro
+ 
+         private ResultCode UnmapNroFromInfo(NroInfo info)
+         {
++            if (S2AHooks.NroHooked)
++            {
++                return S2AHooks.NroUnmapAt(info.NroMappedAddress) == 0 ? ResultCode.Success : ResultCode.NotLoaded;
++            }
++
+             ulong textSize = (ulong)info.Executable.Text.Length;
+             ulong roSize = (ulong)info.Executable.Ro.Length;
+             ulong dataSize = (ulong)info.Executable.Data.Length;
+@@ -475,7 +507,19 @@ namespace Ryujinx.HLE.HOS.Services.Ro
+ 
+                 result = ParseNro(out NroInfo info, context, nroHeapAddress, nroSize, bssHeapAddress, bssSize);
+ 
+-                if (result == ResultCode.Success)
++                if (result == ResultCode.Success && S2AHooks.NroHooked)
++                {
++                    // S2Arm: map the image rewritten at pack time (runtime/src/loader.c s2a_nro_map); the game's nn::ro relocates it, as on hardware
++                    result = S2AMapNro(info, out nroMappedAddress);
++
++                    if (result == ResultCode.Success)
++                    {
++                        info.NroMappedAddress = nroMappedAddress;
++
++                        _nroInfos.Add(info);
++                    }
++                }
++                else if (result == ResultCode.Success)
+                 {
+                     result = MapNro(_owner, info, out nroMappedAddress);
+ 
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 8da8f40a2af07a448bb7c1a744705387221f620b..97cc498053d327217847f7623cc723ab849eb2c8 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -24,6 +24,14 @@ namespace Ryujinx.HLE
+         // svc_mem.c s2a_ipc_addr39: only when the 39-bit address is not a game address and adding bit 39 gives a mapped one). Null = as decoded.
+         public static delegate* unmanaged<ulong, ulong> IpcAddr39;
+         public static ulong FixIpcAddr(ulong a) => IpcAddr39 == null ? a : IpcAddr39(a);
++        // ldr:ro LoadNro / UnloadNro (nn::ro). The NRO's code was rewritten at pack time like the exefs modules and is embedded in the app
++        // (iOS cannot execute code loaded at run time); the native layer maps that image by the NRO file's SHA-256 (runtime/src/loader.c s2a_nro_map).
++        // NroMap(sha256[32], nro size, bss size, out base) -> 0 ok, 1 not in the package, 2 size / bss mismatch, 3 already loaded, 4 module table full, 5 unsupported here.
++        // NroUnmap(base) -> 0 ok, 1 not loaded. Null = upstream (Ryujinx kernel memory manager).
++        public static delegate*<byte*, ulong, ulong, ulong*, int> NroMap;   // 宿主登记（services Native.NroMap → 原生核心 s2a_nro_map，DllImport 集中声明）
++        public static delegate*<ulong, int> NroUnmap;
++        public static bool NroHooked => NroMap != null;
++        public static int NroUnmapAt(ulong mapped) => NroUnmap(mapped);
+ 
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;

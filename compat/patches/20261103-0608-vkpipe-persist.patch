@@ -1,0 +1,96 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index ae59f5083cdbd9a45deb4fd907ba2135c9bdb0c3..0091ab259888f3750ee59308d539f4fb97f5a15f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -167,10 +167,12 @@ namespace Ryujinx.Graphics.Vulkan
+                     PipelineCacheFile.TryRead(_s2aPipelineCachePath, _s2aPipelineCacheIdentity, out byte[] cached, out readError))
+                 {
+                     initialData = cached;
++                    S2APipelineDiagnostics.ReportCacheImport(cached.Length, null);
+                     Console.Error.WriteLine($"[vkpipe] 导入驱动管线缓存 {cached.Length} 字节");
+                 }
+                 else if (_s2aPipelineCachePath != null)
+                 {
++                    S2APipelineDiagnostics.ReportCacheImport(0, readError);
+                     Console.Error.WriteLine($"[vkpipe] 驱动管线缓存未导入：{readError}");
+                 }
+ 
+@@ -188,6 +190,7 @@ namespace Ryujinx.Graphics.Vulkan
+                         Result result = gd.Api.CreatePipelineCache(device, in pipelineCacheCreateInfo, null, out PipelineCache);
+                         if (result.IsError)
+                         {
++                            S2APipelineDiagnostics.ReportCacheImport(0, "DRIVER_REJECTED: " + result);
+                             Console.Error.WriteLine($"[vkpipe] 导入的驱动缓存被拒（{result}），改用空缓存");
+                             pipelineCacheCreateInfo.InitialDataSize = 0;
+                             pipelineCacheCreateInfo.PInitialData = null;
+@@ -1931,6 +1934,8 @@ namespace Ryujinx.Graphics.Vulkan
+         /// </summary>
+         internal bool S2ASavePipelineCacheEarly() => S2ASavePipelineCache("收局请求时提前");
+         internal bool S2ASavePipelineCacheForExit() => S2ASavePipelineCache("收局补存");
++        // S2A（11-03 定期落盘）：崩溃 / 强杀不会走到收局路径，最多丢一个周期的新管线；没有新管线不写盘。
++        internal bool S2ASavePipelineCachePeriodic() => S2APipelineCacheCurrent || S2ASavePipelineCache("定期");
+         // S2A（10-27，单线程收局）：在停 WSI 之前落盘。单线程收局在原生 1.5 s 内做完整释放，窗口 / WSI 退休可能吃掉大半预算
+         //   （9000 r8：通过局总共 1.405 s；18:02 局 GPU Run 退出 +0.670 s、Surface detached +1.029 s、1.509 s 被 _exit）；
+         //   落盘只有几十毫秒，先做，后面超时也不丢缓存。释放时若之后没有新管线由 Dispose 跳过重存
+diff --git a/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+index 08d6908a7536e4fcbc683c76aefe74e96d8fad7e..0c9de1bdca1ac4c17eb29b5288aa083c7a1d0b34 100644
+--- a/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
++++ b/src/Ryujinx.Graphics.Vulkan/S2APipelineDiagnostics.cs
+@@ -20,6 +20,15 @@ namespace Ryujinx.Graphics.Vulkan
+         private static long _feedbackColorHits;
+         private static long _feedbackDepthHits;
+         private static long _depthPassSplits;
++        private static long _cacheImportBytes;
++        private static string _cacheImportError = "未尝试";
++
++        /// <summary>S2A：驱动管线缓存导入结果（字节数 / null = 命中，非 null = 未命中原因），进 [vkpb] 汇总行。</summary>
++        public static void ReportCacheImport(long bytes, string error)
++        {
++            Interlocked.Exchange(ref _cacheImportBytes, bytes);
++            Volatile.Write(ref _cacheImportError, error);
++        }
+ 
+         public static void ReportCreateFailure(Result result, string pipelineKey, string shaderHashes)
+         {
+@@ -118,10 +127,14 @@ namespace Ryujinx.Graphics.Vulkan
+             long feedbackColor = Interlocked.Read(ref _feedbackColorHits);
+             long feedbackDepth = Interlocked.Read(ref _feedbackDepthHits);
+             long depthSplits = Interlocked.Read(ref _depthPassSplits);
++            long cacheBytes = Interlocked.Read(ref _cacheImportBytes);
++            string cacheError = Volatile.Read(ref _cacheImportError);
++            string cache = cacheError == null ? $"驱动缓存导入 {cacheBytes} 字节（命中）"
++                : $"驱动缓存导入 {cacheBytes} 字节（未命中：{cacheError}）";
+ 
+             return $"建管线失败 {create}、未链接跳过 {skips}（图形 {graphics} / 计算 {compute}）、" +
+                    $"反馈环采样附件 {feedback}（颜色 {feedbackColor} / 深度 {feedbackDepth}）、" +
+-                   $"深度反馈环拆通道 {depthSplits}";
++                   $"深度反馈环拆通道 {depthSplits}、{cache}";
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 753b1a6ee5804b39a4f65e95bb46b97eb2589240..af0d35b81b18f33fc0e5269fb5568a82ef6a0bf0 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -159,6 +159,21 @@ namespace Ryujinx.Graphics.Vulkan
+             return worker.Run(pipeline.S2ASavePipelineCacheForExit, highPriority: true);
+         }
+ 
++        /// <summary>
++        /// S2A（11-03 定期落盘）：有编译通道时排到通道（普通优先级，避免插到正在创建的管线前），没有通道时由 GPU owner 直接落盘；
++        /// 没有新管线 = 已完成的 true，没有管线 / 通道已在停 = null。失败只记日志，不改变渲染路径。
++        /// </summary>
++        public Task<bool> S2ASavePipelineCachePeriodic()
++        {
++            CompileWorker worker = S2ACompileWorker;
++            PipelineFull pipeline = _pipeline;
++            if (pipeline == null) return null;
++            if (worker == null) return Task.FromResult(pipeline.S2ASavePipelineCachePeriodic());
++            if (worker.IsStopping) return null;
++
++            return worker.Run(pipeline.S2ASavePipelineCachePeriodic, highPriority: false);
++        }
++
+         /// <summary>
+         /// S2A（Android 单线程收局）：在停 WSI / 证明退休之前，把驱动管线缓存落盘一次（走同一编译通道，与管线创建串行）。
+         /// 原生收局兜底 1.5 s，单线程完整释放 + 窗口 / WSI 退休可能吃掉全部预算（9000 r8 18:02 局：GPU Run 退出 +0.670 s、

@@ -1,0 +1,123 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 83869ed02105d530f0419441a111fc351191e1ce..df854df6f09d24c59ca19efd9633940563bc376a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -39,6 +39,39 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// Must lock for any access from other threads.
+         /// </remarks>
+         private readonly NonOverlappingRangeList<Buffer> _buffers;
++
++        // S2A：缓冲查找的「最近命中」表（按查询地址的页号直接映射）。稳态每次绘制都要按物理地址查缓冲两次
++        // （绑定时 CreateBufferAligned 查重叠、提交时 GetBuffer / SynchronizeBufferRange 找所在缓冲），区间表是二分查找 + 泛型接口比较，AOT 下不内联：
++        // 旧库 10-19 测试机1 真机符号化 GPU 线程约 18%。命中条件 = 代数号相同且该缓冲完整包含所查区间——此时原代码查到的也只能是它
++        // （区间表互不重叠）。_buffers 每次增删（只有两个 CreateBufferAligned 里的 4 处）代数号加一，整表作废。
++        private const int S2ALookupBits = 10;
++        private readonly S2ALookupEntry[] _s2aLookup = new S2ALookupEntry[1 << S2ALookupBits];
++        private uint _s2aGen = 1;
++
++        private struct S2ALookupEntry
++        {
++            public ulong Start;
++            public ulong End;
++            public Buffer Buffer;
++            public uint Gen;
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        private Buffer S2ALookup(ulong address, ulong size)
++        {
++            ref S2ALookupEntry e = ref _s2aLookup[(int)(address >> 12) & ((1 << S2ALookupBits) - 1)];
++            return e.Gen == _s2aGen && address >= e.Start && address + size <= e.End ? e.Buffer : null;
++        }
++
++        [MethodImpl(MethodImplOptions.AggressiveInlining)]
++        private void S2ARemember(ulong address, ulong size, Buffer buffer)
++        {
++            if (buffer != null && address >= buffer.Address && address + size <= buffer.EndAddress)
++            {
++                _s2aLookup[(int)(address >> 12) & ((1 << S2ALookupBits) - 1)] = new S2ALookupEntry { Start = buffer.Address, End = buffer.EndAddress, Buffer = buffer, Gen = _s2aGen };
++            }
++        }
++
+         private readonly MultiRangeList<MultiRangeBuffer> _multiRangeBuffers;
+ 
+         private readonly Dictionary<ulong, BufferCacheEntry> _dirtyCache;
+@@ -484,8 +517,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="stage">The type of usage that created the buffer</param>
+         private void CreateBufferAligned(ulong address, ulong size, BufferStage stage)
+         {
++            if (S2ALookup(address, size) != null) // S2A：已有缓冲完整包含该区间——原代码此时什么也不做
++            {
++                return;
++            }
++
+             ReadOnlySpan<Buffer> overlaps = _buffers.FindOverlapsAsSpan(address, size);
+ 
++            if (overlaps.Length == 1)
++            {
++                S2ARemember(address, size, overlaps[0]); // S2A：只在完整包含时记（此时下面的判断不成立，不动缓冲表）
++            }
++
+             if (overlaps.Length != 0)
+             {
+                 // The buffer already exists. We can just return the existing buffer
+@@ -534,6 +577,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+                     Buffer[] overlapsArray = overlaps.ToArray();
+                     
++                    _s2aGen++; // S2A：缓冲表要变，最近命中表作废
+                     _buffers.RemoveRange(overlaps[0], overlaps[^1]);
+                     
+                     ulong newSize = endAddress - address;
+@@ -544,6 +588,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             else
+             {
+                 // No overlap, just create a new buffer.
++                _s2aGen++; // S2A
+                 _buffers.Add(new(_context, _physicalMemory, address, size, stage, sparseCompatible: false, []));
+             }
+         }
+@@ -599,6 +644,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     
+                     Buffer[] overlapsArray = overlaps.ToArray();
+                     
++                    _s2aGen++; // S2A：缓冲表要变，最近命中表作废
+                     _buffers.RemoveRange(overlaps[0], overlaps[^1]);
+                     
+                     _buffers.Add(CreateBufferAligned(address, newSize, stage, sparseAligned, overlapsArray));
+@@ -607,6 +653,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             else
+             {
+                 // No overlap, just create a new buffer.
++                _s2aGen++; // S2A
+                 _buffers.Add(new(_context, _physicalMemory, address, size, stage, sparseAligned, []));
+             } 
+         }
+@@ -903,7 +950,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             if (size != 0)
+             {
+-                buffer = _buffers.FindOverlap(address, size);
++                buffer = S2ALookup(address, size); // S2A：最近命中
++                if (buffer == null)
++                {
++                    buffer = _buffers.FindOverlap(address, size);
++                    S2ARemember(address, size, buffer);
++                }
+ 
+                 buffer.CopyFromDependantVirtualBuffers();
+                 buffer.SynchronizeMemory(address, size);
+@@ -953,7 +1005,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             if (size != 0)
+             {
+-                Buffer buffer = _buffers.FindOverlap(address, size);
++                Buffer buffer = S2ALookup(address, size); // S2A：最近命中（与 GetBuffer 同口径：只在完整包含时命中）
++                if (buffer == null)
++                {
++                    buffer = _buffers.FindOverlap(address, size);
++                    S2ARemember(address, size, buffer);
++                }
+ 
+                 if (copyBackVirtual)
+                 {

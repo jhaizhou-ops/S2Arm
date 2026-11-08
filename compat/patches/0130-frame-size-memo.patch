@@ -1,0 +1,74 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Window.cs b/src/Ryujinx.Graphics.Gpu/Window.cs
+index 5517c25197d583524fce2322aa7de20d84398244..34c69bdede81ddd6c728209621d236ca68c9e4af 100644
+--- a/src/Ryujinx.Graphics.Gpu/Window.cs
++++ b/src/Ryujinx.Graphics.Gpu/Window.cs
+@@ -123,6 +123,23 @@ namespace Ryujinx.Graphics.Gpu
+         /// <param name="userObj">User defined object passed to the release callback</param>
+         /// <exception cref="ArgumentException">Thrown when <paramref name="pid"/> is invalid</exception>
+         /// <returns>True if the frame was added to the queue, false otherwise</returns>
++        private sealed class S2AFrameSize
++        {
++            public readonly int Width, Height, GobBlocksInY, Size;
++            public readonly byte BytesPerPixel;
++
++            public S2AFrameSize(int width, int height, byte bytesPerPixel, int gobBlocksInY, int size)
++            {
++                Width = width;
++                Height = height;
++                BytesPerPixel = bytesPerPixel;
++                GobBlocksInY = gobBlocksInY;
++                Size = size;
++            }
++        }
++
++        private volatile S2AFrameSize _s2aFrameSize;
++
+         public bool EnqueueFrameThreadSafe(
+             ulong pid,
+             ulong address,
+@@ -161,18 +178,33 @@ namespace Ryujinx.Graphics.Gpu
+                 Target.Texture2D,
+                 formatInfo);
+ 
+-            int size = SizeCalculator.GetBlockLinearTextureSize(
+-                width,
+-                height,
+-                1,
+-                1,
+-                1,
+-                1,
+-                1,
+-                bytesPerPixel,
+-                gobBlocksInY,
+-                1,
+-                1).TotalSize;
++            // S2Arm: SizeCalculator builds four per-level arrays every call (4 x int[1] = 128 B for a frame buffer); the compositor calls
++            // this every frame with the same size (10-21 iPhone: compositor 128 B per frame, the last steady allocation on that thread).
++            // Remember the last size: immutable memo swapped as one reference, so concurrent callers never mix fields of two sizes
++            S2AFrameSize memo = _s2aFrameSize;
++            int size;
++
++            if (memo != null && memo.Width == width && memo.Height == height && memo.BytesPerPixel == bytesPerPixel && memo.GobBlocksInY == gobBlocksInY)
++            {
++                size = memo.Size;
++            }
++            else
++            {
++                size = SizeCalculator.GetBlockLinearTextureSize(
++                    width,
++                    height,
++                    1,
++                    1,
++                    1,
++                    1,
++                    1,
++                    bytesPerPixel,
++                    gobBlocksInY,
++                    1,
++                    1).TotalSize;
++
++                _s2aFrameSize = new S2AFrameSize(width, height, bytesPerPixel, gobBlocksInY, size);
++            }
+ 
+             MultiRange range = new(address, (ulong)size);
+ 

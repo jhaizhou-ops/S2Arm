@@ -1,0 +1,252 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs b/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b2e883f027e1bfb0a66283151e4b9ed01b57aa2
+--- /dev/null
++++ b/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs
+@@ -0,0 +1,34 @@
++using System;
++
++namespace Ryujinx.HLE.FileSystem
++{
++    // S2Arm 平台 adapter（P6 存储提交，签名定稿见 #1072）：存档事务（S2ASaveCommit.cs）与存档迁移（services SaveTransfer，#211）要的宿主存储原语。
++    // 事务逻辑（工作目录、提交、记号）留在共用的 S2ASaveCommit；平台只实现下面这些原语，由平台装配在 Boot 之前登记。
++    // 没登记 = 不启用事务、存档走 LibHac 原路（打一行红）。实现必须无状态、线程安全（FS 服务线程上不同存档并发调）、不抛异常，一律返回 0 / errno；路径都是宿主绝对路径。
++    public interface IHostDirectoryTransaction
++    {
++        // 这个目录所在的卷能不能做本事务：挂载时问一次；false 时走 LibHac 原路。可在该卷建、删自己的探测目录（.s2a_probe_<pid>_<随机>），返回前清干净；任何失败都返回 false
++        bool Supported(string directory);
++        // 把整棵目录 source 复制或克隆到 destination（destination 必须不存在）。失败时实现负责清理，destination 不存在
++        int CloneTree(string source, string destination);
++        // 原子交换两个目录名：任何时刻被杀，两个名字下都是完整的某一版
++        int Exchange(string a, string b);
++        // 目录上的小记号（≤ 64 字节）：超长 EINVAL、不写
++        int WriteToken(string directory, ReadOnlySpan<byte> value);
++        // 没有记号：返回 0、length = 0；缓冲不够：返回 ERANGE、length = 实际长度（同 getxattr）
++        int ReadToken(string directory, Span<byte> value, out int length);
++        // 目录项落盘：在 directory 里新建 / 改名 / 删除之后调，只落这个目录本身、不递归；不跟随符号链接（是链接返回非 0 errno：Darwin 带 O_DIRECTORY 时为 ENOTDIR）
++        int SyncDirectory(string directory);
++        // 安全只读打开一个普通文件（存档迁移读归档 / 存档文件用，#211）：不跟随符号链接、不因 FIFO / 设备文件阻塞（O_NOFOLLOW | O_NONBLOCK 打开后核是普通文件）；
++        //   成功返回 0、handle 归调用方（可交给 FileStream）；是链接 / 不是普通文件 / 打不开返回非 0 errno、handle 为 null
++        int OpenRead(string path, out Microsoft.Win32.SafeHandles.SafeFileHandle handle);
++    }
++
++    public static class S2AHostFileSystem
++    {
++        // 平台装配在 Host.Boot 之前设一次，之后只读
++        public static IHostDirectoryTransaction Transaction { get; set; }
++
++        public const int TokenMax = 64;
++    }
++}
+diff --git a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+index b85cf17c5b99425d78f247350193cbb8bd0fa324..4023f19b1664cb758442ad16565b40851a8f8931 100644
+--- a/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
++++ b/src/Ryujinx.HLE/FileSystem/S2ASaveCommit.cs
+@@ -19,7 +19,8 @@ namespace Ryujinx.HLE.FileSystem
+     // at mount the committed directory <save>/0 is clonefile'd (copy-on-write, no bytes copied) into the working directory <save>/1 and the
+     // game reads and writes there; Commit clones the working directory to <save>/.s2a_new and renamex_np(RENAME_SWAP)s it with <save>/0,
+     // then deletes the swapped-out old version. Killed at any moment, <save>/0 is the old version or the new one, never a mix; extra data
+-    // commits with the same swap (S2ASaveTransaction.TokenAttr).
++    // commits with the same swap (S2ASaveTransaction token). The host primitives (clone / swap / token / directory sync) come from the platform:
++    // S2AHostFileSystem.Transaction (IHostDirectoryTransaction; Apple: clonefile / renamex_np / xattr in platform/apple/cs/savecommit).
+     // LibHac's own directory save copies the whole tree byte by byte at every mount and every commit. Here LibHac still serves files, locks
+     // and extra data (opened with journaling off, so it works on <save>/1 directly and commits nothing); this layer does the clone and the swap.
+     // Read-only opens, other kinds of saves and anything the host cannot clone keep LibHac's path unchanged.
+@@ -27,6 +28,7 @@ namespace Ryujinx.HLE.FileSystem
+     {
+         private readonly ISaveDataFileSystemCreator _inner;
+         private readonly string _baseDir;
++        private static int _unregisteredReported;
+ 
+         public S2ASaveDataFileSystemCreator(ISaveDataFileSystemCreator inner, string baseDir)
+         {
+@@ -44,14 +46,31 @@ namespace Ryujinx.HLE.FileSystem
+                 _ => null,
+             };
+ 
+-            if (partition == null || !(OperatingSystem.IsMacOS() || OperatingSystem.IsIOS()))
++            if (partition == null)
+             {
+                 return null;
+             }
+ 
+             string dir = System.IO.Path.Combine(baseDir, "bis", partition, "save", saveDataId.ToString("x16"));
+ 
+-            return Directory.Exists(dir) ? dir : null;
++            if (!Directory.Exists(dir))
++            {
++                return null;
++            }
++
++            IHostDirectoryTransaction txn = S2AHostFileSystem.Transaction;
++
++            if (txn == null)
++            {
++                if (Interlocked.Exchange(ref _unregisteredReported, 1) == 0)
++                {
++                    S2ASaveTransaction.Red("存档事务：平台没登记宿主目录原语（S2AHostFileSystem.Transaction），存档走 LibHac 原路、不做原子提交");
++                }
++
++                return null;
++            }
++
++            return txn.Supported(dir) ? dir : null;
+         }
+ 
+         public Result Create(ref SharedRef<ISaveDataFileSystem> outFileSystem, ref readonly SharedRef<IFileSystem> baseFileSystem, SaveDataSpaceId spaceId, ulong saveDataId, bool allowDirectorySaveData, bool isDeviceUniqueMac, bool isJournalingSupported, bool isMultiCommitSupported, bool openReadOnly, bool openShared, ISaveDataCommitTimeStampGetter timeStampGetter, bool isReconstructible)
+@@ -101,26 +120,15 @@ namespace Ryujinx.HLE.FileSystem
+     // One mounted transactional save: forwards to LibHac's directory save (journaling off, working on <save>/1) and owns Commit / Rollback
+     public sealed partial class S2ASaveTransaction : ISaveDataFileSystem
+     {
+-        private const uint RenameSwap = 0x2;   // renamex_np RENAME_SWAP
+-
+-        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+-        private static partial int clonefile(string src, string dst, uint flags);
+-
+-        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+-        private static partial int renamex_np(string from, string to, uint flags);
+-
+-        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+-        private static partial int setxattr(string path, string name, byte[] value, nuint size, uint position, int options);
+-
+-        [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+-        private static partial nint getxattr(string path, string name, byte[] value, nuint size, uint position, int options);
++        // 宿主目录原语（克隆 / 原子交换 / 记号 / 目录落盘）由平台登记；能走到这里说明挂载时 Supported 已为真
++        private static IHostDirectoryTransaction Txn => S2AHostFileSystem.Transaction;
+ 
+         // Extra data commits with the directory swap (audit #836 F-save-extra-after-swap): before the swap the new extra data is written as
+-        // <save>/.s2a_extra_pending = token + ExtraData1, and the same random token goes into an extended attribute of the clone being swapped in
++        // <save>/.s2a_extra_pending = token + ExtraData1, and the same random token goes onto the clone being swapped in (IHostDirectoryTransaction.WriteToken)
+         // (the game never sees it). The swap is the one commit point; ExtraData0 is then written from the pending file. If that fails, or the
+         // process dies first, the next mount or commit finds the pending file and applies it only when the committed directory carries its token
+         // (= the swap happened), so a later mount never copies the old ExtraData0 over the new extra data.
+-        private const string TokenAttr = "com.s2arm.save.commit", PendingExtra = ".s2a_extra_pending";
++        private const string PendingExtra = ".s2a_extra_pending";
+         private const int TokenSize = 16;
+ 
+         private SharedRef<ISaveDataFileSystem> _base;
+@@ -141,7 +149,7 @@ namespace Ryujinx.HLE.FileSystem
+             S2AHooks.Red?.Invoke(what);
+         }
+ 
+-        private static string Errno(string op) => $"{op} 失败（errno {Marshal.GetLastPInvokeError()}）";
++        private static string Errno(string op, int errno) => $"{op} 失败（errno {errno}）";
+ 
+         // Before LibHac opens the save: clear what an interrupted transaction left, then clone the committed version into the working directory.
+         // Returns why it could not (the caller then takes LibHac's own path), or null
+@@ -166,9 +174,16 @@ namespace Ryujinx.HLE.FileSystem
+                         Directory.CreateDirectory(working);
+                     }
+ 
+-                    if (clonefile(working, committed, 0) != 0)
++                    int e = Txn.CloneTree(working, committed);
++
++                    if (e != 0)
+                     {
+-                        return Errno("把工作目录克隆成已提交版本");
++                        return Errno("把工作目录克隆成已提交版本", e);
++                    }
++
++                    if ((e = Txn.SyncDirectory(dir)) != 0)
++                    {
++                        return Errno("已提交版本目录项落盘", e);
+                     }
+                 }
+ 
+@@ -177,9 +192,11 @@ namespace Ryujinx.HLE.FileSystem
+                     Directory.Delete(working, true);
+                 }
+ 
+-                if (clonefile(committed, working, 0) != 0)
++                int ce = Txn.CloneTree(committed, working);
++
++                if (ce != 0)
+                 {
+-                    return Errno("把已提交版本克隆成工作目录");
++                    return Errno("把已提交版本克隆成工作目录", ce);
+                 }
+ 
+                 string extra0 = System.IO.Path.Combine(dir, "ExtraData0"), extra1 = System.IO.Path.Combine(dir, "ExtraData1");
+@@ -208,7 +225,7 @@ namespace Ryujinx.HLE.FileSystem
+             }
+ 
+             byte[] data = File.ReadAllBytes(pending), token = new byte[TokenSize];
+-            bool swapped = data.Length >= TokenSize && getxattr(System.IO.Path.Combine(dir, "0"), TokenAttr, token, TokenSize, 0, 0) == TokenSize
++            bool swapped = data.Length >= TokenSize && Txn.ReadToken(System.IO.Path.Combine(dir, "0"), token, out int tokenLength) == 0 && tokenLength == TokenSize
+                 && data.AsSpan(0, TokenSize).SequenceEqual(token);
+ 
+             if (swapped)
+@@ -222,7 +239,7 @@ namespace Ryujinx.HLE.FileSystem
+         }
+ 
+         // Swap the working directory in as the committed version, extra data with it; before the swap any failure leaves the committed version as
+-        // it was, after the swap the commit stands (see TokenAttr)
++        // it was, after the swap the commit stands (see the token above)
+         private Result CommitLocked()
+         {
+             if (Volatile.Read(ref _openWritable) > 0)
+@@ -244,9 +261,10 @@ namespace Ryujinx.HLE.FileSystem
+ 
+                 ApplyPendingExtra(_dir);   // a previous commit's extra data that never landed
+ 
+-                if (clonefile(working, fresh, 0) != 0)
++                int errno = Txn.CloneTree(working, fresh);
++
++                if (errno != 0)
+                 {
+-                    int errno = Marshal.GetLastPInvokeError();
+                     Red($"存档事务：提交 {_dir} 时克隆工作目录失败（errno {errno}），已提交版本不动");
+ 
+                     return errno == 28 ? ResultFs.UsableSpaceNotEnough.Log() : ResultFs.UnexpectedInLocalFileSystemE.Log();   // 28 = ENOSPC
+@@ -254,9 +272,9 @@ namespace Ryujinx.HLE.FileSystem
+ 
+                 byte[] token = System.Security.Cryptography.RandomNumberGenerator.GetBytes(TokenSize);
+ 
+-                if (setxattr(fresh, TokenAttr, token, TokenSize, 0, 0) != 0)
++                if ((errno = Txn.WriteToken(fresh, token)) != 0)
+                 {
+-                    Red($"存档事务：提交 {_dir} 时{Errno("给新版本写提交号（扩展属性）")}，已提交版本不动");
++                    Red($"存档事务：提交 {_dir} 时{Errno("给新版本写提交号", errno)}，已提交版本不动");
+                     Directory.Delete(fresh, true);
+ 
+                     return ResultFs.UnexpectedInLocalFileSystemE.Log();
+@@ -274,9 +292,9 @@ namespace Ryujinx.HLE.FileSystem
+                     File.Move(pendingNew, pending, overwrite: true);
+                 }
+ 
+-                if (renamex_np(fresh, committed, RenameSwap) != 0)
++                if ((errno = Txn.Exchange(fresh, committed)) != 0)
+                 {
+-                    Red($"存档事务：提交 {_dir} 时{Errno("原子交换（RENAME_SWAP）")}，已提交版本不动");
++                    Red($"存档事务：提交 {_dir} 时{Errno("原子交换", errno)}，已提交版本不动");
+                     Directory.Delete(fresh, true);
+                     File.Delete(pending);
+ 
+@@ -291,6 +309,13 @@ namespace Ryujinx.HLE.FileSystem
+             }
+ 
+             // Swapped in: the commit stands. What is left is housekeeping a later mount or commit redoes, so it does not turn the commit into a failure
++            int synced = Txn.SyncDirectory(_dir);   // 交换后的两个目录项（0 / .s2a_new）落盘：掉电后看到的是交换后的样子
++
++            if (synced != 0)
++            {
++                Red($"存档事务：{_dir} 已交换，{Errno("目录项落盘", synced)}（掉电可能回到上一版）");
++            }
++
+             try
+             {
+                 ApplyPendingExtra(_dir);
+@@ -346,9 +371,11 @@ namespace Ryujinx.HLE.FileSystem
+                         Directory.Delete(fresh, true);
+                     }
+ 
+-                    if (clonefile(committed, fresh, 0) != 0 || renamex_np(fresh, working, RenameSwap) != 0)
++                    int e = Txn.CloneTree(committed, fresh);
++
++                    if (e != 0 || (e = Txn.Exchange(fresh, working)) != 0)
+                     {
+-                        Red($"存档事务：回滚 {_dir} 时{Errno("克隆 / 交换")}，工作目录保持原样");
++                        Red($"存档事务：回滚 {_dir} 时{Errno("克隆 / 交换", e)}，工作目录保持原样");
+ 
+                         return ResultFs.UnexpectedInLocalFileSystemE.Log();
+                     }

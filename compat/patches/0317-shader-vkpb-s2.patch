@@ -1,0 +1,86 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index c0d09e832c20c6c1dd0cdccfdc2f3a87542c398d..f299007502c1a893f46279209909fca26738853a 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -153,6 +153,13 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         internal Capabilities Capabilities;
+ 
++        /// <summary>
++        /// S2A offline producer override for the host program cache discriminator. The engine
++        /// normally asks the renderer policy; ShBake has no renderer object but must write the
++        /// exact same host file name the device will read. Null keeps the engine behavior.
++        /// </summary>
++        internal string S2AHostProgramCacheDiscriminator;
++
+         /// <summary>
+         /// Event for signalling shader cache loading progress.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index de76b044141e10c6752566b16d1235f3de33701d..fd0ad11c9a90b319a7ed0153235551d9192a97d8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -256,6 +256,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+         private static string GetHostCacheDiscriminator(GpuContext context)
+         {
++            if (!string.IsNullOrEmpty(context.S2AHostProgramCacheDiscriminator))
++            {
++                return context.S2AHostProgramCacheDiscriminator;
++            }
++
+             IRenderer renderer = context.Renderer is Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer t ? t.BaseRenderer : context.Renderer;
+             return renderer is IHostProgramCachePolicy policy ? policy.HostProgramCacheDiscriminator : null;
+         }
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 81a8a17599e426831bd4754eb10ed7e3126792fa..103e061a8baa37ac12448301aff2e2d60d9ae4ad 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -15,6 +15,7 @@
+   <ItemGroup>
+     <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/ProgramBinary*.cs" Link="S2Arm/ProgramCache/%(Filename)%(Extension)" />
++    <Compile Include="../../../../graphics/vulkan/cache/VulkanProfile.cs" Link="S2Arm/ProgramCache/VulkanProfile.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/CompileWorker.cs" Link="S2Arm/ProgramCache/CompileWorker.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/PipelineCacheFile.cs" Link="S2Arm/ProgramCache/PipelineCacheFile.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/FailedProgram.cs" Link="S2Arm/ProgramCache/FailedProgram.cs" />
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index c1a0bcc40a37098a936211bac1c2c32c2e676fac..e3b02fc705d87d34af770ee786e4c32a9b2dc360 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -128,16 +128,31 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     identity = _s2aProgramBinaryIdentity;
+                     if (identity != null) return identity;
+-                    Capabilities capabilities = GetCapabilities();
+-                    string closure = typeof(ShaderProgram).Assembly.ManifestModule.ModuleVersionId.ToString("N") +
+-                        ":" + typeof(VulkanRenderer).Assembly.ManifestModule.ModuleVersionId.ToString("N");
+-                    identity = ProgramBinaryProfile.Create(in capabilities, Shader.TargetVulkanVersion, closure);
++                    identity = S2ACreateProgramProfile().Identity;
+                     _s2aProgramBinaryIdentity = identity;
+                     return identity;
+                 }
+             }
+         }
+ 
++        // One producer for the offline pack (S2) and the runtime identity: same capabilities,
++        // same SPIR-V target, same translator closure.
++        internal VulkanProfile S2ACreateProgramProfile()
++        {
++            Capabilities capabilities = GetCapabilities();
++            return VulkanProfile.Create(in capabilities, Shader.TargetVulkanVersion, S2ATranslatorClosure());
++        }
++
++        internal static string S2ATranslatorClosure() =>
++            typeof(ShaderProgram).Assembly.ManifestModule.ModuleVersionId.ToString("N") +
++            ":" + typeof(VulkanRenderer).Assembly.ManifestModule.ModuleVersionId.ToString("N");
++
++        /// <summary>
++        /// Serializes the exact translation profile the device uses for VKPB records. The
++        /// offline package producer consumes this file; it is not a capability guess.
++        /// </summary>
++        public byte[] S2ASerializeProgramProfile() => S2ACreateProgramProfile().ToJson();
++
+         internal T S2ARunDriver<T>(Func<T> work)
+         {
+             CompileWorker worker = S2ACompileWorker;

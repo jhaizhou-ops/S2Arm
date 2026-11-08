@@ -1,0 +1,64 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index f4b9be120442345c9507d537f2cfb60dd5a78019..76ea4f81f2b55e58cf4c3306aec34ffa67cab94a 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -19,7 +19,7 @@ namespace Ryujinx.Graphics.Nvdec
+         private static Backend PlatformBackend => SelectBackend(OperatingSystem.IsMacOS() || OperatingSystem.IsIOS(), OperatingSystem.IsAndroid(), RuntimeInformation.RuntimeIdentifier);
+         public IH264Decoder GetH264Decoder()
+         {
+-            return _h264Decoder ??= PlatformBackend switch
++            return _h264Decoder ??= S2AVideoDecoders.CreateH264() ?? PlatformBackend switch
+             {
+                 Backend.Apple => new VideoToolboxH264Decoder(),
+                 Backend.Android => new AvcH264Decoder(),
+@@ -30,7 +30,7 @@ namespace Ryujinx.Graphics.Nvdec
+         // 苹果平台的 VP8 走 libvpx（静态链进宿主，S2Arm 不带 FFmpeg；VideoToolbox 不解 VP8）
+         public IVp8Decoder GetVp8Decoder()
+         {
+-            return _vp8Decoder ??= PlatformBackend switch
++            return _vp8Decoder ??= S2AVideoDecoders.CreateVp8() ?? PlatformBackend switch
+             {
+                 Backend.Apple => new Vpx.VpxVp8Decoder(),
+                 Backend.Android => new AndroidVp8Decoder(),
+diff --git a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6cab200a60f1e2d9cf32a690dc8254167cd74ad
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+@@ -0,0 +1,36 @@
++using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.Video;
++using System;
++
++namespace Ryujinx.Graphics.Nvdec
++{
++    // S2Arm 平台 adapter（10-30 边界设计 P1，接口约定见 #1069）：视频解码器由平台装配登记工厂，Nvdec 不再按操作系统选实现。
++    //   平台装配在 Host.Boot 之前设一次，之后只读；工厂在 Nvdec 设备线程上、每个解码上下文第一次要解码器时调一次，返回新实例，
++    //   解码器归 NvdecDecoderContext（它 Dispose 时释放）。工厂不许抛异常：抛了报红一次、当没登记处理。
++    //   过渡：没登记时 NvdecDecoderContext 仍走原来的按系统选择（苹果 / 安卓各自登记后删掉，见 #1069）
++    public static class S2AVideoDecoders
++    {
++        public static Func<IH264Decoder> H264 { get; set; }
++        public static Func<IVp8Decoder> Vp8 { get; set; }
++
++        private static int _h264Failed, _vp8Failed;
++
++        internal static IH264Decoder CreateH264() => Create(H264, ref _h264Failed, "H.264");
++        internal static IVp8Decoder CreateVp8() => Create(Vp8, ref _vp8Failed, "VP8");
++
++        private static T Create<T>(Func<T> factory, ref int failed, string codec) where T : class
++        {
++            if (factory == null) return null;
++            try
++            {
++                return factory();
++            }
++            catch (Exception e)
++            {
++                if (System.Threading.Interlocked.Exchange(ref failed, 1) == 0)
++                    Logger.Error?.Print(LogClass.Nvdec, $"【红】{codec} 解码器工厂抛异常（{e.GetType().Name}：{e.Message}），当作没登记");
++                return null;
++            }
++        }
++    }
++}

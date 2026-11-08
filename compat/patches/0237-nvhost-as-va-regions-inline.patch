@@ -1,0 +1,46 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+index 6ec44974948d780b359e67bdcbeaf8da350f5017..599b552945c0a3e4ccae3b89146449d89dbc943e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+@@ -19,6 +19,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+         private IoctlProcessor<UnmapBufferArguments> _s2aUnmapBuffer1;
+         private IoctlProcessor<MapBufferExArguments> _s2aMapBufferEx1;
+         private IoctlProcessor<GetVaRegionsArguments> _s2aGetVaRegions1;
++        private IoctlProcessorInlineSpan<GetVaRegionsArguments, VaRegion> _s2aGetVaRegions3;
+         private IoctlProcessor<InitializeExArguments> _s2aInitializeEx1;
+         private IoctlProcessorSpan<RemapArguments> _s2aRemap1;
+ 
+@@ -104,8 +105,11 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+                 switch (command.Number)
+                 {
+                     case 0x08:
+-                        // This is the same as the one in ioctl as inlineOutBuffer is empty.
+-                        result = CallIoctlMethod<GetVaRegionsArguments>(_s2aGetVaRegions1 ??= GetVaRegions, arguments);
++                        // S2Arm: Ioctl3 GetVaRegions hands the regions back in the inline output buffer (Switch nvservices; yuzu GetVARegions3).
++                        // Upstream assumed that buffer is empty and left it untouched: an SDK reading the regions from it (10-26 census
++                        // Brain Training via NvRmGpuAddressSpaceGetInfo) got two all-zero regions, failed to build its GPU VA allocators,
++                        // and crashed in its own cleanup
++                        result = CallIoctlMethod<GetVaRegionsArguments, VaRegion>(_s2aGetVaRegions3 ??= GetVaRegions3, arguments, inlineOutBuffer);
+                         break;
+                 }
+             }
+@@ -365,6 +369,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+             return NvInternalResult.Success;
+         }
+ 
++        private NvInternalResult GetVaRegions3(ref GetVaRegionsArguments arguments, Span<VaRegion> inlineRegions)
++        {
++            // Same count GetVaRegions writes: what the caller's buffer size holds, at most the two regions
++            int count = Math.Min(Math.Min(inlineRegions.Length, (int)(arguments.BufferSize / (uint)Unsafe.SizeOf<VaRegion>())), _pageSizes.Length);
++            NvInternalResult result = GetVaRegions(ref arguments);
++
++            Span<VaRegion> regions = arguments.Regions.AsSpan();
++
++            regions[..count].CopyTo(inlineRegions);
++
++            return result;
++        }
++
+         private NvInternalResult InitializeEx(ref InitializeExArguments arguments)
+         {
+             Logger.Stub?.PrintStub(LogClass.ServiceNv);

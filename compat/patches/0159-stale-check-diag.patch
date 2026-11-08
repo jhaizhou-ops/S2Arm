@@ -1,0 +1,373 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index f12e09b52d4141741ff5947911eb76bd005e1588..d569344e12bb8ac19e2808f2381a18f98bf35f16 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -257,6 +257,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             {
+                 _s2aSyncedSeq = Volatile.Read(ref _s2aPushSeq);
+                 sync();
++
++                if (Image.S2AStaleCheck.On)
++                {
++                    Image.S2AStaleCheck.AfterDrain(_context);
++                }
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs b/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1066e5d95d8493ab24e4a1db9953e47e27a5da7
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Image/S2AStaleCheck.cs
+@@ -0,0 +1,140 @@
++using Ryujinx.Common;
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++
++namespace Ryujinx.Graphics.Gpu.Image
++{
++    // S2A 诊断（帧率能耗线 10-23，八方2 地面黑块）：贴图「漏写」检测，S2A_STALE_CHECK=<秒>（缺省关，关时零开销）。
++    // 要证明的事：宿主贴图内容是不是某次 CPU 写没变成跟踪事件、一直停在旧数据（黑块局绘制数与正常局相同，坏在数据不在少画）。
++    // 做法：整张同步时记下所用客体内存的哈希；每隔 N 秒、在 GPU 线程刚排空写跟踪之后（游戏此前的写都已成事件），
++    // 对「上次整张同步过、组里没有 GPU 改过、也没有脏句柄」的贴图重算客体内存哈希。不同 = 内容变了却没被标脏（嫌疑）。
++    // 排空之后、检查之前别的线程刚写的会误中，所以嫌疑留到下一次排空再确认：那时仍没脏、仍不同才报「漏写」。
++    static class S2AStaleCheck
++    {
++        public static readonly bool On;
++        private static readonly long _interval;
++        private static long _next;
++        private static int _pass;
++        private static readonly List<(Texture Tex, Hash128 Now)> _suspects = [];
++        private static readonly List<Texture> _all = [];
++        private static readonly HashSet<Texture> _reported = [];
++        // 正对照：S2A_STALE_SELFTEST=1 时第一遍对一张可查贴图做一次不经跟踪的 1 字节写（不产生脏事件），检测必须确认它
++        private static bool _selfTest = Environment.GetEnvironmentVariable("S2A_STALE_SELFTEST") == "1";
++        private static Texture _selfTestTex;
++
++        static S2AStaleCheck()
++        {
++            if (int.TryParse(Environment.GetEnvironmentVariable("S2A_STALE_CHECK"), out int s) && s > 0)
++            {
++                On = true;
++                _interval = s * Stopwatch.Frequency;
++                Ryujinx.Memory.S2AWriteLog.On = true;
++            }
++        }
++
++        /// <summary>GPU 线程、写跟踪刚排空之后调</summary>
++        public static void AfterDrain(GpuContext context)
++        {
++            if (_suspects.Count != 0)
++            {
++                Confirm();
++            }
++
++            long now = Stopwatch.GetTimestamp();
++
++            if (now < _next)
++            {
++                return;
++            }
++
++            _next = now + _interval;
++            Scan(context);
++        }
++
++        private static void Scan(GpuContext context)
++        {
++            _pass++;
++            _all.Clear();
++
++            foreach (Memory.PhysicalMemory pm in context.PhysicalMemoryRegistry.Values)
++            {
++                pm.TextureCache.S2AForEach(_all);
++            }
++
++            int eligible = 0;
++            long t0 = Stopwatch.GetTimestamp();
++
++            foreach (Texture t in _all)
++            {
++                if (!t.S2AEligible())
++                {
++                    continue;
++                }
++
++                eligible++;
++
++                if (_selfTest)
++                {
++                    _selfTest = false;
++                    _selfTestTex = t;
++                    t.S2ASelfTestCorrupt();
++                    Console.Error.WriteLine($"[漏写检测·正对照] 已对 {t.S2ADescribe()} 做 1 字节不跟踪写，下一遍必须确认它");
++                }
++
++                Hash128 h = t.S2AGuestHash();
++
++                if (h != t.S2ASyncHash)
++                {
++                    _suspects.Add((t, h));
++                }
++            }
++
++            double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
++            Console.Error.WriteLine($"[漏写检测] 第 {_pass} 遍：贴图 {_all.Count}，可查 {eligible}，嫌疑 {_suspects.Count}，耗时 {ms:F1} ms");
++            _all.Clear();
++        }
++
++        private static void Confirm()
++        {
++            int confirmed = 0;
++
++            foreach ((Texture t, Hash128 seen) in _suspects)
++            {
++                // 已被标脏（排空前的写）/ 已重新同步 / 已被 GPU 改：不是漏写
++                if (!t.S2AEligible())
++                {
++                    continue;
++                }
++
++                Hash128 h = t.S2AGuestHash();
++
++                if (h == t.S2ASyncHash)
++                {
++                    continue;
++                }
++
++                confirmed++;
++
++                if (t == _selfTestTex)
++                {
++                    Console.Error.WriteLine("[漏写检测·正对照] 通过：不跟踪写被确认");
++                }
++
++                if (_reported.Add(t))
++                {
++                    Console.Error.WriteLine($"[漏写检测·确认] 第 {_pass} 遍：{t.S2ADescribe()}；同步后客体内存变了却没被标脏（上次整张同步在第 {t.S2ASyncPass} 遍之前）{t.S2AWriters()}");
++                }
++            }
++
++            if (confirmed != 0)
++            {
++                Console.Error.WriteLine($"[漏写检测] 第 {_pass} 遍确认 {confirmed} 张（嫌疑 {_suspects.Count}）");
++            }
++
++            _suspects.Clear();
++        }
++
++        public static int Pass => _pass;
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 85bff2efd518c2cc1ffa6153f27bcf9cb8c7eab1..9b3c0531a1b25b85a26b73a9560ef4b412d6dce5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Common.Memory;
+ using Ryujinx.Graphics.GAL;
+@@ -615,6 +616,39 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+         }
+ 
++        // S2A 漏写检测（S2AStaleCheck，S2A_STALE_CHECK 开时才写）：上次整张同步所用客体内存的哈希
++        internal Hash128 S2ASyncHash;
++        internal bool S2ASyncValid;
++        internal int S2ASyncPass;
++
++        internal bool S2AEligible() => S2ASyncValid && Target != Target.TextureBuffer && Group != null && !Group.S2AAnyModifiedOrDirty();
++
++        internal Hash128 S2AGuestHash() => Hash128.ComputeHash(_physicalMemory.GetSpan(Range));
++
++        internal string S2AWriters()
++        {
++            System.Text.StringBuilder sb = new();
++
++            for (int i = 0; i < Range.Count; i++)
++            {
++                var r = Range.GetSubRange(i);
++                sb.Append(Ryujinx.Memory.S2AWriteLog.Find(r.Address, r.Size));
++                sb.Append(_physicalMemory.BufferCache.S2AHasGpuModified(r.Address, r.Size) ? "｜重叠缓冲有 GPU 改过" : "｜重叠缓冲无 GPU 改过");
++            }
++
++            return sb.ToString();
++        }
++
++        // 正对照用：首字节取反，经不跟踪写落回客体内存（写跟踪把写入值当基线，不报脏）
++        internal void S2ASelfTestCorrupt()
++        {
++            ulong va = Range.GetSubRange(0).Address;
++            byte b = _physicalMemory.GetSpan(va, 1)[0];
++            _physicalMemory.WriteUntracked(va, [(byte)~b]);
++        }
++
++        internal string S2ADescribe() => $"贴图 0x{Range.GetSubRange(0).Address:x} 长 {Range.GetSize()} 段 {Range.Count} {Info.FormatInfo.Format} {Info.Width}x{Info.Height}x{Info.DepthOrLayers} levels={Info.Levels} linear={Info.IsLinear} target={Target}";
++
+         /// <summary>
+         /// Signal that this texture is dirty, indicating that the texture group must be checked.
+         /// </summary>
+@@ -700,6 +734,13 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _physicalMemory.S2ASignalReadForTexture(Range);
+             ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
+ 
++            if (S2AStaleCheck.On)
++            {
++                S2ASyncHash = Hash128.ComputeHash(data);
++                S2ASyncValid = true;
++                S2ASyncPass = S2AStaleCheck.Pass;
++            }
++
+             if (S2ATryUploadDirect(data))
+             {
+                 return;
+@@ -778,6 +819,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+         // 整张写入前的状态处理（SetData / S2ASetData 共用）：取消缩放、查脏、标覆盖回写
+         private void PrepareSetData()
+         {
++            S2ASyncValid = false;
++
+             BlacklistScale();
+ 
+             Group.CheckDirty(this, true);
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index a24f0effb8bcdedc0f7868c030ad8f41dabf37d1..92a1ca904e617273b44347660eecdf278d1af079 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -48,6 +48,24 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+         private readonly AutoDeleteCache _cache;
+ 
++        // S2A 漏写检测：GPU 线程上取全部贴图
++        internal void S2AForEach(List<Texture> into)
++        {
++            _texturesLock.EnterReadLock();
++
++            try
++            {
++                foreach (Texture t in _textures)
++                {
++                    into.Add(t);
++                }
++            }
++            finally
++            {
++                _texturesLock.ExitReadLock();
++            }
++        }
++
+         /// <summary>
+         /// Constructs a new instance of the texture manager.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 072176b86fbf49f8f59cf263f1f3792918e6bc3b..0ed2d0d99897343c8817d718f0cea94db3366524 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -342,6 +342,28 @@ namespace Ryujinx.Graphics.Gpu.Image
+             return true;
+         }
+ 
++        // S2A 漏写检测：组里有 GPU 改过（宿主内容为准）或有脏句柄（待同步，属正常）的贴图不查
++        internal bool S2AAnyModifiedOrDirty()
++        {
++            foreach (TextureGroupHandle group in _handles)
++            {
++                if (group.Modified)
++                {
++                    return true;
++                }
++
++                foreach (RegionHandle handle in group.Handles)
++                {
++                    if (handle.Dirty)
++                    {
++                        return true;
++                    }
++                }
++            }
++
++            return false;
++        }
++
+         /// <summary>
+         /// Synchronize memory for a given texture.
+         /// If overlapping tracking handles are dirty, fully or partially synchronize the texture data.
+@@ -454,6 +476,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="regionCount">The number of handles to synchronize</param>
+         private void SynchronizePartial(int baseHandle, int regionCount)
+         {
++            Storage.S2ASyncValid = false;   // S2A 漏写检测：部分同步后整张哈希不再代表宿主内容
+             int spanEndIndex = -1;
+             int spanBase = 0;
+             ReadOnlySpan<byte> dataSpan = ReadOnlySpan<byte>.Empty;
+diff --git a/src/Ryujinx.Memory/S2AWriteLog.cs b/src/Ryujinx.Memory/S2AWriteLog.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf5ab66f0bdd81b6cce94a3a909396c34392188b
+--- /dev/null
++++ b/src/Ryujinx.Memory/S2AWriteLog.cs
+@@ -0,0 +1,63 @@
++using System;
++using System.Diagnostics;
++using System.Text;
++
++namespace Ryujinx.Memory
++{
++    // S2A 诊断（帧率能耗线 10-23，地面黑块漏写检测）：最近 4096 次不跟踪写（地址、长度、是否回写、调用方两层方法名）环形记录。
++    // 只在漏写检测开着时由 Ryujinx.Graphics.Gpu.Image.S2AStaleCheck 打开；关时 Note 只多一次布尔判断。
++    public static class S2AWriteLog
++    {
++        public static bool On;
++        private const int N = 4096;
++        private static readonly (ulong Va, int Len, bool Flush, long Tick, string Who)[] _ring = new (ulong, int, bool, long, string)[N];
++        private static long _n;
++        private static readonly object _lock = new();
++
++        public static void Note(ulong va, int len, bool flush)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            StackTrace st = new(2, false);
++            StringBuilder sb = new();
++
++            for (int i = 0; i < 3 && i < st.FrameCount; i++)
++            {
++                var m = st.GetFrame(i)?.GetMethod();
++                sb.Append(i == 0 ? "" : " ← ").Append(m?.DeclaringType?.Name).Append('.').Append(m?.Name);
++            }
++
++            lock (_lock)
++            {
++                _ring[_n++ % N] = (va, len, flush, Stopwatch.GetTimestamp(), sb.ToString());
++            }
++        }
++
++        /// <summary>环里与 [va, va+size) 重叠的不跟踪写，最近的在前，最多 max 条</summary>
++        public static string Find(ulong va, ulong size, int max = 4)
++        {
++            StringBuilder sb = new();
++            int hit = 0;
++
++            lock (_lock)
++            {
++                for (long k = _n - 1; k >= 0 && k >= _n - N && hit < max; k--)
++                {
++                    var e = _ring[k % N];
++
++                    if (e.Va < va + size && va < e.Va + (ulong)e.Len)
++                    {
++                        double ago = (Stopwatch.GetTimestamp() - e.Tick) * 1000.0 / Stopwatch.Frequency;
++                        sb.Append($"｜0x{e.Va:x}+{e.Len} {(e.Flush ? "回写" : "引擎写")} {ago:F0} ms 前 {e.Who}");
++                        hit++;
++                    }
++                }
++            }
++
++            return hit == 0 ? "｜环内（最近 4096 次）无重叠的不跟踪写" : sb.ToString();
++        }
++    }
++}

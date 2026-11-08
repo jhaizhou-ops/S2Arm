@@ -1,0 +1,40 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index d5e6699cff166206b30ef57c4047abe1fac41bad..28f5db580be290167bc7eea2dc5389b72ed65ecf 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -85,7 +85,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+             if (_executionPending)
+             {
+                 _executionPending = false;
++                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();   // S2A：宏执行计时（定「要不要预编」用，见 S2AMacroAot.Account）
+                 _executionEngine?.Execute(code[Position..], state, _argument);
++                S2AMacroAot.Account(_executionEngine, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+index f6e4eca09040f8b08d32c32926accfe5ac0d20b6..2ee930b07c07e3dc30e9e478a4ec6f5629130b88 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/S2AMacroAot.cs
+@@ -206,6 +206,21 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+         private static readonly HashSet<ulong> _missed = new();
+         private static readonly string _dumpDir = Environment.GetEnvironmentVariable("S2A_MACRO_DUMP");
+ 
++        // 宏执行累计（GPU 线程上写；宿主按帧差分写 frames.tsv）：按执行引擎分 HLE 宏 / 离线编 / 解释器，各计次数与 Stopwatch 刻度。
++        // 用途：量表外宏走解释器的真实代价，定离线表要不要留 / 要不要做快速解释器（10-19 总指挥：不靠采集局）
++        public static long HleN, AotN, InterpN, HleTicks, AotTicks, InterpTicks;
++
++        internal static void Account(IMacroEE ee, long ticks)
++        {
++            switch (ee)
++            {
++                case MacroInterpreter: InterpN++; InterpTicks += ticks; break;
++                case S2AMacroAotEE: AotN++; AotTicks += ticks; break;
++                case null: break;
++                default: HleN++; HleTicks += ticks; break;
++            }
++        }
++
+         /// <summary>表外、走解释器的宏程序支数（健康表 / 单测读）。</summary>
+         public static int MissCount => _missed.Count;
+ 

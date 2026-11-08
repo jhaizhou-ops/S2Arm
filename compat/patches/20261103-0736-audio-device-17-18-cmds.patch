@@ -1,0 +1,72 @@
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDevice.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDevice.cs
+index 4fda4bc616529967f6f89749a70e4e20f64e9fd6..20eafabed06b388237f61265d53d8c4249dd33ac 100644
+--- a/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDevice.cs
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioDevice.cs
+@@ -18,6 +18,7 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+         private SystemEventType _audioEvent;
+         private SystemEventType _audioInputEvent;
+         private SystemEventType _audioOutputEvent;
++        private bool _outputVolumeAutoTuneEnabled;
+ 
+         public AudioDevice(VirtualDeviceSessionRegistry registry, AppletResourceUserId appletResourceId, uint revision)
+         {
+@@ -233,46 +234,50 @@ namespace Ryujinx.Horizon.Sdk.Audio.Detail
+             return Result.Success;
+         }
+ 
++        // S2Arm：17.0.0+ / 18.0.0+ 命令原为 NotImplemented（2153-0513），Switch 2 SDK 的 nn::audio 包装把非 0 当致命 abort（火纹 Fortune's Weave 起局即 Break）。
++        // 设备通知复用 QueryAudioDevice*Event 的同一事件（宿主只有一个虚拟设备）；音量自动调节只记开关、读回（宿主不做响度调节）。
+         [CmifCommand(15)] // 17.0.0+
+         public Result AcquireAudioOutputDeviceNotification([CopyHandle] out int eventHandle, ulong deviceId)
+         {
+-            eventHandle = 0;
++            eventHandle = Os.GetReadableHandleOfSystemEvent(ref _audioOutputEvent);
+ 
+-            return AudioResult.NotImplemented;
++            return Result.Success;
+         }
+ 
+         [CmifCommand(16)] // 17.0.0+
+         public Result ReleaseAudioOutputDeviceNotification(ulong deviceId)
+         {
+-            return AudioResult.NotImplemented;
++            return Result.Success;
+         }
+ 
+         [CmifCommand(17)] // 17.0.0+
+         public Result AcquireAudioInputDeviceNotification([CopyHandle] out int eventHandle, ulong deviceId)
+         {
+-            eventHandle = 0;
++            eventHandle = Os.GetReadableHandleOfSystemEvent(ref _audioInputEvent);
+ 
+-            return AudioResult.NotImplemented;
++            return Result.Success;
+         }
+ 
+         [CmifCommand(18)] // 17.0.0+
+         public Result ReleaseAudioInputDeviceNotification(ulong deviceId)
+         {
+-            return AudioResult.NotImplemented;
++            return Result.Success;
+         }
+ 
+         [CmifCommand(19)] // 18.0.0+
+         public Result SetAudioDeviceOutputVolumeAutoTuneEnabled(bool enabled)
+         {
+-            return AudioResult.NotImplemented;
++            _outputVolumeAutoTuneEnabled = enabled;
++
++            return Result.Success;
+         }
+ 
+         [CmifCommand(20)] // 18.0.0+
+         public Result IsAudioDeviceOutputVolumeAutoTuneEnabled(out bool enabled)
+         {
+-            enabled = false;
++            enabled = _outputVolumeAutoTuneEnabled;
+ 
+-            return AudioResult.NotImplemented;
++            return Result.Success;
+         }
+ 
+         protected virtual void Dispose(bool disposing)

@@ -1,0 +1,210 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/ImageArray/ImageArraySetImagesCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/ImageArray/ImageArraySetImagesCommand.cs
+index cc28d585c453114dd00a9d4a8f780d61872baa4c..f0aa3863e1dcc62d02ae8605e3b621dd59929fb1 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/ImageArray/ImageArraySetImagesCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/ImageArray/ImageArraySetImagesCommand.cs
+@@ -21,7 +21,19 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.ImageArray
+         public static void Run(ref ImageArraySetImagesCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+             ThreadedImageArray imageArray = command._imageArray.Get(threaded);
+-            imageArray.Base.SetImages(command._index, command._images.Get(threaded).Select(texture => ((ThreadedTexture)texture)?.Base).ToArray());
++            if (S2ATexArrReuse.ImgOn)
++            {
++                // 开着时入队那份一定是私有副本（ThreadedImageArray.SetImages：ImgOn ⊂ ImgCopy；交替翻相位时同贴图数组的论证）：原地换成底层对象、交下去，下游同步拷走后清空归还
++                ITexture[] a = command._images.Get(threaded);
++                for (int i = 0; i < a.Length; i++) a[i] = ((ThreadedTexture)a[i])?.Base;
++                imageArray.Base.SetImages(command._index, a);
++                S2ATexArrReuse.Return(a);
++                return;
++            }
++
++            ITexture[] images = command._images.Get(threaded);
++            S2ATexArrReuse.DiagAdd(3, images.Length);
++            imageArray.Base.SetImages(command._index, images.Select(texture => ((ThreadedTexture)texture)?.Base).ToArray());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetSamplersCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetSamplersCommand.cs
+index d6d54a5d078bb9aeaf2b99a7b7766611360bd51c..f769226e43d121031e12a8690ec652c318a8352b 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetSamplersCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetSamplersCommand.cs
+@@ -30,7 +30,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.TextureArray
+                 return;
+             }
+ 
+-            textureArray.Base.SetSamplers(command._index, command._samplers.Get(threaded).Select(sampler => ((ThreadedSampler)sampler)?.Base).ToArray());
++            ISampler[] samplers = command._samplers.Get(threaded);
++            S2ATexArrReuse.DiagAdd(3, samplers.Length);
++            textureArray.Base.SetSamplers(command._index, samplers.Select(sampler => ((ThreadedSampler)sampler)?.Base).ToArray());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetTexturesCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetTexturesCommand.cs
+index c711e7d7a4bb3ca6cd54eb1614b946628ec18d6e..8523acd1ac21398f1812d040e9cddac9b272c19f 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetTexturesCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/TextureArray/TextureArraySetTexturesCommand.cs
+@@ -31,7 +31,9 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.TextureArray
+                 return;
+             }
+ 
+-            textureArray.Base.SetTextures(command._index, command._textures.Get(threaded).Select(texture => ((ThreadedTexture)texture)?.Base).ToArray());
++            ITexture[] textures = command._textures.Get(threaded);
++            S2ATexArrReuse.DiagAdd(3, textures.Length);
++            textureArray.Base.SetTextures(command._index, textures.Select(texture => ((ThreadedTexture)texture)?.Base).ToArray());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
+index a415dbbf0e8bd0d4248fe6fa7af96dabaa7e7ba3..82c93d37cdb1d78dc4f8c7912607d680ac35e57f 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedImageArray.cs
+@@ -29,7 +29,8 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         public unsafe void SetImages(int index, ITexture[] images)
+         {
+-            _renderer.New<ImageArraySetImagesCommand>()->Set(Ref(this), index, Ref(images));
++            // S2A：图像数组复用开着（或在交替）时入队给私有副本（开时池里取，执行完在命令里归还；见 S2ATexArrReuse.ImgOn / ImgCopy），Gpu 层条目才能复用自己的数组
++            _renderer.New<ImageArraySetImagesCommand>()->Set(Ref(this), index, Ref(S2ATexArrReuse.ImgCopy ? S2ATexArrReuse.Copy(images, S2ATexArrReuse.ImgOn) : images));
+             _renderer.QueueCommand();
+         }
+     }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+index c7f015fa7243ee3bdc57ae057d2f85d8083f52c8..24149ced43bec8a39baf4a83da1e7d99e31fe86c 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTextureArray.cs
+@@ -19,17 +19,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+         }
+ 
+         // 贴图数组复用开着时（缺省开）：入队那份从精确长度池取（执行完在命令里归还），不每次 ToArray（见 S2ATexArrReuse）
+-        private static T[] S2ACopy<T>(T[] a) where T : class
+-        {
+-            if (!S2ATexArrReuse.On)
+-            {
+-                return a.ToArray();
+-            }
+-
+-            T[] c = S2ATexArrReuse.Rent<T>(a.Length);
+-            Array.Copy(a, c, a.Length);
+-            return c;
+-        }
++        private static T[] S2ACopy<T>(T[] a) where T : class => S2ATexArrReuse.Copy(a, S2ATexArrReuse.On);
+ 
+         private TableRef<T> Ref<T>(T reference)
+         {
+diff --git a/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs b/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
+index f756ac6b645327d8531830dd2da63103fb4832f8..f84ef95c12d31364ad68b2d61d2362d8356771e1 100644
+--- a/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
++++ b/src/Ryujinx.Graphics.GAL/S2ATexArrReuse.cs
+@@ -29,6 +29,35 @@ namespace Ryujinx.Graphics.GAL
+             }
+         }
+ 
++        // 图像数组也复用（帧率能耗线 10-24，缺省关：底层改动真机达标再翻）：S2A_IMGARR_REUSE=1 随 On；没给且设了 S2A_ALT 时按同局交替相位（开段开）；=0 一直关。
++        //   原先图像数组整条每次新建三份：Gpu 层条目 new ITexture[]（双线程按引用入队，不能复用）、渲染线程 Select(...).ToArray()、宽屏 Unwrap 无暂存。
++        //   打开后与贴图数组同法：入队那份是私有副本（池里取），Gpu 层条目就能复用自己的数组；执行时原地换底层对象再归还
++        static readonly string s_imgEnv = Environment.GetEnvironmentVariable("S2A_IMGARR_REUSE");
++        public static bool ImgOn => s_imgEnv == "1" ? On : s_imgEnv != "0" && On && AltOnPhase();
++        // 双线程入队要不要给私有副本：开着要；交替时关段也要（ToArray）——相位可能在 Gpu 层取数组和入队之间翻，按引用入队的若是条目复用的数组会被下一次重建改掉。
++        //   不交替又关着时照上游按引用入队，缺省路径不多一份
++        public static bool ImgCopy => ImgOn || (s_alt && s_imgEnv != "0");
++        static bool AltOnPhase()   // 同局交替的开段（与贴图数组的 S2A_TEXARR_REUSE 无关：给了 =1 也照相位交替图像数组）
++        {
++            if (!s_alt) return false;
++            try { return s2a_alt_phase() == 1; }
++            catch (Exception) { s_alt = false; return false; }
++        }
++
++        // 诊断（S2A_ALLOC_TRACE=1 时渲染循环 20 秒行打出累计）：ITexture[] / ISampler[] 各新建点的字节数（数组头 24 + 8 × 长度）
++        //   0 池未命中 1 宽屏 Unwrap 2 双线程入队 ToArray（关时） 3 渲染线程 Select.ToArray（关时） 4 Gpu 条目复用路径新建（新条目 / 长度变） 5 Gpu 条目关时新建
++        public static readonly long[] Diag = new long[6];
++        public static void DiagAdd(int k, int n) => System.Threading.Interlocked.Add(ref Diag[k], 24 + 8L * n);
++
++        /// <summary>双线程入队用的私有副本：<paramref name="on"/> 时池里取（执行完由命令归还），否则 ToArray。</summary>
++        public static T[] Copy<T>(T[] a, bool on) where T : class
++        {
++            if (!on) { DiagAdd(2, a.Length); return (T[])a.Clone(); }
++            T[] c = Rent<T>(a.Length);
++            Array.Copy(a, c, a.Length);
++            return c;
++        }
++
+         static class Pool<T> where T : class
+         {
+             // 长度 → 空闲数组。生产者是 GPU 模拟线程、消费者是渲染线程；每种长度留着的个数 = 队列里同时在途的最大份数，稳态不再分配
+@@ -39,7 +68,9 @@ namespace Ryujinx.Graphics.GAL
+         public static T[] Rent<T>(int n) where T : class
+         {
+             if (n == 0) return Array.Empty<T>();
+-            return Pool<T>.Free.TryGetValue(n, out var bag) && bag.TryTake(out var a) ? a : new T[n];
++            if (Pool<T>.Free.TryGetValue(n, out var bag) && bag.TryTake(out var a)) return a;
++            DiagAdd(0, n);
++            return new T[n];
+         }
+ 
+         /// <summary>清空并归还 Rent 取的数组。</summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
+index 35d0db6bf6b407854a9f107567e8f84e0e5ad16a..d13cce95a390c302625cd4b3a84242764c8e8da8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsArrayCache.cs
+@@ -227,7 +227,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             public readonly IImageArray ImageArray;
+ 
+             /// <summary>
+-            /// S2A（贴图数组复用，缺省开）：贴图数组条目重建时复用的数组（只给贴图数组；图像数组双线程下按引用入队，不能复用）
++            /// S2A（贴图数组复用，缺省开；图像数组见 S2ATexArrReuse.ImgOn，缺省关）：条目重建时复用的数组（图像数组只用 S2ATexBuf；双线程入队一律私有副本，所以能复用）
+             /// </summary>
+             public ITexture[] S2ATexBuf;
+             public ISampler[] S2ASmpBuf;
+@@ -667,16 +667,22 @@ namespace Ryujinx.Graphics.Gpu.Image
+             ISampler[] samplers;
+             ITexture[] textures;
+ 
+-            if (S2ATexArrReuse.On && !isImage)
++            if (isImage ? S2ATexArrReuse.ImgOn : S2ATexArrReuse.On)
+             {
+-                // 下游（双线程入队副本 / 宽屏包装层 / Metal 后端）都同步拷走，不留引用：条目自己的数组清空复用
+-                if (entry.S2ATexBuf?.Length != bindingInfo.ArrayLength) { entry.S2ATexBuf = new ITexture[bindingInfo.ArrayLength]; entry.S2ASmpBuf = new ISampler[bindingInfo.ArrayLength]; }
+-                else { Array.Clear(entry.S2ATexBuf); Array.Clear(entry.S2ASmpBuf); }
++                // 下游（双线程入队副本 / 宽屏包装层 / Metal 后端）都同步拷走，不留引用：条目自己的数组清空复用（图像数组没有采样器）
++                if (entry.S2ATexBuf?.Length != bindingInfo.ArrayLength)
++                {
++                    S2ATexArrReuse.DiagAdd(4, (isImage ? 1 : 2) * bindingInfo.ArrayLength);
++                    entry.S2ATexBuf = new ITexture[bindingInfo.ArrayLength];
++                    entry.S2ASmpBuf = isImage ? null : new ISampler[bindingInfo.ArrayLength];
++                }
++                else { Array.Clear(entry.S2ATexBuf); if (!isImage) Array.Clear(entry.S2ASmpBuf); }
+                 textures = entry.S2ATexBuf;
+                 samplers = entry.S2ASmpBuf;
+             }
+             else
+             {
++                S2ATexArrReuse.DiagAdd(5, (isImage ? 1 : 2) * bindingInfo.ArrayLength);
+                 samplers = isImage ? null : new ISampler[bindingInfo.ArrayLength];
+                 textures = new ITexture[bindingInfo.ArrayLength];
+             }
+@@ -870,16 +876,22 @@ namespace Ryujinx.Graphics.Gpu.Image
+             ISampler[] samplers;
+             ITexture[] textures;
+ 
+-            if (S2ATexArrReuse.On && !isImage)
++            if (isImage ? S2ATexArrReuse.ImgOn : S2ATexArrReuse.On)
+             {
+-                // 下游（双线程入队副本 / 宽屏包装层 / Metal 后端）都同步拷走，不留引用：条目自己的数组清空复用
+-                if (entry.S2ATexBuf?.Length != bindingInfo.ArrayLength) { entry.S2ATexBuf = new ITexture[bindingInfo.ArrayLength]; entry.S2ASmpBuf = new ISampler[bindingInfo.ArrayLength]; }
+-                else { Array.Clear(entry.S2ATexBuf); Array.Clear(entry.S2ASmpBuf); }
++                // 下游（双线程入队副本 / 宽屏包装层 / Metal 后端）都同步拷走，不留引用：条目自己的数组清空复用（图像数组没有采样器）
++                if (entry.S2ATexBuf?.Length != bindingInfo.ArrayLength)
++                {
++                    S2ATexArrReuse.DiagAdd(4, (isImage ? 1 : 2) * bindingInfo.ArrayLength);
++                    entry.S2ATexBuf = new ITexture[bindingInfo.ArrayLength];
++                    entry.S2ASmpBuf = isImage ? null : new ISampler[bindingInfo.ArrayLength];
++                }
++                else { Array.Clear(entry.S2ATexBuf); if (!isImage) Array.Clear(entry.S2ASmpBuf); }
+                 textures = entry.S2ATexBuf;
+                 samplers = entry.S2ASmpBuf;
+             }
+             else
+             {
++                S2ATexArrReuse.DiagAdd(5, (isImage ? 1 : 2) * bindingInfo.ArrayLength);
+                 samplers = isImage ? null : new ISampler[bindingInfo.ArrayLength];
+                 textures = new ITexture[bindingInfo.ArrayLength];
+             }

@@ -1,0 +1,140 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineLayoutCache.cs b/src/Ryujinx.Graphics.Vulkan/PipelineLayoutCache.cs
+index 9a9a703b5684a5770c95e71a13600f6aa41f19c5..0d9244bb5fb06080022bd9ed6af329821b9a7fc6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineLayoutCache.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineLayoutCache.cs
+@@ -2,20 +2,75 @@ using Ryujinx.Graphics.GAL;
+ using Silk.NET.Vulkan;
+ using System;
+ using System.Collections.Concurrent;
++using System.Collections.Generic;
+ using System.Collections.ObjectModel;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
+     class PipelineLayoutCache
+     {
++        private readonly record struct BindingCoverage(int Set, int Binding, ResourceType Type, int Count, bool IsArray, ResourceStages Stages);
++
++        // Created once per program, never on the draw/descriptor update path.
++        private static BindingCoverage[] FreezeCoverage(ResourceBindingSegment[][] segments)
++        {
++            List<BindingCoverage> coverage = new();
++            for (int set = 0; set < segments.Length; set++)
++            {
++                foreach (ResourceBindingSegment segment in segments[set])
++                {
++                    if (segment.IsArray)
++                    {
++                        coverage.Add(new(set, segment.Binding, segment.Type, segment.Count, true, segment.Stages));
++                    }
++                    else
++                    {
++                        for (int index = 0; index < segment.Count; index++)
++                        {
++                            coverage.Add(new(set, segment.Binding + index, segment.Type, 1, false, segment.Stages));
++                        }
++                    }
++                }
++            }
++
++            coverage.Sort(static (a, b) =>
++            {
++                int result = a.Set.CompareTo(b.Set);
++                if (result == 0) result = a.Binding.CompareTo(b.Binding);
++                if (result == 0) result = a.Type.CompareTo(b.Type);
++                if (result == 0) result = a.Count.CompareTo(b.Count);
++                if (result == 0) result = a.IsArray.CompareTo(b.IsArray);
++                if (result == 0) result = a.Stages.CompareTo(b.Stages);
++                return result;
++            });
++            return coverage.ToArray();
++        }
++
+         private readonly struct PlceKey : IEquatable<PlceKey>
+         {
+             public readonly ReadOnlyCollection<ResourceDescriptorCollection> SetDescriptors;
+             public readonly bool UsePushDescriptors;
++            private readonly BindingCoverage[] _coverage;
+ 
+-            public PlceKey(ReadOnlyCollection<ResourceDescriptorCollection> setDescriptors, bool usePushDescriptors)
++            public PlceKey(ReadOnlyCollection<ResourceDescriptorCollection> setDescriptors, bool usePushDescriptors, ResourceBindingSegment[][] bindingSegments)
+             {
+-                SetDescriptors = setDescriptors;
++                if (setDescriptors != null)
++                {
++                    ResourceDescriptorCollection[] frozenSets = new ResourceDescriptorCollection[setDescriptors.Count];
++                    for (int set = 0; set < setDescriptors.Count; set++)
++                    {
++                        ReadOnlyCollection<ResourceDescriptor> source = setDescriptors[set].Descriptors;
++                        ResourceDescriptor[] frozenDescriptors = new ResourceDescriptor[source.Count];
++                        source.CopyTo(frozenDescriptors, 0);
++                        frozenSets[set] = new ResourceDescriptorCollection(Array.AsReadOnly(frozenDescriptors));
++                    }
++                    SetDescriptors = Array.AsReadOnly(frozenSets);
++                }
++                else
++                {
++                    SetDescriptors = null;
++                }
++                _coverage = FreezeCoverage(bindingSegments);
+                 UsePushDescriptors = usePushDescriptors;
+             }
+ 
+@@ -32,6 +87,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 }
+ 
+                 hasher.Add(UsePushDescriptors);
++                foreach (BindingCoverage entry in _coverage) hasher.Add(entry);
+ 
+                 return hasher.ToHashCode();
+             }
+@@ -64,6 +120,11 @@ namespace Ryujinx.Graphics.Vulkan
+                     }
+                 }
+ 
++                if (_coverage.Length != other._coverage.Length) return false;
++                for (int index = 0; index < _coverage.Length; index++)
++                {
++                    if (_coverage[index] != other._coverage[index]) return false;
++                }
+                 return UsePushDescriptors == other.UsePushDescriptors;
+             }
+         }
+@@ -79,11 +140,12 @@ namespace Ryujinx.Graphics.Vulkan
+             VulkanRenderer gd,
+             Device device,
+             ReadOnlyCollection<ResourceDescriptorCollection> setDescriptors,
+-            bool usePushDescriptors)
++            bool usePushDescriptors,
++            ResourceBindingSegment[][] bindingSegments)
+         {
+-            PlceKey key = new(setDescriptors, usePushDescriptors);
++            PlceKey key = new(setDescriptors, usePushDescriptors, bindingSegments);
+ 
+-            return _plces.GetOrAdd(key, newKey => new PipelineLayoutCacheEntry(gd, device, setDescriptors, usePushDescriptors));
++            return _plces.GetOrAdd(key, newKey => new PipelineLayoutCacheEntry(gd, device, newKey.SetDescriptors, newKey.UsePushDescriptors));
+         }
+ 
+         protected virtual void Dispose(bool disposing)
+diff --git a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+index 8504c4343f9526d7463cff2d45b2b58c413c6f7b..fae87edba889948377bc1c6ac621346a4339ddf6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
++++ b/src/Ryujinx.Graphics.Vulkan/ShaderCollection.cs
+@@ -124,7 +124,8 @@ namespace Ryujinx.Graphics.Vulkan
+             ReadOnlyCollection<ResourceDescriptorCollection> sets = usePushDescriptors ?
+                 BuildPushDescriptorSets(gd, resourceLayout.Sets) : resourceLayout.Sets;
+ 
+-            _plce = gd.PipelineLayoutCache.GetOrCreate(gd, device, sets, usePushDescriptors);
++            BindingSegments = BuildBindingSegments(resourceLayout.SetUsages, out bool usesBufferTextures);
++            _plce = gd.PipelineLayoutCache.GetOrCreate(gd, device, sets, usePushDescriptors, BindingSegments);
+ 
+             HasMinimalLayout = isMinimal;
+             UsePushDescriptors = usePushDescriptors;
+@@ -132,7 +133,6 @@ namespace Ryujinx.Graphics.Vulkan
+             Stages = stages;
+ 
+             ClearSegments = BuildClearSegments(sets);
+-            BindingSegments = BuildBindingSegments(resourceLayout.SetUsages, out bool usesBufferTextures);
+             Templates = BuildTemplates(usePushDescriptors);
+             (IncoherentBufferWriteStages, IncoherentTextureWriteStages) = BuildIncoherentStages(resourceLayout.SetUsages);
+ 

@@ -1,0 +1,57 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ssl/SslService/SslManagedSocketConnection.cs b/src/Ryujinx.HLE/HOS/Services/Ssl/SslService/SslManagedSocketConnection.cs
+index dc33dd6a565cdb066033a3ee8ca653df2be778ee..4f1e9f0020e496929d7452cfd27f17563102283d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ssl/SslService/SslManagedSocketConnection.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ssl/SslService/SslManagedSocketConnection.cs
+@@ -1,3 +1,4 @@
++// S2Arm: translate handshake transport/authentication failures and always restore socket blocking mode.
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd;
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl;
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy;
+@@ -117,12 +118,42 @@ namespace Ryujinx.HLE.HOS.Services.Ssl.SslService
+         public ResultCode Handshake(string hostName)
+         {
+             StartSslOperation();
+-            _stream = new SslStream(new NetworkStream(((DefaultSocket)((ManagedSocket)Socket).Socket).BaseSocket, false), false, null, null);
+-            hostName = RetrieveHostName(hostName);
+-            _stream.AuthenticateAsClient(hostName, null, TranslateSslVersion(_sslVersion), false);
+-            EndSslOperation();
++            try
++            {
++                _stream = new SslStream(new NetworkStream(((DefaultSocket)((ManagedSocket)Socket).Socket).BaseSocket, false), false, null, null);
++                hostName = RetrieveHostName(hostName);
++                _stream.AuthenticateAsClient(hostName, null, TranslateSslVersion(_sslVersion), false);
+ 
+-            return ResultCode.Success;
++                return ResultCode.Success;
++            }
++            catch (Exception exception) when (exception is AuthenticationException or IOException or SocketException)
++            {
++                return TranslateHandshakeException(exception);
++            }
++            finally
++            {
++                EndSslOperation();
++            }
++        }
++
++        private static ResultCode TranslateHandshakeException(Exception exception)
++        {
++            // SslStream may wrap the socket error in both authentication and I/O exceptions.
++            // Handshake is forced blocking, so a timeout stays Timeout even for a nonblocking guest socket.
++            for (Exception current = exception; current != null; current = current.InnerException)
++            {
++                if (current is SocketException socketException)
++                {
++                    return socketException.SocketErrorCode switch
++                    {
++                        SocketError.ConnectionReset => ResultCode.ConnectionReset,
++                        SocketError.TimedOut => ResultCode.Timeout,
++                        _ => ResultCode.ConnectionAbort,
++                    };
++                }
++            }
++
++            return ResultCode.ConnectionAbort;
+         }
+ 
+         public ResultCode Peek(out int peekCount, Memory<byte> buffer)

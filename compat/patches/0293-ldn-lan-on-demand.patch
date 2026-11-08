@@ -1,0 +1,170 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index f95a130522b589bcbd556a1ff2f8122dc01acc1d..efae1cb25804d7f08c5296fc77156bcfd4df2cac 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -550,6 +550,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             }
+ 
+             CloseStation();
++            RefreshNetworkClient(context);
+ 
+             SetState(NetworkState.AccessPoint);
+ 
+@@ -874,6 +875,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             }
+ 
+             CloseAccessPoint();
++            RefreshNetworkClient(context);
+ 
+             SetState(NetworkState.Station);
+ 
+@@ -1161,6 +1163,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+             NetworkClient?.Dispose();
+             NetworkClient = null;
++            S2ANetworkClientServer = null;
+ 
+             return ResultCode.Success;
+         }
+@@ -1186,6 +1189,9 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             {
+                 if (_state != NetworkState.Initialized)
+                 {
++                    // S2Arm: the host may switch to LAN multiplayer right now (first use of local wireless by this game), before the mode is read
++                    S2AHooks.LdnInitializing?.Invoke();
++
+                     // NOTE: Service calls nn::ldn::detail::NetworkInterfaceManager::NetworkInterfaceMonitor::Initialize() with nifmRequestId as argument,
+                     //       then it stores the result code of it in a global variable. Since we use our own implementation, we can just check the connection
+                     //       and return related error codes.
+@@ -1197,40 +1203,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                     {
+                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
+ 
+-                        switch (mode)
+-                        {
+-                            case MultiplayerMode.LdnRyu:
+-                                try
+-                                {
+-                                    string ldnServer = context.Device.Configuration.MultiplayerLdnServer
+-                                                       ?? throw new InvalidOperationException("Cannot initialize RyuLDN with a null Multiplayer server.");
+-
+-                                    if (!IPAddress.TryParse(ldnServer, out IPAddress ipAddress))
+-                                    {
+-                                        ipAddress = Dns.GetHostEntry(ldnServer).AddressList[0];
+-                                    }
+-
+-                                    NetworkClient = new LdnMasterProxyClient(ipAddress.ToString(), SharedConstants.LanPlayPort, context.Device.Configuration);
+-                                }
+-                                catch (Exception ex)
+-                                {
+-                                    Logger.Error?.Print(LogClass.ServiceLdn, "Could not locate RyuLDN server. Defaulting to stubbed wireless.");
+-                                    S2AHooks.Red?.Invoke($"ldn: RyuLDN server {context.Device.Configuration.MultiplayerLdnServer} not resolvable, multiplayer falls back to nobody nearby");
+-                                    Logger.Error?.Print(LogClass.ServiceLdn, ex.Message);
+-                                    NetworkClient = new LdnDisabledClient();
+-                                }
+-
+-                                break;
+-                            case MultiplayerMode.LdnMitm:
+-                                NetworkClient = new LdnMitmClient(context.Device.Configuration);
+-                                break;
+-                            case MultiplayerMode.Disabled:
+-                                NetworkClient = new LdnDisabledClient();
+-                                break;
+-                        }
+-
+-                        // TODO: Call nn::arp::GetApplicationLaunchProperty here when implemented.
+-                        NetworkClient.SetGameVersion(context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties.DisplayVersion);
++                        CreateNetworkClient(context, mode);
+ 
+                         resultCode = ResultCode.Success;
+                         _nifmResultCode = resultCode;
+@@ -1250,6 +1223,73 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             return resultCode;
+         }
+ 
++        // S2Arm: the RyuLDN server the current client was built for (null for the other modes); tests read it
++        internal string S2ANetworkClientServer { get; private set; }
++
++        private void CreateNetworkClient(ServiceCtx context, MultiplayerMode mode)
++        {
++            S2ANetworkClientServer = null;
++
++            switch (mode)
++            {
++                case MultiplayerMode.LdnRyu:
++                    try
++                    {
++                        string ldnServer = context.Device.Configuration.MultiplayerLdnServer
++                                           ?? throw new InvalidOperationException("Cannot initialize RyuLDN with a null Multiplayer server.");
++
++                        if (!IPAddress.TryParse(ldnServer, out IPAddress ipAddress))
++                        {
++                            ipAddress = Dns.GetHostEntry(ldnServer).AddressList[0];
++                        }
++
++                        NetworkClient = new LdnMasterProxyClient(ipAddress.ToString(), SharedConstants.LanPlayPort, context.Device.Configuration);
++                        S2ANetworkClientServer = ldnServer;
++                    }
++                    catch (Exception ex)
++                    {
++                        Logger.Error?.Print(LogClass.ServiceLdn, "Could not locate RyuLDN server. Defaulting to stubbed wireless.");
++                        S2AHooks.Red?.Invoke($"ldn: RyuLDN server {context.Device.Configuration.MultiplayerLdnServer} not resolvable, multiplayer falls back to nobody nearby");
++                        Logger.Error?.Print(LogClass.ServiceLdn, ex.Message);
++                        NetworkClient = new LdnDisabledClient();
++                    }
++
++                    break;
++                case MultiplayerMode.LdnMitm:
++                    NetworkClient = new LdnMitmClient(context.Device.Configuration);
++                    break;
++                case MultiplayerMode.Disabled:
++                    NetworkClient = new LdnDisabledClient();
++                    break;
++            }
++
++            // TODO: Call nn::arp::GetApplicationLaunchProperty here when implemented.
++            NetworkClient.SetGameVersion(context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties.DisplayVersion);
++        }
++
++        // S2Arm: the host can re-point the RyuLDN server while the game is initialized but idle (LAN relay election, Host.SetLdnServer).
++        // Applied at the next OpenAccessPoint / OpenStation, i.e. right before the game creates or looks for a network: the client is only
++        // swapped in state Initialized (nothing created or joined), and before AccessPoint / Station subscribe to its NetworkChange event
++        private void RefreshNetworkClient(ServiceCtx context)
++        {
++            if (context.Device.Configuration.MultiplayerMode != MultiplayerMode.LdnRyu)
++            {
++                return;
++            }
++
++            string server = context.Device.Configuration.MultiplayerLdnServer;
++
++            if (string.IsNullOrEmpty(server) || server == S2ANetworkClientServer)
++            {
++                return;
++            }
++
++            Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"RyuLDN server changed {S2ANetworkClientServer ?? "(none)"} -> {server}, reconnecting");
++            NetworkClient?.DisconnectAndStop();
++            NetworkClient = null;
++            CreateNetworkClient(context, MultiplayerMode.LdnRyu);
++        }
++
+         public void Dispose()
+         {
+             _station?.Dispose();
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 1ad01004ae8ff8f6a2c28dd80a354acacc09e80c..9194199a003eceff4c354f12f17b337b28962727 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -54,6 +54,11 @@ namespace Ryujinx.HLE
+         // A Memory<byte> viewing game memory [va, va + size) in place (S2A: game addresses are host addresses); null = copy instead
+         public static System.Func<ulong, int, System.Memory<byte>?> GuestView;
+ 
++        // The game is initializing ldn:u (IUserLocalCommunicationService Initialize / InitializeOld), before the multiplayer mode is read:
++        // S2A switches the configuration to LAN multiplayer on demand here (hosts the relay, starts Bonjour discovery), so that
++        // only games that use local wireless ever touch the network or ask for the local-network permission
++        public static System.Action LdnInitializing;
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot == null)

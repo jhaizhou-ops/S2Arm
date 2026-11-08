@@ -1,0 +1,102 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index a372c340929feb0deec1af9604f4a582aa31c17b..78cd84c40d48fde3ee6d414ddae918a5fa574990 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -738,7 +738,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+         public void SynchronizeFull()
+         {
+             _physicalMemory.S2ASignalReadForTexture(Range);
+-            ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
++            ReadOnlySpan<byte> data = _physicalMemory.S2AGetSpanScratch(Range, out MemoryOwner<byte> s2aScratch);
++            using MemoryOwner<byte> s2aScratchUse = s2aScratch;   // 多段拼接暂存：本函数各出口都已用完 data（转格式 / 直传都另拷），离开即还
+ 
+             if (S2AStaleCheck.On)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index c6e7121b5476790bf1540875379d99baf4b6f823..56d2720f6506b2a5fdfd3652ff9e62c6534f4f19 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -484,7 +484,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+             int spanEndIndex = -1;
+             int spanBase = 0;
+             ReadOnlySpan<byte> dataSpan = ReadOnlySpan<byte>.Empty;
+-
++            MemoryOwner<byte> s2aScratch = null;   // 多段拼接暂存（PhysicalMemory.S2AGetSpanScratch）：换下一段 / 离开时还
++            try
++            {
+             for (int i = 0; i < regionCount; i++)
+             {
+                 if (_loadNeeded[baseHandle + i])
+@@ -521,7 +523,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                         MultiRange s2aSlice = Storage.Range.Slice((ulong)spanBase, (ulong)size);
+                         _physicalMemory.S2ASignalReadForTexture(s2aSlice);
+-                        dataSpan = _physicalMemory.GetSpan(s2aSlice);
++                        s2aScratch?.Dispose();
++                        dataSpan = _physicalMemory.S2AGetSpanScratch(s2aSlice, out s2aScratch);
+                     }
+ 
+                     // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
+@@ -541,6 +544,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+                 }
+             }
++            }
++            finally
++            {
++                s2aScratch?.Dispose();
++            }
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 489b78056f90de95377b346fe3327ead335bd873..7e7b044c2bef50fe2f1ef845dc4939b91112441b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -134,8 +134,20 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="range">Ranges of physical memory where the data is located</param>
+         /// <param name="tracked">True if read tracking is triggered on the span</param>
+         /// <returns>A read only span of the data at the specified memory location</returns>
+-        public ReadOnlySpan<byte> GetSpan(MultiRange range, bool tracked = false)
++        public ReadOnlySpan<byte> GetSpan(MultiRange range, bool tracked = false) => S2AGetSpan(range, out _, tracked, false);
++
++        /// <summary>
++        /// S2A：同 GetSpan(MultiRange)，但多段时拼接用的暂存从 MemoryOwner 租（用完由调用方 Dispose 归还），不再每次 new 一整张贴图大的托管数组。
++        /// 10-24 原生层：怪猎 Mac 局 240 秒里贴图建立（Texture.SynchronizeFull / TextureGroup.SynchronizePartial）经这里新分配 ≥1 MB 的 byte[] 累计 131 MB，
++        /// 是大对象堆里 Byte[] 的主源（2048²×4 = 16 MB、1280×768×4 等），读盘段把大对象堆顶到几百 MB、gen2 才清。
++        /// 租来的块走 MemoryOwner 池（同尺寸复用）；S2A_MO_NATIVE=1 时 ≥85000 字节的直接取窗口尾部原生暂存、完全不进 GC 堆。
++        /// 只给「本地读完即弃」的调用方用：返回的 span 在 scratch Dispose 后失效
++        /// </summary>
++        public ReadOnlySpan<byte> S2AGetSpanScratch(MultiRange range, out MemoryOwner<byte> scratch, bool tracked = false) => S2AGetSpan(range, out scratch, tracked, true);
++
++        private ReadOnlySpan<byte> S2AGetSpan(MultiRange range, out MemoryOwner<byte> scratch, bool tracked, bool rent)
+         {
++            scratch = null;
+             if (range.Count == 1)
+             {
+                 MemoryRange singleRange = range.GetSubRange(0);
+@@ -145,7 +157,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 }
+             }
+ 
+-            Span<byte> data = new byte[range.GetSize()];
++            if (rent)
++            {
++                scratch = MemoryOwner<byte>.Rent(checked((int)range.GetSize()));
++            }
++
++            Span<byte> data = rent ? scratch.Span : new byte[range.GetSize()];
+ 
+             int offset = 0;
+ 
+@@ -157,6 +174,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 {
+                     _cpuMemory.GetSpan(currentRange.Address, size, tracked).CopyTo(data.Slice(offset, size));
+                 }
++                else if (rent)
++                {
++                    data.Slice(offset, size).Clear();   // 租来的块不保证清零；原路 new byte[] 的未映射段是 0
++                }
+ 
+                 offset += size;
+             }

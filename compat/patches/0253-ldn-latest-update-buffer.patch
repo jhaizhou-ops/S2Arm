@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index 60028b741bb40081dcbd1777bb42e883645a94cc..f95a130522b589bcbd556a1ff2f8122dc01acc1d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -345,21 +345,27 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return resultCode;
+             }
+ 
+-            ulong outputPosition = context.Request.RecvListBuff[0].Position;
+-            ulong outputSize = context.Request.RecvListBuff[0].Size;
++            // S2Arm: NodeLatestUpdate array goes to RecvListBuff[1], not RecvListBuff[0] (which is for NetworkInfo).
++            // The signature is (buffer<network_info, 0x1a>, buffer<node_latest_update, 0xa>), so the second buffer
++            // is the node update array. When RecvListBuff[1] doesn't exist (buffer not passed), skip writing the array.
++            if (context.Request.RecvListBuff.Count > 1)
++            {
++                ulong outputPosition = context.Request.RecvListBuff[1].Position;
++                ulong outputSize = context.Request.RecvListBuff[1].Size;
+ 
+-            ulong latestUpdateSize = (ulong)Marshal.SizeOf<NodeLatestUpdate>();
+-            int count = (int)(outputSize / latestUpdateSize);
++                ulong latestUpdateSize = (ulong)Marshal.SizeOf<NodeLatestUpdate>();
++                int count = (int)(outputSize / latestUpdateSize);
+ 
+-            NodeLatestUpdate[] latestUpdate = GetNodeLatestUpdateImpl(count);
++                NodeLatestUpdate[] latestUpdate = GetNodeLatestUpdateImpl(count);
+ 
+-            MemoryHelper.FillWithZeros(context.Memory, outputPosition, (int)outputSize);
++                MemoryHelper.FillWithZeros(context.Memory, outputPosition, (int)outputSize);
+ 
+-            foreach (NodeLatestUpdate node in latestUpdate)
+-            {
+-                MemoryHelper.Write(context.Memory, outputPosition, node);
++                foreach (NodeLatestUpdate node in latestUpdate)
++                {
++                    MemoryHelper.Write(context.Memory, outputPosition, node);
+ 
+-                outputPosition += latestUpdateSize;
++                    outputPosition += latestUpdateSize;
++                }
+             }
+ 
+             ulong infoSize = MemoryHelper.Write(context.Memory, bufferPosition, networkInfo);

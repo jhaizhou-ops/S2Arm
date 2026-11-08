@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+index a9f65cc510314e4cc75e002788464febd03a6379..af4bb0d4101ec81edaa75edd20922775c327dfdc 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+@@ -721,6 +721,19 @@ namespace Ryujinx.Graphics.Vulkan
+             VkBuffer srcBuffer = registerSrcUsage ? src.Get(cbs, srcOffset, size).Value : src.GetUnsafe().Value;
+             VkBuffer dstBuffer = dst.Get(cbs, dstOffset, size, true).Value;
+ 
++            // Internal buffer merges and virtual-buffer copies can consume GPU-written data
++            // without a guest barrier. Make those writes visible to this transfer read.
++            InsertBufferBarrier(
++                gd,
++                cbs.CommandBuffer,
++                srcBuffer,
++                AccessFlags.MemoryWriteBit,
++                AccessFlags.TransferReadBit,
++                PipelineStageFlags.AllCommandsBit,
++                PipelineStageFlags.TransferBit,
++                srcOffset,
++                size);
++
+             InsertBufferBarrier(
+                 gd,
+                 cbs.CommandBuffer,

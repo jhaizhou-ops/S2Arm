@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.Graphics.Shader/BufferDescriptor.cs b/src/Ryujinx.Graphics.Shader/BufferDescriptor.cs
+index 11d4e3c1165e760733241497057af5af908c8dc6..2e8896ff78a954dd50e11190e264bccc93b48368 100644
+--- a/src/Ryujinx.Graphics.Shader/BufferDescriptor.cs
++++ b/src/Ryujinx.Graphics.Shader/BufferDescriptor.cs
+@@ -10,6 +10,10 @@ namespace Ryujinx.Graphics.Shader
+         public readonly byte SbCbSlot;
+         public readonly ushort SbCbOffset;
+         public readonly BufferUsageFlags Flags;
++        // S2A：结尾 3 字节对齐填充写成显式字段（恒 0），理由同 TextureDescriptor._pad0。布局、大小（16）与读取不变
++#pragma warning disable CS0169 // 只占位、不读
++        private readonly byte _pad0, _pad1, _pad2;
++#pragma warning restore CS0169
+ 
+         public BufferDescriptor(int set, int binding, int slot)
+         {
+diff --git a/src/Ryujinx.Graphics.Shader/TextureDescriptor.cs b/src/Ryujinx.Graphics.Shader/TextureDescriptor.cs
+index 1e387407d82800e86fb6c4784bd8ce3b553d83d9..0e6cf054b75b1cf8024d75ed8512a012ac8dd254 100644
+--- a/src/Ryujinx.Graphics.Shader/TextureDescriptor.cs
++++ b/src/Ryujinx.Graphics.Shader/TextureDescriptor.cs
+@@ -15,6 +15,12 @@ namespace Ryujinx.Graphics.Shader
+         public readonly int ArrayLength;
+ 
+         public readonly bool Separate;
++        // S2A：Separate 后的 3 字节对齐填充写成显式字段（恒 0）。盘缓存按原始内存写本结构（DiskCacheHostStorage.WriteShaderProgramInfo → WriteWithMagicAndSize），
++        //   隐式填充是复制时留下的栈上残留：同一份翻译两次写出的缓存字节不同（10-24 马车8 翻译缓存相邻两份，宿主程序二进制只差这 3 字节），
++        //   着色器包产出指纹（graphics/tools/shbake/out_fp.py）因此对不上。布局、大小（36）与读取不变
++#pragma warning disable CS0169 // 只占位、不读
++        private readonly byte _pad0, _pad1, _pad2;
++#pragma warning restore CS0169
+ 
+         public readonly TextureUsageFlags Flags;
+ 

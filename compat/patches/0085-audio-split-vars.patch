@@ -1,0 +1,60 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+index 756afc34f02710abfb06079ed52ad35999df6339..707b44b132e8bf292073d8a3df5b3a76f03f952c 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceDriver.cs
+@@ -30,26 +30,26 @@ namespace Ryujinx.Audio.Backends.Apple
+             _pauseEvent = new ManualResetEvent(true);
+             _sessions = new ConcurrentDictionary<AppleHardwareDeviceSession, byte>();
+ 
+-            // S2A：能耗单变量开关 S2A_AUDIO_STEREO=1（缺省关，行为不变）：不试建 5.1、只报 2 声道（游戏自己出立体声，系统不再降混），
+-            // 并把 AVAudioSession 设成 SoloAmbient + 首选 IO 缓冲 20 ms（同旧库 front_ios.m；10-20 动森新架构整机功率约为旧库 2 倍）
+-            if (Environment.GetEnvironmentVariable("S2A_AUDIO_STEREO") == "1")
+-            {
+-                _supportSurroundConfiguration = false;
+-                S2AConfigureSession();
+-            }
+-            else
+-            {
+-                _supportSurroundConfiguration = TestSurroundSupport();
+-            }
++            // S2A：能耗单变量开关（缺省全关，行为不变；同旧库 front_ios.m；10-20 动森新架构整机功率约为旧库 2 倍）：
++            //   S2A_AUDIO_CH2=1 不试建 5.1、只报 2 声道（游戏自己出立体声，混音与系统降混都按 2 声道）
++            //   S2A_AUDIO_SOLO=1 AVAudioSession 类别设 SoloAmbient；S2A_AUDIO_IO20=1 首选 IO 缓冲 20 ms
++            //   S2A_AUDIO_STEREO=1 = 以上三项同开（减法实验拆项前的合并开关）
++            bool all = Environment.GetEnvironmentVariable("S2A_AUDIO_STEREO") == "1";
++            bool ch2 = all || Environment.GetEnvironmentVariable("S2A_AUDIO_CH2") == "1";
++            bool solo = all || Environment.GetEnvironmentVariable("S2A_AUDIO_SOLO") == "1";
++            bool io20 = all || Environment.GetEnvironmentVariable("S2A_AUDIO_IO20") == "1";
++            _supportSurroundConfiguration = !ch2 && TestSurroundSupport();
++            if (ch2) Console.Error.WriteLine("[S2A 声音] 只报 2 声道（S2A_AUDIO_CH2 / STEREO）");
++            if (solo || io20) S2AConfigureSession(solo, io20);
+ 
+             Volume = 1f;
+         }
+ 
+-        private static unsafe void S2AConfigureSession()
++        private static unsafe void S2AConfigureSession(bool solo, bool io20)
+         {
+             if (!OperatingSystem.IsIOS())
+             {
+-                Console.Error.WriteLine("[S2A 声音] S2A_AUDIO_STEREO：只报 2 声道（非 iOS，不设音频会话）");
++                Console.Error.WriteLine("[S2A 声音] 非 iOS，不设音频会话");
+                 return;
+             }
+ 
+@@ -67,12 +67,12 @@ namespace Ryujinx.Audio.Backends.Apple
+                 nint catStr;
+                 fixed (byte* p = cat) catStr = ((delegate* unmanaged<nint, nint, byte*, nint>)send)(Cls("NSString"), Sel("stringWithUTF8String:"), p);
+                 nint err = 0;
+-                byte okCat = ((delegate* unmanaged<nint, nint, nint, nint*, byte>)send)(session, Sel("setCategory:error:"), catStr, &err);
+-                byte okIo = ((delegate* unmanaged<nint, nint, double, nint*, byte>)send)(session, Sel("setPreferredIOBufferDuration:error:"), 0.020, &err);
++                byte okCat = solo ? ((delegate* unmanaged<nint, nint, nint, nint*, byte>)send)(session, Sel("setCategory:error:"), catStr, &err) : (byte)2;
++                byte okIo = io20 ? ((delegate* unmanaged<nint, nint, double, nint*, byte>)send)(session, Sel("setPreferredIOBufferDuration:error:"), 0.020, &err) : (byte)2;
+                 byte okAct = ((delegate* unmanaged<nint, nint, byte, nint*, byte>)send)(session, Sel("setActive:error:"), 1, &err);
+                 double io = ((delegate* unmanaged<nint, nint, double>)send)(session, Sel("IOBufferDuration"));
+                 double rate = ((delegate* unmanaged<nint, nint, double>)send)(session, Sel("sampleRate"));
+-                Console.Error.WriteLine($"[S2A 声音] S2A_AUDIO_STEREO：只报 2 声道；SoloAmbient {okCat}、首选 IO 20 ms {okIo}、激活 {okAct}；实际 IO 缓冲 {io * 1000:F1} ms、采样率 {rate:F0}");
++                Console.Error.WriteLine($"[S2A 声音] 会话：SoloAmbient {okCat}、首选 IO 20 ms {okIo}（1 成功 0 失败 2 未设）、激活 {okAct}；实际 IO 缓冲 {io * 1000:F1} ms、采样率 {rate:F0}");
+             }
+             catch (Exception e)
+             {

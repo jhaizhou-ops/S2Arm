@@ -1,0 +1,48 @@
+diff --git a/src/Ryujinx.HLE/S2ADisplay.cs b/src/Ryujinx.HLE/S2ADisplay.cs
+index ccf7a118f236bc4b19aae5516f5ec6067299b11b..b4b541d114f626fff209168fd71112b48959d603 100644
+--- a/src/Ryujinx.HLE/S2ADisplay.cs
++++ b/src/Ryujinx.HLE/S2ADisplay.cs
+@@ -1,16 +1,15 @@
+ using System;
+ using System.Collections.Concurrent;
+-using System.Globalization;
+ 
+ namespace Ryujinx.HLE
+ {
+     // S2Arm: display resolution reported to the game follows the host screen's aspect ratio (native widescreen, the game
+     // computes its own frustum). Height is unchanged (1080 docked / 720 handheld); width = round(height × aspect / 2) × 2.
+-    // Aspect comes from the host (iOS shell from the screen, Mac from S2A_SCREEN_ASPECT "w:h" or a decimal); default 16:9,
+-    // which reproduces the original 1920 / 1280.
++    // Aspect comes from the host: S2Arm sets it at S2A_Init from the native layer's screen width (s2a_screen_w / 1080, the single
++    // source shared with the widescreen patch points and the GAL widen wrapper); default 16:9, which reproduces the original 1920 / 1280.
+     public static class S2ADisplay
+     {
+-        private static double _aspect = Parse(Environment.GetEnvironmentVariable("S2A_SCREEN_ASPECT")) ?? 16.0 / 9.0;
++        private static double _aspect = 16.0 / 9.0;
+         private static readonly ConcurrentDictionary<string, byte> _logged = new();
+ 
+         public static double Aspect
+@@ -29,23 +28,5 @@ namespace Ryujinx.HLE
+                 Console.Error.WriteLine($"[宽] 显示分辨率被查询：{where} → {width}x{height}");
+             }
+         }
+-
+-        private static double? Parse(string s)
+-        {
+-            if (string.IsNullOrWhiteSpace(s))
+-            {
+-                return null;
+-            }
+-
+-            string[] p = s.Split(':', 'x', '/');
+-
+-            if (p.Length == 2 && double.TryParse(p[0], NumberStyles.Float, CultureInfo.InvariantCulture, out double w) &&
+-                double.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out double h) && w > 0 && h > 0)
+-            {
+-                return w / h;
+-            }
+-
+-            return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out double a) && a > 0 ? a : null;
+-        }
+     }
+ }

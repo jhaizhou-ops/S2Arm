@@ -1,0 +1,69 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 103e061a8baa37ac12448301aff2e2d60d9ae4ad..94a886928e250cd5ccd01ef59acabf4293ccc913 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -14,6 +14,7 @@
+ 
+   <ItemGroup>
+     <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
++    <Compile Include="../../../../graphics/vulkan/core/DriverQuirks.cs" Link="S2Arm/DriverQuirks.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/ProgramBinary*.cs" Link="S2Arm/ProgramCache/%(Filename)%(Extension)" />
+     <Compile Include="../../../../graphics/vulkan/cache/VulkanProfile.cs" Link="S2Arm/ProgramCache/VulkanProfile.cs" />
+     <Compile Include="../../../../graphics/vulkan/cache/CompileWorker.cs" Link="S2Arm/ProgramCache/CompileWorker.cs" />
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 26c8d576bd528348f30aef1102b7a0d6abdd385c..7eb9ff1d942984e25675abf00cac9e1a10d003cd 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -298,7 +298,23 @@ namespace Ryujinx.Graphics.Vulkan
+                 PQueuePriorities = queuePriorities,
+             };
+ 
+-            bool useRobustBufferAccess = VendorUtils.FromId(physicalDevice.PhysicalDeviceProperties.VendorID) == Vendor.Nvidia;
++            PhysicalDeviceProperties properties = physicalDevice.PhysicalDeviceProperties;
++            bool hasDriverProperties = physicalDevice.TryGetPhysicalDeviceDriverPropertiesKHR(api, out PhysicalDeviceDriverPropertiesKHR driverProperties);
++            DriverQuirkSelection quirks = DriverQuirks.Query(properties.VendorID,
++                hasDriverProperties ? driverProperties.DriverID : null,
++                properties.DriverVersion, properties.Limits.MaxDrawIndirectCount);
++            bool disableDynamicState = quirks.Disabled.HasFlag(DisabledDriverFeatures.ExtendedDynamicState);
++            bool useRobustBufferAccess = VendorUtils.FromId(properties.VendorID) == Vendor.Nvidia ||
++                quirks.Forced.HasFlag(ForcedDriverFeatures.RobustBufferAccess);
++            if (quirks.RuleIds.Count != 0)
++            {
++                string driverInfo = hasDriverProperties ? Marshal.PtrToStringUTF8((nint)driverProperties.DriverInfo) : "unavailable";
++                Logger.Info?.Print(LogClass.Gpu,
++                    $"Vulkan driver quirks: rules={string.Join(",", quirks.RuleIds)}, vendorID=0x{properties.VendorID:X}, " +
++                    $"driverID={(hasDriverProperties ? driverProperties.DriverID.ToString() : "unavailable")}, " +
++                    $"driverVersion={properties.DriverVersion} (0x{properties.DriverVersion:X8}, {DriverQuirks.FormatVersion(properties.DriverVersion)}), " +
++                    $"driverInfo={driverInfo}, disabled={quirks.Disabled}, forced={quirks.Forced}");
++            }
+ 
+             PhysicalDeviceFeatures2 features2 = new()
+             {
+@@ -584,7 +600,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 {
+                     SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+                     PNext = pExtendedFeatures,
+-                    NullDescriptor = supportedFeaturesRobustness2.NullDescriptor,
++                    NullDescriptor = supportedFeaturesRobustness2.NullDescriptor && !quirks.Disabled.HasFlag(DisabledDriverFeatures.NullDescriptor),
+                 };
+ 
+                 pExtendedFeatures = &featuresRobustness2;
+@@ -597,7 +613,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 ExtendedDynamicState = supportedDynamicState.ExtendedDynamicState,
+             };
+ 
+-            if (physicalDevice.IsDeviceExtensionPresent(ExtExtendedDynamicState.ExtensionName))
++            if (physicalDevice.IsDeviceExtensionPresent(ExtExtendedDynamicState.ExtensionName) && !disableDynamicState)
+             {
+                 pExtendedFeatures = &featuresExtendedDynamicState;
+             }
+@@ -779,6 +795,9 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();
++            enabledExtensions = enabledExtensions.Where(extension =>
++                !(extension == "VK_KHR_push_descriptor" && quirks.Disabled.HasFlag(DisabledDriverFeatures.PushDescriptor)) &&
++                !(extension == ExtExtendedDynamicState.ExtensionName && disableDynamicState)).ToArray();
+             if (hasDescriptorIndexing) enabledExtensions = enabledExtensions.Append("VK_EXT_descriptor_indexing").ToArray();
+             if (hasUniformBufferStandardLayout) enabledExtensions = enabledExtensions.Append("VK_KHR_uniform_buffer_standard_layout").ToArray();
+             if (has8BitStorage) enabledExtensions = enabledExtensions.Append("VK_KHR_8bit_storage").ToArray();

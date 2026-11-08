@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index d9483a6c947380e3ee015f33f0125604f240903c..8deff52cbff00ab7be2f31d60e8199eade336106 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -333,11 +333,19 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             // every 1 ms (S2ABsdWake); a host socket in the set keeps the 1 ms poll (its readiness does not signal)
+             bool wakeable = true;
+ 
++            // S2Arm: a single manager waits out the timeout itself only if it can wait on every descriptor it holds: an LDN proxy socket
++            // has no wait (LdnProxySocket.Poll returns its current state, SocketHelpers.Select waits on host / offline sockets only), so a
++            // select on LDN sockets alone returned 0 at once and the guest spun; with one in the set, wait here like mixed kinds (audit P1-24)
++            bool hasLdn = false;
++
+             foreach (PollEvent evnt in events)
+             {
+                 wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && (ms.Socket is Proxy.OfflineSocket || ms.Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket));
++                hasLdn |= evnt.FileDescriptor is ManagedSocket ldn && ldn.Socket is Ldn.UserServiceCreator.LdnRyu.Proxy.LdnProxySocket;
+             }
+ 
++            bool managerWaits = managersInUse == 1 && !hasLdn;
++
+             while (true)
+             {
+                 long seen = S2ABsdWake.Version;
+@@ -346,7 +354,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 {
+                     if (eventsByPollManager[i].Count > 0)
+                     {
+-                        _pollManagers[i].Select(eventsByPollManager[i], managersInUse == 1 ? timeout : 0, out int updatedPollCount);
++                        _pollManagers[i].Select(eventsByPollManager[i], managerWaits ? timeout : 0, out int updatedPollCount);
+                         updatedCount += updatedPollCount;
+                     }
+                 }
+@@ -356,7 +364,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 // for an unlimited select and clamps a finite wait to [0, int.MaxValue]
+                 long now = System.Diagnostics.Stopwatch.GetTimestamp();
+ 
+-                if (managersInUse == 1 || updatedCount > 0 || S2AShutdown.Requested || now >= deadline)
++                if (managerWaits || updatedCount > 0 || S2AShutdown.Requested || now >= deadline)
+                 {
+                     break;
+                 }

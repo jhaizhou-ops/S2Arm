@@ -1,0 +1,328 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 368c93a4d4effaaaf27a9589b88186333237eacc..37886c0cd0218fd0a862fd2d1982a400236eb8bf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -23,8 +23,26 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+         ];
+ 
+         private BsdContext _context;
++        // S2Arm: the bsd client state belongs to the process (RegisterClient carries the pid). The Switch 2 SDK opens several bsd sessions
++        //   for concurrency (nn::socket::detail::SetClientSessionCount / CreateClientServiceByHipc) and calls RegisterClient on one of them only;
++        //   every session sends command 36 (and the monitor session StartMonitoring) with the pid first, which binds it to its process's context.
++        //   Only the session that called RegisterClient disposes the context.
++        private bool _registered;
+         private readonly bool _isPrivileged;
+ 
++        private void BindByPid(ServiceCtx context)
++        {
++            if (context.Request.HandleDesc is { HasPId: true })
++            {
++                _context ??= BsdContext.GetOrRegister(context.Request.HandleDesc.PId);
++            }
++        }
++
++        private BsdContext Context(ServiceCtx context)
++        {
++            return _context ?? throw new InvalidOperationException("bsd: socket command on a session not bound to a process (no RegisterClient / command 36 / StartMonitoring with pid)");
++        }
++
+         public IClient(ServiceCtx context, bool isPrivileged) : base(context.Device.System.BsdServer)
+         {
+             _isPrivileged = isPrivileged;
+@@ -118,7 +136,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 return WriteBsdResult(context, 0, errNo);
+             }
+ 
+-            int newSockFd = _context.RegisterFileDescriptor(newBsdSocket);
++            int newSockFd = Context(context).RegisterFileDescriptor(newBsdSocket);
+ 
+             if (newSockFd == -1)
+             {
+@@ -153,6 +171,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+         public ResultCode RegisterClient(ServiceCtx context)
+         {
+             _context = BsdContext.GetOrRegister(context.Request.HandleDesc.PId);
++            _registered = true;
+ 
+             /*
+             typedef struct  {
+@@ -184,6 +203,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+         {
+             ulong unknown0 = context.RequestData.ReadUInt64();
+ 
++            BindByPid(context);   // S2Arm：监视会话靠这里的 pid 认进程
++
+             Logger.Stub?.PrintStub(LogClass.ServiceBsd, new { unknown0 });
+ 
+             return ResultCode.Success;
+@@ -255,9 +276,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             (ulong writeFdsOutBufferPosition, ulong writeFdsOutBufferSize) = context.Request.GetBufferType0x22(1);
+             (ulong errorFdsOutBufferPosition, ulong errorFdsOutBufferSize) = context.Request.GetBufferType0x22(2);
+ 
+-            List<IFileDescriptor> readFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(readFdsInBufferPosition, (int)readFdsInBufferSize), fdsCount);
+-            List<IFileDescriptor> writeFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(writeFdsInBufferPosition, (int)writeFdsInBufferSize), fdsCount);
+-            List<IFileDescriptor> errorFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(errorFdsInBufferPosition, (int)errorFdsInBufferSize), fdsCount);
++            List<IFileDescriptor> readFds = Context(context).RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(readFdsInBufferPosition, (int)readFdsInBufferSize), fdsCount);
++            List<IFileDescriptor> writeFds = Context(context).RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(writeFdsInBufferPosition, (int)writeFdsInBufferSize), fdsCount);
++            List<IFileDescriptor> errorFds = Context(context).RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(errorFdsInBufferPosition, (int)errorFdsInBufferSize), fdsCount);
+ 
+             // Only descriptors below nfds participate; closed ones in that range must fail.
+             if (readFds.Contains(null) || writeFds.Contains(null) || errorFds.Contains(null))
+@@ -411,9 +432,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             using WritableRegion writeFdsOut = context.Memory.GetWritableRegion(writeFdsOutBufferPosition, (int)writeFdsOutBufferSize);
+             using WritableRegion errorFdsOut = context.Memory.GetWritableRegion(errorFdsOutBufferPosition, (int)errorFdsOutBufferSize);
+ 
+-            _context.BuildMask(readFds, readFdsOut.Memory.Span);
+-            _context.BuildMask(writeFds, writeFdsOut.Memory.Span);
+-            _context.BuildMask(errorFds, errorFdsOut.Memory.Span);
++            Context(context).BuildMask(readFds, readFdsOut.Memory.Span);
++            Context(context).BuildMask(writeFds, writeFdsOut.Memory.Span);
++            Context(context).BuildMask(errorFds, errorFdsOut.Memory.Span);
+ 
+             WriteBsdResult(context, updatedCount);
+ 
+@@ -460,7 +481,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             {
+                 PollEventData pollEventData = context.Memory.Read<PollEventData>(inputBufferPosition + (ulong)(i * Unsafe.SizeOf<PollEventData>()));
+ 
+-                IFileDescriptor fileDescriptor = _context.RetrieveFileDescriptor(pollEventData.SocketFd);
++                IFileDescriptor fileDescriptor = Context(context).RetrieveFileDescriptor(pollEventData.SocketFd);
+ 
+                 if (fileDescriptor == null)
+                 {
+@@ -617,7 +638,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion receiveRegion = context.Memory.GetWritableRegion(receivePosition, (int)receiveLength);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -648,7 +669,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion receiveRegion = context.Memory.GetWritableRegion(receivePosition, (int)receiveLength);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -687,7 +708,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             ReadOnlySpan<byte> sendBuffer = context.Memory.GetSpan(sendPosition, (int)sendSize);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -718,7 +739,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             ReadOnlySpan<byte> sendBuffer = context.Memory.GetSpan(sendPosition, (int)sendSize);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -747,7 +768,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -759,7 +780,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 }
+                 else if (errno == LinuxError.SUCCESS)
+                 {
+-                    int newSockFd = _context.RegisterFileDescriptor(newSocket);
++                    int newSockFd = Context(context).RegisterFileDescriptor(newSocket);
+ 
+                     if (newSockFd == -1)
+                     {
+@@ -792,7 +813,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -815,7 +836,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -838,7 +859,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             if (socket != null)
+             {
+                 errno = LinuxError.ENOTCONN;
+@@ -867,7 +888,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -893,7 +914,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion optionValue = context.Memory.GetWritableRegion(bufferPosition, (int)bufferSize);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -916,7 +937,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             int backlog = context.RequestData.ReadInt32();
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -941,7 +962,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ #pragma warning restore IDE0059
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -979,7 +1000,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             int result = 0;
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -1018,7 +1039,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             ReadOnlySpan<byte> optionValue = context.Memory.GetSpan(bufferPos, (int)bufferSize);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -1036,7 +1057,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             int how = context.RequestData.ReadInt32();
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+ 
+             if (socket != null)
+             {
+@@ -1061,7 +1082,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             if (how is >= 0 and <= 2)
+             {
+-                errno = _context.ShutdownAllSockets((BsdSocketShutdownFlags)how);
++                errno = Context(context).ShutdownAllSockets((BsdSocketShutdownFlags)how);
+             }
+ 
+             return WriteBsdResult(context, 0, errno);
+@@ -1078,7 +1099,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             ReadOnlySpan<byte> sendBuffer = context.Memory.GetSpan(sendPosition, (int)sendSize);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            IFileDescriptor file = _context.RetrieveFileDescriptor(fd);
++            IFileDescriptor file = Context(context).RetrieveFileDescriptor(fd);
+             int result = -1;
+ 
+             if (file != null)
+@@ -1105,7 +1126,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion receiveRegion = context.Memory.GetWritableRegion(receivePosition, (int)receiveLength);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            IFileDescriptor file = _context.RetrieveFileDescriptor(fd);
++            IFileDescriptor file = Context(context).RetrieveFileDescriptor(fd);
+             int result = -1;
+ 
+             if (file != null)
+@@ -1131,7 +1152,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             LinuxError errno = LinuxError.EBADF;
+ 
+-            if (_context.CloseFileDescriptor(fd))
++            if (Context(context).CloseFileDescriptor(fd))
+             {
+                 errno = LinuxError.SUCCESS;
+             }
+@@ -1155,7 +1176,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             {
+                 errno = LinuxError.SUCCESS;
+ 
+-                newSockFd = _context.DuplicateFileDescriptor(fd);
++                newSockFd = Context(context).DuplicateFileDescriptor(fd);
+ 
+                 if (newSockFd == -1)
+                 {
+@@ -1184,7 +1205,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion receiveRegion = context.Memory.GetWritableRegion(receivePosition, (int)receiveLength);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -1225,7 +1246,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             WritableRegion receiveRegion = context.Memory.GetWritableRegion(receivePosition, (int)receiveLength);
+ 
+             LinuxError errno = LinuxError.EBADF;
+-            ISocket socket = _context.RetrieveSocket(socketFd);
++            ISocket socket = Context(context).RetrieveSocket(socketFd);
+             int result = -1;
+ 
+             if (socket != null)
+@@ -1264,7 +1285,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             LinuxError errno = LinuxError.SUCCESS;
+ 
+-            int newSockFd = _context.RegisterFileDescriptor(newEventFile);
++            int newSockFd = Context(context).RegisterFileDescriptor(newEventFile);
+ 
+             if (newSockFd == -1)
+             {
+@@ -1280,6 +1301,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+         public ResultCode InitializeSessionS2(ServiceCtx context)
+         {
+             context.RequestData.ReadUInt32();
++            BindByPid(context);   // 本会话从此用本进程的描述符表（Switch 2 SDK 只在一条会话上 RegisterClient）
+             context.ResponseData.Write(0u);
+ 
+             return ResultCode.Success;
+@@ -1288,7 +1310,10 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+         public override void DestroyAtExit()
+         {
+-            _context?.Dispose();
++            if (_registered)
++            {
++                _context?.Dispose();
++            }
+         }
+     }
+ }

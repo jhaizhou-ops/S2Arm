@@ -1,0 +1,171 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+index cc64eaff3b5b141726eebc4121920869f20db86e..80d59e88a2931d8300396a5f44bb7f67adb14471 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs
+@@ -59,6 +59,25 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+         private MemoryHandle _workBufferMemoryPin;
+ 
++        // S2Arm: work buffer in native memory owned by this renderer (see AudioRendererManager.OpenAudioRenderer)
++        private unsafe byte* _ownedWorkBuffer;
++
++        public unsafe Memory<byte> AllocateOwnedWorkBuffer(int size)
++        {
++            _ownedWorkBuffer = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed((nuint)Math.Max(size, 1));
++
++            return new Ryujinx.Memory.NativeMemoryManager<byte>(_ownedWorkBuffer, size).Memory;
++        }
++
++        public unsafe void FreeOwnedWorkBuffer()
++        {
++            if (_ownedWorkBuffer != null)
++            {
++                System.Runtime.InteropServices.NativeMemory.Free(_ownedWorkBuffer);
++                _ownedWorkBuffer = null;
++            }
++        }
++
+         private Memory<float> _mixBuffer;
+         private Memory<float> _depopBuffer;
+ 
+@@ -929,6 +948,7 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+                 _manager.Unregister(this);
+                 _workBufferMemoryPin.Dispose();
++                FreeOwnedWorkBuffer();
+ 
+                 if (MemoryManager is IRefCounted rc)
+                 {
+diff --git a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+index e2a44862e4830314dd5e76c719fdcde362ef6da9..d2b6d2ee2a9107e898b1fcc433a54c4cbf3886f1 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/AudioRendererManager.cs
+@@ -323,7 +323,10 @@ namespace Ryujinx.Audio.Renderer.Server
+             // TODO: Eventually, we should try to use the guest supplied work buffer instead of allocating
+             // our own. However, it was causing problems on some applications that would unmap the memory
+             // before the audio renderer was fully disposed.
+-            Memory<byte> workBufferMemory = GC.AllocateArray<byte>((int)workBufferSize, pinned: true);
++            // S2Arm: native memory owned by the renderer (freed on dispose) and only as much as the renderer needs, instead of a pinned
++            // managed array of the game-supplied size (iPhone low address space is scarce; the game may pass a much larger buffer)
++            ulong needed = Math.Min(workBufferSize, AudioRenderSystem.GetWorkBufferSize(ref parameter));
++            Memory<byte> workBufferMemory = audioRenderer.AllocateOwnedWorkBuffer((int)needed);
+ 
+             ResultCode result = audioRenderer.Initialize(
+                 ref parameter,
+@@ -345,6 +348,8 @@ namespace Ryujinx.Audio.Renderer.Server
+             {
+                 ReleaseSessionId(sessionId);
+ 
++                audioRenderer.FreeOwnedWorkBuffer();
++
+                 renderer = null;
+             }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+index 467dc63fe2573b2fb2b60cb55dada0b5a093e28f..e0bf990b48912844f5606c94b3e264c95ea849f7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/CaptureManager.cs
+@@ -59,8 +59,9 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             return resultCode;
+         }
+ 
+-        public ResultCode SaveScreenShot(
+-            byte[] screenshotData,
++        // S2Arm: the screenshot is read straight from game memory (a span), not copied into a managed array first
++        public unsafe ResultCode SaveScreenShot(
++            ReadOnlySpan<byte> screenshotData,
+             ulong appletResourceUserId,
+             ulong titleId,
+             out ApplicationAlbumEntry applicationAlbumEntry)
+@@ -69,12 +70,12 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             {
+                 appletResourceUserId,
+                 titleId,
+-                screenshotDataLength = screenshotData?.Length ?? 0,
++                screenshotDataLength = screenshotData.Length,
+             });
+ 
+             applicationAlbumEntry = default;
+ 
+-            if (screenshotData == null || screenshotData.Length == 0)
++            if (screenshotData.Length == 0)
+             {
+                 return ResultCode.NullInputBuffer;
+             }
+@@ -140,7 +141,7 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+                 return ResultCode.InvalidArgument;
+             }
+ 
+-            Marshal.Copy(screenshotData, 0, pixels, ScreenshotDataSize);
++            screenshotData[..ScreenshotDataSize].CopyTo(new Span<byte>((void*)pixels, ScreenshotDataSize));
+ 
+             using SKData data = bitmap.Encode(SKEncodedImageFormat.Jpeg, 80);
+             using FileStream file = File.OpenWrite(filePath);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Caps/IScreenShotApplicationService.cs b/src/Ryujinx.HLE/HOS/Services/Caps/IScreenShotApplicationService.cs
+index 64e9eeca5d3a9ba46e0d0a9974af584458169db9..8bdbb62ecf83a313d5126b9456dbba6f4f97865a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Caps/IScreenShotApplicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Caps/IScreenShotApplicationService.cs
+@@ -1,6 +1,7 @@
+ using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.HOS.Services.Caps.Types;
++using System;
+ 
+ namespace Ryujinx.HLE.HOS.Services.Caps
+ {
+@@ -48,7 +49,7 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+                 return ResultCode.NullInputBuffer;
+             }
+ 
+-            byte[] screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true).ToArray();
++            ReadOnlySpan<byte> screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true);
+ 
+             ResultCode resultCode = context.Device.System.CaptureManager.SaveScreenShot(screenshotData, appletResourceUserId, context.Device.Processes.GetProcess(context.ClientProcessId).ProgramId, out ApplicationAlbumEntry applicationAlbumEntry);
+ 
+@@ -96,7 +97,7 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             // TODO: Parse the application data: At 0x00 it's UserData (Size of 0x400), at 0x404 it's a uint UserDataSize (Always empty for now).
+             _ = context.Memory.GetSpan(applicationDataPosition, (int)applicationDataSize).ToArray();
+ 
+-            byte[] screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true).ToArray();
++            ReadOnlySpan<byte> screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true);
+ 
+             ResultCode resultCode = context.Device.System.CaptureManager.SaveScreenShot(screenshotData, appletResourceUserId, context.Device.Processes.GetProcess(context.ClientProcessId).ProgramId, out ApplicationAlbumEntry applicationAlbumEntry);
+ 
+@@ -141,7 +142,7 @@ namespace Ryujinx.HLE.HOS.Services.Caps
+             // TODO: Parse the UserIdList.
+             _ = context.Memory.GetSpan(userIdListPosition, (int)userIdListSize).ToArray();
+ 
+-            byte[] screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true).ToArray();
++            ReadOnlySpan<byte> screenshotData = context.Memory.GetSpan(screenshotDataPosition, (int)screenshotDataSize, true);
+ 
+             ResultCode resultCode = context.Device.System.CaptureManager.SaveScreenShot(screenshotData, appletResourceUserId, context.Device.Processes.GetProcess(context.ClientProcessId).ProgramId, out ApplicationAlbumEntry applicationAlbumEntry);
+ 
+diff --git a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+index 5a1c4edd8c137b33bc3666e1a5365f2666eb9bc7..10af5bbf9ef25846044a75f8236f4e02d24c2fe5 100644
+--- a/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
++++ b/src/Ryujinx.Horizon/Prepo/Ipc/PrepoService.cs
+@@ -188,6 +188,8 @@ namespace Ryujinx.Horizon.Prepo.Ipc
+             return PrepoResult.PermissionDenied;
+         }
+ 
++        private const int MaxParsedReportSize = 64 * 1024;
++
+         private Result ProcessPlayReport(PlayReportKind playReportKind, ReadOnlySpan<byte> gameRoomBuffer, ReadOnlySpan<byte> reportBuffer, ulong pid, Uid userId, bool withUserId = false, ApplicationId applicationId = default)
+         {
+             if (withUserId)
+@@ -215,6 +217,15 @@ namespace Ryujinx.Horizon.Prepo.Ipc
+                 return PrepoResult.InvalidBufferSize;
+             }
+ 
++            // S2Arm: play reports are only logged here; parsing one materializes a managed copy and an object tree as large as the report.
++            // Above a fixed cap log the size only (iPhone low address space is scarce; nothing is uploaded either way)
++            if (reportBuffer.Length > MaxParsedReportSize)
++            {
++                Logger.Info?.Print(LogClass.ServicePrepo, $"PlayReport {playReportKind} in room {gameRoom}: {reportBuffer.Length} bytes (not parsed, over {MaxParsedReportSize})");
++
++                return Result.Success;
++            }
++
+             StringBuilder builder = new();
+             MessagePackObject deserializedReport = MessagePackSerializer.UnpackMessagePackObject(reportBuffer.ToArray());
+ 

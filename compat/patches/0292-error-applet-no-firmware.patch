@@ -1,0 +1,40 @@
+diff --git a/src/Ryujinx.HLE/HOS/Applets/Error/ErrorApplet.cs b/src/Ryujinx.HLE/HOS/Applets/Error/ErrorApplet.cs
+index 4c54b4666216af5eb048b5e1d40c706d7b1dae52..88770f6ec10c1531eb7c3eecd90ba1442ecf880c 100644
+--- a/src/Ryujinx.HLE/HOS/Applets/Error/ErrorApplet.cs
++++ b/src/Ryujinx.HLE/HOS/Applets/Error/ErrorApplet.cs
+@@ -111,7 +111,17 @@ namespace Ryujinx.HLE.HOS.Applets.Error
+         {
+             string binaryTitleContentPath = _horizon.ContentManager.GetInstalledContentPath(ErrorMessageBinaryTitleId, StorageId.BuiltInSystem, NcaContentType.Data);
+ 
+-            using LibHac.Fs.IStorage ncaFileStream = new LocalStorage(FileSystem.VirtualFileSystem.SwitchPathToSystemPath(binaryTitleContentPath), FileAccess.Read, FileMode.Open);
++            // S2Arm: no system firmware installed (the iOS package ships none): GetInstalledContentPath gives "" and SwitchPathToSystemPath("") gives null,
++            // and new LocalStorage(null) threw ArgumentNullException out of Start — the game then aborted (nn::err::ShowError asserts on failure).
++            // Fall back to the generic text, as when the message binary lacks the entry.
++            string systemPath = string.IsNullOrEmpty(binaryTitleContentPath) ? null : FileSystem.VirtualFileSystem.SwitchPathToSystemPath(binaryTitleContentPath);
++
++            if (systemPath == null || !File.Exists(systemPath))
++            {
++                return string.Empty;
++            }
++
++            using LibHac.Fs.IStorage ncaFileStream = new LocalStorage(systemPath, FileAccess.Read, FileMode.Open);
+             Nca nca = new(_horizon.Device.FileSystem.KeySet, ncaFileStream);
+             IFileSystem romfs = nca.OpenFileSystem(NcaSectionType.Data, _horizon.FsIntegrityCheckLevel);
+             string languageCode = SystemLanguageToLanguageKey(_horizon.State.DesiredSystemLanguage);
+diff --git a/src/Ryujinx.HLE/HOS/Services/IpcService.cs b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+index a055f0fa5fd44bbf155e852c94593232820e6cc6..1a50e5d1947e212d45d7955024b85da4ada39a9f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/IpcService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/IpcService.cs
+@@ -357,6 +357,12 @@ namespace Ryujinx.HLE.HOS.Services
+             return _domainObjects?.GetData<IpcService>(id);
+         }
+ 
++        // S2Arm: the direct dispatcher (services/S2A.Services HleTarget) needs these to write a well-formed error reply for a domain request
++        // (domain out-header before SFCO) and to name the domain object a failing command was addressed to (the session root is not it)
++        internal bool S2AIsDomain => _isDomain;
++
++        internal string S2ADomainObjectName(int id) => GetObject(id)?.GetType().Name;
++
+         public void SetParent(IpcService parent)
+         {
+             _parent = parent._parent;

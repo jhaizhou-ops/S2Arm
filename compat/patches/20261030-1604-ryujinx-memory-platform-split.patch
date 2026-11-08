@@ -1,0 +1,170 @@
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs b/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4939ca84e36f64ad198f3c636d309ac668aa2ba7
+--- /dev/null
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs
+@@ -0,0 +1,82 @@
++using System;
++using System.Runtime.InteropServices;
++using static Ryujinx.Memory.MemoryManagerUnixHelper;
++
++namespace Ryujinx.Memory
++{
++    static partial class MemoryManagementUnix
++    {
++        // Darwin 10.14+ 的 JIT 规则：Allocate 与 Commit 共用同一条判定。
++        // 仅按真实平台条件收口，不把「Apple 平台」简化成放行，iOS 不因此额外开放可执行权限。
++        private static bool IsDarwinJit(bool forJit) => OperatingSystem.IsMacOSVersionAtLeast(10, 14) && forJit;   // 平台例外：#1067 MemoryManagementUnix 源码分区，合并两处上游 IsMacOSVersionAtLeast 判断
++
++        private static void ApplyAllocationPlatformFlags(ref MmapFlags flags, ref MmapProts prot, bool forJit)
++        {
++            if (!IsDarwinJit(forJit))
++            {
++                return;
++            }
++
++            flags |= MmapFlags.MAP_JIT_DARWIN;
++
++            if (prot == (MmapProts.PROT_READ | MmapProts.PROT_WRITE))
++            {
++                prot |= MmapProts.PROT_EXEC;
++            }
++        }
++
++        private static void ApplyCommitPlatformProt(ref MmapProts prot, bool forJit)
++        {
++            if (IsDarwinJit(forJit))
++            {
++                prot |= MmapProts.PROT_EXEC;
++            }
++        }
++
++        // 匿名共享 fd 创建：Darwin 走 shm_open + shm_unlink，Linux 走 /dev/shm 的 mkstemp + unlink。
++        // fd 在成功返回前归这里；创建后失败路径（shm_unlink / unlink / ftruncate）的关闭配对保持现状，修正归 R3。
++        private static unsafe int CreateAnonymousSharedFd()
++        {
++            int fd;
++
++            if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
++            {
++                byte[] memName = "Ryujinx-XXXXXX"u8.ToArray();
++
++                fixed (byte* pMemName = memName)
++                {
++                    fd = shm_open((nint)pMemName, 0x2 | 0x200 | 0x800 | 0x400, 384); // O_RDWR | O_CREAT | O_EXCL | O_TRUNC, 0600
++                    if (fd == -1)
++                    {
++                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                    }
++
++                    if (shm_unlink((nint)pMemName) != 0)
++                    {
++                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                    }
++                }
++            }
++            else
++            {
++                byte[] fileName = "/dev/shm/Ryujinx-XXXXXX"u8.ToArray();
++
++                fixed (byte* pFileName = fileName)
++                {
++                    fd = mkstemp((nint)pFileName);
++                    if (fd == -1)
++                    {
++                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                    }
++
++                    if (unlink((nint)pFileName) != 0)
++                    {
++                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                    }
++                }
++            }
++
++            return fd;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.cs b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+index 0473b6db7e6c695baf9b11f740130e679db3dd9f..ab0306f7a8e1c71d20f9687284c8dd3bff6e0976 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+@@ -46,15 +46,7 @@ namespace Ryujinx.Memory
+                 flags |= MmapFlags.MAP_NORESERVE;
+             }
+ 
+-            if (OperatingSystem.IsMacOSVersionAtLeast(10, 14) && forJit)
+-            {
+-                flags |= MmapFlags.MAP_JIT_DARWIN;
+-
+-                if (prot == (MmapProts.PROT_READ | MmapProts.PROT_WRITE))
+-                {
+-                    prot |= MmapProts.PROT_EXEC;
+-                }
+-            }
++            ApplyAllocationPlatformFlags(ref flags, ref prot, forJit);
+ 
+             nint ptr;
+ 
+@@ -94,10 +86,7 @@ namespace Ryujinx.Memory
+         {
+             MmapProts prot = MmapProts.PROT_READ | MmapProts.PROT_WRITE;
+ 
+-            if (OperatingSystem.IsMacOSVersionAtLeast(10, 14) && forJit)
+-            {
+-                prot |= MmapProts.PROT_EXEC;
+-            }
++            ApplyCommitPlatformProt(ref prot, forJit);
+ 
+             if (mprotect(address, size, prot) != 0)
+             {
+@@ -163,46 +152,9 @@ namespace Ryujinx.Memory
+             return munmap(address, size) == 0;
+         }
+ 
+-        public unsafe static nint CreateSharedMemory(ulong size, bool reserve)
++        public static nint CreateSharedMemory(ulong size, bool reserve)
+         {
+-            int fd;
+-
+-            if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
+-            {
+-                byte[] memName = "Ryujinx-XXXXXX"u8.ToArray();
+-
+-                fixed (byte* pMemName = memName)
+-                {
+-                    fd = shm_open((nint)pMemName, 0x2 | 0x200 | 0x800 | 0x400, 384); // O_RDWR | O_CREAT | O_EXCL | O_TRUNC, 0600
+-                    if (fd == -1)
+-                    {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
+-                    }
+-
+-                    if (shm_unlink((nint)pMemName) != 0)
+-                    {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
+-                    }
+-                }
+-            }
+-            else
+-            {
+-                byte[] fileName = "/dev/shm/Ryujinx-XXXXXX"u8.ToArray();
+-
+-                fixed (byte* pFileName = fileName)
+-                {
+-                    fd = mkstemp((nint)pFileName);
+-                    if (fd == -1)
+-                    {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
+-                    }
+-
+-                    if (unlink((nint)pFileName) != 0)
+-                    {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
+-                    }
+-                }
+-            }
++            int fd = CreateAnonymousSharedFd();
+ 
+             if (ftruncate(fd, (nint)size) != 0)
+             {

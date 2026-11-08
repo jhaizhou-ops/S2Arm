@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器（graphics/tools/shbake）用磁盘缓存与特化状态内部类型 -->
+    <InternalsVisibleTo Include="S2A.DirectCompiler" /> <!-- S2A：直连统一翻译器（离线 CLI 与 NativeAOT 同一实现）用锁版本 ShaderCache / 特化状态内部类型 -->
+    <InternalsVisibleTo Include="libs2a_cs" /> <!-- S2A：Android NativeAOT 正式路径必须在编译期内联同一 DirectShaderCompiler，不靠反射 -->
+    <!-- S2A：包内特化核对单测（graphics/tools/shbake/tests/spec，10-21）构造特化状态与运行时真值 -->
+    <InternalsVisibleTo Include="S2A.SpecTest" />
+    <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+    <InternalsVisibleTo Include="S2A.SeenTest" /> <!-- S2A：双轨覆盖率 seen 记录单测（graphics/tools/direct/tests/seen） -->
+    <InternalsVisibleTo Include="S2A.GpuShortCacheTest" /> <!-- S2A：贴图短缓存重复描述符单测（tests/gpu_shortcache，#1364） -->
+    <InternalsVisibleTo Include="S2A.VkLayoutStageTest" /> <!-- S2A：着色器描述符阶段位单测（tests/vk_layout_stages，#199） -->
+    <InternalsVisibleTo Include="S2A.PsoWarmGateTest" /> <!-- S2A：加载屏预热后端门控 / 总预算单测（tests/pso_warm_gate） -->
+    <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+    <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
+    <InternalsVisibleTo Include="S2A.GpuBufferHoleTest" /> <!-- S2A：带洞多段缓冲提交绑定单测（tests/gpu_bufferhole，BotW qbotw8e NRE） -->
+    <InternalsVisibleTo Include="S2A.GpuBufferRecreateTest" /> <!-- S2A：缓冲表合并窗口一致性单测（tests/gpu_bufrecreate，BotW 8E/9000/9400 NRE） -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ryujinx.Cpu\Ryujinx.Cpu.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Device\Ryujinx.Graphics.Device.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.GAL\Ryujinx.Graphics.GAL.csproj" />
+    <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Texture\Ryujinx.Graphics.Texture.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Shader\Ryujinx.Graphics.Shader.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+index 69eb0ed241d93f2a18fdbdcbcd0fa6622721c53a..94909f3ad48dc2f2c91b5060483a3660bc980dae 100644
+--- a/src/Ryujinx.Common/S2AThreadAlloc.cs
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -12,7 +12,9 @@ namespace Ryujinx.Common
+     /// </summary>
+     public static class S2AThreadAlloc
+     {
+-        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++        // Not readonly: unit tests switch it on before starting the threads they measure (per-thread bytes per iteration, independent of
++        // whatever other threads allocate meanwhile — a whole-process total flaked under machine load).
++        public static bool On = Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
+ 
+         private sealed class Slot
+         {
+@@ -57,6 +59,26 @@ namespace Ryujinx.Common
+             _last = now;
+         }
+ 
++        /// <summary>Bytes and iterations so far of the slots with this name (summed over threads).</summary>
++        public static (long Bytes, long Rounds) Of(string name)
++        {
++            lock (_slots)
++            {
++                long b = 0, r = 0;
++
++                foreach (Slot s in _slots)
++                {
++                    if (s.Name == name)
++                    {
++                        b += Interlocked.Read(ref s.Bytes);
++                        r += Interlocked.Read(ref s.Rounds);
++                    }
++                }
++
++                return (b, r);
++            }
++        }
++
+         /// <summary>Sum of all slots (bytes).</summary>
+         public static long Total()
+         {

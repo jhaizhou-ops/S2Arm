@@ -1,0 +1,456 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+index 8740f04cf54aa761680507f0d120cf8f41da89ba..007fa5f38c00c95f384382ee1deba1c9ed6edc30 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+@@ -40,6 +40,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private CacheByRange<BufferHolder> _cachedConvertedBuffers;
+ 
++        private List<AlignedTexelWriteback> _alignedTexelWrites;
++        private List<Action> _alignedTexelViewInvalidates;
++
+         public int Size { get; }
+ 
+         private readonly nint _map;
+@@ -62,6 +65,13 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private Action _decrementReferenceCount;
+ 
++        private readonly struct AlignedTexelWriteback(Auto<DisposableBuffer> shadow, int srcOffset, int size)
++        {
++            public readonly Auto<DisposableBuffer> Shadow = shadow;
++            public readonly int SrcOffset = srcOffset;
++            public readonly int Size = size;
++        }
++
+         public BufferHolder(VulkanRenderer gd, Device device, VkBuffer buffer, MemoryAllocation allocation, int size, BufferAllocationType type, BufferAllocationType currentType)
+         {
+             _gd = gd;
+@@ -117,7 +127,68 @@ namespace Ryujinx.Graphics.Vulkan
+             _flushLock = new ReaderWriterLockSlim();
+         }
+ 
+-        public unsafe Auto<DisposableBufferView> CreateView(VkFormat format, int offset, int size, Action invalidateView)
++        internal static bool NeedsAlignedTexelCopy(int offset, int alignment)
++        {
++            return alignment > 1 && (uint)offset % (uint)alignment != 0;
++        }
++
++        public Auto<DisposableBufferView> CreateView(VkFormat format, int offset, int size, Action invalidateView, CommandBufferScoped cbs, out Auto<DisposableBuffer> alignedCopy)
++        {
++            alignedCopy = null;
++
++            if (!NeedsAlignedTexelCopy(offset, _gd.MinTexelBufferOffsetAlignment))
++            {
++                return CreateViewDirect(format, offset, size);
++            }
++
++            FlushAlignedTexelWrites();
++
++            // The view offset does not meet minTexelBufferOffsetAlignment. Serve the
++            // view from an aligned sub-allocation shadowing the same data, so texel
++            // indices still read identical bytes. Source writes invalidate the shadow
++            // through the converted-buffer cache; shadow writes are copied back here
++            // before the next access to the source range.
++
++            AlignedTexelCopyCacheKey key = new();
++
++            if (!_cachedConvertedBuffers.TryGetValue(offset, size, key, out BufferHolder shadow))
++            {
++                shadow = _gd.BufferManager.Create(_gd, size, baseType: BufferAllocationType.DeviceLocal);
++
++                _gd.PipelineInternal.EndRenderPass();
++
++                Copy(_gd, cbs, _buffer, shadow.GetBuffer(), offset, 0, size);
++
++                key.SetShadow(shadow);
++
++                _cachedConvertedBuffers.Add(offset, size, key, shadow);
++            }
++
++            shadow.AddAlignedTexelViewInvalidate(invalidateView);
++
++            alignedCopy = shadow.GetBuffer();
++            alignedCopy.IncrementReferenceCount();
++
++            return shadow.CreateViewDirect(format, 0, size);
++        }
++
++        internal void ArmAlignedTexelWriteback(Auto<DisposableBuffer> alignedCopy, int srcOffset, int size)
++        {
++            List<AlignedTexelWriteback> writes = _alignedTexelWrites ??= [];
++
++            foreach (AlignedTexelWriteback write in writes)
++            {
++                if (write.Shadow == alignedCopy && write.SrcOffset == srcOffset && write.Size == size)
++                {
++                    return;
++                }
++            }
++
++            alignedCopy.IncrementReferenceCount();
++            writes.Add(new AlignedTexelWriteback(alignedCopy, srcOffset, size));
++        }
++
++        private unsafe Auto<DisposableBufferView> CreateViewDirect(VkFormat format, int offset, int size)
+         {
+             BufferViewCreateInfo bufferViewCreateInfo = new()
+             {
+@@ -133,6 +204,88 @@ namespace Ryujinx.Graphics.Vulkan
+             return new Auto<DisposableBufferView>(new DisposableBufferView(_gd.Api, _device, bufferView), this, _waitable, _buffer);
+         }
+ 
++        private void AddAlignedTexelViewInvalidate(Action invalidateView)
++        {
++            if (invalidateView != null)
++            {
++                (_alignedTexelViewInvalidates ??= []).Add(invalidateView);
++            }
++        }
++
++        internal void InvalidateAlignedTexelViews()
++        {
++            if (_alignedTexelViewInvalidates == null)
++            {
++                return;
++            }
++
++            foreach (Action invalidateView in _alignedTexelViewInvalidates)
++            {
++                invalidateView();
++            }
++
++            _alignedTexelViewInvalidates = null;
++        }
++
++        private void FlushAlignedTexelWrites()
++        {
++            List<AlignedTexelWriteback> writes = _alignedTexelWrites;
++
++            if (writes == null || writes.Count == 0)
++            {
++                return;
++            }
++
++            _alignedTexelWrites = null;
++
++            _gd.PipelineInternal.EndRenderPass();
++
++            CommandBufferScoped cbs = _gd.PipelineInternal.CurrentCommandBuffer;
++
++            foreach (AlignedTexelWriteback write in writes)
++            {
++                Copy(_gd, cbs, write.Shadow, _buffer, 0, write.SrcOffset, write.Size);
++                write.Shadow.Dispose();
++
++                // Writing the source back invalidates cached copies of that range
++                // (other converted buffers, texel shadows) the same way SignalWrite does.
++                _cachedConvertedBuffers.ClearRange(write.SrcOffset, write.Size);
++            }
++        }
++
++        private void FlushAlignedTexelWritesAndWait(int offset, int size)
++        {
++            if (_alignedTexelWrites == null)
++            {
++                return;
++            }
++
++            if (_gd.CommandBufferPool.OwnedByCurrentThread)
++            {
++                FlushAlignedTexelWrites();
++                _gd.FlushAllCommands();
++            }
++            else
++            {
++                List<AlignedTexelWriteback> writes = _alignedTexelWrites;
++                _alignedTexelWrites = null;
++
++                CommandBufferPool pool = _gd.BackgroundResources.Get().GetPool();
++
++                using (CommandBufferScoped cbs = pool.Rent())
++                {
++                    foreach (AlignedTexelWriteback write in writes)
++                    {
++                        Copy(_gd, cbs, write.Shadow, _buffer, 0, write.SrcOffset, write.Size);
++                        write.Shadow.Dispose();
++                        _cachedConvertedBuffers.ClearRange(write.SrcOffset, write.Size);
++                    }
++                }
++            }
++
++            WaitForFences(offset, size);
++        }
++
+         public unsafe void InsertBarrier(CommandBuffer commandBuffer, bool isWrite)
+         {
+             // If the last access is write, we always need a barrier to be sure we will read or modify
+@@ -245,11 +398,15 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetBuffer()
+         {
++            FlushAlignedTexelWrites();
++
+             return _buffer;
+         }
+ 
+         public Auto<DisposableBuffer> GetBuffer(CommandBuffer commandBuffer, bool isWrite = false, bool isSSBO = false)
+         {
++            FlushAlignedTexelWrites();
++
+             if (isWrite)
+             {
+                 SignalWrite(0, Size);
+@@ -260,6 +417,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetBuffer(CommandBuffer commandBuffer, int offset, int size, bool isWrite = false)
+         {
++            FlushAlignedTexelWrites();
++
+             if (isWrite)
+             {
+                 SignalWrite(offset, size);
+@@ -270,6 +429,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetMirrorable(CommandBufferScoped cbs, ref int offset, int size, out bool mirrored)
+         {
++            FlushAlignedTexelWrites();
++
+             if (_pendingData != null && TryGetMirror(cbs, ref offset, size, out Auto<DisposableBuffer> result))
+             {
+                 mirrored = true;
+@@ -360,6 +521,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public void SignalWrite(int offset, int size)
+         {
++            FlushAlignedTexelWrites();
++
+             if (offset == 0 && size == Size)
+             {
+                 _cachedConvertedBuffers.Clear();
+@@ -381,6 +544,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public nint Map(int offset, int mappingSize)
+         {
++            FlushAlignedTexelWritesAndWait(offset, mappingSize);
++
+             return _map;
+         }
+ 
+@@ -442,6 +607,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             WaitForFlushFence();
+ 
++            FlushAlignedTexelWritesAndWait(offset, size);
++
+             Span<byte> result;
+ 
+             if (_map != nint.Zero)
+@@ -477,6 +644,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public unsafe Span<byte> GetDataStorage(int offset, int size)
+         {
++            FlushAlignedTexelWritesAndWait(offset, size);
++
+             int mappingSize = Math.Min(size, Size - offset);
+ 
+             if (_map != nint.Zero)
+@@ -522,6 +691,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 return;
+             }
+ 
++            FlushAlignedTexelWrites();
++
+             bool allowMirror = _useMirrors && allowCbsWait && cbs != null && _activeType <= BufferAllocationType.HostMapped;
+ 
+             if (_map != nint.Zero)
+@@ -639,6 +810,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 return;
+             }
+ 
++            FlushAlignedTexelWritesAndWait(offset, dataSize);
++
+             if (_map != nint.Zero)
+             {
+                 data[..dataSize].CopyTo(new Span<byte>((void*)(_map + offset), dataSize));
+@@ -821,6 +994,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetBufferI8ToI16(CommandBufferScoped cbs, int offset, int size)
+         {
++            FlushAlignedTexelWrites();
++
+             if (!BoundToRange(offset, ref size))
+             {
+                 return null;
+@@ -845,6 +1020,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetAlignedVertexBuffer(CommandBufferScoped cbs, int offset, int size, int stride, int alignment)
+         {
++            FlushAlignedTexelWrites();
++
+             if (!BoundToRange(offset, ref size))
+             {
+                 return null;
+@@ -871,6 +1048,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public Auto<DisposableBuffer> GetBufferTopologyConversion(CommandBufferScoped cbs, int offset, int size, IndexBufferPattern pattern, int indexSize)
+         {
++            FlushAlignedTexelWrites();
++
+             if (!BoundToRange(offset, ref size))
+             {
+                 return null;
+@@ -923,6 +1102,16 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             _gd.PipelineInternal?.FlushCommandsIfWeightExceeding(_buffer, (ulong)Size);
+ 
++            if (_alignedTexelWrites != null)
++            {
++                foreach (AlignedTexelWriteback write in _alignedTexelWrites)
++                {
++                    write.Shadow.Dispose();
++                }
++
++                _alignedTexelWrites = null;
++            }
++
+             _buffer.Dispose();
+             _cachedConvertedBuffers.Dispose();
+             if (_allocationImported)
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferManager.cs b/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
+index 5b420e6205556676f591bb7611184af186797dbe..0df48e69d22452ae0cf51b50b322493774e05c7d 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferManager.cs
+@@ -412,16 +412,25 @@ namespace Ryujinx.Graphics.Vulkan
+             return null;
+         }
+ 
+-        public Auto<DisposableBufferView> CreateView(BufferHandle handle, VkFormat format, int offset, int size, Action invalidateView)
++        public Auto<DisposableBufferView> CreateView(BufferHandle handle, VkFormat format, int offset, int size, Action invalidateView, CommandBufferScoped cbs, out Auto<DisposableBuffer> alignedCopy)
+         {
+             if (TryGetBuffer(handle, out BufferHolder holder))
+             {
+-                return holder.CreateView(format, offset, size, invalidateView);
++                return holder.CreateView(format, offset, size, invalidateView, cbs, out alignedCopy);
+             }
+ 
++            alignedCopy = null;
+             return null;
+         }
+ 
++        public void ArmAlignedTexelWriteback(BufferHandle handle, Auto<DisposableBuffer> alignedCopy, int srcOffset, int size)
++        {
++            if (TryGetBuffer(handle, out BufferHolder holder))
++            {
++                holder.ArmAlignedTexelWriteback(alignedCopy, srcOffset, size);
++            }
++        }
++
+         public Auto<DisposableBuffer> GetBuffer(CommandBuffer commandBuffer, BufferHandle handle, bool isWrite, bool isSSBO = false)
+         {
+             if (TryGetBuffer(handle, out BufferHolder holder))
+diff --git a/src/Ryujinx.Graphics.Vulkan/CacheByRange.cs b/src/Ryujinx.Graphics.Vulkan/CacheByRange.cs
+index 30414b4dfccd592168c4bea73f971c43c8ac36a2..a932981454e69ba4b62b066650b429eabb05fdd7 100644
+--- a/src/Ryujinx.Graphics.Vulkan/CacheByRange.cs
++++ b/src/Ryujinx.Graphics.Vulkan/CacheByRange.cs
+@@ -166,6 +166,29 @@ namespace Ryujinx.Graphics.Vulkan
+         }
+     }
+ 
++    struct AlignedTexelCopyCacheKey : ICacheKey
++    {
++        // An aligned sub-allocation shadowing a texel view range whose offset does not
++        // meet minTexelBufferOffsetAlignment. The shadow holder tracks every view
++        // invalidation registered by its consumers.
++        private BufferHolder _shadow;
++
++        public readonly bool KeyEqual(ICacheKey other)
++        {
++            return other is AlignedTexelCopyCacheKey;
++        }
++
++        public void SetShadow(BufferHolder shadow)
++        {
++            _shadow = shadow;
++        }
++
++        public readonly void Dispose()
++        {
++            _shadow?.InvalidateAlignedTexelViews();
++        }
++    }
++
+     struct DrawCountCacheKey : ICacheKey
+     {
+         public readonly bool KeyEqual(ICacheKey other)
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index ec3a2ecdedadb08d21d4d883b0667354487350d1..8c76d3206dbefd12ce83affef3827ef7acfde3f6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -78,6 +78,7 @@
+ 
+   <ItemGroup>
+     <InternalsVisibleTo Include="S2A.VvlSyncTest" /> <!-- 附件访问状态的独立宿主回归 -->
++    <InternalsVisibleTo Include="S2A.VvlTexelTest" /> <!-- texel 视图对齐影子副本的宿主回归 -->
+   </ItemGroup>
+ 
+ </Project>
+diff --git a/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs b/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
+index 8a2cd21023be6e37ef51564787ad0160f8c186b0..710dd8e705beb5ff84906bac04114231618fbdc5 100644
+--- a/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/TextureBuffer.cs
+@@ -14,6 +14,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private int _offset;
+         private int _size;
+         private Auto<DisposableBufferView> _bufferView;
++        private Auto<DisposableBuffer> _alignedCopy;
+ 
+         private int _bufferCount;
+ 
+@@ -79,6 +80,9 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+             _bufferView?.Dispose();
+             _bufferView = null;
++
++            _alignedCopy?.Dispose();
++            _alignedCopy = null;
+         }
+ 
+         /// <inheritdoc/>
+@@ -120,7 +124,14 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public BufferView GetBufferView(CommandBufferScoped cbs, bool write)
+         {
+-            _bufferView ??= _gd.BufferManager.CreateView(_bufferHandle, VkFormat, _offset, _size, ReleaseImpl);
++            _bufferView ??= _gd.BufferManager.CreateView(_bufferHandle, VkFormat, _offset, _size, ReleaseImpl, cbs, out _alignedCopy);
++
++            if (write && _alignedCopy != null)
++            {
++                // The view sits on an aligned shadow copy; record a write-back so the
++                // source range picks up the GPU writes on its next access.
++                _gd.BufferManager.ArmAlignedTexelWriteback(_bufferHandle, _alignedCopy, _offset, _size);
++            }
+ 
+             return _bufferView?.Get(cbs, _offset, _size, write).Value ?? default;
+         }
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index d19ab9404d689117e03a88c0c3e5431333a16bb8..e6f14a4965d24cfb6d25784db573911945c8889f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -68,6 +68,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         internal FormatCapabilities FormatCapabilities { get; private set; }
+         internal HardwareCapabilities Capabilities;
++        internal int MinTexelBufferOffsetAlignment { get; private set; }
+ 
+         internal Vk Api { get; private set; }
+         internal KhrSurface SurfaceApi { get; private set; }
+@@ -618,6 +619,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 properties.Limits.MinTexelBufferOffsetAlignment
+             );
+ 
++            MinTexelBufferOffsetAlignment = (int)properties.Limits.MinTexelBufferOffsetAlignment;
++
+             SampleCountFlags supportedSampleCounts =
+                 properties.Limits.FramebufferColorSampleCounts &
+                 properties.Limits.FramebufferDepthSampleCounts &

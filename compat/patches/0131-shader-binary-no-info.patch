@@ -1,0 +1,97 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 7849d914c68d72a19cfcb906f78f0c6fe2da048d..73f04885a82a9302bd80fc5744b115a1c6a9c2d4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -409,17 +409,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+                         if (hostCode != null)
+                         {
+-                            ShaderInfo shaderInfo = ShaderInfoBuilder.BuildForCache(
+-                                context,
+-                                shaders,
+-                                specState.PipelineState,
+-                                specState.TransformFeedbackDescriptors != null);
+-
+                             // S2A：Vulkan 接口下也按渲染器程序二进制读（原版 Vulkan 存的是各阶段 SPIR-V 打包，重建要整段 SPIR-V；
+                             // nxgal 的二进制只有每阶段的键与参数布局，函数按键从离线库取，旧库动森全量 260 MB → 7 MB）
+                             bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+ 
+-                            IProgram hostProgram = context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, shaderInfo);
++                            // S2A：资源布局在二进制里，渲染器载入不读 ShaderInfo（S2AHostBinaryInfo）
++                            IProgram hostProgram = context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+ 
+                             CachedShaderProgram program = new(hostProgram, specState, shaders);
+ 
+@@ -459,6 +454,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         private Stream _lazyHostData;
+         private readonly object _lazyLock = new();
+ 
++        /// <summary>
++        /// S2A：载入宿主程序二进制时传给渲染器的着色器信息——空。本缓存的宿主二进制是 nxgal 程序二进制（每阶段键 + 参数布局），
++        /// 渲染器从二进制自身建程序、不读 ShaderInfo（graphics/metal/cs/NxProgram.cs Load）。原先每次按缓存条目重建资源布局（ShaderInfoBuilder），
++        /// 动森包实测每个程序 17.2 KB 托管分配、占按需实化的 68%（10-21 画面·着色器线），建出来没人读。
++        /// </summary>
++        internal static readonly ShaderInfo S2AHostBinaryInfo = default;
++
+         /// <summary>
+         /// S2Arm: reads a program indexed at boot from the cache files and creates its host program.
+         /// </summary>
+@@ -524,15 +526,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         return S2AMaterializeVtg(lazy, hostCode, shaders, specState);
+                     }
+ 
+-                    ShaderInfo shaderInfo = ShaderInfoBuilder.BuildForCache(
+-                        lazy.Context,
+-                        shaders,
+-                        specState.PipelineState,
+-                        specState.TransformFeedbackDescriptors != null);
+-
+                     bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+                     long s2aL = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
+-                    IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, shaderInfo);
++                    IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+                     if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, GC.GetAllocatedBytesForCurrentThread() - s2aL);
+ 
+                     if (hostProgram.CheckProgramLink(true) != ProgramLinkStatus.Success)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index c9f7182681e9eac70689759ee530352f0d6cfa4b..d0223e7858f115c5fa1aa3948d3e773c6bb8562c 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -284,24 +284,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public static CachedShaderProgram Load(GpuContext context, Unpacked u, CachedShaderStage[] shaders, ShaderSpecializationState specState)
+         {
+-            ShaderInfoBuilder infoBuilder = new(context, u.TfEnabled, vertexAsCompute: true);
+-            infoBuilder.AddStageInfo(u.PassthroughInfo);
+-
+-            for (int index = 2; index < shaders.Length; index++)
+-            {
+-                // 几何（下标 4）已转计算，不进图形程序；曲面（2 / 3）与片元（5）照常
+-                if (shaders[index] != null && index != 4)
+-                {
+-                    infoBuilder.AddStageInfo(shaders[index].Info);
+-                }
+-            }
+-
++            // 三段都是渲染器程序二进制，资源布局在二进制里，载入不读 ShaderInfo（DiskCacheHostStorage.S2AHostBinaryInfo）
++            ShaderInfo none = DiskCacheHostStorage.S2AHostBinaryInfo;
+             bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+-            IProgram hostProgram = context.Renderer.LoadProgramBinary(u.Graphics, hasFragmentShader, infoBuilder.Build(specState.PipelineState, fromCache: true));
++            IProgram hostProgram = context.Renderer.LoadProgramBinary(u.Graphics, hasFragmentShader, none);
+ 
+             ShaderProgramInfo vertexInfo = shaders[1].Info;
+             ShaderAsCompute vertexAsCompute = new(
+-                context.Renderer.LoadProgramBinary(u.Vertex, false, ShaderInfoBuilder.BuildForVertexAsCompute(context, vertexInfo, u.TfEnabled, fromCache: true)),
++                context.Renderer.LoadProgramBinary(u.Vertex, false, none),
+                 vertexInfo,
+                 u.VertexReservations);
+ 
+@@ -311,7 +301,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             {
+                 ShaderProgramInfo geometryInfo = shaders[4].Info;
+                 geometryAsCompute = new(
+-                    context.Renderer.LoadProgramBinary(u.Geometry, false, ShaderInfoBuilder.BuildForVertexAsCompute(context, geometryInfo, u.TfEnabled, fromCache: true)),
++                    context.Renderer.LoadProgramBinary(u.Geometry, false, none),
+                     geometryInfo,
+                     u.GeometryReservations);
+             }

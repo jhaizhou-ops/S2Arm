@@ -1,0 +1,46 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index e8418a114e2759895cc19f591f6ab4ec554f94cf..1ad793816c0ab4219a00faaa73c69d10f40b2ab1 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -555,6 +555,8 @@ namespace Ryujinx.Graphics.Vulkan
+                 StorageBuffer8BitAccess = supportedPhysicalDeviceVulkan12Features.StorageBuffer8BitAccess,
+                 ShaderSampledImageArrayNonUniformIndexing = supportedPhysicalDeviceVulkan12Features.ShaderSampledImageArrayNonUniformIndexing,
+                 ShaderStorageImageArrayNonUniformIndexing = supportedPhysicalDeviceVulkan12Features.ShaderStorageImageArrayNonUniformIndexing,
++                ShaderOutputLayer = supportedPhysicalDeviceVulkan12Features.ShaderOutputLayer,
++                ShaderOutputViewportIndex = supportedPhysicalDeviceVulkan12Features.ShaderOutputViewportIndex,
+             };
+ 
+             pExtendedFeatures = &featuresVk12;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 7543d90cb61d84799eef287128c95d12bd66b05b..763447f1dddc193af17d4ca0af67fd899ff8d35e 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -653,6 +653,10 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             PhysicalDeviceFeatures features = _enabledFeatures.Core;
+             PhysicalDeviceVulkan12Features featuresVk12 = _enabledFeatures.Vulkan12;
++            // The current SPIR-V emitter uses the combined ShaderViewportIndexLayerEXT
++            // capability. Its core-feature path requires both enabled bits, even when
++            // a particular guest shader writes only one of the two built-ins.
++            bool supportsLayerViewportOutput = featuresVk12.ShaderOutputLayer && featuresVk12.ShaderOutputViewportIndex;
+ 
+             PhysicalDeviceLimits limits = _physicalDevice.PhysicalDeviceProperties.Limits;
+             QueueFamilyProperties mainQueueProperties = _physicalDevice.QueueFamilyProperties[QueueFamilyIndex];
+@@ -698,7 +702,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsGeometryShaderPassthrough: Capabilities.SupportsGeometryShaderPassthrough,
+                 supportsTransformFeedback: Capabilities.SupportsTransformFeedback,
+                 supportsImageLoadFormatted: features.ShaderStorageImageReadWithoutFormat,
+-                supportsLayerVertexTessellation: featuresVk12.ShaderOutputLayer,
++                supportsLayerVertexTessellation: supportsLayerViewportOutput,
+                 supportsMismatchingViewFormat: true,
+                 supportsCubemapView: !IsAmdGcn,
+                 supportsNonConstantTextureOffset: false,
+@@ -714,7 +718,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 supportsTextureGatherOffsets: features.ShaderImageGatherExtended,
+                 supportsTextureShadowLod: false,
+                 supportsVertexStoreAndAtomics: features.VertexPipelineStoresAndAtomics,
+-                supportsViewportIndexVertexTessellation: featuresVk12.ShaderOutputViewportIndex,
++                supportsViewportIndexVertexTessellation: supportsLayerViewportOutput,
+                 supportsViewportMask: Capabilities.SupportsViewportArray2,
+                 supportsViewportSwizzle: false,
+                 supportsIndirectParameters: Capabilities.SupportsIndirectParameters,

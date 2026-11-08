@@ -1,0 +1,35 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
+index 147fe19d983514de4c2c03e158a7b2c686b10232..e270b279bf311cda4a241a829b9a576266f073d6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvMemoryAllocator.cs
+@@ -220,21 +220,16 @@ namespace Ryujinx.HLE.HOS.Services.Nv
+                 if (address < AddressSpaceSize)
+                 {
+                     bool reachedEndOfAddresses = false;
+-                    ulong targetAddress;
+-                    if (start == DefaultStart)
++                    // S2Arm: always first fit from the start address (the real nvgpu allocator also hands out the lowest
++                    // free range). Upstream started default allocations at the highest free range, so with games that
++                    // map / unmap buffers every frame in non-LIFO order the GPU VA drifted upward forever, creating a
++                    // 128 KB page table level for every new 64 MB region and never freeing it (up to ~2 GB over 1 TB).
++                    ulong targetAddress = _tree.Floor(address);
++                    Logger.Debug?.Print(LogClass.ServiceNv, $"Target address set to floor of 0x{address:X}; resulted in 0x{targetAddress:X}.");
++                    if (targetAddress == InvalidAddress)
+                     {
+-                        Logger.Debug?.Print(LogClass.ServiceNv, $"Target address set to start of the last available range: 0x{_list.Last.Value:X}.");
+-                        targetAddress = _list.Last.Value;
+-                    }
+-                    else
+-                    {
+-                        targetAddress = _tree.Floor(address);
+-                        Logger.Debug?.Print(LogClass.ServiceNv, $"Target address set to floor of 0x{address:X}; resulted in 0x{targetAddress:X}.");
+-                        if (targetAddress == InvalidAddress)
+-                        {
+-                            targetAddress = _tree.Ceiling(address);
+-                            Logger.Debug?.Print(LogClass.ServiceNv, $"Target address was invalid, set to ceiling of 0x{address:X}; resulted in 0x{targetAddress:X}");
+-                        }
++                        targetAddress = _tree.Ceiling(address);
++                        Logger.Debug?.Print(LogClass.ServiceNv, $"Target address was invalid, set to ceiling of 0x{address:X}; resulted in 0x{targetAddress:X}");
+                     }
+ 
+                     while (address < AddressSpaceSize)

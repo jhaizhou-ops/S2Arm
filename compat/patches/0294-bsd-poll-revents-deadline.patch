@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 8ed11de5d2e5c876ef38b28733576b40e02aca6e..3a66aae5412862d5041479781dcf85ec3e0b1e4d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -408,6 +408,23 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: milliseconds to wait for the change signal until the poll deadline: -1 only for an unlimited poll (deadline long.MaxValue);
++        // a deadline already passed while computing waits 0, never forever (audit #656 P2: 2 ms late gave (-2) + 1 = -1, read as "forever")
++        internal static int S2APollWaitMs(long deadline, long now, long frequency)
++        {
++            if (deadline == long.MaxValue)
++            {
++                return -1;
++            }
++
++            if (now >= deadline)
++            {
++                return 0;
++            }
++
++            return (int)System.Math.Min((deadline - now) * 1000 / frequency + 1, int.MaxValue);
++        }
++
+         [CommandCmif(6)]
+         // Poll(u32 nfds, u32 timeout, buffer<unknown, 0x21, 0> fds) -> (i32 ret, u32 bsd_errno, buffer<unknown, 0x22, 0>)
+         public ResultCode Poll(ServiceCtx context)
+@@ -438,6 +455,10 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     return WriteBsdResult(context, -1, LinuxError.EBADF);
+                 }
+ 
++                // S2Arm: revents is output only (FreeBSD poll): what the game left in the input entry must not come back for a descriptor that
++                // is not ready (the eventfd poll manager only writes it when something is ready). Audit #656 P1
++                pollEventData.OutputEvents = 0;
++
+                 events[i] = new PollEvent(pollEventData, fileDescriptor);
+             }
+ 
+@@ -525,8 +546,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+                     if (wakeable)
+                     {
+-                        long left = deadline == long.MaxValue ? -1 : (deadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 / System.Diagnostics.Stopwatch.Frequency + 1;
+-                        S2ABsdWake.Wait(seen, left < 0 ? -1 : (int)System.Math.Min(left, int.MaxValue));
++                        S2ABsdWake.Wait(seen, S2APollWaitMs(deadline, System.Diagnostics.Stopwatch.GetTimestamp(), System.Diagnostics.Stopwatch.Frequency));
+                     }
+                     else
+                     {

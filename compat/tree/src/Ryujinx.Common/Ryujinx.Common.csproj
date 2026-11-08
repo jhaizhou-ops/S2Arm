@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants Condition=" '$(ExtraDefineConstants)' != '' ">$(DefineConstants);$(ExtraDefineConstants)</DefineConstants>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" />
+    <PackageReference Include="MsgPack.Cli" />
+    <PackageReference Include="Humanizer" />
+    <PackageReference Include="Gommon" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器宿主单测（selftest-gsdiag）用诊断钩子内部入口 -->
+  </ItemGroup>
+
+</Project>

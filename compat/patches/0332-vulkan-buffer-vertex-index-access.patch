@@ -1,0 +1,13 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+index ca0e79b8bea446dee293cc258e807176a53f13af..a9f65cc510314e4cc75e002788464febd03a6379 100644
+--- a/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
++++ b/src/Ryujinx.Graphics.Vulkan/BufferHolder.cs
+@@ -22,6 +22,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public const AccessFlags DefaultAccessFlags =
+             AccessFlags.IndirectCommandReadBit |
++            AccessFlags.IndexReadBit |
++            AccessFlags.VertexAttributeReadBit |
+             AccessFlags.ShaderReadBit |
+             AccessFlags.ShaderWriteBit |
+             AccessFlags.TransferReadBit |

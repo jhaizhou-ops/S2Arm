@@ -1,0 +1,113 @@
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+index fa391058bdcf5b32f1c940f6e5c134873b55c50b..740f7a54185aa7d959c24a7b450b589367f8c93e 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/AstOptimizer.cs
+@@ -136,6 +136,39 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+         private sealed class MemoryPropagation
+         {
+             private readonly Dictionary<IAstNode, IAstNode[]> _successors = new();
++            // S2Arm 11-07: per-node memory-effect bits, computed once. A node's expression only changes when PropagateExpression
++            // replaces an operand by a source with no MemoryEffect (Optimize only propagates such sources), so whether it writes
++            // memory never changes; recomputing it at every node of every query was quadratic (geometry emulation, DebugMode off:
++            // 1.3-2.1 GB per shader). Queue / visited set are reused across queries.
++            private readonly Dictionary<IAstNode, (bool Mem, bool NestedMem)> _effects = new();
++            private readonly Queue<(IAstNode Node, bool Dirty)> _pending = new();
++            private readonly HashSet<(IAstNode Node, bool Dirty)> _visited = new();
++
++            private static IAstNode ExpressionOf(IAstNode node) => node switch
++            {
++                AstAssignment assignment => assignment.Source,
++                AstBlock block => block.Condition,
++                _ => node,
++            };
++
++            private (bool Mem, bool NestedMem) Effects(IAstNode node)
++            {
++                if (!_effects.TryGetValue(node, out var e))
++                {
++                    bool mem = (GetMemoryEffects(ExpressionOf(node)) & MemoryEffect) != 0;
++                    bool nested = mem;
++                    if (node is AstOperation operation)
++                    {
++                        nested = false;
++                        for (int index = 0; index < operation.SourcesCount && !nested; index++)
++                        {
++                            nested = (GetMemoryEffects(operation.GetSource(index)) & MemoryEffect) != 0;
++                        }
++                    }
++                    _effects[node] = e = (mem, nested);
++                }
++                return e;
++            }
+ 
+             public MemoryPropagation(AstBlock mainBlock)
+             {
+@@ -197,8 +230,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+ 
+             public bool CanPropagate(AstAssignment definition, AstOperand operand)
+             {
+-                Queue<(IAstNode Node, bool Dirty)> pending = new();
+-                HashSet<(IAstNode Node, bool Dirty)> visited = new();
++                // Same answer as walking every (node, dirty) state from the definition and failing at a use reached dirty or with a
++                // nested memory effect: containment is only looked up where it can change the answer, and a node already reached
++                // dirty is not walked again clean (the dirty walk reaches every use the clean one would, and fails there)
++                Queue<(IAstNode Node, bool Dirty)> pending = _pending; HashSet<(IAstNode Node, bool Dirty)> visited = _visited;
++                pending.Clear(); visited.Clear();
+                 foreach (IAstNode next in _successors[definition])
+                 {
+                     pending.Enqueue((next, false));
+@@ -209,7 +245,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                     IAstNode node = state.Node;
+                     // Re-executing the definition refreshes the read, so writes
+                     // from a preceding iteration cannot taint that new value.
+-                    if (node == null || node == definition || !visited.Add(state))
++                    if (node == null || node == definition || (!state.Dirty && visited.Contains((node, true))) || !visited.Add(state))
+                     {
+                         continue;
+                     }
+@@ -219,38 +255,16 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                     // stay valid, but their obsolete expression is not executed.
+                     if (node.Parent != null)
+                     {
+-                        IAstNode expression = node switch
++                        var (mem, nestedMem) = Effects(node);
++                        // Root Store/Call effects happen after evaluating their
++                        // operands. Nested effects have backend-dependent operand
++                        // order, so do not move reads into those expressions.
++                        if ((dirty || nestedMem) && ContainsOperand(ExpressionOf(node), operand))
+                         {
+-                            AstAssignment assignment => assignment.Source,
+-                            AstBlock block => block.Condition,
+-                            _ => node,
+-                        };
+-                        int effects = GetMemoryEffects(expression);
+-                        if (ContainsOperand(expression, operand))
+-                        {
+-                            // Root Store/Call effects happen after evaluating their
+-                            // operands. Nested effects have backend-dependent operand
+-                            // order, so do not move reads into those expressions.
+-                            int nestedEffects = 0;
+-                            if (node is AstOperation operation)
+-                            {
+-                                for (int index = 0; index < operation.SourcesCount; index++)
+-                                {
+-                                    nestedEffects |= GetMemoryEffects(operation.GetSource(index));
+-                                }
+-                            }
+-                            else
+-                            {
+-                                nestedEffects = effects;
+-                            }
+-
+-                            if (dirty || (nestedEffects & MemoryEffect) != 0)
+-                            {
+-                                return false;
+-                            }
++                            return false;
+                         }
+ 
+-                        dirty |= (effects & MemoryEffect) != 0;
++                        dirty |= mem;
+                     }
+ 
+                     foreach (IAstNode next in _successors[node])

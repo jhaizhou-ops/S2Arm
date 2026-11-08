@@ -1,0 +1,60 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index 7d0f026ec726e8f96a39bab98bbc2332e71b287b..eff835cce0cf3ff903b79e4998d526787258c2d1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Graphics.Gpu.Memory;
+ using System;
++using System.Buffers;
+ using System.Collections.Concurrent;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+@@ -41,6 +42,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             /// </summary>
+             public int[] Words;
+ 
++            /// <summary>
++            /// S2Arm: <see cref="Words"/> was rented from <see cref="ArrayPool{T}.Shared"/> by <see cref="Prefetch"/> and is
++            /// returned once the GPU thread has processed the command buffer (may be longer than <see cref="EntryCount"/>).
++            /// </summary>
++            public bool PooledWords;
++
+             /// <summary>
+             /// The GPFIFO entry address (used in <see cref="CommandBufferType.NoPrefetch"/> mode).
+             /// </summary>
+@@ -68,7 +75,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             /// <param name="memoryManager">The memory manager used to fetch the data</param>
+             public void Prefetch(MemoryManager memoryManager)
+             {
+-                Words = GetWords(memoryManager, true).ToArray();
++                // S2Arm: snapshot into a pooled array instead of a new one per GPFIFO entry (games submit several per frame)
++                ReadOnlySpan<int> words = GetWords(memoryManager, true);
++                int[] copy = ArrayPool<int>.Shared.Rent(words.Length);
++                words.CopyTo(copy);
++                Words = copy;
++                PooledWords = true;
+             }
+ 
+             /// <summary>
+@@ -79,7 +91,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             /// <returns>The command buffer words</returns>
+             public readonly ReadOnlySpan<int> Fetch(MemoryManager memoryManager, bool flush)
+             {
+-                return Words ?? GetWords(memoryManager, flush);
++                return Words != null ? Words.AsSpan(0, (int)EntryCount) : GetWords(memoryManager, flush);
+             }
+         }
+ 
+@@ -227,6 +239,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 }
+ 
+                 entry.Processor.Process(entry.EntryAddress, words);
++
++                // S2Arm: the snapshot is not referenced after processing (the replay cache keeps operations, not words)
++                if (entry.PooledWords)
++                {
++                    ArrayPool<int>.Shared.Return(entry.Words);
++                }
+             }
+ 
+             _interrupt = false;

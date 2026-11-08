@@ -1,0 +1,20 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index a5f70f7515615349fe712074e5fd413ef94bde8c..b72bc3eb46d42fe6ed12e8ec65603fc2ace88f44 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -852,11 +852,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             buffer.SignalModified(address, size, BufferStage.Copy);
+             buffer.CopyToDependantVirtualBuffers(address, size);
+ 
+-            // 信号量精确写开时，游戏拿这份 GPU 读回结果不再靠信号量写顺带整页回写：登记成定向读时回写页，游戏读时先回写
+-            if (MemoryManager.S2ASemPrecise)
+-            {
+-                MemoryManager.S2AMarkReadFlush(address, size);
+-            }
++            // 游戏读这份 GPU 读回结果前必须先回写：写跟踪缺省只拦写不拦读，原先（补丁 0153 起）游戏能拿到新值全靠恰好有信号量写把同页整页回写，
++            // 游戏若在那之前读 1x1 亮度就读到旧值——八方2 自动曝光偶发整屏偏红 / 橙色过曝（10-22 jhz 实机 octopath2_1022230148_2 R184，Mac 局同类）。
++            // 登记成定向读时回写页（与开不开信号量精确写无关），游戏读时先回写，同 0153 之前 CPU 当场读回的语义
++            MemoryManager.S2AMarkReadFlush(address, size);
+ 
+             return true;
+         }

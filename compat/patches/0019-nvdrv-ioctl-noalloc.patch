@@ -1,0 +1,447 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvDeviceFile.cs
+index ef0bac452b885a5c7f63be0d593e301871ef7150..567dcc195afb1fb80673825d1bbd389917274ca7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvDeviceFile.cs
+@@ -55,9 +55,10 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices
+         protected delegate NvInternalResult IoctlProcessorInline<T, T1>(ref T arguments, ref T1 inlineData);
+         protected delegate NvInternalResult IoctlProcessorInlineSpan<T, T1>(ref T arguments, Span<T1> inlineData);
+ 
+-        private static NvInternalResult PrintResult(MethodInfo info, NvInternalResult result)
++        // S2Arm: take the delegate, not callback.Method: reading Method allocates on every ioctl even with Debug logging off
++        private static NvInternalResult PrintResult(Delegate callback, NvInternalResult result)
+         {
+-            Logger.Debug?.Print(LogClass.ServiceNv, $"{info.Name} returned result {result}");
++            Logger.Debug?.Print(LogClass.ServiceNv, $"{callback.Method.Name} returned result {result}");
+ 
+             return result;
+         }
+@@ -66,7 +67,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices
+         {
+             Debug.Assert(arguments.Length == Unsafe.SizeOf<T>());
+ 
+-            return PrintResult(callback.Method, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0]));
++            return PrintResult(callback, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0]));
+         }
+ 
+         protected static NvInternalResult CallIoctlMethod<T, T1>(IoctlProcessorInline<T, T1> callback, Span<byte> arguments, Span<byte> inlineBuffer) where T : struct where T1 : struct
+@@ -74,19 +75,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices
+             Debug.Assert(arguments.Length == Unsafe.SizeOf<T>());
+             Debug.Assert(inlineBuffer.Length == Unsafe.SizeOf<T1>());
+ 
+-            return PrintResult(callback.Method, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0], ref MemoryMarshal.Cast<byte, T1>(inlineBuffer)[0]));
++            return PrintResult(callback, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0], ref MemoryMarshal.Cast<byte, T1>(inlineBuffer)[0]));
+         }
+ 
+         protected static NvInternalResult CallIoctlMethod<T>(IoctlProcessorSpan<T> callback, Span<byte> arguments) where T : struct
+         {
+-            return PrintResult(callback.Method, callback(MemoryMarshal.Cast<byte, T>(arguments)));
++            return PrintResult(callback, callback(MemoryMarshal.Cast<byte, T>(arguments)));
+         }
+ 
+         protected static NvInternalResult CallIoctlMethod<T, T1>(IoctlProcessorInlineSpan<T, T1> callback, Span<byte> arguments, Span<byte> inlineBuffer) where T : struct where T1 : struct
+         {
+             Debug.Assert(arguments.Length == Unsafe.SizeOf<T>());
+ 
+-            return PrintResult(callback.Method, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0], MemoryMarshal.Cast<byte, T1>(inlineBuffer)));
++            return PrintResult(callback, callback(ref MemoryMarshal.Cast<byte, T>(arguments)[0], MemoryMarshal.Cast<byte, T1>(inlineBuffer)));
+         }
+ 
+         public abstract void Close();
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+index f21efcea4be0d8ddd1af0c081ebdf5591c434f94..5543ff31f50a32de9236df4a89f4ce28e1844ec5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs
+@@ -12,6 +12,16 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+ {
+     class NvHostAsGpuDeviceFile : NvDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessor<BindChannelArguments> _s2aBindChannel1;
++        private IoctlProcessor<AllocSpaceArguments> _s2aAllocSpace1;
++        private IoctlProcessor<FreeSpaceArguments> _s2aFreeSpace1;
++        private IoctlProcessor<UnmapBufferArguments> _s2aUnmapBuffer1;
++        private IoctlProcessor<MapBufferExArguments> _s2aMapBufferEx1;
++        private IoctlProcessor<GetVaRegionsArguments> _s2aGetVaRegions1;
++        private IoctlProcessor<InitializeExArguments> _s2aInitializeEx1;
++        private IoctlProcessorSpan<RemapArguments> _s2aRemap1;
++
+         private const uint SmallPageSize = 0x1000;
+         private const uint BigPageSize = 0x10000;
+ 
+@@ -56,28 +66,28 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+                 switch (command.Number)
+                 {
+                     case 0x01:
+-                        result = CallIoctlMethod<BindChannelArguments>(BindChannel, arguments);
++                        result = CallIoctlMethod<BindChannelArguments>(_s2aBindChannel1 ??= BindChannel, arguments);
+                         break;
+                     case 0x02:
+-                        result = CallIoctlMethod<AllocSpaceArguments>(AllocSpace, arguments);
++                        result = CallIoctlMethod<AllocSpaceArguments>(_s2aAllocSpace1 ??= AllocSpace, arguments);
+                         break;
+                     case 0x03:
+-                        result = CallIoctlMethod<FreeSpaceArguments>(FreeSpace, arguments);
++                        result = CallIoctlMethod<FreeSpaceArguments>(_s2aFreeSpace1 ??= FreeSpace, arguments);
+                         break;
+                     case 0x05:
+-                        result = CallIoctlMethod<UnmapBufferArguments>(UnmapBuffer, arguments);
++                        result = CallIoctlMethod<UnmapBufferArguments>(_s2aUnmapBuffer1 ??= UnmapBuffer, arguments);
+                         break;
+                     case 0x06:
+-                        result = CallIoctlMethod<MapBufferExArguments>(MapBufferEx, arguments);
++                        result = CallIoctlMethod<MapBufferExArguments>(_s2aMapBufferEx1 ??= MapBufferEx, arguments);
+                         break;
+                     case 0x08:
+-                        result = CallIoctlMethod<GetVaRegionsArguments>(GetVaRegions, arguments);
++                        result = CallIoctlMethod<GetVaRegionsArguments>(_s2aGetVaRegions1 ??= GetVaRegions, arguments);
+                         break;
+                     case 0x09:
+-                        result = CallIoctlMethod<InitializeExArguments>(InitializeEx, arguments);
++                        result = CallIoctlMethod<InitializeExArguments>(_s2aInitializeEx1 ??= InitializeEx, arguments);
+                         break;
+                     case 0x14:
+-                        result = CallIoctlMethod<RemapArguments>(Remap, arguments);
++                        result = CallIoctlMethod<RemapArguments>(_s2aRemap1 ??= Remap, arguments);
+                         break;
+                 }
+             }
+@@ -95,7 +105,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostAsGpu
+                 {
+                     case 0x08:
+                         // This is the same as the one in ioctl as inlineOutBuffer is empty.
+-                        result = CallIoctlMethod<GetVaRegionsArguments>(GetVaRegions, arguments);
++                        result = CallIoctlMethod<GetVaRegionsArguments>(_s2aGetVaRegions1 ??= GetVaRegions, arguments);
+                         break;
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+index a114bd3e099e3d7c7feeeef0f966b47cc3767186..f2c192c3fd4a53857cfa088c660c8e76e2db993e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+@@ -15,6 +15,21 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+ {
+     class NvHostChannelDeviceFile : NvDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessor<GetParameterArguments> _s2aGetSyncpoint1;
++        private IoctlProcessor<GetParameterArguments> _s2aGetWaitBase1;
++        private IoctlProcessor<uint> _s2aSetSubmitTimeout1;
++        private IoctlProcessor<int> _s2aSetNvMapFd1;
++        private IoctlProcessor<uint> _s2aSetTimeout1;
++        private IoctlProcessor<AllocObjCtxArguments> _s2aAllocObjCtx1;
++        private IoctlProcessor<ZcullBindArguments> _s2aZcullBind1;
++        private IoctlProcessor<SetErrorNotifierArguments> _s2aSetErrorNotifier1;
++        private IoctlProcessor<NvChannelPriority> _s2aSetPriority1;
++        private IoctlProcessor<AllocGpfifoExArguments> _s2aAllocGpfifoEx1;
++        private IoctlProcessor<AllocGpfifoExArguments> _s2aAllocGpfifoEx21;
++        private IoctlProcessor<uint> _s2aSetTimeslice1;
++        private IoctlProcessor<ulong> _s2aSetUserData1;
++
+         private static readonly ConcurrentDictionary<ulong, Host1xContext> _host1xContextRegistry = new();
+ 
+         private const uint MaxModuleSyncpoint = 16;
+@@ -78,13 +93,13 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+                         result = Submit(arguments);
+                         break;
+                     case 0x02:
+-                        result = CallIoctlMethod<GetParameterArguments>(GetSyncpoint, arguments);
++                        result = CallIoctlMethod<GetParameterArguments>(_s2aGetSyncpoint1 ??= GetSyncpoint, arguments);
+                         break;
+                     case 0x03:
+-                        result = CallIoctlMethod<GetParameterArguments>(GetWaitBase, arguments);
++                        result = CallIoctlMethod<GetParameterArguments>(_s2aGetWaitBase1 ??= GetWaitBase, arguments);
+                         break;
+                     case 0x07:
+-                        result = CallIoctlMethod<uint>(SetSubmitTimeout, arguments);
++                        result = CallIoctlMethod<uint>(_s2aSetSubmitTimeout1 ??= SetSubmitTimeout, arguments);
+                         break;
+                     case 0x09:
+                         result = MapCommandBuffer(arguments);
+@@ -99,34 +114,34 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+                 switch (command.Number)
+                 {
+                     case 0x01:
+-                        result = CallIoctlMethod<int>(SetNvMapFd, arguments);
++                        result = CallIoctlMethod<int>(_s2aSetNvMapFd1 ??= SetNvMapFd, arguments);
+                         break;
+                     case 0x03:
+-                        result = CallIoctlMethod<uint>(SetTimeout, arguments);
++                        result = CallIoctlMethod<uint>(_s2aSetTimeout1 ??= SetTimeout, arguments);
+                         break;
+                     case 0x08:
+                         result = SubmitGpfifo(arguments);
+                         break;
+                     case 0x09:
+-                        result = CallIoctlMethod<AllocObjCtxArguments>(AllocObjCtx, arguments);
++                        result = CallIoctlMethod<AllocObjCtxArguments>(_s2aAllocObjCtx1 ??= AllocObjCtx, arguments);
+                         break;
+                     case 0x0b:
+-                        result = CallIoctlMethod<ZcullBindArguments>(ZcullBind, arguments);
++                        result = CallIoctlMethod<ZcullBindArguments>(_s2aZcullBind1 ??= ZcullBind, arguments);
+                         break;
+                     case 0x0c:
+-                        result = CallIoctlMethod<SetErrorNotifierArguments>(SetErrorNotifier, arguments);
++                        result = CallIoctlMethod<SetErrorNotifierArguments>(_s2aSetErrorNotifier1 ??= SetErrorNotifier, arguments);
+                         break;
+                     case 0x0d:
+-                        result = CallIoctlMethod<NvChannelPriority>(SetPriority, arguments);
++                        result = CallIoctlMethod<NvChannelPriority>(_s2aSetPriority1 ??= SetPriority, arguments);
+                         break;
+                     case 0x18:
+-                        result = CallIoctlMethod<AllocGpfifoExArguments>(AllocGpfifoEx, arguments);
++                        result = CallIoctlMethod<AllocGpfifoExArguments>(_s2aAllocGpfifoEx1 ??= AllocGpfifoEx, arguments);
+                         break;
+                     case 0x1a:
+-                        result = CallIoctlMethod<AllocGpfifoExArguments>(AllocGpfifoEx2, arguments);
++                        result = CallIoctlMethod<AllocGpfifoExArguments>(_s2aAllocGpfifoEx21 ??= AllocGpfifoEx2, arguments);
+                         break;
+                     case 0x1d:
+-                        result = CallIoctlMethod<uint>(SetTimeslice, arguments);
++                        result = CallIoctlMethod<uint>(_s2aSetTimeslice1 ??= SetTimeslice, arguments);
+                         break;
+                 }
+             }
+@@ -135,7 +150,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+                 switch (command.Number)
+                 {
+                     case 0x14:
+-                        result = CallIoctlMethod<ulong>(SetUserData, arguments);
++                        result = CallIoctlMethod<ulong>(_s2aSetUserData1 ??= SetUserData, arguments);
+                         break;
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostGpuDeviceFile.cs
+index 34663e9d701c66b560291e8d612f75363ee9538b..21661ff6d7c797ae776cf9fb6dcdcb8adce1e212 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostGpuDeviceFile.cs
+@@ -8,6 +8,9 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+ {
+     internal class NvHostGpuDeviceFile : NvHostChannelDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessorInlineSpan<SubmitGpfifoArguments, ulong> _s2aSubmitGpfifoEx2;
++
+ #pragma warning disable IDE0052 // Remove unread private member
+         private readonly KEvent _smExceptionBptIntReportEvent;
+         private readonly KEvent _smExceptionBptPauseReportEvent;
+@@ -46,7 +49,7 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+                 switch (command.Number)
+                 {
+                     case 0x1b:
+-                        result = CallIoctlMethod<SubmitGpfifoArguments, ulong>(SubmitGpfifoEx, arguments, inlineInBuffer);
++                        result = CallIoctlMethod<SubmitGpfifoArguments, ulong>(_s2aSubmitGpfifoEx2 ??= SubmitGpfifoEx, arguments, inlineInBuffer);
+                         break;
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+index 6c5dd312fae6a3590c7b7baa93285d901c6ab49c..d1e98ac76780e275c3f1d0e353eb5aa916eb8b8b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs
+@@ -12,6 +12,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+ {
+     internal class NvHostCtrlDeviceFile : NvDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessor<NvFence> _s2aSyncptRead1;
++        private IoctlProcessor<uint> _s2aSyncptIncr1;
++        private IoctlProcessor<SyncptWaitArguments> _s2aSyncptWait1;
++        private IoctlProcessor<SyncptWaitExArguments> _s2aSyncptWaitEx1;
++        private IoctlProcessor<NvFence> _s2aSyncptReadMax1;
++        private IoctlProcessor<uint> _s2aEventSignal1;
++        private IoctlProcessor<EventWaitArguments> _s2aEventWait1;
++        private IoctlProcessor<EventWaitArguments> _s2aEventWaitAsync1;
++        private IoctlProcessor<uint> _s2aEventRegister1;
++        private IoctlProcessor<uint> _s2aEventUnregister1;
++        private IoctlProcessor<ulong> _s2aEventKill1;
++
+         public const int EventsCount = 64;
+ 
+         private readonly bool _isProductionMode;
+@@ -43,19 +56,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+                 switch (command.Number)
+                 {
+                     case 0x14:
+-                        result = CallIoctlMethod<NvFence>(SyncptRead, arguments);
++                        result = CallIoctlMethod<NvFence>(_s2aSyncptRead1 ??= SyncptRead, arguments);
+                         break;
+                     case 0x15:
+-                        result = CallIoctlMethod<uint>(SyncptIncr, arguments);
++                        result = CallIoctlMethod<uint>(_s2aSyncptIncr1 ??= SyncptIncr, arguments);
+                         break;
+                     case 0x16:
+-                        result = CallIoctlMethod<SyncptWaitArguments>(SyncptWait, arguments);
++                        result = CallIoctlMethod<SyncptWaitArguments>(_s2aSyncptWait1 ??= SyncptWait, arguments);
+                         break;
+                     case 0x19:
+-                        result = CallIoctlMethod<SyncptWaitExArguments>(SyncptWaitEx, arguments);
++                        result = CallIoctlMethod<SyncptWaitExArguments>(_s2aSyncptWaitEx1 ??= SyncptWaitEx, arguments);
+                         break;
+                     case 0x1a:
+-                        result = CallIoctlMethod<NvFence>(SyncptReadMax, arguments);
++                        result = CallIoctlMethod<NvFence>(_s2aSyncptReadMax1 ??= SyncptReadMax, arguments);
+                         break;
+                     case 0x1b:
+                         // As Marshal cannot handle unaligned arrays, we do everything by hand here.
+@@ -69,22 +82,22 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+ 
+                         break;
+                     case 0x1c:
+-                        result = CallIoctlMethod<uint>(EventSignal, arguments);
++                        result = CallIoctlMethod<uint>(_s2aEventSignal1 ??= EventSignal, arguments);
+                         break;
+                     case 0x1d:
+-                        result = CallIoctlMethod<EventWaitArguments>(EventWait, arguments);
++                        result = CallIoctlMethod<EventWaitArguments>(_s2aEventWait1 ??= EventWait, arguments);
+                         break;
+                     case 0x1e:
+-                        result = CallIoctlMethod<EventWaitArguments>(EventWaitAsync, arguments);
++                        result = CallIoctlMethod<EventWaitArguments>(_s2aEventWaitAsync1 ??= EventWaitAsync, arguments);
+                         break;
+                     case 0x1f:
+-                        result = CallIoctlMethod<uint>(EventRegister, arguments);
++                        result = CallIoctlMethod<uint>(_s2aEventRegister1 ??= EventRegister, arguments);
+                         break;
+                     case 0x20:
+-                        result = CallIoctlMethod<uint>(EventUnregister, arguments);
++                        result = CallIoctlMethod<uint>(_s2aEventUnregister1 ??= EventUnregister, arguments);
+                         break;
+                     case 0x21:
+-                        result = CallIoctlMethod<ulong>(EventKill, arguments);
++                        result = CallIoctlMethod<ulong>(_s2aEventKill1 ??= EventKill, arguments);
+                         break;
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+index 29198617f47e3de1e1d67d47d0fcddfc3c4b1177..29ea02b813de95eec5943072610bfd766221d4fa 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrlGpu/NvHostCtrlGpuDeviceFile.cs
+@@ -10,6 +10,19 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+ {
+     class NvHostCtrlGpuDeviceFile : NvDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessor<ZcullGetCtxSizeArguments> _s2aZcullGetCtxSize1;
++        private IoctlProcessor<ZcullGetInfoArguments> _s2aZcullGetInfo1;
++        private IoctlProcessor<ZbcSetTableArguments> _s2aZbcSetTable1;
++        private IoctlProcessor<GetCharacteristicsArguments> _s2aGetCharacteristics1;
++        private IoctlProcessor<GetTpcMasksArguments> _s2aGetTpcMasks1;
++        private IoctlProcessor<NumVsmsArguments> _s2aNumVsms1;
++        private IoctlProcessor<VsmsMappingArguments> _s2aVsmsMapping1;
++        private IoctlProcessor<GetActiveSlotMaskArguments> _s2aGetActiveSlotMask1;
++        private IoctlProcessor<GetGpuTimeArguments> _s2aGetGpuTime1;
++        private IoctlProcessorInline<GetCharacteristicsArguments, GpuCharacteristics> _s2aGetCharacteristics2;
++        private IoctlProcessorInline<GetTpcMasksArguments, int> _s2aGetTpcMasks2;
++
+         private static readonly Stopwatch _pTimer = new();
+         private static readonly double _ticksToNs = (1.0 / Stopwatch.Frequency) * 1_000_000_000;
+ 
+@@ -36,31 +49,31 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+                 switch (command.Number)
+                 {
+                     case 0x01:
+-                        result = CallIoctlMethod<ZcullGetCtxSizeArguments>(ZcullGetCtxSize, arguments);
++                        result = CallIoctlMethod<ZcullGetCtxSizeArguments>(_s2aZcullGetCtxSize1 ??= ZcullGetCtxSize, arguments);
+                         break;
+                     case 0x02:
+-                        result = CallIoctlMethod<ZcullGetInfoArguments>(ZcullGetInfo, arguments);
++                        result = CallIoctlMethod<ZcullGetInfoArguments>(_s2aZcullGetInfo1 ??= ZcullGetInfo, arguments);
+                         break;
+                     case 0x03:
+-                        result = CallIoctlMethod<ZbcSetTableArguments>(ZbcSetTable, arguments);
++                        result = CallIoctlMethod<ZbcSetTableArguments>(_s2aZbcSetTable1 ??= ZbcSetTable, arguments);
+                         break;
+                     case 0x05:
+-                        result = CallIoctlMethod<GetCharacteristicsArguments>(GetCharacteristics, arguments);
++                        result = CallIoctlMethod<GetCharacteristicsArguments>(_s2aGetCharacteristics1 ??= GetCharacteristics, arguments);
+                         break;
+                     case 0x06:
+-                        result = CallIoctlMethod<GetTpcMasksArguments>(GetTpcMasks, arguments);
++                        result = CallIoctlMethod<GetTpcMasksArguments>(_s2aGetTpcMasks1 ??= GetTpcMasks, arguments);
+                         break;
+                     case 0x12:
+-                        result = CallIoctlMethod<NumVsmsArguments>(NumVsms, arguments);
++                        result = CallIoctlMethod<NumVsmsArguments>(_s2aNumVsms1 ??= NumVsms, arguments);
+                         break;
+                     case 0x13:
+-                        result = CallIoctlMethod<VsmsMappingArguments>(VsmsMapping, arguments);
++                        result = CallIoctlMethod<VsmsMappingArguments>(_s2aVsmsMapping1 ??= VsmsMapping, arguments);
+                         break;
+                     case 0x14:
+-                        result = CallIoctlMethod<GetActiveSlotMaskArguments>(GetActiveSlotMask, arguments);
++                        result = CallIoctlMethod<GetActiveSlotMaskArguments>(_s2aGetActiveSlotMask1 ??= GetActiveSlotMask, arguments);
+                         break;
+                     case 0x1c:
+-                        result = CallIoctlMethod<GetGpuTimeArguments>(GetGpuTime, arguments);
++                        result = CallIoctlMethod<GetGpuTimeArguments>(_s2aGetGpuTime1 ??= GetGpuTime, arguments);
+                         break;
+                 }
+             }
+@@ -77,16 +90,16 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrlGpu
+                 switch (command.Number)
+                 {
+                     case 0x05:
+-                        result = CallIoctlMethod<GetCharacteristicsArguments, GpuCharacteristics>(GetCharacteristics, arguments, inlineOutBuffer);
++                        result = CallIoctlMethod<GetCharacteristicsArguments, GpuCharacteristics>(_s2aGetCharacteristics2 ??= GetCharacteristics, arguments, inlineOutBuffer);
+                         break;
+                     case 0x06:
+-                        result = CallIoctlMethod<GetTpcMasksArguments, int>(GetTpcMasks, arguments, inlineOutBuffer);
++                        result = CallIoctlMethod<GetTpcMasksArguments, int>(_s2aGetTpcMasks2 ??= GetTpcMasks, arguments, inlineOutBuffer);
+                         break;
+                     case 0x12:
+-                        result = CallIoctlMethod<NumVsmsArguments>(NumVsms, arguments);
++                        result = CallIoctlMethod<NumVsmsArguments>(_s2aNumVsms1 ??= NumVsms, arguments);
+                         break;
+                     case 0x13:
+-                        result = CallIoctlMethod<VsmsMappingArguments>(VsmsMapping, arguments);
++                        result = CallIoctlMethod<VsmsMappingArguments>(_s2aVsmsMapping1 ??= VsmsMapping, arguments);
+                         break;
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+index 6a0ac58bda521332b71677197f9158ea2a93d0e5..df8244c24db4309f2ee76de8128982149bb8233a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvMap/NvMapDeviceFile.cs
+@@ -8,6 +8,14 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap
+ {
+     internal class NvMapDeviceFile : NvDeviceFile
+     {
++        // S2Arm: ioctl delegates cached per instance (a method group converted per call allocates every ioctl)
++        private IoctlProcessor<NvMapCreate> _s2aCreate1;
++        private IoctlProcessor<NvMapFromId> _s2aFromId1;
++        private IoctlProcessor<NvMapAlloc> _s2aAlloc1;
++        private IoctlProcessor<NvMapFree> _s2aFree1;
++        private IoctlProcessor<NvMapParam> _s2aParam1;
++        private IoctlProcessor<NvMapGetId> _s2aGetId1;
++
+         private const int FlagNotFreedYet = 1;
+ 
+         private static readonly NvMapIdDictionary _maps = new();
+@@ -25,22 +33,22 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvMap
+                 switch (command.Number)
+                 {
+                     case 0x01:
+-                        result = CallIoctlMethod<NvMapCreate>(Create, arguments);
++                        result = CallIoctlMethod<NvMapCreate>(_s2aCreate1 ??= Create, arguments);
+                         break;
+                     case 0x03:
+-                        result = CallIoctlMethod<NvMapFromId>(FromId, arguments);
++                        result = CallIoctlMethod<NvMapFromId>(_s2aFromId1 ??= FromId, arguments);
+                         break;
+                     case 0x04:
+-                        result = CallIoctlMethod<NvMapAlloc>(Alloc, arguments);
++                        result = CallIoctlMethod<NvMapAlloc>(_s2aAlloc1 ??= Alloc, arguments);
+                         break;
+                     case 0x05:
+-                        result = CallIoctlMethod<NvMapFree>(Free, arguments);
++                        result = CallIoctlMethod<NvMapFree>(_s2aFree1 ??= Free, arguments);
+                         break;
+                     case 0x09:
+-                        result = CallIoctlMethod<NvMapParam>(Param, arguments);
++                        result = CallIoctlMethod<NvMapParam>(_s2aParam1 ??= Param, arguments);
+                         break;
+                     case 0x0e:
+-                        result = CallIoctlMethod<NvMapGetId>(GetId, arguments);
++                        result = CallIoctlMethod<NvMapGetId>(_s2aGetId1 ??= GetId, arguments);
+                         break;
+                     case 0x02:
+                     case 0x06:

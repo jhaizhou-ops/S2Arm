@@ -1,0 +1,186 @@
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+index 94909f3ad48dc2f2c91b5060483a3660bc980dae..2dc2ee694f81aec18ae10976d6fc7b03dc6ca8a1 100644
+--- a/src/Ryujinx.Common/S2AThreadAlloc.cs
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -59,6 +59,36 @@ namespace Ryujinx.Common
+             _last = now;
+         }
+ 
++        /// <summary>
++        /// S2Arm: a named part of some thread's loop (e.g. 「合成·取帧上屏」), counted by the caller around that part while <see cref="On"/>;
++        /// listed in <see cref="Summary"/> next to the per-thread slots (a part is a subset of its thread's bytes).
++        /// </summary>
++        public static void Part(string name, long bytes)
++        {
++            lock (_slots)
++            {
++                Slot s = null;
++
++                foreach (Slot x in _slots)
++                {
++                    if (x.Name == name)
++                    {
++                        s = x;
++                        break;
++                    }
++                }
++
++                if (s == null)
++                {
++                    s = new Slot { Name = name };
++                    _slots.Add(s);
++                }
++
++                s.Bytes += bytes;
++                s.Rounds++;
++            }
++        }
++
+         /// <summary>Bytes and iterations so far of the slots with this name (summed over threads).</summary>
+         public static (long Bytes, long Rounds) Of(string name)
+         {
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index a54044d63061783d7627483d9bd7ff2cd87f8a55..82f24d19a1a71931c8878e019bc6d1e03ea803c7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -1469,6 +1469,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 : _state.State.SamplerPoolState.MaximumId;
+ 
+             CachedShaderProgram gs;
++            long s2aGs = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：渲染线程分配拆账（取图形程序合计）
+             try
+             {
+                 gs = shaderCache.GetGraphicsShader(
+@@ -1504,6 +1505,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 throw new InvalidOperationException(sb.ToString(), e);
+             }
+ 
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000c, GC.GetAllocatedBytesForCurrentThread() - s2aGs);
++
+             // Consume the modified flag for spec state so that it isn't checked again.
+             _currentSpecState.SetShader(gs);
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 05586cf2ea3f0c5cda2e90d0037d49ee73398321..61a30f8e3067172f2578c991d24d461d80e0128b 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -68,7 +68,9 @@ namespace Ryujinx.Graphics.Gpu
+             }
+         }
+ 
+-        /// <summary>包含式段计数（不参与嵌套去重，与上面的分派点并列看）：0x40_0001 取命令（Fetch）、0x40_0002 Process 整段（含其中分派）、0x40_0003 RunDeferredActions、0x40_0004 免解读缓存录段。</summary>
++        /// <summary>包含式段计数（不参与嵌套去重，与上面的分派点并列看）：0x40_0001 取命令（Fetch）、0x40_0002 Process 整段（含其中分派）、0x40_0003 RunDeferredActions、0x40_0004 免解读缓存录段；
++        /// 0x40_000c 取图形程序合计、0x40_000d 查缓存 + 按需实化、0x40_000e 首次命中核对（现翻 = 合计 − 后两项；10-21 动森新内容首用时渲染线程分配定位）、
++        /// 0x40_000f 按需实化整段、0x40_0010 其中建宿主程序（iPhone 独有：着色器包 / 离线库查找）。只在渲染线程（按需实化由查找触发）上调。</summary>
+         public static void Raw(int key, long bytes)
+         {
+             if (bytes > 0)
+@@ -78,14 +80,14 @@ namespace Ryujinx.Graphics.Gpu
+             }
+         }
+ 
+-        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调" };
++        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调", "着色器·取图形程序合计（快路径 + 查缓存 + 现翻）", "着色器·查缓存 + 按需实化", "着色器·首次命中核对", "着色器·按需实化整段（读缓存 + 解压 + 建宿主程序）", "着色器·按需实化里建宿主程序（渲染器 LoadProgramBinary：着色器包 / 离线库查找）" };
+ 
+         private static string Name(int key) => (key >> 20) switch
+         {
+             0 => $"方法 子通道 {key >> 16} 偏移 0x{key & 0xffff:x}",
+             1 => $"宏 {key & 0xffff}",
+             2 => $"内联数据 子通道 {key & 0xffff}",
+-            4 => _rawNames[key & 0xf],
++            4 => (key & 0x1f) < _rawNames.Length ? _rawNames[key & 0x1f] : $"段 0x{key & 0x1f:x}",
+             6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
+         };
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 799ee447af8f14ab5e17e15f6e2e1c4486d48597..7849d914c68d72a19cfcb906f78f0c6fe2da048d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -465,6 +465,19 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="lazy">Program to materialize</param>
+         /// <returns>The program, or null if it can't be used (then compiled on demand like an uncached shader)</returns>
+         internal CachedShaderProgram S2AMaterialize(S2ALazyProgram lazy)
++        {
++            long s2aM = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2A：分配拆账（按需实化整段）
++            try
++            {
++                return S2AMaterializeCore(lazy);
++            }
++            finally
++            {
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000f, GC.GetAllocatedBytesForCurrentThread() - s2aM);
++            }
++        }
++
++        private CachedShaderProgram S2AMaterializeCore(S2ALazyProgram lazy)
+         {
+             lock (_lazyLock)
+             {
+@@ -518,7 +531,9 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         specState.TransformFeedbackDescriptors != null);
+ 
+                     bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
++                    long s2aL = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
+                     IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, shaderInfo);
++                    if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, GC.GetAllocatedBytesForCurrentThread() - s2aL);
+ 
+                     if (hostProgram.CheckProgramLink(true) != ProgramLinkStatus.Success)
+                     {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index ee22731f38131c9ead3cc2c9d7caea5491c0fcd8..84107ca33092fff915b3c11137574e369bd63e19 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -342,18 +342,24 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             CachedGraphicsGuestCode cachedGuestCode;
+ 
+-            // S2A：同上（计算着色器那段）
++            // S2A：同上（计算着色器那段）。拆账（S2A_ALLOC_TRACE）：查缓存 + 按需实化 / 首次命中核对分开记
++            long s2aF = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
+             while (_graphicsShaderCache.TryFind(channel, ref poolState, ref graphicsState, addresses, out gpShaders, out cachedGuestCode))
+             {
+-                if (gpShaders.SpecializationState.S2ANeedsVerify &&
+-                    !S2AVerify(gpShaders, channel, ref poolState, samplerPoolMaximumId, isCompute: false, graphicsState, default, state.TfEnable ? GetTransformFeedbackDescriptors(ref state) : null))
++                long s2aV = S2AAllocTrace.On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++                bool s2aBad = gpShaders.SpecializationState.S2ANeedsVerify &&
++                    !S2AVerify(gpShaders, channel, ref poolState, samplerPoolMaximumId, isCompute: false, graphicsState, default, state.TfEnable ? GetTransformFeedbackDescriptors(ref state) : null);
++                if (S2AAllocTrace.On) { long v = GC.GetAllocatedBytesForCurrentThread() - s2aV; S2AAllocTrace.Raw(0x40_000e, v); s2aF += v; }
++                if (s2aBad)
+                 {
+                     continue;
+                 }
+ 
+                 _gpPrograms[addresses] = gpShaders;
++                if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, GC.GetAllocatedBytesForCurrentThread() - s2aF);
+                 return gpShaders;
+             }
++            if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, GC.GetAllocatedBytesForCurrentThread() - s2aF);
+ 
+             S2ALogMiss(isCompute: false);
+             TransformFeedbackDescriptor[] transformFeedbackDescriptors = GetTransformFeedbackDescriptors(ref state);
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index caa84967b9e124c672c82b84d2ae1a91fa460304..c4a2957a49ce64bb0163838464b146d1fe773c2d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -349,6 +349,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+                     if (_ticks >= _ticksPerFrame)
+                     {
++                        long s2aA = Ryujinx.Common.S2AThreadAlloc.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2Arm: per-part allocation accounting (diagnostics)
++
+                         if (_swapIntervalDelay-- == 0)
+                         {
+                             Compose();
+@@ -357,8 +359,12 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                             _swapIntervalDelay = Math.Max(0, _swapInterval - 1);
+                         }
+ 
++                        if (Ryujinx.Common.S2AThreadAlloc.On) { long a = GC.GetAllocatedBytesForCurrentThread(); Ryujinx.Common.S2AThreadAlloc.Part("合成·取帧上屏", a - s2aA); s2aA = a; }
++
+                         _device.System?.SignalVsync();
+ 
++                        if (Ryujinx.Common.S2AThreadAlloc.On) Ryujinx.Common.S2AThreadAlloc.Part("合成·垂直同步", GC.GetAllocatedBytesForCurrentThread() - s2aA);
++
+                         // Apply a maximum bound of 3 frames to the tick remainder, in case some event causes Ryujinx to pause for a long time or messes with the timer.
+                         _ticks = Math.Min(_ticks - _ticksPerFrame, _ticksPerFrame * 3);
+                     }

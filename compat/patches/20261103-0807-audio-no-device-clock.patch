@@ -1,0 +1,131 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 06adf18a8f9cb0f8b2b32ffe2c86b9c7b05d4df1..c49128e45ddcfc0b8be6ebd2058d354d7054c452 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -24,8 +24,6 @@ namespace Ryujinx.Audio.Backends.Apple
+         // 安静游戏凑不够时 StartFallbackMilliseconds 后照常开播。
+         private const int PrimeMilliseconds = 64;
+         private const long StartFallbackMilliseconds = 100;
+-        // S2Arm (11-02 太鼓爆音): 判断设备真断的容差：新数据到达比设备交还晚的调度抖动（太鼓 Mac / iPhone 归零后 0.0–3.0 ms 就有新数据）
+-        private const int ClockToleranceMilliseconds = 5;
+ 
+         private readonly AppleHardwareDeviceDriver _driver;
+         // S2Arm: queued buffers as (identifier, sample count) in a ring under _queueLock, instead of ConcurrentQueue<AppleAudioBuffer>:
+@@ -415,26 +413,16 @@ namespace Ryujinx.Audio.Backends.Apple
+             public Pump(AppleHardwareDeviceSession s, int bufferBytes)
+                 // S2Arm (10-22 杂音): 起播前预充 PrimeMilliseconds 的在途下限（约 3 个游戏缓冲），凑够才让设备开播
+                 : base(NumBuffers, bufferBytes, s._bytesPerFrame, s._bytesPerFrame * (int)s.RequestedSampleRate,
+-                       (long)s._bytesPerFrame * s.RequestedSampleRate * PrimeMilliseconds / 1000,
+-                       (long)s.RequestedSampleRate * ClockToleranceMilliseconds / 1000)
++                       (long)s._bytesPerFrame * s.RequestedSampleRate * PrimeMilliseconds / 1000)
+             {
+                 _s = s;
+             }
+ 
+-            // S2Arm (11-02 太鼓爆音): 设备播放时钟 = 队列时间线的 sample time（缓冲不带时间戳时首尾相接排在这条时间线上）；队列没在播 / 取不到返回 MinValue
+-            protected override unsafe long DeviceClock()
+-            {
+-                nint q = _s._audioQueue;
+-
+-                if (q == nint.Zero)
+-                {
+-                    return long.MinValue;
+-                }
+-
+-                AudioTimeStamp ts;
+-
+-                return AudioQueueGetCurrentTime(q, nint.Zero, &ts, nint.Zero) == 0 ? (long)ts.SampleTime : long.MinValue;
+-            }
++            // S2Arm (11-03 太鼓 iPhone 断续): 不取设备播放时钟（DeviceClock 留缺省 MinValue：补垫不补）。11-02 太鼓爆音修复在每次交还时调
++            //   AudioQueueGetCurrentTime（问音频服务进程）判补垫，iPhone 上这个调用本身打乱输出：调用每 10 秒有 5–18 次超过 10 ms（最长约 50 ms），
++            //   每次都碰上设备交还和游戏交声音一起停 40–50 ms、设备吃空断音约 55 ms。测试机1 太鼓同包 A/B 各 74 秒：每 100 ms 调一次 → 交设备
++            //   >30 ms 空档 42 次、回调最长间隔 55–67 ms；完全不调 → 0 次、21.6–21.8 ms（= 一拉，同修复前的别的款）。
++            //   补垫原为欠载后重建缓冲深度（10-23 马车8）；放回提前量（PlaybackCredit，11-02）让客人始终比交还多送一拉，欠载后深度随之回来
+ 
+             protected override Span<byte> SlotData(int slot)
+             {
+diff --git a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+index d4295fb328dbcce459ca623c4b36df36cfcddb9f..ea2a7867ab1a2be6b870d0b399efb328d1db1a51 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/Native/AudioToolbox.cs
+@@ -69,17 +69,6 @@ namespace Ryujinx.Audio.Backends.Apple.Native
+         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
+         internal static partial int AudioQueuePause(nint audioQueue);
+ 
+-        // S2Arm (11-02): AudioTimeStamp（CoreAudioBaseTypes.h，64 字节）；只读 mSampleTime
+-        [StructLayout(LayoutKind.Explicit, Size = 64)]
+-        internal struct AudioTimeStamp
+-        {
+-            [FieldOffset(0)]
+-            public double SampleTime;
+-        }
+-
+-        [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")] // 平台例外：苹果音频后端本身（AudioQueue 播放时钟），同文件其余导入原样
+-        internal static unsafe partial int AudioQueueGetCurrentTime(nint audioQueue, nint timeline, AudioTimeStamp* timeStamp, nint discontinuity);
+-
+         [LibraryImport("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")]
+         internal static partial int AudioQueueStop(nint audioQueue, [MarshalAs(UnmanagedType.I1)] bool immediate);
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 8809a0c883abb8c10b5b25e4155db80cd111566f..ebb3c3d8bb9fb1707faeac4d7b23f0f4976ce5d9 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -144,6 +144,10 @@ namespace Ryujinx.Audio.Backends.Apple
+         private long _maxStarveTicks;
+         private long _minInFlight = long.MaxValue;
+         private long _maxGapTicks;
++        // S2Arm (11-03 太鼓 iPhone 断续): 交还迟到 = 两次交还相隔超过一拉（放回提前量）+ 5 ms：设备照网格拉，回调却晚送到。真缺口按「已交 vs 墙钟」
++        //   只数超过开局最大落后量的增长，开局 300 ms 落后之后每秒一次 40–55 ms 的断口一次都不数（11-03 测试机1 太鼓：真缺口 0、录屏每秒断 55 ms），
++        //   这里直接数回调晚到；次数和最晚超出一拉多少 ms 进 10 秒行
++        private long _lateBursts, _repLateBursts, _maxLateOverTicks;
+         // S2Arm (10-25 数码宝贝 Mac 欠载)：设备交还时机。提交时按「已在途 + 本块」连续播放推出本块应播完的时刻，压进定长环（设备按提交顺序交还）；
+         //   交还时弹出，记「实际交还 − 应播完」= 设备输出延迟（交还比真正播完晚多少）。游戏按释放补数：这段延迟越长，游戏越晚拿到空缓冲
+         private const int LatRing = 128;
+@@ -325,6 +329,19 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _maxGapTicks = gapTicks;
+             }
+ 
++            long lead = Volatile.Read(ref _leadFrames);
++
++            if (lead > 0 && gapTicks > 0)
++            {
++                long over = gapTicks - (lead * Stopwatch.Frequency / _rate + Stopwatch.Frequency / 200);
++
++                if (over > 0)
++                {
++                    _lateBursts++;
++                    _maxLateOverTicks = Math.Max(_maxLateOverTicks, over + Stopwatch.Frequency / 200);
++                }
++            }
++
+             if (gapTicks >= GapTicks)
+             {
+                 // S2Arm (10-27 #495 音频恢复计时)：这一段静了 ≥ GapMs，本笔回调 = 设备重新出声的瞬间。记绝对时刻供与
+@@ -560,14 +577,17 @@ namespace Ryujinx.Audio.Backends.Apple
+                     d._maxStarveTicks = 0;
+                     d._minInFlight = long.MaxValue;
+                     d._maxGapTicks = 0;
++                    long lb = d._lateBursts;
++                    double lateOverMs = d._maxLateOverTicks * 1000.0 / Stopwatch.Frequency;
++                    d._maxLateOverTicks = 0;
+                     double tf = 1000.0 / Stopwatch.Frequency;
+                     string lat = d._latN > 0 ? $"；交还相对连续播完 最少 {d._latMin * tf:F1} / 平均 {d._latSum * tf / d._latN:F1} / 最多 {d._latMax * tf:F1} ms（负 = 提前）" : "";
+                     d._latMin = long.MaxValue; d._latMax = 0; d._latSum = 0; d._latN = 0;
+ 
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+-                        $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口与交还迟到）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
++                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧；交还迟到 {lb - d._repLateBursts} 次（最多比一拉晚 {lateOverMs:F1} ms）{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     HudAudio(d.Index, gap * 1000 / d._rate, 0);
+ 
+@@ -584,6 +604,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     d._repUnderruns = und;
+                     d._repPauses = pau;
+                     d._repGapFrames = gap;
++                    d._repLateBursts = lb;
+                 }
+             }
+         }

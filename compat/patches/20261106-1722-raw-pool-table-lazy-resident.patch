@@ -1,0 +1,52 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+index cc38de2b768dd335722c8d58438a2b7f249e20e8..3f672fa9f6802545370055f1776af9609a6b16ae 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -837,6 +837,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+         // Reference port: the memory pool table the host binds for raw global memory (dmsh_abi.h DMSH_GMEM_MAP_*): a storage buffer reserved under this sentinel constant buffer
+         // slot, which no constant buffer of the game has (dmsh_build.py turns it into DMSH_KIND_GMEM_MAP). 1 << GmemMapLog2 entries of GmemMapEntryWords words each,
+         // {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start; entry 0 is empty (start 0, end 0) and unused entries start at ~0
++        // S2Arm（11-06 按需常驻，nvn_mtl.m gmem_map / gmem_scan）：字 7 = 这一项的池在宿主「访问位图」里的位号 + 1（0 = 不用记）；第 0 项的差值字（字 4、5）= 访问位图的 GPU 地址。
++        //   宿主只让「访问到的池」进常驻集合：没常驻的池照样有一项，但终点 = 起点（旧翻译的着色器按「不在任何池里」跳过：读 0、写丢，GPU 碰不到不常驻的内存），
++        //   真终点放在差值字里；查到这种项的访问记下位、照样跳过，宿主下一次提交前把池放进常驻集合、重建表。常驻但宿主要知道还用不用的池（字 7 非 0）选中时也记位
+         public const int GmemMapCbSlot = 0xff;
+         private const int GmemMapLog2 = 13;
+         private const int GmemMapEntryWords = 8;
+@@ -958,7 +961,36 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             context.Store(StorageKind.LocalMemory, lastBinding, selected);
+             Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
+             Operand lblSkip = Label();
+-            context.BranchIfFalse(lblSkip, Below(MapWord(found, 3), MapWord(found, 2)));   // an address in no pool: the entry below it ends below it
++            Operand lblHeld = Label();
++
++            // S2Arm: the entry's bit in the host's access bitmap (word 7 = bit + 1, 0 = none; entry 0's delta words = the bitmap's GPU address). Read first: a bit is set once
++            void Note(Operand state)
++            {
++                Operand lblNoted = Label();
++                context.BranchIfTrue(lblNoted, context.ICompareEqual(state, Const(0)));
++                Operand bitIndex = context.ISubtract(state, Const(1));
++                Operand bitLow = context.IAdd(MapWord(Const(0), 4), context.ShiftLeft(context.ShiftRightU32(bitIndex, Const(5)), Const(2)));
++                Operand bitHigh = context.IAdd(MapWord(Const(0), 5), context.ConditionalSelect(context.ICompareLessUnsigned(bitLow, MapWord(Const(0), 4)), Const(1), Const(0)));
++                Operand bitMask = context.ShiftLeft(Const(1), context.BitwiseAnd(bitIndex, Const(31)));
++                context.BranchIfTrue(lblNoted, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.GlobalMemory, bitLow, bitHigh), bitMask), Const(0)));
++                context.AtomicOr(StorageKind.GlobalMemory, bitLow, bitHigh, bitMask);
++                context.MarkLabel(lblNoted);
++            }
++
++            context.BranchIfTrue(lblHeld, Below(MapWord(found, 3), MapWord(found, 2)));
++
++            // An address in no pool (the entry below it ends below it), or in a pool that is not resident: its entry ends where it starts and keeps its true end in the delta words.
++            // Such an access notes the pool and is skipped like one in no pool
++            Operand cold = context.BitwiseAnd(
++                context.BitwiseAnd(context.ICompareEqual(MapWord(found, 2), MapWord(found, 0)), context.ICompareEqual(MapWord(found, 3), MapWord(found, 1))),
++                Below(MapWord(found, 5), MapWord(found, 4)));
++            context.BranchIfFalse(lblSkip, cold);
++            Note(MapWord(found, 7));
++            context.Branch(lblSkip);
++
++            // The hint's or the search's entry holds it: a pool the host tracks is noted when an invocation chooses it (later accesses of the run take the last entry's path)
++            context.MarkLabel(lblHeld);
++            Note(MapWord(found, 7));
+ 
+             // The last entry's range held it, or the hint's or the search's entry does
+             context.MarkLabel(lblChosen);

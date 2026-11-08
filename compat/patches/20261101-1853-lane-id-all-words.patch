@@ -1,0 +1,63 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index dfc8758a604ddd6298ddf9a2b29cb522ab51e6a6..8cff2350df6687126cea8d31edf7d6c66e705459 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1742,7 +1742,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+         // position of the r-th set bit of the hardware ballot(true) mask (5 steps of popcount bisection, straight-line). That is the hardware lane id
+         // whether or not the whole SIMD group is active, so ballots and shuffles keep the hardware lane space. The rank alone was the lane id only
+         // with a full group: Tears of the Kingdom's visibility counter returns early before its ballot, its "highest set bit == my lane id" lane never
+-        // matched and that group added nothing. Apple SIMD groups are 32 wide: the mask is the ballot's first word.
++        // matched and that group added nothing. All four ballot words count (audit 1101 18:00 P1-61): the same SPIR-V feeds Android's Vulkan, whose
++        // subgroups can be 64 wide; on Apple's 32-wide groups the upper words are 0 and the result is the first word's search, bit for bit as before.
+         internal static bool LaneIdEmulated(CodeGenContext context, IoVariable ioVariable)
+         {
+             // S2Arm: the domain stage too: it runs as Metal's post-tessellation vertex function, which has no lane-id input either (Bayonetta 3 DS_Vanish05 152e86c971b807e9 /
+@@ -1753,22 +1754,41 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+         private static SpvInstruction EmulatedLaneId(CodeGenContext context)
+         {
+             SpvInstruction u32 = context.TypeU32();
++            SpvInstruction boolType = context.TypeBool();
+             SpvInstruction execution = context.Constant(u32, Scope.Subgroup);
+             SpvInstruction rank = context.GroupNonUniformIAdd(u32, execution, GroupOperation.ExclusiveScan, context.Constant(u32, 1));
+-            SpvInstruction ballot = context.GroupNonUniformBallot(context.TypeVector(u32, 4), execution, context.ConstantTrue(context.TypeBool()));
+-            SpvInstruction mask = context.CompositeExtract(u32, ballot, (SpvLiteralInteger)0);
++            SpvInstruction ballot = context.GroupNonUniformBallot(context.TypeVector(u32, 4), execution, context.ConstantTrue(boolType));
++
++            // The word of the ballot holding the lane's bit: the first whose running set-bit count passes the rank (subgroups up to 128 wide; on Apple's 32-wide SIMD groups
++            // words 1–3 are 0, so this is word 0 and the result is the 32-bit search alone). Then the rank within that word, and the word's first lane.
++            SpvInstruction[] m = new SpvInstruction[4];
++            for (int i = 0; i < 4; i++)
++            {
++                m[i] = context.CompositeExtract(u32, ballot, (SpvLiteralInteger)i);
++            }
++
++            SpvInstruction c0 = context.BitCount(u32, m[0]);
++            SpvInstruction c1 = context.IAdd(u32, c0, context.BitCount(u32, m[1]));
++            SpvInstruction c2 = context.IAdd(u32, c1, context.BitCount(u32, m[2]));
++            SpvInstruction in0 = context.ULessThan(boolType, rank, c0);
++            SpvInstruction in1 = context.ULessThan(boolType, rank, c1);
++            SpvInstruction in2 = context.ULessThan(boolType, rank, c2);
++            SpvInstruction mask = context.Select(u32, in0, m[0], context.Select(u32, in1, m[1], context.Select(u32, in2, m[2], m[3])));
++            SpvInstruction below = context.Select(u32, in0, context.Constant(u32, 0), context.Select(u32, in1, c0, context.Select(u32, in2, c1, c2)));
++            SpvInstruction first = context.Select(u32, in0, context.Constant(u32, 0), context.Select(u32, in1, context.Constant(u32, 32), context.Select(u32, in2, context.Constant(u32, 64), context.Constant(u32, 96))));
++            SpvInstruction r = context.ISub(u32, rank, below);
+             SpvInstruction pos = context.Constant(u32, 0);
+ 
+-            // pos = the largest p with popcount(mask & ((1 << p) - 1)) <= rank: the lane's own bit
++            // pos = the largest p with popcount(mask & ((1 << p) - 1)) <= r: the lane's own bit within its word
+             foreach (int step in new[] { 16, 8, 4, 2, 1 })
+             {
+                 SpvInstruction next = context.IAdd(u32, pos, context.Constant(u32, step));
+-                SpvInstruction below = context.ISub(u32, context.ShiftLeftLogical(u32, context.Constant(u32, 1), next), context.Constant(u32, 1));
+-                SpvInstruction count = context.BitCount(u32, context.BitwiseAnd(u32, mask, below));
+-                pos = context.Select(u32, context.ULessThanEqual(context.TypeBool(), count, rank), next, pos);
++                SpvInstruction lower = context.ISub(u32, context.ShiftLeftLogical(u32, context.Constant(u32, 1), next), context.Constant(u32, 1));
++                SpvInstruction count = context.BitCount(u32, context.BitwiseAnd(u32, mask, lower));
++                pos = context.Select(u32, context.ULessThanEqual(boolType, count, r), next, pos);
+             }
+ 
+-            return pos;
++            return context.IAdd(u32, first, pos);
+         }
+ 
+         private static OperationResult GenerateLoadOrStore(CodeGenContext context, AstOperation operation, bool isStore)

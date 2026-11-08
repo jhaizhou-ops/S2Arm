@@ -1,0 +1,43 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index a6644112d74c1487943bcaf8a22c73baa07ccfa5..e179300c32938a26b514cbdcba66e26218a8bd13 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -134,25 +134,28 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+             // Check to see if the binaries for previously compiled shaders are ready, and save them out.
+ 
+-            while (_programsToSaveQueue.TryPeek(out ProgramToSave programToSave))
++            // S2A（10-25）：不再在队首 Incomplete 时整体停写。真机上一条永不完成的程序
++            //   （编译任务被丢弃 / 转计算子程序没被使用）会让它后面所有已完成程序一直不落盘，
++            //   下次启动仍然全部现翻（Redmi 实测 525 条客体记录只落 19 条宿主记录）。
++            //   每次只走一遍当前队列：完成的保存、失败的丢弃、未完成的移到队尾下帧再查。
++            int pending = _programsToSaveQueue.Count;
++            for (int i = 0; i < pending; i++)
+             {
++                ProgramToSave programToSave = _programsToSaveQueue.Dequeue();
+                 // S2A：转计算程序有三个宿主程序，全部编完才取（复合）二进制（S2AVtg）
+                 // S2A（10-24）：不等渲染线程查（S2AVtg.LinkStatusNoWait）。原先 CheckLink 是 InvokeCommand，渲染线程正等一条管线 / 一支现编时 GPU 模拟线程就停在这里
+                 //   （10-24 Mac xc3 冷局第 1230 帧停 10 秒：GPU 模拟线程 ProcessShaderCacheQueue → CheckLink 等渲染线程、渲染线程 gal_pso_job_wait 等后台管线）；二进制由渲染线程编完时顺手取好
+                 ProgramLinkStatus result = S2AVtg.LinkStatusNoWait(programToSave.CachedProgram);
+ 
+-                if (result != ProgramLinkStatus.Incomplete)
++                if (result == ProgramLinkStatus.Incomplete)
+                 {
+-                    if (result == ProgramLinkStatus.Success)
+-                    {
+-                        _cacheWriter.AddShader(programToSave.CachedProgram, programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram));
+-                    }
+-
+-                    _programsToSaveQueue.Dequeue();
++                    _programsToSaveQueue.Enqueue(programToSave);
++                    continue;
+                 }
+-                else
++
++                if (result == ProgramLinkStatus.Success)
+                 {
+-                    break;
++                    _cacheWriter.AddShader(programToSave.CachedProgram, programToSave.BinaryCode ?? S2AVtg.GetBinary(programToSave.CachedProgram));
+                 }
+             }
+         }

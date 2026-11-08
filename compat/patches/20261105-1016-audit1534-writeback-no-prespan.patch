@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 979dcf807259072d4f8089c89626001dd7647889..2f2ed43a0e4db9f3a44d66f88703410a5e9f64fb 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -379,7 +379,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             // instead of reporting them later as a CPU write (which re-uploaded them over newer GPU writes and forced a GPU wait whenever the page had a flush action)
+             if (!tracked && size > 0)
+             {
+-                ReadOnlySpan<byte> current = _cpuMemory.GetSpan(address, size);
+                 bool hasProvider = S2AWritebackHasProvider;
+ 
+                 if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AGpuCaps.WritebackRequireProvider))
+@@ -389,6 +388,10 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                         S2AWritebackBorrowedWarning();
+                     }
+ 
++                    // 审计 #1534 P1-17：借来的跨度只在这一支取。有提供者那支只经提供者读旧字节，不先对客内存取跨度
++                    //   （产品的不跟踪 GetSpan 会先按「GPU 改过没回写」收口回写，跨块时还要拷远端副本，取了又不用）
++                    ReadOnlySpan<byte> current = _cpuMemory.GetSpan(address, size);
++
+                     return S2AUntrackedRegionPool.Rent(_cpuMemory, address, current);
+                 }
+ 

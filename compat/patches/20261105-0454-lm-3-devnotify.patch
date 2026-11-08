@@ -1,0 +1,52 @@
+diff --git a/src/Ryujinx.Horizon/LogManager/Ipc/LmLogger.cs b/src/Ryujinx.Horizon/LogManager/Ipc/LmLogger.cs
+index b6460a4bc71d33c8b0a22bceb928c1ba8f2f9cf9..c722e6ee074d85fa28dfc6d8c831c7d45c4fc789 100644
+--- a/src/Ryujinx.Horizon/LogManager/Ipc/LmLogger.cs
++++ b/src/Ryujinx.Horizon/LogManager/Ipc/LmLogger.cs
+@@ -55,6 +55,19 @@ namespace Ryujinx.Horizon.LogManager.Ipc
+             return Result.Success;
+         }
+ 
++        [CmifCommand(3)] // 20.0.0+
++        // S2Arm: DevNotify(nn::diag::DevNotificationHeader (0x28 in-data, opaque), buffer<char, 0x21> text). Wire format from the Zelda OoT (Switch 2)
++        //   sdk proxy; nn::lm::DevNotify aborts on any failing result except one code, and the game imports nn::diag::detail::DevNotifyImpl.
++        //   lm's job is to take the notification; no developer host is attached to this console, so it only goes to the guest log.
++        public Result DevNotify(DevNotificationHeader header, [Buffer(HipcBufferFlags.In | HipcBufferFlags.AutoSelect)] ReadOnlySpan<byte> text)
++        {
++            int length = text.IndexOf((byte)0);
++
++            Logger.Guest?.Print(LogClass.ServiceLm, $"DevNotify (pid {_pid}): {Encoding.UTF8.GetString(length < 0 ? text : text[..length])}");
++
++            return Result.Success;
++        }
++
+         private static bool SetProcessId(Span<byte> message, ulong processId)
+         {
+             ref LogPacketHeader header = ref MemoryMarshal.Cast<byte, LogPacketHeader>(message)[0];
+diff --git a/src/Ryujinx.Horizon/Sdk/Lm/DevNotificationHeader.cs b/src/Ryujinx.Horizon/Sdk/Lm/DevNotificationHeader.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58807d02de14a46e5a96ff518505ab71cec01d28
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Lm/DevNotificationHeader.cs
+@@ -0,0 +1,11 @@
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Horizon.Sdk.Lm
++{
++    // S2Arm: nn::diag::DevNotificationHeader as sent by lm ILogger 3 (DevNotify): 0x28 bytes of in-data, copied verbatim by the SDK
++    //   (Zelda OoT Switch 2 sdk proxy). The meaning of its fields is not known; the service keeps it opaque.
++    [StructLayout(LayoutKind.Sequential, Size = 0x28, Pack = 1)]
++    struct DevNotificationHeader
++    {
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Lm/ILmLogger.cs b/src/Ryujinx.Horizon/Sdk/Lm/ILmLogger.cs
+index 2b32a7a020ce7c54412bd0cd8d7dff673ddf4fa8..6fee922e53ac080b7c1395420954d9d51c415993 100644
+--- a/src/Ryujinx.Horizon/Sdk/Lm/ILmLogger.cs
++++ b/src/Ryujinx.Horizon/Sdk/Lm/ILmLogger.cs
+@@ -8,5 +8,6 @@ namespace Ryujinx.Horizon.Sdk.Lm
+     {
+         Result Log(Span<byte> message);
+         Result SetDestination(LogDestination destination);
++        Result DevNotify(DevNotificationHeader header, ReadOnlySpan<byte> text);
+     }
+ }

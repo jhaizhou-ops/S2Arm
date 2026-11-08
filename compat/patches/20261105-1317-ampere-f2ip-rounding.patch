@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+index d3e5c37b04c447f16d6b625cbb8e382b2e8336e1..bee8c50605489f81917394904051348f3b19f1c7 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereAlu.cs
+@@ -477,19 +477,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
+         // saturated to 0..255 (NaN to 0), and packed with c: d = c[15:0] << 16 | u8(a) << 8 | u8(b). Name: CUDA binary utilities "FP32 Down-Convert to Integer and Pack"; the compiler fuses
+         // cvt.rni.s32.f32 twice and cvt.pack.sat into it (NVIDIA developer forum thread 255571, sm_89), so the packing is PTX cvt.pack's: b in byte 0, a in byte 1, c's low half above.
+         // Zelda's every one has 72..92 = only bit 74 set, and each takes floats just scaled by 255 that a PRMT 0x5410 then joins into RGBA8 words: that is the unsigned 8-bit form. Any
+-        // other modifier (a signed or 16-bit form, a rounding field) has no example and stops here
++        // other modifier (a signed or 16-bit form) has no example and stops here.
++        // S2Arm 11-05: the rounding is F2I's field, 78..80 (nearest even, floor, ceiling, truncation; ARoundToInt): Zelda's mesh shaders (8 of them, e7dd5c5aec308efa, 37d872aeb9af01d4) take
++        // 72..92 = 0xc4, the same unsigned 8-bit form with 78..80 = 3, truncation
+         public static void AF2ip(EmitterContext context)
+         {
+             AmpereOp x = new(context.CurrOp);
+ 
+-            if (x.Field(72, 92) != 0x4)
++            if ((x.Field(72, 92) & ~(0x3UL << 6)) != 0x4)
+             {
+-                throw AFail(context, $"F2IP with modifiers {x.Field(72, 92):x} (only the unsigned 8-bit form, 72..92 = 4, seen)");
++                throw AFail(context, $"F2IP with modifiers {x.Field(72, 92):x} (only the unsigned 8-bit form, 72..92 = 4 with a rounding at 78..80, seen)");
+             }
+ 
+             (ASrc a, ASrc b, ASrc c) = AAluSrcs(context, x, neg: false, abs: false);
++            int mode = x.Bits(78, 80);
+ 
+-            Operand U8(ASrc s) => context.FP32ConvertToU32(context.FPMinimum(context.FPMaximum(context.FPRound(AGet(context, s)), ConstF(0f)), ConstF(255f)));
++            Operand U8(ASrc s) => context.FP32ConvertToU32(context.FPMinimum(context.FPMaximum(ARoundToInt(context, mode, AGet(context, s), Instruction.FP32), ConstF(0f)), ConstF(255f)));
+ 
+             Operand res = context.BitwiseOr(context.ShiftLeft(context.BitwiseAnd(AGet(context, c), Const(0xffff)), Const(16)),
+                 context.BitwiseOr(context.ShiftLeft(U8(a), Const(8)), U8(b)));

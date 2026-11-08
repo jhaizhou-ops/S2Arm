@@ -1,0 +1,143 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneContentManager.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneContentManager.cs
+index 764fb5104c8b22800720b8cbf56389e75e406a13..2085d337e07638b5fcd1357c980098ae52eeb737 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneContentManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneContentManager.cs
+@@ -69,7 +69,7 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+ 
+             string deviceLocationName = SanityCheckDeviceLocationName(device.Configuration.TimeZone);
+ 
+-            ResultCode result = GetTimeZoneBinary(deviceLocationName, out Stream timeZoneBinaryStream, out LocalStorage ncaFile);
++            ResultCode result = GetTimeZoneBinary(deviceLocationName, out Stream timeZoneBinaryStream, out IDisposable ncaFile);
+ 
+             if (result == ResultCode.Success)
+             {
+@@ -80,19 +80,39 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+             }
+             else
+             {
+-                // In the case the user don't have the timezone system archive, we just mark the manager as initialized.
++                // S2Arm: upstream only marked the manager initialized here, leaving an all-zero rule: every calendar
++                // conversion then "succeeded" with zeros (月份 0 → games index out of bounds). Report the missing data
++                // and use a real UTC rule instead of zeros.
++                S2AHooks.Red?.Invoke($"时间服务：缺时区系统数据 010000000000080E（设备时区 {deviceLocationName}），改用 UTC 规则");
++                Manager.S2ASetPosixRule("UTC", "UTC0");
+                 Manager.MarkInitialized();
+             }
+         }
+ 
++        // S2Arm: the time zone system data (010000000000080E) can also come as a plain directory (zoneinfo/ + binaryList.txt,
++        // S2AHooks.TimeZoneDataDir): S2Arm has no firmware NCAs, and the content is the public IANA tz database
++        private IFileSystem S2AOpenTimeZoneRomFs(out IDisposable owner)
++        {
++            if (S2AHooks.TimeZoneDataDir != null)
++            {
++                LibHac.FsSystem.LocalFileSystem dir = new(S2AHooks.TimeZoneDataDir);
++                owner = dir;
++                return dir;
++            }
++
++            LocalStorage ncaFileStream = new(VirtualFileSystem.SwitchPathToSystemPath(GetTimeZoneBinaryTitleContentPath()), FileAccess.Read, FileMode.Open);
++            owner = ncaFileStream;
++
++            Nca nca = new(_virtualFileSystem.KeySet, ncaFileStream);
++            return nca.OpenFileSystem(NcaSectionType.Data, _fsIntegrityCheckLevel);
++        }
++
+         private void InitializeLocationNameCache()
+         {
+             if (HasTimeZoneBinaryTitle())
+             {
+-                using IStorage ncaFileStream = new LocalStorage(VirtualFileSystem.SwitchPathToSystemPath(GetTimeZoneBinaryTitleContentPath()), FileAccess.Read, FileMode.Open);
+-
+-                Nca nca = new(_virtualFileSystem.KeySet, ncaFileStream);
+-                IFileSystem romfs = nca.OpenFileSystem(NcaSectionType.Data, _fsIntegrityCheckLevel);
++                IFileSystem romfs = S2AOpenTimeZoneRomFs(out IDisposable romfsOwner);
++                using IDisposable romfsOwnerScope = romfsOwner;
+ 
+                 using UniqueRef<IFile> binaryListFile = new();
+ 
+@@ -203,7 +223,7 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+ 
+         public ResultCode SetDeviceLocationName(string locationName)
+         {
+-            ResultCode result = GetTimeZoneBinary(locationName, out Stream timeZoneBinaryStream, out LocalStorage ncaFile);
++            ResultCode result = GetTimeZoneBinary(locationName, out Stream timeZoneBinaryStream, out IDisposable ncaFile);
+ 
+             if (result == ResultCode.Success)
+             {
+@@ -251,10 +271,10 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+ 
+         public bool HasTimeZoneBinaryTitle()
+         {
+-            return !string.IsNullOrEmpty(GetTimeZoneBinaryTitleContentPath());
++            return S2AHooks.TimeZoneDataDir != null || !string.IsNullOrEmpty(GetTimeZoneBinaryTitleContentPath());
+         }
+ 
+-        internal ResultCode GetTimeZoneBinary(string locationName, out Stream timeZoneBinaryStream, out LocalStorage ncaFile)
++        internal ResultCode GetTimeZoneBinary(string locationName, out Stream timeZoneBinaryStream, out IDisposable ncaFile)
+         {
+             timeZoneBinaryStream = null;
+             ncaFile = null;
+@@ -264,10 +284,7 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+                 return ResultCode.TimeZoneNotFound;
+             }
+ 
+-            ncaFile = new LocalStorage(VirtualFileSystem.SwitchPathToSystemPath(GetTimeZoneBinaryTitleContentPath()), FileAccess.Read, FileMode.Open);
+-
+-            Nca nca = new(_virtualFileSystem.KeySet, ncaFile);
+-            IFileSystem romfs = nca.OpenFileSystem(NcaSectionType.Data, _fsIntegrityCheckLevel);
++            IFileSystem romfs = S2AOpenTimeZoneRomFs(out ncaFile);
+ 
+             using UniqueRef<IFile> timeZoneBinaryFile = new();
+ 
+@@ -287,7 +304,7 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+                 throw new InvalidSystemResourceException(TimeZoneSystemTitleMissingErrorMessage);
+             }
+ 
+-            ResultCode result = GetTimeZoneBinary(locationName, out Stream timeZoneBinaryStream, out LocalStorage ncaFile);
++            ResultCode result = GetTimeZoneBinary(locationName, out Stream timeZoneBinaryStream, out IDisposable ncaFile);
+ 
+             if (result == ResultCode.Success)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneManager.cs b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneManager.cs
+index 155733d2e43791388359fbdec53233689aec8416..35923d476d2f25c286c2d0a8e94471cd4eb7c172 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZoneManager.cs
+@@ -64,6 +64,21 @@ namespace Ryujinx.HLE.HOS.Services.Time.TimeZone
+             return result;
+         }
+ 
++        // S2Arm: device rule from a POSIX TZ string (used when the time zone system data is missing, instead of zeros)
++        public void S2ASetPosixRule(string locationName, string posix)
++        {
++            lock (_lock)
++            {
++                Box<TimeZoneRule> rules = new();
++
++                if (TimeZone.ParsePosixName(posix, ref rules.Data))
++                {
++                    _deviceLocationName = locationName;
++                    _myRules = rules;
++                }
++            }
++        }
++
+         public ResultCode SetDeviceLocationNameWithTimeZoneRule(string locationName, Stream timeZoneBinaryStream)
+         {
+             ResultCode result = ResultCode.TimeZoneConversionFailed;
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 8ed1dc9ee75c92c716a83166447f58fcf59ef1bc..fc5bee98c284f91ce872beb5f3b41314885098e0 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -18,5 +18,11 @@ namespace Ryujinx.HLE
+ 
+         // Horizon.StartNewServices: start a Horizon (new IPC framework) service on an S2Arm thread instead of a Ryujinx kernel process
+         public static delegate*<Ryujinx.Horizon.ServiceEntry, void> StartHorizonService;
++
++        // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
++        public static System.Action<string> Red;
++
++        // Time zone system data (010000000000080E) as a directory: zoneinfo/<name> TZif files + binaryList.txt
++        public static string TimeZoneDataDir;
+     }
+ }

@@ -1,0 +1,380 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Capabilities.cs b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+index add93c6003fa8c09b79186c8b2a3b281cb6ee3fc..5fcdbf5d078596f2bfa4a18ac2b977f5195b9a66 100644
+--- a/src/Ryujinx.Graphics.GAL/Capabilities.cs
++++ b/src/Ryujinx.Graphics.GAL/Capabilities.cs
+@@ -91,6 +91,12 @@ namespace Ryujinx.Graphics.GAL
+         //   计入宿主缓存能力身份，开与关的宿主程序不混用。
+         public readonly bool S2AStorageOobRecord;
+ 
++        // S2A：宿主不支持作 uniform texel buffer 的顶点 texel 格式集合（FormatTable.VertexTexelViewFormats
++        //   中 bufferFeatures 无 UNIFORM_TEXEL_BUFFER 者）；命中时转计算绑同位宽整型替代 view，
++        //   着色器按 AttributeType.TexelDecode 语义解码。不序列化进宿主缓存/烘焙档——加载时以
++        //   本机能力重算，与特化状态里的 decode 位一并生效。
++        public readonly Format[] UnsupportedUniformTexelBufferFormats;
++
+         public Capabilities(
+             TargetApi api,
+             string vendorName,
+@@ -159,8 +165,10 @@ namespace Ryujinx.Graphics.GAL
+             int maximumVertexOutputComponents = 0,
+             int maximumFragmentInputComponents = 0,
+             bool s2aStorageWindowClamp = false,
+-            bool s2aStorageOobRecord = false)
++            bool s2aStorageOobRecord = false,
++            Format[] unsupportedUniformTexelBufferFormats = null)
+         {
++            UnsupportedUniformTexelBufferFormats = unsupportedUniformTexelBufferFormats;
+             S2AStorageWindowClamp = s2aStorageWindowClamp;
+             S2AStorageOobRecord = s2aStorageWindowClamp && s2aStorageOobRecord;
+             S2AVertexPull = s2aVertexPull;
+diff --git a/src/Ryujinx.Graphics.GAL/Format.cs b/src/Ryujinx.Graphics.GAL/Format.cs
+index 277276fe3f03ed4ffe397571d323dd733464956f..d89d4fd8c6076ec0ab333c814cbc09c2dc634542 100644
+--- a/src/Ryujinx.Graphics.GAL/Format.cs
++++ b/src/Ryujinx.Graphics.GAL/Format.cs
+@@ -1,3 +1,6 @@
++using System.Collections.Generic;
++using System.Linq;
++
+ namespace Ryujinx.Graphics.GAL
+ {
+     public enum Format
+@@ -346,4 +349,68 @@ namespace Ryujinx.Graphics.GAL
+             public bool IsInt => fmt.IsUnsignedInt || fmt.IsSignedInt;
+         }
+     }
++
++    /// <summary>
++    /// Formats the GPU layer may request for vertex texel-buffer views: every
++    /// single-component attribute format plus the fixed index/topology/dummy
++    /// formats (already covered by the same values). Backends probe these for
++    /// uniform texel buffer support; unsupported entries are substituted with a
++    /// same-width integer view plus shader-side decode.
++    /// </summary>
++    public static class VertexTexelFormats
++    {
++        public static readonly Format[] All =
++        {
++            Format.R8Unorm, Format.R8Snorm, Format.R8Uint, Format.R8Sint,
++            Format.R16Float, Format.R16Unorm, Format.R16Snorm, Format.R16Uint, Format.R16Sint,
++            Format.R32Float, Format.R32Uint, Format.R32Sint,
++            Format.R10G10B10A2Unorm, Format.R10G10B10A2Uint, Format.R10G10B10A2Sint, Format.R11G11B10Float,
++        };
++
++        /// <summary>
++        /// Same-bit-width integer substitutes for attribute texel formats a host may
++        /// not support as uniform texel buffer. The integer view delivers raw bits;
++        /// the shader applies the semantic decode (AttributeType.TexelDecode).
++        /// </summary>
++        private static readonly IReadOnlyDictionary<Format, Format> ViewFallbacks = new Dictionary<Format, Format>
++        {
++            { Format.R16Float, Format.R16Uint },
++            { Format.R16Sint, Format.R16Uint },
++            { Format.R10G10B10A2Sint, Format.R32Uint },
++        };
++
++        /// <summary>
++        /// Resolves the buffer view format to use for a vertex texel fetch: when the
++        /// intended format is unsupported as uniform texel buffer, substitutes a
++        /// same-width integer fallback and marks it for shader-side decode.
++        /// </summary>
++        /// <param name="intended">The intended (guest attribute) format</param>
++        /// <param name="unsupported">Host formats without uniform texel buffer support, or null</param>
++        /// <param name="viewFormat">The format the view must be created with</param>
++        /// <param name="needsDecode">True when the view format differs in encoding and the shader must decode raw bits</param>
++        /// <returns>True when a usable view format was found, false when the format is unsupported and has no fallback</returns>
++        public static bool TryResolveViewFormat(
++            Format intended,
++            IReadOnlyCollection<Format> unsupported,
++            out Format viewFormat,
++            out bool needsDecode)
++        {
++            viewFormat = intended;
++            needsDecode = false;
++
++            if (unsupported == null || !unsupported.Contains(intended))
++            {
++                return true;
++            }
++
++            if (!ViewFallbacks.TryGetValue(intended, out viewFormat) || unsupported.Contains(viewFormat))
++            {
++                viewFormat = intended;
++                return false;
++            }
++
++            needsDecode = true;
++            return true;
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeContext.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeContext.cs
+index ed9da4a5ccc845d72aab33596e6e9f4d37be25c3..6ba904e4aeee69429f8c4e9f4c256636ad7a3117 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeContext.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Common;
+ using Ryujinx.Graphics.GAL;
++using Ryujinx.Graphics.Gpu.Image;
+ using System;
+ using System.Collections.Generic;
+ using System.Runtime.InteropServices;
+@@ -461,6 +462,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
+         /// <returns>Buffer texture</returns>
+         public ITexture EnsureBufferTexture(int index, Format format)
+         {
++            // 宿主不支持原格式的 uniform texel 时绑同位宽整型替代 view；原始位由
++            //   着色器按 AttributeType.TexelDecode 解码（无回退者保持原格式，与修前相同）。
++            if (FormatTable.TryResolveVertexTexelViewFormat(
++                    format,
++                    _context.Capabilities.UnsupportedUniformTexelBufferFormats,
++                    out Format viewFormat,
++                    out _))
++            {
++                format = viewFormat;
++            }
++
+             return (_bufferTextures[index] ??= new()).Get(_context.Renderer, format);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+index 1c6ccd920aa18c649b00093cf99dbb4aca800ea4..5ddae9bf8a33513a9ca44dbb3a54ac15092b0ae1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+@@ -1,5 +1,6 @@
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Gpu.Engine.Types;
++using Ryujinx.Graphics.Gpu.Image;
+ using Ryujinx.Graphics.Gpu.Shader;
+ using Ryujinx.Graphics.Shader;
+ using System;
+@@ -261,6 +262,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                         value |= AttributeType.PackedRgb10A2Signed;
+                     }
+                 }
++                if (mayConvertVtgToCompute &&
++                    FormatTable.TryGetSingleComponentAttribFormat(state[location].UnpackFormat(), out Format intended, out _) &&
++                    FormatTable.TryResolveVertexTexelViewFormat(intended, _context.Capabilities.UnsupportedUniformTexelBufferFormats, out _, out bool needsDecode) &&
++                    needsDecode)
++                {
++                    // 宿主不支持该格式的 uniform texel：转计算改绑同位宽整型 view，
++                    // 取回的是原始位，由着色器按本标记解码（VertexToCompute）。
++                    value |= AttributeType.TexelDecode;
++                }
+ 
+                 if (attributeTypesSpan[location] != value)
+                 {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/FormatTable.cs b/src/Ryujinx.Graphics.Gpu/Image/FormatTable.cs
+index b1e46cfbe264b2d7b8ebfea1ab1759a78625ca14..859d00576fc19cdb1d3a86a89b3502e8eb62c031 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/FormatTable.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/FormatTable.cs
+@@ -710,5 +710,18 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+             return result;
+         }
++
++        /// <summary>
++        /// Delegates to <see cref="VertexTexelFormats.TryResolveViewFormat"/> so GPU call
++        /// sites keep a table-shaped entry point.
++        /// </summary>
++        public static bool TryResolveVertexTexelViewFormat(
++            Format intended,
++            IReadOnlyCollection<Format> unsupported,
++            out Format viewFormat,
++            out bool needsDecode)
++        {
++            return VertexTexelFormats.TryResolveViewFormat(intended, unsupported, out viewFormat, out needsDecode);
++        }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index b1dd2ee6447fb8234e060416f6bf3422b5898e4f..c53126d25c91268b0a1e1a3fe15681ccaffe3807 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -750,7 +750,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>Filtered attribute</returns>
+         private static AttributeType FilterAttributeType(GpuChannel channel, AttributeType type)
+         {
+-            type &= ~(AttributeType.Packed | AttributeType.PackedRgb10A2Signed);
++            type &= ~(AttributeType.Packed | AttributeType.PackedRgb10A2Signed | AttributeType.TexelDecode);
+ 
+             if (channel.Capabilities.SupportsScaledVertexFormats &&
+                 (type == AttributeType.Sscaled || type == AttributeType.Uscaled))
+diff --git a/src/Ryujinx.Graphics.Shader/AttributeType.cs b/src/Ryujinx.Graphics.Shader/AttributeType.cs
+index 5244532877f1773873a9f72746b93c736f5184fc..8325a71dcad324ce5fed107c784fb19cbb8027f5 100644
+--- a/src/Ryujinx.Graphics.Shader/AttributeType.cs
++++ b/src/Ryujinx.Graphics.Shader/AttributeType.cs
+@@ -13,25 +13,31 @@ namespace Ryujinx.Graphics.Shader
+         Sscaled,
+         Uscaled,
+ 
++        // The vertex texel buffer view is a same-bit-width integer substitute for a format
++        // the host does not support as uniform texel buffer; the fetch delivers raw bits and
++        // the shader applies the semantic decode (see VertexToCompute).
++        TexelDecode = 1 << 3,
++
+         Packed = 1 << 6,
+         PackedRgb10A2Signed = 1 << 7,
+         AnyPacked = Packed | PackedRgb10A2Signed,
++        BaseTypeMask = 0xff ^ TexelDecode ^ Packed ^ PackedRgb10A2Signed,
+     }
+ 
+     static class AttributeTypeExtensions
+     {
+         extension(AttributeType type)
+         {
+-            public AggregateType Aggregate => 
+-                (type & ~AttributeType.AnyPacked) switch
++            public AggregateType Aggregate =>
++                (type & AttributeType.BaseTypeMask) switch
+             {
+                 AttributeType.Float => AggregateType.FP32,
+                 AttributeType.Sint => AggregateType.S32,
+                 AttributeType.Uint => AggregateType.U32,
+                 _ => throw new ArgumentException($"Invalid attribute type \"{type}\"."),
+             };
+-            
+-            public AggregateType AsAggregate(bool supportsScaledFormats) => (type & ~AttributeType.AnyPacked) switch
++
++            public AggregateType AsAggregate(bool supportsScaledFormats) => (type & AttributeType.BaseTypeMask) switch
+             {
+                 AttributeType.Float => AggregateType.FP32,
+                 AttributeType.Sint => AggregateType.S32,
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index e2c982895e08d08ef49c894425bcb5e0762078e6..0592d81bc8a687658b8f487e719a55564373073f 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -347,7 +347,13 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public bool IsAttributeSint(int location)
+         {
+             S2AAttrRead |= 1u << location;
+-            return (_graphicsState.AttributeTypes[location] & ~AttributeType.AnyPacked) == AttributeType.Sint;
++            return (_graphicsState.AttributeTypes[location] & AttributeType.BaseTypeMask) == AttributeType.Sint;
++        }
++
++        public bool IsAttributeTexelDecode(int location)
++        {
++            S2AAttrRead |= 1u << location;
++            return _graphicsState.AttributeTypes[location].HasFlag(AttributeType.TexelDecode);
+         }
+ 
+         public bool IsAttributePacked(int location)
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/VertexToCompute.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/VertexToCompute.cs
+index 2f85a33d18959262276dd1db00d58f8460366f06..041b390876ef41c00cbb25fe3fc8c9be61314252 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/VertexToCompute.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/VertexToCompute.cs
+@@ -53,9 +53,12 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                         if (context.Definitions.IsAttributePacked(location))
+                         {
+                             bool needsSextNorm = context.Definitions.IsAttributePackedRgb10A2Signed(location);
++                            // TexelDecode：宿主不支持打包格式的 uniform texel，改绑 R32Uint，
++                            //   取回整个打包字，按位段抽取分量后走原有语义解码。
++                            bool texelDecode = context.Definitions.IsAttributeTexelDecode(location);
+ 
+                             SetBindingPair setAndBinding = context.ResourceManager.Reservations.GetVertexBufferTextureSetAndBinding(location);
+-                            Operand temp = needsSextNorm ? Local() : dest;
++                            Operand temp = (needsSextNorm || texelDecode) ? Local() : dest;
+                             Operand vertexElemOffset = GenerateVertexOffset(context.ResourceManager, node, location, 0);
+ 
+                             newNode = node.List.AddBefore(node, new TextureOperation(
+@@ -65,11 +68,23 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                                 TextureFlags.IntCoords,
+                                 setAndBinding.SetIndex,
+                                 setAndBinding.Binding,
+-                                1 << component,
++                                texelDecode ? 1 : 1 << component,
+                                 [temp],
+                                 [vertexElemOffset]));
+ 
+-                            if (needsSextNorm)
++                            if (texelDecode)
++                            {
++                                int bits = component == 3 ? 2 : 10;
++                                Operand extracted = Local();
++                                LinkedListNode<INode> after = node.List.AddAfter(node, new Operation(
++                                    Instruction.BitfieldExtractS32,
++                                    extracted,
++                                    new[] { temp, Const(component * bits), Const(bits) }));
++
++                                bool sint = context.Definitions.IsAttributeSint(location);
++                                CopySignExtendedNormalized(after, bits, !sint, dest, extracted);
++                            }
++                            else if (needsSextNorm)
+                             {
+                                 bool sint = context.Definitions.IsAttributeSint(location);
+                                 CopySignExtendedNormalized(node, component == 3 ? 2 : 10, !sint, dest, temp);
+@@ -78,7 +93,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                         else
+                         {
+                             SetBindingPair setAndBinding = context.ResourceManager.Reservations.GetVertexBufferTextureSetAndBinding(location);
+-                            Operand temp = component > 0 ? Local() : dest;
++                            // TexelDecode：view 是同位宽整型替代（宿主不支持原格式 uniform texel），
++                            //   取回原始位；Float → 低 16 位半浮点解包，整型 → 低 16 位符号扩展。
++                            bool texelDecode = context.Definitions.IsAttributeTexelDecode(location);
++                            Operand temp = (component > 0 || texelDecode) ? Local() : dest;
+                             Operand vertexElemOffset = GenerateVertexOffset(context.ResourceManager, node, location, component);
+ 
+                             newNode = node.List.AddBefore(node, new TextureOperation(
+@@ -92,9 +110,29 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                                 [temp],
+                                 [vertexElemOffset]));
+ 
+-                            if (component > 0)
++                            if (texelDecode)
++                            {
++                                AttributeType baseType = context.Definitions.GetAttributeType(location) & AttributeType.BaseTypeMask;
++                                Operand src = component > 0 || baseType == AttributeType.Sscaled ? Local() : dest;
++                                LinkedListNode<INode> after = baseType == AttributeType.Float
++                                    ? node.List.AddAfter(node, new Operation(Instruction.UnpackHalf2x16, 0, src, new[] { temp }))
++                                    : CopySignExtendedNormalized(node, 16, false, src, temp);
++
++                                if (baseType == AttributeType.Sscaled)
++                                {
++                                    // Sscaled 是整型位段转浮点语义：符号扩展后补一次 I2F。
++                                    Operand asFloat = component > 0 ? Local() : dest;
++                                    after = node.List.AddAfter(after, new Operation(Instruction.ConvertS32ToFP32, asFloat, new[] { src }));
++                                    src = asFloat;
++                                }
++
++                                newNode = component > 0
++                                    ? CopyMasked(context.ResourceManager, after, location, component, dest, src)
++                                    : after;
++                            }
++                            else if (component > 0)
+                             {
+-                                newNode = CopyMasked(context.ResourceManager, newNode, location, component, dest, temp);
++                                newNode = CopyMasked(context.ResourceManager, node, location, component, dest, temp);
+                             }
+                         }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 6b82bad19fd2460cf0f56535c7fd0c818ba0d209..ce9060c7819bc7f0078526319158df326fd14be6 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -1086,7 +1086,26 @@ namespace Ryujinx.Graphics.Vulkan
+                 maximumFragmentInputComponents: checked((int)limits.MaxFragmentInputComponents),
+                 // S2A（F1）：没开 robustBufferAccess 的设备（只有 NVIDIA 开）上越界存储缓冲访存没有驱动兜底，翻译期按宿主窗口钳位
+                 s2aStorageWindowClamp: selected?.StorageWindowClamp ?? !features.RobustBufferAccess,
+-                s2aStorageOobRecord: selected?.StorageOobRecord ?? (S2AStorageOob != null));
++                s2aStorageOobRecord: selected?.StorageOobRecord ?? (S2AStorageOob != null),
++                unsupportedUniformTexelBufferFormats: S2AUnsupportedUniformTexelFormats());
++        }
++
++        // S2A：顶点 texel 格式里缺 UNIFORM_TEXEL_BUFFER 支持位的集合（Mali-G710 上
++        //   R16Sfloat/R16Sint/A2B10G10R10SintPack32 的 bufferFeatures=0x40）；下游对
++        //   命中格式绑同位宽整型替代 view，着色器按 AttributeType.TexelDecode 解码。
++        private Format[] S2AUnsupportedUniformTexelFormats()
++        {
++            List<Format> unsupported = null;
++
++            foreach (Format format in VertexTexelFormats.All)
++            {
++                if (!FormatCapabilities.BufferFormatSupports(FormatFeatureFlags.UniformTexelBufferBit, format))
++                {
++                    (unsupported ??= new List<Format>()).Add(format);
++                }
++            }
++
++            return unsupported?.ToArray();
+         }
+ 
+         private ulong GetTotalGPUMemory()

@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 78e86233e6c8bcc9e7f2960de9a01377e01805a7..0d38a3f717993fe5836baa454b5d9c22cb5fa80d 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -243,6 +243,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                 Dim dim = GetDim(image.Type);
+ 
++                // S2A：格式未知的存储图像（ImageFormat.Unknown）写入要声明 StorageImageWriteWithoutFormat，否则 spirv-val 判非法（#199）
++                if (image.Format == TextureFormat.Unknown && image.Flags.HasFlag(TextureUsageFlags.ImageStore))
++                {
++                    context.AddCapability(Capability.StorageImageWriteWithoutFormat);
++                }
++
+                 SpvInstruction imageType = context.TypeImage(
+                     context.GetType(image.Format.GetComponentType()),
+                     dim,
+diff --git a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+index 1cbc7610c91ceaef72f23482025e1a02986c3443..0ff2587eb258d5164aee4703002690ae822b489a 100644
+--- a/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
++++ b/src/Ryujinx.Graphics.Shader/SupportBuffer.cs
+@@ -135,7 +135,7 @@ namespace Ryujinx.Graphics.Shader
+         internal static StructureType GetStructureType()
+         {
+             return new StructureType([
+-                new StructureField(AggregateType.U32, "alpha_test"),
++                new StructureField(AggregateType.Vector4 | AggregateType.U32, "alpha_test"),   // S2A：x = 比较方式、y = 参考值（EmitterContext.S2AAlphaTestRuntime 按分量读；声明成标量时访问链多一级索引，spirv-val 判非法，#199）
+                 new StructureField(AggregateType.Array | AggregateType.U32, "is_bgra", FragmentIsBgraCount),
+                 new StructureField(AggregateType.Vector4 | AggregateType.FP32, "viewport_inverse"),
+                 new StructureField(AggregateType.Vector4 | AggregateType.FP32, "viewport_size"),

@@ -1,0 +1,817 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index da17baacd5674196b695cc2b9981fb11885b92c7..459a2aa5a8c202372a01a6d6bbe86cc952a37b13 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -247,6 +247,33 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         public static Action S2ATrackSync;
+         private long _s2aPushSeq;
+         private long _s2aSyncedSeq;
++        private int _s2aControlPending;
++
++        /// <summary>
++        /// S2Arm: optional session control consumer, invoked on the GPU thread between command buffers.
++        /// It must not be invoked inside a processor operation that can retain guest memory spans.
++        /// </summary>
++        public Action S2AControlPoll { get; set; }
++
++        /// <summary>
++        /// Wake the GPU and request a control poll independently of guest command pushes.
++        /// The caller must publish its request before signalling.
++        /// </summary>
++        public void S2ASignalControl()
++        {
++            Interlocked.Exchange(ref _s2aControlPending, 1);
++            _event.Set();
++        }
++
++        /// <summary>Consume pending session control on the GPU thread at a safe command boundary.</summary>
++        public void S2APollControl()
++        {
++            if (Volatile.Read(ref _s2aControlPending) != 0 &&
++                Interlocked.Exchange(ref _s2aControlPending, 0) != 0)
++            {
++                S2AControlPoll?.Invoke();
++            }
++        }
+ 
+         /// <summary>S2A：排空写跟踪，并记下此刻已入队的序号（之前入队的命令都不必再排空）。只在 GPU 线程调</summary>
+         public void S2ASync()
+@@ -278,6 +305,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             // Process command buffers.
+             while (_ibEnable && !_interrupt && _commandBufferQueue.TryDequeue(out CommandBuffer entry))
+             {
++                // A VM transaction can park guest writers, so no new push sequence may arrive.
++                // Handle it before fetching any span from the next command buffer's backing.
++                S2APollControl();
+                 bool flushCommandBuffer = true;
+ 
+                 if (entry.S2ASeq > _s2aSyncedSeq)
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index 22e33c6b6efc5d4ee0d1ae0b717f398f5f7cee61..c0d09e832c20c6c1dd0cdccfdc2f3a87542c398d 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -31,6 +31,12 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         public IRenderer Renderer { get; }
+ 
++        /// <summary>
++        /// 平台可选的正常上下文读取：只向租出的目标复制 guest 字节，不回写、不解除源页保护。
++        /// 仅由本 GPU owner 同步消费；调用期间不能处理替页控制请求。未安装的平台沿用原 span。
++        /// </summary>
++        public Action<ulong, Memory<byte>> S2AReadGuestMemory { get; set; }
++
+         /// <summary>
+         /// GPU General Purpose FIFO queue.
+         /// </summary>
+@@ -467,6 +473,21 @@ namespace Ryujinx.Graphics.Gpu
+             return _gpuThread == Thread.CurrentThread;
+         }
+ 
++        /// <summary>
++        /// Publishes pending buffer and texture writeback actions before native guest backing
++        /// changes. The caller must then prove queue completion and flush tracking while the
++        /// old mapping remains valid; this method alone does not permit replacing memory.
++        /// </summary>
++        public void PrepareBackingChange()
++        {
++            if (!IsGpuThread())
++            {
++                throw new InvalidOperationException("Backing changes must be prepared by the GPU owner thread.");
++            }
++
++            CreateHostSyncIfNeeded(HostSyncFlags.Force | HostSyncFlags.Strict | HostSyncFlags.Syncpoint);
++        }
++
+         /// <summary>
+         /// Processes the queue of shaders that must save their binaries to the disk cache.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 0542f3bf998d504ca3fd71856c0f6380213ea4c1..a3532d6bde607fa9ddfe0fa4a2f0bf46c196ea74 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -275,11 +275,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+             return dirty;
+         }
+-        
++
+         bool CheckDirtyCallback(int baseHandle, int regionCount, bool split, bool consume)
+         {
+             bool dirty = false;
+-            
++
+             for (int i = 0; i < regionCount; i++)
+             {
+                 TextureGroupHandle group = _handles[baseHandle + i];
+@@ -333,7 +333,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             EvaluateRelevantHandles(texture, _discardDataCallback, out _);
+         }
+-        
++
+         bool DiscardDataCallback(int baseHandle, int regionCount, bool split, bool bound)
+         {
+             for (int i = 0; i < regionCount; i++)
+@@ -466,37 +466,39 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+             for (int i = 0; i < regionCount; i++)
+             {
+-                if (_loadNeeded[baseHandle + i])
++                for (int i = 0; i < regionCount; i++)
+                 {
+-                    (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) info = GetHandleInformation(baseHandle + i);
+-
+-                    // Ensure the data for this handle is loaded in the span.
+-                    if (spanEndIndex <= i - 1)
++                    if (_loadNeeded[baseHandle + i])
+                     {
+-                        spanEndIndex = i;
++                        (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) info = GetHandleInformation(baseHandle + i);
+ 
+-                        if (_is3D)
++                        // Ensure the data for this handle is loaded in the span.
++                        if (spanEndIndex <= i - 1)
+                         {
+-                            // Look ahead to see how many handles need to be loaded.
+-                            for (int j = i + 1; j < regionCount; j++)
++                            spanEndIndex = i;
++
++                            if (_is3D)
+                             {
+-                                if (_loadNeeded[baseHandle + j])
++                                // Look ahead to see how many handles need to be loaded.
++                                for (int j = i + 1; j < regionCount; j++)
+                                 {
+-                                    spanEndIndex = j;
+-                                }
+-                                else
+-                                {
+-                                    break;
++                                    if (_loadNeeded[baseHandle + j])
++                                    {
++                                        spanEndIndex = j;
++                                    }
++                                    else
++                                    {
++                                        break;
++                                    }
+                                 }
+                             }
+-                        }
+ 
+-                        (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) endInfo = spanEndIndex == i ? info : GetHandleInformation(baseHandle + spanEndIndex);
++                            (int BaseLayer, int BaseLevel, int Levels, int Layers, int Index) endInfo = spanEndIndex == i ? info : GetHandleInformation(baseHandle + spanEndIndex);
+ 
+-                        spanBase = _allOffsets[info.Index];
+-                        int spanLast = _allOffsets[endInfo.Index + endInfo.Layers * endInfo.Levels - 1];
+-                        int endOffset = Math.Min(spanLast + _sliceSizes[endInfo.BaseLevel + endInfo.Levels - 1], (int)Storage.Size);
+-                        int size = endOffset - spanBase;
++                            spanBase = _allOffsets[info.Index];
++                            int spanLast = _allOffsets[endInfo.Index + endInfo.Layers * endInfo.Levels - 1];
++                            int endOffset = Math.Min(spanLast + _sliceSizes[endInfo.BaseLevel + endInfo.Levels - 1], (int)Storage.Size);
++                            int size = endOffset - spanBase;
+ 
+                         MultiRange s2aSlice = Storage.Range.Slice((ulong)spanBase, (ulong)size);
+                         _physicalMemory.S2ASignalReadForTexture(s2aSlice);
+@@ -504,19 +506,20 @@ namespace Ryujinx.Graphics.Gpu.Image
+                         dataSpan = _physicalMemory.S2AGetSpanScratch(s2aSlice, out s2aScratch);
+                     }
+ 
+-                    // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
+-                    for (int layer = 0; layer < info.Layers; layer++)
+-                    {
+-                        for (int level = 0; level < info.Levels; level++)
++                        // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
++                        for (int layer = 0; layer < info.Layers; layer++)
+                         {
+-                            int offsetIndex = GetOffsetIndex(info.BaseLayer + layer, info.BaseLevel + level);
+-                            int offset = _allOffsets[offsetIndex];
++                            for (int level = 0; level < info.Levels; level++)
++                            {
++                                int offsetIndex = GetOffsetIndex(info.BaseLayer + layer, info.BaseLevel + level);
++                                int offset = _allOffsets[offsetIndex];
+ 
+-                            ReadOnlySpan<byte> data = dataSpan[(offset - spanBase)..];
++                                ReadOnlySpan<byte> data = dataSpan[(offset - spanBase)..];
+ 
+-                            MemoryOwner<byte> result = Storage.ConvertToHostCompatibleFormat(data, info.BaseLevel + level, true);
++                                MemoryOwner<byte> result = Storage.ConvertToHostCompatibleFormat(data, info.BaseLevel + level, true);
+ 
+-                            Storage.SetData(result, info.BaseLayer + layer, info.BaseLevel + level);
++                                Storage.SetData(result, info.BaseLayer + layer, info.BaseLevel + level);
++                            }
+                         }
+                     }
+                 }
+@@ -872,10 +875,10 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+ 
+             ClearIncompatibleOverlaps(texture);
+-            
++
+             EvaluateRelevantHandles(texture, _signalModifyingCallback, out _, bound);
+         }
+-        
++
+         bool SignalModifyingCallback(int baseHandle, int regionCount, bool split, bool bound)
+         {
+             for (int i = 0; i < regionCount; i++)
+@@ -884,7 +887,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+                 group.SignalModifying(bound, _context);
+             }
+-            
++
+             return true;
+         }
+ 
+@@ -959,7 +962,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             int targetLevelHandles = _hasMipViews ? levels : 1;
+ 
+             result = false;
+-            
++
+             if (_isBuffer)
+             {
+                 return;
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 7e7b044c2bef50fe2f1ef845dc4939b91112441b..891f26fea69f17431960e120fa3e377f4ab12275 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -185,6 +185,68 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             return data;
+         }
+ 
++        /// <summary>
++        /// 纹理上传的正常读取。精确 GPU 读同步仍先执行；平台副本只解决源页保护，不代替读回。
++        /// 返回的 owner 由调用者在转换和上传取数结束后归还；归还不会写入 guest。
++        /// </summary>
++        public ReadOnlySpan<byte> S2AGetTextureReadSpan(MultiRange range, out MemoryOwner<byte> owner)
++        {
++            owner = null;
++            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory;
++            if (copy != null && !_context.IsGpuThread())
++            {
++                throw new InvalidOperationException("Guest texture reads require the GPU owner thread.");
++            }
++
++            if (copy == null)
++            {
++                S2ASignalReadForTexture(range);
++                return GetSpan(range);
++            }
++
++            // 先检查每段与总长，不能让 ulong 加法或 int 截断把真实映射洞隐藏起来。
++            int total = 0;
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange part = range.GetSubRange(i);
++                int size = checked((int)part.Size);
++                if (part.Address != MemoryManager.PteUnmapped)
++                {
++                    _ = checked(part.Address + part.Size);
++                }
++                total = checked(total + size);
++            }
++
++            S2ASignalReadForTexture(range);
++            MemoryOwner<byte> rented = MemoryOwner<byte>.Rent(total);
++            try
++            {
++                int offset = 0;
++                for (int i = 0; i < range.Count; i++)
++                {
++                    MemoryRange part = range.GetSubRange(i);
++                    int size = checked((int)part.Size);
++                    Memory<byte> target = rented.Memory.Slice(offset, size);
++                    if (part.Address == MemoryManager.PteUnmapped)
++                    {
++                        target.Span.Clear(); // 仅保留原 GetSpan 的显式 PTE 空洞语义。
++                    }
++                    else if (size != 0)
++                    {
++                        copy(part.Address, target);
++                    }
++                    offset += size;
++                }
++                owner = rented;
++                return rented.Span;
++            }
++            catch
++            {
++                rented.Dispose();
++                throw;
++            }
++        }
++
+         /// <summary>
+         /// Gets a writable region from the application process.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs b/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+index 311cc2397ea60426a960c67fceababf6227a739a..0222a744a6760bea02dc3ea6b98d1f20cdc76359 100644
+--- a/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
++++ b/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+@@ -197,6 +197,17 @@ namespace Ryujinx.Graphics.Vulkan
+             return _commandBuffers[cbIndex].SubmissionCount;
+         }
+ 
++        // Releases the existing IAuto references after observed completion without renting or
++        // submitting another buffer. Used by leased WSI before destroying its image views.
++        internal bool CollectCompleted()
++        {
++            lock (_commandBuffers)
++            {
++                FreeConsumed(false);
++                return _queuedCount == 0;
++            }
++        }
++
+         private int FreeConsumed(bool wait)
+         {
+             int freeEntry = 0;
+diff --git a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+index 40b031f21e8a26425169d57e8f4ac076d46b715a..4ec62429cc1badfe1c0862cad68efb2dc029d1a3 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
++++ b/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj
+@@ -14,6 +14,7 @@
+ 
+   <ItemGroup>
+     <Compile Include="../../../../graphics/vulkan/core/DeviceFeatureSnapshot.cs" Link="S2Arm/DeviceFeatureSnapshot.cs" />
++    <Compile Include="../../../../graphics/vulkan/wsi/*.cs" Link="S2Arm/Wsi/%(Filename)%(Extension)" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+index 1ad793816c0ab4219a00faaa73c69d10f40b2ab1..2871b66f75b46082a6c4b42750a40e85e4fc0e8f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanInitialization.cs
+@@ -271,6 +271,11 @@ namespace Ryujinx.Graphics.Vulkan
+         }
+ 
+         internal static Device CreateDevice(Vk api, VulkanPhysicalDevice physicalDevice, uint queueFamilyIndex, uint queueCount, out DeviceFeatureSnapshot enabledFeatures)
++        {
++            return CreateDeviceWithSurfaceMaintenance(api, physicalDevice, queueFamilyIndex, queueCount, out enabledFeatures, false);
++        }
++
++        internal static Device CreateDeviceWithSurfaceMaintenance(Vk api, VulkanPhysicalDevice physicalDevice, uint queueFamilyIndex, uint queueCount, out DeviceFeatureSnapshot enabledFeatures, bool surfaceMaintenanceEnabled)
+         {
+             enabledFeatures = null;
+             if (queueCount > QueuesCount)
+@@ -434,6 +439,18 @@ namespace Ryujinx.Graphics.Vulkan
+                 features2.PNext = &supportedConditional;
+             }
+ 
++            PhysicalDeviceSwapchainMaintenance1FeaturesEXT supportedSwapchainMaintenance = new()
++            {
++                SType = StructureType.PhysicalDeviceSwapchainMaintenance1FeaturesExt,
++                PNext = features2.PNext,
++            };
++            bool canQuerySwapchainMaintenance = surfaceMaintenanceEnabled &&
++                physicalDevice.IsDeviceExtensionPresent("VK_EXT_swapchain_maintenance1");
++            if (canQuerySwapchainMaintenance)
++            {
++                features2.PNext = &supportedSwapchainMaintenance;
++            }
++
+             api.GetPhysicalDeviceFeatures2(physicalDevice.PhysicalDevice, &features2);
+ 
+             PhysicalDeviceFeatures supportedFeatures = features2.Features;
+@@ -652,6 +669,18 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             string[] enabledExtensions = _requiredExtensions.Union(_desirableExtensions.Intersect(physicalDevice.DeviceExtensions)).ToArray();
++            PhysicalDeviceSwapchainMaintenance1FeaturesEXT enabledSwapchainMaintenance = new();
++            if (canQuerySwapchainMaintenance && supportedSwapchainMaintenance.SwapchainMaintenance1)
++            {
++                enabledSwapchainMaintenance = new()
++                {
++                    SType = StructureType.PhysicalDeviceSwapchainMaintenance1FeaturesExt,
++                    PNext = pExtendedFeatures,
++                    SwapchainMaintenance1 = true,
++                };
++                pExtendedFeatures = &enabledSwapchainMaintenance;
++                enabledExtensions = enabledExtensions.Append("VK_EXT_swapchain_maintenance1").ToArray();
++            }
+ 
+             nint* ppEnabledExtensions = stackalloc nint[enabledExtensions.Length];
+             int allocatedNames = 0;
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index c70a889b752695a245e44d22c8530a8a029d0f69..76c5cc952ac0402448d1c03e140c615605c636c0 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -31,6 +31,14 @@ namespace Ryujinx.Graphics.Vulkan
+         private DeviceFeatureSnapshot _enabledFeatures;
+         private WindowBase _window;
+ 
++        // The Android adapter borrows this renderer's queue/pool and owns its leased surface.
++        // Other frontends retain the original Window and renderer-owned surface lifetime.
++        internal Func<VulkanRenderer, SurfaceKHR, PhysicalDevice, Device, WindowBase> WindowFactory { get; set; }
++        // Instance policy: a host that replaces guest backing must not retain imported pointers.
++        internal bool AllowHostMemoryImport { get; set; } = true;
++        internal bool UseSingleQueue { get; set; }
++        internal DeviceFeatureSnapshot EnabledDeviceFeatures => _enabledFeatures;
++
+         private bool _initialized;
+ 
+         public uint ProgramCount { get; set; } = 0;
+@@ -432,7 +440,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private void SetupContext(GraphicsDebugLevel logLevel)
+         {
+-            _instance = VulkanInitialization.CreateInstance(Api, logLevel, _getRequiredExtensions());
++            string[] instanceExtensions = _getRequiredExtensions();
++            _instance = VulkanInitialization.CreateInstance(Api, logLevel, instanceExtensions);
+             _debugMessenger = new VulkanDebugMessenger(Api, _instance.Instance, logLevel);
+ 
+             if (Api.TryGetInstanceExtension(_instance.Instance, out KhrSurface surfaceApi))
+@@ -443,9 +452,19 @@ namespace Ryujinx.Graphics.Vulkan
+             _surface = _getSurface(_instance.Instance, Api);
+             _physicalDevice = VulkanInitialization.FindSuitablePhysicalDevice(Api, _instance, _surface, _preferredGpuId);
+ 
++            if (WindowFactory != null && _physicalDevice.PhysicalDeviceProperties.ApiVersion < Vk.Version12.Value)
++            {
++                throw new NotSupportedException("Android's current Vulkan feature chain requires device API 1.2 or newer.");
++            }
++
+             uint queueFamilyIndex = VulkanInitialization.FindSuitableQueueFamily(Api, _physicalDevice, _surface, out uint maxQueueCount);
++            if (UseSingleQueue)
++            {
++                maxQueueCount = 1;
++            }
+ 
+-            _device = VulkanInitialization.CreateDevice(Api, _physicalDevice, queueFamilyIndex, maxQueueCount, out _enabledFeatures);
++            _device = VulkanInitialization.CreateDeviceWithSurfaceMaintenance(Api, _physicalDevice, queueFamilyIndex, maxQueueCount, out _enabledFeatures,
++                WindowFactory != null && Array.IndexOf(instanceExtensions, "VK_EXT_surface_maintenance1") >= 0);
+ 
+             if (Api.TryGetDeviceExtension(_instance.Instance, _device, out KhrSwapchain swapchainApi))
+             {
+@@ -460,7 +479,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             QueueFamilyIndex = queueFamilyIndex;
+ 
+-            _window = new Window(this, _surface, _physicalDevice.PhysicalDevice, _device);
++            _window = WindowFactory?.Invoke(this, _surface, _physicalDevice.PhysicalDevice, _device)
++                ?? new Window(this, _surface, _physicalDevice.PhysicalDevice, _device);
+ 
+             _initialized = true;
+         }
+@@ -491,6 +511,11 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public BufferHandle CreateBuffer(nint pointer, int size)
+         {
++            if (!AllowHostMemoryImport)
++            {
++                return BufferHandle.Null;
++            }
++
+             return BufferManager.CreateHostImported(this, pointer, size);
+         }
+ 
+@@ -1018,10 +1043,20 @@ namespace Ryujinx.Graphics.Vulkan
+                 return;
+             }
+ 
++            // A leased window must prove retirement before any of its borrowed resources go away.
++            // Dispose may fail closed; in that case the host retains the renderer until process exit.
++            if (WindowFactory != null)
++            {
++                _window.Dispose();
++            }
++
+             CommandBufferPool.Dispose();
+             BackgroundResources.Dispose();
+             _counters.Dispose();
+-            _window.Dispose();
++            if (WindowFactory == null)
++            {
++                _window.Dispose();
++            }
+             HelperShader.Dispose();
+             _pipeline.Dispose();
+             BufferManager.Dispose();
+@@ -1045,7 +1080,10 @@ namespace Ryujinx.Graphics.Vulkan
+                 sampler.Dispose();
+             }
+ 
+-            SurfaceApi.DestroySurface(_instance.Instance, _surface, null);
++            if (WindowFactory == null)
++            {
++                SurfaceApi.DestroySurface(_instance.Instance, _surface, null);
++            }
+ 
+             Api.DestroyDevice(_device, null);
+ 
+@@ -1057,7 +1095,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         public bool PrepareHostMapping(nint address, ulong size)
+         {
+-            return Capabilities.SupportsHostImportedMemory &&
++            return AllowHostMemoryImport && Capabilities.SupportsHostImportedMemory &&
+                 HostMemoryAllocator.TryImport(BufferManager.HostImportedBufferMemoryRequirements, BufferManager.DefaultBufferMemoryFlags, address, size);
+         }
+     }
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 2a4877b5a3a799776ab974de9d01a33bfdd3e289..d907ed5c6fdb284690644e41a7c6dd66a568f157 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -28,6 +28,9 @@ namespace Ryujinx.HLE
+         // A command under Services.Fs failed (S2AFsFail): command name, result + path(s), and whether it is red
+         // (false = a probing result the game is expected to handle: path not found / already exists, save data not found)
+         public static System.Action<string, string, bool> FsFailed;
++        // Service-owned physical memory. Null preserves upstream allocation; a supplied
++        // factory transfers a block of the requested size to Switch's lifetime.
++        public static System.Func<ulong, Ryujinx.Memory.MemoryBlock> CreateServiceMemory;
+ 
+         // Tick source shared with the natively running game (null = Ryujinx's own Stopwatch-based TickSource)
+         public static Ryujinx.Cpu.ITickSource TickSource;
+diff --git a/src/Ryujinx.HLE/Switch.cs b/src/Ryujinx.HLE/Switch.cs
+index 29524dff1e2ecc015e4a8c6fdbb4b51d8a185e4b..a9c5b90de622a224e9181e8629c0677ac07eea4b 100644
+--- a/src/Ryujinx.HLE/Switch.cs
++++ b/src/Ryujinx.HLE/Switch.cs
+@@ -66,6 +66,25 @@ namespace Ryujinx.HLE
+ 
+         public DirtyHacks DirtyHacks { get; }
+ 
++        private static MemoryBlock AllocateServiceMemory(MemoryAllocationFlags flags)
++        {
++            ulong size = HOS.Kernel.Common.KernelInit.GetBackedDramSize();
++            Func<ulong, MemoryBlock> factory = S2AHooks.CreateServiceMemory;
++            if (factory == null)
++            {
++                return new MemoryBlock(size, flags);
++            }
++
++            MemoryBlock memory = factory(size);
++            if (memory == null || memory.Size != size || memory.Pointer == 0 || memory.Pointer == -1)
++            {
++                memory?.Dispose();
++                throw new InvalidOperationException("Service memory factory must return a live block of the requested size.");
++            }
++
++            return memory;
++        }
++
+         public Switch(HleConfiguration configuration)
+         {
+             ArgumentNullException.ThrowIfNull(configuration.GpuRenderer);
+@@ -87,7 +106,7 @@ namespace Ryujinx.HLE
+             // no applet process is ever created, so the applet pool is unused too. Back only kernel reserve + service pool (sized to need) + nv pool
+             // (82 MB, was 304 MB): on iPhone, with a game filling the window, the address space outside it is ~2 GB of holes shared with the GC,
+             // host thread stacks and Metal buffers. Any allocation from the applet / application pools faults loudly.
+-            Memory            = new MemoryBlock(HOS.Kernel.Common.KernelInit.GetBackedDramSize(), memoryAllocationFlags);
++            Memory            = AllocateServiceMemory(memoryAllocationFlags);
+             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
+             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
+             System            = new HOS.Horizon(this);
+diff --git a/src/Ryujinx.Horizon/Arp/Ipc/Registrar.cs b/src/Ryujinx.Horizon/Arp/Ipc/Registrar.cs
+index 841ab7601d58d70d4a2885dd7738014790913d8b..6455b6705fd9d0a7ab040c816318f303eeb98204 100644
+--- a/src/Ryujinx.Horizon/Arp/Ipc/Registrar.cs
++++ b/src/Ryujinx.Horizon/Arp/Ipc/Registrar.cs
+@@ -11,16 +11,28 @@ namespace Ryujinx.Horizon.Arp.Ipc
+     partial class Registrar : IRegistrar, IServiceObject
+     {
+         private readonly ApplicationInstance _applicationInstance;
++        private readonly ApplicationInstanceManager _manager;
++        private readonly ulong _instanceId;
+ 
+-        public Registrar(ApplicationInstance applicationInstance)
++        public Registrar(ApplicationInstanceManager manager, ulong instanceId, ApplicationInstance applicationInstance)
+         {
++            _manager = manager;
++            _instanceId = instanceId;
+             _applicationInstance = applicationInstance;
+         }
+ 
+         [CmifCommand(0)]
+         public Result Issue(out ulong applicationInstanceId)
+         {
+-            throw new NotImplementedException();
++            lock (_manager.Entries)
++            {
++                applicationInstanceId = 0;
++                if (_instanceId >= (ulong)_manager.Entries.Length ||
++                    !ReferenceEquals(_manager.Entries[_instanceId], _applicationInstance))
++                    return ArpResult.InvalidInstanceId;
++                applicationInstanceId = _instanceId;
++                return Result.Success;
++            }
+         }
+ 
+         [CmifCommand(1)]
+diff --git a/src/Ryujinx.Horizon/Arp/Ipc/Writer.cs b/src/Ryujinx.Horizon/Arp/Ipc/Writer.cs
+index 29c98b779850318ca97e75f9e7ea6f7959439a45..2b64a48149d9faba9ba78a1c41cd44bd8646ab63 100644
+--- a/src/Ryujinx.Horizon/Arp/Ipc/Writer.cs
++++ b/src/Ryujinx.Horizon/Arp/Ipc/Writer.cs
+@@ -18,36 +18,30 @@ namespace Ryujinx.Horizon.Arp.Ipc
+         [CmifCommand(0)]
+         public Result AcquireRegistrar(out IRegistrar registrar)
+         {
+-            if (_applicationInstanceManager.Entries[0] != null)
++            lock (_applicationInstanceManager.Entries)
+             {
+-                if (_applicationInstanceManager.Entries[1] != null)
++                for (int i = 0; i < _applicationInstanceManager.Entries.Length; i++)
+                 {
+-                    registrar = null;
+-
+-                    return ArpResult.NoFreeInstance;
+-                }
+-                else
+-                {
+-                    _applicationInstanceManager.Entries[1] = new ApplicationInstance();
+-
+-                    registrar = new Registrar(_applicationInstanceManager.Entries[1]);
++                    if (_applicationInstanceManager.Entries[i] == null)
++                    {
++                        ApplicationInstance instance = new();
++                        _applicationInstanceManager.Entries[i] = instance;
++                        registrar = new Registrar(_applicationInstanceManager, (ulong)i, instance);
++                        return Result.Success;
++                    }
+                 }
++                registrar = null;
++                return ArpResult.NoFreeInstance;
+             }
+-            else
+-            {
+-                _applicationInstanceManager.Entries[0] = new ApplicationInstance();
+-
+-                registrar = new Registrar(_applicationInstanceManager.Entries[0]);
+-            }
+-
+-            return Result.Success;
+         }
+ 
+         [CmifCommand(1)]
+         public Result UnregisterApplicationInstance(ulong applicationInstanceId)
+         {
+-            if (_applicationInstanceManager.Entries[applicationInstanceId] != null)
++            lock (_applicationInstanceManager.Entries)
+             {
++                if (applicationInstanceId >= (ulong)_applicationInstanceManager.Entries.Length)
++                    return ArpResult.InvalidInstanceId;
+                 _applicationInstanceManager.Entries[applicationInstanceId] = null;
+             }
+ 
+diff --git a/src/Ryujinx.Horizon/ServiceTable.cs b/src/Ryujinx.Horizon/ServiceTable.cs
+index 172d2919bd6a66b68346a6751b5a03d9ccd523ac..23b522c761e55a61c6f6bedc8d1dc98e1381d8fb 100644
+--- a/src/Ryujinx.Horizon/ServiceTable.cs
++++ b/src/Ryujinx.Horizon/ServiceTable.cs
+@@ -16,6 +16,7 @@ using Ryujinx.Horizon.Sdk.Arp;
+ using Ryujinx.Horizon.Srepo;
+ using Ryujinx.Horizon.Usb;
+ using Ryujinx.Horizon.Wlan;
++using System;
+ using System.Collections.Generic;
+ using System.Threading;
+ 
+@@ -77,6 +78,19 @@ namespace Ryujinx.Horizon
+             _servicesReadyEvent.WaitOne();
+         }
+ 
++        // Explicit platform startup contracts may bound/cancel the wait. Keep the
++        // original no-argument path unchanged for existing hosts.
++        public void WaitServicesReady(TimeSpan timeout, CancellationToken cancellationToken)
++        {
++            cancellationToken.ThrowIfCancellationRequested();
++            int result = WaitHandle.WaitAny([cancellationToken.WaitHandle, _servicesReadyEvent], timeout);
++            cancellationToken.ThrowIfCancellationRequested();
++            if (result == WaitHandle.WaitTimeout)
++            {
++                throw new TimeoutException("Horizon services did not become ready within the startup deadline");
++            }
++        }
++
+         protected virtual void Dispose(bool disposing)
+         {
+             if (disposing)
+diff --git a/src/Ryujinx.Memory/MemoryBlock.cs b/src/Ryujinx.Memory/MemoryBlock.cs
+index a06b252a76fd57c7cfee1a799639d7f8051832de..b49081f19e5be695f5e92e6b8e0d49ea0a17cbe4 100644
+--- a/src/Ryujinx.Memory/MemoryBlock.cs
++++ b/src/Ryujinx.Memory/MemoryBlock.cs
+@@ -61,6 +61,23 @@ namespace Ryujinx.Memory
+             Size = size;
+         }
+ 
++        /// <summary>
++        /// Reserves Unix anonymous shared memory for native aliases of this block.
++        /// Commit and Dispose use the normal reserved-memory lifecycle. This does not
++        /// provide a shared-memory handle and does not enable CreateMirror or MapView.
++        /// </summary>
++        public static MemoryBlock ReserveShared(ulong size)
++        {
++            ArgumentOutOfRangeException.ThrowIfZero(size);
++            return new MemoryBlock(size, sharedReservation: true);
++        }
++
++        private MemoryBlock(ulong size, bool sharedReservation)
++        {
++            _pointer = MemoryManagement.ReserveShared(size);
++            Size = size;
++        }
++
+         /// <summary>
+         /// Creates a new instance of the memory block class, with a existing backing storage.
+         /// </summary>
+diff --git a/src/Ryujinx.Memory/MemoryManagement.cs b/src/Ryujinx.Memory/MemoryManagement.cs
+index 507ee6845429312c05c42773d97b34a2503e64d1..d659a81a848a6ae981e51e9a1c9601140b4c1376 100644
+--- a/src/Ryujinx.Memory/MemoryManagement.cs
++++ b/src/Ryujinx.Memory/MemoryManagement.cs
+@@ -36,6 +36,17 @@ namespace Ryujinx.Memory
+             }
+         }
+ 
++        // Explicit Unix anonymous backing for native aliases, not fd-based mirroring.
++        public static nint ReserveShared(ulong size)
++        {
++            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsIOS())
++            {
++                return MemoryManagementUnix.ReserveShared(size);
++            }
++
++            throw new PlatformNotSupportedException("Anonymous shared reservations require Unix.");
++        }
++
+         public static void Commit(nint address, ulong size, bool forJit)
+         {
+             if (OperatingSystem.IsWindows())
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.cs b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+index 9f53b6ac84edf895eb4451204975ab94284ff654..14ec200c2a65457e16bb7b8cdec43cb7e619af78 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+@@ -46,13 +46,18 @@ namespace Ryujinx.Memory
+             return AllocateInternal(size, MmapProts.PROT_NONE, forJit);
+         }
+ 
++        public static nint ReserveShared(ulong size)
++        {
++            return AllocateInternal(size, MmapProts.PROT_NONE, forJit: false, shared: true);
++        }
++
+         private static nint AllocateInternal(ulong size, MmapProts prot, bool forJit, bool shared = false)
+         {
+             MmapFlags flags = MmapFlags.MAP_ANONYMOUS;
+ 
+             if (shared)
+             {
+-                flags |= MmapFlags.MAP_SHARED | MmapFlags.MAP_UNLOCKED;
++                flags |= MmapFlags.MAP_SHARED;
+             }
+             else
+             {
+@@ -91,10 +96,18 @@ namespace Ryujinx.Memory
+                 throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
+             }
+ 
+-            if (!_allocations.TryAdd(ptr, size))
++            try
++            {
++                if (!_allocations.TryAdd(ptr, size))
++                {
++                    // The mapping cannot escape without an owner in the allocation table.
++                    throw new InvalidOperationException();
++                }
++            }
++            catch
+             {
+-                // This should be impossible, kernel shouldn't return an already mapped address.
+-                throw new InvalidOperationException();
++                munmap(ptr, size);
++                throw;
+             }
+ 
+             return ptr;
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index 4f6e43efce3707978f1fb57be70ef51efcb7a094..a48c3df781548a3431c4e50f154d61bdc4ead97a 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -51,6 +51,13 @@ namespace Ryujinx.Memory.Tracking
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 
++        /// <summary>
++        /// Optional instance admission before a real tracking handle is created. Hosts use
++        /// this to atomically reserve backing against unsupported aliases. It must not wait
++        /// for another VM/GPU thread; rejection throws before handle publication.
++        /// </summary>
++        public Action<ulong, ulong> BeforeTracking { get; set; }
++
+         // Only use these from within the lock.
+         private readonly NonOverlappingRangeList<VirtualRegion> _virtualRegions;
+         // Guest virtual regions are a subset of the normal virtual regions, with potentially different protection
+@@ -271,6 +278,7 @@ namespace Ryujinx.Memory.Tracking
+         public RegionHandle BeginTracking(ulong address, ulong size, int id, RegionFlags flags = RegionFlags.None)
+         {
+             (ulong paAddress, ulong paSize) = PageAlign(address, size);
++            BeforeTracking?.Invoke(paAddress, paSize);
+ 
+             lock (TrackingLock)
+             {
+@@ -294,6 +302,7 @@ namespace Ryujinx.Memory.Tracking
+         internal RegionHandle BeginTrackingBitmap(ulong address, ulong size, ConcurrentBitmap bitmap, int bit, int id, RegionFlags flags = RegionFlags.None)
+         {
+             (ulong paAddress, ulong paSize) = PageAlign(address, size);
++            BeforeTracking?.Invoke(paAddress, paSize);
+ 
+             lock (TrackingLock)
+             {

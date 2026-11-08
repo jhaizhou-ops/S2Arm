@@ -1,0 +1,584 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index e158ff0efc229d672b967ad5822fb3f54c742d65..7d9f21a5b58e3443a9c0e39b574d3d949c720b15 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -1833,6 +1833,7 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+                 Gd.Api.CmdBeginRenderPass(CommandBuffer, in renderPassBeginInfo, SubpassContents.Inline);
+                 RenderPassActive = true;
++                DrainPendingQueryBegins();
+             }
+         }
+ 
+@@ -1843,6 +1844,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 FramebufferParams.AddStoreOpUsage();
+ 
+                 PauseTransformFeedbackInternal();
++                CloseQueriesForRenderPassEnd();
+                 Gd.Api.CmdEndRenderPass(CommandBuffer);
+                 SignalRenderPassEnd();
+                 RenderPassActive = false;
+@@ -1853,6 +1855,16 @@ namespace Ryujinx.Graphics.Vulkan
+         {
+         }
+ 
++        // Called before vkCmdEndRenderPass so backends can end in-subpass commands (e.g. queries).
++        protected virtual void CloseQueriesForRenderPassEnd()
++        {
++        }
++
++        // Called right after vkCmdBeginRenderPass at subpass 0 so deferred begins record inside.
++        protected virtual void DrainPendingQueryBegins()
++        {
++        }
++
+         private void PauseTransformFeedbackInternal()
+         {
+             if (_tfEnabled && _tfActive)
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index 75b3674b6a5218bba55c42331346581f9f09fc5c..bddfbc48036000b9633166fc00d7029841c5e8cb 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -10,10 +10,15 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private const ulong MinByteWeightForFlush = 256 * 1024 * 1024; // MiB
+ 
+-        private readonly List<(QueryPool, bool)> _activeQueries;
++        // Queries keep begin/end inside the same subpass (VUID 07004/07007). A query that stays
++        // open across a pass boundary is split into per-pass segments: each segment owns one pool
++        // slot and one buffer slot, and the guest-visible result is the CPU-side sum.
++        private readonly List<(QueryPool Pool, bool IsOcclusion, BufferedQuery Query)> _activeQueries;
++        private readonly List<(QueryPool Pool, bool IsOcclusion, BufferedQuery Query)> _pendingQueryBegins;
++        private readonly List<(QueryPool Pool, bool IsOcclusion, BufferedQuery Query)> _resumeQueries;
+         private CounterQueueEvent _activeConditionalRender;
+ 
+-        private readonly List<BufferedQuery> _pendingQueryCopies;
++        private readonly List<(BufferedQuery Query, int Segment)> _pendingQueryCopies;
+         private readonly List<BufferHolder> _activeBufferMirrors;
+ 
+         private ulong _byteWeight;
+@@ -26,6 +31,8 @@ namespace Ryujinx.Graphics.Vulkan
+         public PipelineFull(VulkanRenderer gd, Device device) : base(gd, device)
+         {
+             _activeQueries = [];
++            _pendingQueryBegins = [];
++            _resumeQueries = [];
+             _pendingQueryCopies = [];
+             _backingSwaps = [];
+             _activeBufferMirrors = [];
+@@ -37,9 +44,9 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+         private void CopyPendingQuery()
+         {
+-            foreach (BufferedQuery query in _pendingQueryCopies)
++            foreach ((BufferedQuery query, int segment) in _pendingQueryCopies)
+             {
+-                query.PoolCopy(Cbs);
++                query.PoolCopy(Cbs, segment);
+             }
+ 
+             _pendingQueryCopies.Clear();
+@@ -323,11 +330,6 @@ namespace Ryujinx.Graphics.Vulkan
+             AutoFlush.RegisterFlush(DrawCount);
+             EndRenderPass();
+ 
+-            foreach ((QueryPool queryPool, _) in _activeQueries)
+-            {
+-                Gd.Api.CmdEndQuery(CommandBuffer, queryPool, 0);
+-            }
+-
+             _byteWeight = 0;
+ 
+             if (PreloadCbs != null)
+@@ -349,14 +351,6 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             _activeBufferMirrors.Clear();
+ 
+-            foreach ((QueryPool queryPool, bool isOcclusion) in _activeQueries)
+-            {
+-                bool isPrecise = Gd.Capabilities.SupportsPreciseOcclusionQueries && isOcclusion;
+-
+-                Gd.Api.CmdResetQueryPool(CommandBuffer, queryPool, 0, 1);
+-                Gd.Api.CmdBeginQuery(CommandBuffer, queryPool, 0, isPrecise ? QueryControlFlags.PreciseBit : 0);
+-            }
+-
+             Gd.ResetCounterPool();
+ 
+             Restore();
+@@ -373,7 +367,8 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 EndRenderPass();
+ 
+-                Gd.Api.CmdResetQueryPool(CommandBuffer, pool, 0, 1);
++                Gd.Api.CmdResetQueryPool(CommandBuffer, pool, 0, BufferedQuery.MaxQuerySegments);
++                query.OnPoolReset();
+ 
+                 if (fromSamplePool)
+                 {
+@@ -383,29 +378,65 @@ namespace Ryujinx.Graphics.Vulkan
+                 }
+             }
+ 
+-            bool isPrecise = Gd.Capabilities.SupportsPreciseOcclusionQueries && isOcclusion;
+-            Gd.Api.CmdBeginQuery(CommandBuffer, pool, 0, isPrecise ? QueryControlFlags.PreciseBit : 0);
++            if (RenderPassActive)
++            {
++                int slot = query.BeginSegment();
++                if (slot < 0)
++                {
++                    return;
++                }
+ 
+-            _activeQueries.Add((pool, isOcclusion));
++                bool isPrecise = Gd.Capabilities.SupportsPreciseOcclusionQueries && isOcclusion;
++                Gd.Api.CmdBeginQuery(CommandBuffer, pool, (uint)slot, isPrecise ? QueryControlFlags.PreciseBit : 0);
++
++                _activeQueries.Add((pool, isOcclusion, query));
++            }
++            else
++            {
++                // Occlusion queries must begin inside a subpass; defer to the next pass's subpass 0.
++                _pendingQueryBegins.Add((pool, isOcclusion, query));
++            }
+         }
+ 
+-        public void EndQuery(QueryPool pool)
++        public bool EndQuery(QueryPool pool)
+         {
+-            Gd.Api.CmdEndQuery(CommandBuffer, pool, 0);
+-
+             for (int i = 0; i < _activeQueries.Count; i++)
+             {
+-                if (_activeQueries[i].Item1.Handle == pool.Handle)
++                if (_activeQueries[i].Pool.Handle == pool.Handle)
+                 {
++                    int slot = _activeQueries[i].Query.SegmentEnded();
+                     _activeQueries.RemoveAt(i);
+-                    break;
++                    Gd.Api.CmdEndQuery(CommandBuffer, pool, (uint)slot);
++                    return true;
++                }
++            }
++
++            for (int i = 0; i < _resumeQueries.Count; i++)
++            {
++                if (_resumeQueries[i].Pool.Handle == pool.Handle)
++                {
++                    // The closing pass already ended the recording segment.
++                    _resumeQueries.RemoveAt(i);
++                    return false;
++                }
++            }
++
++            for (int i = 0; i < _pendingQueryBegins.Count; i++)
++            {
++                if (_pendingQueryBegins[i].Pool.Handle == pool.Handle)
++                {
++                    // Begin not recorded yet; the drain records an adjacent begin/end pair.
++                    _pendingQueryBegins[i].Query.EndDeferred = true;
++                    return false;
+                 }
+             }
++
++            return false;
+         }
+ 
+-        public void CopyQueryResults(BufferedQuery query)
++        public void CopyQueryResults(BufferedQuery query, int segment)
+         {
+-            _pendingQueryCopies.Add(query);
++            _pendingQueryCopies.Add((query, segment));
+ 
+             if (AutoFlush.RegisterPendingQuery())
+             {
+@@ -413,6 +444,63 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+         }
+ 
++        // Ends every segment still recording before vkCmdEndRenderPass (VUID 07004).
++        protected override void CloseQueriesForRenderPassEnd()
++        {
++            foreach ((QueryPool pool, _, BufferedQuery query) in _activeQueries)
++            {
++                int slot = query.SegmentEnded();
++                Gd.Api.CmdEndQuery(CommandBuffer, pool, (uint)slot);
++                _pendingQueryCopies.Add((query, slot));
++            }
++
++            _resumeQueries.AddRange(_activeQueries);
++            _activeQueries.Clear();
++        }
++
++        // Records deferred begins and resumes pass-split queries at subpass 0.
++        protected override void DrainPendingQueryBegins()
++        {
++            foreach ((QueryPool pool, bool isOcclusion, BufferedQuery query) in _pendingQueryBegins)
++            {
++                int slot = query.BeginSegment();
++                if (slot < 0)
++                {
++                    continue;
++                }
++
++                Gd.Api.CmdBeginQuery(CommandBuffer, pool, (uint)slot, 0);
++                if (query.EndDeferred)
++                {
++                    // End arrived first: emit the adjacent pair so the query contributes nothing.
++                    query.EndDeferred = false;
++                    Gd.Api.CmdEndQuery(CommandBuffer, pool, (uint)slot);
++                    query.SegmentEnded();
++                }
++                else
++                {
++                    _activeQueries.Add((pool, isOcclusion, query));
++                }
++            }
++
++            _pendingQueryBegins.Clear();
++
++            foreach ((QueryPool pool, bool isOcclusion, BufferedQuery query) in _resumeQueries)
++            {
++                int slot = query.BeginSegment();
++                if (slot < 0)
++                {
++                    continue;
++                }
++
++                bool isPrecise = Gd.Capabilities.SupportsPreciseOcclusionQueries && isOcclusion;
++                Gd.Api.CmdBeginQuery(CommandBuffer, pool, (uint)slot, isPrecise ? QueryControlFlags.PreciseBit : 0);
++                _activeQueries.Add((pool, isOcclusion, query));
++            }
++
++            _resumeQueries.Clear();
++        }
++
+         protected override void SignalAttachmentChange()
+         {
+             if (AutoFlush.ShouldFlushAttachmentChange(DrawCount))
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+index 4763007f44f078636a555a62443d090753d4a7f7..717b2be59cce39d69976e0e2d599fd3097eb9000 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Silk.NET.Vulkan;
+ using System;
++using System.Diagnostics;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using Buffer = Silk.NET.Vulkan.Buffer;
+@@ -11,10 +12,16 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+     class BufferedQuery : IDisposable
+     {
+         private const int MaxQueryRetries = 5000;
++        private const long AwaitResultTimeoutMs = 500;
+         private const long DefaultValue = unchecked((long)0xFFFFFFFEFFFFFFFE);
+         private const long DefaultValueInt = 0xFFFFFFFE;
+         private const ulong HighMask = 0xFFFFFFFF00000000;
+ 
++        // A query result is accumulated from per-render-pass segments. Each segment owns one
++        // pool slot and one buffer slot; Vulkan requires an occlusion query's begin/end to be
++        // inside the same subpass, so a query that stays open across a pass boundary must split.
++        public const int MaxQuerySegments = 16;
++
+         private readonly Vk _api;
+         private readonly Device _device;
+         private readonly PipelineFull _pipeline;
+@@ -30,6 +37,13 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         private readonly long _defaultValue;
+         private int? _resetSequence;
+ 
++        private int _segment;          // next free pool/buffer slot; also open slot+1 while open
++        private int _segmentMax;       // slots the guest-visible result must cover
++        private int _ended;            // End() observed; result expected
++        private int _awaitTimedOut;    // bounded wait exhausted; no valid result ever
++        private int _open;             // a segment is currently recording (begun, not ended)
++        private int _endDeferred;      // End() arrived while the begin was still pending
++
+         public unsafe BufferedQuery(VulkanRenderer gd, Device device, PipelineFull pipeline, CounterType type, bool result32Bit)
+         {
+             _api = gd.Api;
+@@ -48,7 +62,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 QueryPoolCreateInfo queryPoolCreateInfo = new()
+                 {
+                     SType = StructureType.QueryPoolCreateInfo,
+-                    QueryCount = 1,
++                    QueryCount = MaxQuerySegments,
+                     QueryType = GetQueryType(type),
+                     PipelineStatistics = flags,
+                 };
+@@ -56,11 +70,11 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 gd.Api.CreateQueryPool(device, in queryPoolCreateInfo, null, out _queryPool).ThrowOnError();
+             }
+ 
+-            BufferHolder buffer = gd.BufferManager.Create(gd, sizeof(long), forConditionalRendering: true);
++            BufferHolder buffer = gd.BufferManager.Create(gd, sizeof(long) * MaxQuerySegments, forConditionalRendering: true);
+ 
+-            _bufferMap = buffer.Map(0, sizeof(long));
++            _bufferMap = buffer.Map(0, sizeof(long) * MaxQuerySegments);
+             _defaultValue = result32Bit ? DefaultValueInt : DefaultValue;
+-            Marshal.WriteInt64(_bufferMap, _defaultValue);
++            ClearResult();
+             _buffer = buffer;
+         }
+ 
+@@ -86,6 +100,24 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             };
+         }
+ 
++        private void ClearResult()
++        {
++            if (_result32Bit)
++            {
++                for (int i = 0; i < MaxQuerySegments; i++)
++                {
++                    Marshal.WriteInt32(_bufferMap, i * sizeof(int), (int)_defaultValue);
++                }
++            }
++            else
++            {
++                for (int i = 0; i < MaxQuerySegments; i++)
++                {
++                    Marshal.WriteInt64(_bufferMap, i * sizeof(long), _defaultValue);
++                }
++            }
++        }
++
+         public Auto<DisposableBuffer> GetBuffer()
+         {
+             return _buffer.GetBuffer();
+@@ -101,6 +133,9 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         {
+             if (_isSupported)
+             {
++                Volatile.Write(ref _ended, 0);
++                Volatile.Write(ref _awaitTimedOut, 0);
++                Volatile.Write(ref _segmentMax, 0);
+                 bool needsReset = resetSequence == null || _resetSequence == null || resetSequence.Value != _resetSequence.Value;
+                 bool isOcclusion = _type == CounterType.SamplesPassed;
+                 _pipeline.BeginQuery(this, _queryPool, needsReset, isOcclusion, isOcclusion && resetSequence != null);
+@@ -109,22 +144,71 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _resetSequence = null;
+         }
+ 
++        // Pool slots were reset outside a render pass; segment numbering restarts.
++        public void OnPoolReset()
++        {
++            _segment = 0;
++            _open = 0;
++            _endDeferred = 0;
++        }
++
++        // Reserve the next segment slot for an in-subpass begin. -1 on pool exhaustion.
++        public int BeginSegment()
++        {
++            int slot = _segment;
++            if (slot >= MaxQuerySegments)
++            {
++                // Past the segment budget a partial sum would read back as a smaller (but
++                // plausible) value — fail the whole query explicitly instead of returning one.
++                if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
++                {
++                    Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} exceeded {MaxQuerySegments} render-pass segments.");
++                }
++                return -1;
++            }
++            _segment = slot + 1;
++            _open = 1;
++            return slot;
++        }
++
++        // The recording segment just ended at its slot; the query may still resume later.
++        public int SegmentEnded()
++        {
++            _open = 0;
++            return _segment - 1;
++        }
++
++        public bool EndDeferred
++        {
++            get => _endDeferred != 0;
++            set => _endDeferred = value ? 1 : 0;
++        }
++
+         public void End(bool withResult)
+         {
++            bool recordedEnd = false;
+             if (_isSupported)
+             {
+-                _pipeline.EndQuery(_queryPool);
++                recordedEnd = _pipeline.EndQuery(_queryPool);
+             }
+ 
+             if (withResult && _isSupported)
+             {
+-                Marshal.WriteInt64(_bufferMap, _defaultValue);
+-                _pipeline.CopyQueryResults(this);
++                ClearResult();
++                Volatile.Write(ref _segmentMax, Math.Max(_segment, 1));
++                Volatile.Write(ref _ended, 1);
++                if (recordedEnd || _endDeferred != 0)
++                {
++                    _pipeline.CopyQueryResults(this, Math.Max(0, _segment - 1));
++                }
++                // Resumed-between-passes end: the closing pass already queued the last segment's copy.
+             }
+             else
+             {
+                 // Dummy result, just return 0.
+                 Marshal.WriteInt64(_bufferMap, 0);
++                Volatile.Write(ref _ended, 1);
++                Volatile.Write(ref _segmentMax, 1);
+             }
+         }
+ 
+@@ -136,56 +220,96 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+         public bool TryGetResult(out long result)
+         {
+-            result = Marshal.ReadInt64(_bufferMap);
+-
+-            return result != _defaultValue;
+-        }
+-
+-        public long AwaitResult(AutoResetEvent wakeSignal = null)
+-        {
+-            long data = _defaultValue;
++            result = _defaultValue;
++            if (Volatile.Read(ref _ended) == 0 || Volatile.Read(ref _awaitTimedOut) != 0)
++            {
++                return false;
++            }
+ 
+-            if (wakeSignal == null)
++            int count = Volatile.Read(ref _segmentMax);
++            long sum = 0;
++            if (_result32Bit)
+             {
+-                while (WaitingForValue(data))
++                for (int i = 0; i < count; i++)
+                 {
+-                    data = Marshal.ReadInt64(_bufferMap);
++                    int v = Marshal.ReadInt32(_bufferMap, i * sizeof(int));
++                    if (v == unchecked((int)DefaultValueInt))
++                    {
++                        return false;
++                    }
++                    sum += v;
+                 }
+             }
+             else
+             {
+-                int iterations = 0;
+-                while (WaitingForValue(data) && iterations++ < MaxQueryRetries)
++                for (int i = 0; i < count; i++)
+                 {
+-                    data = Marshal.ReadInt64(_bufferMap);
+-                    if (WaitingForValue(data))
++                    long v = Marshal.ReadInt64(_bufferMap, i * sizeof(long));
++                    if (WaitingForValue(v))
+                     {
+-                        wakeSignal.WaitOne(1);
++                        return false;
+                     }
++                    sum += v;
++                }
++            }
++
++            result = sum;
++            return true;
++        }
++
++        // Bounded wait: returns false on timeout instead of handing the sentinel back as guest
++        // data. Callers keep the event pending so the host stall check surfaces the failure.
++        public bool AwaitResult(out long result, AutoResetEvent wakeSignal = null)
++        {
++            long deadline = Stopwatch.GetTimestamp() +
++                (AwaitResultTimeoutMs * Stopwatch.Frequency) / 1000;
++            int iterations = 0;
++
++            while (!TryGetResult(out result) && iterations++ < MaxQueryRetries)
++            {
++                if (Stopwatch.GetTimestamp() >= deadline)
++                {
++                    break;
++                }
++
++                if (wakeSignal != null)
++                {
++                    wakeSignal.WaitOne(1);
++                }
++                else
++                {
++                    Thread.Sleep(1);
+                 }
++            }
+ 
+-                if (iterations >= MaxQueryRetries)
++            if (!TryGetResult(out result))
++            {
++                if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
+                 {
+-                    Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out. Took more than {MaxQueryRetries} tries.");
++                    Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out after {AwaitResultTimeoutMs} ms.");
+                 }
++
++                return false;
+             }
+ 
+-            return data;
++            return true;
+         }
+ 
+         public void PoolReset(CommandBuffer cmd, int resetSequence)
+         {
+             if (_isSupported)
+             {
+-                _api.CmdResetQueryPool(cmd, _queryPool, 0, 1);
++                _api.CmdResetQueryPool(cmd, _queryPool, 0, MaxQuerySegments);
+             }
+ 
+             _resetSequence = resetSequence;
++            OnPoolReset();
+         }
+ 
+-        public void PoolCopy(CommandBufferScoped cbs)
++        public void PoolCopy(CommandBufferScoped cbs, int segment)
+         {
+-            Buffer buffer = _buffer.GetBuffer(cbs.CommandBuffer, true).Get(cbs, 0, sizeof(long), true).Value;
++            int stride = _result32Bit ? sizeof(int) : sizeof(long);
++            Buffer buffer = _buffer.GetBuffer(cbs.CommandBuffer, true).Get(cbs, segment * stride, stride, true).Value;
+ 
+             QueryResultFlags flags = QueryResultFlags.ResultWaitBit;
+ 
+@@ -197,11 +321,11 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _api.CmdCopyQueryPoolResults(
+                 cbs.CommandBuffer,
+                 _queryPool,
+-                0,
++                (uint)segment,
+                 1,
+                 buffer,
+-                0,
+-                (ulong)(_result32Bit ? sizeof(int) : sizeof(long)),
++                (ulong)(segment * stride),
++                (ulong)stride,
+                 flags);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+index 8c7aa983de137cee6aee32e495e10d8f840c0111..482728f5a53fbabb5065dbce7b9568672838e7c8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueueEvent.cs
+@@ -78,7 +78,10 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+                 if (block)
+                 {
+-                    queryResult = _counter.AwaitResult(wakeSignal);
++                    if (!_counter.AwaitResult(out queryResult, wakeSignal))
++                    {
++                        return false;
++                    }
+                 }
+                 else
+                 {

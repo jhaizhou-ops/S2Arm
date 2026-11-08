@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index a9cf4b4472f0228954fa491fbd5314fe230e6e1a..f7f3b86b998aad3e6be1de09bd8196944d06f5de 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -92,6 +92,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     writer.Write((int)format);
+                 }
+             }
++            // #1456：GS+遮挡查询运行时能力为假时身份字节与改前相同（已有宿主缓存继续可用）；
++            //   为真必须轮转——真走硬件 GS 着色器集，假走转计算着色器集。
++            if (capabilities.SupportsGeometryShaderOcclusionQuery)
++            {
++                writer.Write("s2a-gsocc");
++                writer.Write(true);
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }

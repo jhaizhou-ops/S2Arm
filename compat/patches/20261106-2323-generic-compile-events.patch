@@ -1,0 +1,191 @@
+diff --git a/src/Ryujinx.Common/S2ACompileEvents.cs b/src/Ryujinx.Common/S2ACompileEvents.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e75c877362c5573ccecd38802723659dc22315e
+--- /dev/null
++++ b/src/Ryujinx.Common/S2ACompileEvents.cs
+@@ -0,0 +1,82 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Common
++{
++    /// <summary>Explicitly enabled Android debug capture; no file or P/Invoke on normal builds.</summary>
++    public static class S2ACompileEvents
++    {
++        public enum Kind : uint { Translation = 1, GraphicsPipeline = 2, ComputePipeline = 3 }
++        public enum Result : uint { Hit = 1, Miss = 2, Failure = 3 }
++
++        [DllImport("s2a_native", EntryPoint = "s2a_ce_init")]
++        private static extern int Init([MarshalAs(UnmanagedType.LPUTF8Str)] string directory, ulong session);
++        [DllImport("s2a_native", EntryPoint = "s2a_ce_enabled")]
++        private static extern int EnabledNative();
++        [DllImport("s2a_native", EntryPoint = "s2a_ce_now")]
++        private static extern ulong Now();
++        [DllImport("s2a_native", EntryPoint = "s2a_ce_record")]
++        private static extern int Record(uint kind, uint result, ulong begin, ulong end);
++        [DllImport("s2a_native", EntryPoint = "s2a_ce_flush")]
++        private static extern int Flush();
++
++        private static readonly object Gate = new();
++        private static volatile bool _enabled;
++        private static int _active;
++
++        public static bool BeginSession(string directory, ulong session)
++        {
++            lock (Gate)
++            {
++                if (_active != 0 || _enabled) return false;
++                if (Init(directory, session) != 0) return false;
++                _enabled = EnabledNative() != 0;
++                return true;
++            }
++        }
++
++        public static Scope Begin(Kind kind)
++        {
++            if (!_enabled) return null;
++            lock (Gate)
++            {
++                if (!_enabled) return null;
++                _active++;
++                return new Scope(kind, Now());
++            }
++        }
++
++        public static bool EndSession()
++        {
++            lock (Gate)
++            {
++                if (!_enabled) return true;
++                _enabled = false;
++                // A timed-out worker may still emit events; never certify a partial capture.
++                if (_active != 0) return false;
++                return Flush() == 0;
++            }
++        }
++
++        public sealed class Scope : IDisposable
++        {
++            private readonly Kind _kind;
++            private readonly ulong _start;
++            private Result _result = Result.Failure;
++            private bool _closed;
++            internal Scope(Kind kind, ulong start) { _kind = kind; _start = start; }
++            public void Complete(Result result) { _result = result; }
++            public void Dispose()
++            {
++                lock (Gate)
++                {
++                    if (_closed) return;
++                    _closed = true;
++                    // The native producer counts malformed timestamps as lost.
++                    Record((uint)_kind, (uint)_result, _start, Now());
++                    _active--;
++                }
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index d766f33e4aab1cf45a2a5585e845f5fa6e0e54be..1608b0f12918649d7c526da465903f07eef7ca64 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Configuration;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Common.Memory;
+@@ -308,8 +309,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             GpuChannelComputeState computeState,
+             ulong gpuVa)
+         {
++            // One request span: lookup, decode/translation, and host-program creation.
++            // Native debug gate disables this entire trace outside opted-in Android sessions.
++            using var s2aEvent = S2ACompileEvents.Begin(S2ACompileEvents.Kind.Translation);
+             if (_cpPrograms.TryGetValue(gpuVa, out CachedShaderProgram cpShader) && IsShaderEqual(channel, poolState, computeState, cpShader, gpuVa))
+             {
++                s2aEvent?.Complete(S2ACompileEvents.Result.Hit);
+                 return cpShader;
+             }
+ 
+@@ -332,6 +337,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                 _cpPrograms[gpuVa] = cpShader;
+                 S2ASeen.Note(cpShader);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
++                s2aEvent?.Complete(S2ACompileEvents.Result.Hit);
+                 return cpShader;
+             }
+ 
+@@ -400,6 +406,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _cpPrograms[gpuVa] = cpShader;
+             S2ASeen.Note(cpShader);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
+ 
++            s2aEvent?.Complete(S2ACompileEvents.Result.Miss);
+             return cpShader;
+         }
+ 
+@@ -584,8 +591,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             ref GpuChannelGraphicsState graphicsState,
+             ShaderAddresses addresses)
+         {
++            // One request span: lookup, decode/translation, and host-program creation.
++            // Native debug gate disables this entire trace outside opted-in Android sessions.
++            using var s2aEvent = S2ACompileEvents.Begin(S2ACompileEvents.Kind.Translation);
+             if (_gpPrograms.TryGetValue(addresses, out CachedShaderProgram gpShaders) && IsShaderEqual(channel, ref poolState, ref graphicsState, gpShaders, addresses))
+             {
++                s2aEvent?.Complete(S2ACompileEvents.Result.Hit);
+                 return gpShaders;
+             }
+ 
+@@ -615,6 +626,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 _gpPrograms[addresses] = gpShaders;
+                 S2ASeen.Note(gpShaders);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
+                 if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, S2AAllocTrace.Now() - s2aF);
++                s2aEvent?.Complete(S2ACompileEvents.Result.Hit);
+                 return gpShaders;
+             }
+             if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_000d, S2AAllocTrace.Now() - s2aF);
+@@ -787,6 +799,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             _gpPrograms[addresses] = gpShaders;
+             S2ASeen.Note(gpShaders);   // S2A：双轨覆盖率就绪，见过的着色器记 seen（S2ASeen）
+ 
++            s2aEvent?.Complete(S2ACompileEvents.Result.Miss);
+             return gpShaders;
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index f96864c638162feedb3382ab36c6eb231538999a..afd372e90159828e3e69dc6010edb83707da2bde 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Memory;
+ using Silk.NET.Vulkan;
+ using System;
+@@ -421,7 +422,11 @@ namespace Ryujinx.Graphics.Vulkan
+                 }
+ 
+                 long s2aComputeStart = System.Diagnostics.Stopwatch.GetTimestamp();
+-                gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();
++                using (var s2aEvent = S2ACompileEvents.Begin(S2ACompileEvents.Kind.ComputePipeline))
++                {
++                    gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();
++                    s2aEvent?.Complete(S2ACompileEvents.Result.Miss);
++                }
+                 S2AReportPipelineTime(s2aComputeStart);
+             }
+ 
+@@ -727,7 +732,12 @@ namespace Ryujinx.Graphics.Vulkan
+                 };
+ 
+                 long s2aGraphicsStart = System.Diagnostics.Stopwatch.GetTimestamp();
+-                Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
++                Result result;
++                using (var s2aEvent = S2ACompileEvents.Begin(S2ACompileEvents.Kind.GraphicsPipeline))
++                {
++                    result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
++                    if (!result.IsError) s2aEvent?.Complete(S2ACompileEvents.Result.Miss);
++                }
+                 S2AReportPipelineTime(s2aGraphicsStart);
+ 
+                 if (throwOnError)

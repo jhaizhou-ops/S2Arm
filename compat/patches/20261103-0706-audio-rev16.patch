@@ -1,0 +1,23 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs b/src/Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs
+index 04463e8762d284b64c63b70bd4c69f64f5cdf7ac..97c45e286295970d6983ffd874273ec5504a76c6 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs
+@@ -134,10 +134,17 @@ namespace Ryujinx.Audio.Renderer.Server
+         /// <remarks>This was added in system update 19.0.0 </remarks>
+         public const int Revision15 = 15 << 24;
+ 
++        /// <summary>
++        /// REV16:
++        /// Requested by Switch 2 SDK builds (magic 'REv' + 16, e.g. Fire Emblem Fortune's Weave) and 21.0.0 system programs.
++        /// No new parameter layout is known; handled as REV15 (same as upstream Nextendo 5acb1e4247).
++        /// </summary>
++        public const int Revision16 = 16 << 24;
++
+         /// <summary>
+         /// Last revision supported by the implementation.
+         /// </summary>
+-        public const int LastRevision = Revision15;
++        public const int LastRevision = Revision16;
+ 
+         /// <summary>
+         /// Get the revision number from the revision magic.

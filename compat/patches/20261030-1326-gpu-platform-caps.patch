@@ -1,0 +1,90 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index a5a0ef7bc7aa1582b48306480720fd9ab557ab40..979dcf807259072d4f8089c89626001dd7647889 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -12,6 +12,16 @@ using System.Linq;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ 
++namespace Ryujinx.Graphics.Gpu
++{
++    public static class S2AGpuCaps
++    {
++        // Set by the platform before GPU initialization.
++        public static bool WritebackRequireProvider { get; set; }
++    }
++
++}
++
+ namespace Ryujinx.Graphics.Gpu.Memory
+ {
+     /// <summary>
+@@ -28,10 +38,6 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private readonly Action<ulong, Memory<byte>> _s2aReadForWriteback;
+         // 仅供主机负控：老的借页直读。目标页受保护时必缺页（AV），生产不得选到。
+         private static readonly bool S2AWritebackBorrowedReadOn = Environment.GetEnvironmentVariable("S2A_WRITEBACK_BORROWED_READ") == "1";
+-        // 没装无跟踪读提供者时：安卓明确失败（NativeAOT 直读 PROT_NONE 不可恢复）；
+-        // 其余平台保留原来的借页直读并打印一次红，避免苹果既有 0 崩路径因新抛出退役。
+-        // 只给主机夹具改这一项来分别覆盖两端。
+-        internal static bool S2AWritebackRequireProvider { get; set; } = OperatingSystem.IsAndroid();
+         private static int _s2aWritebackBorrowedRed;
+ 
+         /// <summary>
+@@ -376,7 +382,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 ReadOnlySpan<byte> current = _cpuMemory.GetSpan(address, size);
+                 bool hasProvider = S2AWritebackHasProvider;
+ 
+-                if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AWritebackRequireProvider))
++                if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AGpuCaps.WritebackRequireProvider))
+                 {
+                     if (!hasProvider)
+                     {
+@@ -419,7 +425,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 {
+                     bool hasProvider = S2AWritebackHasProvider;
+ 
+-                    if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AWritebackRequireProvider))
++                    if (S2AWritebackBorrowedReadOn || (!hasProvider && !S2AGpuCaps.WritebackRequireProvider))
+                     {
+                         if (!hasProvider)
+                         {
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 30eb9c593595838612e8d56d505ee2e43710a2e3..cb24d30611df4dfca7d87e8a8df16e7f455625c4 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -27,6 +27,21 @@ using SamplerCreateInfo = Ryujinx.Graphics.GAL.SamplerCreateInfo;
+ 
+ namespace Ryujinx.Graphics.Vulkan
+ {
++    public static class S2AVulkanCaps
++    {
++        // Set once by the platform before GPU initialization; zero adds no S2A requirement.
++        public static uint MinimumApiVersion { get; set; }
++        public static string UnsupportedMessage { get; set; }
++
++        internal static void CheckApiVersion(uint version)
++        {
++            if (MinimumApiVersion != 0 && version < MinimumApiVersion)
++            {
++                throw new NotSupportedException(UnsupportedMessage ?? "Initialization failed, none of the available GPUs meets the minimum requirements.");
++            }
++        }
++    }
++
+     public sealed class VulkanRenderer : IRenderer, IHostProgramCachePolicy, IComputeTranslationProfileProvider
+     {
+         private VulkanInstance _instance;
+@@ -663,12 +678,7 @@ namespace Ryujinx.Graphics.Vulkan
+                 ? Vk.Version11.Value
+                 : Vk.Version12.Value;
+ 
+-            // Vulkan 1.1 devices are supported: 1.2 core feature structs are not chained there, and
+-            // the renderer consumes whatever the capability snapshot reports as enabled.
+-            if (WindowFactory != null && _physicalDevice.PhysicalDeviceProperties.ApiVersion < Vk.Version11.Value)
+-            {
+-                throw new NotSupportedException("Android's Vulkan backend requires device API 1.1 or newer.");
+-            }
++            S2AVulkanCaps.CheckApiVersion(_physicalDevice.PhysicalDeviceProperties.ApiVersion);
+ 
+             uint queueFamilyIndex = VulkanInitialization.FindSuitableQueueFamily(Api, _physicalDevice, _surface, out uint maxQueueCount);
+             if (UseSingleQueue)

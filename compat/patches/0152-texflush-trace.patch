@@ -1,0 +1,44 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 00a860452d42379907c7b4a369f7cbb383fa3844..63f1bc3b7bc017c818290c41f8f4bacb9af30a28 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -1722,6 +1722,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+ 
+             bool isGpuThread = _context.IsGpuThread();
+ 
++            if (S2ATexFlushTrace.On) S2ATexFlushTrace.Note(isGpuThread, Storage.Info, address, size);
++
+             if (isGpuThread)
+             {
+                 // No need to wait if we're on the GPU thread, we can just clear the modified flag immediately.
+@@ -1781,5 +1783,30 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+         }
+     }
++
++    // S2A 诊断（帧率能耗线 10-22，缺省关）：S2A_TEXFLUSH_TRACE=1 时按「触发线程 + 调用栈」累计贴图回写（FlushAction）次数，每 10 秒打前 3。
++    // 八方2 每帧在 GPU 线程上触发一次贴图回写、渲染线程等满一帧 GPU（约 14.5 ms）：查 GPU 线程为什么要读这块 GPU 写过的贴图内存
++    internal static class S2ATexFlushTrace
++    {
++        public static readonly bool On = Environment.GetEnvironmentVariable("S2A_TEXFLUSH_TRACE") == "1";
++        private static readonly System.Collections.Generic.Dictionary<string, (long N, string Tex)> _n = new();
++        private static long _last;
++        public static void Note(bool gpuThread, TextureInfo info, ulong address, ulong size)
++        {
++            string st = new System.Diagnostics.StackTrace(2, false).ToString();
++            string[] lines = st.Split('\n');
++            string key = (gpuThread ? "GPU 线程" : "其它线程 " + System.Threading.Thread.CurrentThread.Name) + " | " + string.Join(" ← ", System.Linq.Enumerable.Take(System.Linq.Enumerable.Select(lines, l => l.Trim()), 10));
++            string tex = $"{info.Width}x{info.Height} {info.FormatInfo.Format} 地址 {address:x}+{size:x}";
++            lock (_n)
++            {
++                _n[key] = _n.TryGetValue(key, out var v) ? (v.N + 1, tex) : (1, tex);
++                long now = System.Diagnostics.Stopwatch.GetTimestamp();
++                if (now - _last < System.Diagnostics.Stopwatch.Frequency * 10) return;
++                _last = now;
++                foreach (var kv in System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_n, kv => kv.Value.N), 3))
++                    Console.Error.WriteLine($"[texflush] ×{kv.Value.N} 最近贴图 {kv.Value.Tex}｜{kv.Key}");
++            }
++        }
++    }
+ }
+ 

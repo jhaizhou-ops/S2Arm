@@ -1,0 +1,16 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+index e9e56f92dc692e107e76a3616cdd435abeca0685..e235a8606cd24dbce648b8911f17bf59e4b1020e 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs
+@@ -192,7 +192,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 {
+                     context.AddExecutionMode(spvFunc, ExecutionMode.OutputVertices, (SpvLiteralInteger)context.Definitions.ThreadsPerInputPrimitive);
+                 }
+-                else if (context.Definitions.Stage == ShaderStage.TessellationEvaluation)
++
++                // S2A：曲面控制（TCS）也声明域 / 分区 / 绕序（SPIR-V 允许 TCS、TES 任一或两者声明，两者须一致）。Metal 原生曲面细分里 TCS 翻成计算核写细分因子缓冲，
++                // 因子布局（三角 / 四边形）取决于域：TCS 不带域就无法单独翻译、离线库也无法按单支着色器索引（graphics/metal/曲面几何设计.md）
++                if (context.Definitions.Stage == ShaderStage.TessellationControl || context.Definitions.Stage == ShaderStage.TessellationEvaluation)
+                 {
+                     switch (context.Definitions.TessPatchType)
+                     {

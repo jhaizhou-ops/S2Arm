@@ -1,0 +1,500 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Program/ProgramCheckLinkCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Program/ProgramCheckLinkCommand.cs
+index e07fad9ddcdf79c30183b2e17a2820736e2294da..b8817fa92bf12e9a6e1e9d226c4b14b31cc92401 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Program/ProgramCheckLinkCommand.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Program/ProgramCheckLinkCommand.cs
+@@ -19,7 +19,13 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Program
+ 
+         public static void Run(ref ProgramCheckLinkCommand command, ThreadedRenderer threaded, IRenderer renderer)
+         {
+-            ProgramLinkStatus result = command._program.Get(threaded).Base.CheckProgramLink(command._blocking);
++            ThreadedProgram program = command._program.Get(threaded);
++            ProgramLinkStatus result = program.Base.CheckProgramLink(command._blocking);
++
++            if (result != ProgramLinkStatus.Incomplete)
++            {
++                program.S2ARecord(result);
++            }
+ 
+             command._result.Get(threaded).Result = result;
+         }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
+index 8aadead6d97b9a4ffa6fd64713d5cf3f7c28c7c4..71bc02dbb5dbf7d0288764eb12df88a9dde057e2 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
+@@ -43,6 +43,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+                 if (status != ProgramLinkStatus.Incomplete)
+                 {
++                    program.S2ARecord(status);
+                     program.Compiled = true;
+                     _inProgress.RemoveAt(i--);
+                 }
+@@ -70,6 +71,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+                     if (status != ProgramLinkStatus.Incomplete)
+                     {
+                         // This program is already compiled. Keep going through the queue.
++                        program.Threaded.S2ARecord(status);
+                         program.Threaded.Compiled = true;
+                         i--;
+                         continue;
+@@ -103,7 +105,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+             if (!program.Compiled && (program.Base != null || S2ACreateQueued(program)))
+             {
+-                program.Base.CheckProgramLink(true);
++                program.S2ARecord(program.Base.CheckProgramLink(true));
+                 program.Compiled = true;
+                 return;
+             }
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+index 9573bbaacd7dfb735ef2d2f1fe4b69d507435ed7..51fdc61ac31a65b7c26a56a46dcfa772b2a26a99 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedProgram.cs
+@@ -11,6 +11,24 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+ 
+         internal bool Compiled;
+ 
++        // S2A（10-24）：渲染线程得出的链接结果（-1 = 还没得出），GPU 模拟线程不经命令往返就能读（ThreadedRenderer.S2ALinkStatusNoWait）
++        internal volatile int S2AStatus = -1;
++
++        // S2A：要存进磁盘缓存的程序（ShaderCache 入队时置位）：渲染线程得出链接成功时顺手取好二进制，GPU 模拟线程取时不再发命令等渲染线程
++        internal volatile bool S2AWantBinary;
++        internal byte[] S2ABinary;
++
++        /// <summary>S2A：渲染线程上记下链接结果（要二进制的先取好再记，读的一方先看到结果就一定看到二进制）</summary>
++        internal void S2ARecord(ProgramLinkStatus status)
++        {
++            if (status == ProgramLinkStatus.Success && S2AWantBinary && S2ABinary == null)
++            {
++                S2ABinary = Base.GetBinary();
++            }
++
++            S2AStatus = (int)status;
++        }
++
+         public ThreadedProgram(ThreadedRenderer renderer)
+         {
+             _renderer = renderer;
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index aa1ad8455af1877e0ce07c88eab834daff0ce6d9..c459235b45cf76ba286b285c511aadce59ace262 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -584,6 +584,45 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             _baseRenderer.Initialize(logLevel);
+         }
+ 
++        /// <summary>
++        /// S2A（10-24）：不等渲染线程取链接结果。多线程渲染器的程序取渲染线程已得出的结果（还没得出 = Incomplete），不发命令；
++        /// 别的程序直接非阻塞查。CheckProgramLink 哪怕非阻塞也是 InvokeCommand、要等渲染线程排空——渲染线程正等一支现编时，GPU 模拟线程就被拖住
++        /// （10-24 测试机1 xc3 冷局第 703 帧停 12 秒：按需实化同步查链接，GPU 模拟线程等渲染线程、渲染线程等现编，编译串成一支一支）
++        /// </summary>
++        public static ProgramLinkStatus S2ALinkStatusNoWait(IProgram program)
++        {
++            if (program is ThreadedProgram threaded)
++            {
++                int s = threaded.S2AStatus;
++                return s < 0 ? ProgramLinkStatus.Incomplete : (ProgramLinkStatus)s;
++            }
++
++            return program.CheckProgramLink(false);
++        }
++
++        /// <summary>S2A：程序编完后要取二进制（存磁盘缓存）：多线程渲染器的程序让渲染线程在得出链接结果时顺手取好（见 S2ABinary）</summary>
++        public static void S2AWantBinary(IProgram program)
++        {
++            if (program is ThreadedProgram threaded)
++            {
++                threaded.S2AWantBinary = true;
++            }
++        }
++
++        /// <summary>
++        /// S2A：取已链接成功的程序的二进制。渲染线程已顺手取好就直接用、不发命令；否则照常 GetBinary（多线程渲染器里是 InvokeCommand，
++        /// 只剩入队前就已编完的少数情况会走到）
++        /// </summary>
++        public static byte[] S2ABinary(IProgram program)
++        {
++            if (program is ThreadedProgram threaded && threaded.S2AStatus >= 0 && threaded.S2ABinary != null)
++            {
++                return threaded.S2ABinary;
++            }
++
++            return program.GetBinary();
++        }
++
+         public unsafe IProgram LoadProgramBinary(byte[] programBinary, bool hasFragmentShader, ShaderInfo info)
+         {
+             ThreadedProgram program = new(this);
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 3fdf86170a93fca1e7b8bfb39bde99c9b26696e3..9be3aebb5480bc85b24f2cbc79ab6d30e74d0307 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -2,6 +2,7 @@ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Shader;
+ using Ryujinx.Graphics.Shader.Translation;
+ using System;
++using System.Collections.Generic;
+ using System.IO;
+ using System.Numerics;
+ using System.Runtime.CompilerServices;
+@@ -657,6 +658,55 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             return (specState, hostCode, shaders);
+         }
+ 
++        // S2A（10-24）：按需实化不在 GPU 模拟线程上同步查链接。多线程渲染器里 CheckProgramLink 是 InvokeCommand，要等渲染线程排空；
++        //   渲染线程正等一支首遇现编时，GPU 模拟线程就停在这里，翻不了下一支、排不出下一批编译，现编被串成一支一支
++        //   （10-24 测试机1 xc3 冷局第 703 帧：GPU 模拟线程 S2AMaterializeCore → CheckProgramLink 等渲染线程、渲染线程 WaitForProgram 等现编，停 12 秒）。
++        //   改成登记、由 ShaderCache.ProcessShaderCacheQueue 每帧不等渲染线程补查（S2AVtg.LinkStatusNoWait）：补查到失败 → 条目作废（S2ARejectLink，之后查找跳过、首遇照常翻译）。
++        //   上游翻译路径（CreateProgram）本来就不在 GPU 线程上查链接，这里与它一致
++        private readonly List<(CachedShaderProgram Program, int Index)> _s2aPendingLink = new();
++
++        private CachedShaderProgram S2APendLink(CachedShaderProgram program, int programIndex)
++        {
++            lock (_s2aPendingLink)
++            {
++                _s2aPendingLink.Add((program, programIndex));
++            }
++
++            return program;
++        }
++
++        /// <summary>
++        /// S2A：补查按需实化程序的链接（GPU 模拟线程每帧，不等渲染线程）。链接失败的作废、报红、交 onFailed（调用方把它从按地址的快表里摘掉）后释放；返回还没得出结果的个数
++        /// </summary>
++        internal int S2AProcessPendingLink(Action<CachedShaderProgram> onFailed)
++        {
++            lock (_s2aPendingLink)
++            {
++                for (int i = 0; i < _s2aPendingLink.Count; i++)
++                {
++                    (CachedShaderProgram program, int index) = _s2aPendingLink[i];
++                    ProgramLinkStatus status = S2AVtg.LinkStatusNoWait(program);
++
++                    if (status == ProgramLinkStatus.Incomplete)
++                    {
++                        continue;
++                    }
++
++                    _s2aPendingLink.RemoveAt(i--);
++
++                    if (status == ProgramLinkStatus.Failure)
++                    {
++                        program.SpecializationState.S2ARejectLink();
++                        S2AShaderCacheGuard.Report(1, $"程序 {index} 主机二进制载入失败（按需实化补查，条目作废、之后首遇照常翻译）");
++                        onFailed?.Invoke(program);
++                        program.Dispose();
++                    }
++                }
++
++                return _s2aPendingLink.Count;
++            }
++        }
++
+         private CachedShaderProgram S2AMaterializeCore(S2ALazyProgram lazy)
+         {
+             lock (_lazyLock)
+@@ -694,17 +744,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     IProgram hostProgram = lazy.Context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, S2AHostBinaryInfo);
+                     if (S2AAllocTrace.On) S2AAllocTrace.Raw(0x40_0010, S2AAllocTrace.Now() - s2aL);
+ 
+-                    if (hostProgram.CheckProgramLink(true) != ProgramLinkStatus.Success)
+-                    {
+-                        hostProgram.Dispose();
+-                        S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 主机二进制载入失败（按需实化）");
+-                        return null;
+-                    }
+-
+                     // S2A：来自磁盘缓存（含出包种入的包内条目）：首次命中时按运行时真值核对全部翻译读过的字段（ShaderCache.S2AVerify）
+                     specState.S2AMarkLoaded(lazy.ProgramIndex);
+ 
+-                    return new CachedShaderProgram(hostProgram, specState, shaders);
++                    return S2APendLink(new CachedShaderProgram(hostProgram, specState, shaders), lazy.ProgramIndex);
+                 }
+                 catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
+                 {
+@@ -733,13 +776,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+ 
+             CachedShaderProgram program = S2AVtg.Load(lazy.Context, vtg, shaders, specState);
+-
+-            if (S2AVtg.CheckLink(program, true) != ProgramLinkStatus.Success)
+-            {
+-                program.Dispose();
+-                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 转计算宿主二进制载入失败（按需实化）");
+-                return null;
+-            }
++            lazy.Storage.S2APendLink(program, lazy.ProgramIndex);
+ 
+             int n = System.Threading.Interlocked.Increment(ref _s2aVtgMaterialized);
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index d0223e7858f115c5fa1aa3948d3e773c6bb8562c..55ce67f853e3cb7865e9ad9b059fa21078b3cb16 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -338,28 +338,36 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             Console.Error.WriteLine($"[gal] 转计算程序当场翻译 #{n}：{sb}");
+         }
+ 
++        // S2A：多线程渲染器的程序取渲染线程编完时顺手取好的二进制，不发命令等渲染线程（ThreadedRenderer.S2ABinary）
++        private static byte[] Bin(IProgram program) => Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2ABinary(program);
++
+         /// <summary>程序的宿主二进制：转计算程序 = 复合二进制（三个宿主程序各取 GetBinary）；其余 = 宿主程序 GetBinary。</summary>
+         public static byte[] GetBinary(CachedShaderProgram program)
+         {
+             if (program.VertexAsCompute == null)
+             {
+-                return program.HostProgram.GetBinary();
++                return Bin(program.HostProgram);
+             }
+ 
+             return Pack(
+                 program.SpecializationState.TransformFeedbackDescriptors != null,
+-                program.HostProgram.GetBinary(),
+-                program.VertexAsCompute.HostProgram.GetBinary(),
++                Bin(program.HostProgram),
++                Bin(program.VertexAsCompute.HostProgram),
+                 program.VertexAsCompute.Reservations,
+-                program.GeometryAsCompute?.HostProgram.GetBinary(),
++                program.GeometryAsCompute == null ? null : Bin(program.GeometryAsCompute.HostProgram),
+                 program.GeometryAsCompute?.Reservations,
+                 program.S2APassthroughInfo);
+         }
+ 
+         /// <summary>程序各宿主程序的链接状态合起来：任一失败 = 失败，任一未完成 = 未完成，否则成功。</summary>
+-        public static ProgramLinkStatus CheckLink(CachedShaderProgram program, bool blocking)
++        public static ProgramLinkStatus CheckLink(CachedShaderProgram program, bool blocking) => CombineLink(program, p => p.CheckProgramLink(blocking));
++
++        /// <summary>同 CheckLink，但不等渲染线程（多线程渲染器取渲染线程已得出的结果，见 ThreadedRenderer.S2ALinkStatusNoWait）：GPU 模拟线程上补查按需实化的程序用</summary>
++        public static ProgramLinkStatus LinkStatusNoWait(CachedShaderProgram program) => CombineLink(program, Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2ALinkStatusNoWait);
++
++        private static ProgramLinkStatus CombineLink(CachedShaderProgram program, System.Func<IProgram, ProgramLinkStatus> status)
+         {
+-            ProgramLinkStatus s = program.HostProgram.CheckProgramLink(blocking);
++            ProgramLinkStatus s = status(program.HostProgram);
+ 
+             foreach (ShaderAsCompute c in new[] { program.VertexAsCompute, program.GeometryAsCompute })
+             {
+@@ -368,7 +376,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     continue;
+                 }
+ 
+-                ProgramLinkStatus cs = c.HostProgram.CheckProgramLink(blocking);
++                ProgramLinkStatus cs = status(c.HostProgram);
+ 
+                 if (cs == ProgramLinkStatus.Failure || s == ProgramLinkStatus.Failure)
+                 {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index bf27117474a2b248477fc226ed5d6e5484dfbf16..94dce0a0e4956f534917b2f7175cf576f76714b5 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -13,6 +13,7 @@ using Ryujinx.Memory.Range;
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
++using System.Linq;
+ using System.Threading;
+ 
+ namespace Ryujinx.Graphics.Gpu.Shader
+@@ -128,12 +129,17 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public void ProcessShaderCacheQueue()
+         {
++            // S2A：按需实化的程序不再同步查链接，这里补查；失败的从按地址的快表里摘掉（之后查找跳过作废条目、首遇照常翻译）
++            _diskCacheHostStorage.S2AProcessPendingLink(S2AForget);
++
+             // Check to see if the binaries for previously compiled shaders are ready, and save them out.
+ 
+             while (_programsToSaveQueue.TryPeek(out ProgramToSave programToSave))
+             {
+                 // S2A：转计算程序有三个宿主程序，全部编完才取（复合）二进制（S2AVtg）
+-                ProgramLinkStatus result = S2AVtg.CheckLink(programToSave.CachedProgram, false);
++                // S2A（10-24）：不等渲染线程查（S2AVtg.LinkStatusNoWait）。原先 CheckLink 是 InvokeCommand，渲染线程正等一条管线 / 一支现编时 GPU 模拟线程就停在这里
++                //   （10-24 Mac xc3 冷局第 1230 帧停 10 秒：GPU 模拟线程 ProcessShaderCacheQueue → CheckLink 等渲染线程、渲染线程 gal_pso_job_wait 等后台管线）；二进制由渲染线程编完时顺手取好
++                ProgramLinkStatus result = S2AVtg.LinkStatusNoWait(programToSave.CachedProgram);
+ 
+                 if (result != ProgramLinkStatus.Incomplete)
+                 {
+@@ -151,6 +157,19 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             }
+         }
+ 
++        private void S2AForget(CachedShaderProgram program)
++        {
++            foreach (KeyValuePair<ShaderAddresses, CachedShaderProgram> kv in _gpPrograms.Where(kv => kv.Value == program).ToList())
++            {
++                _gpPrograms.Remove(kv.Key);
++            }
++
++            foreach (KeyValuePair<ulong, CachedShaderProgram> kv in _cpPrograms.Where(kv => kv.Value == program).ToList())
++            {
++                _cpPrograms.Remove(kv.Key);
++            }
++        }
++
+         /// <summary>
+         /// Initialize the cache.
+         /// </summary>
+@@ -612,6 +631,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             {
+                 byte[] binaryCode = null; // S2A：一律存渲染器程序二进制（编完后取），不存 SPIR-V 打包
+                 ProgramToSave programToSave = new(program, hostProgram, binaryCode);
++                Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2AWantBinary(hostProgram);   // S2A：编完时渲染线程顺手取二进制（ProcessShaderCacheQueue 取时不等渲染线程）
++                Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2AWantBinary(program.VertexAsCompute?.HostProgram);
++                Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2AWantBinary(program.GeometryAsCompute?.HostProgram);
+ 
+                 _programsToSaveQueue.Enqueue(programToSave);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+index 53338adfb2d307c642c4b5fb2f7f7c0675e22b8c..61e4c8ac4f43b0cde1952a5296cd1e14cadc8306 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+@@ -64,6 +64,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             out CachedShaderProgram program)
+         {
+             Materialize();
++            List<string> whys = null;
+ 
+             foreach (CachedShaderProgram entry in _entries)
+             {
+@@ -87,12 +88,29 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     program = entry;
+                     return true;
+                 }
++                S2ANoteMiss(ref whys);
+             }
+ 
++            S2AFinishMiss(whys);
+             program = default;
+             return false;
+         }
+ 
++        // S2A（10-24）：首遇重翻拒因记全每个候选的不符字段（原先只剩最后一个候选的）。xc3 冷局「透明测试开关」256 次实为：包里「关」「开」两份都在，
++        //   「关」那份比到透明测试不符、盖掉了「开」那份真正不符的字段。拒因写成「候选数：字段一；字段二」，同字段只记一次
++        private static void S2ANoteMiss(ref List<string> whys)
++        {
++            string w = ShaderSpecializationState.S2AMissWhy ?? "未记字段";
++            ShaderSpecializationState.S2AMissWhy = null;
++            whys ??= new List<string>();
++            if (!whys.Contains(w)) whys.Add(w);
++        }
++
++        private void S2AFinishMiss(List<string> whys)
++        {
++            if (whys != null) ShaderSpecializationState.S2AMissWhy = $"候选 {_entries.Count} 份：" + string.Join("；", whys);
++        }
++
+         /// <summary>
+         /// Tries to find an existing compute program on the cache.
+         /// </summary>
+@@ -104,6 +122,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         public bool TryFindForCompute(GpuChannel channel, GpuChannelPoolState poolState, GpuChannelComputeState computeState, out CachedShaderProgram program)
+         {
+             Materialize();
++            List<string> whys = null;
+ 
+             foreach (CachedShaderProgram entry in _entries)
+             {
+@@ -117,8 +136,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     program = entry;
+                     return true;
+                 }
++                S2ANoteMiss(ref whys);
+             }
+ 
++            S2AFinishMiss(whys);
+             program = default;
+             return false;
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index 6f0c11a25994ece837da5afe7d81c95c968473cf..fefa99115d02fb911deddec43247bb92eaaa7b25 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -276,6 +276,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         public void Prepare(CachedShaderStage[] stages)
+         {
+             _allTextures = _textureSpecialization.ToArray();
++            _s2aFoutTargets = S2AWrittenTargets(stages);
+ 
+             _textureByBinding = new Box<TextureSpecializationState>[stages.Length][];
+             _imageByBinding = new Box<TextureSpecializationState>[stages.Length][];
+@@ -714,9 +715,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 S2AMissWhy = "曲面模式"; return false;
+             }
+ 
+-            if (channel.Capabilities.NeedsFragmentOutputSpecialization && !graphicsState.FragmentOutputTypes.AsSpan().SequenceEqual(GraphicsState.FragmentOutputTypes.AsSpan()))
++            if (channel.Capabilities.NeedsFragmentOutputSpecialization && !S2AFoutMatches(ref graphicsState))
+             {
+-                S2AMissWhy = "片元输出类型"; return false;
++                // S2A（10-24）：拒因带两边取值（条目 / 运行时，0 浮点 1 有符号整数 2 无符号整数…，AttributeType 数值），只在不中时拼串
++                S2AMissWhy = $"片元输出类型（条目 {string.Join(",", GraphicsState.FragmentOutputTypes.AsSpan().ToArray().Select(t => (int)t))} 运行时 {string.Join(",", graphicsState.FragmentOutputTypes.AsSpan().ToArray().Select(t => (int)t))}）"; return false;
+             }
+ 
+             if (graphicsState.DualSourceBlendEnable != GraphicsState.DualSourceBlendEnable)
+@@ -1260,6 +1262,67 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <summary>S2A：首次命中时核对过且与运行时不符的条目（查找时跳过）</summary>
+         internal bool S2ARejected => _s2aVerdict == 2;
+ 
++        // S2A（10-24）：片元输出类型只比片元着色器写到的渲染目标。翻译器只给写到的目标（OmapTargets，双源混合另写 1 号）声明输出、只在那里读输出类型
++        //   （ShaderDefinitions.GetFragmentOutputColorType），没写的目标是什么类型翻出来都一样；原先整组 8 个比，同一份着色器画进「没写的槽绑着整数目标」的帧缓冲就判不符、
++        //   现翻一份逐字节相同的（10-24 xc3 冷局加载段：条目 0,0,0,0,0,0,0,0 对运行时 0,0,0,2,0,0,0,0 / 0,0,2,0,… 等，Mac 冷局 200 秒 122 支首遇现编的主因）。
++        //   -1 = 不知道写了哪些（没有片元阶段信息），整组比；0 = 没有片元着色器，不比
++        private int _s2aFoutTargets = -1;
++
++        private static int S2AWrittenTargets(CachedShaderStage[] stages)
++        {
++            if (stages.Length <= 5)
++            {
++                return -1;
++            }
++
++            CachedShaderStage fs = stages[5];
++
++            if (fs == null)
++            {
++                return 0;
++            }
++
++            if (fs.Info == null || fs.Info.FragmentOutputMap < 0)
++            {
++                return -1;
++            }
++
++            int mask = 0;
++
++            for (int rt = 0; rt < 8; rt++)
++            {
++                if ((fs.Info.FragmentOutputMap >> (rt * 4) & 0xf) != 0)
++                {
++                    mask |= 1 << rt;
++                }
++            }
++
++            return mask;
++        }
++
++        internal bool S2AFoutMatches(ref GpuChannelGraphicsState graphicsState)
++        {
++            int written = _s2aFoutTargets;
++
++            if (written >= 0 && GraphicsState.DualSourceBlendEnable)
++            {
++                written |= 1 << 1;   // 双源混合：翻译器另给 1 号目标写 0（Translator.InitializeOutputs）
++            }
++
++            for (int rt = 0; rt < 8; rt++)
++            {
++                if ((written < 0 || (written >> rt & 1) != 0) && graphicsState.FragmentOutputTypes[rt] != GraphicsState.FragmentOutputTypes[rt])
++                {
++                    return false;
++                }
++            }
++
++            return true;
++        }
++
++        /// <summary>S2A：按需实化的宿主程序补查到链接失败（DiskCacheHostStorage.S2AProcessPendingLink）：作废，查找时跳过</summary>
++        internal void S2ARejectLink() => _s2aVerdict = 2;
++
+         /// <summary>S2A：来自磁盘缓存、还没核对过</summary>
+         internal bool S2ANeedsVerify => _s2aDiskIndex >= 0 && _s2aVerdict == 0;
+ 

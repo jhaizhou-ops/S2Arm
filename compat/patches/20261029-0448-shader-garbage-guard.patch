@@ -1,0 +1,276 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+index cd4bc3af119ae47db90441968df376b3fb3f07f7..bfd0779e366265b074b919941aefa5e2e4b3f615 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+@@ -151,11 +151,19 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+             {
+                 cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
+             }
+-            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀（0012）报红时这次派发跳过，不带走 GPU 线程（同 StateUpdater.S2AShaderFault）
++            catch (Exception e) // S2A：取码越界（0012）或翻译失败（垃圾代码过了取码，10-29）报红时这次派发跳过，不带走 GPU 线程（同 StateUpdater.S2AShaderFault）
+             {
++                bool report;
+                 lock (_s2aFaultReported)
+                 {
+-                    if (_s2aFaultReported.Count < 64 && _s2aFaultReported.Add(shaderGpuVa)) System.Console.Error.WriteLine($"[gpu] 【红】计算着色器取码越界，这次派发跳过：{e.Message}；程序地址 0x{shaderGpuVa:X}");
++                    report = _s2aFaultReported.Count < 64 && _s2aFaultReported.Add(shaderGpuVa);
++                }
++                if (report)
++                {
++                    var sb = new System.Text.StringBuilder($"{S2AShaderFaultReport.Describe(e)}；程序地址 0x{shaderGpuVa:X}；");
++                    try { S2AShaderFaultReport.AppendStage(sb, memoryManager, "计算", shaderGpuVa, memoryManager.Physical.ShaderCache.S2AComputeFetchEnd[0]); }
++                    catch (Exception re) { sb.Append($"地址链查不出：{re.Message}；"); }
++                    System.Console.Error.WriteLine($"[gpu] 【红】计算着色器{S2AShaderFaultReport.Category(e)}，这次派发跳过：{sb}");
+                 }
+                 return;
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index ffc14576d73e44f8e14d809c68e2b834a49bde4f..a6326f996aae90ccd7b615a761b73a030558883d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -39,7 +39,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         private bool _s2aAdvBlendReported;
+         private bool _s2aTfbReported;
+ 
+-        // S2A：着色器取码安全阀（0012）报红后，这组着色器不能用——绘制出口（DrawManager）见此跳过，直到着色器状态再变、解码成功。
++        // S2A：着色器取码安全阀（0012）报红、或这组着色器翻译时抛异常（10-29 垃圾代码）后，这组着色器不能用——绘制出口（DrawManager）见此跳过，直到着色器状态再变、取用成功。
+         // 原先这里补完现场就重抛，GPU 模拟线程退出、进程 abort（10-28 双人成行通用模式联机闪退，片元代码区被一张只由 GPU 写过的贴图盖住）
+         internal bool S2AShaderFault;
+         private static readonly HashSet<ShaderAddresses> _s2aFaultReported = [];
+@@ -1507,14 +1507,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     ref _currentSpecState.GetGraphicsState(),
+                     addresses);
+             }
+-            catch (InvalidOperationException e) when (e.Message.StartsWith("S2A: shader code fetch")) // S2A：取码安全阀报红时补现场（程序区基址 + 各阶段开关 / 偏移 / 地址），本组着色器的绘制跳过
++            catch (Exception e) // S2A：取这组着色器时抛的任何异常（取码越界，或垃圾代码过了取码、翻译时抛：10-29 双人成行「Invalid shader stage 15」）都补现场报红，本组着色器的绘制跳过、GPU 线程不退出
+             {
+                 S2AShaderFault = true;
+                 lock (_s2aFaultReported)
+                 {
+                     if (_s2aFaultReported.Count >= 64 || !_s2aFaultReported.Add(addresses)) return;   // 同一组地址只报一次（补现场要读 1 MB 物理区间）
+                 }
+-                var sb = new System.Text.StringBuilder($"{e.Message}；程序区基址 0x{baseAddress:X}；");
++                string category = S2AShaderFaultReport.Category(e);
++                var sb = new System.Text.StringBuilder($"{S2AShaderFaultReport.Describe(e)}；程序区基址 0x{baseAddress:X}；");
+                 for (int index = 0; index < 6; index++)
+                 {
+                     ShaderState sh = shaderStateSpan[index];
+@@ -1533,7 +1534,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     }
+                     catch (Exception re) { sb.Append($"阶段 {index} 读不出：{re.Message}；"); }
+                 }
+-                System.Console.Error.WriteLine($"[gpu] 【红】着色器取码越界，本组着色器的绘制跳过：{sb}");
++                for (int index = 0; index < 6; index++)   // 原生层定因用：各开着的阶段 GPU 地址 + 读取长度 → 物理段 → 宿主地址 → 宿主页写跟踪状态
++                {
++                    ulong va = addressesSpan[index]; if (va == 0) continue;
++                    try { S2AShaderFaultReport.AppendStage(sb, _channel.MemoryManager, $"阶段 {index}", va, shaderCache.S2AGraphicsFetchEnd[index]); }
++                    catch (Exception re) { sb.Append($"阶段 {index} 地址链查不出：{re.Message}；"); }
++                }
++                System.Console.Error.WriteLine($"[gpu] 【红】图形着色器{category}，本组着色器的绘制跳过：{sb}");
+                 return;
+             }
+             S2AShaderFault = false;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+index 0fb6fb470b398a0abc52f8011e0ffb6b2d0b162c..5ee4f381bbc6fbbb37ae110867ada4742c8b0211 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs
+@@ -87,6 +87,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <summary>S2A：取码失败负缓存（#723 P1）的页集探针，解码前由 ShaderCache 挂上；GetCode 每碰一页记一笔。</summary>
+         internal S2AFaultProbe S2AProbe;
+ 
++        /// <summary>S2A（着色器防线红行现场）：各阶段取码读到的最远地址（不含），ShaderCache 解码前挂上、按阶段切槽；为空不记。</summary>
++        internal ulong[] S2AFetchEnd;
++        internal int S2AFetchSlot;
++
+         /// <inheritdoc/>
+         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
+         {
+@@ -102,6 +106,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             int size = Math.Max(minimumSize, 0x1000 - (int)(address & 0xfff));
+ 
+             S2AProbe?.Note(address, size);   // 这次读到的字节区间（负缓存只比这些字节的内容）
++            if (S2AFetchEnd != null) S2AFetchEnd[S2AFetchSlot] = Math.Max(S2AFetchEnd[S2AFetchSlot], address + (ulong)size);
+ 
+             if (!_channel.MemoryManager.IsMapped(address))
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultReport.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultReport.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..770579c9d6203b56f81d146b97b82847c4b376ad
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultReport.cs
+@@ -0,0 +1,87 @@
++using Ryujinx.Graphics.Gpu.Memory;
++using Ryujinx.Memory.Range;
++using Ryujinx.Memory.Tracking;
++using System;
++using System.Text;
++
++namespace Ryujinx.Graphics.Gpu.Shader
++{
++    /// <summary>
++    /// S2A（10-29 着色器垃圾代码防线）：取着色器失败的红行现场——分类、原异常，与每个阶段给原生层定因用的地址链
++    /// （GPU 地址 + 本次读取长度 → 物理段 → 宿主地址 → 宿主页的写跟踪状态）。StateUpdater（图形）与 ComputeClass（计算）共用。
++    /// 防线只留现场、不替代根修：取码读到的不是代码（双人成行 mini 局 r1「Invalid shader stage 15」）的根因在 GpuAccessor.GetCode 不经写跟踪。
++    /// </summary>
++    internal static class S2AShaderFaultReport
++    {
++        private const int MaxPagesPerReport = 64;   // 一条红行最多打几个宿主页（取码最多 1 MB = 64 个 16 KB 页）
++
++        /// <summary>取码越界（0012 安全阀 / 0300 负缓存，消息同一前缀）还是翻译失败（其余一切异常：垃圾代码过了取码、在翻译 / 生成 / 建程序时抛）。</summary>
++        public static bool IsFetchFault(Exception e) => e is InvalidOperationException && e.Message.StartsWith("S2A: shader code fetch");
++
++        public static string Category(Exception e) => IsFetchFault(e) ? "取码越界" : "翻译失败";
++
++        /// <summary>原异常类型与消息原样，加抛出处最内两帧。</summary>
++        public static string Describe(Exception e)
++        {
++            string[] frames = (e.StackTrace ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
++            string at = frames.Length == 0 ? "无栈" : string.Join(" ← ", frames, 0, Math.Min(2, frames.Length));
++            return $"异常 {e.GetType().FullName}：{e.Message}；抛出处 {at}";
++        }
++
++        /// <summary>一个阶段：GPU 地址与本次读取长度；物理段（物理地址 + 长度）；每段的宿主地址与其各宿主页的写跟踪状态。</summary>
++        public static void AppendStage(StringBuilder sb, MemoryManager mm, string stage, ulong va, ulong fetchEnd)
++        {
++            ulong len = fetchEnd > va ? fetchEnd - va : 0;
++            sb.Append($"{stage} GPU 地址 0x{va:X} 读取长度 0x{len:X}；");
++
++            // 没读（负缓存命中）就按头部 0x50 字节查链路
++            MultiRange range = mm.GetPhysicalRegions(va, len != 0 ? len : 0x50);
++            int pages = 0;
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange r = range.GetSubRange(i);
++                if (r.Address == MemoryManager.PteUnmapped)
++                {
++                    sb.Append($"物理段 未映射 长 0x{r.Size:X}；");
++                    continue;
++                }
++
++                sb.Append($"物理段 0x{r.Address:X} 长 0x{r.Size:X}；");
++                nint host = mm.Physical.GetHostPointer(new MultiRange(r.Address, r.Size));
++                if (host == 0)
++                {
++                    sb.Append("宿主地址拿不到（不是单段宿主映射）；");
++                    continue;
++                }
++
++                sb.Append($"宿主地址 0x{(ulong)host:X}；");
++                AppendTrack(sb, (ulong)host, r.Size, ref pages);
++            }
++        }
++
++        private static unsafe void AppendTrack(StringBuilder sb, ulong host, ulong size, ref int pages)
++        {
++            delegate*<ulong, ulong> query = MemoryTracking.S2ATrackPageInfo;
++            if (query == null)
++            {
++                sb.Append("写跟踪查询未提供；");
++                return;
++            }
++
++            ulong pageSize = (ulong)Environment.SystemPageSize;
++            for (ulong page = host & ~(pageSize - 1); page < host + size; page += pageSize)
++            {
++                if (++pages > MaxPagesPerReport)
++                {
++                    sb.Append($"写跟踪 超过 {MaxPagesPerReport} 页、余下略；");
++                    return;
++                }
++
++                ulong v = query(page);
++                sb.Append(v == ulong.MaxValue
++                    ? $"宿主页 0x{page:X}：未跟踪；"
++                    : $"宿主页 0x{page:X}：state {v & 0xff} lastp 0x{(v >> 8) & 0xff:X} act 0x{(v >> 16) & 0xff:X} want 0x{(v >> 24) & 0xff:X} READFLUSH {(v >> 32) & 0xff} dirty 0x{(v >> 40) & 0xff:X}；");
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index eab71e734bed8cde923d6a5304d8804362aa92aa..06775198a2f80545f22350ea670d246e36f453a8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -265,6 +265,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return cpShader;
+             }
+ 
++            S2AComputeFetchEnd[0] = 0;
++
+             // S2A（#723 P1）：同一地址上次取码失败、碰过的页此后没被写过、映射也没挪 → 直接抛上次的消息，不再解码。
+             S2AFaultHostOf s2aHost = new(channel.MemoryManager);
+             string s2aFault = _s2aFaults.Check(gpuVa, s2aHost);
+@@ -296,6 +298,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             //   确认成功 → 第一次失败是并发写造成的瞬时现象，用确认那次的上下文与状态继续，不记。
+             S2AFaultProbe s2aProbe = new();
+             gpuAccessor.S2AProbe = s2aProbe;
++            gpuAccessor.S2AFetchEnd = S2AComputeFetchEnd;
+ 
+             TranslatorContext translatorContext;
+             try
+@@ -314,6 +317,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 s2aAccessor2.InitializeReservedCounts(tfEnabled: false, vertexAsCompute: false);
+                 S2AFaultProbe s2aProbe2 = new();
+                 s2aAccessor2.S2AProbe = s2aProbe2;
++                s2aAccessor2.S2AFetchEnd = S2AComputeFetchEnd;
+ 
+                 try
+                 {
+@@ -424,6 +428,13 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         // S2A（#723 P1）：取码失败负缓存。命中时抛的消息前缀与安全阀同一条，两个调用方的 catch 不用改。
+         private readonly S2AShaderFaultCache _s2aFaults = new();
+ 
++        /// <summary>
++        /// S2A（着色器防线红行现场，10-29）：最近一次取图形 / 计算着色器时各阶段取码读到的最远 GPU 地址（不含；下标同 ShaderAddresses，计算用 [0]）。
++        /// 缓存没命中、要解码时清零，解码时 GpuAccessor 逐次更新；调用方（StateUpdater / ComputeClass）在 GPU 线程上接住异常后读。0 = 这次没读（如负缓存命中）
++        /// </summary>
++        internal readonly ulong[] S2AGraphicsFetchEnd = new ulong[Constants.ShaderStages + 1];
++        internal readonly ulong[] S2AComputeFetchEnd = new ulong[1];
++
+         /// <summary>S2A：给这些页武装写跟踪并记下读过区间的内容（未映射页返回 null，不武装）。</summary>
+         private static IS2AFaultWatch[] S2AArmFaultPages(S2AFaultHostOf host, S2AFaultPage[] pages)
+         {
+@@ -482,6 +493,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 {
+                     GpuAccessor gpuAccessor = new(context, channel, gpuAccessorState, stageIndex, addresses.Geometry != 0);
+                     gpuAccessor.S2AProbe = probe;
++                    gpuAccessor.S2AFetchEnd = S2AGraphicsFetchEnd;
++                    gpuAccessor.S2AFetchSlot = stageIndex + 1;
+                     TranslatorContext currentStage = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags, gpuVa);
+ 
+                     if (nextStage != null)
+@@ -491,7 +504,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                     if (stageIndex == 0 && addresses.VertexA != 0)
+                     {
++                        gpuAccessor.S2AFetchSlot = 0;   // 顶点 A 与顶点 B 共用这个取码器：记到 [0]，解完切回 [1]
+                         translatorContexts[0] = DecodeGraphicsShader(gpuAccessor, api, DefaultFlags | TranslationFlags.VertexA, addresses.VertexA);
++                        gpuAccessor.S2AFetchSlot = 1;
+                     }
+ 
+                     gpuAccessors[stageIndex] = gpuAccessor;
+@@ -526,6 +541,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return gpShaders;
+             }
+ 
++            Array.Clear(S2AGraphicsFetchEnd);
++
+             // S2A（#723 P1）：这组地址上次取码失败、碰过的页此后没被写过、映射也没挪 → 直接抛上次的消息，不再解码（计算路径同）。
+             S2AFaultHostOf s2aHost = new(channel.MemoryManager);
+             S2AFaultKey s2aKey = S2AFaultKeyOf(addresses);
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index 9fbbabdc52f7420e297bb28ceeac5450e2d8f0e4..f352c2e54eacad2c22ad13a6e0b34b2df95d47fc 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -48,6 +48,12 @@ namespace Ryujinx.Memory.Tracking
+         public static unsafe delegate*<ulong, ulong, void> S2AModSet;
+         public static unsafe delegate*<ulong, ulong, void> S2AModClear;
+ 
++        /// <summary>
++        /// S2A（诊断，10-29 着色器垃圾代码防线）：宿主页的写跟踪状态（NxTrack.Init 设 → graphics/track s2a_track_page_info，只读、不取锁、任意线程）。
++        /// 返回 UINT64_MAX = 没跟踪过；否则按字节打包 state / lastp / act / want / READFLUSH / dirty（见 s2a_track.h）。为空 = 未提供（原生层没这个导出）
++        /// </summary>
++        public static unsafe delegate*<ulong, ulong> S2ATrackPageInfo;
++
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 

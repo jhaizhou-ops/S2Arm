@@ -1,0 +1,81 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index b38f5820154042c7a07a4ec581ab2ae3522cc2fe..3d99ffc26920306cb7788a24f1c9e008e4bb97ff 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -1694,9 +1694,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 // Handles list is not modified by another thread, only replaced, so this is thread safe.
+                 // Remove modified flags from all overlapping handles, so that the textures don't flush to unmapped/remapped GPU memory.
+ 
+-                MultiRange subRange = Storage.Range.Slice((ulong)handle.Offset, (ulong)handle.Size);
+-
+-                if (range.OverlapsWith(subRange))
++                // S2A：不分配的切片判重叠（多段时 Slice 每次新建 List + 数组；渲染目标每次绑定 / 解绑都走这里）
++                if (Storage.Range.SliceOverlapsWith((ulong)handle.Offset, (ulong)handle.Size, range))
+                 {
+                     if ((ignore == null || !handle.HasDependencyTo(ignore)) && handle.Modified)
+                     {
+diff --git a/src/Ryujinx.Memory/Range/MultiRange.cs b/src/Ryujinx.Memory/Range/MultiRange.cs
+index c3bb99f35d53f12b285b65f78c253ebfebae63d4..a062aa9afad0e8e165e18c78766d53d63e89cb20 100644
+--- a/src/Ryujinx.Memory/Range/MultiRange.cs
++++ b/src/Ryujinx.Memory/Range/MultiRange.cs
+@@ -116,6 +116,60 @@ namespace Ryujinx.Memory.Range
+         /// <param name="index">Index of the physical region</param>
+         /// <returns>Region at the index specified</returns>
+         /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is invalid</exception>
++        /// <summary>
++        /// S2A：等价于 <c>Slice(offset, size).OverlapsWith(other)</c>，但不分配。
++        /// 多段时 Slice 每次新建 List 与数组，只为判重叠就浪费：贴图组 ClearModified 每次渲染目标绑定 / 解绑都走（10-23 怪猎每次约 248 B、每帧约 2.5 KB）。
++        /// 切法逐行照抄 Slice（含无效地址段），切出一段就和 other 的各段比。
++        /// </summary>
++        public bool SliceOverlapsWith(ulong offset, ulong size, MultiRange other)
++        {
++            if (HasSingleRange)
++            {
++                return Slice(offset, size).OverlapsWith(other);
++            }
++
++            foreach (MemoryRange range in _ranges)
++            {
++                bool has = false;
++                MemoryRange piece = default;
++
++                if ((long)offset <= 0)
++                {
++                    piece = new MemoryRange(range.Address, Math.Min(size, range.Size));
++                    size -= range.Size;
++                    has = true;
++                }
++                else if (offset < range.Size)
++                {
++                    ulong sliceSize = Math.Min(size, range.Size - offset);
++
++                    piece = range.Address == InvalidAddress ? new MemoryRange(range.Address, sliceSize) : new MemoryRange(range.Address + offset, sliceSize);
++                    size -= sliceSize;
++                    has = true;
++                }
++
++                if (has)
++                {
++                    for (int j = 0; j < other.Count; j++)
++                    {
++                        if (piece.OverlapsWith(other.GetSubRangeUnchecked(j)))
++                        {
++                            return true;
++                        }
++                    }
++                }
++
++                if ((long)size <= 0)
++                {
++                    break;
++                }
++
++                offset -= range.Size;
++            }
++
++            return false;
++        }
++
+         public MemoryRange GetSubRange(int index)
+         {
+             if (HasSingleRange)

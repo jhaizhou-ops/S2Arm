@@ -1,0 +1,30 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index b72bc3eb46d42fe6ed12e8ec65603fc2ace88f44..e09b0d4d863e1d544351ea5af9750c2b67539771 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -529,6 +529,25 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 S2ARemember(address, size, overlaps[0]); // S2A：只在完整包含时记（此时下面的判断不成立，不动缓冲表）
+             }
+ 
++            // S2A：顺序流式写的新区间（10-23 暗黑2 稳态：全新缓冲 99% 是 ≤4K、紧贴已有缓冲末尾，存活缓冲 589→1120 只增不减，
++            //   随后又被跨多段的区间合并重建）。没有重叠、但前 2 页内正好有缓冲结束（中间空隙已映射），且新区间连空隙不超过 2 页
++            //   （= 下面合并分支的 1.5 倍预扩条件）→ 区间并上那块缓冲：走合并 + 预扩，之后的顺序小区间落进预扩出的部分，不再各建一个小缓冲。
++            //   大于 2 页的不这样做：合并不预扩时每次都要整块拷旧缓冲，顺序大块会变成平方级拷贝
++            if (overlaps.Length == 0 && address >= BufferAlignmentSize * 2)
++            {
++                ReadOnlySpan<Buffer> prev = _buffers.FindOverlapsAsSpan(address - BufferAlignmentSize * 2, BufferAlignmentSize * 2);
++
++                if (prev.Length != 0 && prev[^1].EndAddress <= address && address + size - prev[^1].EndAddress <= BufferAlignmentSize * 2 &&
++                    (prev[^1].EndAddress == address || _physicalMemory.IsRangeMapped(prev[^1].EndAddress, address - prev[^1].EndAddress)))
++                {
++                    // 请求区间起点拉回那块缓冲的起点：两者真正重叠，下面预扩后按新区间重查重叠时一定查得到它（不拉回会查空、取 overlaps[0] 越界）
++                    ulong reqEnd = address + size;
++                    address = prev[^1].Address;
++                    size = reqEnd - address;
++                    overlaps = _buffers.FindOverlapsAsSpan(address, size);
++                }
++            }
++
+             if (overlaps.Length != 0)
+             {
+                 // The buffer already exists. We can just return the existing buffer

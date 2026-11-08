@@ -1,0 +1,367 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+index cd71103ca49aeeff5b2871e049a6f2b0e0330324..60ed644d52ac3e533048f60db0387efd870a5c4d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletCreator/ILibraryAppletAccessor.cs
+@@ -143,7 +143,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+         {
+             IStorage data = GetObject<IStorage>(context, 0);
+ 
+-            _normalSession.Push(data.Data);
++            _normalSession.Push(data.Data.ToArray());
+ 
+             return ResultCode.Success;
+         }
+@@ -170,7 +170,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+         {
+             IStorage data = GetObject<IStorage>(context, 0);
+ 
+-            _interactiveSession.Push(data.Data);
++            _interactiveSession.Push(data.Data.ToArray());
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletProxy/ILibraryAppletSelfAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletProxy/ILibraryAppletSelfAccessor.cs
+index 50df65e44e3f8d98a616064f2327f1499f5fa51c..1751e2c185049b475f9e27b716084bddc86dfb19 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletProxy/ILibraryAppletSelfAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/LibraryAppletProxy/ILibraryAppletSelfAccessor.cs
+@@ -59,7 +59,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Lib
+                 return ResultCode.NullObject;
+             }
+     
+-            _appletStandalone.InputData.Enqueue(appletData.Data);
++            _appletStandalone.InputData.Enqueue(appletData.Data.ToArray());
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
+index f1ae81f8d2d7bf409254cd0af5d699e465fc450c..c383e8f58330219d8466f495997682a3b270fb7a 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ILibraryAppletCreator.cs
+@@ -47,13 +47,34 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+                 return ResultCode.ObjectInvalid;
+             }
+ 
+-            MakeObject(context, new IStorage(new byte[size]));
++            if (size > int.MaxValue)
++            {
++                return ResultCode.ObjectInvalid;
++            }
++
++            // S2Arm: native memory owned by the storage (freed when the game closes it), not a managed array of the game-chosen size
++            MakeObject(context, IStorage.CreateNative((int)size));
+ 
+             // NOTE: Returns ResultCode.MemoryAllocationFailed if IStorage is null, it doesn't occur in our case.
+ 
+             return ResultCode.Success;
+         }
+ 
++        // S2Arm: the storage is the game's transfer memory itself (a view, as on hardware) when the host can map it directly; otherwise a copy
++        private static System.Memory<byte> TransferMemoryData(KTransferMemory transferMem)
++        {
++            if (S2AHooks.GuestView != null && S2AHooks.GuestView(transferMem.Address, (int)transferMem.Size) is System.Memory<byte> view)
++            {
++                return view;
++            }
++
++            byte[] data = new byte[transferMem.Size];
++
++            transferMem.Creator.CpuMemory.Read(transferMem.Address, data);
++
++            return data;
++        }
++
+         [CommandCmif(11)]
+         // CreateTransferMemoryStorage(b8, u64, handle<copy>) -> object<nn::am::service::IStorage>
+         public ResultCode CreateTransferMemoryStorage(ServiceCtx context)
+@@ -69,9 +90,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+                 return ResultCode.ObjectInvalid;
+             }
+ 
+-            byte[] data = new byte[transferMem.Size];
+-
+-            transferMem.Creator.CpuMemory.Read(transferMem.Address, data);
++            System.Memory<byte> data = TransferMemoryData(transferMem);
+ 
+             context.Device.System.KernelContext.Syscall.CloseHandle(handle);
+ 
+@@ -94,9 +113,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+                 return ResultCode.ObjectInvalid;
+             }
+ 
+-            byte[] data = new byte[transferMem.Size];
+-
+-            transferMem.Creator.CpuMemory.Read(transferMem.Address, data);
++            System.Memory<byte> data = TransferMemoryData(transferMem);
+ 
+             context.Device.System.KernelContext.Syscall.CloseHandle(handle);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorage.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorage.cs
+index 311084aa19c3b5f66b58c30e6e7637e0a40cc7e5..7d9bfe95a54809b64b44f4472a81f77336cc26c9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorage.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorage.cs
+@@ -1,9 +1,17 @@
++using Ryujinx.Memory;
++using System;
++using System.Runtime.InteropServices;
++
+ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE
+ {
+-    class IStorage : IpcService
++    // S2Arm: storage data is Memory<byte> so it can be a view of the game's transfer memory (no copy) or native memory owned by the
++    // storage (CreateStorage of a game-chosen size), instead of a managed array of the requested length (iPhone low address space is scarce)
++    class IStorage : IpcService, IDisposable
+     {
+         public bool IsReadOnly { get; private set; }
+-        public byte[] Data { get; private set; }
++        public Memory<byte> Data { get; private set; }
++
++        private unsafe byte* _native;
+ 
+         public IStorage(byte[] data, bool isReadOnly = false)
+         {
+@@ -11,6 +19,30 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE
+             Data = data;
+         }
+ 
++        public IStorage(Memory<byte> data, bool isReadOnly = false)
++        {
++            IsReadOnly = isReadOnly;
++            Data = data;
++        }
++
++        // Zeroed native memory owned by this storage, freed on Dispose
++        public static unsafe IStorage CreateNative(int size)
++        {
++            byte* p = (byte*)NativeMemory.AllocZeroed((nuint)size);
++
++            return new IStorage(new NativeMemoryManager<byte>(p, size).Memory) { _native = p };
++        }
++
++        public unsafe void Dispose()
++        {
++            if (_native != null)
++            {
++                NativeMemory.Free(_native);
++                _native = null;
++                Data = Memory<byte>.Empty;
++            }
++        }
++
+         [CommandCmif(0)]
+         // Open() -> object<nn::am::service::IStorageAccessor>
+         public ResultCode Open(ServiceCtx context)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorageAccessor.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorageAccessor.cs
+index 54c7b69e5208977bfb6fc3ac6ad37f8314af764b..97ada6505a17996b689d4e3a64074b7aee40ff56 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorageAccessor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/IStorageAccessor.cs
+@@ -49,11 +49,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE
+                     size = maxSize;
+                 }
+ 
+-                byte[] data = new byte[size];
+-
+-                context.Memory.Read(position, data);
+-
+-                Buffer.BlockCopy(data, 0, _storage.Data, (int)writePosition, (int)size);
++                // S2Arm: copy straight from the game buffer into the storage (no intermediate array of the request length)
++                context.Memory.GetSpan(position, (int)size).CopyTo(_storage.Data.Span[(int)writePosition..]);
+             }
+ 
+             return ResultCode.Success;
+@@ -74,11 +71,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE
+ 
+             size = Math.Min(size, (ulong)_storage.Data.Length - readPosition);
+ 
+-            byte[] data = new byte[size];
+-
+-            Buffer.BlockCopy(_storage.Data, (int)readPosition, data, 0, (int)size);
+-
+-            context.Memory.Write(position, data);
++            // S2Arm: copy straight from the storage into the game buffer (no intermediate array of the request length)
++            context.Memory.Write(position, _storage.Data.Span.Slice((int)readPosition, (int)size));
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 7f885889652aca97a5c920abc228960b7d0ca4bc..4f5884fe3600acae6c5ba46e28ab71a9052fe1fa 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -551,7 +551,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+         {
+             AppletAE.IStorage data = GetObject<AppletAE.IStorage>(context, 0);
+ 
+-            context.Device.Configuration.UserChannelPersistence.Push(data.Data);
++            context.Device.Configuration.UserChannelPersistence.Push(data.Data.ToArray());
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+index 873782d87089f55cdbd274a1d1fd2415879b9677..1c4077b33055a57f8f144c315e46acefcaed8e95 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+@@ -138,27 +138,56 @@ namespace Ryujinx.HLE.HOS.Services.Ro
+                 return ResultCode.InvalidNro;
+             }
+ 
+-            byte[] nroData = new byte[nroSize];
++            byte[] nroHash;
++            NroExecutable nro;
+ 
+-            _owner.CpuMemory.Read(nroAddress, nroData);
++            // S2Arm: hash and parse the NRO in place in game memory when the host can view it (no managed copy of the whole NRO;
++            // the game keeps the buffer, which on hardware becomes the NRO's code mapping)
++            if (S2AHooks.GuestView?.Invoke(nroAddress, (int)nroSize) is System.Memory<byte> nroView)
++            {
++                nroHash = SHA256.HashData(nroView.Span);
+ 
+-            MemoryStream stream = new(nroData);
++                if (!IsNroHashPresent(nroHash))
++                {
++                    return ResultCode.NotRegistered;
++                }
+ 
+-            byte[] nroHash = SHA256.HashData(stream);
++                if (IsNroLoaded(nroHash))
++                {
++                    return ResultCode.AlreadyLoaded;
++                }
+ 
+-            if (!IsNroHashPresent(nroHash))
+-            {
+-                return ResultCode.NotRegistered;
++                unsafe
++                {
++                    using System.Buffers.MemoryHandle pin = nroView.Pin();
++                    UnmanagedMemoryStream header = new((byte*)pin.Pointer, nroView.Length);
++                    nro = new NroExecutable(header.AsStorage(), nroView, nroAddress, bssAddress);
++                }
+             }
+-
+-            if (IsNroLoaded(nroHash))
++            else
+             {
+-                return ResultCode.AlreadyLoaded;
+-            }
++                byte[] nroData = new byte[nroSize];
+ 
+-            stream.Position = 0;
++                _owner.CpuMemory.Read(nroAddress, nroData);
+ 
+-            NroExecutable nro = new(stream.AsStorage(), nroAddress, bssAddress);
++                MemoryStream stream = new(nroData);
++
++                nroHash = SHA256.HashData(stream);
++
++                if (!IsNroHashPresent(nroHash))
++                {
++                    return ResultCode.NotRegistered;
++                }
++
++                if (IsNroLoaded(nroHash))
++                {
++                    return ResultCode.AlreadyLoaded;
++                }
++
++                stream.Position = 0;
++
++                nro = new(stream.AsStorage(), nroAddress, bssAddress);
++            }
+ 
+             // Check if everything is page align.
+             if ((nro.Text.Length & 0xFFF) != 0 || (nro.Ro.Length & 0xFFF) != 0 ||
+diff --git a/src/Ryujinx.HLE/Loaders/Executables/IExecutable.cs b/src/Ryujinx.HLE/Loaders/Executables/IExecutable.cs
+index 06f6d96943a2f311b5353a80a605db1d00764755..6b02587c7438960e2083b52103926299b452ac73 100644
+--- a/src/Ryujinx.HLE/Loaders/Executables/IExecutable.cs
++++ b/src/Ryujinx.HLE/Loaders/Executables/IExecutable.cs
+@@ -4,7 +4,7 @@ namespace Ryujinx.HLE.Loaders.Executables
+ {
+     interface IExecutable
+     {
+-        byte[] Program { get; }
++        Span<byte> Program { get; }
+         Span<byte> Text { get; }
+         Span<byte> Ro { get; }
+         Span<byte> Data { get; }
+diff --git a/src/Ryujinx.HLE/Loaders/Executables/KipExecutable.cs b/src/Ryujinx.HLE/Loaders/Executables/KipExecutable.cs
+index 293e5f846b2a26bc742015d085a529de8549b943..0083de7ea2930cd96c52738de4e8a0d9399b0717 100644
+--- a/src/Ryujinx.HLE/Loaders/Executables/KipExecutable.cs
++++ b/src/Ryujinx.HLE/Loaders/Executables/KipExecutable.cs
+@@ -8,6 +8,7 @@ namespace Ryujinx.HLE.Loaders.Executables
+     class KipExecutable : IExecutable
+     {
+         public byte[] Program { get; }
++        Span<byte> IExecutable.Program => Program;
+         public Span<byte> Text => Program.AsSpan((int)TextOffset, (int)TextSize);
+         public Span<byte> Ro => Program.AsSpan((int)RoOffset, (int)RoSize);
+         public Span<byte> Data => Program.AsSpan((int)DataOffset, (int)DataSize);
+diff --git a/src/Ryujinx.HLE/Loaders/Executables/NroExecutable.cs b/src/Ryujinx.HLE/Loaders/Executables/NroExecutable.cs
+index 6b5a8c8311df57f5160ee7d142ea1206cd1cb56f..39324c4fc2c69d4d9e367c06cb54a47ab9810daa 100644
+--- a/src/Ryujinx.HLE/Loaders/Executables/NroExecutable.cs
++++ b/src/Ryujinx.HLE/Loaders/Executables/NroExecutable.cs
+@@ -6,10 +6,12 @@ namespace Ryujinx.HLE.Loaders.Executables
+ {
+     class NroExecutable : Nro, IExecutable
+     {
+-        public byte[] Program { get; }
+-        public Span<byte> Text => Program.AsSpan((int)TextOffset, (int)Header.NroSegments[0].Size);
+-        public Span<byte> Ro => Program.AsSpan((int)RoOffset, (int)Header.NroSegments[1].Size);
+-        public Span<byte> Data => Program.AsSpan((int)DataOffset, (int)Header.NroSegments[2].Size);
++        // S2Arm: Memory<byte> so the image can be a view of the game's NRO buffer (no copy of the whole NRO)
++        private readonly Memory<byte> _program;
++        public Span<byte> Program => _program.Span;
++        public Span<byte> Text => Program.Slice((int)TextOffset, (int)Header.NroSegments[0].Size);
++        public Span<byte> Ro => Program.Slice((int)RoOffset, (int)Header.NroSegments[1].Size);
++        public Span<byte> Data => Program.Slice((int)DataOffset, (int)Header.NroSegments[2].Size);
+ 
+         public uint TextOffset => Header.NroSegments[0].FileOffset;
+         public uint RoOffset => Header.NroSegments[1].FileOffset;
+@@ -25,7 +27,7 @@ namespace Ryujinx.HLE.Loaders.Executables
+ 
+         public NroExecutable(IStorage inStorage, ulong sourceAddress = 0, ulong bssAddress = 0) : base(inStorage)
+         {
+-            Program = new byte[FileSize];
++            _program = new byte[FileSize];
+ 
+             SourceAddress = sourceAddress;
+             BssAddress = bssAddress;
+@@ -34,5 +36,14 @@ namespace Ryujinx.HLE.Loaders.Executables
+             OpenNroSegment(NroSegmentType.Ro, false).Read(0, Ro);
+             OpenNroSegment(NroSegmentType.Data, false).Read(0, Data);
+         }
++
++        // S2Arm: the whole NRO file already in memory (a view of the game buffer): segments are slices of it, nothing is read or copied
++        public NroExecutable(IStorage inStorage, Memory<byte> image, ulong sourceAddress, ulong bssAddress) : base(inStorage)
++        {
++            _program = image;
++
++            SourceAddress = sourceAddress;
++            BssAddress = bssAddress;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/Loaders/Executables/NsoExecutable.cs b/src/Ryujinx.HLE/Loaders/Executables/NsoExecutable.cs
+index 84f229d8eb4b9c2b0c18181ebc00895583d9d69b..099b1d14d1683798656d38d4fa36b079b3cd7cb9 100644
+--- a/src/Ryujinx.HLE/Loaders/Executables/NsoExecutable.cs
++++ b/src/Ryujinx.HLE/Loaders/Executables/NsoExecutable.cs
+@@ -13,6 +13,7 @@ namespace Ryujinx.HLE.Loaders.Executables
+     partial class NsoExecutable : IExecutable
+     {
+         public byte[] Program { get; }
++        Span<byte> IExecutable.Program => Program;
+         public Span<byte> Text => Program.AsSpan((int)TextOffset, (int)TextSize);
+         public Span<byte> Ro => Program.AsSpan((int)RoOffset, (int)RoSize);
+         public Span<byte> Data => Program.AsSpan((int)DataOffset, (int)DataSize);
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 8e5d2ca938d54ba7f4862a4557a3e283ee76f8a6..04a4c248f66b3d0dbb6447e69dea4a9c71198d05 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -40,6 +40,9 @@ namespace Ryujinx.HLE
+         // OpenAocDataStorage gives the RomFS image of a registered DLC, null when it is licence-only (S2A reports red)
+         public static System.Func<ulong, LibHac.Fs.IStorage> OpenAocDataStorage;
+ 
++        // A Memory<byte> viewing game memory [va, va + size) in place (S2A: game addresses are host addresses); null = copy instead
++        public static System.Func<ulong, int, System.Memory<byte>?> GuestView;
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot == null)

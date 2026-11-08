@@ -1,0 +1,139 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/Common/MemoryAllocator.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/Common/MemoryAllocator.cs
+index c98052094847954ba23d09420770eadaf5ca76a2..cc5dedaae99655368e80aba40ab6b30b166a5d6d 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/Common/MemoryAllocator.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/Common/MemoryAllocator.cs
+@@ -77,9 +77,15 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Common
+                 if (item.Pointer == ptr)
+                 {
+                     item.InUse = false;
+-                    break;
++                    return;
+                 }
+             }
++
++            // S2Arm: an allocation made while every pool entry was in use is not in the pool; upstream never freed it (a leak per such allocation).
++            if (ptr != nint.Zero)
++            {
++                Marshal.FreeHGlobal(ptr);
++            }
+         }
+ 
+         public void Dispose()
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+index 235f29e89c3aff6f3158046395f58e8c53434617..fa99aeb34aaee935cc1d11c737abade86737c3ca 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+@@ -110,61 +110,69 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             cm.AllocTileWorkerData(_allocator, tileCols, tileRows, maxThreads);
+             cm.AllocContextBuffers(_allocator, output.Width, output.Height);
+ 
+-            cm.InitContextBuffers();
+-            LoadSegmentMap(ref cm, ref pictureInfo);
+-            cm.SetupSegmentationDequant();
+-            cm.SetupScaleFactors();
++            // S2Arm: release the per-frame buffers on every exit, including a frame that fails to decode (InternalErrorException → return false).
++            // Upstream freed them only after a successful decode, so each failed frame left its buffers marked in use in the 10-entry pool and the
++            // following frames allocated past the pool, untracked and never freed (11-07 GRID Autosport opening movie: about 2 MB a frame until killed at 8 GB).
++            try
++            {
++                cm.InitContextBuffers();
++                LoadSegmentMap(ref cm, ref pictureInfo);
++                cm.SetupSegmentationDequant();
++                cm.SetupScaleFactors();
+ 
+-            cm.SetMvs(mvsIn);
++                cm.SetMvs(mvsIn);
+ 
+-            if (cm.Lf.FilterLevel != 0 && cm.SkipLoopFilter == 0)
+-            {
+-                LoopFilter.LoopFilterFrameInit(ref cm, cm.Lf.FilterLevel);
+-            }
++                if (cm.Lf.FilterLevel != 0 && cm.SkipLoopFilter == 0)
++                {
++                    LoopFilter.LoopFilterFrameInit(ref cm, cm.Lf.FilterLevel);
++                }
+ 
+-            fixed (byte* dataPtr = bitstream)
+-            {
+-                try
++                fixed (byte* dataPtr = bitstream)
+                 {
+-                    if (maxThreads > 1 && tileRows == 1 && tileCols > 1)
++                    try
+                     {
+-                        DecodeFrame.DecodeTilesMt(ref cm, new ArrayPtr<byte>(dataPtr, bitstream.Length), maxThreads);
+-
+-                        LoopFilter.LoopFilterFrameMt(
+-                            ref cm.Mb.CurBuf,
+-                            ref cm,
+-                            ref cm.Mb,
+-                            cm.Lf.FilterLevel,
+-                            false,
+-                            false,
+-                            maxThreads);
++                        if (maxThreads > 1 && tileRows == 1 && tileCols > 1)
++                        {
++                            DecodeFrame.DecodeTilesMt(ref cm, new ArrayPtr<byte>(dataPtr, bitstream.Length), maxThreads);
++
++                            LoopFilter.LoopFilterFrameMt(
++                                ref cm.Mb.CurBuf,
++                                ref cm,
++                                ref cm.Mb,
++                                cm.Lf.FilterLevel,
++                                false,
++                                false,
++                                maxThreads);
++                        }
++                        else
++                        {
++                            DecodeFrame.DecodeTiles(ref cm, new ArrayPtr<byte>(dataPtr, bitstream.Length));
++
++                            LoopFilter.LoopFilterFrame(
++                                ref cm.Mb.CurBuf,
++                                ref cm,
++                                ref cm.Mb,
++                                cm.Lf.FilterLevel,
++                                false,
++                                false);
++                        }
+                     }
+-                    else
++                    catch (InternalErrorException)
+                     {
+-                        DecodeFrame.DecodeTiles(ref cm, new ArrayPtr<byte>(dataPtr, bitstream.Length));
+-
+-                        LoopFilter.LoopFilterFrame(
+-                            ref cm.Mb.CurBuf,
+-                            ref cm,
+-                            ref cm.Mb,
+-                            cm.Lf.FilterLevel,
+-                            false,
+-                            false);
++                        return false;
+                     }
+                 }
+-                catch (InternalErrorException)
+-                {
+-                    return false;
+-                }
+-            }
+-
+-            SaveSegmentMap(ref cm);
+-            cm.GetMvs(mvsOut);
+ 
+-            cm.FreeTileWorkerData(_allocator);
+-            cm.FreeContextBuffers(_allocator);
++                SaveSegmentMap(ref cm);
++                cm.GetMvs(mvsOut);
+ 
+-            return true;
++                return true;
++            }
++            finally
++            {
++                cm.FreeTileWorkerData(_allocator);
++                cm.FreeContextBuffers(_allocator);
++            }
+         }
+ 
+         private void LoadSegmentMap(ref Vp9Common cm, ref Vp9PictureInfo pictureInfo)

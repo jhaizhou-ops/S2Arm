@@ -1,0 +1,132 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 8c0e81f0b3c1885dc8b9598f5dfba4d6613bb33a..a4de1b25c972c1d6c49efde386d80b18d52e434b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -363,6 +363,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                         ulong alignedSize = alignedEndAddress - alignedAddress;
+ 
+                         Buffer buffer = _buffers.FindOverlap(alignedAddress, alignedSize);
++
++                        // S2A：已映射子段的物理缓冲上面 CreateBuffer 刚建过；查不到 = 缓冲表不一致，
++                        //   报红带地址/大小，不返回假缓冲
++                        if (buffer == null)
++                        {
++                            throw new InvalidOperationException($"S2A buffer cache inconsistent: no physical buffer for mapped range 0x{alignedAddress:X}+0x{alignedSize:X}");
++                        }
++
+                         BufferRange bufferRange = buffer.GetRange(alignedAddress, alignedSize, false);
+ 
+                         alignedSubRanges[i] = new MemoryRange(alignedAddress, alignedSize);
+@@ -435,6 +443,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 {
+                     Buffer buffer = _buffers.FindOverlap(subRange.Address, subRange.Size);
+ 
++                    // S2A：已映射子段的物理缓冲上面 CreateBuffer 刚建过；查不到 = 缓冲表不一致，
++                    //   报红带地址/大小，不返回假缓冲（BotW 9400 NRE 顶帧）
++                    if (buffer == null)
++                    {
++                        throw new InvalidOperationException($"S2A buffer cache inconsistent: no physical buffer for mapped range 0x{subRange.Address:X}+0x{subRange.Size:X}");
++                    }
++
+                     virtualBuffer.AddPhysicalDependency(buffer, subRange.Address, dstOffset, subRange.Size);
+                     physicalBuffers.Add(buffer);
+                 }
+@@ -616,7 +631,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     
+                     ulong newSize = endAddress - address;
+ 
+-                    _buffers.Add(CreateBufferAligned(address, newSize, stage, anySparseCompatible, overlapsArray));
++                    CreateBufferAligned(address, newSize, stage, anySparseCompatible, overlapsArray);
+                 }
+             }
+             else
+@@ -681,7 +696,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     _s2aGen++; // S2A：缓冲表要变，最近命中表作废
+                     _buffers.RemoveRange(overlaps[0], overlaps[^1]);
+                     
+-                    _buffers.Add(CreateBufferAligned(address, newSize, stage, sparseAligned, overlapsArray));
++                    CreateBufferAligned(address, newSize, stage, sparseAligned, overlapsArray);
+                 }
+             }
+             else
+@@ -708,6 +723,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             Buffer newBuffer = new(_context, _physicalMemory, address, size, stage, sparseCompatible, overlaps);
+             S2AAllocTrace.Step(0x40_0029, ref s2aA);
+ 
++            // S2A：新缓冲先入表再做下面的活——CopyTo / SynchronizeMemory / RecreateMultiRangeBuffers 都会
++            //   回到缓冲表（重建多段缓冲会对同段地址 CreateBuffer）。先入表让任何重入都看到一致表；
++            //   否则空窗里建出的缓冲与本缓冲重叠，「互不重叠」表被破坏，之后 FindOverlap 拿空 → NRE
++            //   （BotW 8E/9000/9400 generic READY+~70s 根因：两条 CreateBufferAligned 合并分支同此窗）
++            _buffers.Add(newBuffer);
++
+             for (int index = 0; index < overlaps.Length; index++)
+             {
+                 Buffer buffer = overlaps[index];
+@@ -995,6 +1016,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+                 Buffer subBuffer = _buffers.FindOverlap(subRange.Address, subRange.Size);
+ 
++                // S2A：已映射子段必有物理缓冲（TranslateAndCreate* 已建）；查不到 = 缓冲表不一致，
++                //   报红带地址/大小，不静默跳过、不返回假缓冲（BotW 9000 NRE 顶帧）
++                if (subBuffer == null)
++                {
++                    throw new InvalidOperationException($"S2A buffer cache inconsistent: no physical buffer for mapped range 0x{subRange.Address:X}+0x{subRange.Size:X}");
++                }
++
+                 subBuffer.SynchronizeMemory(subRange.Address, subRange.Size);
+ 
+                 if (write)
+@@ -1018,7 +1046,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 }
+             }
+ 
+-            if (write && buffer != null && !buffer.IsSparse)
++            // S2A：CreateBuffer 走过的区间必有完整覆盖它的多段缓冲；查不到 = 缓冲表不一致，报红不返回空
++            if (buffer == null)
++            {
++                throw new InvalidOperationException($"S2A buffer cache inconsistent: no virtual buffer contains range {range}");
++            }
++
++            if (write && !buffer.IsSparse)
+             {
+                 buffer.AddModifiedRegion(range, ++_virtualModifiedSequenceNumber);
+             }
+@@ -1048,6 +1082,13 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     S2ARemember(address, size, buffer);
+                 }
+ 
++                // S2A：调用方契约是「该区间已有缓冲」；查不到 = 缓冲表不一致，
++                //   报红带地址/大小，不返回假缓冲
++                if (buffer == null)
++                {
++                    throw new InvalidOperationException($"S2A buffer cache inconsistent: no buffer for range 0x{address:X}+0x{size:X}");
++                }
++
+                 buffer.CopyFromDependantVirtualBuffers();
+                 buffer.SynchronizeMemory(address, size);
+ 
+@@ -1103,6 +1144,12 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                     S2ARemember(address, size, buffer);
+                 }
+ 
++                // S2A：与 GetBuffer 同一契约——查不到 = 缓冲表不一致，报红带地址/大小
++                if (buffer == null)
++                {
++                    throw new InvalidOperationException($"S2A buffer cache inconsistent: no buffer for range 0x{address:X}+0x{size:X}");
++                }
++
+                 if (copyBackVirtual)
+                 {
+                     buffer.CopyFromDependantVirtualBuffers();
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 624a86d8aaf1447d78fb39e531b6f962378594f2..3c8e2351389ff1e78c623ab3b56c424c23cc2253 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -19,6 +19,7 @@
+     <InternalsVisibleTo Include="S2A.GraphicsWriterTest" /> <!-- 真实缓存文件的图形关闭写盘排空回归 -->
+     <InternalsVisibleTo Include="S2A.VvlStageTest" /> <!-- S2A：宿主侧 VVL 回归单测（graphics/tools/shbake/tests/vvl）直测 ShaderInfoBuilder 内部类型 -->
+     <InternalsVisibleTo Include="S2A.GpuBufferHoleTest" /> <!-- S2A：带洞多段缓冲提交绑定单测（tests/gpu_bufferhole，BotW qbotw8e NRE） -->
++    <InternalsVisibleTo Include="S2A.GpuBufferRecreateTest" /> <!-- S2A：缓冲表合并窗口一致性单测（tests/gpu_bufrecreate，BotW 8E/9000/9400 NRE） -->
+   </ItemGroup>
+ 
+   <ItemGroup>

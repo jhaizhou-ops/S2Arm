@@ -1,0 +1,285 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 7da262dbce7bad2a09c2ec2c06858bd5095c9bb8..f6e48d5766fa5bd6f2103953963e4caf806ac03a 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -40,6 +40,11 @@ namespace Ryujinx.Audio.Backends.Apple
+         // DynamicRingBuffer copy of everything queued; see AudioSampleQueue. The pump moves them into the device buffers
+         private Pump _pump;
+         private AudioSampleQueue _samples;
++        // S2Arm (11-02 Pokopia iPhone 断续): queued samples count as played for the game one device pull ahead of the hand-backs
++        //   (see PlaybackCredit); bursts of hand-backs ≤ 2 ms apart are one pull; the lead is at most 100 ms
++        private PlaybackCredit _credit;
++        private const int CreditBurstGapMicroseconds = 2000;
++        private const int CreditMaxLeadMilliseconds = 100;
+         private readonly ManualResetEvent _updateRequiredEvent;
+ 
+         private readonly AudioQueueOutputCallback _callbackDelegate;
+@@ -327,7 +332,8 @@ namespace Ryujinx.Audio.Backends.Apple
+                 // 收回的真实样本没播，但当作已播完：让游戏的缓冲照常放回去（丢掉不到 1.6 秒声音），内部补垫不计入完成额度
+                 if (reclaimed > 0)
+                 {
+-                    ProcessPlayedSamples(reclaimed);
++                    _credit.Reclaimed(reclaimed);
++                    S2ACredit();
+                 }
+ 
+                 int startRc = -1;
+@@ -336,6 +342,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 if (_started && newRc == 0)
+                 {
+                     _pump.Pump();
++                    S2ACredit();
+                     startRc = AudioQueueStart(_audioQueue, nint.Zero);
+                     _queueRunning = startRc == 0;
+                 }
+@@ -365,6 +372,8 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+                 _pump = new Pump(this, (int)BufferBytes);
+                 _samples = _pump.Samples;
++                _credit = new PlaybackCredit(_bytesPerFrame, (long)_bytesPerFrame * RequestedSampleRate * CreditMaxLeadMilliseconds / 1000,
++                                             Stopwatch.Frequency * CreditBurstGapMicroseconds / 1_000_000);
+             }
+         }
+ 
+@@ -460,17 +469,29 @@ namespace Ryujinx.Audio.Backends.Apple
+             if (bufferIndex < 0)
+                 return;
+ 
+-            // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes.
++            // S2Arm: recycle every returned device buffer, but advance guest progress only for its queued-sample bytes,
++            //   one device pull ahead of the hand-backs (PlaybackCredit)
+             int bytesPlayed = _pump.Returned(bufferIndex);
+-            if (bytesPlayed > 0)
+-            {
+-                ProcessPlayedSamples(bytesPlayed);
+-            }
++            _credit.Returned(bytesPlayed, Stopwatch.GetTimestamp());
++            _diag.SetLead(_credit.LeadBytes / _bytesPerFrame);
+ 
+             if (_started)
+             {
+                 _pump.Pump();
+             }
++
++            S2ACredit();
++        }
++
++        // S2Arm (11-02): release what now counts as played (handed back, or submitted and within one device pull of the hand-backs)
++        private void S2ACredit()
++        {
++            int bytes = _credit.Take(_pump.SubmittedSampleBytes);
++
++            if (bytes > 0)
++            {
++                ProcessPlayedSamples(bytes);
++            }
+         }
+ 
+         private void ProcessPlayedSamples(int bytesPlayed)
+@@ -552,9 +573,10 @@ namespace Ryujinx.Audio.Backends.Apple
+                 Thread.Sleep(_testProdStall.Ms);
+             }
+ 
+-            _samples.Enqueue(buffer);
+             ulong sampleCount = GetSampleCount(buffer);
+ 
++            // S2Arm (11-02): register before its samples can be submitted: submitted samples may count as played at once (PlaybackCredit),
++            //   and played samples must find their buffer in _queued
+             lock (_queueLock)
+             {
+                 if (_queuedCount == _queued.Length)
+@@ -574,9 +596,12 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _queuedCount++;
+             }
+ 
++            _samples.Enqueue(buffer);
++
+             if (_started)
+             {
+                 _pump.Pump();
++                S2ACredit();
+                 // S2Arm (10-22 杂音): 预充期排进设备但未启播——凑够下限的这一笔到了就开播
+                 if (!_queueRunning)
+                 {
+@@ -599,6 +624,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                 _diag.SetStarted(true);
+                 _startTicks = Stopwatch.GetTimestamp();
+                 _pump.Pump();
++                S2ACredit();
+ 
+                 Volatile.Write(ref _lastCallbackTicks, _startTicks); // S2Arm: 停播看门狗从开播时刻起算
+ 
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 6a54159c87a4775dcba4f68547742132f38a48ab..8809a0c883abb8c10b5b25e4155db80cd111566f 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -168,6 +168,9 @@ namespace Ryujinx.Audio.Backends.Apple
+         // 欠载补垫（DeviceBufferPump.OnCushion，游戏线程上调）：只做原子记数，10 秒汇报时打一行
+         private int _cushions, _repCushions, _lastCushionFrames;
+         private long _lastCushionZeroTicks, _lastCushionLate;
++        // S2Arm (11-02): 放回提前量（PlaybackCredit：交还之外再提前算作已播的帧数，= 实测设备一次拉取），回调线程写、汇报线程读
++        private long _leadFrames;
++        public void SetLead(long frames) => Volatile.Write(ref _leadFrames, frames);
+         public void OnCushion(int frames, long zeroTicks, long lateFrames)
+         {
+             Volatile.Write(ref _lastCushionFrames, frames);
+@@ -564,7 +567,7 @@ namespace Ryujinx.Audio.Backends.Apple
+                     Console.Error.WriteLine(
+                         $"[声] 输出 #{d.Index} 10 秒：回调 {cb - d._repCallbacks} 次，交设备 {sub - d._repSubmitted} 帧、播完 {pl - d._repPlayed} 帧，" +
+                         $"账上在途归零 {und - d._repUnderruns} 次（最长 {maxStarveMs:F1} ms；设备交还早于播完，归零时设备内部仍有缓冲，断音看真缺口）、停流 {pau - d._repPauses} 次，回调后最少在途 {(minInFlight == long.MaxValue ? -1 : minInFlight)} 帧，" +
+-                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
++                        $"回调最长间隔 {maxGapMs:F1} ms；渲染丢周期 {skipped}、周期最晚 {lateNs / 1e6:F1} ms；真缺口 {gap - d._repGapFrames} 帧（{(gap - d._repGapFrames) * 1000.0 / d._rate:F1} ms）；放回提前量 {Volatile.Read(ref d._leadFrames)} 帧{lat}{(d._ring != null ? $"；wav 丢 {d._ringDropped} B" : "")}");
+ 
+                     HudAudio(d.Index, gap * 1000 / d._rate, 0);
+ 
+diff --git a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+index 67decb0fd86c1060056062ec9943519b86997571..f54be1a968253d069d6ee839e3ab1a55832a4f62 100644
+--- a/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
++++ b/src/Ryujinx.Audio/Backends/Common/DeviceBufferPump.cs
+@@ -26,6 +26,7 @@ namespace Ryujinx.Audio.Backends.Common
+         private readonly int[] _filled;
+         private readonly int[] _sampleBytes; // Bytes originating in Samples; _filled also includes internal silence.
+         private long _inFlightBytes;
++        private long _submittedSampleBytes; // S2Arm (11-02): queued-sample bytes submitted so far (internal silence excluded), see PlaybackCredit
+         // S2Arm (10-22 杂音): 起播前预充的在途下限（字节）。在途凑够它之前，缓冲已排进设备但不让设备开播（pre-roll），
+         // 这样一开声就有深度，不会每个游戏缓冲边界掐边欠载（输出端每 21.3 ms 插静音 = 宽频噪声）。0 = 不设下限（旧行为）。
+         private readonly long _primeFloorBytes;
+@@ -89,6 +90,11 @@ namespace Ryujinx.Audio.Backends.Common
+         /// </summary>
+         public long InFlightBytes => Interlocked.Read(ref _inFlightBytes);
+ 
++        /// <summary>
++        /// S2Arm: queued-sample bytes submitted to the device so far (internal silence excluded); their guest memory has been read.
++        /// </summary>
++        public long SubmittedSampleBytes => Interlocked.Read(ref _submittedSampleBytes);
++
+         /// <summary>
+         /// The memory of a pool buffer, at least slotBytes long.
+         /// </summary>
+@@ -213,6 +219,7 @@ namespace Ryujinx.Audio.Backends.Common
+ 
+                     _filled[slot] = read;
+                     _sampleBytes[slot] = read;
++                    Interlocked.Add(ref _submittedSampleBytes, read);
+                     long inFlight = Interlocked.Add(ref _inFlightBytes, read);
+ 
+                     // S2Arm: 在途凑够下限即可起播；闩锁后不再回退（一次欠载不该让后续重新 pre-roll）
+diff --git a/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs b/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1334d27e48f66d64c69173347f2ef17458a3a47d
+--- /dev/null
++++ b/src/Ryujinx.Audio/Backends/Common/PlaybackCredit.cs
+@@ -0,0 +1,113 @@
++using System;
++using System.Threading;
++
++namespace Ryujinx.Audio.Backends.Common
++{
++    /// <summary>
++    /// When queued samples count as played for the game: handed back by the device, plus a lead of one device pull.
++    /// </summary>
++    // S2Arm (11-02 Pokopia iPhone 断续): a game on AudioOut keeps a few buffers queued and appends the next one only when one is released
++    //   (played). On a Switch the hardware consumes 240 frames every 5 ms, so a queue of 4 × 240 frames is plenty there. A host device
++    //   pulls a whole IO period at once and hands back only buffers it has fully taken: iPhone speaker 1024 frames per 21.3 ms, Mac 512.
++    //   When everything the game keeps queued is less than one pull (Pokopia: 4 × 240 = 960 < 1024), every pull comes up short and the
++    //   game cannot refill before it: iPhone delivered 437,760 of 480,000 frames per 10 s (gap 885 ms), Mac with its 512-frame pulls 0.
++    //   So a queued sample counts as played once the device handed it back or it lies within one pull ahead of what was handed back
++    //   (and it was already submitted: guest memory must have been read). The game then refills one pull earlier and the device always
++    //   holds at least a pull; the stream stays paced by the device, latency grows by one pull, nothing else changes.
++    //   The pull is measured, not assumed (routes and devices differ): the hand-backs of one pull come back to back, so a burst is the
++    //   queued-sample bytes handed back with gaps ≤ burstGapTicks, and the lead is the median of the last Window bursts (a stalled callback that
++    //   returns many pulls at once does not move the median). With a short supply a burst is the supply, so the lead starts there and
++    //   grows to a full pull after a few periods.
++    public sealed class PlaybackCredit
++    {
++        private const int Window = 32;
++        private readonly Lock _lock = new();
++        private readonly int _bytesPerFrame;
++        private readonly long _maxLeadBytes;
++        private readonly long _burstGapTicks;
++        private readonly long[] _bursts = new long[Window];
++        private int _burstN, _burstW;
++        private long _burstBytes, _lastReturnTicks;
++        private long _leadBytes, _handedBack, _credited;
++
++        public PlaybackCredit(int bytesPerFrame, long maxLeadBytes, long burstGapTicks)
++        {
++            _bytesPerFrame = bytesPerFrame;
++            _maxLeadBytes = maxLeadBytes / bytesPerFrame * bytesPerFrame;
++            _burstGapTicks = burstGapTicks;
++        }
++
++        /// <summary>
++        /// Current lead in bytes (one device pull, at most maxLeadBytes).
++        /// </summary>
++        public long LeadBytes => Volatile.Read(ref _leadBytes);
++
++        /// <summary>
++        /// The device handed back a buffer holding <paramref name="sampleBytes"/> of queued samples (0 for internal silence), at
++        /// <paramref name="ticks"/> (Stopwatch).
++        /// </summary>
++        public void Returned(int sampleBytes, long ticks)
++        {
++            lock (_lock)
++            {
++                if (_lastReturnTicks != 0 && ticks - _lastReturnTicks > _burstGapTicks)
++                {
++                    PushBurstLocked(_burstBytes);
++                    _burstBytes = 0;
++                }
++
++                _burstBytes += sampleBytes;
++                _lastReturnTicks = ticks;
++                _handedBack += sampleBytes;
++            }
++        }
++
++        /// <summary>
++        /// Queued samples taken back from the device unplayed (it was stopped or rebuilt): they are done with, as if handed back.
++        /// </summary>
++        public void Reclaimed(int sampleBytes)
++        {
++            lock (_lock)
++            {
++                _handedBack += sampleBytes;
++            }
++        }
++
++        /// <summary>
++        /// Bytes of queued samples that count as played now and did not before, given <paramref name="submittedSampleBytes"/> of queued
++        /// samples submitted to the device so far.
++        /// </summary>
++        public int Take(long submittedSampleBytes)
++        {
++            lock (_lock)
++            {
++                long target = Math.Min(submittedSampleBytes, _handedBack + _leadBytes);
++
++                if (target <= _credited)
++                {
++                    return 0;
++                }
++
++                int n = (int)(target - _credited);
++                _credited = target;
++
++                return n;
++            }
++        }
++
++        // Under _lock: a burst closed; the lead is the median of the last Window bursts (allocation-free: the callback thread is real time)
++        private void PushBurstLocked(long bytes)
++        {
++            _bursts[_burstW] = bytes;
++            _burstW = (_burstW + 1) % Window;
++            _burstN = Math.Min(_burstN + 1, Window);
++
++            Span<long> s = stackalloc long[Window];
++            _bursts.AsSpan(0, _burstN).CopyTo(s);
++            s = s[.._burstN];
++            s.Sort();
++
++            Volatile.Write(ref _leadBytes, Math.Min(s[_burstN / 2], _maxLeadBytes) / _bytesPerFrame * _bytesPerFrame);
++        }
++    }
++}

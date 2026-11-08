@@ -1,0 +1,86 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Time/StaticService/ITimeZoneServiceForGlue.cs b/src/Ryujinx.HLE/HOS/Services/Time/StaticService/ITimeZoneServiceForGlue.cs
+index 81944c83592964995a0faeb79e905ff9135fa91e..308dfe29c90574c29f5968f695555b74f7b83d8b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Time/StaticService/ITimeZoneServiceForGlue.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Time/StaticService/ITimeZoneServiceForGlue.cs
+@@ -1,5 +1,7 @@
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Cpu;
++using Ryujinx.HLE.HOS.Ipc;
++using Ryujinx.HLE.HOS.Kernel.Threading;
+ using Ryujinx.HLE.HOS.Services.Time.TimeZone;
+ using Ryujinx.HLE.Utilities;
+ using Ryujinx.Memory;
+@@ -41,7 +43,14 @@ namespace Ryujinx.HLE.HOS.Services.Time.StaticService
+ 
+             string locationName = StringUtils.ReadInlinedAsciiString(context.RequestData, 0x24);
+ 
+-            return _timeZoneContentManager.SetDeviceLocationName(locationName);
++            ResultCode result = _timeZoneContentManager.SetDeviceLocationName(locationName);
++
++            if (result == ResultCode.Success)
++            {
++                _locationNameOperationEvent?.ReadableEvent.Signal();
++            }
++
++            return result;
+         }
+ 
+         [CommandCmif(2)]
+@@ -110,6 +119,57 @@ namespace Ryujinx.HLE.HOS.Services.Time.StaticService
+             return _timeZoneContentManager.LoadTimeZoneRule(ref rules, locationName);
+         }
+ 
++        // S2Arm：glue 的 5 / 6 / 7 / 8 / 20（9.0.0+，4 款 Switch 2 游戏 sdk 的 ITimeZoneService 代理表含 0–8、20、100、101、201、202）。
++        //   事实取自 Eden-NS2（GPL，代码自写）glue/time/time_zone.cpp：5 / 6 转给 psc 的实现；7 先查写权限、再回未实现；8 回未实现；
++        //   20 交出「设备时区变更」事件（本会话 SetDeviceLocationName 成功时触发）
++        [CommandCmif(5)] // 2.0.0+
++        // GetTimeZoneRuleVersion() -> nn::time::TimeZoneRuleVersion
++        public ResultCode GetTimeZoneRuleVersion(ServiceCtx context)
++        {
++            return _inner.GetTimeZoneRuleVersion(context);
++        }
++
++        [CommandCmif(6)] // 5.0.0+
++        // GetDeviceLocationNameAndUpdatedTime() -> (nn::time::LocationName, nn::time::SteadyClockTimePoint)
++        public ResultCode GetDeviceLocationNameAndUpdatedTime(ServiceCtx context)
++        {
++            return _inner.GetDeviceLocationNameAndUpdatedTime(context);
++        }
++
++        [CommandCmif(7)] // 9.0.0+
++        // SetDeviceLocationNameWithTimeZoneRule(nn::time::LocationName, buffer<nn::time::TimeZoneBinary, 0x21>)
++        public ResultCode SetDeviceLocationNameWithTimeZoneRule(ServiceCtx context)
++        {
++            return _writePermission ? ResultCode.NotImplemented : ResultCode.PermissionDenied;
++        }
++
++        [CommandCmif(8)] // 9.0.0+
++        // ParseTimeZoneBinary(buffer<nn::time::TimeZoneBinary, 0x21>) -> buffer<nn::time::TimeZoneRule, 0x16>
++        public ResultCode ParseTimeZoneBinary(ServiceCtx context)
++        {
++            return ResultCode.NotImplemented;
++        }
++
++        private KEvent _locationNameOperationEvent;
++        private int _locationNameOperationEventHandle;
++
++        [CommandCmif(20)] // 9.0.0+
++        // GetDeviceLocationNameOperationEventReadableHandle() -> handle<copy>
++        public ResultCode GetDeviceLocationNameOperationEventReadableHandle(ServiceCtx context)
++        {
++            _locationNameOperationEvent ??= new KEvent(context.Device.System.KernelContext);
++
++            if (_locationNameOperationEventHandle == 0 &&
++                context.Process.HandleTable.GenerateHandle(_locationNameOperationEvent.ReadableEvent, out _locationNameOperationEventHandle) != Ryujinx.Horizon.Common.Result.Success)
++            {
++                throw new InvalidOperationException("Out of handles!");
++            }
++
++            context.Response.HandleDesc = IpcHandleDesc.MakeCopy(_locationNameOperationEventHandle);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(100)]
+         // ToCalendarTime(nn::time::PosixTime time, buffer<nn::time::TimeZoneRule, 0x15> rules) -> (nn::time::CalendarTime, nn::time::sf::CalendarAdditionalInfo)
+         public ResultCode ToCalendarTime(ServiceCtx context)

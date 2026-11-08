@@ -1,0 +1,89 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
+index fabf2a9c99431514158e5d007906a764b0b75bc7..a4d69a2681095bcbe31ea6af5fcf092a41232fe2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
+@@ -102,6 +102,35 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public bool YNegateEnabled;
+ 
++        /// <summary>
++        /// S2A：翻译器看到的透明测试比较方式（主机不支持透明测试、开着时按比较方式换算，否则 Always）。CreateShaderGraphicsState 与特化核对共用这一个换算。
++        /// </summary>
++        internal readonly AlphaTestOp S2AAlphaTestOp(bool hostSupportsAlphaTest)
++        {
++            if (hostSupportsAlphaTest || !AlphaTestEnable)
++            {
++                return AlphaTestOp.Always;
++            }
++
++            return AlphaTestCompare switch
++            {
++                CompareOp.Never or CompareOp.NeverGl => AlphaTestOp.Never,
++                CompareOp.Less or CompareOp.LessGl => AlphaTestOp.Less,
++                CompareOp.Equal or CompareOp.EqualGl => AlphaTestOp.Equal,
++                CompareOp.LessOrEqual or CompareOp.LessOrEqualGl => AlphaTestOp.LessOrEqual,
++                CompareOp.Greater or CompareOp.GreaterGl => AlphaTestOp.Greater,
++                CompareOp.NotEqual or CompareOp.NotEqualGl => AlphaTestOp.NotEqual,
++                CompareOp.GreaterOrEqual or CompareOp.GreaterOrEqualGl => AlphaTestOp.GreaterOrEqual,
++                _ => AlphaTestOp.Always,
++            };
++        }
++
++        /// <summary>
++        /// S2A：这份状态下翻译器会不会生成透明测试代码（比较方式换算后不是 Always）。比较方式 / 参考值已运行时化（SupportBuffer.FragmentAlphaTest），
++        /// 特化核对只需比「有没有代码」：开关位为真但比较方式是 Always，与开关位为假翻出同一份着色器（ShaderSpecializationState.MatchesGraphics）
++        /// </summary>
++        internal readonly bool S2AAlphaTestEmitted(bool hostSupportsAlphaTest) => S2AAlphaTestOp(hostSupportsAlphaTest) != AlphaTestOp.Always;
++
+         /// <summary>
+         /// Creates a new graphics state from this state that can be used for shader generation.
+         /// </summary>
+@@ -112,26 +141,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>GPU graphics state that can be used for shader translation</returns>
+         public readonly GpuGraphicsState CreateShaderGraphicsState(bool hostSupportsAlphaTest, bool hostSupportsQuads, bool hasGeometryShader, bool originUpperLeft)
+         {
+-            AlphaTestOp alphaTestOp;
+-
+-            if (hostSupportsAlphaTest || !AlphaTestEnable)
+-            {
+-                alphaTestOp = AlphaTestOp.Always;
+-            }
+-            else
+-            {
+-                alphaTestOp = AlphaTestCompare switch
+-                {
+-                    CompareOp.Never or CompareOp.NeverGl => AlphaTestOp.Never,
+-                    CompareOp.Less or CompareOp.LessGl => AlphaTestOp.Less,
+-                    CompareOp.Equal or CompareOp.EqualGl => AlphaTestOp.Equal,
+-                    CompareOp.LessOrEqual or CompareOp.LessOrEqualGl => AlphaTestOp.LessOrEqual,
+-                    CompareOp.Greater or CompareOp.GreaterGl => AlphaTestOp.Greater,
+-                    CompareOp.NotEqual or CompareOp.NotEqualGl => AlphaTestOp.NotEqual,
+-                    CompareOp.GreaterOrEqual or CompareOp.GreaterOrEqualGl => AlphaTestOp.GreaterOrEqual,
+-                    _ => AlphaTestOp.Always,
+-                };
+-            }
++            AlphaTestOp alphaTestOp = S2AAlphaTestOp(hostSupportsAlphaTest);
+ 
+             bool isQuad = Topology is PrimitiveTopology.Quads or PrimitiveTopology.QuadStrip;
+             bool halvePrimitiveId = !hostSupportsQuads && !hasGeometryShader && isQuad;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index c8f64a47620c3637ab729a24f17071beb1bc96ac..27f931334b656ea77417da02682adcf7cf0d6ab0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -629,12 +629,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 S2AMissWhy = "DepthMode"; return false;
+             }
+ 
+-            if (graphicsState.AlphaTestEnable != GraphicsState.AlphaTestEnable)
++            // S2A：比「翻出来有没有透明测试代码」，不比原始开关位（开着但比较方式 Always = 关，同一份着色器）。主机能力同 GpuAccessor：Vulkan 口径不支持透明测试
++            bool s2aHostAlpha = channel.Capabilities.Api != Ryujinx.Graphics.Shader.Translation.TargetApi.Vulkan;
++            if (graphicsState.S2AAlphaTestEmitted(s2aHostAlpha) != GraphicsState.S2AAlphaTestEmitted(s2aHostAlpha))
+             {
+                 S2AMissWhy = "透明测试开关"; return false;
+             }
+ 
+-            if (graphicsState.AlphaTestEnable && (!s2aTracked || (_queriedState & QueriedStateFlags.S2AAlphaRead) != 0) &&   // S2A：运行时化后不读比较方式 / 参考值，不比
++            if (graphicsState.S2AAlphaTestEmitted(s2aHostAlpha) && (!s2aTracked || (_queriedState & QueriedStateFlags.S2AAlphaRead) != 0) &&   // S2A：运行时化后不读比较方式 / 参考值，不比
+                 (graphicsState.AlphaTestCompare != GraphicsState.AlphaTestCompare ||
+                 graphicsState.AlphaTestReference != GraphicsState.AlphaTestReference))
+             {

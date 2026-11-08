@@ -1,0 +1,70 @@
+# 构建与语言工具缓存
+build/
+bin/
+# tools/bin 存放随仓库维护的脚本，不是 .NET 产物
+!/tools/bin/
+obj/
+.build/
+DerivedData/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 本机配置、编辑器与系统文件
+.DS_Store
+._*
+.idea/
+*.swp
+*.swo
+*~
+xcuserdata/
+*.xcuserstate
+/tools/machine.local*
+!/tools/machine.local.example
+/tools/*.local
+.s2arm-local/
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# 签名私钥、证书与设备描述文件（T74：防止误加入本机签名材料）
+*.p12
+*.cer
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# 安装与调试产物；保留源码依赖中的预编译工具和二进制测试资产
+*.app/
+*.ipa
+*.apk
+*.aab
+*.hap
+*.dSYM/
+
+# 用户游戏与运行数据应放仓库外；这些规则防止常见的误加入
+/data/
+/games/
+/roms/
+/firmware/
+/keys/
+/saves/
+/run/
+/outputs/
+prod.keys
+title.keys
+console.keys
+*.s2asave
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.nca

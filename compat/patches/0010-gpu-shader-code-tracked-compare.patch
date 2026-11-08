@@ -1,0 +1,76 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index f4a2fac17dc0199f563fa572c9c0208d5356c339..c4657d9551b334a592b87d6383f053c6a421fe4f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -9,6 +9,7 @@ using Ryujinx.Graphics.Gpu.Memory;
+ using Ryujinx.Graphics.Gpu.Shader.DiskCache;
+ using Ryujinx.Graphics.Shader;
+ using Ryujinx.Graphics.Shader.Translation;
++using Ryujinx.Memory.Range;
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
+@@ -682,11 +683,62 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return true;
+             }
+ 
++            // S2A：代码区登记了跟踪句柄、自上次核对相等后没被写过（句柄不脏）、映射代数号也没变 → 内容必然相同，免逐字节比较（读整段代码）。
++            // 旧库热机符号化 SequenceEqual 1.8%（每次切着色器、每个阶段一整段）；precise 双算 535 万次 0 不一致。
++            // 比旧库多两处：先重新武装句柄再读内存比较（旧库比完才武装，中间被写会漏）；比较不等时记为无效，不拿来免比较。
++            S2ACodeCheck chk;
++            lock (_s2aCodeChecks)
++            {
++                _s2aCodeChecks.TryGetValue((shader, gpuVa, memoryManager), out chk);
++            }
++
++            int gen = Volatile.Read(ref memoryManager.S2AMapGen);
++
++            if (chk != null && chk.Equal && chk.Gen == gen && !chk.Handle.Dirty)
++            {
++                return true;
++            }
++
++            if (chk == null)
++            {
++                MultiRange range = memoryManager.GetPhysicalRegions(gpuVa, (ulong)shader.Code.Length);
++                if (!range.IsUnmapped)
++                {
++                    chk = new S2ACodeCheck { Handle = memoryManager.Physical.BeginTracking(range, ResourceKind.None) };
++                    lock (_s2aCodeChecks)
++                    {
++                        _s2aCodeChecks[(shader, gpuVa, memoryManager)] = chk;
++                    }
++                }
++            }
++
++            chk?.Handle.Reprotect(); // S2A：清脏、重新武装，之后一写就标脏；必须在读内存之前
++
+             ReadOnlySpan<byte> memoryCode = memoryManager.GetSpanMapped(gpuVa, shader.Code.Length);
+ 
+-            return memoryCode.SequenceEqual(shader.Code);
++            bool equal = memoryCode.SequenceEqual(shader.Code);
++
++            if (chk != null)
++            {
++                chk.Equal = equal;
++                chk.Gen = gen;
++            }
++
++            return equal;
+         }
+ 
++        /// <summary>
++        /// S2A: 着色器代码区的跟踪句柄与上次核对结果。
++        /// </summary>
++        private sealed class S2ACodeCheck
++        {
++            public GpuRegionHandle Handle;
++            public int Gen;
++            public bool Equal;
++        }
++
++        private static readonly Dictionary<(CachedShaderStage, ulong, MemoryManager), S2ACodeCheck> _s2aCodeChecks = new();
++
+         /// <summary>
+         /// Decode the binary Maxwell shader code to a translator context.
+         /// </summary>

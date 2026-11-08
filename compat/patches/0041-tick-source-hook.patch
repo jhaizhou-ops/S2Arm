@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index 88eddd0965e866ffb18cf60cbf0f785fea8ab13f..30aba2efdd7fbf290c078b2bb7e16757bb64256e 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -119,7 +119,9 @@ namespace Ryujinx.HLE.HOS
+ 
+         public Horizon(Switch device)
+         {
+-            TickSource = new TickSource(KernelConstants.CounterFrequency);
++            // S2Arm: the game runs natively and reads the host-provided system counter; Ryujinx's clocks (time shared memory,
++            // steady clock) must use that same counter, or every time the game derives from them is off by the host uptime
++            TickSource = S2AHooks.TickSource ?? new TickSource(KernelConstants.CounterFrequency);
+ 
+             KernelContext = new KernelContext(
+                 TickSource,
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index fee556bb8a4232ef667ecc3f9e34570788dada67..a064aba9d0fd79fc9ed26cf17d3c5b5e6a435269 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -22,6 +22,9 @@ namespace Ryujinx.HLE
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;
+ 
++        // Tick source shared with the natively running game (null = Ryujinx's own Stopwatch-based TickSource)
++        public static Ryujinx.Cpu.ITickSource TickSource;
++
+         // Time zone system data (010000000000080E) as a directory: zoneinfo/<name> TZif files + binaryList.txt
+         public static string TimeZoneDataDir;
+ 

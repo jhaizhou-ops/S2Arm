@@ -1,0 +1,65 @@
+diff --git a/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs b/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
+index 1de123f7fd389e0300e388fca704b9de8296bda8..37ea0aee9198805dae04b9234b606ee2131ad889 100644
+--- a/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
++++ b/src/Ryujinx.Horizon/Audio/AudioUserIpcServer.cs
+@@ -40,6 +40,8 @@ namespace Ryujinx.Horizon.Audio
+             _serverManager.RegisterObjectForServer(audioInManager, ServiceName.Encode("audin:u"), MaxSessionsCount);
+             _serverManager.RegisterObjectForServer(finalOutputRecorderManager, ServiceName.Encode("audrec:u"), MaxSessionsCount);
+             _serverManager.RegisterObjectForServer(audioSnoopManager, ServiceName.Encode("auddev"), MaxSessionsCount);
++            // S2Arm：Switch 2 SDK 的统一入口 aud:u，转给上面三个管理对象（Sdk/Audio/Detail/NativeAudioManager.cs）
++            _serverManager.RegisterObjectForServer(new NativeAudioManager(audioInManager, audioOutManager, audioRendererManager), ServiceName.Encode("aud:u"), MaxSessionsCount);
+         }
+ 
+         public void ServiceRequests()
+diff --git a/src/Ryujinx.Horizon/Sdk/Audio/Detail/NativeAudioManager.cs b/src/Ryujinx.Horizon/Sdk/Audio/Detail/NativeAudioManager.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..41c40be270f2f5f880773d36ac05e8349abf931d
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Audio/Detail/NativeAudioManager.cs
+@@ -0,0 +1,46 @@
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.Sf;
++
++namespace Ryujinx.Horizon.Sdk.Audio.Detail
++{
++    // S2Arm：Switch 2 的 aud:u（nn::audio 的统一入口）。SDK 先连 aud:u，再经命令 0 / 1 / 2 取音频输入 / 输出 / 渲染器三个管理对象——
++    //   与 audin:u / audout:u / audren:u 注册的是同一份对象（同一组设备与会话表）。Pokopia 首帧后要它，没有就 Break 0xe15（2021-0007）。
++    //   命令号来自 Eden-NS2 audio.cpp（GPL，只借事实，代码自写）
++    partial class NativeAudioManager : IServiceObject
++    {
++        private readonly IAudioInManager _input;
++        private readonly IAudioOutManager _output;
++        private readonly IAudioRendererManager _renderer;
++
++        public NativeAudioManager(IAudioInManager input, IAudioOutManager output, IAudioRendererManager renderer)
++        {
++            _input = input;
++            _output = output;
++            _renderer = renderer;
++        }
++
++        [CmifCommand(0)]
++        public Result GetAudioInManager(out IAudioInManager manager)
++        {
++            manager = _input;
++
++            return Result.Success;
++        }
++
++        [CmifCommand(1)]
++        public Result GetAudioOutManager(out IAudioOutManager manager)
++        {
++            manager = _output;
++
++            return Result.Success;
++        }
++
++        [CmifCommand(2)]
++        public Result GetAudioRendererManager(out IAudioRendererManager manager)
++        {
++            manager = _renderer;
++
++            return Result.Success;
++        }
++    }
++}

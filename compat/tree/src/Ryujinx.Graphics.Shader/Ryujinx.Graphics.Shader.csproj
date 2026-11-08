@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+    <ProjectReference Include="..\Spv.Generator\Spv.Generator.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="CodeGen\Glsl\HelperFunctions\MultiplyHighS32.glsl" />
+    <EmbeddedResource Include="CodeGen\Glsl\HelperFunctions\MultiplyHighU32.glsl" />
+    <EmbeddedResource Include="CodeGen\Glsl\HelperFunctions\SwizzleAdd.glsl" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="dsh_cmp" /> <!-- S2A：直连对拍 / ABI2 资产工具（graphics/tools/direct/tests/dsh_cmp、tests/direct_resolution_assets）直接用 IR 内部类；b69a78a71 起 S2A.Dsh 改引本工程，原先随源码编进 S2A.Dsh 的可见性不再覆盖 -->
+  </ItemGroup>
+</Project>

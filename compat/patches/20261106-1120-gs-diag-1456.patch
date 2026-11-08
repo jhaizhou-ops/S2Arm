@@ -1,0 +1,463 @@
+diff --git a/src/Ryujinx.Common/Ryujinx.Common.csproj b/src/Ryujinx.Common/Ryujinx.Common.csproj
+index 60a75a7b21bc96fc154f24fef7821da1f4e47801..a0c57e41db82c39973aca788e048cf7196841cd6 100644
+--- a/src/Ryujinx.Common/Ryujinx.Common.csproj
++++ b/src/Ryujinx.Common/Ryujinx.Common.csproj
+@@ -14,4 +14,8 @@
+     <PackageReference Include="Gommon" />
+   </ItemGroup>
+ 
++  <ItemGroup>
++    <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器宿主单测（selftest-gsdiag）用诊断钩子内部入口 -->
++  </ItemGroup>
++
+ </Project>
+diff --git a/src/Ryujinx.Common/S2AGsDiag.cs b/src/Ryujinx.Common/S2AGsDiag.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef58924f2c2872177f1cca683a484b11c12c6952
+--- /dev/null
++++ b/src/Ryujinx.Common/S2AGsDiag.cs
+@@ -0,0 +1,266 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.Text;
++using System.Threading;
++
++namespace Ryujinx.Common
++{
++    /// <summary>
++    /// S2A（#1456，owner 批准）：几何补齐 / 原子访存 DeviceLost 的单点诊断。
++    /// 记三类事实，好把「GS 补齐路径」与「描述符漏填」两种嫌疑分开：
++    /// ① 宿主追加的直通几何来自哪个追加点（ShaderCache / 磁盘缓存加载器 / 转计算 Vtg）；
++    /// ② 遮挡查询是否在飞（SamplesPassed 复位未报告的个数）；
++    /// ③ 每次宿主提交里可作原子访存目标的客体 VA（SSBO + 可写镜像，记原值不对齐——漏填的 0x0 要看得见）。
++    ///
++    /// 门序与原生 s2a_debug_entries_open() 同口径：先查门再读条目，生产包不读不写。
++    /// 「门」的判定只有原生一份（编译期 S2A_ANDROID_DEBUG_ENV + 系统属性两道，
++    /// android/native/debug_gate.h）；原生层在封门时把结果注成
++    /// S2A_DEBUG_ENTRIES=1 env（debug_environment.h seal），本类只读这份结果，
++    /// 门开才读 S2A_GS_DIAG。玩家包编译期门就关、标记与 env 都不会有。
++    /// </summary>
++    public static class S2AGsDiag
++    {
++        /// <summary>单次提交最多记的原子面条数；溢出只记个数（诊断不拖慢提交）。</summary>
++        private const int MaxEntriesPerSubmit = 32;
++
++        /// <summary>崩前回放保留的最近提交行数——「崩前最后几次提交里 atomic 地址有没有 0」就靠这环答。</summary>
++        private const int RecentSubmitsKept = 8;
++
++        // 宿主测试可换：门判定与输出口；s_envProbes 让测试断言「门关时连 env 都没读」。
++        internal static Func<bool> s_gateOpen = DefaultGateOpen;
++        internal static Action<string> s_emit = line => Console.Error.WriteLine(line);
++        internal static int s_envProbes;
++
++        private static int _on = -1;   // -1 未查，0 关，1 开
++
++        /// <summary>诊断是否打开：先过门，门开才读 S2A_GS_DIAG；查过一次就冻住（env 注入只在冷启动）。</summary>
++        public static bool On => _on == 1 || (_on == -1 && Probe());
++
++        private static bool Probe()
++        {
++            if (!s_gateOpen())
++            {
++                Volatile.Write(ref _on, 0);
++                return false;
++            }
++
++            Interlocked.Increment(ref s_envProbes);
++            int value = Environment.GetEnvironmentVariable("S2A_GS_DIAG") == "1" ? 1 : 0;
++            Volatile.Write(ref _on, value);
++            return value == 1;
++        }
++
++        private static bool DefaultGateOpen()
++        {
++            // 门的判定只有原生一份：s2a_debug_entries_open()（编译期 S2A_ANDROID_DEBUG_ENV + 系统属性
++            // 两道，android/native/debug_gate.h）——原生层在封门时把门开的结果注成
++            // S2A_DEBUG_ENTRIES=1 env（debug_environment.h seal，registerHost / create 前必跑）。
++            // 这里只读这份结果、不自写属性判定：玩家包编译期门就关、标记不会出现；
++            // 非安卓没有原生门与生产包通道，开发者自己设这个标记 = 自己授权。
++            return Environment.GetEnvironmentVariable("S2A_DEBUG_ENTRIES") == "1";
++        }
++
++        private static readonly ConcurrentDictionary<string, int> _appendSites = new();
++        private static int _occInFlight;
++        private static readonly object _pendingLock = new();
++        private static readonly List<(string Kind, ulong Va, ulong Size)> _pending = new(MaxEntriesPerSubmit);
++        private static int _pendingDropped;
++        private static ulong _submitSeq;
++        private static readonly Queue<string> _recent = new(RecentSubmitsKept);   // _pendingLock 内读写
++
++        /// <summary>① 直通几何追加点：ShaderCache 编译 / 磁盘缓存加载器 / 转计算 Vtg 各在追加处打一处。</summary>
++        public static void NotePassthrough(string site)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            int count = _appendSites.AddOrUpdate(site, 1, static (_, c) => c + 1);
++            s_emit($"[gpu] 【诊】宿主追加直通几何：来源={site} 该点累计={count} 遮挡查询在飞={OccText()}");
++        }
++
++        /// <summary>② 遮挡查询打开（SamplesPassed 复位）。</summary>
++        public static void OccBegin()
++        {
++            if (On)
++            {
++                Interlocked.Increment(ref _occInFlight);
++            }
++        }
++
++        /// <summary>② 遮挡查询关闭（SamplesPassed 报告）；报告可能比复位多，钳位不为负。</summary>
++        public static void OccEnd()
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            int value;
++            do
++            {
++                value = Volatile.Read(ref _occInFlight);
++                if (value <= 0)
++                {
++                    return;
++                }
++            }
++            while (Interlocked.CompareExchange(ref _occInFlight, value - 1, value) != value);
++        }
++
++        /// <summary>③ 原子面登记：SSBO 与可写镜像绑定时记客体 VA（传进来的原值，不做对齐——漏填的 0x0 要看得见）。
++        /// kind 是调用点字面量、stage 为着色器阶段号（无阶段传 -1）——字符串在门内才拼，关着零分配。</summary>
++        public static void NoteAtomic(string kind, int stage, ulong va, ulong size)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            string label = stage < 0 ? kind : $"{kind}-s{stage}";
++
++            lock (_pendingLock)
++            {
++                if (_pending.Count < MaxEntriesPerSubmit)
++                {
++                    _pending.Add((label, va, size));
++                }
++                else
++                {
++                    _pendingDropped++;
++                }
++            }
++        }
++
++        /// <summary>
++        /// 宿主提交点（CommandBufferPool.Return）：把上次提交以来登记的原子面落成一行。
++        /// 绑定在 GPU 线程、提交在渲染线程，「上次提交以来的绑定≈这次提交的」是近似口径；
++        /// 同步写 stderr——崩的是这块 GPU，排队的行可能随进程一起没，落盘才算数。
++        /// </summary>
++        public static void Submit(int commandBufferIndex)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            List<(string Kind, ulong Va, ulong Size)> entries;
++            int dropped;
++
++            lock (_pendingLock)
++            {
++                entries = new List<(string Kind, ulong Va, ulong Size)>(_pending);
++                dropped = _pendingDropped;
++                _pending.Clear();
++                _pendingDropped = 0;
++            }
++
++            ulong seq = Interlocked.Increment(ref _submitSeq);
++            StringBuilder sb = new(256);
++            sb.Append("[gpu] 【诊】提交 cb#").Append(commandBufferIndex)
++              .Append(" 序").Append(seq)
++              .Append(" 原子面=").Append(entries.Count);
++
++            if (dropped != 0)
++            {
++                sb.Append("(+").Append(dropped).Append("溢出)");
++            }
++
++            foreach ((string kind, ulong va, ulong size) in entries)
++            {
++                sb.Append(' ').Append(kind).Append(":0x").Append(va.ToString("X"))
++                  .Append("+0x").Append(size.ToString("X"));
++            }
++
++            sb.Append(" 遮挡查询在飞=").Append(OccText())
++              .Append(" 直通几何追加=").Append(SitesText());
++
++            string line = sb.ToString();
++            lock (_pendingLock)
++            {
++                if (_recent.Count == RecentSubmitsKept)
++                {
++                    _recent.Dequeue();
++                }
++
++                _recent.Enqueue(line);
++            }
++
++            s_emit(line);
++        }
++
++        /// <summary>
++        /// 崩前回放：宿主报 ErrorDeviceLost 时（VulkanException ThrowOnError 钩）把最近
++        /// RecentSubmitsKept 次提交行原样重打一遍——stderr 行已按提交时序落过，但崩溃现场
++        /// 滚屏 / 捞日志时「崩前最后几次提交的 atomic 地址有没有 0」要能一眼答上来。
++        /// 门没开过（含门关时记不了行）就一行头都不打。
++        /// </summary>
++        public static void DumpLost()
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            string[] replay;
++            lock (_pendingLock)
++            {
++                replay = _recent.ToArray();
++            }
++
++            s_emit($"[gpu] 【诊】崩前回放：最近 {replay.Length} 次提交");
++            foreach (string line in replay)
++            {
++                s_emit(line);
++            }
++        }
++
++        private static string OccText()
++        {
++            int value = Volatile.Read(ref _occInFlight);
++            return value > 0 ? $"开×{value}" : "关";
++        }
++
++        private static string SitesText()
++        {
++            if (_appendSites.IsEmpty)
++            {
++                return "无";
++            }
++
++            StringBuilder sb = new(64);
++            foreach (KeyValuePair<string, int> kv in _appendSites)
++            {
++                if (sb.Length != 0)
++                {
++                    sb.Append(',');
++                }
++
++                sb.Append(kv.Key).Append('×').Append(kv.Value);
++            }
++
++            return sb.ToString();
++        }
++
++        /// <summary>宿主测试专用：全部状态与钩子复位到出厂；测试各自先调一次再装自己的门 / 输出。</summary>
++        internal static void S2ATestReset()
++        {
++            s_gateOpen = DefaultGateOpen;
++            s_emit = line => Console.Error.WriteLine(line);
++            s_envProbes = 0;
++            Volatile.Write(ref _on, -1);
++            Interlocked.Exchange(ref _occInFlight, 0);
++            _appendSites.Clear();
++            Volatile.Write(ref _submitSeq, 0UL);
++
++            lock (_pendingLock)
++            {
++                _pending.Clear();
++                _pendingDropped = 0;
++                _recent.Clear();
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+index ad931d883bc94a8329ca9dbbd3ec041f159fca47..24428566fd863fde021e509f962bb7c3cbbe6d28 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Graphics.GAL;
+ using System;
+ using System.Collections.Generic;
+@@ -96,6 +97,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             switch (type)
+             {
+                 case ResetCounterType.SamplesPassed:
++                    S2AGsDiag.OccBegin();   // #1456：遮挡查询在飞计数（复位=打开）
+                     _context.Renderer.ResetCounter(CounterType.SamplesPassed);
+                     break;
+                 case ResetCounterType.PrimitivesGenerated:
+@@ -266,6 +268,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     float scale = _channel.TextureManager.RenderTargetScale;
+                     divisor = scale * scale;
+                     counterType = CounterType.SamplesPassed;
++                    S2AGsDiag.OccEnd();   // #1456：报告=关闭
+                     break;
+                 case ReportCounterType.PrimitivesGenerated:
+                     counterType = CounterType.PrimitivesGenerated;
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+index 498e20be2c4aa9763febf172e93e094cf8af4c13..9dfd724360f3a555d38c05c53e80f2685abe9c2d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureBindingsManager.cs
+@@ -1,9 +1,11 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Gpu.Engine.Types;
+ using Ryujinx.Graphics.Gpu.Memory;
+ using Ryujinx.Graphics.Gpu.Shader;
+ using Ryujinx.Graphics.Shader;
++using Ryujinx.Memory.Range;
+ using System;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
+@@ -655,6 +657,13 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     if (isStore)
+                     {
+                         cachedTexture.SignalModified();
++
++                        // #1456：可写镜像=原子面，记客体首段 VA
++                        if (S2AGsDiag.On && !cachedTexture.Range.IsUnmapped)
++                        {
++                            MemoryRange r = cachedTexture.Range.GetSubRange(0);
++                            S2AGsDiag.NoteAtomic("img", stageIndex, r.Address, r.Size);
++                        }
+                     }
+ 
+                     if ((usageFlags & TextureUsageFlags.NeedsScaleValue) != 0 && UpdateScale(state.CachedTexture, usageFlags, scaleIndex, stage))
+@@ -694,6 +703,13 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     if (isStore)
+                     {
+                         texture?.SignalModified();
++
++                        // #1456：同上
++                        if (S2AGsDiag.On && texture != null && !texture.Range.IsUnmapped)
++                        {
++                            MemoryRange r = texture.Range.GetSubRange(0);
++                            S2AGsDiag.NoteAtomic("img", stageIndex, r.Address, r.Size);
++                        }
+                     }
+ 
+                     if ((usageFlags & TextureUsageFlags.NeedsScaleValue) != 0 &&
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
+index 3aaf9403e4df61f32667b315e2d6eb7788df2dcb..1ea1687b04362e53503ac02629025ff9d6ec3fad 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
+@@ -264,6 +264,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="flags">Buffer usage flags</param>
+         public void SetComputeStorageBuffer(int index, ulong gpuVa, ulong size, BufferUsageFlags flags)
+         {
++            S2AGsDiag.NoteAtomic("ssbo", -1, gpuVa, size);   // #1456：原子面客体 VA（原值，漏填的 0x0 要看得见）
++
+             size += gpuVa & ((ulong)_context.Capabilities.StorageBufferOffsetAlignment - 1);
+ 
+             RecordStorageAlignment(_cpStorageBuffers, index, gpuVa);
+@@ -286,6 +288,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="flags">Buffer usage flags</param>
+         public void SetGraphicsStorageBuffer(int stage, int index, ulong gpuVa, ulong size, BufferUsageFlags flags)
+         {
++            S2AGsDiag.NoteAtomic("ssbo", stage, gpuVa, size);   // #1456：同上
++
+             size += gpuVa & ((ulong)_context.Capabilities.StorageBufferOffsetAlignment - 1);
+ 
+             BuffersPerStage buffers = _gpStorageBuffers[stage];
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index 70a07137fcd5d5edfc754e2a79d09134127a645e..6a8aa299dd9d1e95b174d2a8f8ab2363b9792193 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Shader;
+@@ -760,6 +761,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                     stageIndex == 3 &&
+                     !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
+                 {
++                    S2AGsDiag.NotePassthrough("DiskCacheLoader");   // #1456：追加点来源
+                     translatedStages.Add(previousStage.GenerateGeometryPassthrough());
+                 }
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index 259a8835d29121f86b177d9c719c14b9d9d19ed7..e5b38f7d586cde3106cb3f5c8a71626a0068d15e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Graphics.GAL;
+ using Ryujinx.Graphics.Gpu.Shader.DiskCache;
+ using Ryujinx.Graphics.Shader;
+@@ -121,6 +122,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     stageIndex == 3 &&
+                     !context.Capabilities.SupportsLayerVertexTessellation)
+                 {
++                    S2AGsDiag.NotePassthrough("S2AVtg");   // #1456：追加点来源
+                     t.GraphicsStages.Add(previousStage.GenerateGeometryPassthrough());
+                 }
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index d766f33e4aab1cf45a2a5585e845f5fa6e0e54be..f68d8f264514d626dcb9f70403749f4de4b4fbc0 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -761,6 +761,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                     stageIndex == 3 &&
+                     !GpuAccessorBase.S2ATranslationCapabilities(_context).SupportsLayerVertexTessellation)
+                 {
++                    S2AGsDiag.NotePassthrough("ShaderCache");   // #1456：追加点来源
+                     shaderSources.Add(CreateShaderSource(previousStage.GenerateGeometryPassthrough()));
+                 }
+             }
+diff --git a/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs b/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+index 0222a744a6760bea02dc3ea6b98d1f20cdc76359..c9965647e5ddadd22f0a344af11a304c89ce4bbf 100644
+--- a/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
++++ b/src/Ryujinx.Graphics.Vulkan/CommandBufferPool.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Silk.NET.Vulkan;
+ using System;
+ using System.Collections.Generic;
+@@ -320,6 +321,8 @@ namespace Ryujinx.Graphics.Vulkan
+                             PSignalSemaphores = pSignalSemaphores,
+                         };
+ 
++                        S2AGsDiag.Submit(cbIndex);   // #1456：崩前每次提交的原子面 / 遮挡 / 直通几何追加落一行
++
+                         lock (_queueLock)
+                         {
+                             _api.QueueSubmit(_queue, 1, in sInfo, entry.Fence.GetUnsafe()).ThrowOnError();
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanException.cs b/src/Ryujinx.Graphics.Vulkan/VulkanException.cs
+index 1ccf0363a4268a1d56c6e51ebff858a00dddcd64..a1c2180c16bcb6a50c34f49ef28b2c7cf9f85814 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanException.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanException.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Silk.NET.Vulkan;
+ using System;
+ 
+@@ -14,6 +15,13 @@ namespace Ryujinx.Graphics.Vulkan
+                 // Only negative result codes are errors.
+                 if (result.IsError)
+                 {
++                    if (result == Result.ErrorDeviceLost)
++                    {
++                        // 诊断失败不能取代原始 DeviceLost。
++                        try { S2AGsDiag.DumpLost(); }
++                        catch (Exception) { }
++                    }
++
+                     throw new VulkanException(result);
+                 }
+             }

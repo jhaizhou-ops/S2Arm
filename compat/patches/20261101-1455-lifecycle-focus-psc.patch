@@ -1,0 +1,259 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+index 7aac6f3eab56c1895b31af6f105dd43fd962abaf..35c8775684d58e096d523c41144d9467768bf837 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+@@ -178,6 +178,8 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+ 
+             Logger.Stub?.PrintStub(LogClass.ServiceAm, new { unknownFlag1, unknownFlag2, unknownFlag3 });
+ 
++            context.Device.System.AppletState.FocusHandlingMode = (unknownFlag1, unknownFlag2, unknownFlag3);   // S2Arm：原先读完即弃
++
+             return ResultCode.Success;
+         }
+ 
+@@ -203,6 +205,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+             Logger.Stub?.PrintStub(LogClass.ServiceAm, new { outOfFocusSuspendingEnabled });
+ 
+             _outOfFocusSuspendingEnabled = outOfFocusSuspendingEnabled;
++            context.Device.System.AppletState.SetOutOfFocusSuspending(outOfFocusSuspendingEnabled);   // S2Arm：原先只存不用，宿主失焦时据此暂停
+ 
+             return ResultCode.Success;
+         }
+diff --git a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+index a2837e2071e68e049a41b553939a7d897c2369de..89909588665932fb89b1f462dd487594d2f07942 100644
+--- a/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
++++ b/src/Ryujinx.HLE/HOS/SystemState/AppletStateMgr.cs
+@@ -16,6 +16,19 @@ namespace Ryujinx.HLE.HOS.SystemState
+ 
+         public IdDictionary IndirectLayerHandles { get; }
+ 
++        // S2Arm（缺口扫描族 1，11-01）：游戏经 ISelfController 设的焦点开关，原先存在 ISelfController 里读完即弃。
++        //   失焦暂停缺省开（与主机一致：应用失焦即挂起，游戏用 SetOutOfFocusSuspendingEnabled(false) 关）
++        public bool OutOfFocusSuspending { get; private set; } = true;
++        public (bool, bool, bool) FocusHandlingMode { get; set; }
++        // 宿主接线（S2A.Services）：失焦暂停开关变了就告诉平台壳（平台壳失焦时据此冻结客机）
++        public static System.Action<bool> OutOfFocusSuspendingChanged;
++
++        public void SetOutOfFocusSuspending(bool on)
++        {
++            OutOfFocusSuspending = on;
++            OutOfFocusSuspendingChanged?.Invoke(on);
++        }
++
+         public AppletStateMgr(Horizon system)
+         {
+             Messages = new ConcurrentQueue<AppletMessage>();
+diff --git a/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9256a9994f6c1869fc01f01c5a00f3f0cfaf91e4
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Psc/Ipc/PmModule.cs
+@@ -0,0 +1,129 @@
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.OsTypes;
++using Ryujinx.Horizon.Sdk.Psc;
++using Ryujinx.Horizon.Sdk.Sf;
++using Ryujinx.Horizon.Sdk.Sf.Hipc;
++using System;
++using System.Collections.Generic;
++using System.Threading;
++
++namespace Ryujinx.Horizon.Psc.Ipc
++{
++    // psc 模块（S2Arm 最小实现，缺口扫描族 1）：Initialize 交出一个事件；宿主进后台 / 睡眠时 PscHost.Request 往所有已初始化的模块排一条
++    //   休眠请求、回来时排一条唤醒请求并点亮事件；GetRequest 回队首（没有请求时回 FullAwake），Acknowledge 出队，队里还有就再点亮。
++    //   不阻塞宿主：游戏不确认也照常进后台 / 回来（iOS 后台本来整体冻结，回来后游戏依次读到休眠、唤醒）
++    partial class PmModule : IPmModule, IDisposable
++    {
++        private static readonly Lock _registryLock = new();
++        private static readonly List<PmModule> _modules = [];
++
++        private readonly Lock _lock = new();
++        private readonly Queue<PmState> _requests = new();
++        private SystemEventType _event;
++        private bool _initialized;
++
++        [CmifCommand(0)]
++        public Result Initialize([CopyHandle] out int eventHandle, uint moduleId, [Buffer(HipcBufferFlags.In | HipcBufferFlags.MapAlias)] ReadOnlySpan<uint> dependencies)
++        {
++            lock (_lock)
++            {
++                if (!_initialized)
++                {
++                    Os.CreateSystemEvent(out _event, EventClearMode.AutoClear, interProcess: true).AbortOnFailure();
++                    _initialized = true;
++                    lock (_registryLock) _modules.Add(this);
++                }
++
++                eventHandle = Os.GetReadableHandleOfSystemEvent(ref _event);
++            }
++
++            return Result.Success;
++        }
++
++        [CmifCommand(1)]
++        public Result GetRequest(out PmState state, out uint flags)
++        {
++            lock (_lock)
++            {
++                state = _requests.Count > 0 ? _requests.Peek() : PmState.FullAwake;
++                flags = 0;
++            }
++
++            return Result.Success;
++        }
++
++        [CmifCommand(2)]
++        public Result Acknowledge()
++        {
++            lock (_lock)
++            {
++                if (_requests.Count > 0)
++                {
++                    _requests.Dequeue();
++                }
++
++                if (_requests.Count > 0)
++                {
++                    Os.SignalSystemEvent(ref _event);
++                }
++            }
++
++            return Result.Success;
++        }
++
++        [CmifCommand(3)]
++        public Result Finalize()
++        {
++            Dispose();
++
++            return Result.Success;
++        }
++
++        [CmifCommand(4)] // 5.1.0+
++        public Result AcknowledgeEx(PmState state)
++        {
++            return Acknowledge();
++        }
++
++        // 宿主侧（S2A.Services Lifecycle）：休眠 = SleepReady，唤醒 = FullAwake
++        internal static void RequestAll(PmState state)
++        {
++            lock (_registryLock)
++            {
++                foreach (PmModule module in _modules)
++                {
++                    module.Request(state);
++                }
++            }
++        }
++
++        private void Request(PmState state)
++        {
++            lock (_lock)
++            {
++                if (!_initialized)
++                {
++                    return;
++                }
++
++                _requests.Enqueue(state);
++                Os.SignalSystemEvent(ref _event);
++            }
++        }
++
++        public void Dispose()
++        {
++            lock (_registryLock) _modules.Remove(this);
++
++            lock (_lock)
++            {
++                if (_initialized)
++                {
++                    _initialized = false;
++                    _requests.Clear();
++                    Os.DestroySystemEvent(ref _event);
++                }
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Psc/Ipc/PmService.cs b/src/Ryujinx.Horizon/Psc/Ipc/PmService.cs
+index cb2ea8d404e4217b532a1679402f7a632001fee3..3b996a1684c8331805042260f382f14ea27b8d7b 100644
+--- a/src/Ryujinx.Horizon/Psc/Ipc/PmService.cs
++++ b/src/Ryujinx.Horizon/Psc/Ipc/PmService.cs
+@@ -1,8 +1,18 @@
++using Ryujinx.Horizon.Common;
+ using Ryujinx.Horizon.Sdk.Psc;
++using Ryujinx.Horizon.Sdk.Sf;
+ 
+ namespace Ryujinx.Horizon.Psc.Ipc
+ {
+     partial class PmService : IPmService
+     {
++        // S2Arm（缺口扫描族 1，11-01）：原先 psc:m 一个命令都没有，游戏收不到休眠 / 唤醒
++        [CmifCommand(0)]
++        public Result GetPmModule(out IPmModule module)
++        {
++            module = new PmModule();
++
++            return Result.Success;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.Horizon/Sdk/Psc/IPmModule.cs b/src/Ryujinx.Horizon/Sdk/Psc/IPmModule.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ed768fd4f2e39cde76bed289e1aed3d51d8d7ac
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Psc/IPmModule.cs
+@@ -0,0 +1,15 @@
++using Ryujinx.Horizon.Common;
++using Ryujinx.Horizon.Sdk.Sf;
++using System;
++
++namespace Ryujinx.Horizon.Sdk.Psc
++{
++    interface IPmModule : IServiceObject
++    {
++        Result Initialize(out int eventHandle, uint moduleId, ReadOnlySpan<uint> dependencies);
++        Result GetRequest(out PmState state, out uint flags);
++        Result Acknowledge();
++        Result Finalize();
++        Result AcknowledgeEx(PmState state);
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Psc/IPmService.cs b/src/Ryujinx.Horizon/Sdk/Psc/IPmService.cs
+index 53e703f82889f0a22cc28d0e2329559d144abc67..ec9aa6f341564ac407dc77bbd8228c52a9598904 100644
+--- a/src/Ryujinx.Horizon/Sdk/Psc/IPmService.cs
++++ b/src/Ryujinx.Horizon/Sdk/Psc/IPmService.cs
+@@ -1,8 +1,10 @@
++using Ryujinx.Horizon.Common;
+ using Ryujinx.Horizon.Sdk.Sf;
+ 
+ namespace Ryujinx.Horizon.Sdk.Psc
+ {
+     interface IPmService : IServiceObject
+     {
++        Result GetPmModule(out IPmModule module);
+     }
+ }
+diff --git a/src/Ryujinx.Horizon/Sdk/Psc/PmState.cs b/src/Ryujinx.Horizon/Sdk/Psc/PmState.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8327c282776e25b3726b2feb8d11bde028029d0
+--- /dev/null
++++ b/src/Ryujinx.Horizon/Sdk/Psc/PmState.cs
+@@ -0,0 +1,14 @@
++namespace Ryujinx.Horizon.Sdk.Psc
++{
++    // 电源状态（psc 向各模块发的请求；值同主机）
++    enum PmState : uint
++    {
++        FullAwake = 0,
++        MinimumAwake = 1,
++        SleepReady = 2,
++        EssentialServicesSleepReady = 3,
++        EssentialServicesAwake = 4,
++        ShutdownReady = 5,
++        Invalid = 6,
++    }
++}

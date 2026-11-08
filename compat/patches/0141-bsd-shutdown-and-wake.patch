@@ -1,0 +1,301 @@
+diff --git a/src/Ryujinx.Common/S2AShutdown.cs b/src/Ryujinx.Common/S2AShutdown.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d58021eb01dcc3062c14bde96889d45d5aecc6e7
+--- /dev/null
++++ b/src/Ryujinx.Common/S2AShutdown.cs
+@@ -0,0 +1,69 @@
++using System;
++using System.Collections.Generic;
++using System.Threading;
++
++namespace Ryujinx.Common
++{
++    /// <summary>
++    /// S2Arm: process shutdown for service calls that block on host primitives.
++    /// </summary>
++    /// <remarks>
++    /// Service calls run on the game thread that made them. At shutdown the host parks game threads at their next system call and
++    /// waits for the calls already in C# to come back, so the services are not torn down under them; a call blocked in a service
++    /// wait (bsd select / poll with a timeout, a blocking eventfd read) did not come back before the wait expired
++    /// (10-21 d2r: 29 of 50 runs ended with "1 system call still in C#", bsd:u Select). Upstream Ryujinx never waits for them
++    /// (the process just exits). Every blocking service wait also watches this; <see cref="Request"/> makes them all return
++    /// at once as if timed out / interrupted.
++    /// </remarks>
++    public static class S2AShutdown
++    {
++        private static volatile bool _requested;
++        private static readonly List<Action> _wakers = [];
++
++        /// <summary>
++        /// Set once shutdown was requested.
++        /// </summary>
++        public static bool Requested => _requested;
++
++        /// <summary>
++        /// Signaled once shutdown was requested (for waits on wait handles).
++        /// </summary>
++        public static readonly ManualResetEvent Event = new(false);
++
++        /// <summary>
++        /// Run <paramref name="wake"/> on shutdown (at once if it was already requested): wakes waits on monitors.
++        /// </summary>
++        public static void OnRequest(Action wake)
++        {
++            lock (_wakers)
++            {
++                if (!_requested)
++                {
++                    _wakers.Add(wake);
++
++                    return;
++                }
++            }
++
++            wake();
++        }
++
++        public static void Request()
++        {
++            Action[] wakers;
++
++            lock (_wakers)
++            {
++                _requested = true;
++                wakers = _wakers.ToArray();
++            }
++
++            Event.Set();
++
++            foreach (Action wake in wakers)
++            {
++                wake();
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 88e030af5bc12ae4a5865266a22d4bc9e74a3360..d96afe1f257b6aabd7841a5e67b176458816e5d7 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -318,8 +318,19 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             // have no common wait primitive: poll every manager without waiting, then sleep 1 ms, until something is ready or time is up.
+             long deadline = timeout < 0 ? long.MaxValue : System.Diagnostics.Stopwatch.GetTimestamp() + timeout * System.Diagnostics.Stopwatch.Frequency / 1000000;
+ 
++            // S2Arm: when every descriptor is an eventfd or an offline socket, wait on their common change signal instead of polling
++            // every 1 ms (S2ABsdWake); a host socket in the set keeps the 1 ms poll (its readiness does not signal)
++            bool wakeable = true;
++
++            foreach (PollEvent evnt in events)
++            {
++                wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && ms.Socket is Proxy.OfflineSocket);
++            }
++
+             while (true)
+             {
++                long seen = S2ABsdWake.Version;
++
+                 for (int i = 0; i < _pollManagers.Count; i++)
+                 {
+                     if (eventsByPollManager[i].Count > 0)
+@@ -329,12 +340,20 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     }
+                 }
+ 
+-                if (managersInUse == 1 || updatedCount > 0 || System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
++                if (managersInUse == 1 || updatedCount > 0 || S2AShutdown.Requested || System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                 {
+                     break;
+                 }
+ 
+-                System.Threading.Thread.Sleep(1);
++                if (wakeable)
++                {
++                    long left = deadline == long.MaxValue ? -1 : (deadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 / System.Diagnostics.Stopwatch.Frequency + 1;
++                    S2ABsdWake.Wait(seen, left < 0 ? -1 : (int)System.Math.Min(left, int.MaxValue));
++                }
++                else
++                {
++                    System.Threading.Thread.Sleep(1);
++                }
+             }
+ 
+             readFds.Clear();
+@@ -492,7 +511,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     context.Device.System.KernelContext.Syscall.SleepThread(50 * 1000000);
+                     context.Thread.HandlePostSyscall();
+                 }
+-                while (context.Thread.Context.Running && PerformanceCounter.ElapsedMilliseconds < budgetLeftMilliseconds);
++                // S2Arm: upstream ends this wait when the thread is terminated (Context.Running); game threads here are not, so shutdown ends it too
++                while (context.Thread.Context.Running && !S2AShutdown.Requested && PerformanceCounter.ElapsedMilliseconds < budgetLeftMilliseconds);
+             }
+             else if (timeout == -1)
+             {
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptor.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptor.cs
+index 05fc91d32651cb7f33e0a15ae49512105955367f..ae5313a25b0368e98902ae43d2291c4717bca559 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptor.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptor.cs
+@@ -58,6 +58,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             {
+                 WriteEvent.Set();
+             }
++
++            S2ABsdWake.Signal();   // S2Arm: mixed selects (eventfd + offline socket) wait on this
+         }
+ 
+         public LinuxError Read(out int readSize, Span<byte> buffer)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptorPollManager.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptorPollManager.cs
+index 122bf580f0ef9f0d8e3a5a990cc54154bac00200..0f449da9928fcf142d5c1021bdcfe0abb200eb18 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptorPollManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/EventFileDescriptorPollManager.cs
+@@ -1,3 +1,4 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
+ using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Types;
+ using System.Collections.Generic;
+@@ -61,8 +62,16 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 }
+             }
+ 
++            // S2Arm: shutdown ends the wait as a timeout (Ryujinx.Common.S2AShutdown)
++            waiters.Add(S2AShutdown.Event);
++
+             int index = WaitHandle.WaitAny(waiters.ToArray(), timeoutMilliseconds);
+ 
++            if (index == waiters.Count - 1)
++            {
++                index = WaitHandle.WaitTimeout;
++            }
++
+             if (index != WaitHandle.WaitTimeout)
+             {
+                 for (int i = 0; i < events.Count; i++)
+@@ -119,7 +128,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+             if (waitable.Count == 0)
+             {
+                 updatedCount = 0;
+-                Thread.Sleep(timeoutMilliseconds);
++                S2AShutdown.Event.WaitOne(timeoutMilliseconds);   // S2Arm: a sleep that shutdown ends
+ 
+                 return LinuxError.SUCCESS;
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/S2ABsdWake.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/S2ABsdWake.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2f6b6555888efa17dc6fb51a2cf81cff5d3ad50
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/S2ABsdWake.cs
+@@ -0,0 +1,52 @@
++using Ryujinx.Common;
++using System.Threading;
++
++namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
++{
++    /// <summary>
++    /// S2Arm: one wait for selects that mix descriptor kinds (eventfds and offline sockets).
++    /// </summary>
++    /// <remarks>
++    /// The two kinds have no common wait primitive, so IClient.Select polled every manager without waiting and slept 1 ms until
++    /// something was ready or the timeout passed: ~1000 wakeups per second per blocked select, each poll allocating its lists
++    /// (10-21 d2r on Mac: about 1 MB per select, 260 selects in 200 s = 133 MB, the largest steady allocation on the game threads).
++    /// Every state change of an eventfd or offline socket bumps a version here; a mixed select remembers the version before it
++    /// polls and, when nothing was ready, waits until the version moves, the timeout passes or shutdown is requested.
++    /// </remarks>
++    static class S2ABsdWake
++    {
++        private static readonly object _lock = new();
++        private static long _version;
++
++        static S2ABsdWake()
++        {
++            S2AShutdown.OnRequest(Signal);
++        }
++
++        public static long Version => Interlocked.Read(ref _version);
++
++        public static void Signal()
++        {
++            lock (_lock)
++            {
++                _version++;
++                Monitor.PulseAll(_lock);
++            }
++        }
++
++        /// <summary>
++        /// Wait until the version is no longer <paramref name="seen"/>, <paramref name="timeoutMilliseconds"/> passed (-1 = forever)
++        /// or shutdown was requested.
++        /// </summary>
++        public static void Wait(long seen, int timeoutMilliseconds)
++        {
++            lock (_lock)
++            {
++                if (_version == seen && !S2AShutdown.Requested)
++                {
++                    Monitor.Wait(_lock, timeoutMilliseconds);
++                }
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+index 938d99690d7e64b846f1416a39b4192626f72fc0..350bad6e32ca5f3e2c79041364a6f9b73facb7a6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+@@ -1,4 +1,6 @@
++using Ryujinx.Common;
+ using Ryujinx.Common.Logging;
++using Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl;
+ using System;
+ using System.Collections.Generic;
+ using System.Net;
+@@ -27,6 +29,18 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+         // One lock for the whole offline network: guards the port table and every socket's state, and is the wait / wake primitive for blocking
+         // receive / accept and select / poll (a loopback datagram or a close wakes all waiters, which re-check their own condition).
+         private static readonly object _network = new();
++
++        // S2Arm: shutdown wakes selects waiting on the offline network (Ryujinx.Common.S2AShutdown)
++        static OfflineSocket()
++        {
++            S2AShutdown.OnRequest(() =>
++            {
++                lock (_network)
++                {
++                    Monitor.PulseAll(_network);
++                }
++            });
++        }
+         private static readonly Dictionary<(ProtocolType, int), OfflineSocket> _ports = new();
+         private static int _nextEphemeral = EphemeralFirst;
+ 
+@@ -322,6 +336,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                 target._queuedBytes += buffer.Length;
+ 
+                 Monitor.PulseAll(_network);
++                S2ABsdWake.Signal();   // S2Arm: mixed selects (eventfd + offline socket) wait on this
+             }
+ 
+             socketError = SocketError.Success;
+@@ -451,7 +466,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             {
+                 long deadline = microSeconds < 0 ? long.MaxValue : Environment.TickCount64 + microSeconds / 1000;
+ 
+-                while (!read.Exists(s => s.Readable) && !write.Exists(s => s.Writable))
++                while (!S2AShutdown.Requested && !read.Exists(s => s.Readable) && !write.Exists(s => s.Writable))
+                 {
+                     long left = deadline - Environment.TickCount64;
+ 
+@@ -515,6 +530,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                 _writeShutdown |= how != SocketShutdown.Receive;
+ 
+                 Monitor.PulseAll(_network);
++                S2ABsdWake.Signal();
+             }
+         }
+ 
+@@ -538,6 +554,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                 _queuedBytes = 0;
+ 
+                 Monitor.PulseAll(_network);
++                S2ABsdWake.Signal();
+             }
+         }
+ 

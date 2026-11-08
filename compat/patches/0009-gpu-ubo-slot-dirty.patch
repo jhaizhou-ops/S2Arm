@@ -1,0 +1,117 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
+index 73647bef5140d514fb5f4039a60f074c89fdc4a3..e1cda67ae393bc32ee697a82791940acbe3f28cc 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferManager.cs
+@@ -107,6 +107,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         private bool _gpStorageBuffersDirty;
+         private bool _gpUniformBuffersDirty;
+ 
++        // S2A：常量缓冲按阶段 / 槽位的脏位 + 重复绑定判别。原版只有一个 _gpUniformBuffersDirty：任一阶段
++        // SetGraphicsUniformBuffer（游戏每次绑都调，地址常常和上次相同）就置脏，提交时所有阶段全部重新 GetBufferRange、整组 SetUniformBuffers。
++        // 这里：内存管理器、地址、长度、映射代数号都与上次相同 → 什么都不做（BufferBounds 是只读值，状态与原版相同）；变了 → 只记该阶段该槽脏，
++        // 提交时只重绑脏槽，其余照原版不脏时那样只做数据同步。GAL SetUniformBuffers 按绑定号增量生效（Ryujinx 各后端与 nxgal 同），
++        // 所以渲染器看到的绑定状态与原版逐槽相同；_rebind（换通道 / 计算派发后 / 缓冲重建）与换着色器（SetGraphicsBufferBindings）仍全部重绑。
++        private uint _s2aUbDirtyStages;
++        private readonly ulong[] _s2aUbDirtySlots = new ulong[Constants.ShaderStages]; // 每阶段变了的槽位（位 = 槽号）
++        private readonly (ulong Va, ulong Size, int Gen, MemoryManager Mm)[,] _s2aUbLast = new (ulong, ulong, int, MemoryManager)[Constants.ShaderStages, Constants.TotalGpUniformBuffers];
++        private bool _s2aUbAllSlots = true; // 下一次提交整组重绑（换着色器后 / 初始）
++
+         private bool _indexBufferDirty;
+         private bool _vertexBuffersDirty;
+         private uint _vertexBuffersEnableMask;
+@@ -318,10 +328,22 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="size">Size in bytes of the storage buffer</param>
+         public void SetGraphicsUniformBuffer(int stage, int index, ulong gpuVa, ulong size)
+         {
+-            MultiRange range = _channel.MemoryManager.Physical.BufferCache.TranslateAndCreateBuffer(_channel.MemoryManager, gpuVa, size, BufferStageUtils.FromShaderStage(stage));
++            MemoryManager memoryManager = _channel.MemoryManager;
++            int s2aGen = System.Threading.Volatile.Read(ref memoryManager.S2AMapGen); // S2A：先读代数号再翻译
++            ref (ulong Va, ulong Size, int Gen, MemoryManager Mm) s2aLast = ref _s2aUbLast[stage, index];
++            if (s2aLast.Mm == memoryManager && s2aLast.Va == gpuVa && s2aLast.Size == size && s2aLast.Gen == s2aGen)
++            {
++                return; // S2A：重复绑定，翻译结果与上次相同
++            }
++
++            s2aLast = (gpuVa, size, s2aGen, memoryManager);
++
++            MultiRange range = memoryManager.Physical.BufferCache.TranslateAndCreateBuffer(memoryManager, gpuVa, size, BufferStageUtils.FromShaderStage(stage));
+ 
+             _gpUniformBuffers[stage].SetBounds(index, range);
+             _gpUniformBuffersDirty = true;
++            _s2aUbDirtyStages |= 1u << stage; // S2A
++            _s2aUbDirtySlots[stage] |= 1UL << index; // S2A：只这个槽变了
+         }
+ 
+         /// <summary>
+@@ -370,6 +392,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
+ 
+             _gpStorageBuffersDirty = true;
+             _gpUniformBuffersDirty = true;
++            _s2aUbAllSlots = true; // S2A：换着色器，绑定表变了，全部重绑
+         }
+ 
+         /// <summary>
+@@ -721,7 +744,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             {
+                 _gpUniformBuffersDirty = false;
+ 
+-                BindBuffers(bufferCache, _gpUniformBuffers, isStorage: false);
++                bool all = _rebind || _s2aUbAllSlots;
++                S2ABindUniformBuffers(bufferCache, all ? ~0u : _s2aUbDirtyStages, all); // S2A：只重绑变了的槽（_rebind / 换着色器全部）
++                _s2aUbDirtyStages = 0;
++                _s2aUbAllSlots = false;
++                Array.Clear(_s2aUbDirtySlots);
+             }
+             else
+             {
+@@ -735,6 +762,50 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             _context.SupportBufferUpdater.Commit();
+         }
+ 
++        /// <summary>
++        /// S2A: 常量缓冲按槽位重绑：mask 里的阶段中脏槽（allSlots 时全部槽）同原版 BindBuffers（GetBufferRange + 一次 SetUniformBuffers），其余同原版 UpdateBuffers（只同步数据）。
++        /// </summary>
++        private void S2ABindUniformBuffers(BufferCache bufferCache, uint mask, bool allSlots)
++        {
++            int rangesCount = 0;
++            Span<BufferAssignment> ranges = _ranges;
++
++            for (ShaderStage stage = ShaderStage.Vertex; stage <= ShaderStage.Fragment; stage++)
++            {
++                int si = (int)stage - 1;
++                ref BuffersPerStage buffers = ref _gpUniformBuffers[si];
++                bool rebindStage = ((mask >> si) & 1) != 0;
++                ulong slots = allSlots ? ulong.MaxValue : _s2aUbDirtySlots[si];
++                BufferStage bufferStage = BufferStageUtils.FromShaderStage(stage);
++
++                for (int index = 0; index < buffers.Count; index++)
++                {
++                    ref BufferDescriptor bindingInfo = ref buffers.Bindings[index];
++                    BufferBounds bounds = buffers.Buffers[bindingInfo.Slot];
++
++                    if (bounds.IsUnmapped)
++                    {
++                        continue;
++                    }
++
++                    if (rebindStage && ((slots >> bindingInfo.Slot) & 1) != 0)
++                    {
++                        BufferRange range = bufferCache.GetBufferRange(bounds.Range, bufferStage);
++                        ranges[rangesCount++] = new BufferAssignment(bindingInfo.Binding, range);
++                    }
++                    else
++                    {
++                        bufferCache.SynchronizeBufferRange(bounds.Range);
++                    }
++                }
++            }
++
++            if (rangesCount != 0)
++            {
++                SetHostBuffers(ranges, rangesCount, isStorage: false);
++            }
++        }
++
+         /// <summary>
+         /// Bind respective buffer bindings on the host API.
+         /// </summary>

@@ -1,0 +1,115 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+index 1bfeec1ebf7bbbebaccae90f48ff243fb6f626fe..6a601b0f8f2d37028f0aa73796e21a15ef92f6b8 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+@@ -299,6 +299,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+             return (ResultCode)_apmSystemManagerServer.GetCurrentPerformanceConfiguration(context);
+         }
+ 
++        [CommandCmif(68)]
++        // GetBuiltInDisplayType() -> s32：S2Arm（Switch 2 SDK）——内置屏类型；苹果设备不对应主机的任何一种面板，回 0（同 Eden-NS2 的桩，代码自写）
++        public ResultCode GetBuiltInDisplayType(ServiceCtx context)
++        {
++            context.ResponseData.Write(0);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(300)] // 9.0.0+
+         // GetSettingsPlatformRegion() -> u8
+         public ResultCode GetSettingsPlatformRegion(ServiceCtx context)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+index 00efd4eddb08d82ae15b7c36e7f0f63ffe8c3723..6a075537c208e345744a1c0efa43ee0aae8a8d02 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ISelfController.cs
+@@ -439,5 +439,14 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+ 
+             return ResultCode.Success;
+         }
++
++        [CommandCmif(2400)]
++        // SetRtcScreenSharingAudioEnabled(b8)：S2Arm（Switch 2 SDK）——画面分享时的声音开关；宿主不做画面分享，收下即可（命令号、形状来自 Eden-NS2，代码自写）
++        public ResultCode SetRtcScreenSharingAudioEnabled(ServiceCtx context)
++        {
++            context.RequestData.ReadBoolean();
++
++            return ResultCode.Success;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+index 4f5884fe3600acae6c5ba46e28ab71a9052fe1fa..fdb9c22df1718e297cc74a31ab43ad1c1cf066c9 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IApplicationFunctions.cs
+@@ -655,6 +655,17 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
+             return ResultCode.Success;
+         }
+         
++        [CommandCmif(320)]
++        // GetScreenShotAndContinuousRecordingInitiallyEnabled() -> (b8 screenshot, b8 recording)：S2Arm（Switch 2 SDK）——截图默认允许、
++        //   连续录像宿主没有（不录），回 1 / 0（命令号与两个输出来自 Eden-NS2，代码自写）
++        public ResultCode GetScreenShotAndContinuousRecordingInitiallyEnabled(ServiceCtx context)
++        {
++            context.ResponseData.Write(true);
++            context.ResponseData.Write(false);
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(210)] // 20.0.0+
+         // GetUnknownEvent() -> handle<copy>
+         public ResultCode GetUnknownEvent(ServiceCtx context)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IGraphicsScalingParametersFunctions.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IGraphicsScalingParametersFunctions.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f4e244ff64620166379f97a857af20b2e54a321
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/ApplicationProxy/IGraphicsScalingParametersFunctions.cs
+@@ -0,0 +1,27 @@
++namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy
++{
++    // S2Arm：Switch 2 的 nn::am::service::IGraphicsScalingParametersFunctions（IApplicationProxy 命令 60）。
++    // SDK 的 nn::oe::GetCurrentGraphicsScale 取命令 10 的头一个字，按 10 / 20 / 30 映射成画面档 0 / 1 / 2（the reference port hle_oe.c 的读数）；
++    // 主机实际在哪个模式报哪一档没量过：掌机报 10（档 0）、底座报 20（档 1），随运行模式走（同 参考实现 的选择）。后两个字是屏幕比例分子 / 分母，报 1 / 1。
++    // 命令号与字段来自 Eden-NS2（GPL，只借事实，代码自写）
++    class IGraphicsScalingParametersFunctions : IpcService
++    {
++        [CommandCmif(10)]
++        // GetGraphicsScalingParameters() -> (u32 scale, u32 ratio_numerator, u32 ratio_denominator)
++        public ResultCode GetGraphicsScalingParameters(ServiceCtx context)
++        {
++            context.ResponseData.Write(context.Device.System.State.DockedMode ? 20u : 10u);
++            context.ResponseData.Write(1u);
++            context.ResponseData.Write(1u);
++
++            return ResultCode.Success;
++        }
++
++        [CommandCmif(1050)]
++        // SetGraphicsScaleChangedNotificationEnabled(b8)：画面档只随运行模式变，宿主不单独发这条通知
++        public ResultCode SetGraphicsScaleChangedNotificationEnabled(ServiceCtx context)
++        {
++            return ResultCode.Success;
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/IApplicationProxy.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/IApplicationProxy.cs
+index 27a54a51e3f0254187a5347e01446f38392d88a8..4728c8ea0e1d9387409fa793857046ebcfd90196 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/IApplicationProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/ApplicationProxyService/IApplicationProxy.cs
+@@ -75,6 +75,16 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService
+             return ResultCode.Success;
+         }
+ 
++        [CommandCmif(60)]
++        // GetGraphicsScalingParametersFunctions() -> object<nn::am::service::IGraphicsScalingParametersFunctions>
++        // S2Arm：Switch 2 SDK 起局（nninitInitializeSdkModule → nn::oe）就取它（Pokopia）
++        public ResultCode GetGraphicsScalingParametersFunctions(ServiceCtx context)
++        {
++            MakeObject(context, new IGraphicsScalingParametersFunctions());
++
++            return ResultCode.Success;
++        }
++
+         [CommandCmif(1000)]
+         // GetDebugFunctions() -> object<nn::am::service::IDebugFunctions>
+         public ResultCode GetDebugFunctions(ServiceCtx context)

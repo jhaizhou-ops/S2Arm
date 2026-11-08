@@ -1,0 +1,70 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/ContentManager.cs b/src/Ryujinx.HLE/FileSystem/ContentManager.cs
+index ad5ab8d0dbf55cc3401fc3aa65e58aa859c03fc7..83f7c9372897a21fd52b63d473acd019b76de85d 100644
+--- a/src/Ryujinx.HLE/FileSystem/ContentManager.cs
++++ b/src/Ryujinx.HLE/FileSystem/ContentManager.cs
+@@ -215,6 +215,10 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         public IList<ulong> GetAocTitleIds() => AocData.Select(e => e.Key).ToList();
+ 
++        // S2Arm: the index-th registered DLC title id in sorted order, without building the list (aoc ListAddOnContent, 10-22 mhrise
++        // ~37 calls a minute at 4.4 KB each); SortedList caches its key list, so this does not allocate
++        public ulong GetAocTitleIdAt(int index) => AocData.Keys[index];
++
+         public bool GetAocDataStorage(ulong aocTitleId, out IStorage aocStorage, IntegrityCheckLevel integrityCheckLevel)
+         {
+             aocStorage = null;
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
+index 2cb9215008c1dcef048329036945329b7b32055e..5aebbc3dfbc5f7539b4cb22c2269250c865e2744 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ns/Aoc/IAddOnContentManager.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Common.Logging;
++using Ryujinx.HLE.FileSystem;
+ using Ryujinx.HLE.HOS.Ipc;
+ using Ryujinx.HLE.HOS.Kernel.Threading;
+ using Ryujinx.Horizon.Common;
+@@ -275,7 +276,8 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
+                 return ResultCode.Success;
+             }
+ 
+-            IList<ulong> aocTitleIds = context.Device.System.ContentManager.GetAocTitleIds();
++            // S2Arm: read the ids by index instead of copying them into a new list on every call
++            ContentManager contentManager = context.Device.System.ContentManager;
+ 
+             GetAddOnContentBaseIdFromTitleId(context, titleId);
+ 
+@@ -283,9 +285,9 @@ namespace Ryujinx.HLE.HOS.Services.Ns.Aoc
+ 
+             for (int i = 0; i < indexNumber; i++)
+             {
+-                if (i + (int)startIndex < aocTitleIds.Count)
++                if (i + (int)startIndex < aocTotalCount)
+                 {
+-                    context.Memory.Write(bufferPosition + (ulong)i * sizeof(uint), (uint)(aocTitleIds[i + (int)startIndex] - _addOnContentBaseId));
++                    context.Memory.Write(bufferPosition + (ulong)i * sizeof(uint), (uint)(contentManager.GetAocTitleIdAt(i + (int)startIndex) - _addOnContentBaseId));
+ 
+                     indexCounter++;
+                 }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+index 48622a2245369b0da6fd5803ea44e24f94850d4d..a9ce0ef044fbbc5b9eb922cf294ed78f1be6ae9b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/Types/NvHostEvent.cs
+@@ -78,6 +78,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+             }
+         }
+ 
++        private Action<SyncpointWaiterHandle> _gpuSignaled;
++
+         private void GpuSignaled(SyncpointWaiterHandle waiterInformation)
+         {
+             lock (Lock)
+@@ -151,7 +153,8 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostCtrl
+                     Fence = fence;
+                     State = NvHostEventState.Waiting;
+ 
+-                    _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, GpuSignaled);
++                    // S2Arm: the method group made a new delegate on every wait (nvhost-ctrl EventWaitAsync, every game every frame)
++                    _waiterInformation = gpuContext.Synchronization.RegisterCallbackOnSyncpoint(Fence.Id, Fence.Value, _gpuSignaled ??= GpuSignaled);
+ 
+                     return true;
+                 }

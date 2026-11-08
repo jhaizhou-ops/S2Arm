@@ -1,0 +1,279 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 674af57c92412f21e95036a65278aa99a2f26c65..2cc564c8c7f47f2926c6bdd877632d87c952f430 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -711,6 +711,34 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// 调用方须持 _lazyLock（共用读句柄）。缓存坏了抛 DiskCacheLoadException / IOException / InvalidDataException；没有宿主二进制时 hostCode 为 null
+         /// </summary>
+         private (ShaderSpecializationState specState, byte[] hostCode, CachedShaderStage[] shaders) S2AReadParts(S2ALazyProgram lazy)
++        {
++            ShaderSpecializationState specState = S2AReadSpecStateLocked(lazy);
++
++            (byte[] hostCode, CachedShaderStage[] shaders) = ReadHostCode(
++                lazy.Context,
++                ref _lazyHostToc,
++                ref _lazyHostData,
++                lazy.GuestShaders,
++                lazy.ProgramIndex,
++                lazy.Timestamp);
++
++            return (specState, hostCode, shaders);
++        }
++
++        /// <summary>
++        /// S2A（10-27）：只读一个按需程序的共享记录（特化状态），不读宿主二进制。宿主二进制缺失的条目在查找不中时用它按运行时状态
++        /// 核对「是不是真的需要这一支」（见 <see cref="ShaderSpecializationList"/>）；读失败由调用方按缓存坏处理，不在这里报。
++        /// </summary>
++        internal ShaderSpecializationState S2AReadSpecState(S2ALazyProgram lazy)
++        {
++            lock (_lazyLock)
++            {
++                return S2AReadSpecStateLocked(lazy);
++            }
++        }
++
++        /// <summary>S2A：<see cref="S2AReadSpecState"/> 的实际读取；调用方须持 _lazyLock。</summary>
++        private ShaderSpecializationState S2AReadSpecStateLocked(S2ALazyProgram lazy)
+         {
+             if (_lazyTimestamp != lazy.Timestamp)
+             {
+@@ -740,15 +768,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             ShaderSpecializationState specState = ShaderSpecializationState.Read(ref dataReader);
+             dataReader.EndCompression();
+ 
+-            (byte[] hostCode, CachedShaderStage[] shaders) = ReadHostCode(
+-                lazy.Context,
+-                ref _lazyHostToc,
+-                ref _lazyHostData,
+-                lazy.GuestShaders,
+-                lazy.ProgramIndex,
+-                lazy.Timestamp);
+-
+-            return (specState, hostCode, shaders);
++            return specState;
+         }
+ 
+         // S2A（10-24）：按需实化不在 GPU 模拟线程上同步查链接。多线程渲染器里 CheckProgramLink 是 InvokeCommand，要等渲染线程排空；
+@@ -832,7 +852,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+             if (hostCode == null)
+             {
+-                S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 缺主机代码（按需实化）");
++                // S2Arm（10-27）：这里不再直接报红。缓存里同一份客体代码有很多特化变体，宿主二进制按「构建 + 设备 profile」
++                //   身份分开存；身份一变（换包 / 重建）绝大多数变体都不会有宿主二进制，但同包下一次查找常常用另一个有宿主
++                //   二进制的变体命中。旧口径把整组缺宿主二进制的变体都报成「作废」，同一批变体每局重报（8E 同包两局 643 行 /
++                //   第 1 局 551 次现编、第 2 局 0 次现编）。改由 ShaderSpecializationList 在查找不中时按运行时状态核对，
++                //   只有真的匹配到这条却没有宿主二进制才报一次（= 一次首遇现编）。
++                lazy.HostMissing = true;
+                 return null;
+             }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+index 097f749eb564827c72610cbdabd59f8943fa8eac..2984ec94c7339950ab5dab3227547f5b7b2f8fff 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2ALazyProgram.cs
+@@ -39,6 +39,15 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <summary>S2A：已实化（成功与否都算）；之后提前热不再给它读（持 _lazyLock 读写）。</summary>
+         internal bool Done;
+ 
++        /// <summary>
++        /// S2A：实化时宿主二进制不在（客体代码 / 特化状态仍可读）。这种条目先只登记，等运行时状态真的匹配到它时才算一次
++        /// 「作废 / 首遇现编」并报红——同组里没被选中的特化变体不是作废（见 <see cref="ShaderSpecializationList"/>）。
++        /// </summary>
++        internal bool HostMissing;
++
++        /// <summary>S2A：本局已经为这条缺宿主二进制的条目报过一次红（同一程序不重复报）。</summary>
++        internal bool ReportedMissingHost;
++
+         public S2ALazyProgram(DiskCacheHostStorage storage, GpuContext context, int programIndex, ulong dataOffset, ulong timestamp, bool isCompute, S2AStageIndices stages)
+         {
+             Storage = storage;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+index 6a03991c5328f317d367a1f947d39e1d27176fe6..923482d313a1825c69200eeb0f04c77352ed141a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -19,7 +19,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             return version == TranslatorVersion;
+         }
+ 
+-        /// <summary>Programs dropped from the disk cache instead of being recompiled at boot (health table / tests).</summary>
++        /// <summary>
++        /// Programs whose cached host binary was missing when the runtime state matched them, so they had to be compiled on demand
++        /// (health table / tests). Stale specialization variants that the runtime never selects are not counted (10-27, #551).
++        /// </summary>
+         public static int Discarded => _discarded;
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+index 61e4c8ac4f43b0cde1952a5296cd1e14cadc8306..eef36a8c39ce998d5a80fc20af77ba5c13907f40 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationList.cs
+@@ -1,6 +1,8 @@
+ using Ryujinx.Graphics.Gpu.Shader.DiskCache;
++using System;
+ using System.Collections;
+ using System.Collections.Generic;
++using System.IO;
+ 
+ namespace Ryujinx.Graphics.Gpu.Shader
+ {
+@@ -14,6 +16,9 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         // S2Arm: programs indexed from the disk cache at boot, materialized when a lookup first reaches this group
+         private List<S2ALazyProgram> _lazy;
+ 
++        // S2A（10-27）：实化时宿主二进制不在的条目。它们先只登记，按运行时特化状态核对，只有真的匹配到才算一次作废 / 首遇现编
++        private List<S2ALazyProgram> _s2aMissingHost;
++
+         /// <summary>
+         /// Adds a program that is materialized on the first lookup of this group.
+         /// </summary>
+@@ -35,11 +40,107 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 {
+                     _entries.Add(program);
+                 }
++                else if (lazy.HostMissing)
++                {
++                    (_s2aMissingHost ??= []).Add(lazy);
++                }
+             }
+ 
+             _lazy = null;
+         }
+ 
++        /// <summary>
++        /// S2A（10-27）：本组没有可用条目命中后，按运行时状态核对实化时缺宿主二进制的条目。
++        /// 只有「这一支的特化状态真的匹配当前状态」才报一次作废（= 一次首遇现编）；同组里没被选中的特化变体不是作废，不报。
++        /// 同包第二局时上一局现编的条目已带宿主二进制并命中，查找根本走不到这里，红行归零。
++        /// 保守口径：缺宿主二进制时不知道它是不是顶点转计算 / 读不读绘制参数，按「都是」比（只多比、不少比，不会把不符报成相符）。
++        /// </summary>
++        private void S2AProbeMissingHostGraphics(GpuChannel channel, ref GpuChannelPoolState poolState, ref GpuChannelGraphicsState graphicsState)
++        {
++            if (_s2aMissingHost == null)
++            {
++                return;
++            }
++
++            string why = ShaderSpecializationState.S2AMissWhy;
++
++            foreach (S2ALazyProgram lazy in _s2aMissingHost)
++            {
++                if (lazy.ReportedMissingHost)
++                {
++                    continue;
++                }
++
++                ShaderSpecializationState specState;
++
++                try
++                {
++                    specState = lazy.Storage.S2AReadSpecState(lazy);
++                }
++                catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
++                {
++                    continue;   // 读不了 = 不能证明这一支被需要；缓存坏的行由实化路径负责
++                }
++
++                specState.S2APrepareMatchOnly();
++
++                if (specState.MatchesGraphics(channel, ref poolState, ref graphicsState, true,
++                    !specState.S2AUsageTracked || specState.S2ACbdpRead, checkTextures: true))
++                {
++                    S2AReportMissingHost(lazy);
++                    break;
++                }
++            }
++
++            ShaderSpecializationState.S2AMissWhy = why;   // 查找不中的拒因仍按可用条目算，别被核对覆盖
++        }
++
++        /// <summary>S2A：同 <see cref="S2AProbeMissingHostGraphics"/>，计算着色器。</summary>
++        private void S2AProbeMissingHostCompute(GpuChannel channel, GpuChannelPoolState poolState, GpuChannelComputeState computeState)
++        {
++            if (_s2aMissingHost == null)
++            {
++                return;
++            }
++
++            string why = ShaderSpecializationState.S2AMissWhy;
++
++            foreach (S2ALazyProgram lazy in _s2aMissingHost)
++            {
++                if (lazy.ReportedMissingHost)
++                {
++                    continue;
++                }
++
++                ShaderSpecializationState specState;
++
++                try
++                {
++                    specState = lazy.Storage.S2AReadSpecState(lazy);
++                }
++                catch (Exception e) when (e is DiskCacheLoadException or IOException or InvalidDataException)
++                {
++                    continue;
++                }
++
++                specState.S2APrepareMatchOnly();
++
++                if (specState.MatchesCompute(channel, ref poolState, computeState, checkTextures: true))
++                {
++                    S2AReportMissingHost(lazy);
++                    break;
++                }
++            }
++
++            ShaderSpecializationState.S2AMissWhy = why;
++        }
++
++        private static void S2AReportMissingHost(S2ALazyProgram lazy)
++        {
++            lazy.ReportedMissingHost = true;
++            S2AShaderCacheGuard.Report(1, $"程序 {lazy.ProgramIndex} 缺主机代码（按需实化）");
++        }
++
+         /// <summary>
+         /// Adds a program to the list.
+         /// </summary>
+@@ -92,6 +193,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             }
+ 
+             S2AFinishMiss(whys);
++            S2AProbeMissingHostGraphics(channel, ref poolState, ref graphicsState);
+             program = default;
+             return false;
+         }
+@@ -140,6 +242,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             }
+ 
+             S2AFinishMiss(whys);
++            S2AProbeMissingHostCompute(channel, poolState, computeState);
+             program = default;
+             return false;
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index fefa99115d02fb911deddec43247bb92eaaa7b25..b1dd2ee6447fb8234e060416f6bf3422b5898e4f 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -64,6 +64,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <summary>S2A：使用记录只读（离线批量翻译补变体用）：有无记录 / a2c 抖动是否读过 / 读过类型的属性位置</summary>
+         public bool S2AUsageTracked => (_queriedState & QueriedStateFlags.S2AUsageTracked) != 0;
+         public bool S2AA2cRead => (_queriedState & QueriedStateFlags.S2AA2cRead) != 0;
++        /// <summary>S2A：翻译读过常量缓冲绘制参数（cbdp）。按需实化时用来在不知道宿主程序的情况下按运行时状态核对缺宿主二进制的条目。</summary>
++        public bool S2ACbdpRead => (_queriedState & QueriedStateFlags.S2ACbdpRead) != 0;
+         public uint S2AAttrRead => _s2aAttrRead;
+ 
+         /// <summary>S2A：翻译读过的状态位（S2AStateRead 位号，离线烘焙器统计「读过缺省值字段的程序数」用）；S2AUsageV2 = 有第二代记录（早期深度 … 共享内存这几位可信）</summary>
+@@ -269,6 +271,12 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             }
+         }
+ 
++        /// <summary>
++        /// S2A（10-27）：只做查找用的准备（贴图特化快照）。按需实化核对「缺宿主二进制的条目是否真的匹配」时，条目没有
++        /// CachedShaderProgram（Prepare 不会跑），但比贴图描述符要这份快照；绑定快照与阶段信息不在匹配路径上，不建。
++        /// </summary>
++        internal void S2APrepareMatchOnly() => _allTextures ??= _textureSpecialization.ToArray();
++
+         /// <summary>
+         /// Prepare the shader specialization state for quick binding lookups.
+         /// </summary>

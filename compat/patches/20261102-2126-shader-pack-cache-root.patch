@@ -1,0 +1,121 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 4f076e7b9c42cea3fe625d8c26d1a119d88d9826..933906991c1bf9073bd08b42e569159713352266 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -359,6 +359,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         {
+             if (!CacheExists())
+             {
++                // S2A（#1411）：缓存文件缺失 = 真没读到（包布局与 cache root 不一致的红由 ShaderCache 按 ShouldReportPackZero 报）
++                loader.S2AOutcome = ParallelDiskCacheLoader.S2ALoadOutcome.Missing;
+                 return;
+             }
+ 
+@@ -395,11 +397,20 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+                 bool loadHostCache = header.CodeGenVersion == CodeGenVersion;
+ 
++                // S2A（#1411）：装载结局在版本判定点定案——读到且版本匹配 = 已加载；读到但版本不符 = 整批作废（不是漏读）
++                loader.S2AOutcome = loadHostCache
++                    ? ParallelDiskCacheLoader.S2ALoadOutcome.Loaded
++                    : ParallelDiskCacheLoader.S2ALoadOutcome.StaleVersion;
++
+                 // S2Arm: a cache written by another translator version would be recompiled program by program before the
+                 // first frame; drop the whole cache instead (deleted below, after the streams are closed)
+                 if (!loadHostCache)
+                 {
+-                    S2AShaderCacheGuard.Report(GetProgramCount(), $"缓存的翻译器版本 {header.CodeGenVersion} ≠ 当前 {CodeGenVersion}");
++                    // S2A（#1411）：作废数单独计；红字写明两边版本号与宿主能力身份，一眼分清是没读到还是包旧了
++                    int stale = GetProgramCount();
++                    loader.S2AVersionDiscarded = stale;
++                    S2AShaderCacheGuard.Report(stale, $"缓存的翻译器版本 {header.CodeGenVersion} ≠ 当前 {CodeGenVersion}；" +
++                        $"宿主能力身份 本机 {GetHostFileName(context)} / 缓存 {S2AHostIdentities()}");
+                     discardAll = true;
+                 }
+ 
+@@ -541,6 +552,19 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+             }
+         }
+ 
++        // S2A（#1411）：缓存目录里宿主程序文件名携带的能力身份清单（<api>_<厂商>_bin_<身份> 等），
++        //   报版本不符时与本机需要的身份两边对照；一个都没有写「无」
++        private string S2AHostIdentities()
++        {
++            List<string> names = new();
++            foreach (string file in Directory.GetFiles(_basePath, "*_bin_*.toc"))
++            {
++                names.Add(Path.GetFileNameWithoutExtension(file));
++            }
++            names.Sort(StringComparer.Ordinal);
++            return names.Count == 0 ? "无" : string.Join("、", names);
++        }
++
+         // S2A：提前热按整组预读（10-23 马车8 进赛道首帧：热表 498 个程序所在组共 1046 个，组内兄弟 548 个没预读；
+         //   按需实化是整组一起实化（ShaderSpecializationList.Materialize），没预读的兄弟照样在渲染路径上读缓存 + 解压，首帧仍 104.7 ms / 312 次）。
+         //   组 = 各阶段客体代码号完全相同的程序（同一份客体代码、特化不同的变体）。按热表次序：每个程序后面紧跟它的组内兄弟，去重
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index 9b4dcdada3fbb74a32781979fd7322f6b37b7fd3..70a07137fcd5d5edfc754e2a79d09134127a645e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -204,6 +204,20 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // S2Arm: programs indexed by AddLazy (not in _programList)
+         private int _lazyCount;
+ 
++        /// <summary>Number of programs the disk cache loader actually indexed at boot.</summary>
++        public int LoadedPrograms => _lazyCount;
++
++        // S2Arm（#1411）：装载结局三态——读到并索引 / 版本不符整批作废 / 文件缺失。
++        //   为 null = 装载没走到可判定处（magic / FormatVersion 损坏等抛异常被装载器接住），
++        //   S2AShaderCacheGuard.ShouldReportPackZero 对 null 照样报「读到 0 支」红（#1546 复审：损坏不许静音）。
++        internal enum S2ALoadOutcome { Missing, StaleVersion, Loaded }
++
++        /// <summary>S2Arm（#1411）：本次装载的结局，由 DiskCacheHostStorage.LoadShaders 在三个判定点写入。</summary>
++        internal S2ALoadOutcome? S2AOutcome { get; set; }
++
++        /// <summary>S2Arm（#1411）：StaleVersion 结局作废的程序数（版本不符的 shared.toc 条目数）；其余结局为 0。</summary>
++        internal int S2AVersionDiscarded { get; set; }
++
+         /// <summary>
+         /// Creates a new parallel disk cache loader.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+index 34fe5f8a14af62321e3c59df921d3fee6fd0b089..dc6881c329f378219dbf375d30d7ea7a7ce30fe4 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -38,6 +38,15 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// </summary>
+         public static string WarmList;
+ 
++        /// <summary>
++        /// S2A（#1411 / #1546 复审口径）：离线包种入后要不要报「读到 0 支」红。
++        /// 种入 > 0 且装载索引 0 支时，唯一不报的结局是 StaleVersion——版本不符整批作废在装载时已按两边版本号 /
++        /// 能力身份单独报红，再报「没读到」是误报。其余结局照报：Missing（文件缺失）与 null（装载没走到定结局处，
++        /// 如 magic / FormatVersion 损坏抛异常被装载器接住）都算「读出问题」。
++        /// </summary>
++        internal static bool ShouldReportPackZero(int packPrograms, int loadedPrograms, ParallelDiskCacheLoader.S2ALoadOutcome? outcome)
++            => packPrograms > 0 && loadedPrograms == 0 && outcome != ParallelDiskCacheLoader.S2ALoadOutcome.StaleVersion;
++
+         public static void ResetSession()
+         {
+             _discarded = 0;
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 06775198a2f80545f22350ea670d246e36f453a8..aa878efd2e556151f3a3a832382be83168fb602a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -227,6 +227,16 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 {
+                     Logger.Warning?.Print(LogClass.Gpu, $"Failed to load {errorCount} shaders from the disk cache.");
+                 }
++
++                // S2A：离线包种入成功却一支都没被磁盘缓存读到 = 包布局与 cache root 不一致
++                // （11-02 8E 实测：种入 7 个文件但 LoadShaders 0 支，首遇重翻 26 不受影响）。
++                // #1411/#1546：唯一不报的结局是版本不符整批作废（装载时已单独报红）；文件缺失与
++                // 装载没走到定结局处（magic / FormatVersion 损坏抛异常被接住，结局为 null）都照报。
++                if (S2AShaderCacheGuard.ShouldReportPackZero(S2AShaderCacheGuard.PackPrograms, loader.LoadedPrograms, loader.S2AOutcome))
++                {
++                    Console.Error.WriteLine($"[gal] 【红】着色器离线包：种入 {S2AShaderCacheGuard.PackPrograms} 支，" +
++                        "但运行时从磁盘缓存读到 0 支（检查包文件是否落在 cache root 而不是 shcache/<title>/）");
++                }
+             }
+         }
+ 

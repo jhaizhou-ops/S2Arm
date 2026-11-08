@@ -1,0 +1,159 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleAudioBuffer.cs b/src/Ryujinx.Audio.Backends.Apple/AppleAudioBuffer.cs
+deleted file mode 100644
+index 9952368891d963e72761d09dbef34a64eaa20537..0000000000000000000000000000000000000000
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleAudioBuffer.cs
++++ /dev/null
+@@ -1,16 +0,0 @@
+-namespace Ryujinx.Audio.Backends.Apple
+-{
+-    class AppleAudioBuffer
+-    {
+-        public readonly ulong DriverIdentifier;
+-        public readonly ulong SampleCount;
+-        public ulong SamplePlayed;
+-
+-        public AppleAudioBuffer(ulong driverIdentifier, ulong sampleCount)
+-        {
+-            DriverIdentifier = driverIdentifier;
+-            SampleCount = sampleCount;
+-            SamplePlayed = 0;
+-        }
+-    }
+-}
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 1606e99540d1103a849ad174d3d4977b79642365..301d13124463ee6ba36aae467b09cdb577d29557 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -17,7 +17,14 @@ namespace Ryujinx.Audio.Backends.Apple
+         private const int NumBuffers = 3;
+ 
+         private readonly AppleHardwareDeviceDriver _driver;
+-        private readonly ConcurrentQueue<AppleAudioBuffer> _queuedBuffers = new();
++        // S2Arm: queued buffers as (identifier, sample count) in a ring under _queueLock, instead of ConcurrentQueue<AppleAudioBuffer>:
++        // that allocated an object per buffer, and its TryPeek marks the segment as preserved so dequeues never free slots
++        // and every few buffers a new segment is allocated. Only the head can be partially played (_headPlayed).
++        private (ulong DriverIdentifier, ulong SampleCount)[] _queued = new (ulong, ulong)[16];
++        private int _queuedHead;
++        private int _queuedCount;
++        private ulong _headPlayed;
++        private readonly object _queueLock = new();
+         private readonly DynamicRingBuffer _ringBuffer = new();
+         private readonly ManualResetEvent _updateRequiredEvent;
+ 
+@@ -150,21 +157,26 @@ namespace Ryujinx.Audio.Backends.Apple
+             ulong remaining = samplesPlayed;
+             bool needUpdate = false;
+ 
+-            while (remaining > 0 && _queuedBuffers.TryPeek(out AppleAudioBuffer buffer))
++            lock (_queueLock)
+             {
+-                ulong needed = buffer.SampleCount - Interlocked.Read(ref buffer.SamplePlayed);
+-                ulong take = Math.Min(needed, remaining);
++                while (remaining > 0 && _queuedCount > 0)
++                {
++                    ulong sampleCount = _queued[_queuedHead].SampleCount;
++                    ulong take = Math.Min(sampleCount - _headPlayed, remaining);
+ 
+-                ulong played = Interlocked.Add(ref buffer.SamplePlayed, take);
+-                remaining -= take;
++                    _headPlayed += take;
++                    remaining -= take;
+ 
+-                if (played == buffer.SampleCount)
+-                {
+-                    _queuedBuffers.TryDequeue(out _);
+-                    needUpdate = true;
+-                }
++                    if (_headPlayed == sampleCount)
++                    {
++                        _queuedHead = (_queuedHead + 1) % _queued.Length;
++                        _queuedCount--;
++                        _headPlayed = 0;
++                        needUpdate = true;
++                    }
+ 
+-                Interlocked.Add(ref _playedSampleCount, take);
++                    Interlocked.Add(ref _playedSampleCount, take);
++                }
+             }
+ 
+             if (needUpdate)
+@@ -212,7 +224,26 @@ namespace Ryujinx.Audio.Backends.Apple
+         public override void QueueBuffer(AudioBuffer buffer)
+         {
+             _ringBuffer.Write(buffer.Data, 0, buffer.Data.Length);
+-            _queuedBuffers.Enqueue(new AppleAudioBuffer(buffer.DataPointer, GetSampleCount(buffer)));
++            ulong sampleCount = GetSampleCount(buffer);
++
++            lock (_queueLock)
++            {
++                if (_queuedCount == _queued.Length)
++                {
++                    var grown = new (ulong, ulong)[_queued.Length * 2];
++
++                    for (int i = 0; i < _queuedCount; i++)
++                    {
++                        grown[i] = _queued[(_queuedHead + i) % _queued.Length];
++                    }
++
++                    _queued = grown;
++                    _queuedHead = 0;
++                }
++
++                _queued[(_queuedHead + _queuedCount) % _queued.Length] = (buffer.DataPointer, sampleCount);
++                _queuedCount++;
++            }
+         }
+ 
+         public override void Start()
+@@ -247,10 +278,10 @@ namespace Ryujinx.Audio.Backends.Apple
+ 
+         public override bool WasBufferFullyConsumed(AudioBuffer buffer)
+         {
+-            if (!_queuedBuffers.TryPeek(out AppleAudioBuffer driverBuffer))
+-                return true;
+-
+-            return driverBuffer.DriverIdentifier != buffer.DataPointer;
++            lock (_queueLock)
++            {
++                return _queuedCount == 0 || _queued[_queuedHead].DriverIdentifier != buffer.DataPointer;
++            }
+         }
+ 
+         public override void PrepareToClose() { }
+diff --git a/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs b/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
+index 32457d09a4e19b5e14c584ece17f28b46be22230..7bbbe946e494b5b0d9fcbf6e5a234ef5dee0052e 100644
+--- a/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
++++ b/src/Ryujinx.Audio/Integration/HardwareDeviceImpl.cs
+@@ -13,6 +13,9 @@ namespace Ryujinx.Audio.Integration
+ 
+         private readonly byte[] _buffer;
+ 
++        // S2Arm: one AudioBuffer per tag, reused every 4 rounds (was a new one per round); all fields are re-set before queueing
++        private readonly AudioBuffer[] _audioBuffers = [new(), new(), new(), new()];
++
+         public HardwareDeviceImpl(IHardwareDeviceDriver deviceDriver, uint channelCount, uint sampleRate)
+         {
+             _session = deviceDriver.OpenDeviceSession(IHardwareDeviceDriver.Direction.Output, null, SampleFormat.PcmInt16, sampleRate, channelCount);
+@@ -29,12 +32,15 @@ namespace Ryujinx.Audio.Integration
+         {
+             data.CopyTo(MemoryMarshal.Cast<byte, short>(new Span<byte>(_buffer)));
+ 
+-            _session.QueueBuffer(new AudioBuffer
+-            {
+-                DataPointer = _currentBufferTag++,
+-                Data = _buffer,
+-                DataSize = (ulong)_buffer.Length,
+-            });
++            AudioBuffer audioBuffer = _audioBuffers[_currentBufferTag];
++
++            audioBuffer.BufferTag = 0;
++            audioBuffer.DataPointer = _currentBufferTag++;
++            audioBuffer.Data = _buffer;
++            audioBuffer.DataSize = (ulong)_buffer.Length;
++            audioBuffer.PlayedTimestamp = 0;
++
++            _session.QueueBuffer(audioBuffer);
+ 
+             _currentBufferTag %= 4;
+         }

@@ -1,0 +1,159 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+index 0784fdca80134c4c20ac8b5ce4071f14ffd2409c..e0d5cc73db653d95653e14f9a8dd9dba495332fd 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Compute/ComputeClass.cs
+@@ -92,6 +92,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+         private void SendSignalingPcasB(int argument)
+         {
+             MemoryManager memoryManager = _channel.MemoryManager;
++            long s2aA = S2AAllocTrace.Mark();   // S2A：渲染线程分配拆账（计算派发分段 0x40_0014–0x40_0018）
+ 
+             // Since we're going to change the state, make sure any pending instanced draws are done.
+             _3dEngine.PerformDeferredDraws();
+@@ -142,9 +143,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+                 sharedMemorySize,
+                 _channel.BufferManager.HasUnalignedStorageBuffers);
+ 
++            S2AAllocTrace.Step(0x40_0014, ref s2aA);
+             CachedShaderProgram cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
+ 
+             _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
++            S2AAllocTrace.Step(0x40_0015, ref s2aA);
+ 
+             _channel.TextureManager.SetComputeSamplerPool(samplerPoolGpuVa, _state.State.SetTexSamplerPoolCMaximumIndex, qmd.SamplerIndex);
+             _channel.TextureManager.SetComputeTexturePool(texturePoolGpuVa, _state.State.SetTexHeaderPoolCMaximumIndex);
+@@ -176,6 +179,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+                 _channel.BufferManager.SetComputeStorageBuffer(sb.Slot, sbDescriptor.PackAddress(), size, sb.Flags);
+             }
+ 
++            S2AAllocTrace.Step(0x40_0016, ref s2aA);
+             if (_channel.BufferManager.HasUnalignedStorageBuffers != computeState.HasUnalignedStorageBuffer)
+             {
+                 // Refetch the shader, as assumptions about storage buffer alignment have changed.
+@@ -190,6 +194,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+                 cs = memoryManager.Physical.ShaderCache.GetComputeShader(_channel, samplerPoolMaximumId, poolState, computeState, shaderGpuVa);
+ 
+                 _context.Renderer.Pipeline.SetProgram(cs.HostProgram);
++                S2AAllocTrace.Step(0x40_0015, ref s2aA);
+             }
+ 
+             _channel.BufferManager.SetComputeBufferBindings(cs.Bindings);
+@@ -200,10 +205,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Compute
+             _channel.TextureManager.CommitComputeBindings(cs.SpecializationState);
+ 
+             _channel.BufferManager.CommitComputeBindings();
++            S2AAllocTrace.Step(0x40_0017, ref s2aA);
+ 
+             _context.Renderer.Pipeline.DispatchCompute(qmd.CtaRasterWidth, qmd.CtaRasterHeight, qmd.CtaRasterDepth);
+ 
+             _3dEngine.ForceShaderUpdate();
++            S2AAllocTrace.Step(0x40_0018, ref s2aA);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
+index 3e77eb8acd86857fdcd4c4cf170934b457546913..7a0c917103aebdf47f489c84d9ba59d499da36c8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdateTracker.cs
+@@ -168,7 +168,17 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             {
+                 int groupIndex = BitOperations.TrailingZeroCount(mask);
+ 
+-                _callbacks[groupIndex]();
++                // S2A：渲染线程分配拆账（3D 状态更新按组，键 0x50_00 | 组号，名字见 S2AAllocTrace）
++                if (S2AAllocTrace.On)
++                {
++                    long s2aA = GC.GetAllocatedBytesForCurrentThread();
++                    _callbacks[groupIndex]();
++                    S2AAllocTrace.Raw(0x50_0000 | groupIndex, GC.GetAllocatedBytesForCurrentThread() - s2aA);
++                }
++                else
++                {
++                    _callbacks[groupIndex]();
++                }
+ 
+                 mask &= ~(1UL << groupIndex);
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index f6a3f0b3e10eff17cf44becfb1cc77da9433a801..298db8cea5e61adff8de1265f614c8d00588139d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -339,7 +339,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         /// </summary>
+         private void CommitBindings()
+         {
++            long s2aA = S2AAllocTrace.Mark();   // S2A：渲染线程分配拆账（0x40_0011–0x40_0013）
+             UpdateStorageBuffers();
++            S2AAllocTrace.Step(0x40_0011, ref s2aA);
+ 
+             bool unalignedChanged = _currentSpecState.SetHasUnalignedStorageBuffer(_channel.BufferManager.HasUnalignedStorageBuffers);
+ 
+@@ -360,7 +362,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             }
+             while (scaleMismatch);
+ 
++            S2AAllocTrace.Step(0x40_0012, ref s2aA);
+             _channel.BufferManager.CommitGraphicsBindings(_drawState.DrawIndexed);
++            S2AAllocTrace.Step(0x40_0013, ref s2aA);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 61a30f8e3067172f2578c991d24d461d80e0128b..e95c37042e44dd2317a0ac3a596aef1fe3213df7 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -80,7 +80,31 @@ namespace Ryujinx.Graphics.Gpu
+             }
+         }
+ 
+-        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调", "着色器·取图形程序合计（快路径 + 查缓存 + 现翻）", "着色器·查缓存 + 按需实化", "着色器·首次命中核对", "着色器·按需实化整段（读缓存 + 解压 + 建宿主程序）", "着色器·按需实化里建宿主程序（渲染器 LoadProgramBinary：着色器包 / 离线库查找）" };
++        /// <summary>分段记账：记 a 到现在本线程分配到 key（> 0 才记），a 挪到现在。a 由调用方在段首取 Mark()；On 关时什么都不做</summary>
++        public static void Step(int key, ref long a)
++        {
++            if (!On)
++            {
++                return;
++            }
++
++            long t = GC.GetAllocatedBytesForCurrentThread();
++            Raw(key, t - a);
++            a = t;
++        }
++
++        /// <summary>段首取本线程已分配字节（On 关时 0）</summary>
++        public static long Mark() => On ? GC.GetAllocatedBytesForCurrentThread() : 0;
++
++        private static readonly string[] _rawNames = { "", "段·取命令 Fetch", "段·Process 整段（含分派）", "段·RunDeferredActions", "段·免解读缓存录段", "诊断·录段覆盖已有键", "诊断·段缓存满清空", "诊断·录段新键", "上屏·取帧回调", "上屏·找贴图 + 同步内存", "上屏·渲染器 Present", "上屏·释放回调", "着色器·取图形程序合计（快路径 + 查缓存 + 现翻）", "着色器·查缓存 + 按需实化", "着色器·首次命中核对", "着色器·按需实化整段（读缓存 + 解压 + 建宿主程序）", "着色器·按需实化里建宿主程序（渲染器 LoadProgramBinary：着色器包 / 离线库查找）",
++            "绘制·提交绑定·存储缓冲 UpdateStorageBuffers", "绘制·提交绑定·贴图 TextureManager.CommitGraphicsBindings", "绘制·提交绑定·缓冲 BufferManager.CommitGraphicsBindings",
++            "计算派发·前置（延迟绘制 + 刷常量缓冲 + 设常量缓冲）", "计算派发·取计算程序 + SetProgram", "计算派发·贴图池 + 存储缓冲描述", "计算派发·设绑定 + 提交绑定", "计算派发·下发 DispatchCompute" };
++
++        // 3D 状态更新各组（StateUpdateTracker 按 StateUpdater 构造时的登记顺序编组号；改登记顺序要同步这张表，只影响拆账名字）
++        private static readonly string[] _stateNames = { "VertexBufferState", "VertexAttribState", "BlendState", "FaceState", "StencilTestState", "DepthTestState", "TessellationState",
++            "ViewportTransform", "LogicOpState", "DepthClampState", "PolygonMode", "DepthBiasState", "PrimitiveRestartState", "LineState", "RtColorMask", "RasterizerState", "ScissorState",
++            "TfBufferState", "UserClipState", "AlphaTestState", "SamplerPoolState", "TexturePoolState", "PointState", "IndexBufferState", "MultisampleState", "EarlyZState", "ShaderState",
++            "RenderTargetState" };
+ 
+         private static string Name(int key) => (key >> 20) switch
+         {
+@@ -88,16 +112,19 @@ namespace Ryujinx.Graphics.Gpu
+             1 => $"宏 {key & 0xffff}",
+             2 => $"内联数据 子通道 {key & 0xffff}",
+             4 => (key & 0x1f) < _rawNames.Length ? _rawNames[key & 0x1f] : $"段 0x{key & 0x1f:x}",
++            5 => $"3D 状态更新·组 {key & 0xff} {((key & 0xff) < _stateNames.Length ? _stateNames[key & 0xff] : "?")}",
+             6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
+             _ => key == 0x30_0000 ? "常量缓冲更新" : "FlushUboDirty",
+         };
+ 
+         private static void Dump()
+         {
+-            long total = _acc.Where(kv => kv.Key >> 20 != 4).Sum(kv => kv.Value.Bytes);
++            // 段（0x4x）与 3D 状态更新各组（0x5x）都嵌在分派点里面，不进分派累计
++            long total = _acc.Where(kv => kv.Key >> 20 != 4 && kv.Key >> 20 != 5).Sum(kv => kv.Value.Bytes);
+             Console.Error.WriteLine($"[分配·渲染] GPFIFO 分派累计 {total} B（前 20，字节 / 有分配的调用次数）：");
+ 
+-            foreach (var kv in _acc.OrderByDescending(kv => kv.Value.Bytes).Take(24))
++            // 全打不截断（截断后没出现的键会被读成 0）
++            foreach (var kv in _acc.OrderByDescending(kv => kv.Value.Bytes))
+             {
+                 Console.Error.WriteLine($"[分配·渲染]   {Name(kv.Key)}：{kv.Value.Bytes} B / {kv.Value.Calls} 次");
+             }

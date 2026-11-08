@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index 7c2fcec471ac23e40c00a596bce51aee96408360..847d120e72c7b90024128583787b176263557d05 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -745,13 +745,25 @@ namespace Ryujinx.Graphics.Gpu.Shader
+ 
+                         if (stageIndex == 0)
+                         {
+-                            vertexAsCompute = CreateHostVertexAsComputeProgram(program, currentStage, tfEnabled);
+-
++                            ShaderProgram vertexComputeProgram = program;
+                             TranslatorContext lastInVertexPipeline = geometryToCompute ? translatorContexts[4] ?? currentStage : currentStage;
+ 
++                            // If VS is the final guest vertex stage, this is the
++                            // same decision made at the empty geometry slot below.
++                            // Reject before allocating a compute program that would
++                            // otherwise lose its owner on the exception path.
++                            if (!hasGeometryShader && translatorContexts[2] == null && translatorContexts[3] == null &&
++                                S2ALayerRouteFor(_context, currentStage, 3) == S2ALayerRoute.Unsupported)
++                            {
++                                S2ARejectLayerRoute();
++                            }
++
++                            // Validate the passthrough before allocating a host compute
++                            // program: a rejected Layer route has no owner for it.
+                             program = lastInVertexPipeline.GenerateVertexPassthroughForCompute();
+                             S2ACheckLayerPassthrough(_context, program);
+                             passthroughInfo = program.Info;
++                            vertexAsCompute = CreateHostVertexAsComputeProgram(vertexComputeProgram, currentStage, tfEnabled);
+                         }
+                         else
+                         {

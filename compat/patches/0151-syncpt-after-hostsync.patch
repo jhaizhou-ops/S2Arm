@@ -1,0 +1,90 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+index cedd824a1aa55975f80ba1a40222af401183289c..ccac6094f850ac29565e1bab90df4a57a466a99e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+@@ -160,8 +160,9 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 // "Unbind" render targets since a syncpoint increment might indicate future CPU access for the textures.
+                 _parent.TextureManager.RefreshModifiedTextures();
+ 
+-                _context.CreateHostSyncIfNeeded(HostSyncFlags.StrictSyncpoint);
+-                _context.Synchronization.IncrementSyncpoint(syncpointId);
++                // S2A：强制建严格主机同步号，同步点等它做完再推进（GpuContext.S2AIncrementSyncpointAfterHostSync）
++                _context.CreateHostSyncIfNeeded(GpuContext.S2ASyncptImmediate ? HostSyncFlags.StrictSyncpoint : HostSyncFlags.StrictSyncpoint | HostSyncFlags.Force);
++                _context.S2AIncrementSyncpointAfterHostSync(syncpointId);
+             }
+ 
+             _context.AdvanceSequence();
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+index 67ab96f41477d44353009d1a396717ac5c63225d..fa607c607ce25f8e52fc771c7f8e31f137f77f56 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClass.cs
+@@ -470,9 +470,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             uint syncpointId = (uint)argument & 0xFFFF;
+ 
+             _context.AdvanceSequence();
+-            _context.CreateHostSyncIfNeeded(HostSyncFlags.StrictSyncpoint);
++            // S2A：强制建严格主机同步号，同步点等它做完再推进（同 GPFifoClass，见 GpuContext.S2AIncrementSyncpointAfterHostSync）
++            _context.CreateHostSyncIfNeeded(GpuContext.S2ASyncptImmediate ? HostSyncFlags.StrictSyncpoint : HostSyncFlags.StrictSyncpoint | HostSyncFlags.Force);
+             _context.Renderer.UpdateCounters(); // Poll the query counters, the game may want an updated result.
+-            _context.Synchronization.IncrementSyncpoint(syncpointId);
++            _context.S2AIncrementSyncpointAfterHostSync(syncpointId);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/GpuContext.cs b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+index f1bcd67f42a3cd5d682e0d6e82490acc259f39fc..00fbf3f39f7396f9f46988262a91b109285579c5 100644
+--- a/src/Ryujinx.Graphics.Gpu/GpuContext.cs
++++ b/src/Ryujinx.Graphics.Gpu/GpuContext.cs
+@@ -57,6 +57,44 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         internal ulong SyncNumber { get; private set; }
+ 
++        // S2A（帧率能耗线 10-22，暗黑3 加载转换崩溃）：同步点推进等主机同步做完（= GPU 真做完到这里）再让游戏看到。
++        // 原版在 GPU 线程处理到 SyncpointbOperation.Incr 时就推进同步点值，GPU 还没做完；游戏线程等到同步点就去读 GPU 产出，
++        // 出图改 CPU 等待（1b157788b）后 GPU 线程跑得更靠前，提前量变大，暗黑3 diff→load 偶发查表 miss 崩（原生层线 A/B：GPUWAIT=1 6/6 不崩，cpuwait 8 局 2 崩）。
++        // 做法：推进时强制建严格主机同步号 N，把（同步点，N）按序交给专门线程：WaitSync(N)（CPU 侧等，不占 GPU 渲染通道）后再推进。
++        // 缺省关（照上游立即推进）：S2A_SYNCPT_HOSTSYNC=1 整体打开（同时打开 GAL 严格同步号当场提交，gal_core.m sync_strict_commit），单变量 A/B 证明后再翻缺省（总指挥 10-22）
++        internal static readonly bool S2ASyncptImmediate = Environment.GetEnvironmentVariable("S2A_SYNCPT_HOSTSYNC") != "1";
++        private readonly System.Collections.Concurrent.BlockingCollection<(uint Id, ulong Sync)> _s2aSyncpt = new(new System.Collections.Concurrent.ConcurrentQueue<(uint, ulong)>());
++        private Thread _s2aSyncptThread;
++
++        /// <summary>
++        /// 推进同步点：S2ASyncptImmediate 时当场推进；否则等刚建的主机同步号（SyncNumber - 1）做完再推进（调用前须以 Force 建过主机同步）
++        /// </summary>
++        internal void S2AIncrementSyncpointAfterHostSync(uint syncpointId)
++        {
++            if (S2ASyncptImmediate)
++            {
++                Synchronization.IncrementSyncpoint(syncpointId);
++                return;
++            }
++
++            if (_s2aSyncptThread == null)
++            {
++                _s2aSyncptThread = new Thread(S2ASyncptLoop) { Name = "S2A.Syncpt", IsBackground = true };
++                _s2aSyncptThread.Start();
++            }
++
++            _s2aSyncpt.Add((syncpointId, SyncNumber - 1));
++        }
++
++        private void S2ASyncptLoop()
++        {
++            foreach ((uint id, ulong sync) in _s2aSyncpt.GetConsumingEnumerable())
++            {
++                Renderer.WaitSync(sync);
++                Synchronization.IncrementSyncpoint(id);
++            }
++        }
++
+         /// <summary>
+         /// Actions to be performed when a CPU waiting syncpoint or barrier is triggered.
+         /// If there are more than 0 items when this happens, a host sync object will be generated for the given <see cref="SyncNumber"/>,
+@@ -469,6 +507,7 @@ namespace Ryujinx.Graphics.Gpu
+         /// </summary>
+         public void Dispose()
+         {
++            _s2aSyncpt.CompleteAdding();
+             GPFifo.Dispose();
+             HostInitalized.Dispose();
+             _gpuReadyEvent.Dispose();

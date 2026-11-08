@@ -1,0 +1,55 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index 47aeacd8bb32c0e68038318ef9d146fb6840fb84..e158ff0efc229d672b967ad5822fb3f54c742d65 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -1897,6 +1897,10 @@ namespace Ryujinx.Graphics.Vulkan
+         /// </summary>
+         internal bool S2ASavePipelineCacheEarly() => S2ASavePipelineCache("收局请求时提前");
+         internal bool S2ASavePipelineCacheForExit() => S2ASavePipelineCache("收局补存");
++        // S2A（10-27，单线程收局）：在停 WSI 之前落盘。单线程收局在原生 1.5 s 内做完整释放，窗口 / WSI 退休可能吃掉大半预算
++        //   （9000 r8：通过局总共 1.405 s；18:02 局 GPU Run 退出 +0.670 s、Surface detached +1.029 s、1.509 s 被 _exit）；
++        //   落盘只有几十毫秒，先做，后面超时也不丢缓存。释放时若之后没有新管线由 Dispose 跳过重存
++        internal bool S2ASavePipelineCacheBeforeWsiRetire() => S2ASavePipelineCache("WSI 退休前");
+ 
+         /// <summary>S2A：最近一次写成的落盘之后没有新管线（盘上的驱动管线缓存是最新的）</summary>
+         internal bool S2APipelineCacheCurrent =>
+@@ -1995,9 +1999,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 // S2A：提前落盘的后台写还没完就先有界等它（≤ 1 s），再判断要不要重存；两次写盘由 _s2aSaves 串行、旧不覆盖新
+                 if (_s2aPendingSave is { IsCompleted: false } pending)
+                     pending.Wait(1000);
+-                // S2A：收局请求时已提前写成、之后没有新管线 → 不再重存（缓存内容相同，省一次几 MB 的同步落盘；单线程没有提前落盘，照常存）
++                // S2A：收局请求时 / 单线程 WSI 退休前已提前写成、之后没有新管线 → 不再重存（缓存内容相同，省一次几 MB 的同步落盘）
+                 if (_s2aOwnsPipelineCache && System.Threading.Volatile.Read(ref _s2aSavedAtPipelines) == System.Threading.Interlocked.Read(ref PipelineState.S2APipelinesCreated))
+-                    Console.Error.WriteLine("[vkpipe] 驱动管线缓存与收局请求时提前落盘的一致（之后没有新管线），释放时不再重存");
++                    Console.Error.WriteLine("[vkpipe] 驱动管线缓存与提前落盘的一致（之后没有新管线），释放时不再重存");
+                 else if (_s2aOwnsPipelineCache)
+                     S2ASavePipelineCache();
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 610b4ef393764071f5ed29854322ecc0f5d530e7..770e77cf4716e028206850dd736c0ce1702928e5 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -131,6 +131,23 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             return worker.Run(pipeline.S2ASavePipelineCacheForExit, highPriority: true);
+         }
++
++        /// <summary>
++        /// S2A（Android 单线程收局）：在停 WSI / 证明退休之前，把驱动管线缓存落盘一次（走同一编译通道，与管线创建串行）。
++        /// 原生收局兜底 1.5 s，单线程完整释放 + 窗口 / WSI 退休可能吃掉全部预算（9000 r8 18:02 局：GPU Run 退出 +0.670 s、
++        /// Surface detached +1.029 s、1.509 s 被 _exit，落盘排在 WSI 退休之后没赶上）。这里先落盘（几十毫秒），后面超时也不丢。
++        /// 返回是否写成；没有编译通道 / 管线 / 通道已在停 = false。
++        /// </summary>
++        public bool S2ASavePipelineCacheBeforeWsiRetire()
++        {
++            CompileWorker worker = S2ACompileWorker;
++            PipelineFull pipeline = _pipeline;
++            if (worker == null || pipeline == null || worker.IsStopping) return false;
++            if (pipeline.S2APipelineCacheCurrent) return true;
++
++            Task<bool> save = worker.Run(pipeline.S2ASavePipelineCacheBeforeWsiRetire, highPriority: true);
++            return save != null && save.Wait(1200) && save.IsCompletedSuccessfully && save.Result;
++        }
+         internal string S2APipelineCachePath { get; set; }
+         private readonly object _s2aProgramIdentityGate = new();
+         private ProgramBinaryIdentity _s2aProgramBinaryIdentity;

@@ -1,0 +1,1015 @@
+diff --git a/src/Ryujinx.Common/Memory/MemoryOwner.cs b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+index f99553dc83268b701f2dfff6da599d54f6b12ef5..384d191db7c7b60119c1d8b25ff1de78b508ee44 100644
+--- a/src/Ryujinx.Common/Memory/MemoryOwner.cs
++++ b/src/Ryujinx.Common/Memory/MemoryOwner.cs
+@@ -96,6 +96,7 @@ namespace Ryujinx.Common.Memory
+                         return holder.Array!;
+                     }
+ 
++                    S2APoolStat.Note(1, (long)minimumSize * System.Runtime.CompilerServices.Unsafe.SizeOf<T>());   // S2A：池没命中、新分配
+                     return new T[minimumSize];
+                 }
+             }
+@@ -253,4 +254,27 @@ namespace Ryujinx.Common.Memory
+             throw new ObjectDisposedException(nameof(MemoryOwner<T>), "The buffer has already been disposed.");
+         }
+     }
++
++    // S2A 诊断（帧率能耗线 10-22，S2A_ALLOC_TRACE=1 时生效）：两个数据池没接住、只能新分配的次数与字节——
++    // 种类 1 = MemoryOwner 池没命中（贴图转格式等），2 = ThreadedRenderer 环形池（8 MB）放不下走 ToArray（缓冲上传等）。每 10 秒打一行累计
++    public static class S2APoolStat
++    {
++        public static readonly bool On = System.Environment.GetEnvironmentVariable("S2A_ALLOC_TRACE") == "1";
++        private static long _n1, _b1, _n2, _b2, _last, _stacks;
++        public static void Note(int kind, long bytes)
++        {
++            if (!On) return;
++            if (kind == 1)
++            {
++                long n = System.Threading.Interlocked.Increment(ref _n1); System.Threading.Interlocked.Add(ref _b1, bytes);
++                // 第 2 的幂次次缺口（前 10 次）打调用栈：查谁每帧租大数组又没命中
++                if ((n & (n - 1)) == 0 && System.Threading.Interlocked.Increment(ref _stacks) <= 10)
++                    System.Console.Error.WriteLine($"[分配·池] MemoryOwner 没命中第 {n} 次（{bytes} 字节）：{new System.Diagnostics.StackTrace(2, false).ToString().Replace(System.Environment.NewLine, " ← ")}");
++            }
++            else { System.Threading.Interlocked.Increment(ref _n2); System.Threading.Interlocked.Add(ref _b2, bytes); }
++            long now = System.Diagnostics.Stopwatch.GetTimestamp(), last = System.Threading.Volatile.Read(ref _last);
++            if (now - last < System.Diagnostics.Stopwatch.Frequency * 10 || System.Threading.Interlocked.CompareExchange(ref _last, now, last) != last) return;
++            System.Console.Error.WriteLine($"[分配·池] 累计：MemoryOwner 池没命中 {_n1} 次 {_b1 / 1048576.0:F1} MB；渲染命令环形池放不下走 ToArray {_n2} 次 {_b2 / 1048576.0:F1} MB");
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/IRenderer.cs b/src/Ryujinx.Graphics.GAL/IRenderer.cs
+index cc51ed67b2676c37cf372fb447c148ffa03fdae4..4c6fb63251cfa9e222a949dc45500545b1296055 100644
+--- a/src/Ryujinx.Graphics.GAL/IRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/IRenderer.cs
+@@ -12,6 +12,19 @@ namespace Ryujinx.Graphics.GAL
+ 
+         bool PreferThreading { get; }
+ 
++        /// <summary>S2A：租一段上传内存（见 <see cref="S2AUploadLease"/>；可在 GPU 模拟线程上直接调用）。不支持返回 false，调用方走原路</summary>
++        bool S2ATryRentUpload(int size, out S2AUploadLease lease)
++        {
++            lease = default;
++            return false;
++        }
++
++        /// <summary>S2A：退还没交出去的租约</summary>
++        void S2ADropUpload(S2AUploadLease lease) { }
++
++        /// <summary>S2A：把租约里的数据写进缓冲（同 SetBufferData，按命令顺序生效），租约随之收回</summary>
++        void S2ASetBufferData(BufferHandle buffer, int offset, S2AUploadLease lease) => throw new NotSupportedException();
++
+         public IRenderer TryMakeThreaded(BackendThreading backendThreading = BackendThreading.Auto)
+         {
+             if (backendThreading is BackendThreading.On ||
+diff --git a/src/Ryujinx.Graphics.GAL/ITexture.cs b/src/Ryujinx.Graphics.GAL/ITexture.cs
+index 2aa4053ff2c042848fa4477b85f6d657404a1df6..ba1ab506063381f640f114a41c9d0180639d2970 100644
+--- a/src/Ryujinx.Graphics.GAL/ITexture.cs
++++ b/src/Ryujinx.Graphics.GAL/ITexture.cs
+@@ -1,4 +1,5 @@
+ using Ryujinx.Common.Memory;
++using System;
+ 
+ namespace Ryujinx.Graphics.GAL
+ {
+@@ -23,6 +24,8 @@ namespace Ryujinx.Graphics.GAL
+         /// </summary>
+         /// <param name="data">Texture data bytes</param>
+         void SetData(MemoryOwner<byte> data);
++        /// <summary>S2A：同 SetData(MemoryOwner)，数据在渲染器租出的上传内存里（<see cref="S2AUploadLease"/>），租约随之收回。只有租约来自的渲染器支持</summary>
++        void S2ASetData(S2AUploadLease lease) => throw new NotSupportedException();
+ 
+         /// <summary>
+         /// Sets the texture data. The data passed as a <see cref="MemoryOwner{Byte}" /> will be disposed when
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/CommandHelper.cs b/src/Ryujinx.Graphics.GAL/Multithreading/CommandHelper.cs
+index a1e6db97192960c382c1f448017ffc9070b77846..791f91b816d211fab4c6146f315e559f8f297548 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/CommandHelper.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/CommandHelper.cs
+@@ -62,6 +62,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             Register<BufferDisposeCommand>(CommandType.BufferDispose);
+             Register<BufferGetDataCommand>(CommandType.BufferGetData);
+             Register<BufferSetDataCommand>(CommandType.BufferSetData);
++            Register<BufferS2ASetDataCommand>(CommandType.BufferS2ASetData);
+ 
+             Register<CounterEventDisposeCommand>(CommandType.CounterEventDispose);
+             Register<CounterEventFlushCommand>(CommandType.CounterEventFlush);
+@@ -84,6 +85,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+             Register<TextureGetDataSliceCommand>(CommandType.TextureGetDataSlice);
+             Register<TextureReleaseCommand>(CommandType.TextureRelease);
+             Register<TextureSetDataCommand>(CommandType.TextureSetData);
++            Register<TextureS2ASetDataCommand>(CommandType.TextureS2ASetData);
+             Register<TextureSetDataSliceCommand>(CommandType.TextureSetDataSlice);
+             Register<TextureSetDataSliceRegionCommand>(CommandType.TextureSetDataSliceRegion);
+             Register<TextureSetStorageCommand>(CommandType.TextureSetStorage);
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/CommandType.cs b/src/Ryujinx.Graphics.GAL/Multithreading/CommandType.cs
+index 348c8e46204199af80352b7c945df75c13573098..6114736fe5eec92b752c26216c39a08e7c4125ce 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/CommandType.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/CommandType.cs
+@@ -22,6 +22,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         BufferDispose,
+         BufferGetData,
+         BufferSetData,
++        BufferS2ASetData,
+ 
+         CounterEventDispose,
+         CounterEventFlush,
+@@ -44,6 +45,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+         TextureGetDataSlice,
+         TextureRelease,
+         TextureSetData,
++        TextureS2ASetData,
+         TextureSetDataSlice,
+         TextureSetDataSliceRegion,
+         TextureSetStorage,
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Buffer/BufferS2ASetDataCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Buffer/BufferS2ASetDataCommand.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e468542f4ac92fdb893f4cdf209dd6273b7c7298
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Buffer/BufferS2ASetDataCommand.cs
+@@ -0,0 +1,23 @@
++namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Buffer
++{
++    /// <summary>S2A：缓冲写入，数据在上传租约里（ThreadedRenderer.SetBufferData 环形池放不下时用，原先 ToArray 新分配）</summary>
++    struct BufferS2ASetDataCommand : IGALCommand, IGALCommand<BufferS2ASetDataCommand>
++    {
++        public readonly CommandType CommandType => CommandType.BufferS2ASetData;
++        private BufferHandle _buffer;
++        private int _offset;
++        private S2AUploadLease _lease;
++
++        public void Set(BufferHandle buffer, int offset, S2AUploadLease lease)
++        {
++            _buffer = buffer;
++            _offset = offset;
++            _lease = lease;
++        }
++
++        public static void Run(ref BufferS2ASetDataCommand command, ThreadedRenderer threaded, IRenderer renderer)
++        {
++            renderer.S2ASetBufferData(threaded.Buffers.MapBuffer(command._buffer), command._offset, command._lease);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureS2ASetDataCommand.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureS2ASetDataCommand.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d043a86ffdbdda932389c462da5750928f9a482a
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Commands/Texture/TextureS2ASetDataCommand.cs
+@@ -0,0 +1,25 @@
++using Ryujinx.Graphics.GAL.Multithreading.Model;
++using Ryujinx.Graphics.GAL.Multithreading.Resources;
++
++namespace Ryujinx.Graphics.GAL.Multithreading.Commands.Texture
++{
++    /// <summary>S2A：整张贴图写入，数据在上传租约里（Gpu 层转格式直接写进租约，见 S2AUploadLease）</summary>
++    struct TextureS2ASetDataCommand : IGALCommand, IGALCommand<TextureS2ASetDataCommand>
++    {
++        public readonly CommandType CommandType => CommandType.TextureS2ASetData;
++        private TableRef<ThreadedTexture> _texture;
++        private S2AUploadLease _lease;
++
++        public void Set(TableRef<ThreadedTexture> texture, S2AUploadLease lease)
++        {
++            _texture = texture;
++            _lease = lease;
++        }
++
++        public static void Run(ref TextureS2ASetDataCommand command, ThreadedRenderer threaded, IRenderer renderer)
++        {
++            ThreadedTexture texture = command._texture.Get(threaded);
++            texture.Base.S2ASetData(command._lease);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
+index ec7ab159898026a0cf3af3d61a801dbe1705ad5d..6eb1b912159dce3daf4d14c7531d87e3efaafcbd 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Model/CircularSpanPool.cs
+@@ -52,6 +52,7 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Model
+                 // - A wraparound would happen but the consumer would be covered by it.
+                 // - The producer would catch up to the consumer as a result.
+ 
++                Ryujinx.Common.Memory.S2APoolStat.Note(2, size);   // S2A：环形池放不下、新分配
+                 return new SpanRef<T>(_renderer, data.ToArray());
+             }
+ 
+@@ -67,6 +68,27 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Model
+             return new SpanRef<T>(data.Length);
+         }
+ 
++        /// <summary>
++        /// S2A：同 Insert，但放不下时返回 false（不走 ToArray 新分配），调用方改用上传租约（ThreadedRenderer.SetBufferData）
++        /// </summary>
++        public bool S2ATryInsert<T>(ReadOnlySpan<T> data, out SpanRef<T> spanRef) where T : unmanaged
++        {
++            int size = data.Length * Unsafe.SizeOf<T>();
++            bool wraparound = _producerPtr + size >= _size;
++            int index = wraparound ? 0 : _producerPtr;
++            int consumer = _consumerPtr;
++            bool beforeConsumer = _producerPtr < consumer;
++
++            if (size > _size - 1 || (wraparound && beforeConsumer) || ((index < consumer || wraparound) && index + size >= consumer))
++            {
++                spanRef = default;
++                return false;
++            }
++
++            spanRef = Insert(data);
++            return true;
++        }
++
+         public Span<T> Get<T>(int length) where T : unmanaged
+         {
+             int size = length * Unsafe.SizeOf<T>();
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+index 356756a54f923b15d1d6226c11ad8d08fa958bce..5bcd80e54891e6026db9d832c4888086f0bd84b7 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ThreadedTexture.cs
+@@ -149,6 +149,13 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+             _renderer.QueueCommand();
+         }
+ 
++        /// <inheritdoc/>
++        public unsafe void S2ASetData(S2AUploadLease lease)
++        {
++            _renderer.New<TextureS2ASetDataCommand>()->Set(Ref(this), lease);
++            _renderer.QueueCommand();
++        }
++
+         /// <inheritdoc/>
+         public unsafe void SetData(MemoryOwner<byte> data, int layer, int level)
+         {
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+index 292090b5ec3809a4d968c42e228ac9a776552fbe..e4ec0c5337de7d4a6dd1da221f878931ae125f78 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/ThreadedRenderer.cs
+@@ -666,7 +666,34 @@ namespace Ryujinx.Graphics.GAL.Multithreading
+ 
+         public unsafe void SetBufferData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data)
+         {
+-            New<BufferSetDataCommand>()->Set(buffer, offset, CopySpan(data));
++            // S2A（帧率能耗线 10-22，方案 B）：环形池（8 MB）放不下时原版走 ToArray 新分配（巫师3 换场景缓冲首次上传几十 MB），改租渲染器上传内存拷进去
++            if (!_spanPool.S2ATryInsert(data, out SpanRef<byte> spanRef))
++            {
++                if (_baseRenderer.S2ATryRentUpload(data.Length, out S2AUploadLease lease))
++                {
++                    data.CopyTo(lease.Span);
++                    New<BufferS2ASetDataCommand>()->Set(buffer, offset, lease);
++                    QueueCommand();
++                    return;
++                }
++
++                spanRef = CopySpan(data);
++            }
++
++            New<BufferSetDataCommand>()->Set(buffer, offset, spanRef);
++            QueueCommand();
++        }
++
++        /// <summary>S2A：租约直接向底层渲染器租（原生，线程安全），不排队</summary>
++        public bool S2ATryRentUpload(int size, out S2AUploadLease lease) => _baseRenderer.S2ATryRentUpload(size, out lease);
++
++        /// <summary>S2A：退租直接交底层</summary>
++        public void S2ADropUpload(S2AUploadLease lease) => _baseRenderer.S2ADropUpload(lease);
++
++        /// <summary>S2A：租约数据写缓冲，按命令顺序排队</summary>
++        public unsafe void S2ASetBufferData(BufferHandle buffer, int offset, S2AUploadLease lease)
++        {
++            New<BufferS2ASetDataCommand>()->Set(buffer, offset, lease);
+             QueueCommand();
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.GAL/S2AUploadLease.cs b/src/Ryujinx.Graphics.GAL/S2AUploadLease.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b62c98f6339e8e67f453fe01f346890d01ebef7
+--- /dev/null
++++ b/src/Ryujinx.Graphics.GAL/S2AUploadLease.cs
+@@ -0,0 +1,26 @@
++using System;
++
++namespace Ryujinx.Graphics.GAL
++{
++    /// <summary>
++    /// S2A（帧率能耗线 10-22，巫师3 换场景分配方案 B）：渲染器租出的一段上传内存（原生、共享给 GPU）。
++    /// Gpu 层转贴图格式 / 线程渲染器传缓冲数据时直接写进 <see cref="Span"/>，再交给 ITexture.S2ASetData / IRenderer.S2ASetBufferData，
++    /// 渲染器拿它当暂存、用完收回——不经托管数组（换场景帧 GPU 模拟线程几十 MB 分配），也省一次托管 → 暂存的拷贝。
++    /// 只能交一次；不交要 IRenderer.S2ADropUpload 退租。值类型，排进线程渲染器命令队列不分配
++    /// </summary>
++    public readonly struct S2AUploadLease
++    {
++        public readonly nint Ptr;
++        public readonly int Size;
++        public readonly uint Id;
++
++        public S2AUploadLease(nint ptr, int size, uint id)
++        {
++            Ptr = ptr;
++            Size = size;
++            Id = id;
++        }
++
++        public unsafe Span<byte> Span => new((void*)Ptr, Size);
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index b97086768df835bb8278e2fd780d85612fc9cabb..fc1889fe00e1415b82b90851f903359111638b71 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -139,6 +139,42 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+         /// <param name="yCount">Number of lines to be copied</param>
+         /// <returns></returns>
+         private static readonly bool _s2aTexToBuf = Environment.GetEnvironmentVariable("S2A_DMA_TEX2BUF") != "0";
++
++        /// <summary>S2A：DMA 写整张贴图走上传租约（同原路的转换参数，只是输出写进租约），成功返回 true</summary>
++        private bool S2ADmaToTextureLease(MemoryManager memoryManager, Image.Texture target, DmaTexture src, bool srcLinear, int srcBpp, int srcStride, int xCount, ReadOnlySpan<byte> srcSpan)
++        {
++            if (!srcLinear && srcBpp == 12)
++            {
++                return false;
++            }
++
++            int tbpp = target.Info.FormatInfo.BytesPerPixel;
++            int size = srcLinear
++                ? LayoutConverter.S2ALinearStridedToLinearSize(target.Info.Width, target.Info.Height, 1, 1, tbpp)
++                : LayoutConverter.S2ABlockLinearToLinearSize(src.Width, src.Height, 1, 1, 1, 1, 1, srcBpp);
++
++            if (!_context.Renderer.S2ATryRentUpload(size, out Ryujinx.Graphics.GAL.S2AUploadLease lease))
++            {
++                return false;
++            }
++
++            if (srcLinear)
++            {
++                LayoutConverter.ConvertLinearStridedToLinear(lease.Span, target.Info.Width, target.Info.Height, 1, 1, xCount * srcBpp, srcStride, tbpp, srcSpan);
++            }
++            else
++            {
++                LayoutConverter.ConvertBlockLinearToLinear(
++                    lease.Span, src.Width, src.Height, src.Depth, 1, 1, 1, 1, 1, srcBpp,
++                    src.MemoryLayout.UnpackGobBlocksInY(), src.MemoryLayout.UnpackGobBlocksInZ(), 1, new SizeInfo((int)target.Size), srcSpan);
++            }
++
++            target.SynchronizeMemory();
++            target.S2ASetData(lease);
++            target.SignalModified();
++
++            return true;
++        }
+         private static readonly bool _s2aDmaTrace = Environment.GetEnvironmentVariable("S2A_DMA_TRACE") == "1";
+         private int _s2aTexToBufN, _s2aTexToBufMiss;
+ 
+@@ -442,6 +478,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+ 
+                     if (target != null)
+                     {
++                        // S2A（帧率能耗线 10-22，方案 B）：转好的线性数据直接写进渲染器租出的上传内存，不经 MemoryOwner（八方2 每帧 DMA 写 640x360 R8，
++                        // 池总被淘汰、每帧新分配 230 KB，整局 885 MB）。租不到 / 12 字节像素的块线性（上游行尾越界，见 Texture.S2ATryUploadDirect）走原路
++                        if (S2ADmaToTextureLease(memoryManager, target, src, srcLinear, srcBpp, srcStride, xCount, srcSpan))
++                        {
++                            return;
++                        }
++
+                         MemoryOwner<byte> data;
+                         if (srcLinear)
+                         {
+@@ -490,7 +533,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 // OPT: This allocates a (potentially) huge temporary array and then copies an existing
+                 // region of memory into it, data that might get overwritten entirely anyways. Ideally this should
+                 // all be rewritten to use pooled arrays, but that gets complicated with packed data and strides
+-                Span<byte> dstSpan = memoryManager.GetSpan(dstGpuVa + (ulong)dstBaseOffset, dstSize).ToArray();
++                // S2A（帧率能耗线 10-22，八方2 稳态分配）：原版 ToArray 每次新分配目标区大小的数组（八方2 每帧多次、每次约 26 KB，整局 536 MB），
++                // 改从 ArrayPool 租、用完还（稳态复用、零分配），语义不变：先拷目标区现内容、按布局改写、写回
++                long s2aA = S2AAllocTrace.Mark();
++                byte[] s2aDst = System.Buffers.ArrayPool<byte>.Shared.Rent(dstSize);
++                Span<byte> dstSpan = s2aDst.AsSpan(0, dstSize);
++                memoryManager.GetSpan(dstGpuVa + (ulong)dstBaseOffset, dstSize).CopyTo(dstSpan);
++                S2AAllocTrace.Step(0x40_002d, ref s2aA);
+ 
+                 TextureParams srcParams = new(srcRegionX, srcRegionY, srcBaseOffset, srcBpp, srcLinear, srcCalculator);
+                 TextureParams dstParams = new(dstRegionX, dstRegionY, dstBaseOffset, dstBpp, dstLinear, dstCalculator);
+@@ -548,6 +597,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 }
+ 
+                 memoryManager.Write(dstGpuVa + (ulong)dstBaseOffset, dstSpan);
++                System.Buffers.ArrayPool<byte>.Shared.Return(s2aDst);
++                S2AAllocTrace.Step(0x40_002e, ref s2aA);
+             }
+             else
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+index 03c931381ec5051d010f76b659aa72ac5917d622..9dd05557dfbd298f53bdda62789d7e918591bc37 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/AutoDeleteCache.cs
+@@ -59,8 +59,13 @@ namespace Ryujinx.Graphics.Gpu.Image
+         private readonly LinkedList<Texture> _textures;
+         private ulong _totalSize;
+ 
+-        private HashSet<ShortTextureCacheEntry> _shortCacheBuilder;
+-        private HashSet<ShortTextureCacheEntry> _shortCache;
++        // S2A（帧率能耗线 10-22）：上游短缓存是两代（builder 收新条目、上一代下次 Tick 删），这里改成 16 代环：
++        // 贴图缓冲（TextureBuffer，只是缓冲上的视图、不占自己的存储）留满 16 代，其余照上游留 2 代（放进第 2 个要删的集合）。
++        // 八方2 每帧换贴图缓冲描述符、同一描述符隔 3–16 代才回来，两代接不住、每帧新建约 10 张（GPU 模拟线程约 11 KB/帧分配）；
++        // Mac 实测 16 代新建 −78%、MARK 后 60 秒 gen0 4 → 1，Metal 已分配不变（op2_alloc r7 / r12）。S2A_SHORT_CACHE_GEN 覆盖代数（A/B 用，2 = 上游）
++        private static readonly int _shortCacheGenerations = S2AShortCacheGenerations();
++        private readonly HashSet<ShortTextureCacheEntry>[] _shortCacheGens;
++        private int _shortCacheBuilder;
+ 
+         private readonly Dictionary<TextureDescriptor, ShortTextureCacheEntry> _shortCacheLookup;
+ 
+@@ -101,8 +106,12 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             _textures = [];
+ 
+-            _shortCacheBuilder = [];
+-            _shortCache = [];
++            _shortCacheGens = new HashSet<ShortTextureCacheEntry>[_shortCacheGenerations];
++
++            for (int i = 0; i < _shortCacheGens.Length; i++)
++            {
++                _shortCacheGens[i] = [];
++            }
+ 
+             _shortCacheLookup = new Dictionary<TextureDescriptor, ShortTextureCacheEntry>();
+         }
+@@ -227,6 +236,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+                 else
+                 {
++                    S2ADescReuse.StaleHits++;
+                     _shortCacheLookup.Remove(descriptor);
+                 }
+             }
+@@ -240,8 +250,12 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="texture">Texture to remove from the short cache</param>
+         public void RemoveShortCache(Texture texture)
+         {
+-            bool removed = _shortCache.Remove(texture.ShortCacheEntry);
+-            removed |= _shortCacheBuilder.Remove(texture.ShortCacheEntry);
++            bool removed = false;
++
++            foreach (HashSet<ShortTextureCacheEntry> gen in _shortCacheGens)
++            {
++                removed |= gen.Remove(texture.ShortCacheEntry);
++            }
+ 
+             if (removed)
+             {
+@@ -266,7 +280,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         {
+             ShortTextureCacheEntry entry = new(descriptor, texture);
+ 
+-            _shortCacheBuilder.Add(entry);
++            _shortCacheGens[texture.Target == GAL.Target.TextureBuffer ? _shortCacheBuilder : (_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
+             _shortCacheLookup.Add(entry.Descriptor, entry);
+ 
+             texture.ShortCacheEntry = entry;
+@@ -285,7 +299,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+             {
+                 ShortTextureCacheEntry entry = new(texture);
+ 
+-                _shortCacheBuilder.Add(entry);
++                _shortCacheGens[(_shortCacheBuilder + 2) % _shortCacheGens.Length].Add(entry);
+ 
+                 texture.ShortCacheEntry = entry;
+ 
+@@ -299,7 +313,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         public void ProcessShortCache()
+         {
+-            HashSet<ShortTextureCacheEntry> toRemove = _shortCache;
++            int oldest = (_shortCacheBuilder + 1) % _shortCacheGens.Length;
++            HashSet<ShortTextureCacheEntry> toRemove = _shortCacheGens[oldest];
+ 
+             foreach (ShortTextureCacheEntry entry in toRemove)
+             {
+@@ -318,8 +333,12 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+ 
+             toRemove.Clear();
+-            _shortCache = _shortCacheBuilder;
+-            _shortCacheBuilder = toRemove;
++            _shortCacheBuilder = oldest;
++        }
++
++        private static int S2AShortCacheGenerations()
++        {
++            return int.TryParse(System.Environment.GetEnvironmentVariable("S2A_SHORT_CACHE_GEN"), out int n) && n >= 2 && n <= 64 ? n : 16;
+         }
+ 
+         public IEnumerator<Texture> GetEnumerator()
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Pool.cs b/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
+index 3cc65a92bff89cbf243301ab3a5570569e788976..2c0c104f3d84400f4468e9561b6fb924d2648d3a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Pool.cs
+@@ -143,8 +143,10 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         public void SynchronizeMemory()
+         {
++            long s2aA = S2AAllocTrace.Mark();
+             _modified = false;
+             _memoryTracking.QueryModified(_modifiedDelegate);
++            S2AAllocTrace.Step(0x40_002f, ref s2aA);
+ 
+             if (_modified)
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index df3aa2bcc8b8921330a2c6cbd37aee9441ce0b79..85bff2efd518c2cc1ffa6153f27bcf9cb8c7eab1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -279,7 +279,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 Debug.Assert(!isView);
+ 
+                 TextureCreateInfo createInfo = TextureCache.GetCreateInfo(Info, _context.Capabilities, ScaleFactor);
+-                HostTexture = _context.Renderer.CreateTexture(createInfo);
++                { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
+ 
+                 SynchronizeMemory(); // Load the data.
+                 if (ScaleMode == TextureScaleMode.Scaled)
+@@ -303,7 +303,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+ 
+                     TextureCreateInfo createInfo = TextureCache.GetCreateInfo(Info, _context.Capabilities, ScaleFactor);
+-                    HostTexture = _context.Renderer.CreateTexture(createInfo);
++                    { long s2aC = S2AAllocTrace.Mark(); HostTexture = _context.Renderer.CreateTexture(createInfo); S2AAllocTrace.Step(0x40_0026, ref s2aC); }
+                 }
+             }
+         }
+@@ -631,6 +631,66 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _modifiedStale = true;
+         }
+ 
++        // S2A（帧率能耗线 10-22，巫师3 换场景分配方案 B）：整张同步时转格式直接写进渲染器租出的上传内存（S2AUploadLease），
++        // 不经 MemoryOwner 托管数组（换场景帧 GPU 模拟线程几十 MB 分配，池全是冷的），也省一次托管 → 暂存的拷贝。
++        // 只走「转格式后不需要再解压 / 换格式」且不缩放的贴图；租不到或渲染器不支持照原路（S2A_UPLOAD_LEASE=0 渲染器一律不租）
++
++        private bool S2ATryUploadDirect(ReadOnlySpan<byte> data)
++        {
++            FormatInfo fi = Info.FormatInfo;
++
++            // 12 字节像素不走：上游 ConvertBlockLinearToLinear 对 bpp 12 的行尾起点算错（xStart = AlignDown(w×12, 16) / 12 取整），每行多写、越过输出尾；
++            // 原路的池数组常比要的大才没崩（数据照样错位）。租约按精确大小建，越界会踩到缓冲外（10-22 新旧对拍 AccessViolation 实测）
++            if (fi.BytesPerPixel == 12 || (ScaleFactor != 1f && AllowScaledSetData()) || !S2ANoHostConversion())
++            {
++                return false;
++            }
++
++            int width = Info.Width, height = Info.Height, depth = _depth, layers = _layers, levels = Info.Levels;
++            int size = Info.IsLinear
++                ? LayoutConverter.S2ALinearStridedToLinearSize(width, height, fi.BlockWidth, fi.BlockHeight, fi.BytesPerPixel)
++                : LayoutConverter.S2ABlockLinearToLinearSize(width, height, depth, levels, layers, fi.BlockWidth, fi.BlockHeight, fi.BytesPerPixel);
++
++            if (!_context.Renderer.S2ATryRentUpload(size, out S2AUploadLease lease))
++            {
++                return false;
++            }
++
++            long s2aS = S2AAllocTrace.Mark();
++
++            if (Info.IsLinear)
++            {
++                LayoutConverter.ConvertLinearStridedToLinear(lease.Span, width, height, fi.BlockWidth, fi.BlockHeight, Info.Stride, Info.Stride, fi.BytesPerPixel, data);
++            }
++            else
++            {
++                LayoutConverter.ConvertBlockLinearToLinear(
++                    lease.Span, width, height, depth, depth, levels, layers, fi.BlockWidth, fi.BlockHeight, fi.BytesPerPixel,
++                    Info.GobBlocksInY, Info.GobBlocksInZ, Info.GobBlocksInTileX, _sizeInfo, data);
++            }
++
++            S2AAllocTrace.Step(0x40_0027, ref s2aS);
++            HostTexture.S2ASetData(lease);
++            S2AAllocTrace.Step(0x40_0028, ref s2aS);
++            _hasData = true;
++
++            return true;
++        }
++
++        // 与 ConvertToHostCompatibleFormat 的后处理分支一一对应（只会更严）：都不需要时，布局转换的线性数据就是宿主格式
++        private bool S2ANoHostConversion()
++        {
++            Capabilities caps = _context.Capabilities;
++            Format f = Format;
++
++            return !(!caps.SupportsAstcCompression && f.IsAstc) &&
++                   !(!caps.SupportsEtc2Compression && f.IsEtc2) &&
++                   TextureCompatibility.HostSupportsBcFormat(f, Target, caps) &&
++                   !(!caps.SupportsR4G4Format && f == Format.R4G4Unorm) &&
++                   !(f == Format.R4G4B4A4Unorm && !caps.SupportsR4G4B4A4Format) &&
++                   !(!caps.Supports5BitComponentFormat && f.Is16BitPacked);
++        }
++
+         /// <summary>
+         /// Fully synchronizes guest and host memory.
+         /// This will replace the entire texture with the data present in guest memory.
+@@ -640,6 +700,11 @@ namespace Ryujinx.Graphics.Gpu.Image
+             _physicalMemory.S2ASignalReadForTexture(Range);
+             ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
+ 
++            if (S2ATryUploadDirect(data))
++            {
++                return;
++            }
++
+             // If the host does not support ASTC compression, we need to do the decompression.
+             // The decompression is slow, so we want to avoid it as much as possible.
+             // This does a byte-by-byte check and skips the update if the data is equal in this case.
+@@ -662,7 +727,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+             }
+ 
++            long s2aS = S2AAllocTrace.Mark();
+             MemoryOwner<byte> result = ConvertToHostCompatibleFormat(data);
++            S2AAllocTrace.Step(0x40_0027, ref s2aS);
+ 
+             if (ScaleFactor != 1f && AllowScaledSetData())
+             {
+@@ -678,6 +745,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 HostTexture.SetData(result);
+             }
+ 
++            S2AAllocTrace.Step(0x40_0028, ref s2aS);
+             _hasData = true;
+         }
+ 
+@@ -687,17 +755,36 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// <param name="data">New data</param>
+         public void SetData(MemoryOwner<byte> data)
+         {
+-            BlacklistScale();
++            PrepareSetData();
+ 
+-            Group.CheckDirty(this, true);
++            HostTexture.SetData(data);
+ 
+-            AlwaysFlushOnOverlap = true;
++            _hasData = true;
++        }
+ 
+-            HostTexture.SetData(data);
++        /// <summary>
++        /// S2A（帧率能耗线 10-22，方案 B）：同 SetData(MemoryOwner)，数据在渲染器租出的上传内存里（调用方已直接写进 lease，见 S2AUploadLease）。
++        /// 与 SetData 共用 PrepareSetData，只有数据来源不同
++        /// </summary>
++        public void S2ASetData(S2AUploadLease lease)
++        {
++            PrepareSetData();
++
++            HostTexture.S2ASetData(lease);
+ 
+             _hasData = true;
+         }
+ 
++        // 整张写入前的状态处理（SetData / S2ASetData 共用）：取消缩放、查脏、标覆盖回写
++        private void PrepareSetData()
++        {
++            BlacklistScale();
++
++            Group.CheckDirty(this, true);
++
++            AlwaysFlushOnOverlap = true;
++        }
++
+         /// <summary>
+         /// Uploads new texture data to the host GPU for a specific layer/level.
+         /// </summary>
+@@ -1592,6 +1679,10 @@ namespace Ryujinx.Graphics.Gpu.Image
+             return _referenceCount == 1;
+         }
+ 
++        /// <summary>S2A 诊断：当前引用数、池所有者数</summary>
++        public int S2ARefCount => _referenceCount;
++        public int S2APoolOwners => _poolOwners.Count;
++
+         /// <summary>
+         /// Decrements the texture reference count.
+         /// When the reference count hits zero, the texture may be deleted and can't be used anymore.
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+index 117e0def4bfc165e4818d47b0438ec5a61f14aef..a24f0effb8bcdedc0f7868c030ad8f41dabf37d1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureCache.cs
+@@ -948,7 +948,10 @@ namespace Ryujinx.Graphics.Gpu.Image
+             // No match, create a new texture.
+             if (texture == null)
+             {
++                long s2aA = S2AAllocTrace.Mark();   // S2A：新建贴图分段（0x40_0021–0x40_0025，帧率能耗线 10-22 巫师3 换场景分配）
++                if (S2AAllocTrace.On) S2ANewTexStat.Note(info);
+                 texture = new Texture(_context, _physicalMemory, info, sizeInfo, range.Value, scaleMode);
++                S2AAllocTrace.Step(0x40_0021, ref s2aA);
+ 
+                 // Step 1: Find textures that are view compatible with the new texture.
+                 // Any textures that are incompatible will contain garbage data, so they should be removed where possible.
+@@ -1071,11 +1074,14 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+                 }
+ 
++                S2AAllocTrace.Step(0x40_0022, ref s2aA);
+                 texture.InitializeGroup(hasLayerViews, hasMipViews, incompatibleOverlaps);
++                S2AAllocTrace.Step(0x40_0023, ref s2aA);
+ 
+                 // We need to synchronize before copying the old view data to the texture,
+                 // otherwise the copied data would be overwritten by a future synchronization.
+                 texture.InitializeData(false, setData && !ShouldDiscard(discard, texture, sizeHint));
++                S2AAllocTrace.Step(0x40_0024, ref s2aA);
+ 
+                 texture.Group.InitializeOverlaps();
+ 
+@@ -1127,6 +1133,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 }
+ 
+                 texture.SynchronizeMemory();
++                S2AAllocTrace.Step(0x40_0025, ref s2aA);
+             }
+ 
+             // Sampler textures are managed by the texture pool, all other textures
+@@ -1501,8 +1508,19 @@ namespace Ryujinx.Graphics.Gpu.Image
+         public void Tick()
+         {
+             _cache.ProcessShortCache();
++            S2ATicks++;
++            if (S2AAllocTrace.On)
++            {
++                long c = Ryujinx.Memory.Tracking.RegionHandle.S2ACreated, d = Ryujinx.Memory.Tracking.RegionHandle.S2ADisposed, v = Ryujinx.Memory.Tracking.RegionHandle.S2AVRegions;
++                if (c - _s2aHc >= 1000) System.Console.Error.WriteLine($"[分配·跟踪句柄] Tick {S2ATicks}：本帧新建句柄 {c - _s2aHc}、释放 {d - _s2aHd}、新建虚拟区域 {v - _s2aHv}；累计新建 {c}、释放 {d}（在用 {c - d}）");
++                _s2aHc = c; _s2aHd = d; _s2aHv = v;
++            }
+         }
+ 
++        /// <summary>S2A 诊断：Tick 次数（短缓存代数），S2ANewTexStat 量描述符重现间隔用</summary>
++        public static long S2ATicks;
++        private static long _s2aHc, _s2aHd, _s2aHv;
++
+         /// <summary>
+         /// Disposes all textures and samplers in the cache.
+         /// It's an error to use the texture cache after disposal.
+@@ -1524,4 +1542,23 @@ namespace Ryujinx.Graphics.Gpu.Image
+             }
+         }
+     }
++
++    // S2A 诊断（帧率能耗线 10-22，S2A_ALLOC_TRACE=1 时）：新建贴图按「宽×高 格式 目标」计数，每 10 秒打前 8——查稳态每帧反复新建的是哪类贴图（八方2 每秒约 116 张）
++    static class S2ANewTexStat
++    {
++        static readonly System.Collections.Generic.Dictionary<(int, int, int, Format, Target), long> _n = new();
++        static long _last, _total;
++        public static void Note(TextureInfo info)
++        {
++            var k = (info.Width, info.Height, info.GetDepth(), info.FormatInfo.Format, info.Target);
++            _n[k] = _n.TryGetValue(k, out long v) ? v + 1 : 1; _total++;
++            long now = System.Diagnostics.Stopwatch.GetTimestamp();
++            if (now - _last < System.Diagnostics.Stopwatch.Frequency * 10) return;
++            _last = now;
++            var top = System.Linq.Enumerable.Take(System.Linq.Enumerable.OrderByDescending(_n, kv => kv.Value), 8);
++            var sb = new System.Text.StringBuilder($"[分配·新建贴图] 累计 {_total} 张，前 8：");
++            foreach (var kv in top) sb.Append($" {kv.Key.Item1}x{kv.Key.Item2}x{kv.Key.Item3} {kv.Key.Item4} {kv.Key.Item5}×{kv.Value}");
++            System.Console.Error.WriteLine(sb.ToString());
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TexturePool.cs b/src/Ryujinx.Graphics.Gpu/Image/TexturePool.cs
+index 667e66aafde88f90d5ab2d3c4c17915860ceac15..6ead24939b883cf4e9a5de2098d7bae3c4ea9f02 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TexturePool.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TexturePool.cs
+@@ -200,7 +200,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     return ref descriptor;
+                 }
+ 
++                long s2aP = S2AAllocTrace.Mark();
+                 texture = PhysicalMemory.TextureCache.FindShortCache(descriptor);
++                bool s2aHit = texture != null;
+ 
+                 if (texture == null)
+                 {
+@@ -211,6 +213,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                     }
+ 
+                     TextureInfo info = GetInfo(descriptor, out int layerSize);
++                    if (S2AAllocTrace.On) { S2AAllocTrace.Step(0x40_0030, ref s2aP); S2ADescReuse.Note(descriptor); S2AAllocTrace.Step(0x40_0032, ref s2aP); }
+                     texture = PhysicalMemory.TextureCache.FindOrCreateTexture(_channel.MemoryManager, TextureSearchFlags.ForSampler, info, layerSize);
+ 
+                     // If this happens, then the texture address is invalid, we can't add it to the cache.
+@@ -230,6 +233,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+                 texture.IncrementReferenceCount(this, id, descriptor.UnpackAddress());
+ 
+                 DescriptorCache[id] = descriptor;
++                S2AAllocTrace.Step(s2aHit ? 0x40_0031 : 0x40_0030, ref s2aP);
+             }
+             else
+             {
+@@ -523,6 +527,8 @@ namespace Ryujinx.Graphics.Gpu.Image
+                         continue;
+                     }
+ 
++                    if (S2AAllocTrace.On) { long s2aD = S2AAllocTrace.Mark(); S2ADescReuse.Removed(cachedDescriptor, texture); S2AAllocTrace.Step(0x40_0032, ref s2aD); }
++
+                     if (texture.HasOneReference())
+                     {
+                         _channel.MemoryManager.Physical.TextureCache.AddShortCache(texture, ref cachedDescriptor);
+@@ -859,4 +865,53 @@ namespace Ryujinx.Graphics.Gpu.Image
+             base.Dispose();
+         }
+     }
++
++    // S2A 诊断（帧率能耗线 10-22，S2A_ALLOC_TRACE=1 时）：短缓存没接住、要新建贴图的描述符，距它上次因描述符改写被移出池几代 Tick
++    // （短缓存按代保留，这个间隔就是要几代才接得住）。每 10 秒打一行累计分布；「移出时还有别的引用」的不进短缓存，单独计
++    static class S2ADescReuse
++    {
++        static readonly System.Collections.Generic.Dictionary<TextureDescriptor, long> _removed = new();
++        static readonly int[] _edges = { 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64 };
++        static readonly long[] _h = new long[13];
++        static long _multiRef, _removedN, _last, _nearMulti, _nearOne;
++        // 短缓存里找到了但贴图失效序号已变（AutoDeleteCache.FindShortCache 丢弃）的次数
++        public static long StaleHits;
++        // 移出时多引用的分桶：[贴图缓冲?][引用数 2 / 3 / 4+]，另记其中池所有者数 ≥2（同一贴图挂在多个池槽位）的个数
++        static readonly long[,] _multiBy = new long[2, 3];
++        static long _multiPoolOwners;
++        public static void Removed(in TextureDescriptor d, Texture tex)
++        {
++            bool oneRef = tex.HasOneReference();
++            _removedN++;
++            if (!oneRef)
++            {
++                _multiRef++;
++                _multiBy[tex.Target == Target.TextureBuffer ? 1 : 0, Math.Min(Math.Max(tex.S2ARefCount, 2), 4) - 2]++;
++                if (tex.S2APoolOwners >= 2) _multiPoolOwners++;
++            }
++            // 值 = Tick × 2 + 移出时是否只剩池这一个引用
++            if (_removed.Count < 65536 || _removed.ContainsKey(d)) _removed[d] = TextureCache.S2ATicks * 2 + (oneRef ? 1 : 0);
++        }
++        public static void Note(in TextureDescriptor d)
++        {
++            long now = TextureCache.S2ATicks;
++            int b = 12;
++            if (_removed.TryGetValue(d, out long tv))
++            {
++                long t = tv >> 1;
++                long g = now - t;
++                if (g <= 2) { if ((tv & 1) != 0) _nearOne++; else _nearMulti++; }
++                b = _edges.Length;
++                for (int i = 0; i < _edges.Length; i++) if (g <= _edges[i]) { b = i; break; }
++            }
++            _h[b]++;
++            long ts = System.Diagnostics.Stopwatch.GetTimestamp();
++            if (ts - _last < System.Diagnostics.Stopwatch.Frequency * 10) return;
++            _last = ts;
++            var sb = new System.Text.StringBuilder("[分配·描述符重现] 新建时距上次移出：");
++            for (int i = 0; i < _edges.Length; i++) sb.Append($"≤{_edges[i]} 代 {_h[i]}、");
++            sb.Append($">64 代 {_h[11]}、没移出过 {_h[12]}；移出共 {_removedN} 次（其中还有别的引用、不进短缓存 {_multiRef}）；≤2 代未命中里移出时多引用 {_nearMulti}、单引用 {_nearOne}；短缓存找到但失效序号已变 {StaleHits}；多引用移出 贴图缓冲 引用 2/3/4+ = {_multiBy[1, 0]}/{_multiBy[1, 1]}/{_multiBy[1, 2]}、其他 = {_multiBy[0, 0]}/{_multiBy[0, 1]}/{_multiBy[0, 2]}，其中挂在多个池槽位 {_multiPoolOwners}（Tick 累计 {now}）");
++            System.Console.Error.WriteLine(sb.ToString());
++        }
++    }
+ }
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 7f8caad87928a311f0a605b65481c9d31fe4ffde..6dec949333c921282511f9fcec93974dff263b21 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -677,7 +677,9 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="overlaps">Buffers overlapping the range</param>
+         private Buffer CreateBufferAligned(ulong address, ulong size, BufferStage stage, bool sparseCompatible, Buffer[] overlaps)
+         {
++            long s2aA = S2AAllocTrace.Mark();   // S2A：新建缓冲分段（0x40_0029–0x40_002c，帧率能耗线 10-22 巫师3 换场景分配）
+             Buffer newBuffer = new(_context, _physicalMemory, address, size, stage, sparseCompatible, overlaps);
++            S2AAllocTrace.Step(0x40_0029, ref s2aA);
+ 
+             for (int index = 0; index < overlaps.Length; index++)
+             {
+@@ -691,12 +693,15 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                 buffer.DecrementReferenceCount();
+             }
+ 
++            S2AAllocTrace.Step(0x40_002a, ref s2aA);
+             newBuffer.SynchronizeMemory(address, size);
++            S2AAllocTrace.Step(0x40_002b, ref s2aA);
+ 
+             // Existing buffers were modified, we need to rebind everything.
+             NotifyBuffersModified?.Invoke();
+ 
+             RecreateMultiRangeBuffers(address, size);
++            S2AAllocTrace.Step(0x40_002c, ref s2aA);
+             
+             return newBuffer;
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index bd1581ff5313a5799ef931e7d0f1a7d886bce8b1..911d8c796b7fbb464c6fcaa96f54e023da3ea15d 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -100,7 +100,12 @@ namespace Ryujinx.Graphics.Gpu
+             "绘制·提交绑定·存储缓冲 UpdateStorageBuffers", "绘制·提交绑定·贴图 TextureManager.CommitGraphicsBindings", "绘制·提交绑定·缓冲 BufferManager.CommitGraphicsBindings",
+             "计算派发·前置（延迟绘制 + 刷常量缓冲 + 设常量缓冲）", "计算派发·取计算程序 + SetProgram", "计算派发·贴图池 + 存储缓冲描述", "计算派发·设绑定 + 提交绑定", "计算派发·下发 DispatchCompute",
+             "2D 拷贝·找源贴图 FindOrCreateTexture", "2D 拷贝·Lift", "2D 拷贝·找目标贴图 FindOrCreateTexture", "2D 拷贝·CopyTo + SignalModified",
+-            "计算派发·其中 缓冲设绑定", "计算派发·其中 贴图设绑定", "计算派发·其中 贴图提交", "计算派发·其中 缓冲提交" };
++            "计算派发·其中 缓冲设绑定", "计算派发·其中 贴图设绑定", "计算派发·其中 贴图提交", "计算派发·其中 缓冲提交",
++            "新建贴图·new Texture", "新建贴图·查重叠 / 视图兼容", "新建贴图·InitializeGroup", "新建贴图·InitializeData 整段", "新建贴图·重叠视图替换 + 同步",
++            "贴图·建宿主贴图 Renderer.CreateTexture", "贴图同步·读内存 + 转格式 ConvertToHostCompatibleFormat", "贴图同步·上传 HostTexture.SetData",
++            "新建缓冲·new Buffer", "新建缓冲·拷旧缓冲 + 继承修改范围", "新建缓冲·SynchronizeMemory", "新建缓冲·重建多段缓冲 + 通知",
++            "DMA·目标区暂存（原 ToArray，现 ArrayPool）", "DMA·布局拷贝 + 写回客体内存",
++            "贴图池·同步内存（描述符改写移出 + 短缓存登记）", "贴图池·取贴图未命中整段（含新建贴图）", "贴图池·短缓存命中后挂回池", "诊断·描述符重现统计" };
+ 
+         // 3D 状态更新各组（StateUpdateTracker 按 StateUpdater 构造时的登记顺序编组号；改登记顺序要同步这张表，只影响拆账名字）
+         private static readonly string[] _stateNames = { "VertexBufferState", "VertexAttribState", "BlendState", "FaceState", "StencilTestState", "DepthTestState", "TessellationState",
+diff --git a/src/Ryujinx.Graphics.Texture/LayoutConverter.cs b/src/Ryujinx.Graphics.Texture/LayoutConverter.cs
+index 143c36259311d6a3d99429f1b7fe51263220d545..117e7304dcfe97cc099a1aeda30069e81a6dc70e 100644
+--- a/src/Ryujinx.Graphics.Texture/LayoutConverter.cs
++++ b/src/Ryujinx.Graphics.Texture/LayoutConverter.cs
+@@ -122,8 +122,40 @@ namespace Ryujinx.Graphics.Texture
+                 bytesPerPixel);
+ 
+             MemoryOwner<byte> outputOwner = MemoryOwner<byte>.Rent(outSize);
+-            Span<byte> output = outputOwner.Span;
+ 
++            ConvertBlockLinearToLinear(outputOwner.Span, width, height, depth, sliceDepth, levels, layers, blockWidth, blockHeight, bytesPerPixel, gobBlocksInY, gobBlocksInZ, gobBlocksInTileX, sizeInfo, data);
++
++            return outputOwner;
++        }
++
++        /// <summary>
++        /// S2A（帧率能耗线 10-22，方案 B）：块线性 → 线性的输出字节数（同 ConvertBlockLinearToLinear 租的大小），调用方按它向渲染器租上传内存
++        /// </summary>
++        public static int S2ABlockLinearToLinearSize(int width, int height, int sliceDepth, int levels, int layers, int blockWidth, int blockHeight, int bytesPerPixel)
++        {
++            return GetTextureSize(width, height, sliceDepth, levels, layers, blockWidth, blockHeight, bytesPerPixel);
++        }
++
++        /// <summary>
++        /// S2A：块线性 → 线性，写进调用方给的 output（长度至少 S2ABlockLinearToLinearSize；可以是渲染器租出的原生上传内存，不经托管数组）。算法同原版，原版改成租池数组后调这里
++        /// </summary>
++        public static void ConvertBlockLinearToLinear(
++            Span<byte> output,
++            int width,
++            int height,
++            int depth,
++            int sliceDepth,
++            int levels,
++            int layers,
++            int blockWidth,
++            int blockHeight,
++            int bytesPerPixel,
++            int gobBlocksInY,
++            int gobBlocksInZ,
++            int gobBlocksInTileX,
++            SizeInfo sizeInfo,
++            ReadOnlySpan<byte> data)
++        {
+             int outOffs = 0;
+ 
+             int mipGobBlocksInY = gobBlocksInY;
+@@ -248,8 +280,6 @@ namespace Ryujinx.Graphics.Texture
+                     _ => throw new NotSupportedException($"Unable to convert ${bytesPerPixel} bpp pixel format."),
+                 };
+             }
+-
+-            return outputOwner;
+         }
+ 
+         public static MemoryOwner<byte> ConvertLinearStridedToLinear(
+@@ -266,10 +296,40 @@ namespace Ryujinx.Graphics.Texture
+             int h = BitUtils.DivRoundUp(height, blockHeight);
+ 
+             int outStride = BitUtils.AlignUp(w * bytesPerPixel, HostStrideAlignment);
+-            lineSize = Math.Min(lineSize, outStride);
+ 
+             MemoryOwner<byte> output = MemoryOwner<byte>.Rent(h * outStride);
+-            Span<byte> outSpan = output.Span;
++
++            ConvertLinearStridedToLinear(output.Span, width, height, blockWidth, blockHeight, lineSize, stride, bytesPerPixel, data);
++
++            return output;
++        }
++
++        /// <summary>S2A：线性跨步 → 线性的输出字节数（同 ConvertLinearStridedToLinear 租的大小）</summary>
++        public static int S2ALinearStridedToLinearSize(int width, int height, int blockWidth, int blockHeight, int bytesPerPixel)
++        {
++            int w = BitUtils.DivRoundUp(width, blockWidth);
++            int h = BitUtils.DivRoundUp(height, blockHeight);
++
++            return h * BitUtils.AlignUp(w * bytesPerPixel, HostStrideAlignment);
++        }
++
++        /// <summary>S2A：线性跨步 → 线性，写进调用方给的 outSpan（长度至少 S2ALinearStridedToLinearSize）。算法同原版</summary>
++        public static void ConvertLinearStridedToLinear(
++            Span<byte> outSpan,
++            int width,
++            int height,
++            int blockWidth,
++            int blockHeight,
++            int lineSize,
++            int stride,
++            int bytesPerPixel,
++            ReadOnlySpan<byte> data)
++        {
++            int w = BitUtils.DivRoundUp(width, blockWidth);
++            int h = BitUtils.DivRoundUp(height, blockHeight);
++
++            int outStride = BitUtils.AlignUp(w * bytesPerPixel, HostStrideAlignment);
++            lineSize = Math.Min(lineSize, outStride);
+ 
+             int outOffs = 0;
+             int inOffs = 0;
+@@ -281,8 +341,6 @@ namespace Ryujinx.Graphics.Texture
+                 inOffs += stride;
+                 outOffs += outStride;
+             }
+-
+-            return output;
+         }
+ 
+         public static void ConvertLinearToBlockLinear(

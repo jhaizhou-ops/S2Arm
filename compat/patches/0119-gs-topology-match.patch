@@ -1,0 +1,34 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs b/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
+index 694b67ab9f8c93651cf953de2a3db53aa3ab86bb..fabf2a9c99431514158e5d007906a764b0b75bc7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/GpuChannelGraphicsState.cs
+@@ -165,6 +165,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <param name="topology">Maxwell primitive topology</param>
+         /// <param name="tessellationMode">Maxwell tessellation mode</param>
+         /// <returns>Shader translator topology</returns>
++        /// <summary>
++        /// S2A：本状态下翻译器看到的输入拓扑（几何着色器按它定输入图元，见 ShaderSpecializationState.MatchesGraphics）。
++        /// </summary>
++        internal readonly InputTopology S2AInputTopology => ConvertToInputTopology(Topology, TessellationMode);
++
+         private static InputTopology ConvertToInputTopology(PrimitiveTopology topology, TessMode tessellationMode)
+         {
+             return topology switch
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index b26323b1f3d47add5612fe9ec1928a43bfeaf3db..ae70a19897b30d523faff762961b75f0ce629663 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -602,6 +602,13 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return false;
+             }
+ 
++            // S2A：翻译读了图元拓扑（几何着色器按输入拓扑定输入图元；转计算时几何计算核按它取顶点）→ 输入拓扑类不同就不是同一个程序。
++            // 上游这里不比（拓扑变化只触发重新查找、查到的还是旧程序）：首遇按三角形翻的几何程序画点 / 线时照用，出包按缺省拓扑烘的更会错配
++            if (IsPrimitiveTopologyQueried() && graphicsState.S2AInputTopology != GraphicsState.S2AInputTopology)
++            {
++                return false;
++            }
++
+             bool thisA2cDitherEnable = GraphicsState.AlphaToCoverageEnable && GraphicsState.AlphaToCoverageDitherEnable;
+             bool otherA2cDitherEnable = graphicsState.AlphaToCoverageEnable && graphicsState.AlphaToCoverageDitherEnable;
+ 

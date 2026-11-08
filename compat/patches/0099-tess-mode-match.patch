@@ -1,0 +1,71 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index 30535a640a7dfa4727d976cb09552e70d86eb7c3..6e452a206ff0b3c586bd7e0aa3d11179ae32b165 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -39,7 +39,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
+             S2ADepthRead = 1 << 10,
+             S2ACbdpRead = 1 << 11,
+             S2AAlphaRead = 1 << 12,
+-            S2AReadMask = S2AA2cRead | S2ADepthRead | S2ACbdpRead | S2AAlphaRead,
++            S2ATessRead = 1 << 13,   // S2A：翻译读了曲面模式（TCS / TES）：匹配要比 TessellationMode
++            S2AReadMask = S2AA2cRead | S2ADepthRead | S2ACbdpRead | S2AAlphaRead | S2ATessRead,
+         }
+ 
+         private QueriedStateFlags _queriedState;
+@@ -650,6 +651,11 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return false;
+             }
+ 
++            if (s2aTracked && (_queriedState & QueriedStateFlags.S2ATessRead) != 0 && graphicsState.TessellationMode.Packed != GraphicsState.TessellationMode.Packed)   // S2A：曲面程序按翻译时的域 / 分区 / 绕序匹配
++            {
++                return false;
++            }
++
+             if (channel.Capabilities.NeedsFragmentOutputSpecialization && !graphicsState.FragmentOutputTypes.AsSpan().SequenceEqual(GraphicsState.FragmentOutputTypes.AsSpan()))
+             {
+                 return false;
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index 7b2c2179b92dac743f39cef16fe01af517a282dc..bd966ed0e25ee7934da5378257673f15ce3e85bc 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -9,7 +9,7 @@ namespace Ryujinx.Graphics.Shader
+     /// <summary>S2A：翻译读过的特化状态位（S2AReportStateUse 的 readFlags；特化状态序列化按位存，只增不改位号）</summary>
+     public static class S2AStateRead
+     {
+-        public const uint A2c = 1, Depth = 2, Cbdp = 4, Alpha = 8;
++        public const uint A2c = 1, Depth = 2, Cbdp = 4, Alpha = 8, Tess = 16;   // Tess：曲面域 / 分区 / 绕序（TCS / TES 翻译读）
+     }
+ 
+     public interface IGpuAccessor : ILogger
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index 5ea49b8c5db091a8e8d2feef168ae78844329100..dff3dd881a0af72d47e2d5eeb49f8e5d1d3b0110 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -15,9 +15,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public int ComputeLocalSizeY { get; }
+         public int ComputeLocalSizeZ { get; }
+ 
+-        public bool TessCw => _graphicsState.TessCw;
+-        public TessPatchType TessPatchType => _graphicsState.TessPatchType;
+-        public TessSpacing TessSpacing => _graphicsState.TessSpacing;
++        // S2A：曲面模式读了就记（上游缓存匹配不比曲面模式：同一 TES / TCS 换了域照样命中旧翻译，画成错的域；离线烘焙没有参考局时按缺省状态翻，更会撞上）
++        public bool TessCw { get { S2ATessRead = true; return _graphicsState.TessCw; } }
++        public TessPatchType TessPatchType { get { S2ATessRead = true; return _graphicsState.TessPatchType; } }
++        public TessSpacing TessSpacing { get { S2ATessRead = true; return _graphicsState.TessSpacing; } }
++        public bool S2ATessRead;
+ 
+         // S2A（10-19 出包线）：记下这次翻译实际读了哪些特化状态，缓存匹配只比读过的（ShaderSpecializationState.MatchesGraphics）；原版无条件比 a2c 抖动与全部 32 个属性类型，
+         // 同一份翻译结果因没读过的字段不同而未命中、运行时现翻（动森首局现翻 8 支：代码全同，只差 a2c_dither / 未用位置的属性类型）
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index f8cccc9fae42c557301ac55101b8b2a70ac10cea..fbe465d4d5425841b19308ab7136ff3beaa1f2d6 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -237,7 +237,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         }
+ 
+         // S2A：把这次翻译读过的特化状态报给访问器（写进特化状态，缓存匹配只比读过的）
+-        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse((Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0) | (Definitions.S2AAlphaRead ? S2AStateRead.Alpha : 0), Definitions.S2AAttrRead);
++        private void S2AReportStateUse() => GpuAccessor.S2AReportStateUse((Definitions.S2AA2cRead ? S2AStateRead.A2c : 0) | (Definitions.S2ADepthRead ? S2AStateRead.Depth : 0) | (Definitions.S2AAlphaRead ? S2AStateRead.Alpha : 0) | (Definitions.S2ATessRead ? S2AStateRead.Tess : 0), Definitions.S2AAttrRead);
+ 
+         public ShaderProgram Translate(TranslatorContext other, bool asCompute = false)
+         {

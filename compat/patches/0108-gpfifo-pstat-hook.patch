@@ -1,0 +1,31 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index 8e5cced241058ee5787dea944846d1965b3ef858..3b5af45d65320544e742f1c39d0ec42290abad8e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -171,6 +171,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             };
+         }
+ 
++        /// <summary>
++        /// S2A：诊断 NXGAL_PSTAT 的 GPFIFO 段统计挂钩（缺省 null = 不调，零开销）。参数：本通道 GPU 内存管理器、段 GPU 地址、段字节。只读统计，不改命令处理
++        /// </summary>
++        public static unsafe delegate*<MemoryManager, ulong, ulong, void> S2ASegmentHook;
++
+         /// <summary>
+         /// Pushes GPFIFO entries.
+         /// </summary>
+@@ -186,6 +191,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+                 CommandBuffer commandBuffer = CreateCommandBuffer(processor, Unsafe.As<ulong, GPEntry>(ref entry));
+ 
++                unsafe
++                {
++                    if (S2ASegmentHook != null)
++                    {
++                        S2ASegmentHook(processor.MemoryManager, commandBuffer.EntryAddress, (ulong)commandBuffer.EntryCount * 4);
++                    }
++                }
++
+                 if (beforeBarrier && commandBuffer.Type == CommandBufferType.Prefetch)
+                 {
+                     commandBuffer.Prefetch(processor.MemoryManager);

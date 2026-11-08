@@ -1,0 +1,15 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs b/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs
+index a654b4056b3c6f6d2eb68a5ddd6994c04525fd73..d59ecbc69a8d780914e49acc3856cc6a1c58b786 100644
+--- a/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs
++++ b/src/Ryujinx.HLE/HOS/Services/S2AIpcRecord.cs
+@@ -40,7 +40,9 @@ namespace Ryujinx.HLE.HOS.Services
+             S2ARecord.AppendHash(sb, "out", ReadAll(context.ResponseData.BaseStream));
+             S2ARecord.AppendBuffers(sb, "b", req.ReceiveBuff.Count, i => (req.ReceiveBuff[i].Position, req.ReceiveBuff[i].Size), Read(context));
+             S2ARecord.AppendBuffers(sb, "w", req.ExchangeBuff.Count, i => (req.ExchangeBuff[i].Position, req.ExchangeBuff[i].Size), Read(context));
+-            S2ARecord.AppendBuffers(sb, "c", req.RecvListBuff.Count, i => (req.RecvListBuff[i].Position, req.RecvListBuff[i].Size), Read(context));
++            // c：按应答 X 描述符回告的长度记实际交回的字节（上游服务端接收长度取原始数据末尾的 u16，定长缓冲游戏不发、读成 0，
++            // 真值记 0 字节而游戏实际收到 WithSize 的长度；两边同口径才可比）
++            S2ARecord.AppendBuffers(sb, "c", req.RecvListBuff.Count, i => (req.RecvListBuff[i].Position, i < resp.PtrBuff.Count ? resp.PtrBuff[i].Size : req.RecvListBuff[i].Size), Read(context));
+             sb.Append("\toh=").Append(resp.HandleDesc?.ToCopy.Length ?? 0).Append('/').Append(resp.HandleDesc?.ToMove.Length ?? 0);
+             sb.Append("\tobj=").Append(resp.ObjectIds.Count);
+ 

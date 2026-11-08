@@ -1,0 +1,38 @@
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+index 2c8356a51931e60c01e0c2558c2886cc4d7f311a..f1c579ab4dccf8150160aa3921cd05e42e820407 100644
+--- a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -110,7 +110,15 @@ namespace Ryujinx.Cpu
+                 }
+             }
+ 
+-            current.CopyTo(new Span<byte>(slot.Buf, size));
++            // 原样拷出目标段：经不走页保护的读（读时回写把这些页设成不可读，直接读会缺页、改两次保护；字节相同）
++            if (Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked != null)
++            {
++                Ryujinx.Memory.Tracking.MemoryTracking.S2AReadUntracked(va, slot.Buf, size);
++            }
++            else
++            {
++                current.CopyTo(new Span<byte>(slot.Buf, size));
++            }
+             slot.Target = target;
+             slot.Mem.Reset(slot.Buf, size);
+             slot.Region.S2AReuse(slot, va, slot.Mem.Memory);
+diff --git a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+index bc43fc25af45cd43e19689df3e3c0678ac3c40f8..a429ab2bebb31a8b9ba541fb6e55d8bf052a159e 100644
+--- a/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
++++ b/src/Ryujinx.Memory/Tracking/MemoryTracking.cs
+@@ -16,6 +16,12 @@ namespace Ryujinx.Memory.Tracking
+         /// </summary>
+         public static Action<ulong, ulong> S2AMarkReadFlush;
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-23）：宿主读游戏内存、不经页保护（NxTrack.Init 设，指向 graphics/track s2a_track_read_untracked）。
++        /// GPU 回写把目标段原样拷出来（S2AUntrackedRegionPool.Rent）时用：目标页常被读时回写设成不可读，直接读会缺页、改两次保护。为空时照旧直接拷
++        /// </summary>
++        public static unsafe delegate*<ulong, byte*, int, void> S2AReadUntracked;
++
+         private readonly IVirtualMemoryManager _memoryManager;
+         private readonly InvalidAccessHandler _invalidAccessHandler;
+ 

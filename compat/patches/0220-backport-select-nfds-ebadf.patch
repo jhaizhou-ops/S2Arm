@@ -1,0 +1,69 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
+index b7bd3e6da8f3694c0dbaa33e65cd93fabc8e30e1..e609859541981db2bbb8642d04a58a26199ed82b 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/BsdContext.cs
+@@ -45,11 +45,15 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             return null;
+         }
+ 
+-        public List<IFileDescriptor> RetrieveFileDescriptorsFromMask(ReadOnlySpan<byte> mask)
++        public List<IFileDescriptor> RetrieveFileDescriptorsFromMask(ReadOnlySpan<byte> mask, int fdLimit = int.MaxValue)
+         {
+             List<IFileDescriptor> fds = [];
+ 
+-            for (int i = 0; i < mask.Length; i++)
++            // select's nfds is exclusive. A partial last byte must not inspect higher descriptors.
++            // This form avoids overflow for int.MaxValue and preserves existing callers' default.
++            int bytesToScan = fdLimit <= 0 ? 0 : Math.Min(mask.Length, (fdLimit - 1) / 8 + 1);
++
++            for (int i = 0; i < bytesToScan; i++)
+             {
+                 byte current = mask[i];
+ 
+@@ -59,6 +63,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     current &= (byte)~(1 << bit);
+                     int fd = i * 8 + bit;
+ 
++                    if (fd >= fdLimit)
++                    {
++                        break;
++                    }
++
+                     fds.Add(RetrieveFileDescriptor(fd));
+                 }
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index d96afe1f257b6aabd7841a5e67b176458816e5d7..46e96fa2b9462d5a1875e6324dcc039c2941f8d3 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -242,6 +242,11 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                 : timeoutSeconds >= int.MaxValue / 1000000 ? int.MaxValue
+                 : (int)Math.Min(timeoutSeconds * 1000000 + timeoutMicroseconds, int.MaxValue);
+ 
++            if (fdsCount < 0)
++            {
++                return WriteBsdResult(context, -1, LinuxError.EINVAL);
++            }
++
+             (ulong readFdsInBufferPosition, ulong readFdsInBufferSize) = context.Request.GetBufferType0x21(0);
+             (ulong writeFdsInBufferPosition, ulong writeFdsInBufferSize) = context.Request.GetBufferType0x21(1);
+             (ulong errorFdsInBufferPosition, ulong errorFdsInBufferSize) = context.Request.GetBufferType0x21(2);
+@@ -250,9 +255,15 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             (ulong writeFdsOutBufferPosition, ulong writeFdsOutBufferSize) = context.Request.GetBufferType0x22(1);
+             (ulong errorFdsOutBufferPosition, ulong errorFdsOutBufferSize) = context.Request.GetBufferType0x22(2);
+ 
+-            List<IFileDescriptor> readFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(readFdsInBufferPosition, (int)readFdsInBufferSize));
+-            List<IFileDescriptor> writeFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(writeFdsInBufferPosition, (int)writeFdsInBufferSize));
+-            List<IFileDescriptor> errorFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(errorFdsInBufferPosition, (int)errorFdsInBufferSize));
++            List<IFileDescriptor> readFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(readFdsInBufferPosition, (int)readFdsInBufferSize), fdsCount);
++            List<IFileDescriptor> writeFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(writeFdsInBufferPosition, (int)writeFdsInBufferSize), fdsCount);
++            List<IFileDescriptor> errorFds = _context.RetrieveFileDescriptorsFromMask(context.Memory.GetSpan(errorFdsInBufferPosition, (int)errorFdsInBufferSize), fdsCount);
++
++            // Only descriptors below nfds participate; closed ones in that range must fail.
++            if (readFds.Contains(null) || writeFds.Contains(null) || errorFds.Contains(null))
++            {
++                return WriteBsdResult(context, -1, LinuxError.EBADF);
++            }
+ 
+             int actualFdsCount = readFds.Count + writeFds.Count + errorFds.Count;
+ 

@@ -1,0 +1,89 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/HelperShader.cs b/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
+index dbb5ee22442c246a92abe9c41d590889527e3b37..882462b7497902070f1ae62f873c4e06e4f93a19 100644
+--- a/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
+@@ -915,9 +915,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 cbs.CommandBuffer,
+                 dstBuffer,
+                 BufferHolder.DefaultAccessFlags,
+-                AccessFlags.TransferWriteBit,
++                AccessFlags.ShaderWriteBit,
+                 PipelineStageFlags.AllCommandsBit,
+-                PipelineStageFlags.TransferBit,
++                PipelineStageFlags.ComputeShaderBit,
+                 0,
+                 convertedCount * outputIndexSize);
+ 
+@@ -931,9 +931,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 gd,
+                 cbs.CommandBuffer,
+                 dstBuffer,
+-                AccessFlags.TransferWriteBit,
++                AccessFlags.ShaderWriteBit,
+                 BufferHolder.DefaultAccessFlags,
+-                PipelineStageFlags.TransferBit,
++                PipelineStageFlags.ComputeShaderBit,
+                 PipelineStageFlags.AllCommandsBit,
+                 0,
+                 convertedCount * outputIndexSize);
+@@ -1500,7 +1500,8 @@ namespace Ryujinx.Graphics.Vulkan
+ 
+             const int ParamsBufferSize = 24 * sizeof(int);
+             const int ParamsIndirectDispatchOffset = 16 * sizeof(int);
+-            const int ParamsIndirectDispatchSize = 3 * sizeof(int);
++            const int ParamsOutputOffset = 14 * sizeof(int);
++            const int ParamsOutputSize = 5 * sizeof(int);
+ 
+             Span<int> shaderParams = stackalloc int[ParamsBufferSize / sizeof(int)];
+ 
+@@ -1552,22 +1553,33 @@ namespace Ryujinx.Graphics.Vulkan
+             BufferHolder.InsertBufferBarrier(
+                 gd,
+                 cbs.CommandBuffer,
+-                patternBufferAuto.Get(cbs, patternScoped.Offset + ParamsIndirectDispatchOffset, ParamsIndirectDispatchSize).Value,
++                patternBufferAuto.Get(cbs, patternScoped.Offset + ParamsOutputOffset, ParamsOutputSize).Value,
++                AccessFlags.ShaderWriteBit,
++                AccessFlags.UniformReadBit | AccessFlags.IndirectCommandReadBit,
++                PipelineStageFlags.ComputeShaderBit,
++                PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.DrawIndirectBit,
++                patternScoped.Offset + ParamsOutputOffset,
++                ParamsOutputSize);
++
++            BufferHolder.InsertBufferBarrier(
++                gd,
++                cbs.CommandBuffer,
++                dstIndirectBuffer.GetBuffer().Get(cbs, 0, indirectDataSize).Value,
+                 AccessFlags.ShaderWriteBit,
+                 AccessFlags.IndirectCommandReadBit,
+                 PipelineStageFlags.ComputeShaderBit,
+                 PipelineStageFlags.DrawIndirectBit,
+-                patternScoped.Offset + ParamsIndirectDispatchOffset,
+-                ParamsIndirectDispatchSize);
++                0,
++                indirectDataSize);
+ 
+             BufferHolder.InsertBufferBarrier(
+                 gd,
+                 cbs.CommandBuffer,
+                 dstBuffer,
+                 BufferHolder.DefaultAccessFlags,
+-                AccessFlags.TransferWriteBit,
++                AccessFlags.ShaderWriteBit,
+                 PipelineStageFlags.AllCommandsBit,
+-                PipelineStageFlags.TransferBit,
++                PipelineStageFlags.ComputeShaderBit,
+                 0,
+                 convertedCount * outputIndexSize);
+ 
+@@ -1582,9 +1594,9 @@ namespace Ryujinx.Graphics.Vulkan
+                 gd,
+                 cbs.CommandBuffer,
+                 dstBuffer,
+-                AccessFlags.TransferWriteBit,
++                AccessFlags.ShaderWriteBit,
+                 BufferHolder.DefaultAccessFlags,
+-                PipelineStageFlags.TransferBit,
++                PipelineStageFlags.ComputeShaderBit,
+                 PipelineStageFlags.AllCommandsBit,
+                 0,
+                 convertedCount * outputIndexSize);

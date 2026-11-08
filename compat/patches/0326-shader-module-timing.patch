@@ -1,0 +1,39 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Shader.cs b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+index c687573166dba624d7f5256b298f18b7af204bfb..13c50c893a26be079bd34cbaf5f41e1650d6474f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Shader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Shader.cs
+@@ -14,6 +14,24 @@ namespace Ryujinx.Graphics.Vulkan
+     class Shader : IDisposable
+     {
+         private static readonly nint _ptrMainEntryPointName = Marshal.StringToHGlobalAnsi("main");
++        private static long _s2aModCount, _s2aModMs, _s2aModMax, _s2aModSlow, _s2aModReported;
++
++        // S2A：启动期 GPU 线程纯用户态 CPU；统计 vkCreateShaderModule 实际耗时（驱动编译）。
++        private static void S2AReportModuleTime(long start)
++        {
++            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
++            _s2aModCount++;
++            _s2aModMs += (long)ms;
++            if ((long)ms > _s2aModMax) _s2aModMax = (long)ms;
++            if (ms > 50) _s2aModSlow++;
++            long now = Environment.TickCount64;
++            if (now - _s2aModReported >= 5000)
++            {
++                _s2aModReported = now;
++                Console.Error.WriteLine($"[vkpb] 着色器模块：{_s2aModCount} 个、总 {_s2aModMs} ms、max {_s2aModMax} ms、>50ms {_s2aModSlow}");
++                _s2aModCount = _s2aModMs = _s2aModMax = _s2aModSlow = 0;
++            }
++        }
+ 
+         // GLSL is compiled for the device's own Vulkan version: SPIR-V 1.5 is not valid on a
+         // Vulkan 1.1 device, and Adreno's 1.1 driver rejects it at vkCreateShaderModule time.
+@@ -73,7 +91,9 @@ namespace Ryujinx.Graphics.Vulkan
+                     PCode = (uint*)pCode,
+                 };
+ 
++                long s2aModuleStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                 _api.CreateShaderModule(_device, in shaderModuleCreateInfo, null, out _module).ThrowOnError();
++                S2AReportModuleTime(s2aModuleStart);
+             }
+ 
+             CompileStatus = ProgramLinkStatus.Success;

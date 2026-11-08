@@ -1,0 +1,77 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+index 237d38a0e8479da392969ef00e402e8dd0e63094..d676f33f3fafb19c66e084ec949c5ac665d5a97e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs
+@@ -16,6 +16,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+     /// <summary>
+     /// Represents a GPU General Purpose FIFO command processor.
+     /// </summary>
++    /// <summary>S2A：免解读缓存长段自适应的统计（收局日志读；GPFifoProcessor 是 internal）</summary>
++    public static class S2ASegStats
++    {
++        /// <summary>长段总数、其中跳过哈希直接解读的数、进入跳过期的次数</summary>
++        public static long LongTotal, LongSkipped, SkipRounds;
++    }
++
+     class GPFifoProcessor : IDisposable
+     {
+         private const int MacrosCount = 0x80;
+@@ -119,6 +126,15 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+         // S2A：等价核对（S2A_SEGCHECK=1，诊断）：命中时不回放，照常解读并重新记录，与缓存里的记录逐条比、结束状态比；不一致计数并打前 5 条。执行走原解读，结果本身不受影响
+         private static readonly bool S2ASegCheck = Environment.GetEnvironmentVariable("S2A_SEGCHECK") == "1";
++
++        // S2A：长段按实测命中率自适应。每段都要整段算哈希才能查缓存；长段（≥ S2ALongLen 个字）在有的游戏里几乎从不重复
++        // （10-21 暗黑3：每帧 GPFIFO 约 3 MB，段内容与前 2 帧相同 0.0% 字节；Mac 采样 S2AHash 占 GPU 模拟线程忙时约 15%），整段哈希是白算。
++        // 做法：完整处理一个测量窗口（S2ALongWin 个长段）计命中；命中率低于 1/8 就接下来 S2ALongSkip 个长段不算哈希、直接逐字解读（与不用缓存同语义），
++        // 期满再量一窗。已入缓存的段跳过期间不清，能命中的游戏（动森等）测量窗口里照样命中、保持开启。短段照旧。S2A_SEG_ADAPT=0 关（恒算哈希）
++        private const int S2ALongLen = 512, S2ALongWin = 256, S2ALongSkip = 2048;
++        private static readonly bool S2ASegAdapt = Environment.GetEnvironmentVariable("S2A_SEG_ADAPT") != "0";
++        private int _s2aLongTried, _s2aLongHit, _s2aLongSkipLeft;
++
+         private static long _s2aCheckHits, _s2aCheckBad;
+         private static readonly bool S2ASegCorrupt = Environment.GetEnvironmentVariable("S2A_SEGCHECK_CORRUPT") == "1";
+ 
+@@ -234,11 +250,42 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 return;
+             }
+ 
++            bool isLong = commandBuffer.Length >= S2ALongLen;
++            if (isLong && S2ASegAdapt)
++            {
++                S2ASegStats.LongTotal++;
++                if (_s2aLongSkipLeft > 0)
++                {
++                    _s2aLongSkipLeft--;
++                    S2ASegStats.LongSkipped++;
++                    ProcessCore(baseGpuVa, commandBuffer);
++                    return;
++                }
++
++                if (++_s2aLongTried >= S2ALongWin)
++                {
++                    // 窗口满：命中率 < 1/8 进入跳过期
++                    if (_s2aLongHit * 8 < _s2aLongTried)
++                    {
++                        _s2aLongSkipLeft = S2ALongSkip;
++                        S2ASegStats.SkipRounds++;
++                    }
++
++                    _s2aLongTried = 0;
++                    _s2aLongHit = 0;
++                }
++            }
++
+             ulong key = S2AHash(commandBuffer, _state);
+             DmaState start = _state;
+ 
+             if (_s2aSegs.TryGetValue(key, out S2ASeg seg) && seg.Len == commandBuffer.Length && S2AStateEq(seg.Start, start))
+             {
++                if (isLong)
++                {
++                    _s2aLongHit++;
++                }
++
+                 if (S2ASegCheck)
+                 {
+                     S2ACheckHit(baseGpuVa, commandBuffer, in seg);

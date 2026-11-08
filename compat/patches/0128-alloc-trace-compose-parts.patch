@@ -1,0 +1,55 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index c4a2957a49ce64bb0163838464b146d1fe773c2d..d6a8ec70f8fa292b2af2078875e46548dd633cee 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -392,7 +392,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+                 Layer layer = GetLayerByIdLocked(RenderLayerId);
+ 
++                long s2aA = Ryujinx.Common.S2AThreadAlloc.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2Arm: per-part allocation accounting (diagnostics)
+                 Status acquireStatus = layer.Consumer.AcquireBuffer(out BufferItem item, 0);
++                if (Ryujinx.Common.S2AThreadAlloc.On) Ryujinx.Common.S2AThreadAlloc.Part("合成·取帧上屏·取帧 AcquireBuffer", GC.GetAllocatedBytesForCurrentThread() - s2aA);
+ 
+                 if (acquireStatus == Status.Success)
+                 {
+@@ -431,6 +433,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private void PostFrameBuffer(Layer layer, BufferItem item)
+         {
++            long s2aP = Ryujinx.Common.S2AThreadAlloc.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2Arm: per-part allocation accounting (diagnostics)
+             int frameBufferWidth = item.GraphicBuffer.Object.Width;
+             int frameBufferHeight = item.GraphicBuffer.Object.Height;
+ 
+@@ -485,7 +488,9 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             textureCallbackInformation.Layer = layer;
+             textureCallbackInformation.Item = item;
+ 
+-            if (_device.Gpu.Window.EnqueueFrameThreadSafe(
++            if (Ryujinx.Common.S2AThreadAlloc.On) { long a = GC.GetAllocatedBytesForCurrentThread(); Ryujinx.Common.S2AThreadAlloc.Part("合成·取帧上屏·准备参数", a - s2aP); s2aP = a; }
++
++            bool s2aQueued = _device.Gpu.Window.EnqueueFrameThreadSafe(
+                 layer.Owner,
+                 frameBufferAddress,
+                 frameBufferWidth,
+@@ -498,7 +503,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+                 crop,
+                 _acquireBufferCallback,
+                 _releaseBufferCallback,
+-                textureCallbackInformation))
++                textureCallbackInformation);
++
++            if (Ryujinx.Common.S2AThreadAlloc.On) { long a = GC.GetAllocatedBytesForCurrentThread(); Ryujinx.Common.S2AThreadAlloc.Part("合成·取帧上屏·交帧 EnqueueFrameThreadSafe", a - s2aP); s2aP = a; }
++
++            if (s2aQueued)
+             {
+                 if (item.Fence.FenceCount == 0)
+                 {
+@@ -514,6 +523,8 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+             {
+                 ReleaseBuffer(textureCallbackInformation);
+             }
++
++            if (Ryujinx.Common.S2AThreadAlloc.On) Ryujinx.Common.S2AThreadAlloc.Part(item.Fence.FenceCount == 0 ? "合成·取帧上屏·发帧就绪（无围栏）" : "合成·取帧上屏·登记围栏回调", GC.GetAllocatedBytesForCurrentThread() - s2aP);
+         }
+ 
+         private void ReleaseBuffer(object obj)

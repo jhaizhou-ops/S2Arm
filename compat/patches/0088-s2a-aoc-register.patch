@@ -1,0 +1,59 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/ContentManager.cs b/src/Ryujinx.HLE/FileSystem/ContentManager.cs
+index d6eedd32f31632feb514389251f79b34da2770fb..ad5ab8d0dbf55cc3401fc3aa65e58aa859c03fc7 100644
+--- a/src/Ryujinx.HLE/FileSystem/ContentManager.cs
++++ b/src/Ryujinx.HLE/FileSystem/ContentManager.cs
+@@ -211,12 +211,22 @@ namespace Ryujinx.HLE.FileSystem
+ 
+         public int GetAocCount() => AocData.Count;
+ 
++        public bool HasAoc(ulong titleId) => AocData.ContainsKey(titleId);
++
+         public IList<ulong> GetAocTitleIds() => AocData.Select(e => e.Key).ToList();
+ 
+         public bool GetAocDataStorage(ulong aocTitleId, out IStorage aocStorage, IntegrityCheckLevel integrityCheckLevel)
+         {
+             aocStorage = null;
+ 
++            // S2Arm: DLC registered from the game data directory (no NSP / XCI container)
++            if (S2AHooks.OpenAocDataStorage != null && AocData.ContainsKey(aocTitleId))
++            {
++                aocStorage = S2AHooks.OpenAocDataStorage(aocTitleId);
++
++                return aocStorage != null;
++            }
++
+             if (AocData.TryGetValue(aocTitleId, out AocItem aoc))
+             {
+                 FileStream file = new(aoc.ContainerPath, FileMode.Open, FileAccess.Read);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 459eb8309a31aa58f58d760fc64739e4309a73fc..74ba547ab068eebe099b84cb633715065f5bda11 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -813,6 +813,12 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return ResultCode.Success;
+             }
+ 
++            // S2Arm: a registered DLC without data (licence only) is "target not found", not an installed-content lookup
++            if (S2AHooks.OpenAocDataStorage != null && context.Device.System.ContentManager.HasAoc(titleId))
++            {
++                return (ResultCode)LibHac.Fs.ResultFs.TargetNotFound.Value.Value;
++            }
++
+             // S2Arm: system data as a directory (no firmware NCAs); falls through to upstream when absent
+             if (S2AHooks.OpenSystemDataStorage?.Invoke(titleId) is LibHac.Fs.IStorage s2aStorage)
+             {
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index a064aba9d0fd79fc9ed26cf17d3c5b5e6a435269..8e5d2ca938d54ba7f4862a4557a3e283ee76f8a6 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -36,6 +36,10 @@ namespace Ryujinx.HLE
+         public static string SystemDataRoot;
+         public static System.Func<ulong, LibHac.Fs.IStorage> OpenSystemDataStorage;
+ 
++        // Add-on content (DLC) registered by S2A from the game data directory (aoc.tsv + aoc/<idx>/):
++        // OpenAocDataStorage gives the RomFS image of a registered DLC, null when it is licence-only (S2A reports red)
++        public static System.Func<ulong, LibHac.Fs.IStorage> OpenAocDataStorage;
++
+         public static string SystemDataDir(ulong id)
+         {
+             if (SystemDataRoot == null)

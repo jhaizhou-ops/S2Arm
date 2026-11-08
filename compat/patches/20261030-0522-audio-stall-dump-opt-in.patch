@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+index 65a69d799fcf62c67dbbe7313dc3e5ce50fef9b7..41e9a57ee71f993f0227c196d8296c6a76c4e83a 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/AppleHardwareDeviceSession.cs
+@@ -260,8 +260,9 @@ namespace Ryujinx.Audio.Backends.Apple
+                 return;
+             }
+ 
+-            // S2Arm (#284): 设备整段没回调时画面往往也停（进程级停顿，不是音频会话单独被挂起）：重启队列前打一份全线程宿主栈，看停住时谁在跑、谁在等；每局至多 3 次
+-            if (Interlocked.Increment(ref s_stallDumps) <= 3)
++            // Full thread dumps suspend every other thread while collecting stacks.
++            // Opt in explicitly for diagnosis; normal audio recovery must not pause the game.
++            if (s_stallDumpOn && Interlocked.Increment(ref s_stallDumps) <= 3)
+             {
+                 try
+                 {
+@@ -277,6 +278,7 @@ namespace Ryujinx.Audio.Backends.Apple
+             S2ARecover($"兜底：设备 {stall * 1000 / Stopwatch.Frequency} ms 没有回调{(S2AAudioNotes.Interrupted ? "（系统中断中）" : "")}，最近系统通知 {S2AAudioNotes.Last}", false, now, true);
+         }
+ 
++        private static readonly bool s_stallDumpOn = Environment.GetEnvironmentVariable("S2A_AUDIO_STALL_DUMP") == "1";
+         private static int s_stallDumps;
+ 
+         [DllImport("s2a_native")]

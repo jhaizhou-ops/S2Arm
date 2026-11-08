@@ -1,0 +1,33 @@
+diff --git a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+index 9646e9092f5e859990067f5a87ae70e7c1736594..389877afc2f986dc192a0c94da5cc1dcef1c68f9 100644
+--- a/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
++++ b/src/Ryujinx.Audio.Backends.Apple/S2AOutputDiag.cs
+@@ -27,7 +27,27 @@ namespace Ryujinx.Audio.Backends.Apple
+         private static readonly S2AOutputDiag[] _all = new S2AOutputDiag[MaxSessions];
+         private static int _nextIndex = -1;
+         private static int _reporterStarted;
+-        private static readonly string _wavBase = Environment.GetEnvironmentVariable("S2A_AUDIO_WAV");
++        private static readonly string _wavBase = DocPath(Environment.GetEnvironmentVariable("S2A_AUDIO_WAV"));
++
++        // A relative S2A_AUDIO_WAV lands in Documents, same rule as frames.tsv (graphics/metal/cs NxColdStart.Doc): S2A_DOCS if set,
++        // else the app container's Documents on iOS (the process' working directory there is not writable: 10-22 a relative name
++        // wrote nothing on the device) and the working directory on Mac
++        private static string DocPath(string p)
++        {
++            if (string.IsNullOrEmpty(p) || Path.IsPathRooted(p))
++            {
++                return p;
++            }
++
++            string d = Environment.GetEnvironmentVariable("S2A_DOCS");
++
++            if (string.IsNullOrEmpty(d))
++            {
++                d = OperatingSystem.IsIOS() ? Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) : Directory.GetCurrentDirectory();
++            }
++
++            return Path.Combine(d, p);
++        }
+ 
+         public readonly int Index;
+         private readonly int _bytesPerFrame;

@@ -1,0 +1,32 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+index 680298f8c53836d9ac2e3eb1520a9f44b51b0f5d..8f82663831573c61a4b4f4f3a23cd0c953a34f84 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/MME/Macro.cs
+@@ -91,7 +91,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.MME
+                 if (S2AAllocTrace.On)
+                 {
+                     long d = S2AAllocTrace.Now() - s2aA;   // 只在有分配时才拼标签（诊断自己不能每次执行都分配：10-20 第一版每次插值字符串，污染读数）
+-                    S2AAllocTrace.Raw(0x60_0000 | (_executionEngine is MacroHLE ? (int)_hleFunction : 0xff), d);   // 按 HLE 函数累计（0xff = 非 HLE 引擎）
++                    // 按 HLE 函数累计；非 HLE 分开记：0xff = 离线编（S2AMacroAotEE）、0xfe = 解释器（10-23 合成一行被读成「落进解释器」）
++                    S2AAllocTrace.Raw(0x60_0000 | (_executionEngine is MacroHLE ? (int)_hleFunction : _executionEngine is MacroInterpreter ? 0xfe : 0xff), d);
+                     if (d > 0 && S2AAllocTrace.FirstSeen(_executionEngine?.GetType(), (int)_hleFunction)) Console.Error.WriteLine($"[分配·宏] {_executionEngine?.GetType().Name}/{_hleFunction} 位置 {Position} 一次执行分配 {d} B");
+                 }
+                 S2AMacroAot.Account(_executionEngine, System.Diagnostics.Stopwatch.GetTimestamp() - t0);
+diff --git a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+index 1021d4c45508b22971a8991ccbb61c8ec215b0a2..de80e4c0e7bf4eec0134bd2c4e7fca6d4e2c0974 100644
+--- a/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
++++ b/src/Ryujinx.Graphics.Gpu/S2AAllocTrace.cs
+@@ -168,7 +168,12 @@ namespace Ryujinx.Graphics.Gpu
+             2 => $"内联数据 子通道 {key & 0xffff}",
+             4 => (key & 0xff) < _rawNames.Length ? _rawNames[key & 0xff] : $"段 0x{key & 0xff:x}",
+             5 => $"3D 状态更新·组 {key & 0xff} {((key & 0xff) < _stateNames.Length ? _stateNames[key & 0xff] : "?")}",
+-            6 => (key & 0xff) == 0xff ? "宏引擎·离线编 / 解释器" : $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
++            6 => (key & 0xff) switch
++            {
++                0xff => "宏引擎·离线编",
++                0xfe => "宏引擎·解释器",
++                _ => $"宏引擎·HLE {(Engine.MME.MacroHLEFunctionName)(key & 0xff)}",
++            },
+             7 => (key & 0xff) switch
+             {
+                 1 => "资源·描述符池数组与写跟踪",

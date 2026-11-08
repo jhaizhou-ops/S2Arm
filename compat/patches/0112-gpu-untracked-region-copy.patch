@@ -1,0 +1,207 @@
+diff --git a/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..220fcb9aca48c932b5ec64a24e72d9fcc0acccac
+--- /dev/null
++++ b/src/Ryujinx.Cpu/S2AUntrackedRegionPool.cs
+@@ -0,0 +1,136 @@
++using Ryujinx.Memory;
++using System;
++using System.Buffers;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Cpu
++{
++    // S2Arm: copy-and-write-back regions for writes the GPU emulation makes to guest memory itself (texture flush, buffer clear fill).
++    // The caller writes into a private copy; Dispose writes it back through IVirtualMemoryManagerTracked.WriteUntracked, exactly like Buffer.FlushImpl,
++    // so the memory manager's write tracker can treat the bytes as GPU data (baseline) instead of a CPU write it reports later.
++    // Copies and region objects are pooled (zero allocation in steady state); a region may be disposed on another thread;
++    // copies larger than KeepMax are freed on return so a one-off big flush does not stay resident.
++    public static unsafe class S2AUntrackedRegionPool
++    {
++        private const int KeepMax = 16 << 20;
++
++        private sealed class PointerMemory : MemoryManager<byte>
++        {
++            private byte* _ptr;
++            private int _len;
++
++            public void Reset(byte* ptr, int len)
++            {
++                _ptr = ptr;
++                _len = len;
++            }
++
++            public override Span<byte> GetSpan() => new(_ptr, _len);
++
++            public override MemoryHandle Pin(int elementIndex = 0) => new(_ptr + elementIndex);
++
++            public override void Unpin()
++            {
++            }
++
++            protected override void Dispose(bool disposing)
++            {
++            }
++        }
++
++        private sealed class Slot : IWritableBlock
++        {
++            public byte* Buf;
++            public int Cap;
++            public bool Used;
++            public IVirtualMemoryManagerTracked Target;
++            public readonly PointerMemory Mem = new();
++            public readonly WritableRegion Region = new(null, 0, Memory<byte>.Empty);
++
++            public void Write(ulong va, ReadOnlySpan<byte> data) => WriteUntracked(va, data);
++
++            public void WriteUntracked(ulong va, ReadOnlySpan<byte> data)
++            {
++                Target.WriteUntracked(va, data);
++                Return(this);
++            }
++        }
++
++        private static readonly object _lock = new();
++        private static Slot[] _slots = new Slot[8];
++        private static int _count;
++
++        /// <summary>
++        /// Rents a writable copy of <paramref name="current"/> (the guest bytes at <paramref name="va"/>) that is written back to
++        /// <paramref name="target"/> with WriteUntracked when the region is disposed.
++        /// </summary>
++        public static WritableRegion Rent(IVirtualMemoryManagerTracked target, ulong va, ReadOnlySpan<byte> current)
++        {
++            int size = current.Length;
++            Slot slot = null;
++
++            lock (_lock)
++            {
++                // Among free slots prefer the smallest one that fits, otherwise the largest one (grown below)
++                for (int i = 0; i < _count; i++)
++                {
++                    Slot s = _slots[i];
++
++                    if (s.Used)
++                    {
++                        continue;
++                    }
++
++                    bool fits = s.Cap >= size;
++
++                    if (slot == null || (fits && (slot.Cap < size || s.Cap < slot.Cap)) || (!fits && slot.Cap < size && s.Cap > slot.Cap))
++                    {
++                        slot = s;
++                    }
++                }
++
++                if (slot == null)
++                {
++                    if (_count == _slots.Length)
++                    {
++                        Array.Resize(ref _slots, _count * 2);
++                    }
++
++                    slot = _slots[_count++] = new Slot();
++                }
++
++                slot.Used = true;
++
++                if (slot.Cap < size)
++                {
++                    NativeMemory.Free(slot.Buf);
++                    slot.Buf = (byte*)NativeMemory.Alloc((nuint)Math.Max(size, 1));
++                    slot.Cap = size;
++                }
++            }
++
++            current.CopyTo(new Span<byte>(slot.Buf, size));
++            slot.Target = target;
++            slot.Mem.Reset(slot.Buf, size);
++            slot.Region.S2AReuse(slot, va, slot.Mem.Memory);
++
++            return slot.Region;
++        }
++
++        private static void Return(Slot slot)
++        {
++            lock (_lock)
++            {
++                if (slot.Cap > KeepMax)
++                {
++                    NativeMemory.Free(slot.Buf);
++                    slot.Buf = null;
++                    slot.Cap = 0;
++                }
++
++                slot.Target = null;
++                slot.Used = false;
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 27db7e40afe96dae65a87c42ff20f16599b5e1a5..c27dfcf6ea35754377bd0eb693258b8a38893e22 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -173,6 +173,14 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <returns>A writable region with the data at the specified memory location</returns>
+         public WritableRegion GetWritableRegion(ulong address, int size, bool tracked = false)
+         {
++            // S2Arm: an untracked region here is the GPU writing its own data to guest memory (texture flush, buffer clear fill; every caller disposes it).
++            // Hand out a copy written back through WriteUntracked on Dispose, like Buffer.FlushImpl, so the guest write tracker keeps the bytes as GPU data
++            // instead of reporting them later as a CPU write (which re-uploaded them over newer GPU writes and forced a GPU wait whenever the page had a flush action)
++            if (!tracked && size > 0)
++            {
++                return S2AUntrackedRegionPool.Rent(_cpuMemory, address, _cpuMemory.GetSpan(address, size));
++            }
++
+             return _cpuMemory.GetWritableRegion(address, size, tracked);
+         }
+ 
+@@ -358,7 +366,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         {
+             _cpuMemory.SignalMemoryTracking(address, size, write: true, precise: true, (int)kind);
+ 
+-            using WritableRegion region = _cpuMemory.GetWritableRegion(address, (int)size);
++            // S2Arm: through the copy-and-write-back region (WriteUntracked right after the precise signal: the fill value is final, not a CPU write)
++            using WritableRegion region = GetWritableRegion(address, (int)size);
+ 
+             MemoryMarshal.Cast<byte, uint>(region.Memory.Span).Fill(value);
+         }
+diff --git a/src/Ryujinx.Memory/WritableRegion.cs b/src/Ryujinx.Memory/WritableRegion.cs
+index e9f6a747cef8f23493f488ba93addbb3bef120b7..4b1bc9b04205cee1935e7759b37aa3578c733c17 100644
+--- a/src/Ryujinx.Memory/WritableRegion.cs
++++ b/src/Ryujinx.Memory/WritableRegion.cs
+@@ -5,8 +5,8 @@ namespace Ryujinx.Memory
+ {
+     public sealed class WritableRegion : IDisposable
+     {
+-        private readonly IWritableBlock _block;
+-        private readonly ulong _va;
++        private IWritableBlock _block;
++        private ulong _va;
+         private readonly MemoryOwner<byte> _memoryOwner;
+         private readonly bool _tracked;
+ 
+@@ -26,6 +26,20 @@ namespace Ryujinx.Memory
+             Memory = memory;
+         }
+ 
++        // S2Arm: re-point a region that writes back through `block` on Dispose (untracked: block.WriteUntracked) and owns no memory,
++        // so a memory manager can hand out write-back regions over its own reused scratch without allocating one per call
++        public void S2AReuse(IWritableBlock block, ulong va, Memory<byte> memory)
++        {
++            if (_memoryOwner != null || _tracked)
++            {
++                throw new InvalidOperationException("S2Arm: only untracked regions without owned memory can be reused with a block");
++            }
++
++            _block = block;
++            _va = va;
++            Memory = memory;
++        }
++
+         public WritableRegion(IWritableBlock block, ulong va, Memory<byte> memory, bool tracked = false)
+         {
+             _block = block;

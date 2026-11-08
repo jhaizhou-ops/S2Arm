@@ -1,0 +1,22 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 8deff52cbff00ab7be2f31d60e8199eade336106..368c93a4d4effaaaf27a9589b88186333237eacc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -1274,6 +1274,17 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             return WriteBsdResult(context, newSockFd, errno);
+         }
+ 
++        [CommandCmif(36)] // 18.0.0+
++        // S2Arm：未命名（Switch 2 SDK 的 nn::socket::Initialize 每个会话在 StartMonitoring 前发一次）：(u32 套接字配置首字, pid) -> u32，非 0 即初始化失败。
++        //   宿主不按配置调资源：收下、回 0。Pokopia 首帧后发它，原先未实现回错（命令号与形状来自 Eden-NS2 bsd.cpp，GPL，只借事实，代码自写）
++        public ResultCode InitializeSessionS2(ServiceCtx context)
++        {
++            context.RequestData.ReadUInt32();
++            context.ResponseData.Write(0u);
++
++            return ResultCode.Success;
++        }
++
+ 
+         public override void DestroyAtExit()
+         {

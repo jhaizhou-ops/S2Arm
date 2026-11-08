@@ -1,0 +1,86 @@
+diff --git a/src/Ryujinx.Common/AsyncWorkQueue.cs b/src/Ryujinx.Common/AsyncWorkQueue.cs
+index e3f91c8916af29c1580f4a847549d40a51cf45be..f7577ab2ef65a4991552875fe308a4f66c080df1 100644
+--- a/src/Ryujinx.Common/AsyncWorkQueue.cs
++++ b/src/Ryujinx.Common/AsyncWorkQueue.cs
+@@ -36,6 +36,7 @@ namespace Ryujinx.Common
+             {
+                 foreach (T item in _queue.GetConsumingEnumerable(_cts.Token))
+                 {
++                    S2AThreadAlloc.Tick(); // S2Arm: per-thread allocation accounting (Host1x / Nvdec / ...)
+                     _workerAction(item);
+                 }
+             }
+diff --git a/src/Ryujinx.Common/S2AThreadAlloc.cs b/src/Ryujinx.Common/S2AThreadAlloc.cs
+index 41ed5cdc658d1f69c606c7f37f709b10678f4a8a..69eb0ed241d93f2a18fdbdcbcd0fa6622721c53a 100644
+--- a/src/Ryujinx.Common/S2AThreadAlloc.cs
++++ b/src/Ryujinx.Common/S2AThreadAlloc.cs
+@@ -29,7 +29,7 @@ namespace Ryujinx.Common
+         [ThreadStatic]
+         private static long _last;
+ 
+-        public static void Tick(string name)
++        public static void Tick(string name = null)
+         {
+             if (!On)
+             {
+@@ -40,7 +40,7 @@ namespace Ryujinx.Common
+ 
+             if (_slot == null)
+             {
+-                _slot = new Slot { Name = name };
++                _slot = new Slot { Name = name ?? Thread.CurrentThread.Name ?? $"线程 {Environment.CurrentManagedThreadId}" };
+ 
+                 lock (_slots)
+                 {
+@@ -57,6 +57,15 @@ namespace Ryujinx.Common
+             _last = now;
+         }
+ 
++        /// <summary>Sum of all slots (bytes).</summary>
++        public static long Total()
++        {
++            lock (_slots)
++            {
++                return _slots.Sum(s => s.Bytes);
++            }
++        }
++
+         public static string Summary()
+         {
+             lock (_slots)
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
+index 0e89a20a1f68bf0cd4032bea7e618eeb6e4a89e5..8b6c412db3f24a5b43406783033bb1a474b38e5a 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/BackgroundDiskCacheWriter.cs
+@@ -92,6 +92,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         /// <param name="task">Task to process</param>
+         private void ProcessTask(CacheFileOperationTask task)
+         {
++            Ryujinx.Common.S2AThreadAlloc.Tick(); // S2Arm: per-thread allocation accounting
+             switch (task.Type)
+             {
+                 case CacheFileOperation.AddShader:
+diff --git a/src/Ryujinx.HLE/HOS/Services/ServerBase.cs b/src/Ryujinx.HLE/HOS/Services/ServerBase.cs
+index 0eb36865b9c42954c43b28e714a133fe5df513ea..99ded1430b756da214275f32ee24c90873c73fdf 100644
+--- a/src/Ryujinx.HLE/HOS/Services/ServerBase.cs
++++ b/src/Ryujinx.HLE/HOS/Services/ServerBase.cs
+@@ -213,6 +213,7 @@ namespace Ryujinx.HLE.HOS.Services
+ 
+             while (true)
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick(); // S2Arm: per-thread allocation accounting
+                 int portHandleCount;
+                 int handleCount;
+                 int[] handles;
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+index a9b67c47e5ffa5a4c81e7073412984d8a3995de2..df28077cb0284ff42c60b1336122ceba1e48c44c 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+@@ -123,6 +123,7 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+         {
+             while (WaitAndProcessRequestsImpl())
+             {
++                Ryujinx.Common.S2AThreadAlloc.Tick(); // S2Arm: per-thread allocation accounting
+             }
+ 
+             // Unlink pending sessions, dispose expects them to be already unlinked.

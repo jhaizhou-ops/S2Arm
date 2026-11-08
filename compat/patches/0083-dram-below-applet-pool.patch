@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.HLE/Switch.cs b/src/Ryujinx.HLE/Switch.cs
+index d432f1892feea3573d6bd3e376141981a0bc9d73..fef2a0d69e5d3c45d825a9ee6112910d2b5bd1f7 100644
+--- a/src/Ryujinx.HLE/Switch.cs
++++ b/src/Ryujinx.HLE/Switch.cs
+@@ -83,12 +83,14 @@ namespace Ryujinx.HLE
+ #pragma warning disable IDE0055 // Disable formatting
+             DirtyHacks        = new DirtyHacks(Configuration.Hacks);
+             AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(Configuration.AudioDeviceDriver);
+-            // S2Arm: the application pool (top of DRAM) is the game's memory, and the game runs in the host 64 GB address window, not in this block.
+-            // Reserve only DRAM below the application pool (kernel / service / nv / applet pools: 811 MB on 4 GiB); on iPhone the address space
+-            // outside the window has no 4 GB hole when a game fills the window. Any allocation from the application pool now faults loudly.
+-            ulong dramBelowApplicationPool = Configuration.MemoryConfiguration.DramSize -
+-                HOS.Kernel.Common.KSystemControl.GetApplicationPoolSize(Configuration.MemoryConfiguration.KernelMemoryArrange);
+-            Memory            = new MemoryBlock(dramBelowApplicationPool, memoryAllocationFlags);
++            // S2Arm: the application pool (top of DRAM) is the game's memory, and the game runs in the host 64 GB address window, not in this block;
++            // no applet process is ever created, so the applet pool below it is unused too (Mac vmmap: nothing committed above the nv pool).
++            // Reserve only kernel / service / nv pools (304 MB on 4 GiB): on iPhone, with a game filling the window, the address space outside it
++            // is ~1.7 GB of holes shared with host thread stacks and small Metal buffers. Any allocation from the applet / application pools faults loudly.
++            HOS.Kernel.Common.MemoryArrange arrange = Configuration.MemoryConfiguration.KernelMemoryArrange;
++            ulong dramBelowAppletPool = Configuration.MemoryConfiguration.DramSize -
++                HOS.Kernel.Common.KSystemControl.GetApplicationPoolSize(arrange) - HOS.Kernel.Common.KSystemControl.GetAppletPoolSize(arrange);
++            Memory            = new MemoryBlock(dramBelowAppletPool, memoryAllocationFlags);
+             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
+             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
+             System            = new HOS.Horizon(this);

@@ -1,0 +1,49 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+index e99906d1fbf648776dc9bea604f353140d9f874d..82d302ce281cf1934a711aecf321a737ee7c8dbb 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ro/IRoInterface.cs
+@@ -59,18 +59,41 @@ namespace Ryujinx.HLE.HOS.Services.Ro
+             {
+                 return ResultCode.InvalidNrr;
+             }
+-            else if (header.Size != nrrSize)
++
++            uint size = header.Size, hashesOffset = header.HashesOffset, hashesCount = header.HashesCount;
++
++            // S2Arm：Switch 2 的 NRR（头字节 6 = 1）签名区更长，程序号 / 大小 / 哈希表偏移 / 哈希个数整体从 0x330 挪到 0x4B0
++            //   （大小 +8、偏移 +0x10、个数 +0x14）。事实取自 Eden-NS2（GPL，代码自写）ro/ro.cpp RegisterModuleInfo（真机 ro 模块 0x3d68–0x3e24）
++            if (_owner.CpuMemory.Read<byte>(nrrAddress + 6) == 1)
++            {
++                const ulong LongBody = 0x4B0;
++
++                if (nrrSize < LongBody + 0x20)
++                {
++                    return ResultCode.InvalidNrr;
++                }
++
++                size = _owner.CpuMemory.Read<uint>(nrrAddress + LongBody + 0x8);
++                hashesOffset = _owner.CpuMemory.Read<uint>(nrrAddress + LongBody + 0x10);
++                hashesCount = _owner.CpuMemory.Read<uint>(nrrAddress + LongBody + 0x14);
++            }
++
++            if (size != nrrSize)
+             {
+                 return ResultCode.InvalidSize;
+             }
++            else if (hashesOffset > nrrSize || hashesCount > (nrrSize - hashesOffset) / 0x20)
++            {
++                return ResultCode.InvalidNrr;
++            }
+ 
+             List<byte[]> hashes = [];
+ 
+-            for (int i = 0; i < header.HashesCount; i++)
++            for (int i = 0; i < hashesCount; i++)
+             {
+                 byte[] hash = new byte[0x20];
+ 
+-                _owner.CpuMemory.Read(nrrAddress + header.HashesOffset + (uint)(i * 0x20), hash);
++                _owner.CpuMemory.Read(nrrAddress + hashesOffset + (uint)(i * 0x20), hash);
+ 
+                 hashes.Add(hash);
+             }

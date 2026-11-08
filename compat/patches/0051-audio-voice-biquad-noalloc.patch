@@ -1,0 +1,127 @@
+diff --git a/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs b/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
+index fad8649821ae0eed5b775d061ec0851a92d208f0..38d92a432ce701b71cd8fa67e8c6b456257c06a1 100644
+--- a/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
++++ b/src/Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs
+@@ -25,13 +25,30 @@ namespace Ryujinx.Audio.Renderer.Dsp.Command
+             
+         }
+ 
++        // S2Arm: pooled command reinitialized every audio frame for every voice with filters; keep one array per length
++        // (voices use 1 or 2 biquad filters) instead of allocating two arrays each time
++        private BiquadFilterParameter2[] _parameters1, _parameters2;
++        private bool[] _isInitialized1, _isInitialized2;
++
+         public MultiTapBiquadFilterCommand Initialize(int baseIndex, ReadOnlySpan<BiquadFilterParameter2> filters, Memory<BiquadFilterState> biquadFilterStateMemory, int inputBufferOffset, int outputBufferOffset, ReadOnlySpan<bool> isInitialized, int nodeId)
+         {
+-            Parameters = filters.ToArray();
++            Parameters = filters.Length switch
++            {
++                1 => _parameters1 ??= new BiquadFilterParameter2[1],
++                2 => _parameters2 ??= new BiquadFilterParameter2[2],
++                _ => new BiquadFilterParameter2[filters.Length],
++            };
++            filters.CopyTo(Parameters);
+             BiquadFilterStates = biquadFilterStateMemory;
+             InputBufferIndex = baseIndex + inputBufferOffset;
+             OutputBufferIndex = baseIndex + outputBufferOffset;
+-            IsInitialized = isInitialized.ToArray();
++            IsInitialized = isInitialized.Length switch
++            {
++                1 => _isInitialized1 ??= new bool[1],
++                2 => _isInitialized2 ??= new bool[2],
++                _ => new bool[isInitialized.Length],
++            };
++            isInitialized.CopyTo(IsInitialized);
+ 
+             Enabled = true;
+             NodeId = nodeId;
+diff --git a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+index 6f76d48840ac5b1f2a8542a2075f8b20546e5e1e..b4b5d16548273e3c0eca03979de332d0fd219534 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/CommandGenerator.cs
+@@ -148,7 +148,7 @@ namespace Ryujinx.Audio.Renderer.Server
+             }
+         }
+ 
+-        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Memory<VoiceState> state, int baseIndex, int bufferOffset, int nodeId)
++        private void GenerateBiquadFilterForVoice(ref VoiceInfo voiceInfo, Memory<BiquadFilterState> stateMemory, int baseIndex, int bufferOffset, int nodeId)
+         {
+             bool supportsOptimizedPath = _rendererContext.BehaviourInfo.UseMultiTapBiquadFilterProcessing();
+ 
+@@ -156,9 +156,6 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+             if (supportsOptimizedPath && biquadFiltersSpan[0].Enable && biquadFiltersSpan[1].Enable)
+             {
+-                Memory<byte> biquadStateRawMemory = SpanMemoryManager<byte>.Cast(state)[..(Unsafe.SizeOf<BiquadFilterState>() * Constants.VoiceBiquadFilterCount)];
+-                Memory<BiquadFilterState> stateMemory = SpanMemoryManager<BiquadFilterState>.Cast(biquadStateRawMemory);
+-
+                 _commandBuffer.GenerateMultiTapBiquadFilter(baseIndex, biquadFiltersSpan, stateMemory, bufferOffset, bufferOffset, voiceInfo.BiquadFilterNeedInitialization, nodeId);
+             }
+             else
+@@ -169,9 +166,6 @@ namespace Ryujinx.Audio.Renderer.Server
+ 
+                     if (filter.Enable)
+                     {
+-                        Memory<byte> biquadStateRawMemory = SpanMemoryManager<byte>.Cast(state)[..(Unsafe.SizeOf<BiquadFilterState>() * Constants.VoiceBiquadFilterCount)];
+-                        Memory<BiquadFilterState> stateMemory = SpanMemoryManager<BiquadFilterState>.Cast(biquadStateRawMemory);
+-
+                         _commandBuffer.GenerateBiquadFilter(
+                             baseIndex,
+                             ref filter,
+@@ -378,7 +372,7 @@ namespace Ryujinx.Audio.Renderer.Server
+                         GeneratePerformance(ref performanceEntry, PerformanceCommand.Type.Start, nodeId);
+                     }
+ 
+-                    GenerateBiquadFilterForVoice(ref voiceInfo, dspStateMemory, (int)_rendererContext.MixBufferCount, channelIndex, nodeId);
++                    GenerateBiquadFilterForVoice(ref voiceInfo, _voiceContext.GetBiquadFilterStatesForDsp(channelResourceIdsSpan[channelIndex]), (int)_rendererContext.MixBufferCount, channelIndex, nodeId);
+ 
+                     if (performanceInitialized)
+                     {
+diff --git a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
+index 8957d8a42417e3c192fd589fa5e8fb393204dab0..fa43080cd29262297a1b84b52af52fdc994780e3 100644
+--- a/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
++++ b/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceContext.cs
+@@ -1,7 +1,9 @@
+ using Ryujinx.Audio.Renderer.Common;
++using Ryujinx.Audio.Renderer.Dsp.State;
+ using Ryujinx.Audio.Renderer.Utils;
+ using System;
+ using System.Diagnostics;
++using System.Runtime.CompilerServices;
+ 
+ namespace Ryujinx.Audio.Renderer.Server.Voice
+ {
+@@ -50,6 +52,7 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
+             _voiceChannelResources = voiceChannelResources;
+             _voiceStatesCpu = voiceStatesCpu;
+             _voiceStatesDsp = voiceStatesDsp;
++            _biquadFilterStatesDsp = null;
+             _voiceCount = voiceCount;
+         }
+ 
+@@ -94,6 +97,25 @@ namespace Ryujinx.Audio.Renderer.Server.Voice
+             return SpanIOHelper.GetMemory(_voiceStatesDsp, id, _voiceCount);
+         }
+ 
++        // S2Arm: the biquad filter states at the start of each voice's DSP state, reinterpreted once per voice and cached.
++        // Reinterpreting creates two memory manager objects, and command generation needs it for every voice with filters
++        // on every audio frame. The DSP state memory of a voice never moves after Initialize.
++        private Memory<BiquadFilterState>[] _biquadFilterStatesDsp;
++
++        public Memory<BiquadFilterState> GetBiquadFilterStatesForDsp(int id)
++        {
++            _biquadFilterStatesDsp ??= new Memory<BiquadFilterState>[_voiceCount];
++            ref Memory<BiquadFilterState> states = ref _biquadFilterStatesDsp[id];
++
++            if (states.IsEmpty)
++            {
++                Memory<byte> raw = SpanMemoryManager<byte>.Cast(GetUpdateStateForDsp(id))[..(Unsafe.SizeOf<BiquadFilterState>() * Constants.VoiceBiquadFilterCount)];
++                states = SpanMemoryManager<BiquadFilterState>.Cast(raw);
++            }
++
++            return states;
++        }
++
+         /// <summary>
+         /// Get a reference to a <see cref="VoiceInfo"/> at the given <paramref name="id"/>.
+         /// </summary>

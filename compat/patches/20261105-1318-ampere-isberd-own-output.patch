@@ -1,0 +1,25 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index b8a395521078a26695fec4a07f9ce677b6ff69ba..611b3a70936c79c181be84ad9d476b1bad9f2829 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -133,15 +133,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             if (stage != null)
+             {
+-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset]
++                // A task or mesh shader's stage memory (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
++                // S2Arm 11-05: 0xb8, a word of its own outputs, where 0x927 mode 0xb8 writes them ([Ra + offset] from stage[2]): Zelda: Ocarina of Time's task shader 5d3a096025e375a1
++                // stores a payload word at +0x10 and reads it straight back
+                 int mode = x.Bits(72, 80);
+ 
+-                if (mode != 0x78 && mode != 0x38)
++                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
+                 {
+                     throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
+                 }
+ 
+-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const(stage[1] + (int)x.SignedField(40, 64)));
++                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const((mode == 0xb8 ? stage[2] : stage[1]) + (int)x.SignedField(40, 64)));
+                 EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                 return;
+             }

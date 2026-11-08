@@ -1,0 +1,66 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 7b58e18c34beafd2c3a5649286ae5108db03aad3..a705edde333562def2ffa733e97b554961fb1f9e 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -228,7 +228,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         {
+             string apiName = context.Capabilities.Api.ToString().ToLowerInvariant();
+             string vendorName = RemoveInvalidCharacters(context.Capabilities.VendorName.ToLowerInvariant());
+-            return $"{apiName}_{vendorName}";
++            return $"{apiName}_{vendorName}_bin"; // S2A：主机缓存存渲染器自己的程序二进制，另起文件名，不与原版 SPIR-V 打包格式混读
+         }
+ 
+         /// <summary>
+@@ -394,20 +394,11 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                                 specState.PipelineState,
+                                 specState.TransformFeedbackDescriptors != null);
+ 
+-                            IProgram hostProgram;
++                            // S2A：Vulkan 接口下也按渲染器程序二进制读（原版 Vulkan 存的是各阶段 SPIR-V 打包，重建要整段 SPIR-V；
++                            // nxgal 的二进制只有每阶段的键与参数布局，函数按键从离线库取，旧库动森全量 260 MB → 7 MB）
++                            bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+ 
+-                            if (context.Capabilities.Api == TargetApi.Vulkan)
+-                            {
+-                                ShaderSource[] shaderSources = ShaderBinarySerializer.Unpack(shaders, hostCode);
+-
+-                                hostProgram = context.Renderer.CreateProgram(shaderSources, shaderInfo);
+-                            }
+-                            else
+-                            {
+-                                bool hasFragmentShader = shaders.Length > 5 && shaders[5] != null;
+-
+-                                hostProgram = context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, shaderInfo);
+-                            }
++                            IProgram hostProgram = context.Renderer.LoadProgramBinary(hostCode, hasFragmentShader, shaderInfo);
+ 
+                             CachedShaderProgram program = new(hostProgram, specState, shaders);
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+index a0d3e8c15a8a57f01bead455db352384ec64d2dc..40fd679c3c3ca73986edff66af1905c235f3fd3d 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/ParallelDiskCacheLoader.cs
+@@ -503,8 +503,8 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 IProgram hostProgram = _context.Renderer.CreateProgram(shaderSources, shaderInfo);
+                 CachedShaderProgram program = new(hostProgram, compilation.SpecializationState, compilation.Shaders);
+ 
+-                // Vulkan's binary code is the SPIR-V used for compilation, so it is ready immediately. Other APIs get this after compilation.
+-                byte[] binaryCode = _context.Capabilities.Api == TargetApi.Vulkan ? ShaderBinarySerializer.Pack(shaderSources) : null;
++                // S2A：一律存渲染器程序二进制（编完后取），不存 SPIR-V 打包
++                byte[] binaryCode = null;
+ 
+                 EnqueueForValidation(new ProgramEntry(program, binaryCode, compilation.ProgramIndex, compilation.IsCompute, isBinary: false));
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+index c4657d9551b334a592b87d6383f053c6a421fe4f..5cf7eb532a29d216792fd6fbfd78db9e0e1cb567 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderCache.cs
+@@ -564,7 +564,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         {
+             if (_diskCacheHostStorage.CacheEnabled)
+             {
+-                byte[] binaryCode = _context.Capabilities.Api == TargetApi.Vulkan ? ShaderBinarySerializer.Pack(sources) : null;
++                byte[] binaryCode = null; // S2A：一律存渲染器程序二进制（编完后取），不存 SPIR-V 打包
+                 ProgramToSave programToSave = new(program, hostProgram, binaryCode);
+ 
+                 _programsToSaveQueue.Enqueue(programToSave);

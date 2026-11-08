@@ -1,0 +1,279 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+index bddfbc48036000b9633166fc00d7029841c5e8cb..472317e6b13e699177dc8833c601e6034a171704 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineFull.cs
+@@ -393,7 +393,7 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+             else
+             {
+-                // Occlusion queries must begin inside a subpass; defer to the next pass's subpass 0.
++                // A query begin outside a subpass is invalid; defer to the next pass's subpass 0.
+                 _pendingQueryBegins.Add((pool, isOcclusion, query));
+             }
+         }
+@@ -469,7 +469,8 @@ namespace Ryujinx.Graphics.Vulkan
+                     continue;
+                 }
+ 
+-                Gd.Api.CmdBeginQuery(CommandBuffer, pool, (uint)slot, 0);
++                bool isPrecise = Gd.Capabilities.SupportsPreciseOcclusionQueries && isOcclusion;
++                Gd.Api.CmdBeginQuery(CommandBuffer, pool, (uint)slot, isPrecise ? QueryControlFlags.PreciseBit : 0);
+                 if (query.EndDeferred)
+                 {
+                     // End arrived first: emit the adjacent pair so the query contributes nothing.
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+index 2196332a9cd12b4b1e008761ce9d2adf1d99e21f..f1b89a6de066847ffa4ddfe464375f183687eead 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+@@ -20,11 +20,13 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         // A query result is accumulated from per-render-pass segments. Each segment owns one
+         // pool slot and one buffer slot; Vulkan requires an occlusion query's begin/end to be
+         // inside the same subpass, so a query that stays open across a pass boundary must split.
+-        public const int MaxQuerySegments = 16;
++        // 64 slots = 512 B of mapped buffer per query; far beyond observed pass-split counts.
++        public const int MaxQuerySegments = 64;
+ 
+         private readonly Vk _api;
+         private readonly Device _device;
+         private readonly PipelineFull _pipeline;
++        private readonly VulkanRenderer _gd;
+ 
+         private QueryPool _queryPool;
+ 
+@@ -40,10 +42,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         private int _segment;          // next free pool/buffer slot; also open slot+1 while open
+         private int _segmentMax;       // slots the guest-visible result must cover
+         private int _ended;            // End() observed; result expected
+-        private int _awaitTimedOut;    // bounded wait exhausted; no valid result ever
+-        // Session-visible count of latched query failures (await timeout or segment overflow).
+-        public static long TotalTimeouts;
+-        private int _open;             // a segment is currently recording (begun, not ended)
++        private int _overflowed;       // segment budget exceeded; no valid result ever
+         private int _endDeferred;      // End() arrived while the begin was still pending
+ 
+         public unsafe BufferedQuery(VulkanRenderer gd, Device device, PipelineFull pipeline, CounterType type, bool result32Bit)
+@@ -51,6 +50,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _api = gd.Api;
+             _device = device;
+             _pipeline = pipeline;
++            _gd = gd;
+             _type = type;
+             _result32Bit = result32Bit;
+ 
+@@ -135,8 +135,11 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         {
+             if (_isSupported)
+             {
++                // Clear at the start of the cycle: segment copies may land before End(),
++                // so the slots must already hold the sentinel for TryGetResult to wait on.
++                ClearResult();
+                 Volatile.Write(ref _ended, 0);
+-                Volatile.Write(ref _awaitTimedOut, 0);
++                Volatile.Write(ref _overflowed, 0);
+                 Volatile.Write(ref _segmentMax, 0);
+                 bool needsReset = resetSequence == null || _resetSequence == null || resetSequence.Value != _resetSequence.Value;
+                 bool isOcclusion = _type == CounterType.SamplesPassed;
+@@ -150,7 +153,6 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         public void OnPoolReset()
+         {
+             _segment = 0;
+-            _open = 0;
+             _endDeferred = 0;
+         }
+ 
+@@ -162,22 +164,20 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             {
+                 // Past the segment budget a partial sum would read back as a smaller (but
+                 // plausible) value — fail the whole query explicitly instead of returning one.
+-                if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
++                if (Interlocked.Exchange(ref _overflowed, 1) == 0)
+                 {
+-                    Interlocked.Increment(ref TotalTimeouts);
++                    _gd?.IncrementQueryTimeouts();
+                     Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} exceeded {MaxQuerySegments} render-pass segments.");
+                 }
+                 return -1;
+             }
+             _segment = slot + 1;
+-            _open = 1;
+             return slot;
+         }
+ 
+         // The recording segment just ended at its slot; the query may still resume later.
+         public int SegmentEnded()
+         {
+-            _open = 0;
+             return _segment - 1;
+         }
+ 
+@@ -197,7 +197,6 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+             if (withResult && _isSupported)
+             {
+-                ClearResult();
+                 Volatile.Write(ref _segmentMax, Math.Max(_segment, 1));
+                 Volatile.Write(ref _ended, 1);
+                 if (recordedEnd || _endDeferred != 0)
+@@ -224,7 +223,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         public bool TryGetResult(out long result)
+         {
+             result = _defaultValue;
+-            if (Volatile.Read(ref _ended) == 0 || Volatile.Read(ref _awaitTimedOut) != 0)
++            if (Volatile.Read(ref _ended) == 0 || Volatile.Read(ref _overflowed) != 0)
+             {
+                 return false;
+             }
+@@ -287,11 +286,10 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+ 
+             if (!TryGetResult(out result))
+             {
+-                if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
+-                {
+-                    Interlocked.Increment(ref TotalTimeouts);
+-                    Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out after {AwaitResultTimeoutMs} ms.");
+-                }
++                // Bounded-wait expiry only counts and reports; it never latches the result.
++                // The event stays pending and a late-arriving value remains consumable.
++                _gd?.IncrementQueryTimeouts();
++                Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out after {AwaitResultTimeoutMs} ms.");
+ 
+                 return false;
+             }
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+index a1c2bcbbbca6d7e76891396fb719f6dd28ca48fa..4686dc162c4ffb81f67c0b2198ffe3692da900fb 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+@@ -9,6 +9,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+     class CounterQueue : IDisposable
+     {
+         private const int QueryPoolInitialSize = 100;
++        private const long FlushToTimeoutMs = 500;
+ 
+         private readonly VulkanRenderer _gd;
+         private readonly Device _device;
+@@ -113,7 +114,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 {
+                     if (_events.Count > 0)
+                     {
+-                        evt = _events.Dequeue();
++                        evt = _events.Peek();
+                     }
+                 }
+ 
+@@ -121,10 +122,18 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 {
+                     _queuedEvent.WaitOne(); // No more events to go through, wait for more.
+                 }
+-                else
++                // Spin-wait rather than sleeping if there are any waiters, by passing null instead of the wake signal.
++                else if (evt.TryConsume(ref _accumulatedCounter, true, _waiterCount == 0 ? _wakeSignal : null))
+                 {
+-                    // Spin-wait rather than sleeping if there are any waiters, by passing null instead of the wake signal.
+-                    evt.TryConsume(ref _accumulatedCounter, true, _waiterCount == 0 ? _wakeSignal : null);
++                    // Peek-then-dequeue: a failed consume keeps the event queued so it can
++                    // still complete when its result lands; only a success removes it.
++                    lock (_lock)
++                    {
++                        if (_events.Count > 0 && ReferenceEquals(_events.Peek(), evt))
++                        {
++                            _events.Dequeue();
++                        }
++                    }
+                 }
+ 
+                 if (_waiterCount > 0)
+@@ -210,18 +219,32 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 return;
+             }
+ 
+-            lock (_lock)
++            while (true)
+             {
+-                // Tell the queue to process all events.
+-                while (_events.Count > 0)
++                CounterQueueEvent flush;
++                lock (_lock)
+                 {
+-                    CounterQueueEvent flush = _events.Peek();
+-                    if (!flush.TryConsume(ref _accumulatedCounter, true))
++                    if (_events.Count == 0)
+                     {
+-                        return; // If not blocking, then return when we encounter an event that is not ready yet.
++                        return;
+                     }
+ 
+-                    _events.Dequeue();
++                    flush = _events.Peek();
++                }
++
++                // The bounded consume runs outside the queue lock: holding it across a 500 ms
++                // await would stall QueueReport/QueueReset for the full timeout per event.
++                if (!flush.TryConsume(ref _accumulatedCounter, true))
++                {
++                    return; // If not blocking, then return when we encounter an event that is not ready yet.
++                }
++
++                lock (_lock)
++                {
++                    if (_events.Count > 0 && ReferenceEquals(_events.Peek(), flush))
++                    {
++                        _events.Dequeue();
++                    }
+                 }
+             }
+         }
+@@ -232,13 +255,22 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             Interlocked.Increment(ref _waiterCount);
+ 
+             // S2A：等的是计数消费线程拿到 GPU 结果，而结果所在的命令缓冲要靠渲染线程提交；宿主（Android 拆线程）经 S2AWaitCheck
+-            // 做有界与失败闩检查（渲染线程卡住 / 失败时抛错）。没登记 = 原样；抛错时也要把等待计数还回去
++            // 做有界与失败闩检查（渲染线程卡住 / 失败时抛错）。没登记 = 原样；抛错时也要把等待计数还回去。
++            // 等待自带上限：到期报红返回（事件仍留队，结果真到了消费线程照样交付），不把进程拖进无界自旋。
++            long deadline = Environment.TickCount64 + FlushToTimeoutMs;
+             try
+             {
+                 _wakeSignal.Set();
+ 
+                 while (!evt.Disposed)
+                 {
++                    if (Environment.TickCount64 >= deadline)
++                    {
++                        Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
++                            $"Error: Counter queue flush for {Type} timed out after {FlushToTimeoutMs} ms; event stays pending.");
++                        return;
++                    }
++
+                     _eventConsumed.WaitOne(1);
+                     _gd.S2AWaitCheck?.Invoke();
+                 }
+@@ -277,13 +309,6 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _queuedEvent.Dispose();
+             _wakeSignal.Dispose();
+             _eventConsumed.Dispose();
+-
+-            // Session summary: number of queries that latched failure this session.
+-            long timeouts = Volatile.Read(ref BufferedQuery.TotalTimeouts);
+-            if (timeouts != 0)
+-            {
+-                Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"Query results timed out {timeouts} time(s) this session.");
+-            }
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index cb24d30611df4dfca7d87e8a8df16e7f455625c4..303df2fa4971e839cc9421198c7dc323c6300286 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -120,6 +120,12 @@ namespace Ryujinx.Graphics.Vulkan
+         public bool S2ACounterLifetime { get; set; }
+         public bool S2AStopCountersForExit(int milliseconds) => _counters.S2AStopForExit(milliseconds);
+ 
++        // Query results whose bounded wait expired this session. Read-only for the
++        // session-summary line; counted once per expiry at the latch site.
++        private long _queryTimeouts;
++        public long QueryTimeouts => Interlocked.Read(ref _queryTimeouts);
++        internal void IncrementQueryTimeouts() => Interlocked.Increment(ref _queryTimeouts);
++
+         /// <summary>
+         /// S2A（Android 拆线程收局）：把一次驱动管线缓存落盘排到编译通道（高优先级，与管线创建串行），不等它；返回该次落盘是否写成的任务，
+         /// 没有编译通道 / 管线 / 通道已在停 = null。释放时照常再存一次

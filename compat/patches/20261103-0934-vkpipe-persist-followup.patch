@@ -1,0 +1,108 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+index 0091ab259888f3750ee59308d539f4fb97f5a15f..79cb2d0f688e5baa5756a85e98c8aa9804465cb0 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineBase.cs
+@@ -57,6 +57,29 @@ namespace Ryujinx.Graphics.Vulkan
+                 return true;
+             }
+         }
++
++        /// <summary>
++        /// 写盘回执的等待口径：收局路径 bounded——有界等（≤ milliseconds），退出期限到没写完交后台、旧文件保留；
++        /// 定期落盘不界等——调用方在编译通道上，等写盘会让通道上排队的新管线白等，后台写结果只记日志。
++        /// </summary>
++        public static bool AwaitReceipt(Task<bool> save, int milliseconds, string label, bool bounded)
++        {
++            if (!bounded) return true;
++            try
++            {
++                if (!save.Wait(milliseconds))
++                {
++                    Console.Error.WriteLine($"[vkpipe] 驱动缓存写盘仍在后台{label}（退出期限已到，旧文件保留）");
++                    return false;
++                }
++                return save.Result;
++            }
++            catch (AggregateException e)
++            {
++                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存写盘异常{label}：{e.GetBaseException().Message}");
++                return false;
++            }
++        }
+     }
+ 
+     class PipelineBase : IDisposable
+@@ -161,6 +184,15 @@ namespace Ryujinx.Graphics.Vulkan
+                 _s2aPipelineCachePath = gd.S2APipelineCachePath;
+                 _s2aPipelineCacheIdentity = S2ACacheIdentity(gd);
+ 
++                // S2A：上个进程被杀留下的落盘临时文件（*.tmp.<pid>.*）在这里清——只删进程号已证实不在的；
++                // 本进程号的一律不动：进程内重建会话时旧会话的后台写可能还在进行，删了会让它 rename 失败。
++                if (_s2aPipelineCachePath != null)
++                {
++                    int orphans = PipelineCacheFile.CleanOrphanedTemporaries(_s2aPipelineCachePath);
++                    if (orphans > 0)
++                        Console.Error.WriteLine($"[vkpipe] 清掉上个进程留下的落盘临时文件 {orphans} 个");
++                }
++
+                 byte[] initialData = null;
+                 string readError = null;
+                 if (_s2aPipelineCachePath != null &&
+@@ -1935,7 +1967,8 @@ namespace Ryujinx.Graphics.Vulkan
+         internal bool S2ASavePipelineCacheEarly() => S2ASavePipelineCache("收局请求时提前");
+         internal bool S2ASavePipelineCacheForExit() => S2ASavePipelineCache("收局补存");
+         // S2A（11-03 定期落盘）：崩溃 / 强杀不会走到收局路径，最多丢一个周期的新管线；没有新管线不写盘。
+-        internal bool S2ASavePipelineCachePeriodic() => S2APipelineCacheCurrent || S2ASavePipelineCache("定期");
++        //   定期场景不等写盘（waitForWrite: false）：收局才有退出期限要有界等，定期在编译通道上干等只会让新管线排队。
++        internal bool S2ASavePipelineCachePeriodic() => S2APipelineCacheCurrent || S2ASavePipelineCache("定期", waitForWrite: false);
+         // S2A（10-27，单线程收局）：在停 WSI 之前落盘。单线程收局在原生 1.5 s 内做完整释放，窗口 / WSI 退休可能吃掉大半预算
+         //   （9000 r8：通过局总共 1.405 s；18:02 局 GPU Run 退出 +0.670 s、Surface detached +1.029 s、1.509 s 被 _exit）；
+         //   落盘只有几十毫秒，先做，后面超时也不丢缓存。释放时若之后没有新管线由 Dispose 跳过重存
+@@ -1951,7 +1984,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private readonly S2AVersionedSave _s2aSaves = new();
+         private Task<bool> _s2aPendingSave;
+ 
+-        private unsafe bool S2ASavePipelineCache(string when = null)
++        private unsafe bool S2ASavePipelineCache(string when = null, bool waitForWrite = true)
+         {
+             if (!_s2aOwnsPipelineCache || _s2aPipelineCachePath == null)
+                 return false;
+@@ -1996,7 +2029,13 @@ namespace Ryujinx.Graphics.Vulkan
+             Task<bool> save = Task.Run(() =>
+             {
+                 string error = null;
+-                bool written = _s2aSaves.Write(version, () => PipelineCacheFile.TryWriteAtomic(path, identity, snapshot, out error), out bool skipped);
++                bool written = _s2aSaves.Write(version, () =>
++                {
++                    if (!PipelineCacheFile.TryWriteAtomic(path, identity, snapshot, out error)) return false;
++                    // 写成才记「盘上已是这份管线数」：在 _s2aSaves 串行区内按版本序推进，晚到的旧快照不回退标记
++                    System.Threading.Volatile.Write(ref _s2aSavedAtPipelines, pipelines);
++                    return true;
++                }, out bool skipped);
+                 if (skipped)
+                 {
+                     Console.Error.WriteLine($"[vkpipe] 驱动管线缓存这份快照{label}不写：盘上已是更新的快照");
+@@ -2012,21 +2051,8 @@ namespace Ryujinx.Graphics.Vulkan
+             });
+             _s2aPendingSave = save;
+ 
+-            try
+-            {
+-                if (!save.Wait(1000))
+-                {
+-                    Console.Error.WriteLine($"[vkpipe] 驱动缓存写盘仍在后台{label}（退出期限已到，旧文件保留）");
+-                    return false;
+-                }
+-                if (save.Result) System.Threading.Volatile.Write(ref _s2aSavedAtPipelines, pipelines);
+-                return save.Result;
+-            }
+-            catch (AggregateException e)
+-            {
+-                Console.Error.WriteLine($"[vkpipe] 驱动管线缓存写盘异常{label}：{e.GetBaseException().Message}");
+-                return false;
+-            }
++            // 定期落盘不界等：写盘继续在后台，编译通道立刻让给新管线；收局路径才有界等。
++            return S2AVersionedSave.AwaitReceipt(save, 1000, label, waitForWrite);
+         }
+ 
+         protected virtual void Dispose(bool disposing)

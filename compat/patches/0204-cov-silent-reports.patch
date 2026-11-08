@@ -1,0 +1,66 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+index 60e6369fd888665ce87d81c1bade1497319b5e30..1a6ca7fe1fb0c660d83d6dd640563ee4d00df604 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs
+@@ -35,6 +35,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         private readonly DeviceStateWithShadow<ThreedClassState> _state;
+         private readonly DrawState _drawState;
+         private readonly AdvancedBlendManager _blendManager;
++        private bool _s2aAdvBlendReported;
++        private bool _s2aTfbReported;
+ 
+         private readonly StateUpdateTracker<ThreedClassState> _updateTracker;
+ 
+@@ -1298,6 +1300,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 else
+                 {
+                     // TODO: Blend emulation fallback.
++                    // S2A（画幅线 10-24，图形接口盘点 8）：后端不支持高级混合时这里静默退回普通混合。先报出来（每进程一次），看哪款真用到再补着色器里的帧缓冲读取混合
++                    if (!_s2aAdvBlendReported)
++                    {
++                        _s2aAdvBlendReported = true;
++                        bool known = _blendManager.TryGetAdvancedBlend(out AdvancedBlendDescriptor d);
++                        System.Console.Error.WriteLine($"[gpu] 【红】游戏开了高级混合（混合微码 {_state.State.BlendUcodeEnable}，{(known ? $"认出 {d.Op} / {d.Overlap}" : "微码不在预生成表")}），后端不支持、退回普通混合（图形接口盘点 8）");
++                    }
+                 }
+             }
+ 
+@@ -1524,6 +1533,13 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+             _vsClipDistancesWritten = gs.Shaders[1]?.Info.ClipDistancesWritten ?? 0;
+ 
+             bool hasTransformFeedback = gs.SpecializationState.TransformFeedbackDescriptors != null;
++            // S2A（画幅线 10-24，图形接口盘点 7 / 17）：后端不支持变换反馈时 Gpu 层只在顶点着色器里仿真写出（几何 / 曲面为末阶段时不写），图元计数恒 0。先报出来（每进程一次）
++            if (hasTransformFeedback && !_context.Capabilities.SupportsTransformFeedback && !_s2aTfbReported)
++            {
++                _s2aTfbReported = true;
++                string last = gs.Shaders[4] != null ? "几何（不写出）" : gs.Shaders[3] != null ? "曲面评估（不写出）" : "顶点（仿真写出）";
++                System.Console.Error.WriteLine($"[gpu] 【红】游戏开了变换反馈：后端不支持、走 Gpu 层仿真，末阶段 {last}；TransformFeedbackPrimitivesWritten 计数恒 0（图形接口盘点 7 / 17）");
++            }
+             if (hasTransformFeedback != _channel.BufferManager.HasTransformFeedbackOutputs)
+             {
+                 if (!_context.Capabilities.SupportsTransformFeedback)
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index 3fb859ffd66d7f0eebc45d6a8b8b29000d7706df..ed4ebcefbca2f29a9f6ddd8de9f7c8677d282b9f 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -533,12 +533,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             return GenerateUnary(context, operation, context.Delegates.GlslExp2, null);
+         }
+ 
++        private static bool s_s2aFsiReported;
++
+         private static OperationResult GenerateFSIBegin(CodeGenContext context, AstOperation operation)
+         {
+             if (context.HostCapabilities.SupportsFragmentShaderInterlock)
+             {
+                 context.BeginInvocationInterlockEXT();
+             }
++            else if (!s_s2aFsiReported)
++            {
++                // S2A（画幅线 10-24，图形接口盘点 10）：后端不支持片元互锁时互锁段被省略（同像素的片元读改写不再有序）。先报出来（每进程一次），看哪款真用到再补 Metal 光栅顺序组
++                s_s2aFsiReported = true;
++                System.Console.Error.WriteLine("[gpu] 【红】着色器用了片元互锁（FSI）：后端不支持、互锁被省略（图形接口盘点 10）");
++            }
+ 
+             return OperationResult.Invalid;
+         }

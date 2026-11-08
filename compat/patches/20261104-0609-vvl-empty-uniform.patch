@@ -1,0 +1,103 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+index da9ba8c547a714613302fb16e42eb631918af2cf..5e0967a02669545f184f725bcc90b36e98fa66ae 100644
+--- a/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
++++ b/src/Ryujinx.Graphics.Vulkan/DescriptorSetUpdater.cs
+@@ -127,6 +127,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private DirtyFlags _dirty;
+ 
+         private readonly BufferHolder _dummyBuffer;
++        private BufferHolder _emptyUniformDummyBuffer;
+         private readonly TextureView _dummyTexture;
+         private readonly SamplerHolder _dummySampler;
+ 
+@@ -797,13 +798,34 @@ namespace Ryujinx.Graphics.Vulkan
+             info.Range = ClampBufferRange(requestedRange, bufferSize, (long)info.Offset, maxRange, out bool insufficient);
+             if (insufficient)
+             {
+-                gd.S2ANoteUniformBufferRangeError();
+-                Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
+-                    $"【红】Uniform buffer descriptor range {requestedRange} exceeds device maxUniformBufferRange {maxRange} " +
+-                    $"(buffer size {bufferSize}, offset {info.Offset}); clamped below shader-declared constant buffer size.");
++                if (gd.S2ANoteUniformBufferRangeError() == 1)
++                {
++                    Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
++                        $"【红】Uniform buffer descriptor range {requestedRange} exceeds device maxUniformBufferRange {maxRange} " +
++                        $"(buffer size {bufferSize}, offset {info.Offset}); clamped below shader-declared constant buffer size.");
++                }
+             }
+         }
+ 
++        internal static bool UniformRangeNeedsDummy(long bufferSize, long offset, ulong range) =>
++            offset < 0 || offset >= bufferSize || range == 0;
++
++        // 越界或空范围不能写入 Vulkan 描述符；使用合法的 dummy 窗口。
++        internal static void BindEmptyUniformDummy(ref DescriptorBufferInfo info, Buffer dummy, long dummySize, ulong maxRange)
++        {
++            info.Buffer = dummy;
++            info.Offset = 0;
++            info.Range = Math.Min((ulong)dummySize, maxRange);
++        }
++
++        private void BindEmptyUniformDummy(CommandBufferScoped cbs, ref DescriptorBufferInfo info, ulong maxRange)
++        {
++            // 支持 null descriptor 的设备平常不建 dummy；此处按需建一个并由 updater 释放。
++            _emptyUniformDummyBuffer ??= _dummyBuffer ?? _gd.BufferManager.Create(_gd, 0x10000, forConditionalRendering: false, baseType: BufferAllocationType.DeviceLocal);
++            DisposableBuffer dummy = _emptyUniformDummyBuffer.GetBuffer().Get(cbs);
++            BindEmptyUniformDummy(ref info, dummy.Value, dummy.Size, maxRange);
++        }
++
+         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+         private bool UpdateBuffer(
+             CommandBufferScoped cbs,
+@@ -817,6 +839,13 @@ namespace Ryujinx.Graphics.Vulkan
+             bool mirrored = false;
+             DisposableBuffer? resolved;
+ 
++            // 先排除越界，避免 mirror/使用跟踪在无效范围上运行。
++            if (maxRange != 0 && buffer.Buffer != null && UniformRangeNeedsDummy(buffer.Buffer.GetUnsafe().Size, offset, info.Range))
++            {
++                BindEmptyUniformDummy(cbs, ref info, maxRange);
++                return false;
++            }
++
+             if (mirrorable)
+             {
+                 resolved = buffer.Buffer?.GetMirrorable(cbs, ref offset, (int)info.Range, out mirrored);
+@@ -839,9 +868,14 @@ namespace Ryujinx.Graphics.Vulkan
+             }
+ 
+             // S2A（VUID-00332）：range 收进设备上限；仍盖不住着色器声明范围时报红（不静默截断）。
+-            if (maxRange != 0)
++            if (maxRange != 0 && info.Buffer.Handle != 0)
+             {
+                 ClampAndReportUniformBufferRange(ref info, resolved?.Size ?? 0, maxRange, _gd);
++                if (info.Range == 0)
++                {
++                    BindEmptyUniformDummy(cbs, ref info, maxRange);
++                    mirrored = false;
++                }
+             }
+ 
+             return mirrored;
+@@ -1367,7 +1367,8 @@ namespace Ryujinx.Graphics.Vulkan
+             {
+                 _dummyTexture.Dispose();
+                 _dummySampler.Dispose();
+                 _dummyBufferView?.Dispose();
++                if (_emptyUniformDummyBuffer != _dummyBuffer) _emptyUniformDummyBuffer?.Dispose();
+                 _dummyBuffer?.Dispose();
+                 _templateUpdater.Dispose();
+             }
+diff --git a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+index 662bb59f20bce4751382c0b9be34231d00c36563..d19ab9404d689117e03a88c0c3e5431333a16bb8 100644
+--- a/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
++++ b/src/Ryujinx.Graphics.Vulkan/VulkanRenderer.cs
+@@ -130,7 +130,7 @@ namespace Ryujinx.Graphics.Vulkan
+         private long _s2aUniformBufferRangeErrors;
+         public long S2AUniformBufferRangeErrors => Interlocked.Read(ref _s2aUniformBufferRangeErrors);
+         public string S2AUniformBufferRangeSummary => $"UBO 范围不足 {S2AUniformBufferRangeErrors} 次";
+-        internal void S2ANoteUniformBufferRangeError() => Interlocked.Increment(ref _s2aUniformBufferRangeErrors);
++        internal long S2ANoteUniformBufferRangeError() => Interlocked.Increment(ref _s2aUniformBufferRangeErrors);
+ 
+         // S2A：空 storage image view 回退到 1×1 dummy 的次数，并入收局汇总行。
+         private long _s2aNullImageFallbacks;

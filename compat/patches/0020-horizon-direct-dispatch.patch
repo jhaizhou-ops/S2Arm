@@ -1,0 +1,110 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index bcce72d1afc8f6a6c03a1e861516687f840fe6d0..2f9d05d124c8e58ec2a3bb74843b44881b3bf0b0 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -265,7 +265,7 @@ namespace Ryujinx.HLE.HOS
+             StartNewServices();
+         }
+ 
+-        private void StartNewServices()
++        private unsafe void StartNewServices()
+         {
+             HorizonFsClient fsClient = new(this);
+ 
+@@ -280,6 +280,13 @@ namespace Ryujinx.HLE.HOS
+ 
+             foreach (ServiceEntry service in services)
+             {
++                // S2Arm: Horizon services run on S2Arm threads with S2Arm's syscall layer (the game's handles live in the native layer)
++                if (S2AHooks.StartHorizonService != null)
++                {
++                    S2AHooks.StartHorizonService(service);
++                    continue;
++                }
++
+                 const ProcessCreationFlags Flags =
+                     ProcessCreationFlags.EnableAslr |
+                     ProcessCreationFlags.AddressSpace64Bit |
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 5a42292f26f3c15c8d2df8257304908f6a36a46c..8ed1dc9ee75c92c716a83166447f58fcf59ef1bc 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -15,5 +15,8 @@ namespace Ryujinx.HLE
+         // because the game waits on the native event (WaitSynchronization never enters C#).
+         public static delegate*<ulong, void> EventSignal;
+         public static delegate*<ulong, void> EventClear;
++
++        // Horizon.StartNewServices: start a Horizon (new IPC framework) service on an S2Arm thread instead of a Ryujinx kernel process
++        public static delegate*<Ryujinx.Horizon.ServiceEntry, void> StartHorizonService;
+     }
+ }
+diff --git a/src/Ryujinx.Horizon/AssemblyInfo.cs b/src/Ryujinx.Horizon/AssemblyInfo.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..97bbb48a96f964eb10060e0d016abd770a26584e
+--- /dev/null
++++ b/src/Ryujinx.Horizon/AssemblyInfo.cs
+@@ -0,0 +1,5 @@
++using System.Runtime.CompilerServices;
++
++// S2Arm: services/S2A.Services serves Horizon services in-thread (see S2AHorizonHooks)
++[assembly: InternalsVisibleTo("S2A.Services")]
++[assembly: InternalsVisibleTo("S2A.Services.Tests")]
+diff --git a/src/Ryujinx.Horizon/S2AHorizonHooks.cs b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..246bead6588de454f0213ddcaf835e1f9cb1f96f
+--- /dev/null
++++ b/src/Ryujinx.Horizon/S2AHorizonHooks.cs
+@@ -0,0 +1,18 @@
++using Ryujinx.Horizon.Sdk.Sf.Hipc;
++using System;
++
++namespace Ryujinx.Horizon
++{
++    // S2Arm: hooks for in-thread direct dispatch of Horizon services (services/S2A.Services sets them; when unset,
++    // behaviour is upstream's). The game's requests are processed on the game thread through the service's own
++    // ServerManager (ProcessRequest), instead of the service thread's receive loop.
++    static class S2AHorizonHooks
++    {
++        // A server port was registered with a manager (sm RegisterService / ManageNamedPort succeeded)
++        public static Action<ServerManagerBase, Server> PortRegistered;
++
++        // A session was registered (after accept / CreateSession, and after each processed request); when set, the session
++        // is not linked to the manager's wait list (the service thread's loop never serves it)
++        public static Action<ServerManagerBase, ServerSession> SessionRegistered;
++    }
++}
+diff --git a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+index 669dc5ee3cbec34da2317ebc2b0b21922c1beeb2..a9b67c47e5ffa5a4c81e7073412984d8a3995de2 100644
+--- a/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
++++ b/src/Ryujinx.Horizon/Sdk/Sf/Hipc/ServerManagerBase.cs
+@@ -99,6 +99,14 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+             server.UserData = UserDataTag.Server;
+ 
+             _multiWait.LinkMultiWaitHolder(server);
++
++            S2AHorizonHooks.PortRegistered?.Invoke(this, server);
++        }
++
++        // S2Arm: accept one pending session on this server port now, on the caller's thread (same path as the receive loop)
++        internal Result S2AProcessForServer(Server server)
++        {
++            return ProcessForServer(server);
+         }
+ 
+         protected virtual Result OnNeedsToAccept(int portIndex, Server server)
+@@ -196,6 +204,15 @@ namespace Ryujinx.Horizon.Sdk.Sf.Hipc
+ 
+         protected override void RegisterSessionToWaitList(ServerSession session)
+         {
++            // S2Arm: in-thread direct dispatch serves this session on the game thread; it never waits in this manager's loop
++            // (checked first: setting UserData boxes the tag, an allocation per request)
++            if (S2AHorizonHooks.SessionRegistered != null)
++            {
++                S2AHorizonHooks.SessionRegistered(this, session);
++
++                return;
++            }
++
+             session.HasReceived = false;
+             session.UserData = UserDataTag.Session;
+ 

@@ -1,0 +1,77 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+index 39f5b4adac5da8f0c5732c7430278119cf4de74c..259a8835d29121f86b177d9c719c14b9d9d19ed7 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/S2AVtg.cs
+@@ -6,6 +6,7 @@ using System;
+ using System.Buffers.Binary;
+ using System.Collections.Generic;
+ using System.IO;
++using System.Threading;
+ 
+ namespace Ryujinx.Graphics.Gpu.Shader
+ {
+@@ -161,6 +162,14 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// </summary>
+         public static byte[] Pack(bool tfEnabled, byte[] graphics, byte[] vertex, ResourceReservations vertexReservations, byte[] geometry, ResourceReservations geometryReservations, ShaderProgramInfo passthroughInfo)
+         {
++            // 后端可以合法地不给宿主二进制（最小布局 / 阶段集合在 VKPB v1 之外）：
++            // 这时不存这条记录，返回 null；不能在 Pack 里取 Length / S2AWrite 空引用。
++            if (graphics == null || vertex == null || vertexReservations == null ||
++                (geometry != null && geometryReservations == null))
++            {
++                return null;
++            }
++
+             using MemoryStream infoStream = new();
+             BinarySerializer infoWriter = new(infoStream);
+             DiskCacheHostStorage.S2AWriteShaderProgramInfo(ref infoWriter, passthroughInfo);
+@@ -359,6 +368,17 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         // S2A：多线程渲染器的程序取渲染线程编完时顺手取好的二进制，不发命令等渲染线程（ThreadedRenderer.S2ABinary）
+         private static byte[] Bin(IProgram program) => Ryujinx.Graphics.GAL.Multithreading.ThreadedRenderer.S2ABinary(program);
+ 
++        private static int _s2aNullBinaryRed;
++
++        // 空宿主二进制会悄悄少一条缓存记录（下次开机现编），每个进程只报一次并点名缺哪段。
++        private static void S2ANullBinaryRed(string detail)
++        {
++            if (Interlocked.Exchange(ref _s2aNullBinaryRed, 1) == 0)
++            {
++                Console.Error.WriteLine($"[gal] 【红】转计算程序宿主二进制缺失（{detail}），本条不落盘");
++            }
++        }
++
+         /// <summary>程序的宿主二进制：转计算程序 = 复合二进制（三个宿主程序各取 GetBinary）；其余 = 宿主程序 GetBinary。</summary>
+         public static byte[] GetBinary(CachedShaderProgram program)
+         {
+@@ -367,12 +387,28 @@ namespace Ryujinx.Graphics.Gpu.Shader
+                 return Bin(program.HostProgram);
+             }
+ 
++            byte[] graphics = Bin(program.HostProgram);
++            byte[] vertex = Bin(program.VertexAsCompute.HostProgram);
++            byte[] geometry = program.GeometryAsCompute == null ? null : Bin(program.GeometryAsCompute.HostProgram);
++
++            // 任一段后端不给二进制（Vulkan 的 GetBinary 在不能落盘时返回 null）：整条记录跳过，
++            // 与非转计算程序的 null 语义一致；不能再送进 Pack 空引用。
++            if (graphics == null || vertex == null || (program.GeometryAsCompute != null && geometry == null))
++            {
++                List<string> missing = new(3);
++                if (graphics == null) missing.Add("图形");
++                if (vertex == null) missing.Add("顶点计算");
++                if (program.GeometryAsCompute != null && geometry == null) missing.Add("几何计算");
++                S2ANullBinaryRed(string.Join("、", missing));
++                return null;
++            }
++
+             return Pack(
+                 program.SpecializationState.TransformFeedbackDescriptors != null,
+-                Bin(program.HostProgram),
+-                Bin(program.VertexAsCompute.HostProgram),
++                graphics,
++                vertex,
+                 program.VertexAsCompute.Reservations,
+-                program.GeometryAsCompute == null ? null : Bin(program.GeometryAsCompute.HostProgram),
++                geometry,
+                 program.GeometryAsCompute?.Reservations,
+                 program.S2APassthroughInfo);
+         }

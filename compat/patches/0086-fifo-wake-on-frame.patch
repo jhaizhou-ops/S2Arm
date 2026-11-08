@@ -1,0 +1,41 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index e63a1ed3b490d3af6b85d9e5e731715e5aa84256..8e5cced241058ee5787dea944846d1965b3ef858 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -204,9 +204,23 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+         /// Waits until commands are pushed to the FIFO.
+         /// </summary>
+         /// <returns>True if commands were received, false if wait timed out</returns>
++        // S2A：能耗减法开关 S2A_FIFO_WAIT_MS=<毫秒>（缺省不设 = 上游 8 ms 轮询不变）。设了：出帧就绪也唤醒（Window.SignalFrameReady → S2AWake），
++        // 超时放宽到给定值（保底：停机只取消令牌不发事件）。上游 8 ms 超时空闲时每秒醒约 125 次，且醒在性能核上（10-20 动森新包性能核占比 74%）
++        internal static readonly int S2AWaitMs = int.TryParse(System.Environment.GetEnvironmentVariable("S2A_FIFO_WAIT_MS"), out int s2aMs) && s2aMs > 0 ? s2aMs : 8;
++        internal static readonly bool S2AWakeOnFrame = S2AWaitMs != 8;
++
++        /// <summary>出帧就绪唤醒等待中的渲染循环（S2A_FIFO_WAIT_MS 设了才生效）</summary>
++        public void S2AWake()
++        {
++            if (S2AWakeOnFrame)
++            {
++                _event.Set();
++            }
++        }
++
+         public bool WaitForCommands()
+         {
+-            return !_commandBufferQueue.IsEmpty || (_event.WaitOne(8) && !_commandBufferQueue.IsEmpty);
++            return !_commandBufferQueue.IsEmpty || (_event.WaitOne(S2AWaitMs) && !_commandBufferQueue.IsEmpty);
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Window.cs b/src/Ryujinx.Graphics.Gpu/Window.cs
+index b9fb488266eb18edb795d29cff1f87f64b958751..5517c25197d583524fce2322aa7de20d84398244 100644
+--- a/src/Ryujinx.Graphics.Gpu/Window.cs
++++ b/src/Ryujinx.Graphics.Gpu/Window.cs
+@@ -255,6 +255,7 @@ namespace Ryujinx.Graphics.Gpu
+         public void SignalFrameReady()
+         {
+             Interlocked.Increment(ref _framesAvailable);
++            _context.GPFifo.S2AWake(); // S2A：S2A_FIFO_WAIT_MS 设了时，就绪即唤醒渲染循环（不靠超时轮询）
+         }
+ 
+         /// <summary>

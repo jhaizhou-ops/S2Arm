@@ -1,0 +1,29 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/TouchDevice.cs b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/TouchDevice.cs
+index 65ba434c7bc36d2453ca106e37745b998b29b154..6e5745a317145d81f0718e8288ad7bceaba2adbd 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/TouchDevice.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/HidDevices/TouchDevice.cs
+@@ -8,6 +8,9 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+     {
+         public TouchDevice(Switch device, bool active) : base(device, active) { }
+ 
++        // S2Arm: last mode the game passed to SetTouchScreenConfiguration; -1 = never configured.
++        public volatile int ConfiguredMode = -1;
++
+         public void Update(params ReadOnlySpan<TouchPoint> points)
+             => UpdateWithIds(points, default);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+index 8654368b86cc7402024d8d8561ff7aa3df429c00..7dcfe8f4068a90b64e9481063ce26e51fe4ed279 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Hid/IHidServer.cs
+@@ -1901,6 +1901,10 @@ namespace Ryujinx.HLE.HOS.Services.Hid
+             long touchScreenConfigurationForNx = context.RequestData.ReadInt64();
+             long appletResourceUserId = context.RequestData.ReadInt64();
+ 
++            // S2Arm: TouchScreenConfigurationForNx starts with the mode byte (0 UseSystemSetting, 1 Finger, 2 Heat2 = stylus).
++            // The call itself means the game drives the touch screen; the host reads this to pick its touch-first input scheme.
++            context.Device.Hid.Touchscreen.ConfiguredMode = (int)(touchScreenConfigurationForNx & 0xFF);
++
+             Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId, touchScreenConfigurationForNx });
+ 
+             return ResultCode.Success;

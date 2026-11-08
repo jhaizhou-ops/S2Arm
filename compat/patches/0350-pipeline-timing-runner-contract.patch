@@ -1,0 +1,38 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+index 87b48dca455c084b9d12a0d36d3c48255f079ccf..76612aa6ca2126afacd730b92d6e465d1eaa4812 100644
+--- a/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
++++ b/src/Ryujinx.Graphics.Vulkan/PipelineState.cs
+@@ -9,7 +9,6 @@ namespace Ryujinx.Graphics.Vulkan
+     {
+         private const int RequiredSubgroupSize = 32;
+         private const int MaxDynamicStatesCount = 9;
+-        private static readonly bool S2ATimingDiagnostics = Environment.GetEnvironmentVariable("S2A_SHADER_CACHE_DIAG") == "1";
+         private static long _s2aPipeCount, _s2aPipeMs, _s2aPipeMax, _s2aPipeSlow, _s2aPipeReported;
+ 
+         // S2A：Android 启动期 GPU 线程连续满载，区分是驱动管线编译还是别的工作。
+@@ -19,7 +18,6 @@ namespace Ryujinx.Graphics.Vulkan
+         private static void S2AReportPipelineTime(long start)
+         {
+             System.Threading.Interlocked.Increment(ref S2APipelinesCreated);
+-            if (!S2ATimingDiagnostics) return;
+             double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+             _s2aPipeCount++;
+             _s2aPipeMs += (long)ms;
+@@ -419,7 +417,7 @@ namespace Ryujinx.Graphics.Vulkan
+                     pipelineCreateInfo.Stage.PSpecializationInfo = info;
+                 }
+ 
+-                long s2aComputeStart = S2ATimingDiagnostics ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
++                long s2aComputeStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                 gd.Api.CreateComputePipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle).ThrowOnError();
+                 S2AReportPipelineTime(s2aComputeStart);
+             }
+@@ -725,7 +723,7 @@ namespace Ryujinx.Graphics.Vulkan
+                     RenderPass = renderPass,
+                 };
+ 
+-                long s2aGraphicsStart = S2ATimingDiagnostics ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
++                long s2aGraphicsStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                 Result result = gd.Api.CreateGraphicsPipelines(device, cache, 1, &pipelineCreateInfo, null, &pipelineHandle);
+                 S2AReportPipelineTime(s2aGraphicsStart);
+ 

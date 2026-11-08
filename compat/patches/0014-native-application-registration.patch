@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
+index f32dc651d5a055b5a48983011e7a9043b549b31a..b1b3cc7ad4a9f7ee17f523a61faf301fdcd17aae 100644
+--- a/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
++++ b/src/Ryujinx.HLE/Loaders/Processes/ProcessLoader.cs
+@@ -93,6 +93,19 @@ namespace Ryujinx.HLE.Loaders.Processes
+             _processesByPid = new ConcurrentDictionary<ulong, ProcessResult>();
+         }
+ 
++        // S2Arm: register an application whose code runs natively outside Ryujinx (no Ryujinx CPU process to start),
++        // with the same bookkeeping LoadXxx does after a successful start
++        internal void S2ARegisterApplication(ProcessResult processResult)
++        {
++            lock (_pidLock)
++            {
++                _processesByPid[processResult.ProcessId] = processResult;
++                _latestPid = processResult.ProcessId;
++            }
++
++            TitleIDs.CurrentApplication.Value = processResult.ProgramIdText;
++        }
++
+         public bool TryGetProcess(ulong pid, out ProcessResult process)
+         {
+             return _processesByPid.TryGetValue(pid, out process);

@@ -1,0 +1,192 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+index bbb599293aff524a9afbfb5eb9615a7011ef33e5..b97086768df835bb8278e2fd780d85612fc9cabb 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Dma/DmaClass.cs
+@@ -256,12 +256,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Dma
+                 ulong address = ((ulong)_state.State.SetSemaphoreA << 32) | _state.State.SetSemaphoreB;
+                 if (type == LaunchDmaSemaphoreType.ReleaseOneWordSemaphore)
+                 {
+-                    _channel.MemoryManager.Write(address, _state.State.SetSemaphorePayload);
++                    _channel.MemoryManager.S2AEngineWrite(address, _state.State.SetSemaphorePayload);
+                 }
+                 else /* if (type == LaunchDmaSemaphoreType.ReleaseFourWordSemaphore) */
+                 {
+-                    _channel.MemoryManager.Write(address + 8, _context.GetTimestamp());
+-                    _channel.MemoryManager.Write(address, (ulong)_state.State.SetSemaphorePayload);
++                    _channel.MemoryManager.S2AEngineWrite(address + 8, _context.GetTimestamp());
++                    _channel.MemoryManager.S2AEngineWrite(address, (ulong)_state.State.SetSemaphorePayload);
+                 }
+             }
+         }
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+index ccac6094f850ac29565e1bab90df4a57a466a99e..3d06aaee9ff59d3aab99508dcf77b5783206ee66 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs
+@@ -92,14 +92,14 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+ 
+             if (_state.State.SemaphoredReleaseSize == SemaphoredReleaseSize.SixteenBytes)
+             {
+-                _parent.MemoryManager.Write(address + 4, 0);
+-                _parent.MemoryManager.Write(address + 8, _context.GetTimestamp());
++                _parent.MemoryManager.S2AEngineWrite(address + 4, 0);
++                _parent.MemoryManager.S2AEngineWrite(address + 8, _context.GetTimestamp());
+             }
+ 
+             // TODO: Acquire operations (Wait), interrupts for invalid combinations.
+             if (operation == SemaphoredOperation.Release)
+             {
+-                _parent.MemoryManager.Write(address, value);
++                _parent.MemoryManager.S2AEngineWrite(address, value);
+             }
+             else if (operation == SemaphoredOperation.Reduction)
+             {
+@@ -135,7 +135,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                         break;
+                 }
+ 
+-                _parent.MemoryManager.Write(address, value);
++                _parent.MemoryManager.S2AEngineWrite(address, value);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+index 94390d1f45290ef23b5088232e8998d6309010fd..0179d84aabf579c3d381d2781b85f82c0cecbdf3 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs
+@@ -132,7 +132,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+         /// </summary>
+         private void ReleaseSemaphore()
+         {
+-            _channel.MemoryManager.Write(_state.State.SemaphoreAddress.Pack(), _state.State.SemaphorePayload);
++            _channel.MemoryManager.S2AEngineWrite(_state.State.SemaphoreAddress.Pack(), _state.State.SemaphorePayload);
+ 
+             _context.AdvanceSequence();
+         }
+@@ -164,7 +164,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                     Timestamp = _context.GetTimestamp(),
+                 };
+ 
+-                _channel.MemoryManager.Write(va, data);
++                _channel.MemoryManager.S2AEngineWrite(va, data);
+                 _channel.MemoryManager.CounterCache.AddOrUpdate(va, null);
+                 return;
+             }
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+index 05a316c45009341efb0dfbf62598b1e2c514654c..df3aa2bcc8b8921330a2c6cbd37aee9441ce0b79 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/Texture.cs
+@@ -637,6 +637,7 @@ namespace Ryujinx.Graphics.Gpu.Image
+         /// </summary>
+         public void SynchronizeFull()
+         {
++            _physicalMemory.S2ASignalReadForTexture(Range);
+             ReadOnlySpan<byte> data = _physicalMemory.GetSpan(Range);
+ 
+             // If the host does not support ASTC compression, we need to do the decompression.
+diff --git a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+index 63f1bc3b7bc017c818290c41f8f4bacb9af30a28..072176b86fbf49f8f59cf263f1f3792918e6bc3b 100644
+--- a/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
++++ b/src/Ryujinx.Graphics.Gpu/Image/TextureGroup.cs
+@@ -492,7 +492,9 @@ namespace Ryujinx.Graphics.Gpu.Image
+                         int endOffset = Math.Min(spanLast + _sliceSizes[endInfo.BaseLevel + endInfo.Levels - 1], (int)Storage.Size);
+                         int size = endOffset - spanBase;
+ 
+-                        dataSpan = _physicalMemory.GetSpan(Storage.Range.Slice((ulong)spanBase, (ulong)size));
++                        MultiRange s2aSlice = Storage.Range.Slice((ulong)spanBase, (ulong)size);
++                        _physicalMemory.S2ASignalReadForTexture(s2aSlice);
++                        dataSpan = _physicalMemory.GetSpan(s2aSlice);
+                     }
+ 
+                     // Only one of these will be greater than 1, as partial sync is only called when there are sub-image views.
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+index 3e5aaa46d777b055725075ac70b9452753d592c0..7f8caad87928a311f0a605b65481c9d31fe4ffde 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/BufferCache.cs
+@@ -850,6 +850,22 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             return true;
+         }
+ 
++        /// <summary>
++        /// S2A：物理区间上有没有 GPU 改过、还没回写的缓冲数据（按字节区间判，不按页）。只在 GPU 线程调、零分配
++        /// </summary>
++        public bool S2AHasGpuModified(ulong address, ulong size)
++        {
++            foreach (Buffer buffer in _buffers.FindOverlapsAsSpan(address, size))
++            {
++                if (buffer.IsModified(address, size))
++                {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++
+         /// <summary>
+         /// Clears a buffer at a given address with the specified value.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+index f7e392c98acdd4f6ab4f16a9b631cf75a6e84b02..049fe4fcb2804fd9dba624bc6831326f7befabac 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/MemoryManager.cs
+@@ -297,6 +297,25 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             WriteImpl(va, data, _writeTrackedResource);
+         }
+ 
++        /// <summary>
++        /// S2A（帧率能耗线 10-22）：GPU 引擎（信号量 / 计数器报告）写一个值，按精确写跟踪（同 InlineToMemory）：写到 GPU 改过的缓冲上只在改过范围里打洞，
++        /// 不整页等 GPU 回写。前提：客体读 GPU 改过的页也触发回写（写跟踪 S2A_TRACK_READFLUSH=1），否则客体拿不到同页的 GPU 结果（只开本项实测八方2 自动曝光全白）。
++        /// 缺省关：S2A_SEM_PRECISE=1 开，须与 S2A_TRACK_READFLUSH=1 同开
++        /// </summary>
++        public void S2AEngineWrite<T>(ulong va, T value) where T : unmanaged
++        {
++            if (_s2aSemPrecise)
++            {
++                WriteTrackedResource(va, MemoryMarshal.Cast<T, byte>(MemoryMarshal.CreateSpan(ref value, 1)));
++            }
++            else
++            {
++                Write(va, value);
++            }
++        }
++
++        private static readonly bool _s2aSemPrecise = Environment.GetEnvironmentVariable("S2A_SEM_PRECISE") == "1";
++
+         /// <summary>
+         /// Writes data to GPU mapped memory without write tracking.
+         /// </summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index c27dfcf6ea35754377bd0eb693258b8a38893e22..63a72effcf906e3d06e8455c1a9e5c67b4aa88ec 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -380,6 +380,30 @@ namespace Ryujinx.Graphics.Gpu.Memory
+         /// <param name="kind">Kind of the resource being tracked</param>
+         /// <param name="flags">Region flags</param>
+         /// <returns>The memory tracking handle</returns>
++        // S2A（帧率能耗线 10-22）：贴图从内存同步（新建 / CPU 改过后重传）前，贴图字节若和 GPU 改过、没回写的缓冲重叠，按读对这段发跟踪事件、豁免贴图自己的句柄：
++        // 同页里 GPU 改过、没回写的缓冲先在正常上下文里回写，再读。原版靠宿主读缺页时信号处理里回写；我方信号处理不能回写
++        // （宿主线程没有改道，见 graphics/track/track.c READFLUSH 宿主读），宿主读到旧值再传给 GPU 就盖掉 GPU 新值。S2A_TEX_READ_TRACK=0 关
++        private static readonly bool _s2aTexReadTrack = Environment.GetEnvironmentVariable("S2A_TEX_READ_TRACK") != "0";
++
++        public void S2ASignalReadForTexture(MultiRange range)
++        {
++            if (!_s2aTexReadTrack)
++            {
++                return;
++            }
++
++            for (int i = 0; i < range.Count; i++)
++            {
++                MemoryRange r = range.GetSubRange(i);
++
++                // 只在贴图自己的字节真和 GPU 改过、没回写的缓冲重叠时发（同页不重叠不用等：读的字节不归 GPU 管。10-22 八方2 按页发每帧白等约 1.5 ms）
++                if (r.Address != MemoryManager.PteUnmapped && BufferCache.S2AHasGpuModified(r.Address, r.Size))
++                {
++                    _cpuMemory.SignalMemoryTracking(r.Address, r.Size, false, false, (int)ResourceKind.Texture);
++                }
++            }
++        }
++
+         public RegionHandle BeginTracking(ulong address, ulong size, ResourceKind kind, RegionFlags flags = RegionFlags.None)
+         {
+             return _cpuMemory.BeginTracking(address, size, (int)kind, flags);

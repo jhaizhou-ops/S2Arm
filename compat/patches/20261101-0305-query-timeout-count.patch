@@ -1,0 +1,47 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+index 717b2be59cce39d69976e0e2d599fd3097eb9000..2196332a9cd12b4b1e008761ce9d2adf1d99e21f 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/BufferedQuery.cs
+@@ -41,6 +41,8 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+         private int _segmentMax;       // slots the guest-visible result must cover
+         private int _ended;            // End() observed; result expected
+         private int _awaitTimedOut;    // bounded wait exhausted; no valid result ever
++        // Session-visible count of latched query failures (await timeout or segment overflow).
++        public static long TotalTimeouts;
+         private int _open;             // a segment is currently recording (begun, not ended)
+         private int _endDeferred;      // End() arrived while the begin was still pending
+ 
+@@ -162,6 +164,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+                 // plausible) value — fail the whole query explicitly instead of returning one.
+                 if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
+                 {
++                    Interlocked.Increment(ref TotalTimeouts);
+                     Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} exceeded {MaxQuerySegments} render-pass segments.");
+                 }
+                 return -1;
+@@ -286,6 +289,7 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             {
+                 if (Interlocked.Exchange(ref _awaitTimedOut, 1) == 0)
+                 {
++                    Interlocked.Increment(ref TotalTimeouts);
+                     Logger.Error?.Print(LogClass.Gpu, $"Error: Query result {_type} timed out after {AwaitResultTimeoutMs} ms.");
+                 }
+ 
+diff --git a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+index 0998d7a5b6ba494444a17691d440cdce51faae1a..a1c2bcbbbca6d7e76891396fb719f6dd28ca48fa 100644
+--- a/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
++++ b/src/Ryujinx.Graphics.Vulkan/Queries/CounterQueue.cs
+@@ -277,6 +277,13 @@ namespace Ryujinx.Graphics.Vulkan.Queries
+             _queuedEvent.Dispose();
+             _wakeSignal.Dispose();
+             _eventConsumed.Dispose();
++
++            // Session summary: number of queries that latched failure this session.
++            long timeouts = Volatile.Read(ref BufferedQuery.TotalTimeouts);
++            if (timeouts != 0)
++            {
++                Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu, $"Query results timed out {timeouts} time(s) this session.");
++            }
+         }
+     }
+ }

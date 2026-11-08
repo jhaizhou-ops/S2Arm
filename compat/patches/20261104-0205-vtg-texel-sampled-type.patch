@@ -1,0 +1,276 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+index 5ddae9bf8a33513a9ca44dbb3a54ac15092b0ae1..271a5e864eeca4510c6459737bacc29124e7ce69 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/SpecializationStateUpdater.cs
+@@ -262,6 +262,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                         value |= AttributeType.PackedRgb10A2Signed;
+                     }
+                 }
++                if (mayConvertVtgToCompute &&
++                    !FormatTable.TryGetSingleComponentAttribFormat(state[location].UnpackFormat(), out _, out _))
++                {
++                    // VtgAsComputeState binds a generic R32 view for unknown formats.
++                    value |= AttributeType.TexelInvalidFormat;
++                }
+                 if (mayConvertVtgToCompute &&
+                     FormatTable.TryGetSingleComponentAttribFormat(state[location].UnpackFormat(), out Format intended, out _) &&
+                     FormatTable.TryResolveVertexTexelViewFormat(intended, _context.Capabilities.UnsupportedUniformTexelBufferFormats, out _, out bool needsDecode) &&
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index e87ff2ac6182508e00ad0e8514845c371350ef84..6dd26eb25908aea38aeb3dc2b6b179c765ff8520 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -31,7 +31,10 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+         // +8: SupportBuffer's unconditional shader declaration grows to 3776 bytes
+         // with ABI2 member 12. Re-translate old host binaries rather than assuming
+         // that every backend treats the added uniform-block member as compatible.
+-        internal const uint CodeGenVersion = 7354 + 8;
++        // +9: VTG texel-buffer image declarations now use the sampler's declared
++        // sampled type instead of unconditional FP32; host binaries translated
++        // with the old declaration must be re-translated.
++        internal const uint CodeGenVersion = 7354 + 9;
+ 
+         private const string SharedTocFileName = "shared.toc";
+         private const string SharedDataFileName = "shared.data";
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+index c53126d25c91268b0a1e1a3fe15681ccaffe3807..184c1558a12a35d0b6c0088a93e3d2f3687fcbe8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/ShaderSpecializationState.cs
+@@ -750,7 +750,7 @@ namespace Ryujinx.Graphics.Gpu.Shader
+         /// <returns>Filtered attribute</returns>
+         private static AttributeType FilterAttributeType(GpuChannel channel, AttributeType type)
+         {
+-            type &= ~(AttributeType.Packed | AttributeType.PackedRgb10A2Signed | AttributeType.TexelDecode);
++            type &= ~(AttributeType.Packed | AttributeType.PackedRgb10A2Signed | AttributeType.TexelDecode | AttributeType.TexelInvalidFormat);
+ 
+             if (channel.Capabilities.SupportsScaledVertexFormats &&
+                 (type == AttributeType.Sscaled || type == AttributeType.Uscaled))
+diff --git a/src/Ryujinx.Graphics.Shader/AttributeType.cs b/src/Ryujinx.Graphics.Shader/AttributeType.cs
+index 8325a71dcad324ce5fed107c784fb19cbb8027f5..6f1897ebe80feab1ae299d4a5d61816532080d4e 100644
+--- a/src/Ryujinx.Graphics.Shader/AttributeType.cs
++++ b/src/Ryujinx.Graphics.Shader/AttributeType.cs
+@@ -18,10 +18,13 @@ namespace Ryujinx.Graphics.Shader
+         // the shader applies the semantic decode (see VertexToCompute).
+         TexelDecode = 1 << 3,
+ 
++        // An unrecognized attribute format uses the host's R32 fallback view.
++        TexelInvalidFormat = 1 << 4,
++
+         Packed = 1 << 6,
+         PackedRgb10A2Signed = 1 << 7,
+         AnyPacked = Packed | PackedRgb10A2Signed,
+-        BaseTypeMask = 0xff ^ TexelDecode ^ Packed ^ PackedRgb10A2Signed,
++        BaseTypeMask = 0xff ^ TexelDecode ^ TexelInvalidFormat ^ Packed ^ PackedRgb10A2Signed,
+     }
+ 
+     static class AttributeTypeExtensions
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+index dad1fdd61cf87cd021500f5bec298daff7c892cc..b6e8badc40fae5a71be6805b32d6f8845d33f096 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/Declarations.cs
+@@ -353,6 +353,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
+                 }
+ 
+                 string samplerTypeName = definition.Separate ? definition.Type.GlslTextureTypeName : definition.Type.GlslSamplerTypeName;
++                samplerTypeName = definition.SampledType switch
++                {
++                    AggregateType.U32 => "u" + samplerTypeName,
++                    AggregateType.S32 => "i" + samplerTypeName,
++                    _ => samplerTypeName,
++                };
+ 
+                 string layout = string.Empty;
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/OperandManager.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/OperandManager.cs
+index 6c20cb0c8b9e578f415b82fa2e92828eef670990..21e2bbba44c06a6d3f0cde67bd62c4e834752c5c 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/OperandManager.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Glsl/OperandManager.cs
+@@ -152,7 +152,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Glsl
+                     }
+                     else if (texOp.Inst == Instruction.TextureSample)
+                     {
+-                        return texOp.GetVectorType(GetDestVarType(operation.Inst));
++                        return texOp.GetVectorType(context.Properties.Textures.TryGetValue(texOp.GetTextureSetAndBinding(), out TextureDefinition definition)
++                            ? definition.SampledType : GetDestVarType(operation.Inst));
+                     }
+                 }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+index 0d38a3f717993fe5836baa454b5d9c22cb5fa80d..e4d1e2fd076a47f72d36491455a136d9cbc3e8cc 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Declarations.cs
+@@ -188,7 +188,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                     }
+ 
+                     imageType = context.TypeImage(
+-                        context.TypeFP32(),
++                        context.GetType(sampler.SampledType),
+                         dim,
+                         sampler.Type.HasFlag(SamplerType.Shadow),
+                         sampler.Type.HasFlag(SamplerType.Array),
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index 8cff2350df6687126cea8d31edf7d6c66e705459..30b0bf757f918db508818f1cd1e6e2593fd16178 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1462,7 +1462,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+             bool colorIsVector = isGather || !isShadow;
+ 
+-            SpvInstruction resultType = colorIsVector ? context.TypeVector(context.TypeFP32(), 4) : context.TypeFP32();
++            AggregateType sampledType = context.Properties.Textures[texOp.GetTextureSetAndBinding()].SampledType;
++            SpvInstruction sampledScalarType = context.GetType(sampledType);
++            SpvInstruction resultType = colorIsVector ? context.TypeVector(sampledScalarType, 4) : sampledScalarType;
+ 
+             if (intCoords)
+             {
+@@ -1527,7 +1529,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 result = context.ImageSampleImplicitLod(resultType, image, pCoords, operandsMask, operands);
+             }
+ 
+-            AggregateType swizzledResultType = AggregateType.FP32;
++            AggregateType swizzledResultType = sampledType;
+ 
+             if (colorIsVector)
+             {
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
+index f4830dfd90c5e167edd9689a83e8a2b6d64ae549..9db851bba9a66f15448176a63bc4dd56800319d1 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/StructuredProgram.cs
+@@ -198,6 +198,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                     {
+                         destType = texOp.Format.GetComponentType();
+                     }
++                    else if (texOp.Inst == Instruction.TextureSample &&
++                        context.ResourceManager.Properties.Textures.TryGetValue(new SetBindingPair(texOp.Set, texOp.Binding), out TextureDefinition texture))
++                    {
++                        destType = texture.SampledType;
++                    }
+ 
+                     source = GetAstTextureOperation(texOp);
+                 }
+@@ -282,6 +287,11 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
+                     {
+                         dest.VarType = texOp.Format.GetComponentType();
+                     }
++                    else if (texOp.Inst == Instruction.TextureSample &&
++                        context.ResourceManager.Properties.Textures.TryGetValue(new SetBindingPair(texOp.Set, texOp.Binding), out TextureDefinition texture))
++                    {
++                        dest.VarType = texture.SampledType;
++                    }
+ 
+                     source = GetAstTextureOperation(texOp);
+                 }
+diff --git a/src/Ryujinx.Graphics.Shader/StructuredIr/TextureDefinition.cs b/src/Ryujinx.Graphics.Shader/StructuredIr/TextureDefinition.cs
+index 1021dff0e8d16b652d8e46d879e54cd40cfc43ec..1c6b6844de7522cf6c20907c9b3283976a855162 100644
+--- a/src/Ryujinx.Graphics.Shader/StructuredIr/TextureDefinition.cs
++++ b/src/Ryujinx.Graphics.Shader/StructuredIr/TextureDefinition.cs
+@@ -1,3 +1,5 @@
++using Ryujinx.Graphics.Shader.Translation;
++
+ namespace Ryujinx.Graphics.Shader
+ {
+     readonly struct TextureDefinition
+@@ -10,6 +12,7 @@ namespace Ryujinx.Graphics.Shader
+         public SamplerType Type { get; }
+         public TextureFormat Format { get; }
+         public TextureUsageFlags Flags { get; }
++        public AggregateType SampledType { get; }
+ 
+         public TextureDefinition(
+             int set,
+@@ -19,7 +22,8 @@ namespace Ryujinx.Graphics.Shader
+             string name,
+             SamplerType type,
+             TextureFormat format,
+-            TextureUsageFlags flags)
++            TextureUsageFlags flags,
++            AggregateType sampledType = AggregateType.FP32)
+         {
+             Set = set;
+             Binding = binding;
+@@ -29,15 +33,16 @@ namespace Ryujinx.Graphics.Shader
+             Type = type;
+             Format = format;
+             Flags = flags;
++            SampledType = sampledType;
+         }
+ 
+-        public TextureDefinition(int set, int binding, string name, SamplerType type) : this(set, binding, 1, false, name, type, TextureFormat.Unknown, TextureUsageFlags.None)
++        public TextureDefinition(int set, int binding, string name, SamplerType type, AggregateType sampledType = AggregateType.FP32) : this(set, binding, 1, false, name, type, TextureFormat.Unknown, TextureUsageFlags.None, sampledType)
+         {
+         }
+ 
+         public TextureDefinition SetFlag(TextureUsageFlags flag)
+         {
+-            return new TextureDefinition(Set, Binding, ArrayLength, Separate, Name, Type, Format, Flags | flag);
++            return new TextureDefinition(Set, Binding, ArrayLength, Separate, Name, Type, Format, Flags | flag, SampledType);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 51d3a6f9ea3a0975ded2f611560450ebadb46443..9e6c23e8fa60343f0229b226a291269464abfe0a 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -610,7 +610,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 if (Stage == ShaderStage.Vertex)
+                 {
+                     SetBindingPair ibSetAndBinding = resourceManager.Reservations.GetIndexBufferTextureSetAndBinding();
+-                    TextureDefinition indexBuffer = new(ibSetAndBinding.SetIndex, ibSetAndBinding.Binding, "ib_data", SamplerType.TextureBuffer);
++                    TextureDefinition indexBuffer = new(ibSetAndBinding.SetIndex, ibSetAndBinding.Binding, "ib_data", SamplerType.TextureBuffer, AggregateType.U32);
+                     resourceManager.Properties.AddOrUpdateTexture(indexBuffer);
+ 
+                     int inputMap = _program.AttributeUsage.UsedInputAttributes;
+@@ -619,7 +619,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     {
+                         int location = BitOperations.TrailingZeroCount(inputMap);
+                         SetBindingPair setAndBinding = resourceManager.Reservations.GetVertexBufferTextureSetAndBinding(location);
+-                        TextureDefinition vaBuffer = new(setAndBinding.SetIndex, setAndBinding.Binding, $"vb_data{location}", SamplerType.TextureBuffer);
++                        TextureDefinition vaBuffer = new(setAndBinding.SetIndex, setAndBinding.Binding, $"vb_data{location}", SamplerType.TextureBuffer, GetVertexTexelSampledType(location));
+                         resourceManager.Properties.AddOrUpdateTexture(vaBuffer);
+ 
+                         inputMap &= ~(1 << location);
+@@ -628,7 +628,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 else if (Stage == ShaderStage.Geometry)
+                 {
+                     SetBindingPair trbSetAndBinding = resourceManager.Reservations.GetTopologyRemapBufferTextureSetAndBinding();
+-                    TextureDefinition remapBuffer = new(trbSetAndBinding.SetIndex, trbSetAndBinding.Binding, "trb_data", SamplerType.TextureBuffer);
++                    TextureDefinition remapBuffer = new(trbSetAndBinding.SetIndex, trbSetAndBinding.Binding, "trb_data", SamplerType.TextureBuffer, AggregateType.U32);
+                     resourceManager.Properties.AddOrUpdateTexture(remapBuffer);
+ 
+                     int geometryVbOutputSbBinding = resourceManager.Reservations.GeometryVertexOutputStorageBufferBinding;
+@@ -651,6 +651,36 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return resourceManager;
+         }
+ 
++        // Match the actual single-component view chosen by FormatTable, including raw fallbacks.
++        private AggregateType GetVertexTexelSampledType(int location)
++        {
++            AttributeType type = Definitions.GetAttributeType(location);
++            if (type.HasFlag(AttributeType.TexelDecode)) return AggregateType.U32;
++            AttributeType basic = type & AttributeType.BaseTypeMask;
++            if (type.HasFlag(AttributeType.TexelInvalidFormat))
++            {
++                return basic switch
++                {
++                    AttributeType.Sint => AggregateType.S32,
++                    AttributeType.Uint => AggregateType.U32,
++                    _ => AggregateType.FP32,
++                };
++            }
++            if (type.HasFlag(AttributeType.Packed))
++            {
++                if (basic == AttributeType.Sscaled) return AggregateType.S32;
++                if (basic is AttributeType.Sint or AttributeType.Uint or AttributeType.Uscaled ||
++                    type.HasFlag(AttributeType.PackedRgb10A2Signed)) return AggregateType.U32;
++                return AggregateType.FP32;
++            }
++            return basic switch
++            {
++                AttributeType.Sint or AttributeType.Sscaled => AggregateType.S32,
++                AttributeType.Uint or AttributeType.Uscaled => AggregateType.U32,
++                _ => AggregateType.FP32,
++            };
++        }
++
+         private ShaderDefinitions GetDefinitions(bool vertexAsCompute)
+         {
+             if (vertexAsCompute)

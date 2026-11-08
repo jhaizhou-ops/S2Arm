@@ -1,0 +1,57 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
+index 5f78028e0921cf4ff5ad0f2e18405a368da042c9..c446383e17d0bbbba7016557d59aa0b917c10025 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/ISharedFontManager.cs
+@@ -122,6 +122,52 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+             return GetSharedFontInOrderOfPriority(context);
+         }
+ 
++        // S2Arm：Switch 2 SDK 的 pl:u 代理不再有 5 / 6（按优先级列字体），取内置字体改走 2000 / 2010（4 款 Switch 2 游戏 sdk 的
++        //   nn::pl::sharedresource::detail::IPlatformSharedResourceManager 代理表：0–4、2000、2010、2100）。
++        //   事实取自 Eden-NS2（GPL，代码自写）ns/platform_service_manager.cpp、ns/builtin_font.h：2000 回同一块字体共享内存与其长度；
++        //   2010(u8 字体类型, b8 选项) 回 (b8 有无, 描述 {u8 类型, u8 标志 0, u16 保留, u32 偏移, u32 长度})，偏移 / 长度与命令 3 / 2 同口径，
++        //   选项在真机模块里不被使用；类型越界或区域越出共享内存 → 无（描述全 0），命令本身成功
++        [CommandCmif(2000)] // Switch 2
++        // GetBuiltInFontSharedMemory() -> (u32 size, handle<copy>)
++        public ResultCode GetBuiltInFontSharedMemory(ServiceCtx context)
++        {
++            ResultCode result = GetSharedMemoryNativeHandle(context);
++
++            context.ResponseData.Write((uint)Horizon.FontSize);
++
++            return result;
++        }
++
++        [CommandCmif(2010)] // Switch 2
++        // GetBuiltInFontData(u8 type, b8 option) -> (b8 available, nn::pl::BuiltInFontDescriptor)
++        public ResultCode GetBuiltInFontData(ServiceCtx context)
++        {
++            byte type = context.RequestData.ReadByte();
++
++            context.Device.System.SharedFontManager.EnsureInitialized(context.Device.System.ContentManager);
++
++            uint offset = 0, size = 0;
++            bool available = false;
++
++            if (type < (byte)SharedFontType.Count)
++            {
++                offset = (uint)context.Device.System.SharedFontManager.GetSharedMemoryAddressOffset((SharedFontType)type);
++                size = (uint)context.Device.System.SharedFontManager.GetFontSize((SharedFontType)type);
++                available = size != 0 && offset <= (uint)Horizon.FontSize && size <= (uint)Horizon.FontSize - offset;
++            }
++
++            context.ResponseData.Write(available);
++            context.ResponseData.Write((byte)0);
++            context.ResponseData.Write((ushort)0);
++            context.ResponseData.Write(available ? type : (byte)0);
++            context.ResponseData.Write((byte)0);
++            context.ResponseData.Write((ushort)0);
++            context.ResponseData.Write(available ? offset : 0u);
++            context.ResponseData.Write(available ? size : 0u);
++
++            return ResultCode.Success;
++        }
++
+         private bool AddFontToOrderOfPriorityList(ServiceCtx context, SharedFontType fontType, uint offset)
+         {
+             ulong typesPosition = context.Request.ReceiveBuff[0].Position;

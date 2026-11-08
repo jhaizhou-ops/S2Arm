@@ -1,0 +1,195 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index 3ec023fca57b65358a489eb3f8086bcba1f63549..7954f2c6efd6246447b82ed65f40527d11140c9d 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -36,6 +36,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         private NetworkState _state;
+         private DisconnectReason _disconnectReason;
+         private ResultCode _nifmResultCode;
++        private bool _unavailableReported;
+ 
+         private AccessPoint _accessPoint;
+         private Station _station;
+@@ -57,10 +58,24 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             return !IsDevelopment ? SecurityMode.Retail : securityMode;
+         }
+ 
++        // S2Arm: the process metadata the nacp checks below read can be absent
++        // (native games without a kernel-side process entry, synthetic fixtures).
++        // Every lookup degrades through this helper instead of dereferencing null.
++        private static bool TryGetControlProperty(ServiceCtx context, out ApplicationControlProperty controlProperty)
++        {
++            var processResult = context.Device.Processes.GetProcess(context.ClientProcessId);
++            controlProperty = processResult?.ApplicationControlProperties ?? default;
++            return processResult != null;
++        }
++
+         private bool CheckLocalCommunicationIdPermission(ServiceCtx context, ulong localCommunicationIdChecked)
+         {
+             // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-            ApplicationControlProperty controlProperty = context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties;
++            if (!TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++            {
++                // S2Arm: no declared LocalCommunicationId list to check against.
++                return true;
++            }
+ 
+             foreach (ulong localCommunicationId in controlProperty.LocalCommunicationId)
+             {
+@@ -444,9 +459,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                                 if (scanFilter.NetworkId.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+                                 {
+                                     // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                                    ApplicationControlProperty controlProperty = context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties;
+-
+-                                    scanFilter.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                                    if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                                    {
++                                        scanFilter.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                                    }
+                                 }
+ 
+                                 RefreshOpenNetworkClient(context);
+@@ -615,6 +631,12 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+         public ResultCode CreateNetworkImpl(ServiceCtx context, bool isPrivate = false)
+         {
++            if (_nifmResultCode != ResultCode.Success)
++            {
++                Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"CreateNetworkImpl: _nifmResultCode = {_nifmResultCode}");
++                return _nifmResultCode;
++            }
++
+             SecurityConfig securityConfig = context.RequestData.ReadStruct<SecurityConfig>();
+             SecurityParameter securityParameter = isPrivate ? context.RequestData.ReadStruct<SecurityParameter>() : new SecurityParameter();
+ 
+@@ -626,9 +648,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             if (networkConfig.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+             {
+                 // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                ApplicationControlProperty controlProperty = context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties;
+-
+-                networkConfig.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                {
++                    networkConfig.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                }
+             }
+ 
+             bool isLocalCommunicationIdValid = CheckLocalCommunicationIdPermission(context, (ulong)networkConfig.IntentId.LocalCommunicationId);
+@@ -638,12 +661,6 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return ResultCode.InvalidObject;
+             }
+ 
+-            if (_nifmResultCode != ResultCode.Success)
+-            {
+-                Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"CreateNetworkImpl: _nifmResultCode = {_nifmResultCode}");
+-                return _nifmResultCode;
+-            }
+-
+             networkConfig.Channel = CheckDevelopmentChannel(networkConfig.Channel);
+             securityConfig.SecurityMode = CheckDevelopmentSecurityMode(securityConfig.SecurityMode);
+ 
+@@ -958,6 +975,12 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+ 
+         private ResultCode ConnectImpl(ServiceCtx context, bool isPrivate = false)
+         {
++            if (_nifmResultCode != ResultCode.Success)
++            {
++                Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"ConnectImpl: _nifmResultCode = {_nifmResultCode}");
++                return _nifmResultCode;
++            }
++
+             SecurityConfig securityConfig = context.RequestData.ReadStruct<SecurityConfig>();
+             SecurityParameter securityParameter = isPrivate ? context.RequestData.ReadStruct<SecurityParameter>() : new SecurityParameter();
+ 
+@@ -989,9 +1012,10 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+             if (networkInfo.NetworkId.IntentId.LocalCommunicationId == -1 && NetworkClient.NeedsRealId)
+             {
+                 // TODO: Call nn::arp::GetApplicationControlProperty here when implemented.
+-                ApplicationControlProperty controlProperty = context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties;
+-
+-                networkInfo.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++                {
++                    networkInfo.NetworkId.IntentId.LocalCommunicationId = (long)controlProperty.LocalCommunicationId[0];
++                }
+             }
+ 
+             bool isLocalCommunicationIdValid = CheckLocalCommunicationIdPermission(context, (ulong)networkInfo.NetworkId.IntentId.LocalCommunicationId);
+@@ -1001,12 +1025,6 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                 return ResultCode.InvalidObject;
+             }
+ 
+-            if (_nifmResultCode != ResultCode.Success)
+-            {
+-                Logger.NetLog?.PrintMsg(LogClass.ServiceLdn, $"ConnectImpl: _nifmResultCode = {_nifmResultCode}");
+-                return _nifmResultCode;
+-            }
+-
+             securityConfig.SecurityMode = CheckDevelopmentSecurityMode(securityConfig.SecurityMode);
+ 
+             ResultCode resultCode = ResultCode.InvalidArgument;
+@@ -1219,18 +1237,19 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                     //       and return related error codes.
+                     MultiplayerMode mode = context.Device.Configuration.MultiplayerMode;
+ 
+-                    // S2Arm: with multiplayer disabled the stubbed client never uses the network (nobody nearby, as on a console with
+-                    // local wireless on and no other console around), so the host's interfaces are not queried either
++                    // S2Arm: with multiplayer disabled the service reports unavailable without touching
++                    // the network, so the host's interfaces are not queried either
+                     if (mode == MultiplayerMode.Disabled || System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+                     {
+                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
+ 
+-                        CreateNetworkClient(context, mode);
+-
+-                        resultCode = ResultCode.Success;
++                        resultCode = CreateNetworkClient(context, mode);
+                         _nifmResultCode = resultCode;
+ 
+-                        SetState(NetworkState.Initialized);
++                        if (resultCode == ResultCode.Success)
++                        {
++                            SetState(NetworkState.Initialized);
++                        }
+                     }
+                     else
+                     {
+@@ -1248,7 +1267,7 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+         // S2Arm: the RyuLDN server the current client was built for (null for the other modes); tests read it
+         internal string S2ANetworkClientServer { get; private set; }
+ 
+-        private void CreateNetworkClient(ServiceCtx context, MultiplayerMode mode)
++        private ResultCode CreateNetworkClient(ServiceCtx context, MultiplayerMode mode)
+         {
+             S2ANetworkClientServer = null;
+ 
+@@ -1281,12 +1300,24 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                     NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                     break;
+                 case MultiplayerMode.Disabled:
+-                    NetworkClient = new LdnDisabledClient();
+-                    break;
++                    // S2Arm: local wireless discovery / multiplayer is unavailable. Return
++                    // the service's own result code and report once, instead of handing a
++                    // client forward whose later calls dereference missing game metadata.
++                    if (!_unavailableReported)
++                    {
++                        _unavailableReported = true;
++                        S2AHooks.Red?.Invoke("ldn: local wireless unavailable, reporting DeviceNotAvailable");
++                    }
++                    return ResultCode.DeviceNotAvailable;
+             }
+ 
+             // TODO: Call nn::arp::GetApplicationLaunchProperty here when implemented.
+-            NetworkClient.SetGameVersion(context.Device.Processes.GetProcess(context.ClientProcessId).ApplicationControlProperties.DisplayVersion);
++            if (TryGetControlProperty(context, out ApplicationControlProperty controlProperty))
++            {
++                NetworkClient.SetGameVersion(controlProperty.DisplayVersion);
++            }
++
++            return ResultCode.Success;
+         }
+ 
+         // S2Arm: the host can re-point the RyuLDN server while the game is initialized but idle (LAN relay election, Host.SetLdnServer).

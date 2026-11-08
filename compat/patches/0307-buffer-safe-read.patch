@@ -1,0 +1,71 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+index aca5518da7998b3c2c5a06e6c3d97fb0b4e33b24..16dbba6297e6527407dd071343b7026332fdaad2 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/Buffer.cs
+@@ -369,7 +369,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+                         // 零拷贝：数据已在游戏内存里，不上传
+                         if (!_s2aZeroCopy)
+                         {
+-                            _context.Renderer.SetBufferData(Handle, 0, _physicalMemory.GetSpan(Address, (int)Size));
++                            ReadOnlySpan<byte> data = _physicalMemory.S2AGetBufferReadSpan(Address, (int)Size, out var readOwner);
++                            using (readOwner)
++                            {
++                                _context.Renderer.SetBufferData(Handle, 0, data);
++                            }
+                         }
+ 
+                         CopyToDependantVirtualBuffers();
+@@ -693,7 +697,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             // 零拷贝：数据已在游戏内存里，不上传
+             if (!_s2aZeroCopy)
+             {
+-                _context.Renderer.SetBufferData(Handle, offset, _physicalMemory.GetSpan(mAddress, (int)mSize));
++                ReadOnlySpan<byte> data = _physicalMemory.S2AGetBufferReadSpan(mAddress, (int)mSize, out var readOwner);
++                using (readOwner)
++                {
++                    _context.Renderer.SetBufferData(Handle, offset, data);
++                }
+             }
+             else
+             {
+diff --git a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+index 891f26fea69f17431960e120fa3e377f4ab12275..478574e50f0140e7e25470055a61594f2b0e9919 100644
+--- a/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
++++ b/src/Ryujinx.Graphics.Gpu/Memory/PhysicalMemory.cs
+@@ -218,6 +218,36 @@ namespace Ryujinx.Graphics.Gpu.Memory
+             }
+ 
+             S2ASignalReadForTexture(range);
++            return S2ACopyReadSpan(range, copy, total, out owner);
++        }
++
++        /// <summary>
++        /// 缓冲已按自身 dirty/GPU-modified 区间完成同步后取数；这里不能再次发跟踪事件，避免重入当前 flush。
++        /// 未安装平台复制时保留原 span；副本 owner 必须活到 SetBufferData 消费结束。
++        /// </summary>
++        internal ReadOnlySpan<byte> S2AGetBufferReadSpan(ulong address, int size, out MemoryOwner<byte> owner)
++        {
++            owner = null;
++            Action<ulong, Memory<byte>> copy = _context.S2AReadGuestMemory;
++            if (copy == null)
++            {
++                return GetSpan(address, size);
++            }
++
++            if (!_context.IsGpuThread())
++            {
++                throw new InvalidOperationException("Guest buffer reads require the GPU owner thread.");
++            }
++
++            ArgumentOutOfRangeException.ThrowIfNegative(size);
++            _ = checked(address + (ulong)size);
++            return S2ACopyReadSpan(new MultiRange(address, (ulong)size), copy, size, out owner);
++        }
++
++        private static ReadOnlySpan<byte> S2ACopyReadSpan(MultiRange range, Action<ulong, Memory<byte>> copy,
++            int total, out MemoryOwner<byte> owner)
++        {
++            owner = null;
+             MemoryOwner<byte> rented = MemoryOwner<byte>.Rent(total);
+             try
+             {

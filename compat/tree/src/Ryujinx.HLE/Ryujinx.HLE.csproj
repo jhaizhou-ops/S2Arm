@@ -1,0 +1,85 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefaultItemExcludes>$(DefaultItemExcludes);._*</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Ryujinx.Audio\Ryujinx.Audio.csproj" />
+    <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />
+    <ProjectReference Include="..\Ryujinx.Cpu\Ryujinx.Cpu.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Host1x\Ryujinx.Graphics.Host1x.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Nvdec\Ryujinx.Graphics.Nvdec.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Vic\Ryujinx.Graphics.Vic.csproj" />
+    <ProjectReference Include="..\Ryujinx.HLE.Generators\Ryujinx.HLE.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false"/>
+    <ProjectReference Include="..\Ryujinx.Horizon.Common\Ryujinx.Horizon.Common.csproj" />
+    <ProjectReference Include="..\Ryujinx.Horizon.Kernel.Generators\Ryujinx.Horizon.Kernel.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\Ryujinx.Horizon\Ryujinx.Horizon.csproj" />
+    <ProjectReference Include="..\Ryujinx.Memory\Ryujinx.Memory.csproj" />
+    <ProjectReference Include="..\ARMeilleure\ARMeilleure.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.Gpu\Ryujinx.Graphics.Gpu.csproj" />
+    <ProjectReference Include="..\Ryujinx.Graphics.GAL\Ryujinx.Graphics.GAL.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Ryujinx.LibHac" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
+    <PackageReference Include="MsgPack.Cli" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
+    <PackageReference Include="SkiaSharp.NativeAssets.macOS" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" />
+    <PackageReference Include="NetCoreServer" />
+    <PackageReference Include="Open.Nat.V2" />
+  </ItemGroup>
+
+  <!-- linux-bionic is the Android host. Its platform codec is mandatory; other
+       hosts retain their existing Skia implementation and package selection. -->
+  <!-- Apple hosts (macOS / iOS NativeAOT, statically linked, no libSkiaSharp.dylib) register an ImageIO
+       encoder (platform/apple/cs/capture) and never theme the inline keyboard (headless), so Skia is
+       unreachable there: removed like Android. A RID-less build on macOS (the services unit tests) is an Apple host. -->
+  <PropertyGroup>
+    <S2AAndroidHost Condition="'$(S2AAndroidHost)' == '' and $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-bionic-'))">true</S2AAndroidHost>
+    <DefineConstants Condition="'$(S2AAndroidHost)' == 'true'">$(DefineConstants);S2A_ANDROID_HOST</DefineConstants>
+    <S2AAppleHost Condition="'$(S2AAppleHost)' == '' and ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')) or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('ios-')) or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('iossimulator-')) or ('$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('OSX'))))">true</S2AAppleHost>
+    <DefineConstants Condition="'$(S2AAppleHost)' == 'true'">$(DefineConstants);S2A_APPLE_HOST</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(S2AAndroidHost)' == 'true' or '$(S2AAppleHost)' == 'true'">
+    <Compile Remove="HOS/Services/Caps/SkiaScreenshotEncoder.cs" />
+    <Compile Remove="HOS/Applets/SoftwareKeyboard/SoftwareKeyboardRendererBase.cs" />
+    <PackageReference Remove="SkiaSharp;SkiaSharp.NativeAssets.Win32;SkiaSharp.NativeAssets.macOS;SkiaSharp.NativeAssets.Linux.NoDependencies" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Debugger\Gdb\Xml\aarch64-core.xml" />
+    <None Remove="Debugger\Gdb\Xml\aarch64-fpu.xml" />
+    <None Remove="Debugger\Gdb\Xml\arm-core.xml" />
+    <None Remove="Debugger\Gdb\Xml\arm-neon.xml" />
+    <None Remove="Debugger\Gdb\Xml\target64.xml" />
+    <None Remove="Debugger\Gdb\Xml\target32.xml" />
+    <None Remove="Homebrew.npdm" />
+    <None Remove="HOS\Applets\SoftwareKeyboard\Resources\Logo_Ryujinx.png" />
+    <None Remove="HOS\Applets\SoftwareKeyboard\Resources\Icon_BtnA.png" />
+    <None Remove="HOS\Applets\SoftwareKeyboard\Resources\Icon_BtnB.png" />
+    <None Remove="HOS\Applets\SoftwareKeyboard\Resources\Icon_KeyF6.png" />
+    <None Remove="HOS\Services\Account\Acc\DefaultUserImage.jpg" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Debugger\Gdb\Xml\aarch64-core.xml" />
+    <EmbeddedResource Include="Debugger\Gdb\Xml\aarch64-fpu.xml" />
+    <EmbeddedResource Include="Debugger\Gdb\Xml\arm-core.xml" />
+    <EmbeddedResource Include="Debugger\Gdb\Xml\arm-neon.xml" />
+    <EmbeddedResource Include="Debugger\Gdb\Xml\target32.xml" />
+    <EmbeddedResource Include="Debugger\Gdb\Xml\target64.xml" />
+    <EmbeddedResource Include="Homebrew.npdm" />
+    <EmbeddedResource Include="HOS\Applets\SoftwareKeyboard\Resources\Logo_Ryujinx.png" />
+    <EmbeddedResource Include="HOS\Applets\SoftwareKeyboard\Resources\Icon_BtnA.png" />
+    <EmbeddedResource Include="HOS\Applets\SoftwareKeyboard\Resources\Icon_BtnB.png" />
+    <EmbeddedResource Include="HOS\Applets\SoftwareKeyboard\Resources\Icon_KeyF6.png" />
+    <EmbeddedResource Include="HOS\Services\Account\Acc\DefaultUserImage.jpg" />
+    <EmbeddedResource Include="HOS\Services\Account\Acc\GuestUserImage.jpg" />
+  </ItemGroup>
+
+</Project>

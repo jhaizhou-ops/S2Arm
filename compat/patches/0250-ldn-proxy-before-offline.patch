@@ -1,0 +1,36 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
+index a06b5623cd1e86bacae4de9722f054a10a292bcc..17bce3073dc70549112dd1bef1ea335f5b673731 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
+@@ -73,6 +73,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+         public static ISocketImpl CreateSocket(AddressFamily domain, SocketType type, ProtocolType protocol, string lanInterfaceId, bool offline)
+         {
++            // S2Arm: local wireless works without internet access (a console in a local-play room has no internet either),
++            // so sockets go on the LDN network first whenever one is joined
++            if (_proxy != null && _proxy.Supported(domain, type, protocol))
++            {
++                Logger.Info?.PrintMsg(LogClass.ServiceBsd, $"Socket is using LDN proxy");
++                return new LdnProxySocket(domain, type, protocol, _proxy);
++            }
++
+             // S2Arm: without internet access the console is offline — its sockets live on the offline network, never on a host socket
+             if (offline)
+             {
+@@ -83,15 +91,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+ 
+             if (_proxy != null)
+             {
+-                if (_proxy.Supported(domain, type, protocol))
+-                {
+-                    Logger.Info?.PrintMsg(LogClass.ServiceBsd, $"Socket is using LDN proxy");
+-                    return new LdnProxySocket(domain, type, protocol, _proxy);
+-                }
+-                else
+-                {
+-                    Logger.Warning?.PrintMsg(LogClass.ServiceBsd, $"LDN proxy does not support socket {domain}, {type}, {protocol}");
+-                }
++                Logger.Warning?.PrintMsg(LogClass.ServiceBsd, $"LDN proxy does not support socket {domain}, {type}, {protocol}");
+             }
+             else
+             {

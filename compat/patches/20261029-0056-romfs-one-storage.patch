@@ -1,0 +1,111 @@
+diff --git a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+index 32afd88a6c876be34bc27f946da1f8af43023e94..3735b7ac2047c0be5fdb604e9cb0933934525260 100644
+--- a/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
++++ b/src/Ryujinx.HLE/FileSystem/VirtualFileSystem.cs
+@@ -38,7 +38,10 @@ namespace Ryujinx.HLE.FileSystem
+         public SdmmcApi SdCard { get; private set; }
+         public ModLoader ModLoader { get; private set; }
+ 
+-        private readonly ConcurrentDictionary<ulong, Stream> _romFsByPid;
++        // S2Arm: one RomFS storage per process, read by offset (audit / intel #883). Each OpenDataStorage* used to wrap the same Stream in a new
++        // StreamStorage: every wrapper had its own lock, all shared the stream's position, so two data storage sessions reading at once (each
++        // session is serialized on its own, HleTarget) could read each other's bytes. A stream registered here is wrapped once; sessions get views
++        private readonly ConcurrentDictionary<ulong, LibHac.Fs.IStorage> _romFsByPid;
+ 
+         private static bool _isInitialized = false;
+         private FileSystemServer _fsServer;
+@@ -63,34 +66,37 @@ namespace Ryujinx.HLE.FileSystem
+         {
+             ReloadKeySet();
+             ModLoader = new ModLoader(); // Should only be created once
+-            _romFsByPid = new ConcurrentDictionary<ulong, Stream>();
++            _romFsByPid = new ConcurrentDictionary<ulong, LibHac.Fs.IStorage>();
+         }
+ 
+         public void LoadRomFs(ulong pid, string fileName)
+         {
+-            FileStream romfsStream = new(fileName, FileMode.Open, FileAccess.Read);
+-
+-            _romFsByPid.AddOrUpdate(pid, romfsStream, (pid, oldStream) =>
+-            {
+-                oldStream.Close();
+-
+-                return romfsStream;
+-            });
++            SetRomFs(pid, new FileStream(fileName, FileMode.Open, FileAccess.Read));
+         }
+ 
+         public void SetRomFs(ulong pid, Stream romfsStream)
+         {
+-            _romFsByPid.AddOrUpdate(pid, romfsStream, (pid, oldStream) =>
++            SetRomFs(pid, romfsStream.AsStorage(false));
++        }
++
++        // The storage is owned here from now on (disposed when replaced or at shutdown); it must allow concurrent reads at different offsets
++        public void SetRomFs(ulong pid, LibHac.Fs.IStorage romfs)
++        {
++            _romFsByPid.AddOrUpdate(pid, romfs, (pid, old) =>
+             {
+-                oldStream.Close();
++                old.Dispose();
+ 
+-                return romfsStream;
++                return romfs;
+             });
+         }
+ 
+-        public Stream GetRomFs(ulong pid)
++        // A view for one data storage session: reads go to the shared storage by offset; disposing the view leaves the storage open
++        public LibHac.Fs.IStorage GetRomFs(ulong pid)
+         {
+-            return _romFsByPid[pid];
++            LibHac.Fs.IStorage romfs = _romFsByPid[pid];
++            romfs.GetSize(out long size).ThrowIfFailure();
++
++            return new SubStorage(romfs, 0, size);
+         }
+ 
+         public static string GetFullPath(string basePath, string fileName)
+@@ -726,9 +732,9 @@ namespace Ryujinx.HLE.FileSystem
+ 
+                 try
+                 {
+-                    foreach (Stream stream in _romFsByPid.Values)
++                    foreach (LibHac.Fs.IStorage romfs in _romFsByPid.Values)
+                     {
+-                        stream.Close();
++                        romfs.Dispose();
+                     }
+ 
+                     _romFsByPid.Clear();
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 04a1b7928a6a4f4df758d606ce53346490ddd691..00bd720fa70c4628344e667972da6cdf3ce10f4c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -787,7 +787,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+         // OpenDataStorageByCurrentProcess() -> object<nn::fssrv::sf::IStorage> dataStorage
+         public ResultCode OpenDataStorageByCurrentProcess(ServiceCtx context)
+         {
+-            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid).AsStorage(true);
++            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid);
+             using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(storage);
+             using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
+ 
+@@ -897,7 +897,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+         // OpenPatchDataStorageByCurrentProcess() -> object<nn::fssrv::sf::IStorage>
+         public ResultCode OpenPatchDataStorageByCurrentProcess(ServiceCtx context)
+         {
+-            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid).AsStorage(true);
++            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid);
+             using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(storage);
+             using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
+ 
+@@ -917,7 +917,7 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 throw new NotImplementedException($"Accessing storage from other programs is not supported (program index = {programIndex}).");
+             }
+ 
+-            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid).AsStorage(true);
++            LibHac.Fs.IStorage storage = context.Device.FileSystem.GetRomFs(_pid);
+             using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(storage);
+             using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
+ 

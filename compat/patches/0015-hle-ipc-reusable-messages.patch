@@ -1,0 +1,407 @@
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
+index aa91743548e952c78437e989684f2a4c205f2c0c..3f25028957a6a387a27226e58da8ef82ced5392d 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcBuffDesc.cs
+@@ -8,6 +8,19 @@ namespace Ryujinx.HLE.HOS.Ipc
+         public ulong Size { get; private set; }
+         public byte Flags { get; private set; }
+ 
++        // S2Arm: from the three descriptor words (zero-allocation parse, see IpcMessage.S2A.cs)
++        internal IpcBuffDesc(ulong word0, ulong word1, ulong word2)
++        {
++            Position = word1;
++            Position |= (word2 << 4) & 0x0f00000000;
++            Position |= (word2 << 34) & 0x7000000000;
++
++            Size = word0;
++            Size |= (word2 << 8) & 0xf00000000;
++
++            Flags = (byte)(word2 & 3);
++        }
++
+         public IpcBuffDesc(BinaryReader reader)
+         {
+             ulong word0 = reader.ReadUInt32();
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcHandleDesc.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcHandleDesc.cs
+index 0ed5b74a2df8b295668e821dde62d98528c85860..10e09f6ad8afb8f7a5ae11e37e91107efb43c10e 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcHandleDesc.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcHandleDesc.cs
+@@ -6,7 +6,7 @@ using System.IO;
+ 
+ namespace Ryujinx.HLE.HOS.Ipc
+ {
+-    class IpcHandleDesc
++    partial class IpcHandleDesc
+     {
+         public bool HasPId { get; private set; }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e48b4706bfce3a0ac386d55c2ccb571570a1939
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.S2A.cs
+@@ -0,0 +1,277 @@
++using System;
++using System.Buffers.Binary;
++
++namespace Ryujinx.HLE.HOS.Ipc
++{
++    // S2Arm: zero steady-state allocation for in-thread direct dispatch. One request / response message per game
++    // thread is reused: parsed in place from the game's message buffer and written back into it, with the same layout
++    // rules as the IpcMessage(ReadOnlySpan<byte>, long) constructor and GetStream / GetStreamTipc.
++    partial class IpcMessage
++    {
++        // Raw data location inside the parsed buffer (RawData is not filled on this path)
++        internal int S2ARawOffset { get; private set; }
++        internal int S2ARawSize { get; private set; }
++
++        private IpcHandleDesc _s2aHandleDesc;
++
++        internal void S2AReset()
++        {
++            Type = 0;
++            HandleDesc = null;
++            RawData = null;
++            PtrBuff.Clear();
++            SendBuff.Clear();
++            ReceiveBuff.Clear();
++            ExchangeBuff.Clear();
++            RecvListBuff.Clear();
++            ObjectIds.Clear();
++        }
++
++        internal void S2AParse(ReadOnlySpan<byte> data, long cmdPtr)
++        {
++            S2AReset();
++
++            uint word0 = BinaryPrimitives.ReadUInt32LittleEndian(data);
++            uint word1 = BinaryPrimitives.ReadUInt32LittleEndian(data[4..]);
++            int pos = 8;
++
++            Type = (IpcMessageType)(word0 & 0xffff);
++
++            int ptrBuffCount = (int)(word0 >> 16) & 0xf;
++            int sendBuffCount = (int)(word0 >> 20) & 0xf;
++            int recvBuffCount = (int)(word0 >> 24) & 0xf;
++            int xchgBuffCount = (int)(word0 >> 28) & 0xf;
++
++            int rawDataSize = (int)(word1 & 0x3ff) * 4;
++            int recvListFlags = (int)(word1 >> 10) & 0xf;
++
++            if ((word1 >> 31) != 0)
++            {
++                _s2aHandleDesc ??= new IpcHandleDesc([], []);
++                pos = _s2aHandleDesc.S2AParse(data, pos);
++                HandleDesc = _s2aHandleDesc;
++            }
++
++            for (int i = 0; i < ptrBuffCount; i++, pos += 8)
++            {
++                PtrBuff.Add(new IpcPtrBuffDesc(U32(data, pos), U32(data, pos + 4)));
++            }
++
++            pos = ReadBuff(data, pos, sendBuffCount, SendBuff);
++            pos = ReadBuff(data, pos, recvBuffCount, ReceiveBuff);
++            pos = ReadBuff(data, pos, xchgBuffCount, ExchangeBuff);
++
++            int recvListPos = pos + rawDataSize;
++
++            // Only CMIF has the padding requirements.
++            if (Type < IpcMessageType.TipcCloseSession)
++            {
++                int pad0 = (int)GetPadSize16(pos + cmdPtr);
++
++                if (rawDataSize != 0)
++                {
++                    rawDataSize -= pad0;
++                }
++
++                pos += pad0;
++            }
++
++            int recvListCount = recvListFlags - 2;
++
++            if (recvListCount == 0)
++            {
++                recvListCount = 1;
++            }
++            else if (recvListCount < 0)
++            {
++                recvListCount = 0;
++            }
++
++            S2ARawOffset = pos;
++            S2ARawSize = Math.Clamp(rawDataSize, 0, Math.Max(0, data.Length - pos));
++
++            for (int i = 0; i < recvListCount && recvListPos + 8 <= data.Length; i++, recvListPos += 8)
++            {
++                RecvListBuff.Add(new IpcRecvListBuffDesc(BinaryPrimitives.ReadUInt64LittleEndian(data[recvListPos..])));
++            }
++        }
++
++        private static int ReadBuff(ReadOnlySpan<byte> data, int pos, int count, System.Collections.Generic.List<IpcBuffDesc> list)
++        {
++            for (int i = 0; i < count; i++, pos += 12)
++            {
++                list.Add(new IpcBuffDesc(U32(data, pos), U32(data, pos + 4), U32(data, pos + 8)));
++            }
++
++            return pos;
++        }
++
++        private static uint U32(ReadOnlySpan<byte> data, int pos) => BinaryPrimitives.ReadUInt32LittleEndian(data[pos..]);
++
++        // CMIF response, same layout as GetStream(cmdPtr, recvListAddr: 0); returns the length written
++        internal int S2AWriteCmif(Span<byte> dst, long cmdPtr, ReadOnlySpan<byte> raw)
++        {
++            int handleLength = HandleDesc?.S2ASize ?? 0;
++            int dataLength = (raw.Length + 3) & ~3;
++            int rawLength = dataLength;
++            int pad0 = (int)GetPadSize16(cmdPtr + 8 + handleLength + PtrBuff.Count * 8);
++            int pad1 = 0x10 - pad0;
++            int total = 8 + handleLength + PtrBuff.Count * 8 + pad0 + rawLength + pad1 + 8;
++
++            if (total > dst.Length)
++            {
++                return -total;
++            }
++
++            uint word0 = (uint)Type;
++            word0 |= (uint)(PtrBuff.Count & 0xf) << 16;
++            word0 |= (uint)(SendBuff.Count & 0xf) << 20;
++            word0 |= (uint)(ReceiveBuff.Count & 0xf) << 24;
++            word0 |= (uint)(ExchangeBuff.Count & 0xf) << 28;
++
++            uint word1 = (uint)(((dataLength + pad0 + pad1) / 4) & 0x3ff) | (2u << 10);
++
++            if (HandleDesc != null)
++            {
++                word1 |= 1u << 31;
++            }
++
++            BinaryPrimitives.WriteUInt32LittleEndian(dst, word0);
++            BinaryPrimitives.WriteUInt32LittleEndian(dst[4..], word1);
++            int pos = 8;
++
++            if (HandleDesc != null)
++            {
++                pos = HandleDesc.S2AWrite(dst, pos);
++            }
++
++            foreach (IpcPtrBuffDesc desc in PtrBuff)
++            {
++                BinaryPrimitives.WriteUInt32LittleEndian(dst[pos..], desc.GetWord0());
++                BinaryPrimitives.WriteUInt32LittleEndian(dst[(pos + 4)..], desc.GetWord1());
++                pos += 8;
++            }
++
++            dst.Slice(pos, pad0).Clear();
++            pos += pad0;
++            raw.CopyTo(dst[pos..]);
++            pos += raw.Length;
++            dst.Slice(pos, rawLength - raw.Length + pad1 + 8).Clear(); // tail padding, pad1, recvListAddr = 0
++            pos += rawLength - raw.Length + pad1 + 8;
++
++            return pos;
++        }
++
++        // TIPC response, same layout as GetStreamTipc; returns the length written
++        internal int S2AWriteTipc(Span<byte> dst, ReadOnlySpan<byte> raw)
++        {
++            int handleLength = HandleDesc?.S2ASize ?? 0;
++            int total = 8 + handleLength + raw.Length;
++
++            if (total > dst.Length)
++            {
++                return -total;
++            }
++
++            uint word0 = (uint)Type;
++            word0 |= (uint)(SendBuff.Count & 0xf) << 20;
++            word0 |= (uint)(ReceiveBuff.Count & 0xf) << 24;
++            word0 |= (uint)(ExchangeBuff.Count & 0xf) << 28;
++
++            uint word1 = (uint)((((raw.Length + 3) & ~3) / 4) & 0x3ff);
++
++            if (HandleDesc != null)
++            {
++                word1 |= 1u << 31;
++            }
++
++            BinaryPrimitives.WriteUInt32LittleEndian(dst, word0);
++            BinaryPrimitives.WriteUInt32LittleEndian(dst[4..], word1);
++            int pos = 8;
++
++            if (HandleDesc != null)
++            {
++                pos = HandleDesc.S2AWrite(dst, pos);
++            }
++
++            raw.CopyTo(dst[pos..]);
++
++            return pos + raw.Length;
++        }
++    }
++
++    partial class IpcHandleDesc
++    {
++        // S2Arm: handle arrays cached per count (0..15), reused by the per-thread request message
++        private readonly int[][] _s2aCopy = new int[16][];
++        private readonly int[][] _s2aMove = new int[16][];
++
++        internal int S2ASize => 4 + (HasPId ? 8 : 0) + 4 * (ToCopy.Length + ToMove.Length);
++
++        internal int S2AParse(ReadOnlySpan<byte> data, int pos)
++        {
++            int word = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]);
++            pos += 4;
++
++            HasPId = (word & 1) != 0;
++            PId = 0;
++
++            if (HasPId)
++            {
++                PId = BinaryPrimitives.ReadUInt64LittleEndian(data[pos..]);
++                pos += 8;
++            }
++
++            int copyCount = (word >> 1) & 0xf;
++            int[] copy = _s2aCopy[copyCount] ??= new int[copyCount];
++
++            for (int i = 0; i < copyCount; i++, pos += 4)
++            {
++                copy[i] = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]);
++            }
++
++            int moveCount = (word >> 5) & 0xf;
++            int[] move = _s2aMove[moveCount] ??= new int[moveCount];
++
++            for (int i = 0; i < moveCount; i++, pos += 4)
++            {
++                move[i] = BinaryPrimitives.ReadInt32LittleEndian(data[pos..]);
++            }
++
++            ToCopy = copy;
++            ToMove = move;
++
++            return pos;
++        }
++
++        internal int S2AWrite(Span<byte> dst, int pos)
++        {
++            int word = HasPId ? 1 : 0;
++            word |= (ToCopy.Length & 0xf) << 1;
++            word |= (ToMove.Length & 0xf) << 5;
++
++            BinaryPrimitives.WriteInt32LittleEndian(dst[pos..], word);
++            pos += 4;
++
++            if (HasPId)
++            {
++                BinaryPrimitives.WriteUInt64LittleEndian(dst[pos..], PId);
++                pos += 8;
++            }
++
++            foreach (int h in ToCopy)
++            {
++                BinaryPrimitives.WriteInt32LittleEndian(dst[pos..], h);
++                pos += 4;
++            }
++
++            foreach (int h in ToMove)
++            {
++                BinaryPrimitives.WriteInt32LittleEndian(dst[pos..], h);
++                pos += 4;
++            }
++
++            return pos;
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.cs
+index 13a93db39ce7bfe014223837242d7c607a9b10c9..8e7b808b0da99bba7e113a2e1915040c70ee8f64 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcMessage.cs
+@@ -9,7 +9,7 @@ using System.IO;
+ 
+ namespace Ryujinx.HLE.HOS.Ipc
+ {
+-    class IpcMessage
++    partial class IpcMessage
+     {
+         public IpcMessageType Type { get; set; }
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs b/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
+index 7ea2af0a8eee7ce494fbf6efbaecaba7ccd8114b..31b3ed10de7790c43b00be60e48c6f5b54492848 100644
+--- a/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
++++ b/src/Ryujinx.HLE/HOS/Ipc/IpcPtrBuffDesc.cs
+@@ -15,6 +15,19 @@ namespace Ryujinx.HLE.HOS.Ipc
+             Size = size;
+         }
+ 
++        // S2Arm: from the two descriptor words (zero-allocation parse, see IpcMessage.S2A.cs)
++        internal IpcPtrBuffDesc(ulong word0, ulong word1)
++        {
++            Position = word1;
++            Position |= (word0 << 20) & 0x0f00000000;
++            Position |= (word0 << 30) & 0x7000000000;
++
++            Index = ((uint)word0 >> 0) & 0x03f;
++            Index |= ((uint)word0 >> 3) & 0x1c0;
++
++            Size = (ushort)(word0 >> 16);
++        }
++
+         public IpcPtrBuffDesc(BinaryReader reader)
+         {
+             ulong word0 = reader.ReadUInt32();
+diff --git a/src/Ryujinx.HLE/HOS/ServiceCtx.cs b/src/Ryujinx.HLE/HOS/ServiceCtx.cs
+index 881ea2fe3ee8bbb9b94dfda4026d7398546b2f6d..9cbbceecfea21fd8eaa3a5976df00ca8a198ba07 100644
+--- a/src/Ryujinx.HLE/HOS/ServiceCtx.cs
++++ b/src/Ryujinx.HLE/HOS/ServiceCtx.cs
+@@ -8,16 +8,37 @@ namespace Ryujinx.HLE.HOS
+ {
+     class ServiceCtx
+     {
+-        public Switch Device { get; }
+-        public KProcess Process { get; }
+-        public IVirtualMemoryManager Memory { get; }
+-        public KThread Thread { get; }
+-        public IpcMessage Request { get; }
+-        public IpcMessage Response { get; }
+-        public BinaryReader RequestData { get; }
+-        public BinaryWriter ResponseData { get; }
++        public Switch Device { get; private set; }
++        public KProcess Process { get; private set; }
++        public IVirtualMemoryManager Memory { get; private set; }
++        public KThread Thread { get; private set; }
++        public IpcMessage Request { get; private set; }
++        public IpcMessage Response { get; private set; }
++        public BinaryReader RequestData { get; private set; }
++        public BinaryWriter ResponseData { get; private set; }
+         public ulong ClientProcessId => Request.HandleDesc is { HasPId: true } ? Request.HandleDesc.PId : Process.Pid;
+ 
++        // S2Arm: reuse one context per game thread (zero steady-state allocation in direct dispatch)
++        internal void S2AReset(
++            Switch device,
++            KProcess process,
++            IVirtualMemoryManager memory,
++            KThread thread,
++            IpcMessage request,
++            IpcMessage response,
++            BinaryReader requestData,
++            BinaryWriter responseData)
++        {
++            Device = device;
++            Process = process;
++            Memory = memory;
++            Thread = thread;
++            Request = request;
++            Response = response;
++            RequestData = requestData;
++            ResponseData = responseData;
++        }
++
+         public ServiceCtx(
+             Switch device,
+             KProcess process,

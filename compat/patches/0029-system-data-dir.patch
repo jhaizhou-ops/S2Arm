@@ -1,0 +1,68 @@
+diff --git a/src/Ryujinx.HLE/HOS/HorizonFsClient.cs b/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
+index cffd894131e39e0d33a6ad4d2501af05ae0a06a6..f1ebe1de11180cde7142687ee551e4aef4c997e2 100644
+--- a/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
++++ b/src/Ryujinx.HLE/HOS/HorizonFsClient.cs
+@@ -38,6 +38,14 @@ namespace Ryujinx.HLE.HOS
+ 
+         public Result MountSystemData(string mountName, ulong dataId)
+         {
++            // S2Arm: system data as a directory (no firmware NCAs)
++            if (S2AHooks.SystemDataDir(dataId) is string s2aDir)
++            {
++                using UniqueRef<IFileSystem> dirFsRef = new(new LibHac.FsSystem.LocalFileSystem(s2aDir));
++
++                return _fsClient.Register(mountName.ToU8Span(), ref dirFsRef.Ref).Horizon;
++            }
++
+             string contentPath = _system.ContentManager.GetInstalledContentPath(dataId, StorageId.BuiltInSystem, NcaContentType.PublicData);
+             string installPath = VirtualFileSystem.SwitchPathToSystemPath(contentPath);
+ 
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+index 75d8edfb2746bb36942382b627415aa2dcf1da5a..459eb8309a31aa58f58d760fc64739e4309a73fc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/IFileSystemProxy.cs
+@@ -813,6 +813,17 @@ namespace Ryujinx.HLE.HOS.Services.Fs
+                 return ResultCode.Success;
+             }
+ 
++            // S2Arm: system data as a directory (no firmware NCAs); falls through to upstream when absent
++            if (S2AHooks.OpenSystemDataStorage?.Invoke(titleId) is LibHac.Fs.IStorage s2aStorage)
++            {
++                using SharedRef<LibHac.Fs.IStorage> sharedStorage = new(s2aStorage);
++                using SharedRef<IStorage> sfStorage = new(new StorageInterfaceAdapter(ref sharedStorage.Ref));
++
++                MakeObject(context, new FileSystemProxy.IStorage(ref sfStorage.Ref));
++
++                return ResultCode.Success;
++            }
++
+             NcaContentType contentType = NcaContentType.Data;
+ 
+             StorageId installedStorage = context.Device.System.ContentManager.GetInstalledStorage(titleId, contentType, storageId);
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 3ccf7babe13e539b732fdd0a3501676fb4387e54..fee556bb8a4232ef667ecc3f9e34570788dada67 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -27,5 +27,22 @@ namespace Ryujinx.HLE
+ 
+         // Shared font system data (0100000000000810–0814) as a directory of the original .bfttf files
+         public static string SharedFontDir;
++
++        // System data archives (e.g. 0100000000000802 Mii resources) as directories <SystemDataRoot>/<016x id>/:
++        // OpenSystemDataStorage gives the RomFS image of one (fs OpenDataStorageByDataId), null when absent
++        public static string SystemDataRoot;
++        public static System.Func<ulong, LibHac.Fs.IStorage> OpenSystemDataStorage;
++
++        public static string SystemDataDir(ulong id)
++        {
++            if (SystemDataRoot == null)
++            {
++                return null;
++            }
++
++            string dir = System.IO.Path.Combine(SystemDataRoot, id.ToString("X16"));
++
++            return System.IO.Directory.Exists(dir) ? dir : null;
++        }
+     }
+ }

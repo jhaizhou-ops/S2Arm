@@ -1,0 +1,34 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+index 168dfc37a43f3b90861409d210059dc334ff48d1..defb54749eb33b8f3a3e570a2da04247afb3ec93 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Fs/FileSystemProxy/IFileSystem.cs
+@@ -151,6 +151,15 @@ namespace Ryujinx.HLE.HOS.Services.Fs.FileSystemProxy
+         public ResultCode Commit(ServiceCtx context)
+         {
+             ResultCode resultCode = (ResultCode)_fileSystem.Get.Commit().Value;
++
++            // S2Arm: a committed save marks the touch-pad recording (formal runs replay the player's input from the last save)
++            unsafe
++            {
++                if (resultCode == ResultCode.Success && S2AHooks.SaveCommitted != null)
++                {
++                    S2AHooks.SaveCommitted();
++                }
++            }
+             if (resultCode == ResultCode.PathAlreadyInUse)
+             {
+                 Logger.Warning?.Print(LogClass.ServiceFs, "The file system is already in use by another process.");
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index 04a4c248f66b3d0dbb6447e69dea4a9c71198d05..2808893e5776f782ca8754fd59f9ed48043ace93 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -22,6 +22,9 @@ namespace Ryujinx.HLE
+         // Upstream silently defaulted on missing data in a few places; those now report through here (S2Arm red list)
+         public static System.Action<string> Red;
+ 
++        // Game committed a file system (fsp-srv IFileSystem.Commit, i.e. a save): S2Arm records a marker in the touch-pad recording
++        public static delegate*<void> SaveCommitted;
++
+         // Tick source shared with the natively running game (null = Ryujinx's own Stopwatch-based TickSource)
+         public static Ryujinx.Cpu.ITickSource TickSource;
+ 

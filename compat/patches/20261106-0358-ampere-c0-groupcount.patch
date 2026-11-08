@@ -1,0 +1,19 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
+index d475b50e7858ccd295854f71a09ce8fa8ca730f4..66cdae36862b98ea6c0675da1c875ab63425a8e2 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpere.cs
+@@ -283,6 +283,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             int sepSamplers = sepTextures + 8 * (layout.Length > 5 ? layout[5] : 0);
+             int ib = sepSamplers + 8 * (layout.Length > 6 ? layout[6] : 0);
+ 
++            // S2Arm 11-05: 0x4 / 0x8 / 0xc are the dispatch's workgroup counts x / y / z, mapped to where the host puts them (c[0] + 0x200, NVN's compute table). Zelda: Ocarina of Time's sky
++            // irradiance 21d9f83e6027c565 (32 x 32 threads) numbers its threads (workgroup y x 32 + y) x (c[0][4] x 32) + workgroup x x 32 + x and divides by (c[0][4] x 32) x (c[0][8] x 32);
++            // left unmapped it read 0, divided by 0, and its sums came out inf / NaN, which every lit material then read (18 of its 4,091 compute shaders read 0x4 / 0x8)
++            if (offset >= 0x4 && offset < 0x10)
++            {
++                return (0, 0x200 + (offset - 0x4));
++            }
++
+             if (offset >= 0x10 && offset < ub)
+             {
+                 return (24, offset - 0x10);

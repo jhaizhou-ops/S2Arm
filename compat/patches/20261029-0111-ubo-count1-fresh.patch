@@ -1,0 +1,41 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
+index 67d9f31067646c8811220da5a341fffd74036d0b..04c9e577e5064d1df986400bfbd33724edb405f8 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs
+@@ -17,7 +17,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+         // State associated with direct uniform buffer updates.
+         // This state is used to attempt to batch together consecutive updates.
+-        private ulong _ubBeginCpuAddress = 0;
+         private ulong _ubFollowUpAddress = 0;
+         private ulong _ubByteCount = 0;
+         private int _ubIndex = 0;
+@@ -122,7 +121,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+ 
+                 if (range.Count == 1)
+                 {
+-                    if (memoryManager.Physical.WriteWithRedundancyCheck(_ubBeginCpuAddress, data))
++                    // S2A（审计 #876 F-ubo-count1-stale）：用刷新这一刻的翻译，不用开批时缓存的物理地址——中间这块 GPU 地址被改映射 / 卸掉时，
++                    //   旧地址已不属于它（写进别人的页）；卸掉时还会对没有映射的地址标脏，BufferCache 取不到缓冲直接空引用崩。未映射不写
++                    ulong pa = range.GetSubRange(0).Address;
++
++                    if (pa != MemoryManager.PteUnmapped && memoryManager.Physical.WriteWithRedundancyCheck(pa, data))
+                     {
+                         memoryManager.Physical.BufferCache.ForceDirty(memoryManager, gpuVa, _ubByteCount);
+                     }
+@@ -167,7 +170,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 FlushUboDirty();
+ 
+                 _ubByteCount = 0;
+-                _ubBeginCpuAddress = _channel.MemoryManager.Translate(address);
+             }
+ 
+             _ubData[_ubIndex++] = argument;
+@@ -195,7 +197,6 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
+                 FlushUboDirty();
+ 
+                 _ubByteCount = 0;
+-                _ubBeginCpuAddress = _channel.MemoryManager.Translate(address);
+             }
+ 
+             data.CopyTo(_ubData.AsSpan(_ubIndex));

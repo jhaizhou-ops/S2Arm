@@ -1,0 +1,95 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+index 21a39dbd6219e69bedcbc3f58daf57bba392a762..2a7c52a17b80d6f2d9e87e14fede83bbad5a9ba1 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/DiskCacheHostStorage.cs
+@@ -298,6 +298,7 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+             Stream hostTocFileStream = null;
+             Stream hostDataFileStream = null;
++            bool discardAll = false;
+ 
+             try
+             {
+@@ -324,11 +325,19 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+ 
+                 bool loadHostCache = header.CodeGenVersion == CodeGenVersion;
+ 
++                // S2Arm: a cache written by another translator version would be recompiled program by program before the
++                // first frame; drop the whole cache instead (deleted below, after the streams are closed)
++                if (!loadHostCache)
++                {
++                    S2AShaderCacheGuard.Report(GetProgramCount(), $"缓存的翻译器版本 {header.CodeGenVersion} ≠ 当前 {CodeGenVersion}");
++                    discardAll = true;
++                }
++
+                 int programIndex = 0;
+ 
+                 DataEntry entry = new();
+ 
+-                while (tocFileStream.Position < tocFileStream.Length && loader.Active)
++                while (!discardAll && tocFileStream.Position < tocFileStream.Length && loader.Active)
+                 {
+                     ulong dataOffset = 0;
+                     tocReader.Read(ref dataOffset);
+@@ -406,15 +415,12 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                         }
+                         else
+                         {
+-                            loadHostCache = false;
++                            // S2Arm: host code missing for this program — skip it (compiled on demand) instead of
++                            // recompiling it and every following program from guest code at boot
++                            S2AShaderCacheGuard.Report(1, $"程序 {programIndex} 缺主机代码");
+                         }
+                     }
+ 
+-                    if (!loadHostCache)
+-                    {
+-                        loader.QueueGuestProgram(guestShaders, specState, programIndex, isCompute);
+-                    }
+-
+                     loader.CheckCompilation();
+                     programIndex++;
+                 }
+@@ -426,6 +432,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 hostTocFileStream?.Dispose();
+                 hostDataFileStream?.Dispose();
+             }
++
++            if (discardAll)
++            {
++                ClearSharedCache();
++                ClearGuestCache();
++                ClearHostCache(context);
++            }
+         }
+ 
+         /// <summary>
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1402bdf2cb3ced8d8b99ea0b000d18215c448ff5
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/S2AShaderCacheGuard.cs
+@@ -0,0 +1,23 @@
++using System;
++
++namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
++{
++    // S2Arm: the shader disk cache must never make the game wait for a batch recompile at boot. Upstream, when the cache
++    // was written by another translator version (or a program's host code is missing), every affected program is
++    // re-translated and re-compiled from guest code before the first frame (desktop shows a progress screen; 9000+
++    // programs take minutes). Here such programs are dropped instead (the whole stale cache is deleted) and are
++    // compiled on demand / taken from the offline library; each drop is reported red and counted.
++    public static class S2AShaderCacheGuard
++    {
++        private static int _discarded;
++
++        /// <summary>Programs dropped from the disk cache instead of being recompiled at boot (health table / tests).</summary>
++        public static int Discarded => _discarded;
++
++        internal static void Report(int count, string reason)
++        {
++            System.Threading.Interlocked.Add(ref _discarded, count);
++            Console.Error.WriteLine($"[gal] 【红】着色器磁盘缓存作废 {count} 支（{reason}）：不在开局重编，改走离线库 + 按需");
++        }
++    }
++}

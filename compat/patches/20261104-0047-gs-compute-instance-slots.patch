@@ -1,0 +1,116 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeGeometryOutput.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeGeometryOutput.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..086b013873273e383618dee00576e027fe6bb3d3
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeGeometryOutput.cs
+@@ -0,0 +1,28 @@
++using Ryujinx.Graphics.GAL;
++
++namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
++{
++    static class VtgAsComputeGeometryOutput
++    {
++        // Generic GS shader uses instance * vertexCount + primitive as its output slot.
++        public static (int Slots, int Vertices, int Indices) Layout(int vertexCount, int instances, int primitives, int maxOutput, int verticesPerPrimitive, int invocations)
++        {
++            checked
++            {
++                int slots = instances > 0 && primitives > 0 ? (instances - 1) * vertexCount + primitives : 0;
++                int vertices = slots * maxOutput * invocations;
++                int indices = slots * (maxOutput + maxOutput / verticesPerPrimitive) * invocations;
++                return (slots, vertices, indices);
++            }
++        }
++
++        public static void ClearAndDispatch(IPipeline pipeline, BufferRange indices, int x, int y, int z)
++        {
++            if (indices.Size != 0)
++            {
++                pipeline.ClearBuffer(indices.Handle, indices.Offset, indices.Size, uint.MaxValue);
++            }
++            pipeline.DispatchCompute(x, y, z);
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeState.cs b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeState.cs
+index 6d62464d25aa86d002620c1ed6a680e26e95bce6..7a895178d8049ee72d03bb24400dc2647a9ff129 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeState.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/Threed/ComputeDraw/VtgAsComputeState.cs
+@@ -99,12 +99,25 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
+ 
+             if (geometryAsCompute != null)
+             {
+-                int totalPrimitivesCount = VtgAsComputeContext.GetPrimitivesCount(topology, count * instanceCount);
+-                int maxCompleteStrips = GetMaxCompleteStrips(geometryAsCompute.Info.GeometryVerticesPerPrimitive, geometryAsCompute.Info.GeometryMaxOutputVertices);
+-                int totalVerticesCount = totalPrimitivesCount * geometryAsCompute.Info.GeometryMaxOutputVertices * geometryAsCompute.Info.ThreadsPerInputPrimitive;
+-                int geometryVbDataSize = totalVerticesCount * geometryAsCompute.Reservations.OutputSizeInBytesPerInvocation;
+-                int geometryIbDataCount = totalVerticesCount + totalPrimitivesCount * maxCompleteStrips;
+-                int geometryIbDataSize = geometryIbDataCount * sizeof(uint);
++                int totalVerticesCount;
++                int geometryIbDataCount;
++                if (geometryAsCompute.Reservations.GeometryInputFixed)
++                {
++                    // The fixed-input translator has a different layout; preserve its existing path.
++                    int totalPrimitivesCount = VtgAsComputeContext.GetPrimitivesCount(topology, count * instanceCount);
++                    int maxCompleteStrips = GetMaxCompleteStrips(geometryAsCompute.Info.GeometryVerticesPerPrimitive, geometryAsCompute.Info.GeometryMaxOutputVertices);
++                    totalVerticesCount = totalPrimitivesCount * geometryAsCompute.Info.GeometryMaxOutputVertices * geometryAsCompute.Info.ThreadsPerInputPrimitive;
++                    geometryIbDataCount = totalVerticesCount + totalPrimitivesCount * maxCompleteStrips;
++                }
++                else
++                {
++                    int primitivesPerInstance = VtgAsComputeContext.GetPrimitivesCount(topology, count);
++                    (_, totalVerticesCount, geometryIbDataCount) = VtgAsComputeGeometryOutput.Layout(
++                        count, instanceCount, primitivesPerInstance, geometryAsCompute.Info.GeometryMaxOutputVertices,
++                        geometryAsCompute.Info.GeometryVerticesPerPrimitive, geometryAsCompute.Info.ThreadsPerInputPrimitive);
++                }
++                int geometryVbDataSize = checked(totalVerticesCount * geometryAsCompute.Reservations.OutputSizeInBytesPerInvocation);
++                int geometryIbDataSize = checked(geometryIbDataCount * sizeof(uint));
+ 
+                 (_geometryVertexDataOffset, _geometryVertexDataSize) = vacContext.GetGeometryVertexDataBuffer(geometryVbDataSize);
+                 (_geometryIndexDataOffset, _geometryIndexDataSize) = vacContext.GetGeometryIndexDataBuffer(geometryIbDataSize);
+@@ -228,6 +241,10 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
+             }
+ 
+             int primitivesCount = VtgAsComputeContext.GetPrimitivesCount(_topology, _count);
++            if (!_geometryAsCompute.Reservations.GeometryInputFixed && (primitivesCount == 0 || _instanceCount == 0))
++            {
++                return;
++            }
+ 
+             _vacContext.VertexInfoBufferUpdater.SetVertexCounts(_count, _instanceCount, _firstVertex, _firstInstance);
+             _vacContext.VertexInfoBufferUpdater.SetGeometryCounts(primitivesCount);
+@@ -259,10 +276,18 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
+                 new BufferAssignment(geometryIbBinding, indexBuffer)
+             ]);
+ 
+-            _context.Renderer.Pipeline.DispatchCompute(
+-                BitUtils.DivRoundUp(primitivesCount, ComputeLocalSize),
+-                BitUtils.DivRoundUp(_instanceCount, ComputeLocalSize),
+-                _geometryAsCompute.Info.ThreadsPerInputPrimitive);
++            int groupsX = BitUtils.DivRoundUp(primitivesCount, ComputeLocalSize);
++            int groupsY = BitUtils.DivRoundUp(_instanceCount, ComputeLocalSize);
++            int groupsZ = _geometryAsCompute.Info.ThreadsPerInputPrimitive;
++            if (_geometryAsCompute.Reservations.GeometryInputFixed)
++            {
++                _context.Renderer.Pipeline.DispatchCompute(groupsX, groupsY, groupsZ);
++            }
++            else
++            {
++                // Unwritten slots between instances must be primitive-restart indices.
++                VtgAsComputeGeometryOutput.ClearAndDispatch(_context.Renderer.Pipeline, indexBuffer, groupsX, groupsY, groupsZ);
++            }
+         }
+ 
+         /// <summary>
+@@ -271,6 +296,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed.ComputeDraw
+         /// </summary>
+         public readonly void RunFragment()
+         {
++            if (_geometryAsCompute != null && !_geometryAsCompute.Reservations.GeometryInputFixed && _geometryIndexDataCount == 0)
++            {
++                return;
++            }
++
+             bool tfEnabled = _state.State.TfEnable;
+ 
+             if (!_state.State.RasterizeEnable && (!tfEnabled || !_context.Capabilities.SupportsTransformFeedback))

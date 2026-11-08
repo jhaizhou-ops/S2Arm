@@ -1,0 +1,73 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+index 3b5af45d65320544e742f1c39d0ec42290abad8e..f12e09b52d4141741ff5947911eb76bd005e1588 100644
+--- a/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
++++ b/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs
+@@ -58,6 +58,12 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             /// </summary>
+             public uint EntryCount;
+ 
++            /// <summary>
++            /// S2Arm: push sequence number (<see cref="S2ATrackSync"/>): the CPU writes the game made before pushing this entry
++            /// must be drained from the write tracker before the entry is processed.
++            /// </summary>
++            public long S2ASeq;
++
+             /// <summary>
+             /// Get the entries for the command buffer from memory.
+             /// </summary>
+@@ -141,6 +147,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                 Words = commandBuffer,
+                 EntryAddress = ulong.MaxValue,
+                 EntryCount = (uint)commandBuffer.Length,
++                S2ASeq = Interlocked.Increment(ref _s2aPushSeq),
+             });
+         }
+ 
+@@ -209,6 +216,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+                     beforeBarrier = false;
+                 }
+ 
++                commandBuffer.S2ASeq = Interlocked.Increment(ref _s2aPushSeq);
+                 _commandBufferQueue.Enqueue(commandBuffer);
+             }
+         }
+@@ -231,6 +239,27 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             }
+         }
+ 
++        // S2A：写跟踪排空（graphics/track 设计.md 第 11 条）。游戏直跑在真内存上，CPU 写由写跟踪模块记下、排空时才变成 Ryujinx 的跟踪事件；
++        // 原版事件在 CPU 写的当下同步发出，任何之后入队的命令都看得到。DispatchCalls 一次会接着取走排空之后才入队的命令（游戏边写下一组缓冲边提交），
++        // 只在唤醒时排空一次，这些命令就拿 GPU 侧旧数据画（10-21 八方2 选项页：常量 / 顶点缓冲新旧混杂、4 组轮换缓冲按 4 KB 整页旧内容上传）。
++        // 规则：每个命令入队时取递增序号；处理一个命令前，它的序号大于上次排空时读到的序号就先排空——游戏在入队之前的写都已被排空看见。
++        // S2ATrackSync = null（单测 / 不接写跟踪）不调
++        public static Action S2ATrackSync;
++        private long _s2aPushSeq;
++        private long _s2aSyncedSeq;
++
++        /// <summary>S2A：排空写跟踪，并记下此刻已入队的序号（之前入队的命令都不必再排空）。只在 GPU 线程调</summary>
++        public void S2ASync()
++        {
++            Action sync = S2ATrackSync;
++
++            if (sync != null)
++            {
++                _s2aSyncedSeq = Volatile.Read(ref _s2aPushSeq);
++                sync();
++            }
++        }
++
+         public bool WaitForCommands()
+         {
+             return !_commandBufferQueue.IsEmpty || (_event.WaitOne(S2AWaitMs) && !_commandBufferQueue.IsEmpty);
+@@ -251,6 +280,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
+             {
+                 bool flushCommandBuffer = true;
+ 
++                if (entry.S2ASeq > _s2aSyncedSeq)
++                {
++                    S2ASync();
++                }
++
+                 if (_flushSkips != 0)
+                 {
+                     _flushSkips--;

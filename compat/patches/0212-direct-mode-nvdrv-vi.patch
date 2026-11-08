@@ -1,0 +1,90 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+index c6af5ed5e3ebda5e059529ec23dcf14459442f67..55048c233e68e61a927587c62c3904ec24422a80 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs
+@@ -450,6 +450,35 @@ namespace Ryujinx.HLE.HOS.Services.Nv.NvDrvServices.NvHostChannel
+ 
+             header.Fence.Id = _channelSyncpoint.Id;
+ 
++            // S2A：直连模式下不执行 GPFIFO（游戏的 NVN 已由直连图形层接管），只照常算出栅栏并当场推进同步点，等这个栅栏的地方不会卡住
++            if (S2ADirect.On)
++            {
++                uint inc = header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) ? 2u : 0u;
++
++                if (header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
++                {
++                    inc += header.Fence.Value;
++                }
++
++                if (inc != 0)
++                {
++                    header.Fence.Value = _device.System.HostSyncpoint.IncrementSyncpointMaxExt(header.Fence.Id, (int)inc);
++
++                    for (uint i = 0; i < inc; i++)
++                    {
++                        _device.Gpu.Synchronization.IncrementSyncpoint(header.Fence.Id);
++                    }
++                }
++                else
++                {
++                    header.Fence.Value = _device.System.HostSyncpoint.ReadSyncpointMaxValue(header.Fence.Id);
++                }
++
++                header.Flags = SubmitGpfifoFlags.None;
++
++                return NvInternalResult.Success;
++            }
++
+             if (header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) || header.Flags.HasFlag(SubmitGpfifoFlags.IncrementWithValue))
+             {
+                 uint incrementCount = header.Flags.HasFlag(SubmitGpfifoFlags.FenceIncrement) ? 2u : 0u;
+diff --git a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+index d6a8ec70f8fa292b2af2078875e46548dd633cee..7a84d93d50bf6fc83a3f7b0d46fc3ce8034a826e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
++++ b/src/Ryujinx.HLE/HOS/Services/SurfaceFlinger/SurfaceFlinger.cs
+@@ -433,6 +433,15 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
+ 
+         private void PostFrameBuffer(Layer layer, BufferItem item)
+         {
++            // S2A：直连模式下由直连图形层出图，这里取到的帧直接放回（不交 GPU 窗口），游戏照常拿得到空闲缓冲、不重复出图
++            if (S2ADirect.On)
++            {
++                AndroidFence s2aNoFence = AndroidFence.NoFence;
++                layer.Consumer.ReleaseBuffer(item, ref s2aNoFence);
++
++                return;
++            }
++
+             long s2aP = Ryujinx.Common.S2AThreadAlloc.On ? GC.GetAllocatedBytesForCurrentThread() : 0;   // S2Arm: per-part allocation accounting (diagnostics)
+             int frameBufferWidth = item.GraphicBuffer.Object.Width;
+             int frameBufferHeight = item.GraphicBuffer.Object.Height;
+diff --git a/src/Ryujinx.HLE/S2ADirect.cs b/src/Ryujinx.HLE/S2ADirect.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..88e10f2a550501a85532cef65ca6cd5ba6746060
+--- /dev/null
++++ b/src/Ryujinx.HLE/S2ADirect.cs
+@@ -0,0 +1,24 @@
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.HLE
++{
++    /// <summary>
++    /// S2A：双轨直连模式（docs/设计_直连架构.md §12.1 / §12.2）。直连模式下游戏的 NVN 由直连图形层接管，Ryujinx 这边剩下的 nvdrv / vi 调用
++    /// 只回「没东西可画」：GPFIFO 提交直接成功、不执行（栅栏当场到达），vi 取到的帧直接放回、不出图。
++    /// 模式由原生层 s2a_gfx_mode()（0 通用 / 1 直连）给出，起局判定一次；主程序没有这个导出（Ryujinx 自己的测试、没带直连的构建）按通用走
++    /// </summary>
++    public static unsafe class S2ADirect
++    {
++        public static readonly bool On = Probe();
++
++        private static bool Probe()
++        {
++            if (!NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_gfx_mode", out nint f))
++            {
++                return false;
++            }
++
++            return ((delegate* unmanaged<int>)f)() == 1;
++        }
++    }
++}

@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/IApplicationProxyService.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/IApplicationProxyService.cs
+index 9814976f701aff06aae424b2077cc9fd72ce3e33..72b43d40c0f2b4d8864981534d74ac6899506318 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/IApplicationProxyService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletOE/IApplicationProxyService.cs
+@@ -15,5 +15,13 @@ namespace Ryujinx.HLE.HOS.Services.Am
+ 
+             return ResultCode.Success;
+         }
++
++        [CommandCmif(10)]
++        // OpenApplicationProxyWithFlags(u32 flags, u64, pid, handle<copy>) -> object<nn::am::service::IApplicationProxy>
++        // S2Arm：Switch 2 SDK（Pokopia 0400A3A01EE4C000 起局第一条 am 请求）改用这条；多一个 u32 标志，其余同 0（Eden-NS2 只思路，自写）
++        public ResultCode OpenApplicationProxyWithFlags(ServiceCtx context)
++        {
++            return OpenApplicationProxy(context);
++        }
+     }
+ }

@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+index 0240a6e8ee5f13531e44b632688b0d195440d5ec..b7a7ada9481656f77bef1b8ea74cfd8cdd6f7396 100644
+--- a/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
++++ b/src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj
+@@ -7,6 +7,8 @@
+ 
+   <ItemGroup>
+     <InternalsVisibleTo Include="S2A.ShBake" /> <!-- S2A：离线着色器烘焙器（graphics/tools/shbake）用磁盘缓存与特化状态内部类型 -->
++    <InternalsVisibleTo Include="S2A.DirectCompiler" /> <!-- S2A：直连统一翻译器（离线 CLI 与 NativeAOT 同一实现）用锁版本 ShaderCache / 特化状态内部类型 -->
++    <InternalsVisibleTo Include="libs2a_cs" /> <!-- S2A：Android NativeAOT 正式路径必须在编译期内联同一 DirectShaderCompiler，不靠反射 -->
+     <!-- S2A：包内特化核对单测（graphics/tools/shbake/tests/spec，10-21）构造特化状态与运行时真值 -->
+     <InternalsVisibleTo Include="S2A.SpecTest" />
+     <InternalsVisibleTo Include="S2A.SegChunksTest" /> <!-- S2A：免解读缓存分块存储单测（graphics/tools/shbake/tests/segchunks） -->
+diff --git a/src/Ryujinx.HLE/AssemblyInfo.cs b/src/Ryujinx.HLE/AssemblyInfo.cs
+index 9e7e8399f17329e91a11b201af0b6ddb80244ba4..bd1f648bb24d94a1f37cef2f3e0eaafe24423663 100644
+--- a/src/Ryujinx.HLE/AssemblyInfo.cs
++++ b/src/Ryujinx.HLE/AssemblyInfo.cs
+@@ -3,3 +3,6 @@ using System.Runtime.CompilerServices;
+ [assembly: InternalsVisibleTo("Ryujinx.Tests")]
+ [assembly: InternalsVisibleTo("S2A.Services")]
+ [assembly: InternalsVisibleTo("S2A.Services.Tests")]
++[assembly: InternalsVisibleTo("S2A.Android.Aot")]
++[assembly: InternalsVisibleTo("libs2a_cs")]
++[assembly: InternalsVisibleTo("AndroidRuntime.Tests")]

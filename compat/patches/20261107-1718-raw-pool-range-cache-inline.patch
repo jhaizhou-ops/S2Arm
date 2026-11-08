@@ -1,0 +1,532 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+index 3b572e5a532591bc0b79db7b8f1f61b4b907a5dd..7976d8b4f24d7a5be9e06bfb44077f64816cf3eb 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitAmpereMem.cs
+@@ -314,6 +314,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 context.BranchIfFalse(lblSkip, pred);
+             }
+ 
++            Operation first = null;
++
+             for (int index = 0; index < count; index++)
+             {
+                 if (x.Rd + index >= RegisterConsts.RegisterZeroIndex)
+@@ -321,7 +323,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     break;
+                 }
+ 
+-                context.Copy(Register(x.Rd + index, RegisterType.Gpr), context.Load(storageKind, los[index], his[index]));
++                Operand value = context.Load(storageKind, los[index], his[index]);
++                NoteVectorWord(context, ref first, (Operation)value.AsgOp);
++                context.Copy(Register(x.Rd + index, RegisterType.Gpr), value);
+             }
+ 
+             if (lblSkip != null)
+@@ -344,6 +348,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             int count = GetVectorCount(size);
+             StorageKind storageKind = GetStorageKind(size);
+ 
++            Operation first = null;
++
+             for (int index = 0; index < count; index++)
+             {
+                 bool isRz = x.Rb + index >= RegisterConsts.RegisterZeroIndex;
+@@ -351,7 +357,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+                 (Operand lo, Operand hi) = AGlobalAddress(context, x, 90, 64, index * 4);
+ 
+-                context.Store(storageKind, lo, hi, value);
++                Operation store = new(Instruction.Store, storageKind, null, lo, hi, value);
++                context.Add(store);
++                NoteVectorWord(context, ref first, store);
++            }
++        }
++
++        // S2Arm（11-07）：a later word of one LDG / STG .64 / .128 is noted with its first word (ResourceManager.RawVectorHeads): the access is naturally aligned, so GlobalToStorage's raw
++        // pool table path looks only the first word's entry up
++        private static void NoteVectorWord(EmitterContext context, ref Operation first, Operation word)
++        {
++            if (first == null)
++            {
++                first = word;
++            }
++            else
++            {
++                context.ResourceManager.RawVectorHeads[word] = first;
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+index 3f672fa9f6802545370055f1776af9609a6b16ae..6252aafb584639eb3dff76b23c512227bfd13876 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -121,6 +121,35 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             // S2A：Ampere 代码（ShaderDefinitions.Ampere）：参考实现 的两处改动（统一寄存器相加的源序、追不到存储缓冲的原始指针访问）只对它生效
+             public bool Ampere { get; init; }
+ 
++            // S2Arm: the raw pool table search shared by the shader's raw access helpers (GetRawLookup), and the private words of their range cache
++            public int RawLookupId { get; set; } = -1;
++            public int[] RawCache { get; set; }
++
++            // The last raw access GlobalToStorage made, and its block: a later word of a vector access right after it takes its entry (TryGenerateRawStorageOp)
++            public Operation RawGroupHead { get; set; }
++            public BasicBlock RawGroupBlock { get; set; }
++
++            private readonly Dictionary<(Instruction, StorageKind), int> _rawPieces = [];
++
++            public int AddRawLookup(Function function)
++            {
++                return _hfm.AddFunction(function);
++            }
++
++            public int AddRawPiece(Operation baseOp, Function function)
++            {
++                int functionId = _hfm.AddFunction(function);
++
++                _rawPieces.Add((baseOp.Inst, baseOp.StorageKind), functionId);
++
++                return functionId;
++            }
++
++            public bool TryGetRawPieceId(Operation baseOp, out int functionId)
++            {
++                return _rawPieces.TryGetValue((baseOp.Inst, baseOp.StorageKind), out functionId);
++            }
++
+             public GtsContext(HelperFunctionManager hfm)
+             {
+                 _entries = [];
+@@ -304,6 +333,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                             node = nextNode;
+                         }
+                     }
++                    else if (operation.Inst == Instruction.Call)
++                    {
++                        // S2Arm: a called function may make raw accesses of its own: the next one tests its range again
++                        gtsContext.RawGroupHead = null;
++                    }
+                     else if (operation.Inst == Instruction.Store &&
+                         (operation.StorageKind == StorageKind.SharedMemory ||
+                         operation.StorageKind == StorageKind.LocalMemory))
+@@ -686,14 +720,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     : $"Failed to find storage buffer for global memory operation \"{operation.Inst}\".");
+             }
+ 
+-            if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
++            if (targetCbs.Count == 0 && gtsContext.Ampere)
+             {
+-                return true;
++                return TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, block, operation, out functionId);
+             }
+ 
+-            if (targetCbs.Count == 0 && gtsContext.Ampere)
++            if (gtsContext.TryGetFunctionId(operation, isMultiTarget: true, targetCbs, out functionId))
+             {
+-                return TryGenerateRawStorageOp(gtsContext, resourceManager, gpuAccessor, operation, out functionId);
++                return true;
+             }
+ 
+             int inArgumentsCount = 2;
+@@ -854,25 +888,47 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+         // shader that resets the terrain's indirect draw records reads each record's address from a storage buffer). Ryujinx drops such an access (a load reads 0). Here it
+         // goes to the address itself: a tagged hint for its 2 MiB chunk, else a branchless binary search, finds the host's pool holding it, the address moves by that pool's delta (its Metal GPU address minus its
+         // guest address) and is accessed through a physical storage buffer pointer. An address in no pool is still dropped
++        // S2Arm（11-07 时之笛主遍顶点）：the helper of each access inlines and only the search (hint, binary search, access bitmap notes) is one function per shader that does not inline
++        //   (GetRawLookup). An access first tests the range of the entry chosen last, kept with its delta in this invocation's private words (RawCache*: no table read when it holds),
++        //   and only an access outside it calls the search. The second to fourth words of one LDG / STG .64 / .128 (ResourceManager.RawVectorHeads) take the first word's entry with no
++        //   test at all. When every access called the whole search, the shader either inlined it at each one (3d0d6d61bb9076e7: 253 accesses, 65,000 IR instructions, 8.4 s on the
++        //   device) or, made not to inline (11-05 Dsh.cs PoolNoInline), saved its live registers to the stack around each call (Ocarina of Time's main pass vertex shaders
++        //   89d44129ff5e0e3e / e73b3c6708323a85: 253 calls a vertex, 60% of the pass)
+         private static bool TryGenerateRawStorageOp(
+             GtsContext gtsContext,
+             ResourceManager resourceManager,
+             IGpuAccessor gpuAccessor,
++            BasicBlock block,
+             Operation operation,
+             out int functionId)
+         {
+             functionId = 0;
+ 
++            // A later word of a vector access right after the access's earlier words (the same block, no other raw access in between): the cache holds the entry its first word chose,
++            // or says that word was skipped. A vector access is naturally aligned, so its words are in one 16-byte block, inside one page and so one entry (the host's entries are made of
++            // whole pages of pools, nvn_mtl.m gmem_map)
++            bool piece = resourceManager.RawVectorHeads.TryGetValue(operation, out Operation head) && gtsContext.RawGroupBlock == block && gtsContext.RawGroupHead == head;
++
++            gtsContext.RawGroupBlock = block;
++            gtsContext.RawGroupHead = piece ? head : operation;
++
++            if (piece ? gtsContext.TryGetRawPieceId(operation, out functionId) : gtsContext.TryGetFunctionId(operation, isMultiTarget: true, [], out functionId))
++            {
++                return true;
++            }
++
+             bool isSmall = IsSmallInt(operation.StorageKind);
+ 
+             if (isSmall && operation.Inst.IsAtomic())
+             {
+                 gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" on a small integer traced to no storage buffer: not implemented.");
++                gtsContext.RawGroupHead = null;
+                 return false;
+             }
+ 
+             if (!resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, 0, write: false, out int mapBinding))
+             {
++                gtsContext.RawGroupHead = null;
+                 return false;
+             }
+ 
+@@ -881,6 +937,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ 
+             if (writes && !resourceManager.TryGetStorageBufferBinding(GmemMapCbSlot, GmemLogCbOffset, write: true, out logBinding))
+             {
++                gtsContext.RawGroupHead = null;
+                 return false;
+             }
+ 
+@@ -897,6 +954,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 inArgumentsCount = 3;
+             }
+ 
++            int lookupId = GetRawLookup(gtsContext, resourceManager, mapBinding);
++            int[] cache = gtsContext.RawCache;
++
+             EmitterContext context = new();
+ 
+             Operand addrLow = Argument(0);
+@@ -907,111 +967,88 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
+             }
+ 
+-            Operand AtOrBelow(Operand high, Operand low)   // the address is at or above {low, high}
++            Operand Cached(int word)
+             {
+-                return context.BitwiseOr(
+-                    context.ICompareLessUnsigned(high, addrHigh),
+-                    context.BitwiseAnd(context.ICompareEqual(high, addrHigh), context.ICompareLessOrEqualUnsigned(low, addrLow)));
++                return context.Load(StorageKind.LocalMemory, cache[word]);
+             }
+ 
+-            Operand Below(Operand high, Operand low)   // the address is below {low, high}
++            void Cache(int word, Operand value)
+             {
+-                return context.BitwiseOr(
+-                    context.ICompareLessUnsigned(addrHigh, high),
+-                    context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
++                context.Store(StorageKind.LocalMemory, cache[word], value);
+             }
+ 
+             Operand selected = Local();
+-            Operand lblFound = Label();
+-            Operand lblChosen = Label();
+-
+-            // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
+-            // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
+-            // (nvn_mtl.m gmem_map), so the search below would choose the same entry, and the host binds one table for a whole draw or dispatch. The word starts at 0, the empty entry
+-            int lastBinding = resourceManager.AddRawLastEntryMemory();
+-            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
+-            Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
+-            Operand lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+-            context.Copy(selected, last);
+-            context.BranchIfTrue(lblChosen, lastHolds);
+-
+-            // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
+-            Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
+-            Operand indexMask = Const((1 << GmemMapLog2) - 1);
+-            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
+-            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
+-            Operand hintFits = context.BitwiseAnd(
+-                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
+-                context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+-            context.Copy(selected, hintIndex);
+-            context.BranchIfTrue(lblFound, hintFits);
++            Operand deltaLow = Local();
++            Operand deltaHigh = Local();
++            Operand lblSkip = Label();
+ 
+-            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
+-            Operand index = Const(0);
++            context.Copy(deltaLow, Cached(RawCacheDeltaLow));
++            context.Copy(deltaHigh, Cached(RawCacheDeltaHigh));
+ 
+-            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
++            if (piece)
+             {
+-                Operand candidate = context.IAdd(index, Const(step));
+-                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
+-                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
++                context.BranchIfTrue(lblSkip, context.ICompareNotEqual(Cached(RawCacheSkipped), Const(0)));
+             }
+-
+-            context.Copy(selected, index);
+-            context.MarkLabel(lblFound);
+-            context.Store(StorageKind.LocalMemory, lastBinding, selected);
+-            Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
+-            Operand lblSkip = Label();
+-            Operand lblHeld = Label();
+-
+-            // S2Arm: the entry's bit in the host's access bitmap (word 7 = bit + 1, 0 = none; entry 0's delta words = the bitmap's GPU address). Read first: a bit is set once
+-            void Note(Operand state)
+-            {
+-                Operand lblNoted = Label();
+-                context.BranchIfTrue(lblNoted, context.ICompareEqual(state, Const(0)));
+-                Operand bitIndex = context.ISubtract(state, Const(1));
+-                Operand bitLow = context.IAdd(MapWord(Const(0), 4), context.ShiftLeft(context.ShiftRightU32(bitIndex, Const(5)), Const(2)));
+-                Operand bitHigh = context.IAdd(MapWord(Const(0), 5), context.ConditionalSelect(context.ICompareLessUnsigned(bitLow, MapWord(Const(0), 4)), Const(1), Const(0)));
+-                Operand bitMask = context.ShiftLeft(Const(1), context.BitwiseAnd(bitIndex, Const(31)));
+-                context.BranchIfTrue(lblNoted, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.GlobalMemory, bitLow, bitHigh), bitMask), Const(0)));
+-                context.AtomicOr(StorageKind.GlobalMemory, bitLow, bitHigh, bitMask);
+-                context.MarkLabel(lblNoted);
+-            }
+-
+-            context.BranchIfTrue(lblHeld, Below(MapWord(found, 3), MapWord(found, 2)));
+-
+-            // An address in no pool (the entry below it ends below it), or in a pool that is not resident: its entry ends where it starts and keeps its true end in the delta words.
+-            // Such an access notes the pool and is skipped like one in no pool
+-            Operand cold = context.BitwiseAnd(
+-                context.BitwiseAnd(context.ICompareEqual(MapWord(found, 2), MapWord(found, 0)), context.ICompareEqual(MapWord(found, 3), MapWord(found, 1))),
+-                Below(MapWord(found, 5), MapWord(found, 4)));
+-            context.BranchIfFalse(lblSkip, cold);
+-            Note(MapWord(found, 7));
+-            context.Branch(lblSkip);
+-
+-            // The hint's or the search's entry holds it: a pool the host tracks is noted when an invocation chooses it (later accesses of the run take the last entry's path)
+-            context.MarkLabel(lblHeld);
+-            Note(MapWord(found, 7));
+-
+-            // The last entry's range held it, or the hint's or the search's entry does
+-            context.MarkLabel(lblChosen);
+-            found = context.IMultiply(selected, Const(GmemMapEntryWords));
+-
+-            if (writes)
++            else
+             {
+-                Operand word = context.ShiftRightU32(selected, Const(5));
+-                Operand bit = context.ShiftLeft(Const(1), context.BitwiseAnd(selected, Const(31)));
+-                Operand lblLogged = Label();
++                Operand lblChosen = Label();
++
++                // The cached range holds the address: the address minus its start, 64-bit, is below its size (the end minus the start, at most 2^32 - 1: an address 4 GiB or more past
++                // the start of a larger entry calls the search each time, which chooses the same entry). Integer arithmetic, not short-circuit tests: one branch an access.
++                // All zero at the start: the empty range
++                Operand startLow = Cached(RawCacheStartLow);
++                Operand offsetLow = context.ISubtract(addrLow, startLow);
++                Operand borrow = context.ConditionalSelect(context.ICompareLessUnsigned(addrLow, startLow), Const(1), Const(0));
++                Operand offsetHigh = context.ISubtract(context.ISubtract(addrHigh, Cached(RawCacheStartHigh)), borrow);
++                Operand outside = context.BitwiseOr(offsetHigh, context.ConditionalSelect(context.ICompareGreaterOrEqualUnsigned(offsetLow, Cached(RawCacheSize)), Const(1), Const(0)));
++                context.Copy(selected, Cached(RawCacheEntry));
++                Cache(RawCacheSkipped, Const(0));
++                context.BranchIfTrue(lblChosen, context.ICompareEqual(outside, Const(0)));
++
++                // Outside it: the search returns the entry holding the address (noted in the access bitmap when the host tracks its pool), or -1 to skip the access
++                // (no pool, or a pool that is not resident). Only an entry that holds the address is cached
++                Operand found = context.Call(lookupId, true, addrLow, addrHigh);
++                Operand lblFound = Label();
++                context.BranchIfFalse(lblFound, context.ICompareLess(found, Const(0)));
++                Cache(RawCacheSkipped, Const(1));
++                context.Branch(lblSkip);
++                context.MarkLabel(lblFound);
++
++                Operand entry = context.IMultiply(found, Const(GmemMapEntryWords));
++                Operand entryStartLow = MapWord(entry, 0);
++                Operand entryStartHigh = MapWord(entry, 1);
++                Operand entryEndLow = MapWord(entry, 2);
++                Operand entryBorrow = context.ConditionalSelect(context.ICompareLessUnsigned(entryEndLow, entryStartLow), Const(1), Const(0));
++                Operand sizeHigh = context.ISubtract(context.ISubtract(MapWord(entry, 3), entryStartHigh), entryBorrow);
++                context.Copy(selected, found);
++                context.Copy(deltaLow, MapWord(entry, 4));
++                context.Copy(deltaHigh, MapWord(entry, 5));
++                Cache(RawCacheEntry, found);
++                Cache(RawCacheStartLow, entryStartLow);
++                Cache(RawCacheStartHigh, entryStartHigh);
++                Cache(RawCacheSize, context.ConditionalSelect(context.ICompareEqual(sizeHigh, Const(0)), context.ISubtract(entryEndLow, entryStartLow), Const(-1)));
++                Cache(RawCacheDeltaLow, deltaLow);
++                Cache(RawCacheDeltaHigh, deltaHigh);
++
++                context.MarkLabel(lblChosen);
++
++                if (writes)
++                {
++                    Operand word = context.ShiftRightU32(selected, Const(5));
++                    Operand bit = context.ShiftLeft(Const(1), context.BitwiseAnd(selected, Const(31)));
++                    Operand lblLogged = Label();
+ 
+-                context.BranchIfTrue(lblLogged, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.StorageBuffer, logBinding, Const(0), word), bit), Const(0)));
+-                context.AtomicOr(StorageKind.StorageBuffer, logBinding, Const(0), word, bit);
+-                context.MarkLabel(lblLogged);
++                    context.BranchIfTrue(lblLogged, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.StorageBuffer, logBinding, Const(0), word), bit), Const(0)));
++                    context.AtomicOr(StorageKind.StorageBuffer, logBinding, Const(0), word, bit);
++                    context.MarkLabel(lblLogged);
++                }
+             }
+ 
+             // A small integer is read or written in its 32-bit word
+             Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
+-            Operand hostLow = context.IAdd(wordLow, MapWord(found, 4));
++            Operand hostLow = context.IAdd(wordLow, deltaLow);
+             Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
+-            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
++            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, deltaHigh), carry);
+ 
+             Operand resultValue = null;
+ 
+@@ -1088,16 +1125,141 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+ 
+             Function function = new(
+                 ControlFlowGraph.Create(context.GetOperations()).Blocks,
+-                GetFunctionName(operation, isMultiTarget: true, []) + "Raw",
++                GetFunctionName(operation, isMultiTarget: true, []) + (piece ? "RawPiece" : "Raw"),
+                 returnsValue,
+                 inArgumentsCount,
+                 0);
+ 
+-            functionId = gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
++            functionId = piece ? gtsContext.AddRawPiece(operation, function) : gtsContext.AddFunction(operation, isMultiTarget: true, [], function);
+ 
+             return true;
+         }
+ 
++        // The private words of the range cache (TryGenerateRawStorageOp): the entry, its start, its size (at most 2^32 - 1), its delta, all zero at the start
++        private const int RawCacheEntry = 0;
++        private const int RawCacheStartLow = 1;
++        private const int RawCacheStartHigh = 2;
++        private const int RawCacheSize = 3;
++        private const int RawCacheDeltaLow = 4;
++        private const int RawCacheDeltaHigh = 5;
++        private const int RawCacheSkipped = 6;   // the last full access was skipped (its later vector words are too)
++        private const int RawCacheWords = 7;
++
++        // S2Arm（11-07）：the search of the pool table, one function per shader shared by every raw access helper (Dsh.cs PoolNoInline makes it not inline: it touches no
++        // private memory, so a call keeps nothing of the caller's on the stack but what is live across the call itself, and only an access outside the cached range calls it).
++        // (address low, address high) → the entry holding the address, or -1: an address in no pool, or in a pool that is not resident (its entry ends where it starts and keeps
++        // its true end in the delta words). The access bitmap (word 7 = bit + 1, 0 = none; entry 0's delta words = the bitmap's GPU address) gets the entry's bit when the search
++        // chooses a pool the host tracks, and when the address is in a pool that is not resident (the host makes it resident before its next submission and rebuilds the table)
++        private static int GetRawLookup(GtsContext gtsContext, ResourceManager resourceManager, int mapBinding)
++        {
++            if (gtsContext.RawLookupId >= 0)
++            {
++                return gtsContext.RawLookupId;
++            }
++
++            gtsContext.RawCache = new int[RawCacheWords];
++
++            for (int word = 0; word < RawCacheWords; word++)
++            {
++                gtsContext.RawCache[word] = resourceManager.AddRawLastEntryMemory();
++            }
++
++            EmitterContext context = new();
++
++            Operand addrLow = Argument(0);
++            Operand addrHigh = Argument(1);
++
++            Operand MapWord(Operand entry, int word)
++            {
++                return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
++            }
++
++            Operand AtOrBelow(Operand high, Operand low)   // the address is at or above {low, high}
++            {
++                return context.BitwiseOr(
++                    context.ICompareLessUnsigned(high, addrHigh),
++                    context.BitwiseAnd(context.ICompareEqual(high, addrHigh), context.ICompareLessOrEqualUnsigned(low, addrLow)));
++            }
++
++            Operand Below(Operand high, Operand low)   // the address is below {low, high}
++            {
++                return context.BitwiseOr(
++                    context.ICompareLessUnsigned(addrHigh, high),
++                    context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
++            }
++
++            Operand selected = Local();
++            Operand lblFound = Label();
++
++            // The hint of the address's 2 MiB chunk names an entry holding the whole chunk (dmsh_abi.h DMSH_GMEM_HINT_SHIFT). An address too high for the tag searches
++            Operand chunk = context.BitwiseOr(context.ShiftLeft(addrHigh, Const(32 - GmemHintShift)), context.ShiftRightU32(addrLow, Const(GmemHintShift)));
++            Operand indexMask = Const((1 << GmemMapLog2) - 1);
++            Operand hint = MapWord(context.IMultiply(context.BitwiseAnd(chunk, indexMask), Const(GmemMapEntryWords)), 6);
++            Operand hintIndex = context.BitwiseAnd(hint, indexMask);
++            Operand hintFits = context.BitwiseAnd(
++                context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
++                context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
++            context.Copy(selected, hintIndex);
++            context.BranchIfTrue(lblFound, hintFits);
++
++            // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
++            Operand index = Const(0);
++
++            for (int step = 1 << (GmemMapLog2 - 1); step != 0; step >>= 1)
++            {
++                Operand candidate = context.IAdd(index, Const(step));
++                Operand entry = context.IMultiply(candidate, Const(GmemMapEntryWords));
++                index = context.ConditionalSelect(AtOrBelow(MapWord(entry, 1), MapWord(entry, 0)), candidate, index);
++            }
++
++            context.Copy(selected, index);
++            context.MarkLabel(lblFound);
++            Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
++            Operand lblHeld = Label();
++
++            // Read first: a bit is set once
++            void Note(Operand state)
++            {
++                Operand lblNoted = Label();
++                context.BranchIfTrue(lblNoted, context.ICompareEqual(state, Const(0)));
++                Operand bitIndex = context.ISubtract(state, Const(1));
++                Operand bitLow = context.IAdd(MapWord(Const(0), 4), context.ShiftLeft(context.ShiftRightU32(bitIndex, Const(5)), Const(2)));
++                Operand bitHigh = context.IAdd(MapWord(Const(0), 5), context.ConditionalSelect(context.ICompareLessUnsigned(bitLow, MapWord(Const(0), 4)), Const(1), Const(0)));
++                Operand bitMask = context.ShiftLeft(Const(1), context.BitwiseAnd(bitIndex, Const(31)));
++                context.BranchIfTrue(lblNoted, context.ICompareNotEqual(context.BitwiseAnd(context.Load(StorageKind.GlobalMemory, bitLow, bitHigh), bitMask), Const(0)));
++                context.AtomicOr(StorageKind.GlobalMemory, bitLow, bitHigh, bitMask);
++                context.MarkLabel(lblNoted);
++            }
++
++            context.BranchIfTrue(lblHeld, Below(MapWord(found, 3), MapWord(found, 2)));
++
++            // An address in no pool (the entry below it ends below it), or in a pool that is not resident: notes the pool and is skipped like one in no pool
++            Operand lblSkip = Label();
++            Operand cold = context.BitwiseAnd(
++                context.BitwiseAnd(context.ICompareEqual(MapWord(found, 2), MapWord(found, 0)), context.ICompareEqual(MapWord(found, 3), MapWord(found, 1))),
++                Below(MapWord(found, 5), MapWord(found, 4)));
++            context.BranchIfFalse(lblSkip, cold);
++            Note(MapWord(found, 7));
++            context.MarkLabel(lblSkip);
++            context.Return(Const(-1));
++
++            // The hint's or the search's entry holds it: a pool the host tracks is noted when an invocation chooses it (later accesses in its range take the cached range)
++            context.MarkLabel(lblHeld);
++            Note(MapWord(found, 7));
++            context.Return(selected);
++
++            Function function = new(
++                ControlFlowGraph.Create(context.GetOperations()).Blocks,
++                "GlobalMemoryRawLookup",
++                true,
++                2,
++                0);
++
++            gtsContext.RawLookupId = gtsContext.AddRawLookup(function);
++
++            return gtsContext.RawLookupId;
++        }
++
+         private static uint PackCbSlotAndOffset(int cbSlot, int cbOffset)
+         {
+             return (uint)((ushort)cbSlot | ((ushort)cbOffset << 16));
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index 0ac71d90cc2607f8f10380c3276caab2f25ca27f..62a4532026d983c1ce6826ddd1fdd778f8a8ade2 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -161,7 +161,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+         }
+ 
+-        // S2A (from the upstream reference implementation, MIT): the pool table entry a raw global memory helper chose last in this invocation (GlobalToStorage.TryGenerateRawStorageOp), one word for each helper, zero at the start
++        // S2Arm（11-07）：the second to fourth words of one Ampere LDG / STG .64 / .128 (InstEmitAmpereMem ALdg / AStg) → the operation of its first word, for the raw pool table
++        // path (GlobalToStorage.TryGenerateRawStorageOp: a naturally aligned vector access is in one entry, so only its first word looks the entry up)
++        public Dictionary<Operation, Operation> RawVectorHeads { get; } = [];
++
++        // S2A (from the upstream reference implementation, MIT): a private word of the raw global memory range cache (GlobalToStorage.TryGenerateRawStorageOp: the entry chosen last, its range and delta; S2Arm 11-07: one cache for the whole shader), zero at the start
+         public int AddRawLastEntryMemory()
+         {
+             return Properties.AddLocalMemory(new MemoryDefinition($"gmem_last_{Properties.LocalMemories.Count}", AggregateType.U32, 1, zeroInit: true));

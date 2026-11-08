@@ -1,0 +1,79 @@
+diff --git a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
+index 902527b5b8fde0d7c42b7b180592cc8cdf86b5c3..8aadead6d97b9a4ffa6fd64713d5cf3f7c28c7c4 100644
+--- a/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
++++ b/src/Ryujinx.Graphics.GAL/Multithreading/Resources/ProgramQueue.cs
+@@ -91,6 +91,23 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+         /// <param name="program">The program to wait for</param>
+         public void WaitForProgram(ThreadedProgram program)
+         {
++            // S2A：不自旋轮询——对所等的程序阻塞查询，后端在本线程就地编（或等已在编的作业）；还在排队没建的当场建。
++            // 原先只轮询 CheckProgramLink(false)：所等程序的作业排在后台低优先级现编队列后面、或卡在写缓存，渲染线程就一直转，
++            // 出图停 60 秒以上（10-24 原生层线 xc3 / 怪猎 / 巫师3 / 马车8 九局同形）
++            if (program.Compiled)
++            {
++                return;
++            }
++
++            ProcessQueue();
++
++            if (!program.Compiled && (program.Base != null || S2ACreateQueued(program)))
++            {
++                program.Base.CheckProgramLink(true);
++                program.Compiled = true;
++                return;
++            }
++
+             Span<SpinWait> spinWait = stackalloc SpinWait[1];
+ 
+             while (!program.Compiled)
+@@ -103,5 +120,35 @@ namespace Ryujinx.Graphics.GAL.Multithreading.Resources
+                 }
+             }
+         }
++
++        /// <summary>
++        /// S2A：所等程序还在待编队列里（在编的已满 MaxConcurrentCompilations）：当场建它的宿主程序。
++        /// 它出队时走「Base 已有」那一支（查状态、记已编），不会再建一次
++        /// </summary>
++        private bool S2ACreateQueued(ThreadedProgram program)
++        {
++            IProgramRequest request = null;
++
++            lock (_toCompile)
++            {
++                foreach (IProgramRequest r in _toCompile)
++                {
++                    if (r.Threaded == program)
++                    {
++                        request = r;
++                        break;
++                    }
++                }
++            }
++
++            if (request == null)
++            {
++                return false;
++            }
++
++            program.Base = request.Create(_renderer);
++
++            return true;
++        }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj b/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
+index b94a4ec9058ed3c1c2ee7d452a3d9940ff5228ef..06228bae29b63e016e7910a7c4a42cf36aa89226 100644
+--- a/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
++++ b/src/Ryujinx.Graphics.GAL/Ryujinx.Graphics.GAL.csproj
+@@ -12,6 +12,10 @@
+     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+   </PropertyGroup>
+ 
++  <ItemGroup>
++    <InternalsVisibleTo Include="S2A.ProgQueueTest" /> <!-- S2A：多线程渲染器等程序不自旋单测（graphics/tools/shbake/tests/progqueue） -->
++  </ItemGroup>
++
+   <ItemGroup>
+     <ProjectReference Include="..\Ryujinx.Graphics.Shader\Ryujinx.Graphics.Shader.csproj" />
+     <ProjectReference Include="..\Ryujinx.Common\Ryujinx.Common.csproj" />

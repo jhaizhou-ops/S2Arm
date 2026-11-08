@@ -1,0 +1,65 @@
+diff --git a/src/Ryujinx.Common/Logging/Logger.cs b/src/Ryujinx.Common/Logging/Logger.cs
+index 82710540070a811543909de3bf9770e05ce30e65..50d3405d7eba7007b66d331c24cfc4d73f33f7c7 100644
+--- a/src/Ryujinx.Common/Logging/Logger.cs
++++ b/src/Ryujinx.Common/Logging/Logger.cs
+@@ -12,6 +12,33 @@ namespace Ryujinx.Common.Logging
+ {
+     public static class Logger
+     {
++        // S2Arm: stubs hit every frame (e.g. pctl IsFreeCommunicationAvailable) formatted a message, raised an event and wrote a
++        // log line per call. Hits are now counted per (class, caller, message) without allocating; the event only fires on the
++        // first hit. S2AStubHits() returns the full counts (caller / message are compile-time constants here).
++        private static readonly Dictionary<(LogClass, string, string), long> _s2aStubHits = new();
++
++        private static bool S2AStubHit(LogClass logClass, string caller, string message)
++        {
++            long n;
++
++            lock (_s2aStubHits)
++            {
++                (LogClass, string, string) key = (logClass, caller, message);
++                _s2aStubHits.TryGetValue(key, out n);
++                _s2aStubHits[key] = ++n;
++            }
++
++            return n == 1;
++        }
++
++        public static List<(string Name, long Count)> S2AStubHits()
++        {
++            lock (_s2aStubHits)
++            {
++                return _s2aStubHits.Select(kv => ($"{kv.Key.Item1} {kv.Key.Item2}: Stubbed. {kv.Key.Item3}".TrimEnd(), kv.Value)).ToList();
++            }
++        }
++
+         private static readonly Stopwatch _time;
+ 
+         private static readonly bool[] _enabledClasses;
+@@ -74,7 +101,7 @@ namespace Ryujinx.Common.Logging
+             [MethodImpl(MethodImplOptions.AggressiveInlining)]
+             public void PrintStub(LogClass logClass, string message = "", [CallerMemberName] string caller = "")
+             {
+-                if (_enabledClasses[(int)logClass])
++                if (_enabledClasses[(int)logClass] && S2AStubHit(logClass, caller, message))
+                 {
+                     Updated?.Invoke(null, new LogEventArgs(Level, _time.Elapsed, Thread.CurrentThread.Name, FormatMessage(logClass, caller, "Stubbed. " + message)));
+                 }
+@@ -83,7 +110,7 @@ namespace Ryujinx.Common.Logging
+             [MethodImpl(MethodImplOptions.AggressiveInlining)]
+             public void PrintStub(LogClass logClass, object data, [CallerMemberName] string caller = "")
+             {
+-                if (_enabledClasses[(int)logClass])
++                if (_enabledClasses[(int)logClass] && S2AStubHit(logClass, caller, ""))
+                 {
+                     Updated?.Invoke(null, new LogEventArgs(Level, _time.Elapsed, Thread.CurrentThread.Name, FormatMessage(logClass, caller, "Stubbed."), data));
+                 }
+@@ -92,7 +119,7 @@ namespace Ryujinx.Common.Logging
+             [MethodImpl(MethodImplOptions.AggressiveInlining)]
+             public void PrintStub(LogClass logClass, string message, object data, [CallerMemberName] string caller = "")
+             {
+-                if (_enabledClasses[(int)logClass])
++                if (_enabledClasses[(int)logClass] && S2AStubHit(logClass, caller, message))
+                 {
+                     Updated?.Invoke(null, new LogEventArgs(Level, _time.Elapsed, Thread.CurrentThread.Name, FormatMessage(logClass, caller, "Stubbed. " + message), data));
+                 }

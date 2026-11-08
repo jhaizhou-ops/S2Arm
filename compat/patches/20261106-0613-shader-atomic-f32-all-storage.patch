@@ -1,0 +1,28 @@
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+index 505778f844767a992de974de6bd0d3711b15b473..f7fce4e6348ea1ff2df425220a45018172e1e39c 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -218,16 +218,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                     {
+                         res = context.AtomicAdd(storageKind, e0, e1, value);
+                     }
+-                    else if (type == AtomSize.F32FtzRn && storageKind == StorageKind.GlobalMemory)
++                    else if (type == AtomSize.F32FtzRn)
+                     {
+-                        // S2Arm 11-05: a 32-bit float add to global memory (RED.E.ADD.F32.FTZ.RN / ATOM .F32; Zelda: Ocarina of Time, 398 in 33 shaders, which the old
+-                        // log-and-drop path lost: luminance and histogram sums). No float atomic in the IR: a compare-and-swap loop on the word's bits, which returns the value
+-                        // before this thread's add, as the atomic does. Bits are compared, so a NaN in memory does not loop forever
++                        // S2Arm 11-05: a 32-bit float add (RED.E.ADD.F32.FTZ.RN / ATOM .F32; Zelda: Ocarina of Time, 398 in 33 shaders, which the old log-and-drop path lost:
++                        // luminance and histogram sums). No float atomic in the IR: a compare-and-swap loop on the word's bits, which returns the value before this thread's add,
++                        // as the atomic does. Bits are compared, so a NaN in memory does not loop forever. 11-06 (upstream (MIT) b1d7c707): every storage kind, not only global
++                        // memory: ATOMS.ADD.F32 on shared memory took the same log-and-drop path
+                         Operand lblRetry = Label();
+                         context.MarkLabel(lblRetry);
+-                        Operand old = context.Load(StorageKind.GlobalMemory, e0, e1);
++                        Operand old = context.Load(storageKind, e0, e1);
+                         Operand sum = context.FPAdd(old, value);
+-                        Operand seen = context.AtomicCompareAndSwap(StorageKind.GlobalMemory, e0, e1, old, sum);
++                        Operand seen = context.AtomicCompareAndSwap(storageKind, e0, e1, old, sum);
+                         context.BranchIfFalse(lblRetry, context.ICompareEqual(seen, old));
+                         res = old;
+                     }

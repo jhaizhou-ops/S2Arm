@@ -1,0 +1,19 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/Detokenize.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/Detokenize.cs
+index 88a83b2071c8a985b9ead80cfc9aaf9a9f846226..80e48473078a2b85f734cae3b8588bdaea4be540 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/Detokenize.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/Detokenize.cs
+@@ -57,8 +57,12 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             uint range = r.Range;
+             int count = r.Count;
+             
+-            ReadOnlySpan<Array6<Array4<uint>>> coefSpan = counts.Coef[(int)txSize][(int)type][refr].AsSpan();
+-            ReadOnlySpan<Array6<uint>> eobBranchSpan = counts.EobBranch[(int)txSize][(int)type][refr].AsSpan();
++            // S2Arm: Span, not ReadOnlySpan. Array6's indexer is not a readonly member, so on a ReadOnlySpan element (ref readonly) C# indexes a defensive copy:
++            //   every ++ below landed in a temporary and the coefficient / EOB-branch counts NVDEC writes back stayed 0. The guest driver adapts the next frame's
++            //   coefficient probabilities from them (frame_parallel_decoding_mode 0), so the frames after a keyframe decoded with the wrong probabilities and failed
++            //   ("Failed to decode tile data") until the next keyframe: GRID Autosport's feral_sting.webm showed a green frame (all-zero YUV) on most frames
++            Span<Array6<Array4<uint>>> coefSpan = counts.Coef[(int)txSize][(int)type][refr].AsSpan();
++            Span<Array6<uint>> eobBranchSpan = counts.EobBranch[(int)txSize][(int)type][refr].AsSpan();
+ 
+             while (c < maxEob)
+             {

@@ -1,0 +1,68 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
+index f5d3f161dee3f715d78a1662ced7e1539bc7f4b8..4dd57dd63649ba6296dc82ff897a0efd12c84a91 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
+@@ -65,6 +65,41 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+                 {
+                     if (contentManager.TryGetFontTitle(name, out ulong fontTitle) && contentManager.TryGetFontFilename(name, out string fontFilename))
+                     {
++                        // S2Arm: no firmware NCAs; the same .bfttf files can come from a directory (S2AHooks.SharedFontDir)
++                        if (S2AHooks.SharedFontDir != null)
++                        {
++                            string file = System.IO.Path.Combine(S2AHooks.SharedFontDir, fontFilename);
++
++                            if (!File.Exists(file))
++                            {
++                                S2AHooks.Red?.Invoke($"共享字体：{name}（{fontTitle:x16}）缺 {fontFilename}");
++
++                                throw new InvalidSystemResourceException($"{name} ({fontTitle:x16}) {fontFilename} not found in {S2AHooks.SharedFontDir}");
++                            }
++
++                            byte[] fileData;
++
++                            using (FileStream fs = File.OpenRead(file))
++                            {
++                                fileData = DecryptFont(fs);
++                            }
++
++                            FontInfo fileInfo = new((int)fontOffset, fileData.Length);
++
++                            WriteMagicAndSize(fontOffset, fileData.Length);
++
++                            fontOffset += 8;
++
++                            uint fileStart = fontOffset;
++
++                            for (; fontOffset - fileStart < fileData.Length; fontOffset++)
++                            {
++                                _storage.GetRef<byte>(fontOffset) = fileData[fontOffset - fileStart];
++                            }
++
++                            return fileInfo;
++                        }
++
+                         string contentPath = contentManager.GetInstalledContentPath(fontTitle, StorageId.BuiltInSystem, NcaContentType.Data);
+                         string fontPath = VirtualFileSystem.SwitchPathToSystemPath(contentPath);
+ 
+@@ -106,6 +141,8 @@ namespace Ryujinx.HLE.HOS.Services.Sdb.Pl
+                                 titleName = "Unknown";
+                             }
+ 
++                            S2AHooks.Red?.Invoke($"共享字体：缺系统数据 {titleName}（{fontTitle:x16}）");
++
+                             throw new InvalidSystemResourceException($"{titleName} ({fontTitle:x8}) system title not found! This font will not work, provide the system archive to fix this error.");
+                         }
+                     }
+diff --git a/src/Ryujinx.HLE/S2AHooks.cs b/src/Ryujinx.HLE/S2AHooks.cs
+index fc5bee98c284f91ce872beb5f3b41314885098e0..3ccf7babe13e539b732fdd0a3501676fb4387e54 100644
+--- a/src/Ryujinx.HLE/S2AHooks.cs
++++ b/src/Ryujinx.HLE/S2AHooks.cs
+@@ -24,5 +24,8 @@ namespace Ryujinx.HLE
+ 
+         // Time zone system data (010000000000080E) as a directory: zoneinfo/<name> TZif files + binaryList.txt
+         public static string TimeZoneDataDir;
++
++        // Shared font system data (0100000000000810–0814) as a directory of the original .bfttf files
++        public static string SharedFontDir;
+     }
+ }

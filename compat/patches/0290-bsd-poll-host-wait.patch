@@ -1,0 +1,88 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 46e96fa2b9462d5a1875e6324dcc039c2941f8d3..8ed11de5d2e5c876ef38b28733576b40e02aca6e 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -479,20 +479,25 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                     return error is not LinuxError.SUCCESS and not LinuxError.ETIMEDOUT;
+                 }
+ 
+-                // Hybrid approach
+-                long budgetLeftMilliseconds;
++                // S2Arm: the service runs on the game thread that called it, with no KThread (context.Thread is null) and no HLE
++                // scheduler, so upstream's wait (Syscall.SleepThread 50 ms + Thread.HandlePostSyscall until Context.Running ends)
++                // threw NullReferenceException whenever nothing was ready and the timeout was not 0 (FF RESONANCE: poll on an eventfd,
++                // 100 ms, the game Breaks before its first frame). Wait as Select does: poll every manager without waiting; when
++                // every descriptor is an eventfd or an offline socket wait on their common change signal (S2ABsdWake), otherwise
++                // sleep 1 ms; until something is ready, the timeout passes or shutdown is requested.
++                long deadline = timeout == -1 ? long.MaxValue : System.Diagnostics.Stopwatch.GetTimestamp() + timeout * System.Diagnostics.Stopwatch.Frequency / 1000;
+ 
+-                if (timeout == -1)
+-                {
+-                    budgetLeftMilliseconds = PerformanceCounter.ElapsedMilliseconds + uint.MaxValue;
+-                }
+-                else
++                bool wakeable = true;
++
++                foreach (PollEvent evnt in events)
+                 {
+-                    budgetLeftMilliseconds = PerformanceCounter.ElapsedMilliseconds + timeout;
++                    wakeable &= evnt.FileDescriptor is EventFileDescriptor || (evnt.FileDescriptor is ManagedSocket ms && ms.Socket is Proxy.OfflineSocket);
+                 }
+ 
+-                do
++                while (true)
+                 {
++                    long seen = S2ABsdWake.Version;
++
+                     for (int i = 0; i < eventsByPollManager.Length; i++)
+                     {
+                         if (eventsByPollManager[i].Count == 0)
+@@ -513,17 +518,21 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+                         }
+                     }
+ 
+-                    if (updateCount > 0)
++                    if (updateCount > 0 || IsUnexpectedLinuxError(errno) || S2AShutdown.Requested || System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                     {
+                         break;
+                     }
+ 
+-                    // If we are here, that mean nothing was available, sleep for 50ms
+-                    context.Device.System.KernelContext.Syscall.SleepThread(50 * 1000000);
+-                    context.Thread.HandlePostSyscall();
++                    if (wakeable)
++                    {
++                        long left = deadline == long.MaxValue ? -1 : (deadline - System.Diagnostics.Stopwatch.GetTimestamp()) * 1000 / System.Diagnostics.Stopwatch.Frequency + 1;
++                        S2ABsdWake.Wait(seen, left < 0 ? -1 : (int)System.Math.Min(left, int.MaxValue));
++                    }
++                    else
++                    {
++                        System.Threading.Thread.Sleep(1);
++                    }
+                 }
+-                // S2Arm: upstream ends this wait when the thread is terminated (Context.Running); game threads here are not, so shutdown ends it too
+-                while (context.Thread.Context.Running && !S2AShutdown.Requested && PerformanceCounter.ElapsedMilliseconds < budgetLeftMilliseconds);
+             }
+             else if (timeout == -1)
+             {
+@@ -532,7 +541,8 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             }
+             else
+             {
+-                context.Device.System.KernelContext.Syscall.SleepThread(timeout);
++                // S2Arm: no KThread to put to sleep (see above); a host wait that shutdown also ends
++                S2AShutdown.Event.WaitOne(timeout);
+             }
+ 
+             // TODO: Spanify
+@@ -542,7 +552,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+             }
+ 
+             // In case of non blocking call timeout should not be returned.
+-            if (timeout == 0 && errno == LinuxError.ETIMEDOUT)
++            // S2Arm: nor for a blocking one: Horizon's bsd is FreeBSD's, whose poll returns 0 when the timeout passes (as Select
++            // here does); upstream returned -1 / ETIMEDOUT, never reached there before this wait could run at all
++            if (errno == LinuxError.ETIMEDOUT)
+             {
+                 errno = LinuxError.SUCCESS;
+             }

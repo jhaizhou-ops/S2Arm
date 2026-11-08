@@ -1,0 +1,769 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+index f5ca0fd827b3f50de0e2c3ec2c3aa9570b2457df..3e19aa8865410e6a1d45d5ab0829f68a020e7a3c 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator/IUserLocalCommunicationService.cs
+@@ -1170,10 +1170,12 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
+                     // NOTE: Service calls nn::ldn::detail::NetworkInterfaceManager::NetworkInterfaceMonitor::Initialize() with nifmRequestId as argument,
+                     //       then it stores the result code of it in a global variable. Since we use our own implementation, we can just check the connection
+                     //       and return related error codes.
+-                    if (System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+-                    {
+-                        MultiplayerMode mode = context.Device.Configuration.MultiplayerMode;
++                    MultiplayerMode mode = context.Device.Configuration.MultiplayerMode;
+ 
++                    // S2Arm: with multiplayer disabled the stubbed client never uses the network (nobody nearby, as on a console with
++                    // local wireless on and no other console around), so the host's interfaces are not queried either
++                    if (mode == MultiplayerMode.Disabled || System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
++                    {
+                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
+ 
+                         switch (mode)
+diff --git a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+index b8a791134a6f5cb3f5d39e032cf68093f703a3f8..73fab2da0db70180d63c8eb03fa04285e5d4715f 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Nifm/StaticService/IGeneralService.cs
+@@ -18,6 +18,10 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+         private UnicastIPAddressInformation _targetAddressInfoCache = null;
+         private string _cacheChosenInterface = null;
+ 
++        // S2Arm: an offline console never looks at the host's network — subscribing to NetworkChange starts the runtime's host
++        // network-change listener (SCDynamicStore session on Apple), and the cache it invalidates is only used with internet access
++        private readonly bool _watchHostNetwork;
++
+         public IGeneralService(ServiceCtx context)
+         {
+             _generalServiceDetail = new GeneralServiceDetail
+@@ -26,7 +30,12 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+                 IsAnyInternetRequestAccepted = !context.Device.DirtyHacks.IsEnabled(DirtyHack.NifmServiceDisableIsAnyInternetRequestAccepted), // NOTE: Why not accept any internet request?
+             };
+ 
+-            NetworkChange.NetworkAddressChanged += LocalInterfaceCacheHandler;
++            _watchHostNetwork = context.Device.Configuration.EnableInternetAccess;
++
++            if (_watchHostNetwork)
++            {
++                NetworkChange.NetworkAddressChanged += LocalInterfaceCacheHandler;
++            }
+ 
+             GeneralServiceManager.Add(_generalServiceDetail);
+         }
+@@ -200,7 +209,10 @@ namespace Ryujinx.HLE.HOS.Services.Nifm.StaticService
+         {
+             if (isDisposing)
+             {
+-                NetworkChange.NetworkAddressChanged -= LocalInterfaceCacheHandler;
++                if (_watchHostNetwork)
++                {
++                    NetworkChange.NetworkAddressChanged -= LocalInterfaceCacheHandler;
++                }
+ 
+                 GeneralServiceManager.Remove(_generalServiceDetail.ClientId);
+             }
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index cd6185ccc831152c6894d1b4d0452c1e1c7d1243..88e030af5bc12ae4a5865266a22d4bc9e74a3360 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -107,7 +107,7 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+ 
+             try
+             {
+-                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId)
++                newBsdSocket = new ManagedSocket(netDomain, (SocketType)type, protocol, context.Device.Configuration.MultiplayerLanInterfaceId, !context.Device.Configuration.EnableInternetAccess)
+                 {
+                     Blocking = !creationFlags.HasFlag(BsdSocketCreationFlags.NonBlocking),
+                 };
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+index 0624fcf91d9c07f018ee4ddb1664420a6705fb5c..7b17f6086a36bc1e4b9426d67c365abf738c05e5 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Impl/ManagedSocket.cs
+@@ -29,9 +29,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+ 
+         public ISocketImpl Socket { get; }
+ 
+-        public ManagedSocket(AddressFamily addressFamily, SocketType socketType, ProtocolType protocolType, string lanInterfaceId)
++        public ManagedSocket(AddressFamily addressFamily, SocketType socketType, ProtocolType protocolType, string lanInterfaceId, bool offline)
+         {
+-            Socket = SocketHelpers.CreateSocket(addressFamily, socketType, protocolType, lanInterfaceId);
++            Socket = SocketHelpers.CreateSocket(addressFamily, socketType, protocolType, lanInterfaceId, offline);
+             Refcount = 1;
+         }
+ 
+@@ -582,6 +582,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 return LinuxError.SUCCESS;
+             }
+ 
++            // S2Arm: scatter / gather goes straight to the host socket; sockets without one (offline, LDN proxy) do not support it
++            if (Socket is not DefaultSocket)
++            {
++                Logger.Warning?.Print(LogClass.ServiceBsd, "RecvMMsg on a socket without a host socket is not supported");
++
++                return LinuxError.EOPNOTSUPP;
++            }
++
+             try
+             {
+                 int receiveSize = (Socket as DefaultSocket).BaseSocket.Receive(ConvertMessagesToBuffer(message), ConvertBsdSocketFlags(flags), out SocketError socketError);
+@@ -625,6 +633,14 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Impl
+                 return LinuxError.SUCCESS;
+             }
+ 
++            // S2Arm: scatter / gather goes straight to the host socket; sockets without one (offline, LDN proxy) do not support it
++            if (Socket is not DefaultSocket)
++            {
++                Logger.Warning?.Print(LogClass.ServiceBsd, "SendMMsg on a socket without a host socket is not supported");
++
++                return LinuxError.EOPNOTSUPP;
++            }
++
+             try
+             {
+                 int sendSize = (Socket as DefaultSocket).BaseSocket.Send(ConvertMessagesToBuffer(message), ConvertBsdSocketFlags(flags), out SocketError socketError);
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..938d99690d7e64b846f1416a39b4192626f72fc0
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/OfflineSocket.cs
+@@ -0,0 +1,549 @@
++using Ryujinx.Common.Logging;
++using System;
++using System.Collections.Generic;
++using System.Net;
++using System.Net.Sockets;
++using System.Threading;
++
++namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
++{
++    /// <summary>
++    /// S2Arm: a socket of a console that is not connected to any network (internet access disabled).
++    /// The Switch socket stack (FreeBSD-derived) then only has the loopback interface: creating, binding and polling sockets works,
++    /// loopback UDP is delivered locally, and anything that needs a route to another host fails the way FreeBSD fails without a route
++    /// (connect / sendto: ENETUNREACH). No host socket is ever opened, so the host OS sees no network activity
++    /// (on iOS the first network access raises the "allow wireless data" prompt over the game).
++    /// TCP over loopback is not modelled: a loopback connect is refused (ECONNREFUSED) as if nothing listened on the port.
++    /// </summary>
++    class OfflineSocket : ISocketImpl
++    {
++        // Ephemeral port range of FreeBSD (net.inet.ip.portrange.first / last)
++        private const int EphemeralFirst = 49152;
++        private const int EphemeralLast = 65535;
++
++        // Receive buffer of a UDP socket (Switch default udp_rx_buf_size 0xA500): datagrams beyond it are dropped, as a full socket buffer does
++        private const int ReceiveBufferBytes = 0xA500;
++
++        // One lock for the whole offline network: guards the port table and every socket's state, and is the wait / wake primitive for blocking
++        // receive / accept and select / poll (a loopback datagram or a close wakes all waiters, which re-check their own condition).
++        private static readonly object _network = new();
++        private static readonly Dictionary<(ProtocolType, int), OfflineSocket> _ports = new();
++        private static int _nextEphemeral = EphemeralFirst;
++
++        private readonly Queue<(byte[] Data, IPEndPoint From)> _receiveQueue = new();
++        private int _queuedBytes;
++        private readonly Dictionary<SocketOptionName, int> _options = new();
++        private bool _listening;
++        private bool _readShutdown;
++        private bool _writeShutdown;
++        private bool _closed;
++
++        public EndPoint RemoteEndPoint { get; private set; }
++
++        public EndPoint LocalEndPoint { get; private set; }
++
++        public bool Connected { get; private set; }
++
++        public bool IsBound { get; private set; }
++
++        public AddressFamily AddressFamily { get; }
++
++        public SocketType SocketType { get; }
++
++        public ProtocolType ProtocolType { get; }
++
++        public bool Blocking { get; set; } = true;
++
++        public int Available
++        {
++            get
++            {
++                lock (_network)
++                {
++                    return _receiveQueue.Count > 0 ? _receiveQueue.Peek().Data.Length : 0;
++                }
++            }
++        }
++
++        public OfflineSocket(AddressFamily addressFamily, SocketType socketType, ProtocolType protocolType)
++        {
++            if (addressFamily != AddressFamily.InterNetwork && addressFamily != AddressFamily.InterNetworkV6)
++            {
++                throw new SocketException((int)SocketError.AddressFamilyNotSupported);
++            }
++
++            if (socketType != SocketType.Stream && socketType != SocketType.Dgram)
++            {
++                throw new SocketException((int)SocketError.SocketNotSupported);
++            }
++
++            AddressFamily = addressFamily;
++            SocketType = socketType;
++            ProtocolType = protocolType;
++        }
++
++        // Readable: a datagram is queued, or the read side is shut down / closed (a read returns at once)
++        public bool Readable => _receiveQueue.Count > 0 || _readShutdown || _closed;
++
++        // Writable: a UDP socket always has send buffer space; a TCP socket only once connected (which never happens offline)
++        public bool Writable => SocketType == SocketType.Dgram ? !_writeShutdown : Connected;
++
++        private static bool IsLocal(IPAddress address)
++        {
++            return IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any);
++        }
++
++        private static SocketException Error(SocketError error)
++        {
++            return new SocketException((int)error);
++        }
++
++        // Caller holds _network
++        private int AllocatePort()
++        {
++            for (int i = 0; i <= EphemeralLast - EphemeralFirst; i++)
++            {
++                int port = _nextEphemeral;
++
++                _nextEphemeral = port == EphemeralLast ? EphemeralFirst : port + 1;
++
++                if (!_ports.ContainsKey((ProtocolType, port)))
++                {
++                    return port;
++                }
++            }
++
++            throw Error(SocketError.AddressAlreadyInUse);
++        }
++
++        // Caller holds _network
++        private void BindLocked(IPEndPoint localEndPoint)
++        {
++            if (_closed)
++            {
++                throw Error(SocketError.NotSocket);
++            }
++
++            if (IsBound)
++            {
++                throw Error(SocketError.InvalidArgument);
++            }
++
++            if (!IsLocal(localEndPoint.Address))
++            {
++                throw Error(SocketError.AddressNotAvailable);
++            }
++
++            int port = localEndPoint.Port == 0 ? AllocatePort() : localEndPoint.Port;
++
++            if (_ports.ContainsKey((ProtocolType, port)))
++            {
++                throw Error(SocketError.AddressAlreadyInUse);
++            }
++
++            _ports[(ProtocolType, port)] = this;
++            LocalEndPoint = new IPEndPoint(localEndPoint.Address, port);
++            IsBound = true;
++        }
++
++        // Caller holds _network. An unbound socket that sends gets an ephemeral port on the wildcard address (FreeBSD in_pcbbind on first use)
++        private void EnsureBoundLocked()
++        {
++            if (!IsBound)
++            {
++                BindLocked(new IPEndPoint(AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
++            }
++        }
++
++        public void Bind(EndPoint localEP)
++        {
++            lock (_network)
++            {
++                BindLocked((IPEndPoint)localEP);
++            }
++        }
++
++        public void Connect(EndPoint remoteEP)
++        {
++            IPEndPoint remote = (IPEndPoint)remoteEP;
++
++            lock (_network)
++            {
++                if (SocketType == SocketType.Stream)
++                {
++                    if (Connected)
++                    {
++                        throw Error(SocketError.IsConnected);
++                    }
++
++                    if (IsLocal(remote.Address))
++                    {
++                        Logger.Info?.PrintMsg(LogClass.ServiceBsd, $"Offline: TCP loopback connect to port {remote.Port} refused");
++
++                        throw Error(SocketError.ConnectionRefused);
++                    }
++
++                    throw Error(SocketError.NetworkUnreachable);
++                }
++
++                if (!IsLocal(remote.Address))
++                {
++                    throw Error(SocketError.NetworkUnreachable);
++                }
++
++                EnsureBoundLocked();
++                RemoteEndPoint = new IPEndPoint(IPAddress.IsLoopback(remote.Address) ? remote.Address : IPAddress.Loopback, remote.Port);
++                Connected = true;
++            }
++        }
++
++        public void Disconnect(bool reuseSocket)
++        {
++            lock (_network)
++            {
++                RemoteEndPoint = null;
++                Connected = false;
++            }
++        }
++
++        public void Listen(int backlog)
++        {
++            lock (_network)
++            {
++                if (SocketType != SocketType.Stream)
++                {
++                    throw Error(SocketError.OperationNotSupported);
++                }
++
++                EnsureBoundLocked();
++                _listening = true;
++            }
++        }
++
++        public ISocketImpl Accept()
++        {
++            lock (_network)
++            {
++                if (!_listening)
++                {
++                    throw Error(SocketError.InvalidArgument);
++                }
++
++                // Nobody can connect to an offline console (and loopback TCP is refused): accept never completes
++                if (!Blocking)
++                {
++                    throw Error(SocketError.WouldBlock);
++                }
++
++                while (!_closed)
++                {
++                    Monitor.Wait(_network);
++                }
++
++                throw Error(SocketError.ConnectionAborted);
++            }
++        }
++
++        public int Send(ReadOnlySpan<byte> buffer)
++        {
++            return Send(buffer, SocketFlags.None);
++        }
++
++        public int Send(ReadOnlySpan<byte> buffer, SocketFlags flags)
++        {
++            int sent = Send(buffer, flags, out SocketError error);
++
++            return error == SocketError.Success ? sent : throw Error(error);
++        }
++
++        public int Send(ReadOnlySpan<byte> buffer, SocketFlags flags, out SocketError socketError)
++        {
++            lock (_network)
++            {
++                if (!Connected)
++                {
++                    socketError = SocketType == SocketType.Dgram ? SocketError.DestinationAddressRequired : SocketError.NotConnected;
++
++                    return -1;
++                }
++
++                return SendToLocked(buffer, (IPEndPoint)RemoteEndPoint, out socketError);
++            }
++        }
++
++        public int SendTo(ReadOnlySpan<byte> buffer, SocketFlags flags, EndPoint remoteEP)
++        {
++            lock (_network)
++            {
++                if (SocketType == SocketType.Stream)
++                {
++                    throw Error(Connected ? SocketError.IsConnected : SocketError.NotConnected);
++                }
++
++                int sent = SendToLocked(buffer, (IPEndPoint)remoteEP, out SocketError error);
++
++                return error == SocketError.Success ? sent : throw Error(error);
++            }
++        }
++
++        // Caller holds _network. UDP only.
++        private int SendToLocked(ReadOnlySpan<byte> buffer, IPEndPoint remote, out SocketError socketError)
++        {
++            if (_writeShutdown)
++            {
++                socketError = SocketError.Shutdown;
++
++                return -1;
++            }
++
++            if (remote.Address.Equals(IPAddress.Broadcast))
++            {
++                // FreeBSD: broadcast needs SO_BROADCAST (EACCES), and no up interface can broadcast (lo0 cannot): ENETUNREACH
++                socketError = _options.GetValueOrDefault(SocketOptionName.Broadcast) == 0 ? SocketError.AccessDenied : SocketError.NetworkUnreachable;
++
++                return -1;
++            }
++
++            if (!IsLocal(remote.Address))
++            {
++                socketError = SocketError.NetworkUnreachable;
++
++                return -1;
++            }
++
++            EnsureBoundLocked();
++
++            IPEndPoint from = new(IPAddress.IsLoopback(remote.Address) ? remote.Address : IPAddress.Loopback, ((IPEndPoint)LocalEndPoint).Port);
++
++            if (_ports.TryGetValue((ProtocolType, remote.Port), out OfflineSocket target) && target.Accepts(from) &&
++                target._queuedBytes + buffer.Length <= ReceiveBufferBytes)
++            {
++                target._receiveQueue.Enqueue((buffer.ToArray(), from));
++                target._queuedBytes += buffer.Length;
++
++                Monitor.PulseAll(_network);
++            }
++
++            socketError = SocketError.Success;
++
++            return buffer.Length;
++        }
++
++        // Caller holds _network. A connected UDP socket only takes datagrams from its peer.
++        private bool Accepts(IPEndPoint from)
++        {
++            return !_closed && !_readShutdown && (!Connected || RemoteEndPoint.Equals(from));
++        }
++
++        public int Receive(Span<byte> buffer)
++        {
++            return Receive(buffer, SocketFlags.None);
++        }
++
++        public int Receive(Span<byte> buffer, SocketFlags flags)
++        {
++            EndPoint from = null;
++
++            return ReceiveFrom(buffer, flags, ref from);
++        }
++
++        public int Receive(Span<byte> buffer, SocketFlags flags, out SocketError socketError)
++        {
++            try
++            {
++                socketError = SocketError.Success;
++
++                return Receive(buffer, flags);
++            }
++            catch (SocketException exception)
++            {
++                socketError = exception.SocketErrorCode;
++
++                return -1;
++            }
++        }
++
++        public int ReceiveFrom(Span<byte> buffer, SocketFlags flags, ref EndPoint remoteEP)
++        {
++            lock (_network)
++            {
++                if (SocketType == SocketType.Stream)
++                {
++                    throw Error(SocketError.NotConnected);
++                }
++
++                int timeout = _options.GetValueOrDefault(SocketOptionName.ReceiveTimeout);
++                long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
++
++                while (_receiveQueue.Count == 0 && !_readShutdown && !_closed)
++                {
++                    if (!Blocking)
++                    {
++                        throw Error(SocketError.WouldBlock);
++                    }
++
++                    long left = deadline - Environment.TickCount64;
++
++                    if (left <= 0)
++                    {
++                        throw Error(SocketError.WouldBlock);
++                    }
++
++                    Monitor.Wait(_network, deadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(left, int.MaxValue));
++                }
++
++                if (_receiveQueue.Count == 0)
++                {
++                    return 0;
++                }
++
++                (byte[] data, IPEndPoint from) = flags.HasFlag(SocketFlags.Peek) ? _receiveQueue.Peek() : _receiveQueue.Dequeue();
++
++                if (!flags.HasFlag(SocketFlags.Peek))
++                {
++                    _queuedBytes -= data.Length;
++                }
++
++                // A datagram longer than the buffer is truncated, the rest is discarded (UDP semantics)
++                int length = Math.Min(data.Length, buffer.Length);
++
++                data.AsSpan(0, length).CopyTo(buffer);
++                remoteEP = from;
++
++                return length;
++            }
++        }
++
++        public bool Poll(int microSeconds, SelectMode mode)
++        {
++            lock (_network)
++            {
++                long deadline = microSeconds < 0 ? long.MaxValue : Environment.TickCount64 + microSeconds / 1000;
++
++                while (true)
++                {
++                    bool ready = mode switch
++                    {
++                        SelectMode.SelectRead => Readable,
++                        SelectMode.SelectWrite => Writable,
++                        _ => false,
++                    };
++
++                    long left = deadline - Environment.TickCount64;
++
++                    if (ready || left <= 0)
++                    {
++                        return ready;
++                    }
++
++                    Monitor.Wait(_network, deadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(left, int.MaxValue));
++                }
++            }
++        }
++
++        /// <summary>
++        /// Select over offline sockets: keeps in each list only the ready sockets, waiting up to <paramref name="microSeconds"/> (-1 = forever)
++        /// for at least one to become ready. Offline sockets never have a pending error, so the error list is always emptied.
++        /// </summary>
++        public static void Select(List<OfflineSocket> read, List<OfflineSocket> write, List<OfflineSocket> error, int microSeconds)
++        {
++            lock (_network)
++            {
++                long deadline = microSeconds < 0 ? long.MaxValue : Environment.TickCount64 + microSeconds / 1000;
++
++                while (!read.Exists(s => s.Readable) && !write.Exists(s => s.Writable))
++                {
++                    long left = deadline - Environment.TickCount64;
++
++                    if (left <= 0)
++                    {
++                        break;
++                    }
++
++                    Monitor.Wait(_network, deadline == long.MaxValue ? Timeout.Infinite : (int)Math.Min(left, int.MaxValue));
++                }
++
++                read.RemoveAll(s => !s.Readable);
++                write.RemoveAll(s => !s.Writable);
++                error.Clear();
++            }
++        }
++
++        public void GetSocketOption(SocketOptionLevel optionLevel, SocketOptionName optionName, byte[] optionValue)
++        {
++            int value;
++
++            lock (_network)
++            {
++                value = optionName switch
++                {
++                    SocketOptionName.Type => (int)SocketType,
++                    SocketOptionName.Error => 0,
++                    SocketOptionName.AcceptConnection => _listening ? 1 : 0,
++                    SocketOptionName.ReceiveBuffer when !_options.ContainsKey(optionName) => ReceiveBufferBytes,
++                    _ => _options.GetValueOrDefault(optionName),
++                };
++            }
++
++            Array.Clear(optionValue);
++            BitConverter.GetBytes(value).AsSpan(0, Math.Min(sizeof(int), optionValue.Length)).CopyTo(optionValue);
++        }
++
++        public void SetSocketOption(SocketOptionLevel optionLevel, SocketOptionName optionName, int optionValue)
++        {
++            lock (_network)
++            {
++                _options[optionName] = optionValue;
++            }
++        }
++
++        public void SetSocketOption(SocketOptionLevel optionLevel, SocketOptionName optionName, object optionValue)
++        {
++            SetSocketOption(optionLevel, optionName, optionValue is LingerOption linger ? (linger.Enabled ? 1 : 0) : Convert.ToInt32(optionValue));
++        }
++
++        public void Shutdown(SocketShutdown how)
++        {
++            lock (_network)
++            {
++                if (!Connected)
++                {
++                    throw Error(SocketError.NotConnected);
++                }
++
++                _readShutdown |= how != SocketShutdown.Send;
++                _writeShutdown |= how != SocketShutdown.Receive;
++
++                Monitor.PulseAll(_network);
++            }
++        }
++
++        public void Close()
++        {
++            lock (_network)
++            {
++                if (_closed)
++                {
++                    return;
++                }
++
++                _closed = true;
++
++                if (IsBound && _ports.TryGetValue((ProtocolType, ((IPEndPoint)LocalEndPoint).Port), out OfflineSocket owner) && owner == this)
++                {
++                    _ports.Remove((ProtocolType, ((IPEndPoint)LocalEndPoint).Port));
++                }
++
++                _receiveQueue.Clear();
++                _queuedBytes = 0;
++
++                Monitor.PulseAll(_network);
++            }
++        }
++
++        public void Dispose()
++        {
++            Close();
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
+index e6d5f849be2b8ad8011f1448f27dc938bf37b317..a06b5623cd1e86bacae4de9722f054a10a292bcc 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/Proxy/SocketHelpers.cs
+@@ -17,12 +17,22 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             List<Socket> writeDefault = writeEvents.Select(x => (x as DefaultSocket)?.BaseSocket).Where(x => x != null).ToList();
+             List<Socket> errorDefault = errorEvents.Select(x => (x as DefaultSocket)?.BaseSocket).Where(x => x != null).ToList();
+ 
++            // S2Arm: offline sockets have no host socket; they wait on the offline network (all sockets are offline sockets, or none is)
++            List<OfflineSocket> readOffline = readEvents.OfType<OfflineSocket>().ToList();
++            List<OfflineSocket> writeOffline = writeEvents.OfType<OfflineSocket>().ToList();
++            List<OfflineSocket> errorOffline = errorEvents.OfType<OfflineSocket>().ToList();
++
+             if (readDefault.Count != 0 || writeDefault.Count != 0 || errorDefault.Count != 0)
+             {
+                 Socket.Select(readDefault, writeDefault, errorDefault, timeout);
+             }
+ 
+-            void FilterSockets(List<ISocketImpl> removeFrom, List<Socket> selectedSockets, Func<LdnProxySocket, bool> ldnCheck)
++            if (readOffline.Count != 0 || writeOffline.Count != 0 || errorOffline.Count != 0)
++            {
++                OfflineSocket.Select(readOffline, writeOffline, errorOffline, readDefault.Count + writeDefault.Count + errorDefault.Count != 0 ? 0 : timeout);
++            }
++
++            void FilterSockets(List<ISocketImpl> removeFrom, List<Socket> selectedSockets, Func<LdnProxySocket, bool> ldnCheck, List<OfflineSocket> selectedOffline)
+             {
+                 removeFrom.RemoveAll(socket =>
+                 {
+@@ -32,15 +42,17 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+                             return !selectedSockets.Contains(dsocket.BaseSocket);
+                         case LdnProxySocket psocket:
+                             return !ldnCheck(psocket);
++                        case OfflineSocket osocket:
++                            return !selectedOffline.Contains(osocket);
+                         default:
+                             throw new NotImplementedException();
+                     }
+                 });
+             }
+ 
+-            FilterSockets(readEvents, readDefault, (socket) => socket.Readable);
+-            FilterSockets(writeEvents, writeDefault, (socket) => socket.Writable);
+-            FilterSockets(errorEvents, errorDefault, (socket) => socket.Error);
++            FilterSockets(readEvents, readDefault, (socket) => socket.Readable, readOffline);
++            FilterSockets(writeEvents, writeDefault, (socket) => socket.Writable, writeOffline);
++            FilterSockets(errorEvents, errorDefault, (socket) => socket.Error, errorOffline);
+         }
+ 
+         public static void RegisterProxy(LdnProxy proxy)
+@@ -59,8 +71,16 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd.Proxy
+             _proxy = null;
+         }
+ 
+-        public static ISocketImpl CreateSocket(AddressFamily domain, SocketType type, ProtocolType protocol, string lanInterfaceId)
++        public static ISocketImpl CreateSocket(AddressFamily domain, SocketType type, ProtocolType protocol, string lanInterfaceId, bool offline)
+         {
++            // S2Arm: without internet access the console is offline — its sockets live on the offline network, never on a host socket
++            if (offline)
++            {
++                Logger.Info?.PrintMsg(LogClass.ServiceBsd, "Offline console: socket on the loopback-only network (no host socket)");
++
++                return new OfflineSocket(domain, type, protocol);
++            }
++
+             if (_proxy != null)
+             {
+                 if (_proxy.Supported(domain, type, protocol))
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+index 80bdbec8a07178c51903f4ac0c0ad980ef4518d6..9a385334db01a1786a428f25c6167a3917e8c4d3 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Sfdnsres/IResolver.cs
+@@ -291,8 +291,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+             ulong optionsBufferSize)
+         {
+             string host = MemoryHelper.ReadAsciiString(context.Memory, inputBufferPosition, (int)inputBufferSize);
++            bool offline = !context.Device.Configuration.EnableInternetAccess;
+ 
+-            if (host != "localhost" && !context.Device.Configuration.EnableInternetAccess)
++            if (host != "localhost" && offline)
+             {
+                 Logger.Info?.Print(LogClass.ServiceSfdnsres, $"Guest network access disabled, DNS Blocked: {host}");
+ 
+@@ -344,7 +345,10 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Sfdnsres
+ 
+                     try
+                     {
+-                        hostEntry = DnsMitmResolver.Instance.ResolveAddress(targetHost);
++                        // S2Arm: offline, "localhost" is the console's own loopback address — answered here, not by the host's resolver
++                        hostEntry = offline
++                            ? new IPHostEntry { HostName = host, AddressList = [IPAddress.Loopback], Aliases = [] }
++                            : DnsMitmResolver.Instance.ResolveAddress(targetHost);
+                     }
+                     catch (SocketException exception)
+                     {

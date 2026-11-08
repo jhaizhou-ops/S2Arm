@@ -1,0 +1,51 @@
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs b/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs
+index 4939ca84e36f64ad198f3c636d309ac668aa2ba7..58bac44fd9e065ad48dbe1f9a64962ec0c3ffebf 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.Platform.cs
+@@ -34,7 +34,7 @@ namespace Ryujinx.Memory
+         }
+ 
+         // 匿名共享 fd 创建：Darwin 走 shm_open + shm_unlink，Linux 走 /dev/shm 的 mkstemp + unlink。
+-        // fd 在成功返回前归这里；创建后失败路径（shm_unlink / unlink / ftruncate）的关闭配对保持现状，修正归 R3。
++        // fd 在成功返回前归这里：拿到 fd 之后的失败路径（shm_unlink / unlink）先取错误文本、关 fd 再抛（11-01 审计 P2-31：原先不关，一次失败漏一个 fd）。
+         private static unsafe int CreateAnonymousSharedFd()
+         {
+             int fd;
+@@ -53,7 +53,9 @@ namespace Ryujinx.Memory
+ 
+                     if (shm_unlink((nint)pMemName) != 0)
+                     {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                        string error = Marshal.GetLastPInvokeErrorMessage();
++                        close(fd);
++                        throw new SystemException(error);
+                     }
+                 }
+             }
+@@ -71,7 +73,9 @@ namespace Ryujinx.Memory
+ 
+                     if (unlink((nint)pFileName) != 0)
+                     {
+-                        throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                        string error = Marshal.GetLastPInvokeErrorMessage();
++                        close(fd);
++                        throw new SystemException(error);
+                     }
+                 }
+             }
+diff --git a/src/Ryujinx.Memory/MemoryManagementUnix.cs b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+index ab0306f7a8e1c71d20f9687284c8dd3bff6e0976..a76ba378ccc557fcc5ed6d8aac735b35769c8bc7 100644
+--- a/src/Ryujinx.Memory/MemoryManagementUnix.cs
++++ b/src/Ryujinx.Memory/MemoryManagementUnix.cs
+@@ -158,7 +158,10 @@ namespace Ryujinx.Memory
+ 
+             if (ftruncate(fd, (nint)size) != 0)
+             {
+-                throw new SystemException(Marshal.GetLastPInvokeErrorMessage());
++                // S2Arm: close the fd before throwing; the caller never gets it to DestroySharedMemory (audit 11-01 P2-31).
++                string error = Marshal.GetLastPInvokeErrorMessage();
++                close(fd);
++                throw new SystemException(error);
+             }
+ 
+             return fd;

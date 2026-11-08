@@ -1,0 +1,24 @@
+diff --git a/src/Ryujinx.Graphics.Vulkan/HelperShader.cs b/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
+index 882462b7497902070f1ae62f873c4e06e4f93a19..69123e23dfc4b4c67fd69e731afbaaa04156ca88 100644
+--- a/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
++++ b/src/Ryujinx.Graphics.Vulkan/HelperShader.cs
+@@ -1543,6 +1543,19 @@ namespace Ryujinx.Graphics.Vulkan
+                 srcIndirectBufferOffset,
+                 indirectDataSize);
+ 
++            // S2A（审计 #1534 P1-14）：转换后的间接缓冲按源区间缓存复用（BufferManager.TryGetCachedConvertedBuffer），更早录下的间接绘制可能还在读它。
++            //   计算写之前先等它此前的全部访问（同下面 dstBuffer 的写前屏障）；派发后那两道屏障只管「写完再读」，排不住「读完再写」
++            BufferHolder.InsertBufferBarrier(
++                gd,
++                cbs.CommandBuffer,
++                dstIndirectBuffer.GetBuffer().Get(cbs, 0, indirectDataSize).Value,
++                BufferHolder.DefaultAccessFlags,
++                AccessFlags.ShaderWriteBit,
++                PipelineStageFlags.AllCommandsBit,
++                PipelineStageFlags.ComputeShaderBit,
++                0,
++                indirectDataSize);
++
+             _pipeline.SetUniformBuffers([new BufferAssignment(0, drawCountBufferAligned)]);
+             _pipeline.SetStorageBuffers(1, new[] { srcIndirectBuffer.GetBuffer(), dstIndirectBuffer.GetBuffer() });
+             _pipeline.SetStorageBuffers([new BufferAssignment(3, patternScoped.Range)]);

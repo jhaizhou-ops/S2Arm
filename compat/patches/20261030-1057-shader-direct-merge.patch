@@ -1,0 +1,642 @@
+diff --git a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+index 54989c4af6e67bbe6842be719d86f74fe6d7f583..ab9685a6c5e2964b7689b188c7cfc7c2d32e28fd 100644
+--- a/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
++++ b/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/Instructions.cs
+@@ -1335,6 +1335,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+                 lod = Src(coordType);
+             }
+ 
++            // Reference port: texel offsets read from a register (Maxwell AOFFI / PTP from a non-immediate) are not constants. Upstream put them
++            // into an OpConstantComposite and passed them as ConstOffset / ConstOffsets: invalid SPIR-V, on which SPIRV-Cross throws "nullptr"
++            // (the shader never builds). Constant offsets keep the old form byte for byte; runtime ones use Offset (see the gather below)
++            bool offsetsConst = true;
++
+             SpvInstruction AssembleOffsetVector(int count)
+             {
+                 if (count > 1)
+@@ -1348,11 +1353,25 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+                     SpvInstruction vectorType = context.TypeVector(context.TypeS32(), count);
+ 
++                    if (Array.Exists(elems, e => e.Opcode != Op.OpConstant))
++                    {
++                        offsetsConst = false;
++
++                        return context.CompositeConstruct(vectorType, elems);
++                    }
++
+                     return context.ConstantComposite(vectorType, elems);
+                 }
+                 else
+                 {
+-                    return Src(AggregateType.S32);
++                    SpvInstruction elem = Src(AggregateType.S32);
++
++                    if (elem.Opcode != Op.OpConstant)
++                    {
++                        offsetsConst = false;
++                    }
++
++                    return elem;
+                 }
+             }
+ 
+@@ -1425,10 +1444,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+ 
+             if (hasOffset)
+             {
+-                operandsMask |= ImageOperandsMask.ConstOffset;
++                operandsMask |= offsetsConst ? ImageOperandsMask.ConstOffset : ImageOperandsMask.Offset;
+                 operandsList.Add(offsets[0]);
+             }
+-            else if (hasOffsets)
++            else if (hasOffsets && offsetsConst)
+             {
+                 operandsMask |= ImageOperandsMask.ConstOffsets;
+                 SpvInstruction arrayv2 = context.TypeArray(context.TypeVector(context.TypeS32(), 2), context.Constant(context.TypeU32(), 4));
+@@ -1458,6 +1477,25 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
+             {
+                 result = context.ImageFetch(resultType, image, pCoords, operandsMask, operands);
+             }
++            else if (isGather && hasOffsets && !offsetsConst)
++            {
++                // Reference port: ConstOffsets must be constant. Each texel of a four-offset gather is texel (i0, j0) of a gather at that one offset,
++                // which is component w of its result (gather order: i0j1, i1j1, i1j0, i0j0)
++                SpvInstruction[] texels = new SpvInstruction[4];
++
++                for (int index = 0; index < 4; index++)
++                {
++                    SpvInstruction[] gatherOperands = [.. operands, offsets[index]];
++                    ImageOperandsMask gatherMask = operandsMask | ImageOperandsMask.Offset;
++                    SpvInstruction texel4 = isShadow
++                        ? context.ImageDrefGather(resultType, image, pCoords, dRef, gatherMask, gatherOperands)
++                        : context.ImageGather(resultType, image, pCoords, compIdx, gatherMask, gatherOperands);
++
++                    texels[index] = context.CompositeExtract(context.TypeFP32(), texel4, 3);
++                }
++
++                result = context.CompositeConstruct(resultType, texels);
++            }
+             else if (isGather)
+             {
+                 if (isShadow)
+diff --git a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+index f270d4c404c5c89f5fb3607608a7c8e0f3f1944f..72ec3df3fec6ba23a645db9ef8f889ed83ee6adf 100644
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -17,6 +17,28 @@ namespace Ryujinx.Graphics.Shader
+ 
+     public interface IGpuAccessor : ILogger
+     {
++        /// <summary>S2A（直连离线几何）：顶点阶段输出按固定捕获布局给几何当计算跑（见 ResourceReservations.FillGeometryInputMap）。只有直连翻译器答真，通用模式缺省假。</summary>
++        bool QueryGeometryInputFixed() => false;
++
++        /// <summary>
++        /// S2A（直连）：1D 整数坐标取样（TLD / TLDS 1D）在类型问不出是贴图缓冲时，按 (x &amp; 0x3FFF, x &gt;&gt; 14) 折成 2D 读，宿主把这一槽的贴图缓冲按 16384 一行的线性 2D 贴图绑（nvn_mtl.m tbuf_as_2d）。
++        /// 依赖宿主这一绑定合同，所以只有直连翻译器答真；通用模式缺省假，输出与上游一致。
++        /// </summary>
++        bool QueryTexelFetch1DWrap() => false;
++
++        /// <summary>
++        /// S2A（直连）：BindlessElimination 认句柄时穿过嵌套 phi（循环变量里存的句柄），并把「或上同一常量采样器」当作同一句柄。
++        /// 只有直连翻译器答真（直连出库已长期用它）；通用模式缺省假，输出与上游一致。
++        /// </summary>
++        bool QueryBindlessPhiSeeThrough() => false;
++
++        /// <summary>
++        /// S2A：特化状态运行时化（点大小、DepthMode、alpha 测试、绘制参数来源、贴图坐标归一化改读支持缓冲 s2a_flags / s2a_point）。缺省 = 进程开关
++        /// TranslatorContext.S2ARuntimeState（通用模式，S2A_RUNTIME_STATE=0 关）；直连翻译器答假：直连宿主不填这几个字段，编成运行时判断只会多读多分支。
++        /// 按次翻译问，不用进程静态量：玩家包里直连兜底现编（S2A.Dsh）与通用模式在同一进程
++        /// </summary>
++        bool QueryS2ARuntimeState() => Translation.TranslatorContext.S2ARuntimeState;
++
+         /// <summary>实际宿主要求按配对阶段建立紧凑接口；不是 TargetApi 的别名。</summary>
+         bool QueryHostRequiresLinkedVaryingInterface() => false;
+ 
+@@ -475,6 +497,15 @@ namespace Ryujinx.Graphics.Shader
+             return SamplerType.Texture2D;
+         }
+ 
++        /// <summary>
++        /// Reference port: a 1D integer-coordinate fetch (TLD / TLDS 1D) of the bound texture handle was translated as a 2D read at (x &amp; 0x3FFF, x &gt;&gt; 14),
++        /// because the texture type query did not say it is a texture buffer.
++        /// </summary>
++        /// <param name="handle">Texture handle</param>
++        void RecordTexelFetch1D(int handle)
++        {
++        }
++
+         /// <summary>
+         /// S2A：只问贴图是不是贴图缓冲（TEX / TLDS 一维时区分「一维贴图」与「贴图缓冲」，翻出的代码只取决于这一位）。
+         /// 与 <see cref="QuerySamplerType"/> 分开记，匹配时只比「是不是缓冲」——出包离线烘焙按缺省类型翻，运行时别的非缓冲类型不该被拒（10-22 暗黑2 27 个「贴图类型」误拒）
+diff --git a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
+index cffe0d23b1aa329713b7e66053ca540e778ae78e..91f98447d3ca4fec604d9f05d90addded2c33f85 100644
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitTexture.cs
+@@ -210,6 +210,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
+             }
+ 
+             bool hasLod = lodMode > Lod.Lz;
++            bool wrap1D = false;
+ 
+             if (type == SamplerType.Texture1D && (flags & ~TextureFlags.Bindless) == TextureFlags.IntCoords && !(
+                 hasLod ||
+@@ -225,6 +226,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
+                 {
+                     type = SamplerType.TextureBuffer;
+                 }
++                else
++                {
++                    // Reference port: the descriptor decides between a 1D texture and a texture buffer, so the 2D read below wraps x into rows of 16384 texels (see the TLDS Texture1DLodZero case)
++                    wrap1D = Sample1DAs2D && context.TranslatorContext.GpuAccessor.QueryTexelFetch1DWrap();
++                }
+             }
+ 
+             int coordsCount = type.Dimensions;
+@@ -238,7 +244,17 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+             if (Sample1DAs2D && (type & SamplerType.Mask) == SamplerType.Texture1D)
+             {
+-                sourcesList.Add(ConstF(0));
++                if (wrap1D)
++                {
++                    Operand x = sourcesList[^1];
++                    sourcesList[^1] = context.BitwiseAnd(x, Const(0x3FFF));
++                    sourcesList.Add(context.ShiftRightU32(x, Const(14)));
++                    context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(imm);
++                }
++                else
++                {
++                    sourcesList.Add(ConstF(0));
++                }
+ 
+                 type = SamplerType.Texture2D | (type & SamplerType.Array);
+                 is1DTo2D = true;
+@@ -494,7 +510,20 @@ namespace Ryujinx.Graphics.Shader.Instructions
+ 
+                         if (type != SamplerType.TextureBuffer)
+                         {
+-                            if (Sample1DAs2D)
++                            if (Sample1DAs2D && context.TranslatorContext.GpuAccessor.QueryTexelFetch1DWrap())
++                            {
++                                // S2A（直连，原 graphics/nvn/third_party/ryujinx 的改动；IGpuAccessor.QueryTexelFetch1DWrap 为真时）：Maxwell fetches a 1D texture and a texture buffer with the same instruction, and the descriptor decides. With no type answer the read is
++                                // 2D at (x & 0x3FFF, x >> 14): a 1D texture (a one-row 2D texture at most 16384 wide on the host) reads (x, 0) as before, and the host binds a texture
++                                // buffer in such a slot as a linear 2D texture of 16384-texel rows over the same memory (nvn_mtl.m tbuf_as_2d)
++                                Operand x = sourcesList[^1];
++                                sourcesList[^1] = context.BitwiseAnd(x, Const(0x3FFF));
++                                sourcesList.Add(context.ShiftRightU32(x, Const(14)));
++                                context.TranslatorContext.GpuAccessor.RecordTexelFetch1D(tldsOp.TidB);
++
++                                type &= ~SamplerType.Mask;
++                                type |= SamplerType.Texture2D;
++                            }
++                            else if (Sample1DAs2D)
+                             {
+                                 sourcesList.Add(ConstF(0));
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+index a3f7e3e199205c953e98ad46c15f583eb355e511..61e53c0cb1afafb2d9904e0cab25fe812a20cc87 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContext.cs
+@@ -86,7 +86,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             if (TranslatorContext.Definitions.Stage == ShaderStage.Vertex)
+             {
+                 // S2A：点大小运行时化——从支持缓冲 s2a_point.x 读（浮点位；IR 操作数不分类型，写浮点输出时按位转），不再把特化状态的点大小编成常量
+-                Operand pointSize = TranslatorContext.S2ARuntimeState
++                Operand pointSize = TranslatorContext.GpuAccessor.QueryS2ARuntimeState()
+                     ? this.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding, Const((int)SupportBufferField.S2APoint), Const(0))
+                     : ConstF(TranslatorContext.Definitions.PointSize);
+ 
+@@ -161,6 +161,20 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                     this.Store(StorageKind.LocalMemory, ResourceManager.LocalGeometryOutputVertexCountMemoryId, Const(0));
+                     this.Store(StorageKind.LocalMemory, ResourceManager.LocalGeometryOutputIndexCountMemoryId, Const(0));
++                    if (ResourceManager.Reservations.GeometryInputFixed)
++                    {
++                        this.Store(StorageKind.LocalMemory, ResourceManager.LocalGeometryPrimitiveOpenMemoryId, Const(0));
++                        for (int i = 0; i < ResourceManager.Reservations.OutputSizePerInvocation; i++)
++                            this.Store(StorageKind.LocalMemory, ResourceManager.LocalVertexDataMemoryId, Const(i), ConstF(0));
++                        void DefaultOne(IoVariable variable, int location, int component)
++                        {
++                            if (ResourceManager.Reservations.TryGetOffset(StorageKind.Output, variable, location, component, out int offset))
++                                this.Store(StorageKind.LocalMemory, ResourceManager.LocalVertexDataMemoryId, Const(offset), ConstF(1));
++                        }
++                        DefaultOne(IoVariable.Position, 0, 3);
++                        DefaultOne(IoVariable.PointSize, 0, 0);
++                        for (int i = 0; i < 32; i++) DefaultOne(IoVariable.UserDefined, i, 3);
++                    }
+                 }
+             }
+         }
+@@ -330,7 +344,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+             }
+         }
+ 
+-        private bool S2ADepthRuntime() => TranslatorContext.S2ARuntimeState && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl();
++        private bool S2ADepthRuntime() => TranslatorContext.GpuAccessor.QueryS2ARuntimeState() && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl();
+ 
+         private void S2AAlphaTestRuntime()
+         {
+@@ -487,7 +501,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                 // S2A：透明测试运行时化——开着时比较方式 / 参考值读支持缓冲 FragmentAlphaTest，一份着色器覆盖全部比较方式与参考值（只有透明测试开的程序带 discard，
+                 // 普通绘制仍是无 discard 的那份，保住分块延迟渲染的隐藏面剔除）。离线烘焙器给每个程序再出一份「透明测试开」的特化状态
+-                bool s2aAlphaRt = TranslatorContext.S2ARuntimeState && TranslatorContext.Definitions.S2AAlphaTestEnabled;
++                bool s2aAlphaRt = TranslatorContext.GpuAccessor.QueryS2ARuntimeState() && TranslatorContext.Definitions.S2AAlphaTestEnabled;
+                 if (s2aAlphaRt) S2AAlphaTestRuntime();
+ 
+                 AlphaTestOp alphaTestOp = s2aAlphaRt ? AlphaTestOp.Always : TranslatorContext.Definitions.AlphaTestCompare;
+@@ -611,7 +625,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                     Operand writtenIndices = this.Load(StorageKind.LocalMemory, ResourceManager.LocalGeometryOutputIndexCountMemoryId);
+ 
+-                    int maxIndicesPerPrimitiveInvocation = TranslatorContext.Definitions.GetGeometryOutputIndexBufferStridePerInstance();
++                    int maxIndicesPerPrimitiveInvocation = TranslatorContext.Definitions.GetGeometryOutputIndexBufferStridePerInstance(ResourceManager.Reservations.GeometryInputFixed);
+                     int maxIndicesPerPrimitive = maxIndicesPerPrimitiveInvocation * TranslatorContext.Definitions.ThreadsPerInputPrimitive;
+ 
+                     this.BranchIfTrue(lblExit, this.ICompareGreaterOrEqualUnsigned(writtenIndices, Const(maxIndicesPerPrimitiveInvocation)));
+@@ -621,7 +635,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+                     Operand primitiveIndex = this.Load(StorageKind.Input, IoVariable.GlobalId, Const(0));
+                     Operand instanceIndex = this.Load(StorageKind.Input, IoVariable.GlobalId, Const(1));
+                     Operand invocationId = this.Load(StorageKind.Input, IoVariable.GlobalId, Const(2));
+-                    Operand vertexCount = this.Load(StorageKind.ConstantBuffer, vertexInfoCbBinding, Const((int)VertexInfoBufferField.VertexCounts), Const(0));
++                    Operand vertexCount = this.Load(StorageKind.ConstantBuffer, vertexInfoCbBinding, Const((int)(ResourceManager.Reservations.GeometryInputFixed ? VertexInfoBufferField.GeometryCounts : VertexInfoBufferField.VertexCounts)), Const(0));
+                     Operand primitiveId = this.IAdd(this.IMultiply(instanceIndex, vertexCount), primitiveIndex);
+                     Operand ibOffset = this.IMultiply(primitiveId, Const(maxIndicesPerPrimitive));
+                     ibOffset = this.IAdd(ibOffset, this.IMultiply(invocationId, Const(maxIndicesPerPrimitiveInvocation)));
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs b/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
+index 4a603a7dfd33ae0ac1ea2955e60f295f34a64324..5d4157cf68765312741feed0919bc4f4f974156e 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
+@@ -233,11 +233,31 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public static Operand EmitVertex(this EmitterContext context)
+         {
++            if (context.VertexAsCompute && context.ResourceManager.Reservations.GeometryInputFixed)
++            {
++                Operand end = Label();
++                Operand count = context.Load(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryOutputVertexCountMemoryId);
++                context.BranchIfTrue(end, context.ICompareGreaterOrEqualUnsigned(count, Const(context.TranslatorContext.Definitions.MaxOutputVertices)));
++                context.Store(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId, Const(1));
++                context.Add(Instruction.EmitVertex);
++                context.MarkLabel(end);
++                return null;
++            }
+             return context.Add(Instruction.EmitVertex);
+         }
+ 
+         public static Operand EndPrimitive(this EmitterContext context)
+         {
++            if (context.VertexAsCompute && context.ResourceManager.Reservations.GeometryInputFixed)
++            {
++                Operand end = Label();
++                Operand open = context.Load(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId);
++                context.BranchIfTrue(end, context.ICompareEqual(open, Const(0)));
++                context.Store(StorageKind.LocalMemory, context.ResourceManager.LocalGeometryPrimitiveOpenMemoryId, Const(0));
++                context.Add(Instruction.EndPrimitive);
++                context.MarkLabel(end);
++                return null;
++            }
+             return context.Add(Instruction.EndPrimitive);
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+index c40568a6117f5820823da55ec9d61e55ea5a3532..47f677b21147fb88e0aa2061ce963fcb345906a1 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessElimination.cs
+@@ -204,7 +204,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+                     return true;
+                 }
+ 
+-                if (!TryGetOperation(bindlessHandle.AsgOp, out Operation handleCombineOp))
++                if (!TryGetOperation(bindlessHandle.AsgOp, gpuAccessor.QueryBindlessPhiSeeThrough(), out Operation handleCombineOp))
+                 {
+                     return false;
+                 }
+@@ -353,25 +353,74 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return false;
+         }
+ 
+-        private static bool TryGetOperation(INode asgOp, out Operation outOperation)
++        private static bool TryGetOperation(INode asgOp, bool seeThrough, out Operation outOperation)
+         {
+-            if (asgOp is PhiNode phi)
++            if (asgOp is PhiNode upstreamPhi && !seeThrough)
++            {
++                // 上游原样（通用模式）：只比 phi 的直接输入
++                Operand first = upstreamPhi.GetSource(0);
++
++                for (int index = 1; index < upstreamPhi.SourcesCount; index++)
++                {
++                    if (!IsSameOperand(first, upstreamPhi.GetSource(index), seeThrough: false))
++                    {
++                        outOperation = null;
++
++                        return false;
++                    }
++                }
++
++                asgOp = first.AsgOp;
++            }
++            else if (asgOp is PhiNode phi)
+             {
+                 // If we have a phi, let's check if all inputs are effectively the same value.
+                 // If so, we can "see through" the phi and pick any of the inputs (since they are all the same).
++                // S2A（直连，原 graphics/nvn/third_party/ryujinx 的改动；IGpuAccessor.QueryBindlessPhiSeeThrough 为真时）：the inputs are gathered through the phis they come from, as a loop makes (a handle kept in a loop variable
++                // reaches the phi from the loop's own phi). Upstream compared the phi's direct inputs only and gave up on such handles.
+ 
+-                Operand firstSrc = phi.GetSource(0);
++                Operand firstSrc = null;
++                HashSet<PhiNode> visited = new();
++                Stack<PhiNode> pending = new();
++                pending.Push(phi);
+ 
+-                for (int index = 1; index < phi.SourcesCount; index++)
++                while (pending.Count > 0)
+                 {
+-                    if (!IsSameOperand(firstSrc, phi.GetSource(index)))
++                    PhiNode current = pending.Pop();
++
++                    if (!visited.Add(current))
+                     {
+-                        outOperation = null;
++                        continue;
++                    }
+ 
+-                        return false;
++                    for (int index = 0; index < current.SourcesCount; index++)
++                    {
++                        Operand src = current.GetSource(index);
++
++                        if (src.AsgOp is PhiNode srcPhi)
++                        {
++                            pending.Push(srcPhi);
++                        }
++                        else if (firstSrc == null)
++                        {
++                            firstSrc = src;
++                        }
++                        else if (!IsSameOperand(firstSrc, src, seeThrough: true))
++                        {
++                            outOperation = null;
++
++                            return false;
++                        }
+                     }
+                 }
+ 
++                if (firstSrc == null)
++                {
++                    outOperation = null;
++
++                    return false;
++                }
++
+                 asgOp = firstSrc.AsgOp;
+             }
+ 
+@@ -387,16 +436,22 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return false;
+         }
+ 
+-        private static bool IsSameOperand(Operand x, Operand y)
++        private static bool IsSameOperand(Operand x, Operand y, bool seeThrough)
+         {
++            if (seeThrough && x == y)
++            {
++                return true;
++            }
++
+             if (x.Type == y.Type && x.Type == OperandType.LocalVariable)
+             {
++                // Reference port: the second source may also be the same constant (a constant sampler ORed into a texture handle).
+                 return x.AsgOp is Operation xOp &&
+                     y.AsgOp is Operation yOp &&
+                     xOp.Inst == Instruction.BitwiseOr &&
+                     yOp.Inst == Instruction.BitwiseOr &&
+                     AreBothEqualConstantBuffers(xOp.GetSource(0), yOp.GetSource(0)) &&
+-                    AreBothEqualConstantBuffers(xOp.GetSource(1), yOp.GetSource(1));
++                    (AreBothEqualConstantBuffers(xOp.GetSource(1), yOp.GetSource(1)) || (seeThrough && AreBothEqualConstants(xOp.GetSource(1), yOp.GetSource(1))));
+             }
+ 
+             return false;
+@@ -407,6 +462,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
+             return x.Type == y.Type && x.Value == y.Value && x.Type == OperandType.ConstantBuffer;
+         }
+ 
++        private static bool AreBothEqualConstants(Operand x, Operand y)
++        {
++            return x.Type == y.Type && x.Value == y.Value && x.Type == OperandType.Constant;
++        }
++
+         private static Operand GetSourceForMaskedHandle(Operation asgOp, uint mask)
+         {
+             // Assume it was already checked that the operation is bitwise AND.
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+index f5aea3de331ec1da1619413b78b93eeae4251e52..50dff377504dc4fe81436eaaa682c5be3138a463 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceManager.cs
+@@ -54,6 +54,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public int LocalVertexIndexInstanceRateMemoryId { get; private set; }
+         public int LocalGeometryOutputVertexCountMemoryId { get; private set; }
+         public int LocalGeometryOutputIndexCountMemoryId { get; private set; }
++        public int LocalGeometryPrimitiveOpenMemoryId { get; private set; }
+ 
+         public ShaderProperties Properties { get; }
+ 
+@@ -139,6 +140,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+                 LocalGeometryOutputVertexCountMemoryId = AddMemoryDefinition("local_geometry_output_vertex", AggregateType.U32);
+                 LocalGeometryOutputIndexCountMemoryId = AddMemoryDefinition("local_geometry_output_index", AggregateType.U32);
++                if (Reservations.GeometryInputFixed)
++                    LocalGeometryPrimitiveOpenMemoryId = AddMemoryDefinition("local_geometry_primitive_open", AggregateType.U32);
+             }
+         }
+ 
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs b/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
+index 1c2323d0d119b5fc4064bb1b9bb28b1318f4af51..330688b593d6c1e67fdcc6027be9ef6e96c4ae68 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ResourceReservations.cs
+@@ -24,6 +24,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         public int ReservedStorageBuffers { get; }
+         public int ReservedTextures { get; }
+         public int ReservedImages { get; }
++        public bool GeometryInputFixed { get; }
+         public int InputSizePerInvocation { get; }
+         public int OutputSizePerInvocation { get; }
+         public int OutputSizeInBytesPerInvocation => OutputSizePerInvocation * sizeof(uint);
+@@ -82,7 +83,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+                 vacInput,
+                 vacOutput,
+                 gpuAccessor.QueryHostSupportsViewportIndexVertexTessellation(),
+-                gpuAccessor.QueryHostSupportsViewportMask())
++                gpuAccessor.QueryHostSupportsViewportMask(),
++                vertexAsCompute && gpuAccessor.QueryGeometryInputFixed())
+         {
+         }
+ 
+@@ -93,7 +95,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+             IoUsage? vacInput,
+             IoUsage vacOutput,
+             bool hostViewportIndexVt,
+-            bool hostViewportMask) : this(isTransformFeedbackEmulated, vertexAsCompute)
++            bool hostViewportMask,
++            bool geometryInputFixed = false) : this(isTransformFeedbackEmulated, vertexAsCompute)
+         {
+             _s2aTfe = isTransformFeedbackEmulated;
+             _s2aInput = vacInput;
+@@ -104,10 +107,11 @@ namespace Ryujinx.Graphics.Shader.Translation
+             if (vertexAsCompute)
+             {
+                 _offsets = new();
++                GeometryInputFixed = geometryInputFixed;
+ 
+                 if (vacInput.HasValue)
+                 {
+-                    InputSizePerInvocation = FillIoOffsetMap(hostViewportIndexVt, hostViewportMask, StorageKind.Input, vacInput.Value);
++                    InputSizePerInvocation = geometryInputFixed ? FillGeometryInputMap() : FillIoOffsetMap(hostViewportIndexVt, hostViewportMask, StorageKind.Input, vacInput.Value);
+                 }
+ 
+                 OutputSizePerInvocation = FillIoOffsetMap(hostViewportIndexVt, hostViewportMask, StorageKind.Output, vacOutput);
+@@ -159,6 +163,20 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return new ResourceReservations((f & 1) != 0, vertexAsCompute: true, input, output, (f & 4) != 0, (f & 8) != 0);
+         }
+ 
++        // S2A（直连离线几何，原 graphics/nvn/third_party/ryujinx 的改动）：几何输入按 Maxwell 属性表的固定布局排，与 dmsh_geometry.py 一致，独立出库的各阶段靠它对上。
++        //   只有直连翻译器的 IGpuAccessor 答 QueryGeometryInputFixed 为真；通用模式恒为假，磁盘缓存重建（S2ARead）也走假，不进序列化
++        private int FillGeometryInputMap()
++        {
++            for (int c = 0; c < 4; c++) _offsets.Add(new(StorageKind.Input, IoVariable.Position, 0, c), c);
++            _offsets.Add(new(StorageKind.Input, IoVariable.PointSize), 4);
++            for (int c = 0; c < 8; c++) _offsets.Add(new(StorageKind.Input, IoVariable.ClipDistance, 0, c), 5 + c);
++            _offsets.Add(new(StorageKind.Input, IoVariable.Layer), 13);
++            _offsets.Add(new(StorageKind.Input, IoVariable.ViewportIndex), 14);
++            for (int a = 0; a < 32; a++) for (int c = 0; c < 4; c++)
++                _offsets.Add(new(StorageKind.Input, IoVariable.UserDefined, a, c), 16 + 4 * a + c);
++            return 144;
++        }
++
+         private int FillIoOffsetMap(bool hostViewportIndexVt, bool hostViewportMask, StorageKind storageKind, IoUsage vacUsage)
+         {
+             int offset = 0;
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+index 59ff6935cfd9e8aab87a73e851b6f724e724e924..e2c982895e08d08ef49c894425bcb5e0762078e6 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/ShaderDefinitions.cs
+@@ -362,8 +362,12 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return _graphicsState.AttributeTypes[location].HasFlag(AttributeType.PackedRgb10A2Signed);
+         }
+ 
+-        public int GetGeometryOutputIndexBufferStridePerInstance()
++        public int GetGeometryOutputIndexBufferStridePerInstance(bool fixedInput = false)
+         {
++            // Even a strip with fewer than three vertices can be ended. Empty
++            // ends are ignored by the fixed-input emitter, so at most one
++            // restart per emitted vertex is needed.
++            if (fixedInput) return MaxOutputVertices * 2;
+             return MaxOutputVertices + OutputTopology switch
+             {
+                 OutputTopology.LineStrip => MaxOutputVertices / 2,
+@@ -372,9 +376,9 @@ namespace Ryujinx.Graphics.Shader.Translation
+             };
+         }
+ 
+-        public int GetGeometryOutputIndexBufferStride()
++        public int GetGeometryOutputIndexBufferStride(bool fixedInput = false)
+         {
+-            return GetGeometryOutputIndexBufferStridePerInstance() * ThreadsPerInputPrimitive;
++            return GetGeometryOutputIndexBufferStridePerInstance(fixedInput) * ThreadsPerInputPrimitive;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
+index f827f0ea11258573b0391d8953b83e2958094407..7f710845fbe18dc32ccd7cacffac22f895a15470 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/DrawParametersReplace.cs
+@@ -16,7 +16,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+         {
+             Operation operation = (Operation)node.Value;
+ 
+-            if (TranslatorContext.S2ARuntimeState)
++            if (context.GpuAccessor.QueryS2ARuntimeState())
+             {
+                 // S2A：绘制参数来源运行时化——宏 HLE 绘制（cbdp 真）用内建、寄存器绘制用游戏写进 cb0 的值，按支持缓冲 s2a_flags.x 位 1 逐次绘制选，不读 cbdp
+                 if (S2ASelectDrawParameters(node, operation))
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
+index 547204be55018268d5b5e23d10fc8b4bdb752fed..7b6b799e790a0bf890d8daa40846d987f734defc 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/GeometryToCompute.cs
+@@ -148,7 +148,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             Operand baseIndexOffset = GenerateBaseOffset(
+                 resourceManager,
+                 node,
+-                definitions.GetGeometryOutputIndexBufferStride(),
++                definitions.GetGeometryOutputIndexBufferStride(resourceManager.Reservations.GeometryInputFixed),
+                 definitions.ThreadsPerInputPrimitive);
+             Operand outputBaseIndex = Local();
+             node.List.AddBefore(node, new Operation(Instruction.Add, outputBaseIndex, new[] { baseIndexOffset, outputPrimIndex }));
+@@ -203,7 +203,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             Operand baseIndexOffset = GenerateBaseOffset(
+                 resourceManager,
+                 node,
+-                definitions.GetGeometryOutputIndexBufferStride(),
++                definitions.GetGeometryOutputIndexBufferStride(resourceManager.Reservations.GeometryInputFixed),
+                 definitions.ThreadsPerInputPrimitive);
+             Operand outputBaseIndex = Local();
+             node.List.AddBefore(node, new Operation(Instruction.Add, outputBaseIndex, new[] { baseIndexOffset, outputPrimIndex }));
+@@ -218,7 +218,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+         private static Operand GenerateBaseOffset(ResourceManager resourceManager, LinkedListNode<INode> node, int stride, int threadsPerInputPrimitive)
+         {
+             Operand primitiveId = Local();
+-            GeneratePrimitiveId(resourceManager, node, primitiveId);
++            GeneratePrimitiveId(resourceManager, node, primitiveId, true);
+ 
+             Operand baseOffset = Local();
+             node.List.AddBefore(node, new Operation(Instruction.Multiply, baseOffset, new[] { primitiveId, Const(stride) }));
+@@ -309,8 +309,10 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+             return vertexElemOffset;
+         }
+ 
+-        private static LinkedListNode<INode> GeneratePrimitiveId(ResourceManager resourceManager, LinkedListNode<INode> node, Operand dest)
++        private static LinkedListNode<INode> GeneratePrimitiveId(ResourceManager resourceManager, LinkedListNode<INode> node, Operand dest, bool outputIndex = false)
+         {
++            if (resourceManager.Reservations.GeometryInputFixed && !outputIndex)
++                return node.List.AddBefore(node, new Operation(Instruction.Load, StorageKind.Input, dest, new[] { Const((int)IoVariable.GlobalId), Const(0) }));
+             int vertexInfoCbBinding = resourceManager.Reservations.VertexInfoConstantBufferBinding;
+ 
+             Operand vertexCount = Local();
+@@ -318,7 +320,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+                 Instruction.Load,
+                 StorageKind.ConstantBuffer,
+                 vertexCount,
+-                new[] { Const(vertexInfoCbBinding), Const((int)VertexInfoBufferField.VertexCounts), Const(0) }));
++                new[] { Const(vertexInfoCbBinding), Const((int)(resourceManager.Reservations.GeometryInputFixed ? VertexInfoBufferField.GeometryCounts : VertexInfoBufferField.VertexCounts)), Const(0) }));
+ 
+             Operand vertexIndex = Local();
+             node.List.AddBefore(node, new Operation(
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+index b1bfeefcb874f948a730740c0ed2b688fabc03e7..c093f2f6cdb08529e7171788481e95f4d81c70dd 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Transforms/TexturePass.cs
+@@ -175,7 +175,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
+ 
+             bool intCoords = (texOp.Flags & TextureFlags.IntCoords) != 0;
+ 
+-            if (TranslatorContext.S2ARuntimeState && !intCoords && SupportBuffer.S2ATexUnnormBit(texOp.Binding) >= 0)
++            if (gpuAccessor.QueryS2ARuntimeState() && !intCoords && SupportBuffer.S2ATexUnnormBit(texOp.Binding) >= 0)
+             {
+                 return S2AInsertCoordNormalizationRuntime(hfm, node, resourceManager, stage, texOp);
+             }
+diff --git a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+index 1320f868baa0a6e3d6d109c983a4c8c9ce68526e..5376e9b98fea3e1916b27f079586f95c5fc0905c 100644
+--- a/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/TranslatorContext.cs
+@@ -638,7 +638,7 @@ namespace Ryujinx.Graphics.Shader.Translation
+         {
+             if (vertexAsCompute)
+             {
+-                return new ShaderDefinitions(ShaderStage.Compute, 32, 32, 1);
++                return new ShaderDefinitions(ShaderStage.Compute, 32, GpuAccessor.QueryGeometryInputFixed() ? 1 : 32, 1);
+             }
+             else
+             {

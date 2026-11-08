@@ -1,0 +1,18 @@
+diff --git a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+index f7d389c1721ba9e0f360caabaef52f8793fe47ea..71c9603b44478096532222f2fe95990046124c76 100644
+--- a/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
++++ b/src/Ryujinx.Graphics.Gpu/Shader/DiskCache/HostCacheCapabilities.cs
+@@ -117,6 +117,13 @@ namespace Ryujinx.Graphics.Gpu.Shader.DiskCache
+                 writer.Write("s2a-spirv-layer-legacy-route");
+                 writer.Write(capabilities.S2ASpirvLayerNv);
+             }
++            // The old translator could create an unsupported hardware GS on
++            // this profile; its already persisted host binary must not bypass
++            // the new fail-closed route. Guest/shared records remain reusable.
++            if (!capabilities.SupportsGeometryShader && !capabilities.SupportsLayerVertexTessellation)
++            {
++                writer.Write("s2a-layer-route-fail-closed-v1");
++            }
+             writer.Flush();
+             return Convert.ToHexStringLower(SHA256.HashData(stream.GetBuffer().AsSpan(0, (int)stream.Length)));
+         }
