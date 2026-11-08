@@ -104,13 +104,13 @@ probe_from() {   # 开局第一次拉文件当通道探针：超时重试一次�
   return $r
 }
 vk_spv_keep() {   # vk_spv_keep <拉回的 vk/ 目录> <程序号大写>：Vulkan 首遇现编存下的游戏 SPIR-V（<键>.spv）并进 pso_seed/<程序号>/vk_spv/（已有同名不覆盖），下次出包翻进离线库（11-05）
-  local n=0 f d=${S2A_PSO_SEED_DIR:-$HOME/.s2arm/run/s2arm/pso_seed}/$2/vk_spv
+  local n=0 f d=${S2A_PSO_SEED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/pso_seed}/$2/vk_spv
   for f in "$1"/*.spv; do [ -s "$f" ] || continue; mkdir -p "$d"; [ -e "$d/${f##*/}" ] || { cp "$f" "$d/${f##*/}.tmp" && mv "$d/${f##*/}.tmp" "$d/${f##*/}" && n=$((n + 1)); }; done
   [ "$n" = 0 ] || t "Vulkan 现编 SPIR-V：新收 ${n} 支 → pso_seed/$2/vk_spv/"
 }
 pso_keep() {   # pso_keep <拉回的 pso_user.tsv> <标签>：非空就按时间戳存一份进 pso_seed/<程序号>/（出库时 graphics/tools/direct/pso_seed.py 跨文件按行去重合并）；空 / 没有只记一行、不判红
   local u; u=$(echo "$TIDL" | tr 'a-f' 'A-F')
-  if [ -s "$1" ]; then local d=${S2A_PSO_SEED_DIR:-$HOME/.s2arm/run/s2arm/pso_seed}/$u f; f=$(basename "$J")_${O##*_}_$2.tsv; mkdir -p "$d"
+  if [ -s "$1" ]; then local d=${S2A_PSO_SEED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/pso_seed}/$u f; f=$(basename "$J")_${O##*_}_$2.tsv; mkdir -p "$d"
     cp "$1" "$d/$f.tmp" && mv "$d/$f.tmp" "$d/$f"; t "管线种子来源（$2）：拉回 pso_user.tsv $(grep -c . "$1") 行 → pso_seed/$u/$f"
   else rm -f "$1"; t "管线种子来源（$2）：机上没有 wire/$u/pso_user.tsv（没装过 / 通用模式局 / 没建过管线）"; fi
 }
@@ -189,7 +189,7 @@ fi
 #   （11-02 改：原先比第一行，可每次开机第一行都是同一行「窗口已占 …」，jhz 手玩智慧的再现 v3 那局没认出来，被体验线紧接着起的对照局覆盖；只部署也照样抢救——收推送会起一次 App、轮转 host.log）
 #   连同往局日志 logs/host-*.log 存到 S2A_JHZ_PLAY_DIR（缺省 ~/.s2arm/run/s2arm/jhz_play）/<款>_<时刻>_机<号>/，tools/firstuse_scan.py 扫首遇现编，> 0 记进记分板读数并写着色器线收件箱。只读，不判格
 jhzplay() {
-  local hm="$BD/hostlog_head_${UD}_$B" jp=${S2A_JHZ_PLAY_DIR:-$HOME/.s2arm/run/s2arm/jhz_play} h d sc n pk sd
+  local hm="$BD/hostlog_head_${UD}_$B" jp=${S2A_JHZ_PLAY_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/jhz_play} h d sc n pk sd
   # 这是开局第一次拉文件：用 probe_from 当通道探针（挂住重试一次、还挂判红），不白等 60 秒再到后面 app.id 那里挂第二次
   probe_from Documents/host.log "$O/prev_host.log" && [ -s "$O/prev_host.log" ] || { rm -f "$O/prev_host.log"; return 0; }
   h=$(shasum -a 256 < "$O/prev_host.log" | cut -c1-16)
@@ -203,7 +203,7 @@ jhzplay() {
   CPF_T=60 cpfrom Documents/logs "$d/logs" > /dev/null 2>&1 || rm -rf "$d/logs"
   for h in "$d"/logs/host-*.log; do [ -s "$h" ] && [ "$(shasum -a 256 < "$h" | cut -c1-16)" != "$(cat "$hm")" ] || rm -f "$h"; done
   rmdir "$d/logs" 2> /dev/null
-  sd=${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched}; pk=$(bash -c ". '$sd/installed/${DEV:-x}_$B' 2>/dev/null; echo \${COMMIT:-?}")
+  sd=${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}; pk=$(bash -c ". '$sd/installed/${DEV:-x}_$B' 2>/dev/null; echo \${COMMIT:-?}")
   sc=$(python3 "$TOOLS/firstuse_scan.py" "$d" 2>/dev/null); n=${sc%%	*}; echo "包 ${pk}；${sc#*	}" > "$d/firstuse.txt"
   t "两局测试之间机上有人自己玩过（host.log 不是上一局测试收局时那份）：日志$([ -s "$d/frames.tsv" ] && echo " + frames.tsv")存 ${d}；首遇现编 ${n:-?}（${sc#*	}）"
   [ "${n:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -585,7 +585,7 @@ for f in ap_summary.json threads.txt; do ptry "Documents/$f" "$O/$f" 10 2> /dev/
 # 记下本局 host.log / frames.tsv 的内容哈希（下局起局前用来认「中间有没有人自己玩过」，见 jhzplay）；本局不是冷局但扫出首遇现编也报着色器线（冷局归首局格判）
 [ -s "$O/host.log" ] && shasum -a 256 < "$O/host.log" | cut -c1-16 > "$BD/hostlog_head_${UD}_$B"
 [ -s "$O/frames.tsv" ] && shasum -a 256 < "$O/frames.tsv" | cut -c1-16 > "$BD/frames_sha_${UD}_$B"
-if [ "${COLD:-0}" != 1 ] && [ -s "$O/host.log" ]; then FU=$(python3 "$TOOLS/firstuse_scan.py" "$O" 2>/dev/null); [ "${FU%%	*}" -gt 0 ] 2>/dev/null && { t "非冷局首遇现编 ${FU%%	*}（${FU#*	}）"; mkdir -p "${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched}/inbox"; echo "$(date '+%m-%d %H:%M:%S') 🟡 非冷局首遇现编 ${FU%%	*} 次：${GAME:-$B}（${FU#*	}；局 ${O}）" >> "${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched}/inbox/画面着色器.log"; }; fi   # 自动玩家轨迹 / 小结（走路线的局没有）、全线程现场（崩溃 / GPU 卡死前原生层写）；空 = 本局没写
+if [ "${COLD:-0}" != 1 ] && [ -s "$O/host.log" ]; then FU=$(python3 "$TOOLS/firstuse_scan.py" "$O" 2>/dev/null); [ "${FU%%	*}" -gt 0 ] 2>/dev/null && { t "非冷局首遇现编 ${FU%%	*}（${FU#*	}）"; mkdir -p "${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}/inbox"; echo "$(date '+%m-%d %H:%M:%S') 🟡 非冷局首遇现编 ${FU%%	*} 次：${GAME:-$B}（${FU#*	}；局 ${O}）" >> "${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}/inbox/画面着色器.log"; }; fi   # 自动玩家轨迹 / 小结（走路线的局没有）、全线程现场（崩溃 / GPU 卡死前原生层写）；空 = 本局没写
 # 本局新遇到的着色器（画面·着色器线 C①，10-21 总指挥定：遇到包里没有的代码自动收回、并入下一版包）：起局时 graphics/loop/ShaderPack.cs 把包内 Ryujinx 缓存种进
 #   Documents/S2A/ryujinx/games/<程序号>/cache/shader/，运行中 Ryujinx 往后追加包里没有的程序；收局（成功 / 红局都拉）拉回 shcache_rt/，收集与重烘归着色器线。
 #   程序号取包里 shaders/shcache/<程序号>/ 那一层；拉不到只记一行、不判红

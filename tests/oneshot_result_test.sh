@@ -73,7 +73,7 @@ cat > "$TMP/mock-env" <<'EOF'
 sleep() { SECONDS=$((SECONDS + 1501)); }
 timeout() { shift; "$@"; }
 grep() {
-  if [ "${1:-}" = -l ] && [ "$#" = 3 ] && [[ "$3" == "$HOME/.s2arm/run/s2arm/sched/jobs/"* ]]; then
+  if [ "${1:-}" = -l ] && [ "$#" = 3 ] && [[ "$3" == "${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched/jobs/"* ]]; then
     /usr/bin/grep -l "$2" "$S2A_ONESHOT_TEST_DIR/jobs/"*.job
   else
     /usr/bin/grep "$@"

@@ -9,7 +9,7 @@ set -u
 G=${1:?款}; SRC=${2:?原始游戏数据目录}; shift 2; DEV=2; ACT=120
 for a in "$@"; do case $a in --device=*) DEV=${a#*=};; --act=*) ACT=${a#*=};; esac; done
 H=$(cd "$(dirname "$0")/.." && pwd); . "$H/tools/machine.sh"; TS=$(date +%m%d%H%M%S)
-export S2A_ROOTS=$HOME/.s2arm/run/s2arm/roots_priv/oneshot_$TS S2A_ROOTS_NO_BOOT=1
+export S2A_ROOTS=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots_priv/oneshot_$TS S2A_ROOTS_NO_BOOT=1
 # 管线归档只出目标机那一个系统大版本（帧率能耗线 8272445：GPU 二进制绑系统大版本，全版本会让管线段翻倍）：读目标机 ProductVersion 传 S2A_PSO_OS
 UD=$(S2A_DEVICE_NO_USB_CHECK=1 bash -c "source '$H/tools/devices.sh'; s2a_device $DEV > /dev/null 2>&1 && echo \$SW_IOS_UDID")
 if [ "$DEV" = 1 ]; then PV=$(ideviceinfo -u "$UD" -k ProductVersion 2>/dev/null); else PV=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "${S2A_MINI:-${S2A_MINI_DEFAULT:-}}" "PATH=/opt/homebrew/bin:\$PATH ideviceinfo -u $(printf %q "$UD") -k ProductVersion" 2>/dev/null); fi
@@ -36,7 +36,7 @@ step 入队 env MERGE_OWNER=测试出包 bash "$H/tools/sched.sh" submit "$G" --
 s0=$SECONDS; JF=
 while [ -z "$JF" ] && [ $((SECONDS - s0)) -lt 1500 ]; do   # 设备被别的局占着时 once 一个都不派、立即返回：反复派到认出本次作业为止（按标签认，同款别的线的局可能同时在跑）
   timeout 1500 bash "$H/tools/sched.sh" once > /dev/null 2>&1
-  JF=$(grep -l "os$TS" "$HOME/.s2arm/run/s2arm/sched/jobs/${G}_"*.job 2>/dev/null | head -1); [ -n "$JF" ] || sleep 15
+  JF=$(grep -l "os$TS" "${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched/jobs/${G}_"*.job 2>/dev/null | head -1); [ -n "$JF" ] || sleep 15
 done
 [ -n "$JF" ] || { echo "🔴 没有派出本次装机跑局作业（os${TS}），不能当成成功"; exit 1; }
 J=${JF%.job}/

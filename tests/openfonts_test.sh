@@ -15,7 +15,7 @@
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd)
 PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}
-OUT=${1:-$HOME/.s2arm/run/s2arm/openfonts}
+OUT=${1:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/openfonts}
 [ -x "$PY" ] || { echo "不通 解释器 $PY 不存在"; exit 1; }
 "$PY" -c 'import fontTools, pathops' 2> /dev/null || { echo "不通 $PY 缺 fonttools / skia-pathops（pip install -r pack/fonts/requirements.txt）"; exit 1; }
 [ -d "$OUT" ] || { echo "不通 产物目录 ${OUT} 不存在（先跑 pack/fonts/make_open_fonts.py ${OUT}）"; exit 1; }

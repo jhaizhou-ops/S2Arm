@@ -10,12 +10,12 @@
 set -u
 B=${1:?批次目录}; R=$(cd "$(dirname "$0")/../.." && pwd); PY=${PY:-$HOME/.s2arm/venv/bin/python3}; [ -x "$PY" ] || PY=python3
 RT=${CENSUS_REG_REPO:-$HOME/.s2arm/wt/census_reg}; BASE=${CENSUS_REG_BASE:-origin/main}
-TRAIN=${CENSUS_REG_TRAIN:-$HOME/.s2arm/run/s2arm/bin/train-now/train.sh}
+TRAIN=${CENSUS_REG_TRAIN:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/train-now/train.sh}
 red() { echo "【红】普查收批登记：$*"; exit 1; }
 [ -d "$B" ] || red "没有批次目录 $B"
 # 收批先删机械盘读锁登记（11-03 运维线）：起批脚本把批名写进 locks/hdd_read.lock.official（登记表非空时只有登记批能拿读锁），
 #   收批不删 → 死名单一直占着、别的读者全排着等。放在下面任何一步红退出之前；写 .tmp 再 mv（读锁每 0.3 秒在读这份文件）
-OFF=${CENSUS_HDD_OFFICIAL:-$HOME/.s2arm/run/s2arm/locks/hdd_read.lock.official}; bn0=$(basename "$(cd "$B" && pwd)")
+OFF=${CENSUS_HDD_OFFICIAL:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/locks/hdd_read.lock.official}; bn0=$(basename "$(cd "$B" && pwd)")
 if [ -f "$OFF" ] && tr -s ' \t' '\n\n' < "$OFF" | grep -qxF "$bn0"; then
   tr -s ' \t' '\n\n' < "$OFF" | grep -vxF "$bn0" | grep -v '^$' > "$OFF.tmp.$$"; mv -f "$OFF.tmp.$$" "$OFF" && echo "普查收批登记：读锁登记表删掉 $bn0"
 fi

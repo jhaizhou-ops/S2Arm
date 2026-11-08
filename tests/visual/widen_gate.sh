@@ -25,8 +25,8 @@
 set -u
 R=$(pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 source "$R/tests/visual/crash_keep.sh"   # 回放器被信号打死时留崩溃报告与日志（不稳定项 15）
-RECS=${S2A_GAL_RECS:-$HOME/.s2arm/run/s2arm/replay/gal}
-C=${S2A_WIDEN_GATE_CACHE:-$HOME/.s2arm/run/s2arm/cache/widen_gate}
+RECS=${S2A_GAL_RECS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/replay/gal}
+C=${S2A_WIDEN_GATE_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/widen_gate}
 TAB=$R/tests/visual/widen_gate.tsv
 t0=$SECONDS; red=0
 die() { echo "🔴 $1"; echo "宽屏门禁：期望 九款中间区 / 出图参数 / 回放全过 → 真结果 $1，红"; exit 1; }

@@ -8,7 +8,7 @@
 # 只核宿主路：macOS 上 APK 门禁不跑 docker 镜像步（#1299 / #1327，android/gate.sh run_apk_gate），备 docker 路是白备、核它报红是假红。
 set -u
 [ "$(uname -s)" = Darwin ] || { echo "非 macOS：本机不跑安卓 APK 门禁，跳过"; exit 0; }
-TD=${S2A_TRAIN_DIR:-$HOME/.s2arm/run/s2arm/train}; LK=${S2A_ANDROID_PREPARE_LOCK:-$HOME/.cache/s2arm-build/post-prepare.lock}
+TD=${S2A_TRAIN_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/train}; LK=${S2A_ANDROID_PREPARE_LOCK:-$HOME/.cache/s2arm-build/post-prepare.lock}
 mkdir -p "$(dirname "$LK")"
 until mkdir "$LK" 2> /dev/null; do
   p=$(cat "$LK/pid" 2> /dev/null); kill -0 "$p" 2> /dev/null || { rm -rf "$LK"; continue; }

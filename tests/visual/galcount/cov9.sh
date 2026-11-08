@@ -4,7 +4,7 @@
 # 用法：bash tests/visual/galcount/cov9.sh <输出目录>   → <输出目录>/<录像名>.tsv 各一份 + cov_matrix.tsv（键 × 九款，全部次数）
 # 语料源（只读）：run/s2arm/replay/gal/<款>/*.rec.zst（逐份解压到临时目录、计完即删）+ ~/.s2arm/gate_data/diffrec/*.rec + run/s2arm/visual/recs/*.rec
 set -u -o pipefail
-O=${1:?输出目录}; S=${S2A_RUN:-$HOME/.s2arm/run/s2arm}; H=$(cd "$(dirname "$0")" && pwd)
+O=${1:?输出目录}; S=${S2A_RUN:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm}; H=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$O/out" || exit 1
 B=$O/build; timeout 300 dotnet build -c Release --artifacts-path "$B" "$H/galcount.csproj" > "$O/build.log" 2>&1 || { echo "【红】galcount 编译失败，见 $O/build.log"; exit 1; }
 X=$(ls "$B"/bin/galcount/release*/galcount 2> /dev/null | head -1); [ -x "$X" ] || { echo "【红】找不到 galcount 可执行文件（${B}）"; exit 1; }

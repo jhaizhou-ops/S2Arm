@@ -8,7 +8,7 @@ TXT=
 if [ -s "$P" ]; then
   if [ -n "${S2A_OCR:-}" ]; then TXT=$($S2A_OCR "$P" 2> /dev/null)
   else
-    K=$(shasum -a 256 < "$H/screen_text.swift" | cut -c1-12); BIN=${S2A_BIN_CACHE:-$HOME/.s2arm/run/s2arm/bin}/screen_text_$K
+    K=$(shasum -a 256 < "$H/screen_text.swift" | cut -c1-12); BIN=${S2A_BIN_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin}/screen_text_$K
     [ -x "$BIN" ] || { mkdir -p "$(dirname "$BIN")" && swiftc -O "$H/screen_text.swift" -o "$BIN.tmp.$$" > /dev/null 2>&1 && mv "$BIN.tmp.$$" "$BIN"; rm -f "$BIN.tmp.$$"; }
     [ -x "$BIN" ] && TXT=$("$BIN" "$P" 2> /dev/null)
   fi

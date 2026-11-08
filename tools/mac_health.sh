@@ -17,7 +17,7 @@ export S2A_CS=${S2A_CS:-1}   # run_mac.sh 里 make host 要链 C#（服务 + Ryu
 #   HEALTH_PAR > 1 时几局也不再各自并行 make 抢写同一份构建产物
 bash "$R/tools/host_build.sh" > "$D/build.out" 2>&1 || { echo "🔴 宿主构建失败（见 $D/build.out）"; exit 2; }
 export S2A_HOST_PREBUILT=1
-root() { local v=HEALTH_ROOT_$1; [ -n "${!v:-}" ] && { echo "${!v}"; return; }; (cd -P "${HEALTH_ROOT:-$HOME/.s2arm/run/s2arm/roots}/$1@现行" 2>/dev/null && pwd); }
+root() { local v=HEALTH_ROOT_$1; [ -n "${!v:-}" ] && { echo "${!v}"; return; }; (cd -P "${HEALTH_ROOT:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/$1@现行" 2>/dev/null && pwd); }
 one() {
   local g=$1 o src sn rc t0=$SECONDS; o=$D/$g; rm -rf "$o"; mkdir -p "$o"
   local hv=HEALTH_ROOT_$g   # 用现行产物根时先刷到本树的阶段键（落后的产物根起局会卡死，读数作废）；显式给了产物根的原样用
@@ -25,7 +25,7 @@ one() {
     echo "现行产物根刷新红：$(tail -1 "$o/refresh.log")" > "$o/skip"; echo "[$(date +%T)] 🔴 $g 跳过：$(cat "$o/skip")"; return; fi
   src=$(root "$g"); [ -n "$src" ] && [ -d "$src" ] || { echo "没有 $g 的现行产物根" > "$o/skip"; echo "[$(date +%T)] $g 跳过：没有现行产物根"; return; }
   sn=$o/in_snap; python3 "$R/tools/clonedir.py" "$src" "$sn" || { echo "[$(date +%T)] 🔴 $g 快照失败"; return; }
-  local sa; sa=${S2A_SAVES:-$HOME/.s2arm/run/s2arm/saves}/${g}_$(xxd -s 0x40 -l 16 -p "$sn/exefs/main" 2>/dev/null)   # 测试资产存档（按 main 构建号），有就带存档起局
+  local sa; sa=${S2A_SAVES:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/saves}/${g}_$(xxd -s 0x40 -l 16 -p "$sn/exefs/main" 2>/dev/null)   # 测试资产存档（按 main 构建号），有就带存档起局
   unset S2A_SAVE_DIR S2A_SYSTEM_TIME   # 存档交给 runtime/run_mac.sh 缺省（tools/mac_save.sh：按同一构建号取存档、拷副本到局目录，原件只读；10-24 前这里直接给原件路径）
   [ -s "$sa/language" ] && export S2A_SYSTEM_LANGUAGE=$(cat "$sa/language") || unset S2A_SYSTEM_LANGUAGE; [ -s "$sa/region" ] && export S2A_REGION=$(cat "$sa/region") || unset S2A_REGION
   [ -s "$sa/timezone" ] && export S2A_TIMEZONE=$(cat "$sa/timezone") || unset S2A_TIMEZONE   # 设备时区（与对拍真值同一份资产，动森岛上时钟按它走）

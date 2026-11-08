@@ -14,7 +14,7 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/machine.sh"
 _S2A_DEV_CODE_PHONE=00000000-0000000000000000
 _S2A_DEV_CODE_LIST="1|测试机1|00000000-0000000000000001|00000000-0000-0000-0000-000000000001|$HOME/sw-work/run/ios/device.lock|$HOME/sw-work/run/ios|iphone
-2|测试机2|00000000-0000000000000002|00000000-0000-0000-0000-000000000002|$HOME/.s2arm/run/devq2/device2.lock|$HOME/.s2arm/run/devq2/battery|iphone
+2|测试机2|00000000-0000000000000002|00000000-0000-0000-0000-000000000002|${S2A_RUN_ROOT:-$HOME/.s2arm/run}/devq2/device2.lock|${S2A_RUN_ROOT:-$HOME/.s2arm/run}/devq2/battery|iphone
 3|Duo|00000000-0000000000000003|00000000-0000-0000-0000-000000000003|$HOME/.s2arm/devices/00000000-0000000000000003/device.lock|$HOME/.s2arm/devices/00000000-0000000000000003/battery|duo"
 if [ "${S2A_DEVICES_NO_LOCAL:-0}" = 1 ]; then
   S2A_DAILY_PHONE=$_S2A_DEV_CODE_PHONE; S2A_DEVICES=$_S2A_DEV_CODE_LIST
@@ -51,7 +51,7 @@ s2a_device_load() {
 #   按（负载，没装这款容器，机号）取最小；同包名的容器记录 = 调度的现装登记 <调度目录>/installed/<机号>_<包名>（记忆 place-game-on-device-with-container-1102）。
 #   选中即在 <锁>.claim/ 记一个占位（调用方 pid），取锁排号时 devlock 清掉；两家同时选不会挤到同一台（选机整段在 ~/.s2arm/devpick 互斥里）
 s2a_device_pick() {
-  local spec=${1:-any} b=${2:-} sd=${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched} n best= bk= k ld u p mx=${S2A_DEVICE_PICK_LOCK:-$HOME/.s2arm/devpick} i L
+  local spec=${1:-any} b=${2:-} sd=${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched} n best= bk= k ld u p mx=${S2A_DEVICE_PICK_LOCK:-$HOME/.s2arm/devpick} i L
   [ -n "${S2A_TEST_ROOT:-}" ] && mx=$S2A_TEST_ROOT/devpick
   mkdir -p "${mx%/*}"; for i in $(seq 100); do mkdir "$mx" 2> /dev/null && break; p=$(cat "$mx/pid" 2> /dev/null); [ -n "$p" ] && ! kill -0 "$p" 2> /dev/null && rm -rf "$mx"; sleep 0.1; done; echo $$ > "$mx/pid" 2> /dev/null
   for n in $(s2a_device_ids "$spec"); do

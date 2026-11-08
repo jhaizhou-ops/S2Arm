@@ -11,8 +11,8 @@
 set -u
 G=${1:?款}; REG=0; [ "${2:-}" = --register ] && REG=1
 R=$(cd "$(dirname "$0")/.." && pwd); C=$(git -C "$R" rev-parse --short=9 HEAD) || exit 1
-SD=${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched}; RT=${S2A_ROOTS_SHARED:-$HOME/.s2arm/run/s2arm/roots}
-OUTR=${S2A_APP_ONLY_DIR:-$HOME/.s2arm/run/s2arm/apponly}; t0=$SECONDS
+SD=${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}; RT=${S2A_ROOTS_SHARED:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}
+OUTR=${S2A_APP_ONLY_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/apponly}; t0=$SECONDS
 BC=$(. "$SD/pkgs/$G.env" 2> /dev/null; echo "${COMMIT:-}"); BP=$(. "$SD/pkgs/$G.env" 2> /dev/null; echo "${PKG:-}")
 [ -n "$BC" ] && [ -d "$BP" ] || { echo "【黄】$G 没有登记包（$SD/pkgs/$G.env），走正常出包"; exit 2; }
 B=$(cd -P "$RT/$G@pkg-$BC" 2> /dev/null && pwd) || { echo "【黄】$G 登记包 $BC 的产物根 $RT/$G@pkg-$BC 不在了，走正常出包"; exit 2; }

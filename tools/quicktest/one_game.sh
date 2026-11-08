@@ -26,7 +26,7 @@
 set -u
 SRC=${1:-}; [ -n "$SRC" ] && [ -d "$SRC" ] || { echo "用法：bash tools/quicktest/one_game.sh <源包文件夹 | 解包目录> [<输出目录>]"; exit 2; }
 # 源在 exfat 机械盘（单读者）且我方读锁脚本存在 → 默认走读锁（S2A_HDD_READ 显式设了含置空就照它）：快测直读与普查拷贝、别线解包并发抢磁头，实测三读者时 10 MB 小读 15 秒读不完（11-02）。读锁脚本不存在（贡献者机器）= 不变
-if [ -z "${S2A_HDD_READ+x}" ] && [ -x "$HOME/.s2arm/run/s2arm/bin/hdd_read.sh" ] && mount | grep -q "^$(df -P "$SRC" 2> /dev/null | awk 'NR==2{print $1}') on .*(exfat"; then export S2A_HDD_READ=$HOME/.s2arm/run/s2arm/bin/hdd_read.sh; fi
+if [ -z "${S2A_HDD_READ+x}" ] && [ -x "${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/hdd_read.sh" ] && mount | grep -q "^$(df -P "$SRC" 2> /dev/null | awk 'NR==2{print $1}') on .*(exfat"; then export S2A_HDD_READ=${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/hdd_read.sh; fi
 FX=; [ -f "$SRC/exefs/main" ] && [ -f "$SRC/unpack.tsv" ] && FX=$(cd "$SRC" && pwd -P)
 PK=; [ -f "$SRC/.qt_packed" ] && PK=$(cd "$SRC" && pwd -P)   # 只跑局：源是 QT_PACK_ONLY 留下的工作目录
 ROOT=$(cd "$(dirname "$0")/../.." && pwd); PY=${S2A_PY:-$HOME/.s2arm/venv/bin/python3}; [ -x "$PY" ] || PY=python3

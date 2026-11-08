@@ -86,7 +86,7 @@ case $CENSUS_SAVES in
   *) echo "🔴 CENSUS_SAVES 只认 none（缺省，不带存档）/ lib（存档复判批）：$CENSUS_SAVES"; exit 2;;
 esac
 # <<< save_pick
-[ -f "$HOME/.s2arm/run/s2arm/bin/safe_rm.sh" ] && export S2A_SAFE_RM=${S2A_SAFE_RM:-$HOME/.s2arm/run/s2arm/bin/safe_rm.sh}
+[ -f "${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/safe_rm.sh" ] && export S2A_SAFE_RM=${S2A_SAFE_RM:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/safe_rm.sh}
 bat_ok() { [ -e "$B/.census_batch" ] && return 0; echo "🔴【红】普查目录 $B 不见了（外接盘掉了？），停整批，不往内置盘补写" >&2; kill -TERM $$; exit 1; }
 if [ -z "$SRC" ]; then   # 资料盘索引表：census.py src_files 按表取路径
   [ -n "${S2A_LIBRARY_INDEX:-}" ] || { echo "🔴 没给 --src，也没设 S2A_LIBRARY_INDEX（资料盘索引表）"; exit 2; }
@@ -373,7 +373,7 @@ runone() {   # runone <机器> <键> [道]：解包目录同步到跑局那台 �
     PSYNC=(--sync "~/$REL/work/$k/patch"); PULLS+=(--pull "~/$REL/work/$k/r_patch/logs=$W/r_patch/logs" --pull "~/$REL/work/$k/r_patch/结果.tsv=$W/r_patch/结果.tsv"); fi
   S2A_REMOTE_SLOTS=$RLANES S2A_REMOTE_LONG="普查：远端出包 + Mac 局 $RUN_S 秒" bash "$R/tools/remote.sh" --host "$h" --name "${NAME}_${h}$([ "$ln" = 1 ] || echo "_$ln")" --timeout "${CENSUS_REMOTE_S:-${WALL:-5400}}" \
     $([ "$AIRLOCAL" = 1 ] || echo "--sync ~/$REL/$X") ${PSYNC[@]+"${PSYNC[@]}"} "${PULLS[@]}" -- \
-    bash -c "${RSAVE:-}S2A_SAFE_RM=\$HOME/.s2arm/run/s2arm/bin/safe_rm.sh; [ -f \$S2A_SAFE_RM ] || unset S2A_SAFE_RM; export S2A_SAFE_RM; python3 tools/census/dcache_gc.py \"\$HOME/.s2arm/run/s2arm/census_dcache\" ${CENSUS_REMOTE_DCACHE_GB:-40} $k; env ${CENSUS_REMOTE_SLOT_RUN:+S2A_SLOT_RUN=\"$CENSUS_REMOTE_SLOT_RUN\" S2A_SLOTS=1 S2A_SLOT_DIR=\"\$HOME/.s2arm/run/s2arm/slots_census\"} S2A_VISION_PROXY=${CENSUS_VISION_PROXY-http://127.0.0.1:18118} S2A_DIRECT_CACHE=\"\$HOME/.s2arm/run/s2arm/census_dcache/$k\" $FAB QT_SLOT=census QT_FULL=1 QT_DUAL=1 QT_NATIVE_TIER=${CENSUS_NATIVE_TIER:-1} QT_UNPACK_S=$us ${AIRLOCAL:+QT_KEEP_EXEFS=$AIRLOCAL} QT_RUN_S=$RUN_S QT_NAME=$k QT_TITLE_ID=$k S2A_SCREEN_W=$SW bash -c 'bash tools/quicktest/one_game.sh \"\$1\" \"\$2\"; rc=\$?; $RP bash tools/census/patch_run.sh \"\$1\" \"\$2\" $k; exit \$rc' _ \"$([ "$AIRLOCAL" = 1 ] && echo "$AIRSRC/$k" || echo "\$HOME/$REL/$X")\" \"\$HOME/$REL/work/$k/r\"" > "$W/run.out" 2>&1; rc=$?
+    bash -c "${RSAVE:-}S2A_SAFE_RM=\${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/bin/safe_rm.sh; [ -f \$S2A_SAFE_RM ] || unset S2A_SAFE_RM; export S2A_SAFE_RM; python3 tools/census/dcache_gc.py \"\${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/census_dcache\" ${CENSUS_REMOTE_DCACHE_GB:-40} $k; env ${CENSUS_REMOTE_SLOT_RUN:+S2A_SLOT_RUN=\"$CENSUS_REMOTE_SLOT_RUN\" S2A_SLOTS=1 S2A_SLOT_DIR=\"\${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/slots_census\"} S2A_VISION_PROXY=${CENSUS_VISION_PROXY-http://127.0.0.1:18118} S2A_DIRECT_CACHE=\"\${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/census_dcache/$k\" $FAB QT_SLOT=census QT_FULL=1 QT_DUAL=1 QT_NATIVE_TIER=${CENSUS_NATIVE_TIER:-1} QT_UNPACK_S=$us ${AIRLOCAL:+QT_KEEP_EXEFS=$AIRLOCAL} QT_RUN_S=$RUN_S QT_NAME=$k QT_TITLE_ID=$k S2A_SCREEN_W=$SW bash -c 'bash tools/quicktest/one_game.sh \"\$1\" \"\$2\"; rc=\$?; $RP bash tools/census/patch_run.sh \"\$1\" \"\$2\" $k; exit \$rc' _ \"$([ "$AIRLOCAL" = 1 ] && echo "$AIRSRC/$k" || echo "\$HOME/$REL/$X")\" \"\$HOME/$REL/work/$k/r\"" > "$W/run.out" 2>&1; rc=$?
   fi
   # 接口缺口（11-01 总指挥：常设预检并进普查、不另设门禁步骤）：解包的 exefs 静态读 + 这局 host.log 运行期红行（Slay the Spire 这类按名现查的只在运行期出现）→ $W/api_gap，总表「接口缺口」列
   [ -n "$PKL" ] && [ -d "$PKL" ] && mkdir -p "$W/r/logs/$k" && rsync -a --ignore-existing --exclude=/exefs "$PKL/" "$W/r/logs/$k/"   # 出包段日志并进局日志（局里同名的不盖）
@@ -563,7 +563,7 @@ rwait() {
 # local_paused：本机道暂停旗有主才算数（11-04 压测：凌晨挂的空旗主人早没了，4 道静默空转 45 分钟）。
 #   旗文件内容 = 挂旗进程的 pid（挂法：echo <活着的 pid> > 旗）；进程活着 → 暂停（返回 0）；空文件 / 进程不在 → 写一行【红】「遗留暂停旗无主」、删旗、不暂停
 local_paused() {
-  local f=${S2A_CENSUS_LOCAL_PAUSE:-$HOME/.s2arm/run/s2arm/locks/census_local_pause} p
+  local f=${S2A_CENSUS_LOCAL_PAUSE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/locks/census_local_pause} p
   [ -e "$f" ] || return 1
   p=$(head -1 "$f" 2> /dev/null | tr -cd '0-9')
   [ -n "$p" ] && kill -0 "$p" 2> /dev/null && return 0
@@ -585,7 +585,7 @@ runner() {   # runner <机器> [道]：取最早出好的一款（mv 到 running
     if [ -z "$k" ]; then [ -f "$B/.pack_done" ] && break; sleep 10; continue; fi
     # 本机先看机器槽有空位再领款（10-31：3 槽被出包实验单占满时，本机 3 道把待跑款全领走、各自在 slot.sh 里干等 36 分钟，Air 道一直领不到款闲着）
     # 本机道暂停旗（11-01 总指挥：体验线判帧率的局要低负载）：有主的旗在就不接新款，在跑的局不动；撤旗或挂旗进程退出即恢复（local_paused）。旗 = ${S2A_CENSUS_LOCAL_PAUSE} 缺省 ~/.s2arm/run/s2arm/locks/census_local_pause
-    [ "$h" = local ] && local_paused && { rwait "$RW" "本机 ${ln} 道：暂停旗在（挂旗进程 $(head -1 "${S2A_CENSUS_LOCAL_PAUSE:-$HOME/.s2arm/run/s2arm/locks/census_local_pause}" 2> /dev/null) 活着；撤旗或它退出即恢复）"; sleep 20; continue; }
+    [ "$h" = local ] && local_paused && { rwait "$RW" "本机 ${ln} 道：暂停旗在（挂旗进程 $(head -1 "${S2A_CENSUS_LOCAL_PAUSE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/locks/census_local_pause}" 2> /dev/null) 活着；撤旗或它退出即恢复）"; sleep 20; continue; }
     [ "$h" = local ] && ! local_slot_free && { rwait "$RW" "本机 ${ln} 道：机器槽没有空位"; sleep 15; continue; }
     # 本机负载过高不接新款（11-01 总指挥：本机路在 1 分钟负载 > CENSUS_LOCAL_LOAD_MAX（缺省 36）时停接，已在跑的不动）
     [ "$h" = local ] && [ "$(sysctl -n vm.loadavg | awk '{print int($2)}')" -gt "${CENSUS_LOCAL_LOAD_MAX:-36}" ] && { rwait "$RW" "本机 ${ln} 道：1 分钟负载 > ${CENSUS_LOCAL_LOAD_MAX:-36}"; sleep 60; continue; }

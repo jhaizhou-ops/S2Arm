@@ -117,7 +117,7 @@ if [ ${#L1[@]} -gt 0 ]; then
   fi
   say "第一层：$TIER 档，改 $NCH 个文件 → 跑 ${#L1[@]} 步（$([ "$CHOST" = local ] && echo 本机 || echo "派 ${CHOST}，本机不排负载队")）；日志 $OUT/gate.log"
   S2A_REPO=$PWD GATE_HOST=$CHOST GATE_SCAN_BASE="$MB" GATE_TIER=$TIER GATE_CHANGED="$(tr '\n' ' ' < <(printf '%s\n' "$CH"))" GATE_RERUN="$KEEP" GATE_REMOTE_NAME=contrib-$(basename "$PWD") \
-    env $([ "$CHOST" != local ] && echo GATE_NO_LOADQ=1) bash "$ITO" "$CTO" $((CTO * 3)) "$OUT" "${S2A_REMOTE_LOGS:-$HOME/.s2arm/run/s2arm/remote}/contrib-$(basename "$PWD")" -- bash tools/gate.sh > "$OUT/gate.log" 2>&1; RC=$?
+    env $([ "$CHOST" != local ] && echo GATE_NO_LOADQ=1) bash "$ITO" "$CTO" $((CTO * 3)) "$OUT" "${S2A_REMOTE_LOGS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/remote}/contrib-$(basename "$PWD")" -- bash tools/gate.sh > "$OUT/gate.log" 2>&1; RC=$?
   grep '^工具链提示：' "$OUT/gate.log"   # 原始诊断可见，但不进入步骤计数
   grep -E '^(🟢|🔴) ' "$OUT/gate.log"
   SUM=$(tail -1 "$OUT/gate.log")
@@ -181,7 +181,7 @@ if [ "$CHOST" = local ] && [ "${REDN:-0}" -gt 0 ] && [ $RC != 0 ] && [ $RC != 75
           grep -v '^路由：' <<< "$BL" | cut -f1 > "$OUT/base_steps.txt"
           RB=$(tr '\t' '\n' < <(printf '%s\n' "$RST") | grep -Fxf "$OUT/base_steps.txt" | awk 'NR > 1 { printf "\t" } { printf "%s", $0 }')
           say "红步与基线对照：在分叉点 $(git rev-parse --short=9 "$MB") 的临时工作树里只重跑本机红、基线也有的 $(tr '\t' '\n' <<< "$RB" | grep -c .) 步（本机超时的 $(grep -c . <<< "$TOS") 步不重跑；CONTRIB_BASE_RERUN=1）"
-          if [ -n "$RB" ]; then (cd "$BW/t" && S2A_REPO=$PWD GATE_HOST=local GATE_SCAN_BASE="$MB" GATE_TIER=$TIER GATE_CHANGED="$(tr '\n' ' ' < <(printf '%s\n' "$CH"))" GATE_RERUN="$RB" bash "$ITO" "$CTO" $((CTO * 3)) "$OUT" "${S2A_REMOTE_LOGS:-$HOME/.s2arm/run/s2arm/remote}/contrib-$(basename "$PWD")" -- bash tools/gate.sh) > "$OUT/base_gate.log" 2>&1; fi
+          if [ -n "$RB" ]; then (cd "$BW/t" && S2A_REPO=$PWD GATE_HOST=local GATE_SCAN_BASE="$MB" GATE_TIER=$TIER GATE_CHANGED="$(tr '\n' ' ' < <(printf '%s\n' "$CH"))" GATE_RERUN="$RB" bash "$ITO" "$CTO" $((CTO * 3)) "$OUT" "${S2A_REMOTE_LOGS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/remote}/contrib-$(basename "$PWD")" -- bash tools/gate.sh) > "$OUT/base_gate.log" 2>&1; fi
         fi
       fi
       # 基线工作树的路径先换成本仓库的：同一项失败的错误原文才对得上（known_red 只归一化临时目录那一级，后面的路径保留）
@@ -259,7 +259,7 @@ RAN=${#L1[@]}
 echo; echo "===== 贴进 PR 的摘要（也在 $OUT/summary.md）====="; cat "$OUT/summary.md"
 # 入队凭据（维护者机器上才有列车目录）：<提交全号> → 结论 / 档 / 基线全号 / 跑了几步 / 在哪跑 / 时刻；tools/train.sh enqueue 只认结论绿、且基线是待合提交祖先的
 #   基线记分叉点 MB（本次自检实际对比的 main 提交），不记当时 origin/main 的头：自检十几分钟里 main 会前进，记头的话凭据永远「基线不在本支历史里」（10-25 merge349 / pushpak 绿了照样被拒）
-CKD=${S2A_TRAIN_DIR:-$HOME/.s2arm/run/s2arm/train}
+CKD=${S2A_TRAIN_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/train}
 [ -d "$CKD" ] && mkdir -p "$CKD/checks" && printf '结论	%s
 档	%s
 基线	%s

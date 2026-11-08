@@ -6,7 +6,7 @@
 # 测试机名单，列：编号|代号|硬件标识|CoreDevice 标识|锁目录|电量目录
 # S2A_DAILY_PHONE_LOCAL='日常手机的硬件标识'
 # S2A_DEVICES_LOCAL="1|测试机1|<硬件标识>|<CoreDevice 标识>|$HOME/sw-work/run/ios/device.lock|$HOME/sw-work/run/ios
-# 2|测试机2|<硬件标识>|<CoreDevice 标识>|$HOME/.s2arm/run/devq2/device2.lock|$HOME/.s2arm/run/devq2/battery"
+# 2|测试机2|<硬件标识>|<CoreDevice 标识>|${S2A_RUN_ROOT:-$HOME/.s2arm/run}/devq2/device2.lock|${S2A_RUN_ROOT:-$HOME/.s2arm/run}/devq2/battery"
 
 # 签名团队（pack/ipa.sh、探针直签）。没设则出包在签名前停下。
 # S2A_TEAM_DEFAULT='Apple Team ID'

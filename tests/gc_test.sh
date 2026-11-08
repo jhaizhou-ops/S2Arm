@@ -278,7 +278,7 @@ o=$(HOME=$T/rr/home S2A_RUN=$RS S2A_GC_REMOTE_ROOT=$T/rr S2A_GC_FREE_CMD="echo 3
 ck "存档 / 依赖按路径保护：30 天前修改时间的 deps/rewriter-deps、saves/、saves_backup/（存档备份）、vk2job/comm/saves、带 .keep 的 kept/ 都留，同样旧的 junk/y 与 vk2job/comm/rr 删" '[ -f $RS/deps/rewriter-deps/lib/libcapstone.a ] && [ -f $RS/saves/smo_friend/account/a.sav ] && [ -f $RS/vk2job/comm/saves/k1/b.sav ] && [ -f $RS/kept/x/f ] && [ -f $RS/saves_backup/duo_x/f ] && [ ! -e $RS/junk/y ] && [ ! -e $RS/vk2job/comm/rr ]'
 ck "系统归档按路径保护：30 天前 gj_play 产物根里的 systemdata/0100000000000823 留，同根同样旧的 exefs/ 删" '[ -f $PS/systemdata/0100000000000823/data ] && [ ! -e $PS/exefs ]'
 # 安卓固定源码缓存（10-29 #939 缺省挪到 $HOME/.cache/s2arm-build；mini 门禁 HOME = 远端假家目录，三份源码门禁时不现下、缺了安卓步就红）：
-#   远端回收只管 $HOME/.s2arm/run/s2arm（S），不碰假家目录的 .cache——30 天前的源码包留；同样旧的 run/s2arm/junk2/y 照删（证明回收真跑了）
+#   远端回收只管 ${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm（S），不碰假家目录的 .cache——30 天前的源码包留；同样旧的 run/s2arm/junk2/y 照删（证明回收真跑了）
 rm -rf $T/rr; RS=$T/rr/home/.s2arm/run/s2arm; QC=$T/rr/home/.cache/s2arm-build/codecs/sources; mkdir -p $T/rr/wt $QC $RS/junk2/y; echo l > $QC/8901129497b2.tar.gz; echo j > $RS/junk2/y/f
 python3 -c "import os,sys,time;t=time.time()-30*86400
 for d in sys.argv[1:]:

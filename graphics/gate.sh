@@ -154,7 +154,7 @@ T0=$(date +%s); LOG=build/gate_gfx; mkdir -p "$LOG"
 REGOK=1; REGS=; REGBAD=
 # 逐子项计时（10-25 列车提速：今天门禁超过 280 秒的几乎全是本钩子一步拖的，要知道时间花在哪）：同名函数包住 timeout，
 #   每项一行「秒数<TAB>命令」记进 $LOG/timing.tsv，收尾时连同时刻 / 主机追加进 gate_snap/gfx_timing.tsv（mini 上累积，列车提速按它拆账）
-: > "$LOG/timing.tsv"; TMF=${S2A_SNAP_DIR:-$HOME/.s2arm/run/s2arm/gate_snap}/gfx_timing.tsv
+: > "$LOG/timing.tsv"; TMF=${S2A_SNAP_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_snap}/gfx_timing.tsv
 timeout() { local s=$SECONDS r; command timeout "$@"; r=$?; printf '%s\t%s\n' "$((SECONDS - s))" "$(printf '%s ' "$@" | cut -c1-90)" >> "$LOG/timing.tsv"; return $r; }
 trap 'mkdir -p "$(dirname "$TMF")" 2> /dev/null && sed "s|^|$(date +%m%d%H%M%S)\t$(hostname -s)\t|" "$LOG/timing.tsv" >> "$TMF" 2> /dev/null' EXIT
 # 红项证据（11-01 总指挥：红报告只留一句、截断两次丢证据）：每登记一项打一次标记；某项红时，把上次标记以来新写的 $LOG/*.log 记为它的证据，
@@ -277,7 +277,7 @@ if has "$RUNG" track_c; then t=$(timeout 120 make -s gfx-test-track > "$LOG/trac
 else t=0; reg 0 "写跟踪单测 t_track：本批没改到 track.c / 模拟访存 / 构建脚本，不跑"; fi
 # 超时前抓现场（10-23 总指挥：今天 4 次 300 秒超时一行没出，不循环复现，下次自然发生时带栈）：到上限前 10 秒对进程组 + 本用户 MTLCompilerService sample 5 秒，
 #   连同 ps / vm_stat / 负载写进持久目录（门禁工作树会被删）；栈摘要以「不通」行带进门禁红行
-SNAP=${S2A_SNAP_DIR:-$HOME/.s2arm/run/s2arm/gate_snap}/metal_$(date +%m%d%H%M%S)_$$.txt
+SNAP=${S2A_SNAP_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_snap}/metal_$(date +%m%d%H%M%S)_$$.txt
 # 先并行预编单测要的全部产物（10-23 第一次超时现场：300 秒全花在 make test 的前置编译上、和门禁别的步骤抢核；本机冷编顺序 362 秒、-j 并行 60 秒），
 #   自己的上限；编不过直接红并带编译日志尾。之后计时那步依赖都已是新的，只跑单测（本机 33 秒）
 if has "$RUNG" metal; then

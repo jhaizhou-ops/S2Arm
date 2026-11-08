@@ -18,7 +18,7 @@ except Exception: sys.exit(2)   # 读不出 / 结构不对 = 不知道装没装�
 sys.exit(0 if apps else 1)" "$T/apps.json"; }
 # 卸前拉回管线种子来源（总指挥 11-02：卸载连 App 容器一起清，人玩 / 测试局首遇现编记下的 pso_user.tsv 会跟着丢）：机上 Documents/wire/<程序号>/pso_user.tsv
 #   逐个拉回 pso_seed/<程序号>/<包名>_<时间>_卸前.tsv（同 tools/dev_run.sh 装前拉回；出库时 graphics/tools/direct/pso_seed.py 跨文件按行去重合并）；拉不到只记一行、照常卸
-pso_pull() { local d=${S2A_PSO_SEED_DIR:-$HOME/.s2arm/run/s2arm/pso_seed} p n=0
+pso_pull() { local d=${S2A_PSO_SEED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/pso_seed} p n=0
   dcp 60 device info files --device "$SW_DEVICE" --domain-type appDataContainer --domain-identifier "$B" --subdirectory Documents/wire --json-output "$T/wire.json" > /dev/null 2>&1
   for p in $(python3 -c "
 import json, re, sys

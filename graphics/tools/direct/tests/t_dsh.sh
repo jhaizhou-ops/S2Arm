@@ -23,7 +23,7 @@ set -u; R=$(cd "$(dirname "$0")/../../../.." && pwd); H=$R/graphics/tools/direct
 X=; T=$(mktemp -d "${TMPDIR:-/tmp}/t_dsh.XXXXXX"); trap 'rm -rf "$T" ${X:+"$X"}' EXIT; bad=0; res=()
 DN=${DOTNET:-$HOME/.dotnet/dotnet}; [ -x "$DN" ] || DN=$(command -v dotnet)
 ck() { if eval "$2"; then echo "✓ $1"; else echo "✗ $1"; bad=1; fi; res+=("$3"); }
-TID=01006F8002326000; IN=${DSH_INPUTS:-$HOME/.s2arm/run/s2arm/gate_data/dsh/$TID}
+TID=01006F8002326000; IN=${DSH_INPUTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/gate_data/dsh/$TID}
 insha() { (cd "$1" && find . -type f ! -name inputs.sha | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16); }
 if [ "${1:-}" = freeze ]; then   # freeze <直连出库 work 目录>：冻结门禁输入（只在换考卷游戏 / 抽取格式变了时人工跑一次）
   W=${2:?freeze 要给直连出库的 work 目录（S2A_DIRECT_KEEP=1 出库后的 cache/direct/<程序号>/keep/work）}; [ ! -e "$IN" ] || { echo "$IN 已在（换新先挪走旧的）"; exit 1; }
@@ -73,7 +73,7 @@ if [ -z "${DSH_EXAM:-}" ]; then
   # 考卷按 库版本 V + 翻译指纹 xlate_fp 分目录：10-30 起 V 只随 ABI 变，翻译器改了 V 不变，只按 V 分会拿旧翻译器出的考卷对拍
   read -r CHAIN XFP < <(cd "$R/translator" && python3 -c 'import dmsh_chain; print(dmsh_chain.version(), dmsh_chain.xlate_fp())') && [ -n "${XFP:-}" ] || { echo "S2A.Dsh 对拍：算不出离线链版本 / 翻译指纹 → 红"; exit 1; }
   BFP=$(cat "$R"/gfx/tools/direct/dsh/batch/*.cs "$R/graphics/tools/direct/dsh/batch/dsh_batch.csproj" | shasum | cut -c1-8)   # 出库进程（编排、编批库、发布）不在翻译指纹里：改了它考卷要重出
-  EC=${DSH_EXAM_CACHE:-$HOME/.s2arm/run/s2arm/cache/gate_dsh}; E=$EC/$(cat "$IN/inputs.sha")-$CHAIN-$XFP$BFP-$(shasum < "$T/exk.txt" | cut -c1-8); REF=$E/mac/b-$CHAIN
+  EC=${DSH_EXAM_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/gate_dsh}; E=$EC/$(cat "$IN/inputs.sha")-$CHAIN-$XFP$BFP-$(shasum < "$T/exk.txt" | cut -c1-8); REF=$E/mac/b-$CHAIN
   if [ ! -f "$E/done" ]; then
     mkdir -p "$EC"; X=$(mktemp -d "$EC/.mk.XXXXXX")
     exam "$T/exk.txt" "$T/exam" "$X" "$EC/cas" --iosout "$T/exam/pub" --no-ios --publish mac -j "$EXAM_J" > "$X/build.log" 2>&1 \

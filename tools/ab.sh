@@ -4,7 +4,7 @@
 #     → 用该款登记的包排两局冷局：A 只带 S2A_AB=<号>:A；B 带 S2A_AB=<号>:B 和给的开关。两局都带 --env，按诊断局排（不写记分板），结果进发起线收件箱
 #   tools/ab.sh report <号> [--wait=秒]
 #     → 两局都出结果后打两行对比表（frame_gate 同口径：MARK 后满 60 秒的窗口；读回 / 帧数 / 每帧分配；GC 停顿按可玩段（MARK 后）最长，10-26 起）；--wait 时等到出齐或超时
-set -u; TOOLS=$(cd "$(dirname "$0")" && pwd); SD=${S2A_SCHED_DIR:-$HOME/.s2arm/run/s2arm/sched}; SCH=${S2A_AB_SCHED:-$TOOLS/sched.sh}   # S2A_AB_SCHED：单测换假调度
+set -u; TOOLS=$(cd "$(dirname "$0")" && pwd); SD=${S2A_SCHED_DIR:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}; SCH=${S2A_AB_SCHED:-$TOOLS/sched.sh}   # S2A_AB_SCHED：单测换假调度
 if [ "${1:-}" = report ]; then
   id=${2:?号}; W=0; for a in "${@:3}"; do case $a in --wait=*) W=${a#*=};; esac; done; s=$SECONDS
   while :; do

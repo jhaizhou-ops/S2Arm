@@ -15,7 +15,7 @@ t0=$SECONDS; ( unset SW_IOS_UDID DEVBATTERY_FAKE; DEVBATTERY_DIR=$T SW_DEVBATTER
   s2a_device 00000000-0000000000000000 2>/dev/null && echo "不通 日常手机被选中" || echo "通 日常手机拒绝"
   s2a_device 00000000-DEADBEEF 2>/dev/null && echo "不通 名单外被选中" || echo "通 名单外拒绝"
   s2a_device 1 && [ "$SW_IOS_UDID" = 00000000-0000000000000001 ] && [ "$SW_DEVICE" = 00000000-0000-0000-0000-000000000001 ] && [ "$SW_DEVLOCK_DIR" = $HOME/sw-work/run/ios/device.lock ] && [ "$SW_DEVBATTERY_LOCKS" = "$SW_DEVLOCK_DIR" ] && echo "通 测试机1 → 本机锁 + UDID" || echo "不通 测试机1 导出不对"
-  s2a_device 00000000-0000-0000-0000-000000000002 && [ "$SW_IOS_UDID" = 00000000-0000000000000002 ] && [ "$SW_DEVLOCK_DIR" = $HOME/.s2arm/run/devq2/device2.lock ] && [ "$DEVNAME" = 测试机2 ] && echo "通 测试机2 按 CoreDevice 标识选中" || echo "不通 测试机2 导出不对"
+  s2a_device 00000000-0000-0000-0000-000000000002 && [ "$SW_IOS_UDID" = 00000000-0000000000000002 ] && [ "$SW_DEVLOCK_DIR" = ${S2A_RUN_ROOT:-$HOME/.s2arm/run}/devq2/device2.lock ] && [ "$DEVNAME" = 测试机2 ] && echo "通 测试机2 按 CoreDevice 标识选中" || echo "不通 测试机2 导出不对"
   s2a_device_allowed 00000000-0000000000000002 && echo "通 白名单认测试机2 UDID" || echo "不通 白名单不认测试机2"
   s2a_device_allowed 00000000-0000000000000000 && echo "不通 白名单放过日常手机" || echo "通 白名单拒日常手机"
   s2a_device_allowed "" && echo "不通 白名单放过空串" || echo "通 白名单拒空串" ) > $T/o3

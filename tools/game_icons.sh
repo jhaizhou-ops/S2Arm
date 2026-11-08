@@ -6,7 +6,7 @@
 # 出包时 pack/ipa.sh 优先用它，没有再退回产物根 icon.jpg。不动产物根；图标不进仓库。
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd); source "$H/pack/roots.sh"; source "$H/pack/srcs.sh"   # 原始包按内容认：pack/srcs.sh（与追加内容阶段共用）
-N=$SRC_N; K=$SRC_K; SRC=$SRC_DIR; OUT=${S2A_ICONS:-$HOME/.s2arm/run/s2arm/icons}; mkdir -p "$OUT"
+N=$SRC_N; K=$SRC_K; SRC=$SRC_DIR; OUT=${S2A_ICONS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/icons}; mkdir -p "$OUT"
 [ -x "$N" ] || { echo "【红】没有 ${N}"; exit 1; }
 rc=0
 for g in "$@"; do

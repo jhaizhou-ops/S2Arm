@@ -34,7 +34,7 @@ ck "验证器编译" '[ -f $V ]'
 if [ -f $V ]; then
   "$DOTNET" $V $T/a empty | sed 's/^/    /'; rc=${PIPESTATUS[0]}
   ck "验证器读合成数据全过（${rc}）" '[ $rc = 0 ]'
-  R=${S2A_NGWORD_REAL:-$HOME/.s2arm/run/s2arm/roots/mhrise@现行/systemdata/0100000000000823}
+  R=${S2A_NGWORD_REAL:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots/mhrise@现行/systemdata/0100000000000823}
   if [ -d "$R" ]; then
     ck "真机数据文件清单与固定名字一致（${R}）" 'ls "$R" | LC_ALL=C sort | diff -q - $T/want.txt > /dev/null'
     "$DOTNET" $V "$R" real | sed 's/^/    /'; rc=${PIPESTATUS[0]}
@@ -49,7 +49,7 @@ ck "Mii：合成 6 个固定文件（ShapeHigh/Mid + NXTexture{Low,Mid}{Linear,S
 ck "Mii：解析器读合成数据全过" 'python3 $H/pack/sysdata_mii.py check $T/m1 > /dev/null'
 python3 -c "import sys;p=sys.argv[1];b=bytearray(open(p,'rb').read());o=0x6c+88;b[o+8]^=1;open(p,'wb').write(b)" $T/m2/ShapeHigh.dat
 ck "Mii 反证：改坏一个条目的压缩长 → 解析器报红" '! python3 $H/pack/sysdata_mii.py check $T/m2 > /dev/null'
-RM=${S2A_MII_REAL:-$HOME/.s2arm/run/s2arm/roots/mk8d@现行/systemdata/0100000000000802}
+RM=${S2A_MII_REAL:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots/mk8d@现行/systemdata/0100000000000802}
 if [ -d "$RM" ] && [ ! -e "$RM.synth" ]; then ck "Mii：解析器读真数据也过（对照，${RM}）" 'python3 $H/pack/sysdata_mii.py check "$RM" > /dev/null'
 else echo "【黄】没有真 Mii 数据目录 ${RM}：跳过对照（S2A_MII_REAL 指定）"; fi
 [ $bad = 0 ] && echo "✓ sysdata_synth 单测全过" || { echo "sysdata_synth 单测有不通"; exit 1; }

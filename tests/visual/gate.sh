@@ -35,7 +35,7 @@
 set -u
 [ "${NXGAL_BOUNDS_COUNT:-}" = 1 ] && { echo "画幅线 / 画面·着色器线：计数关（出货口径）下比像素 → 计数开着（NXGAL_BOUNDS_COUNT=1），本钩子全是比像素，红"; exit 1; }
 R=$(pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-RECS=${S2A_VISUAL_RECS:-$HOME/.s2arm/run/s2arm/visual/recs}
+RECS=${S2A_VISUAL_RECS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/visual/recs}
 red=0; msg=(); ONLY=${GATE_ONLY:-}; SKIPK=${GATE_SKIP:-}; refskip=
 for k in $SKIPK $ONLY; do
   case $k in

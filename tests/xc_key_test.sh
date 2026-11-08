@@ -10,7 +10,7 @@ set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 LUT=compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures
 mk() { mkdir -p "$T/$1/gfx" "$T/$1/tools" "$T/$1/$LUT" && cp -R "$H/graphics/metal" "$H/graphics/third_party" "$T/$1/graphics/" && rm -rf "$T/$1/graphics/metal/tests" && cp "$H/tools/toolchain.env" "$T/$1/tools/" && cp "$H/$LUT/SmaaAreaTexture.bin" "$H/$LUT/SmaaSearchTexture.bin" "$T/$1/$LUT/"; }   # 隔离树使用生产构建输入
-key() { S2A_XCKEY_TREE=$T/$1 S2A_XCKEY_CACHE=${S2A_XCKEY_CACHE:-$HOME/.s2arm/run/s2arm/cache/xckey} bash "$H/graphics/tools/shbake/xc_key.sh"; }
+key() { S2A_XCKEY_TREE=$T/$1 S2A_XCKEY_CACHE=${S2A_XCKEY_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/xckey} bash "$H/graphics/tools/shbake/xc_key.sh"; }
 mk a; mk b; mk c; mk d; mk e; mk f
 # e：Makefile 只加一个单测目标（编译参数不变）→ 键不变；f：OBJCFLAGS 加一个宏 → 键变（10-22 起键里是编译参数、不是整份 Makefile）
 printf '\n$(OUT)/t_xkprobe: $(T_FBR)\n' >> "$T/e/gfx/metal/Makefile"

@@ -10,8 +10,8 @@ ck "本仓库：共享位置全部登记（$(echo "$o" | tail -1 | cut -c1-120)�
 [ $r = 0 ] || echo "$o" | head -10
 mkdir -p $T/repo/tools $T/repo/native/src; cp "$H/tools/shared_path_lint.py" "$H/tools/shared_paths.tsv" $T/repo/tools/
 cat > $T/repo/tools/new.sh <<'EOF'
-OUT=${OUT:-$HOME/.s2arm/run/s2arm/newshared}; echo x > /tmp/fixed_name.log
-L=$(mktemp -d); echo y > /tmp/ok_$$.log; echo z > "$D/frames.tsv"; S=${S:-$HOME/.s2arm/run/s2arm/sched}
+OUT=${OUT:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/newshared}; echo x > /tmp/fixed_name.log
+L=$(mktemp -d); echo y > /tmp/ok_$$.log; echo z > "$D/frames.tsv"; S=${S:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/sched}
 EOF
 printf "import os\nP = os.path.expanduser('~/.s2arm/run/s2arm/pyshared')\n" > $T/repo/tools/new.py
 printf 'unsigned m = ~0u; unsigned long a = x & ~15ull;\n' > $T/repo/native/src/bits.c
