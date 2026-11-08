@@ -502,7 +502,7 @@ class AndroidDeliveryTest(unittest.TestCase):
                 adapter.check_request(request)
 
     def test_bundled_engine_includes_android_runtime_and_tools(self):
-        from platforms.macos.bundle_engine import INPUTS
+        from launchers.macos.bundle_engine import INPUTS
         self.assertIn('android', INPUTS)
         self.assertIn('graphics/vulkan', INPUTS)
         for relative in ('android/docker/build.sh', 'android/docker/Dockerfile',
@@ -512,7 +512,7 @@ class AndroidDeliveryTest(unittest.TestCase):
             self.assertTrue((ROOT / relative).is_file(), relative)
 
     def test_bundled_android_excludes_only_test_trees(self):
-        from platforms.macos import bundle_engine
+        from launchers.macos import bundle_engine
         excluded = ('android/codecs/tests/vectors/tiny.h264',
                     'android/app/src/test/java/Foo.java',
                     'android/app/src/androidTest/java/Foo.java',
@@ -526,7 +526,7 @@ class AndroidDeliveryTest(unittest.TestCase):
         for path in included: self.assertTrue(bundle_engine.include_source(Path(path)), path)
 
     def test_bundled_fingerprint_ignores_android_test_vectors(self):
-        from platforms.macos import bundle_engine
+        from launchers.macos import bundle_engine
         source = self.base / 'engine'
         prod = source / 'android/native/input.c'; prod.parent.mkdir(parents=True)
         vec = source / 'android/codecs/tests/vectors/fixture.h264'; vec.parent.mkdir(parents=True)

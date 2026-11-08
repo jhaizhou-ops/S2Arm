@@ -46,15 +46,15 @@ chg graphics/nvn/gfx/nvn/nvn_mtl.m; d1=$(key $T/r direct); e1=$(key $T/r extract
 ck "② 宿主运行时代码 nvn_mtl.m 改一行 → 直连库键 ${d0} → ${d1}、抽取键 ${e0} → ${e1} 都不变（旧算法 graphics/nvn 整树对象号 ${o0:0:9} → ${o1:0:9} 会变）" '[ "$d0" = "$d1" ] && [ "$e0" = "$e1" ] && [ "$o0" != "$o1" ]'
 echo "# stage_keys_test" >> $T/r/tools/clonedir.py; ( cd $T/r && git commit -qam mb ); d2=$(key $T/r direct)
 ck "② 「外」文件 tools/clonedir.py 改一行 → 直连库键不变（${d2}）" '[ "$d2" = "$d0" ]'
-echo "# stage_keys_test" >> $T/r/gfx/tools/direct/se_want.py; ( cd $T/r && git commit -qam db ); d3=$(key $T/r direct); e3=$(key $T/r extract)
+echo "# stage_keys_test" >> $T/r/graphics/tools/direct/se_want.py; ( cd $T/r && git commit -qam db ); d3=$(key $T/r direct); e3=$(key $T/r extract)
 ck "② 「入」文件 se_want.py 改一行 → 直连库键变（${d0} → ${d3}）、抽取键不变（${e3}）" '[ "$d3" != "$d0" ] && [ "$e3" = "$e0" ]'
-sed_edit 's/uint64_t h; memcpy(&h, d, 8); return h;/uint64_t h; memcpy(\&h, d + 8, 8); return h;/' $T/r/gfx/metal/gal_prog.m   # 种类键取 SHA256 摘要的另一段 8 字节
+sed_edit 's/uint64_t h; memcpy(&h, d, 8); return h;/uint64_t h; memcpy(\&h, d + 8, 8); return h;/' $T/r/graphics/metal/gal_prog.m   # 种类键取 SHA256 摘要的另一段 8 字节
 ( cd $T/r && git commit -qam gp ) > /dev/null; d5=$(key $T/r direct)
 ck "② gal_prog.m 里 gal_spv_hash 改取摘要第 8–15 字节（$(git -C $T/r diff HEAD~1 --stat | tail -1 | tr -s ' ')）→ 直连库键变（${d3} → ${d5}）" 'git -C $T/r show HEAD -- graphics/metal/gal_prog.m | grep -q "^+.*d + 8, 8" && [ "$d5" != "$d3" ]'
-echo "# stage_keys_test" >> $T/r/gfx/tools/shbake/nxsh_extract.py; ( cd $T/r && git commit -qam nx ); e4=$(key $T/r extract)
+echo "# stage_keys_test" >> $T/r/graphics/tools/shbake/nxsh_extract.py; ( cd $T/r && git commit -qam nx ); e4=$(key $T/r extract)
 ck "② 「入」文件 nxsh_extract.py 改一行 → 抽取键变（${e0} → ${e4}）" '[ "$e4" != "$e0" ]'
 # ③
-printf 'X = 1\n' > $T/r/gfx/tools/direct/stage_keys_newdep.py; printf 'import stage_keys_newdep  # noqa\n' >> $T/r/gfx/tools/direct/se_want.py
+printf 'X = 1\n' > $T/r/graphics/tools/direct/stage_keys_newdep.py; printf 'import stage_keys_newdep  # noqa\n' >> $T/r/graphics/tools/direct/se_want.py
 ( cd $T/r && git add -A && git -c user.email=t@t -c user.name=t commit -qm dep ); m=$(miss $T/r direct)
 ck "③ se_want.py 新 import 表外模块 → 闭包核对报出 graphics/tools/direct/stage_keys_newdep.py（${m}）" '[ "$m" = graphics/tools/direct/stage_keys_newdep.py ]'
 # ⑤ libnxgal 导出连到实现（审计 #1565 P1-115）：表里删掉 gal_tessxc.m → 闭包核对报出它（SpvCross.cs 经 DllImport 调 nxgal_dmsh_xc_tess）；
@@ -63,7 +63,7 @@ grep -v '^入	graphics/metal/gal_tessxc.m	' $T/r/pack/stage_inputs/direct.tsv > 
 ( cd $T/r && git -c user.email=t@t -c user.name=t commit -qam rmtess ); m=$(miss $T/r direct)
 ck "⑤ 表里删掉 gal_tessxc.m → 闭包核对报出它（${m//$'\n'/ }）" 'grep -qx graphics/metal/gal_tessxc.m <<< "$m"'
 ( cd $T/r && git checkout -q HEAD~1 -- pack/stage_inputs/direct.tsv && git -c user.email=t@t -c user.name=t commit -qm putback ); d6=$(key $T/r direct)
-sed_edit '1s#$# （stage_keys_test 只改注释）#' $T/r/gfx/metal/gal_tessxc.m; ( cd $T/r && git commit -qam tc ) > /dev/null; d7=$(key $T/r direct)
+sed_edit '1s#$# （stage_keys_test 只改注释）#' $T/r/graphics/metal/gal_tessxc.m; ( cd $T/r && git commit -qam tc ) > /dev/null; d7=$(key $T/r direct)
 ck "⑤ 只改 gal_tessxc.m 一行注释 → 直连库键变（${d6} → ${d7}）" '[ -n "$d6" ] && [ -n "$d7" ] && [ "$d6" != "$d7" ]'
 # ④ locale 合同：原创三阶段夹具，不改生产声明表；包装 awk 只记录环境，仍执行真实系统 awk。
 mkdir -p "$T/locale/pack/stage_inputs" "$T/awk-bin"

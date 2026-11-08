@@ -76,7 +76,7 @@ class SnapshotIgnoresBuildOutputs(unittest.TestCase):
 
     def test_root_gitignore_is_an_engine_input(self):
         sys.path.insert(0, str(self.ROOT))
-        from platforms.macos.bundle_engine import INPUTS
+        from launchers.macos.bundle_engine import INPUTS
         self.assertIn(".gitignore", INPUTS)
 
     def test_build_outputs_do_not_count_as_changes(self):
