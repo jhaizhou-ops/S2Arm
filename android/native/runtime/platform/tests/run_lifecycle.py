@@ -115,7 +115,7 @@ def main():
 
     original = source.read_text()
     # Mutants are emitted outside the source tree and preserve the production header path.
-    absolute = original.replace('"../../platforms/android/native/runtime/platform/lifecycle_android.h"',
+    absolute = original.replace('"runtime/runtime/platform/lifecycle_android.h"',
                                 '"' + str(PLATFORM / "lifecycle_android.h") + '"')
     mutants = {
         "optional-cancel": ("    S2A_CancelWaits();",
@@ -155,7 +155,7 @@ def main():
         (staged / "platform/lifecycle_android.h").write_text(base_header.read_text())
         (staged / "platform/lifecycle_android.c").write_text(base_helper.read_text())
         (staged / "runtime/src/lifecycle.c").write_text(base_source.read_text().replace(
-            '"../../platforms/android/native/runtime/platform/lifecycle_android.h"', '"' + str(staged / "platform/lifecycle_android.h") + '"'))
+            '"runtime/runtime/platform/lifecycle_android.h"', '"' + str(staged / "platform/lifecycle_android.h") + '"'))
         baseline = build(staged / "runtime/src/lifecycle.c", "baseline-lifecycle", staged / "platform/lifecycle_android.c")
         blocked_file(staged / "platform/lifecycle_android.c", "baseline-blocked-file")
         normalize = lambda text: re.sub(r"[0-9]+\.[0-9]+ 秒", "N 秒", text)

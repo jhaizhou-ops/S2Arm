@@ -943,7 +943,7 @@ main 把后端接口从 `mtl_*` 统一成 `nvn_be_*`（`graphics/gate.sh` 有棘
 
 - `graphics/nvn/tests/t_nvn_draw_record.c`（main 的真实录制测试）只能 macOS + Metal 构建，本轮未跑。
 - `nvn_mtl.m`（Apple 回放）未编译：本机无 Metal 工具链；其改动为 main 原文，只做了符号与 helper 一致性的人工核对。
-- `cmake` 配置进到 `core-link/CoreLink.cmake` 时被未解决冲突挡住（Android 宿主分组），因此 `CMakeLists.txt` 的本次改动只做了文本与语法核对，未完成整包配置；`CMakeLists.txt` 的两段冲突已按"两边都保留"解决并暂存（VK 引擎选项 + main 的 `S2A_ANDROID_REWRITER`；`plat_test` 源清单 + main 的 `../../runtime/include`）。
+- `cmake` 配置进到 `core-link/CoreLink.cmake` 时被未解决冲突挡住（Android 宿主分组），因此 `CMakeLists.txt` 的本次改动只做了文本与语法核对，未完成整包配置；`CMakeLists.txt` 的两段冲突已按"两边都保留"解决并暂存（VK 引擎选项 + main 的 `S2A_ANDROID_REWRITER`；`plat_test` 源清单 + main 的 `../runtime/include`）。
 - 未构建 APK、未上真机、未做性能或兼容性验收；本节的通过项都是 CPU / 编译 / 符号级证据。
 
 ### 13.9 §13.8 的逐行复核（main 原有行是否丢失）
@@ -972,7 +972,7 @@ main 把后端接口从 `mtl_*` 统一成 `nvn_be_*`（`graphics/gate.sh` 有棘
 
 **`android/CMakeLists.txt`：+289 / −8**
 
-删除行都是本线把源清单展开（`bridge.cpp`/`touch_jni`/`selftest`/`guest_signal`/`host_ui_*`/`wsi_probe`）与 `plat_test` 扩源所致；main 的 `native/s2a_native_stub.c`（diagnostic 模式）、`VK_USE_PLATFORM_ANDROID_KHR`（移入 `NvnDirect.cmake`）、`plat_test` 的 `../../runtime/include` 均保留。
+删除行都是本线把源清单展开（`bridge.cpp`/`touch_jni`/`selftest`/`guest_signal`/`host_ui_*`/`wsi_probe`）与 `plat_test` 扩源所致；main 的 `native/s2a_native_stub.c`（diagnostic 模式）、`VK_USE_PLATFORM_ANDROID_KHR`（移入 `NvnDirect.cmake`）、`plat_test` 的 `../runtime/include` 均保留。
 
 **本线新增、main 无对应物的文件**（不构成对 main 的风险）
 

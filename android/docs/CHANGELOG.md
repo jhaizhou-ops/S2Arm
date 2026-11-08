@@ -2471,7 +2471,7 @@
   与 `libs2a_cs_probe.so`（1.2 MB 运行时探针），**没有 `libs2a_cs.so`**——`docker/build.sh` 默认
   `S2ARM_ANDROID_CS_SERVICES=0`，服务层（`S2A.Services` + Ryujinx HLE）根本没进包；原生核心侧
   `android/CMakeLists.txt:37` 只链 `native/s2a_native_stub.c`（59 行，除 `s2a_screen_w` /
-  `s2a_boot_mark` 外全是 `unbacked()`），`../../runtime/src` 只加 include 路径；启动入口
+  `s2a_boot_mark` 外全是 `unbacked()`），`../runtime/src` 只加 include 路径；启动入口
   `Exports.cs:26` 的 `S2A_Init` 在 Android 侧没有任何调用者。应用界面自述
   `Game execution is not connected yet`。该项取决于 A2 的真实原生核心与 A1/A3 接线（文档 §4.2 列了
   接上要做的四件事），不是换游戏或调包能解决的。

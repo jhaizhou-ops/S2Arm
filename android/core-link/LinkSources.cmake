@@ -13,7 +13,7 @@ endif()
 function(s2a_android_host_sources output)
     set(sources
         native/s2a_savecommit.c native/capacity_affinity.cpp
-        native/bridge.cpp native/lan_discovery.cpp ../../runtime/src/lan_elect.c native/capture_jpeg.cpp native/touch_jni.cpp native/game_touch.c native/window.cpp native/presenter.cpp
+        native/bridge.cpp native/lan_discovery.cpp ../runtime/src/lan_elect.c native/capture_jpeg.cpp native/touch_jni.cpp native/game_touch.c native/window.cpp native/presenter.cpp
         native/wsi_lease.c native/input.c native/tsd.c native/module.c native/selftest.c native/selftest_gate.S
         native/guest_signal.c native/redlog.c native/redzone.S native/pcm_ring.c native/aaudio_sink.c native/hostapi.c native/screen_metrics.c
         native/host_android.c native/host_ui.c native/host_ui_android.c native/host_ui_jni.cpp native/plat_android.c
@@ -31,9 +31,9 @@ function(s2a_android_diagnostic_sources output)
     # 直连核心的页级写跟踪（nvn_dirty → nvn_host_hooks）登记到 direct_host 的 dispatcher，
     # 诊断目标同样编入真实实现（游戏目标由 Runtime.cmake 的 core 列表提供）。
     set(sources
-        ../../runtime/src/os.c ../../runtime/src/alt.c ../../runtime/src/direct_host.c ../../graphics/track/track.c
+        ../runtime/src/os.c ../runtime/src/alt.c ../runtime/src/direct_host.c ../graphics/track/track.c
         # 应用池 s2a_app_pool（Switch 2 9 GiB）：plat_android.c 的 layout_android.inc 经 S2A_HEAP_DEFAULT 读它
-        ../../runtime/src/layout.c
+        ../runtime/src/layout.c
         native/runtime/tracking/platform.c native/runtime/tracking/runtime.c
         native/runtime/tracking/registry.c
         # #1456 capprobe：诊断单库同样链 bridge.cpp / vk_device.c 引用的探测符号；
@@ -97,10 +97,10 @@ function(s2a_android_direct_sources output)
         native/direct/bind_defer.c
         native/direct/program_cache.c native/direct/offline_library.c
         # Pure texture helpers are needed by the core even without the game frontend.
-        ../../graphics/nvn/gfx/nvn/nvn_tex.c ../../graphics/nvn/gfx/tex/nvn_deswizzle.c
+        ../graphics/nvn/gfx/nvn/nvn_tex.c ../graphics/nvn/gfx/tex/nvn_deswizzle.c
         # 纹理缓存（nvn_vk_texcache.c）按页级写跟踪判脏，前端关也引用：nvn_dirty 与它的
         # Android 宿主钩子（dm_* → direct_host）随直连核心编入，不再只挂在前端源列表里。
-        ../../graphics/nvn/gfx/nvn/nvn_dirty.c native/nvn/nvn_host_hooks.c)
+        ../graphics/nvn/gfx/nvn/nvn_dirty.c native/nvn/nvn_host_hooks.c)
     set(${output} "${sources}" PARENT_SCOPE)
 endfunction()
 
