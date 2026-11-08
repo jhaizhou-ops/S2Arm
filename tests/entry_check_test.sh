@@ -7,7 +7,7 @@
 #   缺省直连（10-27 jhz「直连才是主力」）：根里没有本链直连库 → 退出 5「待直连根」、不起局；宿主没走直连 → 「没走直连」退出 1；S2A_ENTRY_GFX=generic 才强制通用
 # 门禁覆盖：tools/entry_check.sh
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d "${TMPDIR:-/tmp}/entry-check.XXXXXX"); trap 'rm -rf "$T"' EXIT; bad=0
-R=$T/r; mkdir -p $R/tools $R/native $R/graphics/widen/scan $R/graphics/nvn/gfx/nvn $T/roots/tg@现行/exefs $T/roots/tg@现行/shaders/direct/b-abc123
+R=$T/r; mkdir -p $R/tools $R/runtime $R/graphics/widen/scan $R/graphics/nvn/gfx/nvn $T/roots/tg@现行/exefs $T/roots/tg@现行/shaders/direct/b-abc123
 echo '#define DMSH_CHAIN "abc123"' > $R/graphics/nvn/gfx/nvn/dmsh_chain.h; mkidx() { python3 - "$1" "$2" <<'PYE'
 import struct, sys   # 合法 lib.idx：头 48 字节 + 1 个分片（lib.000.pak 共 100 字节）+ 0 条记录
 d, n = sys.argv[1], int(sys.argv[2])

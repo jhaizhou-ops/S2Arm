@@ -9,7 +9,7 @@ exp=$(cut -d' ' -f1 $T/.stage_pkg)-$(shasum -a 256 < $T/.stage_pkg | cut -c1-8);
 ck "包号 = 一键出包原公式（${exp}）：ipa.sh 传包键（${got}）、oneclick 读文件（${got2}）都一致" '[ "$got" = "$exp" ] && [ "$got2" = "$exp" ]'
 ck "包号格式 <提交号>-<8 位十六进制>" '[[ $got =~ ^8cf4073a1-[0-9a-f]{8}$ ]]'
 # 源码树干净才出（11-02 总指挥）：开发树有未提交改动 → 拒；发布快照（根有 engine.json）不判，哪怕有未跟踪的编译产物；开发树干净 → 放行。期望按规则手写
-SD=$(sed -n '/^src_dirty() {/p' "$H/pack/ipa.sh"); E=$T/eg; mkdir -p $E/gfx; (cd $E && git init -q && echo a > graphics/a.c && git add -A && git -c user.name=t -c user.email=t@t commit -qm a)
+SD=$(sed -n '/^src_dirty() {/p' "$H/pack/ipa.sh"); E=$T/eg; mkdir -p $E/graphics; (cd $E && git init -q && echo a > graphics/a.c && git add -A && git -c user.name=t -c user.email=t@t commit -qm a)
 d0=$(bash -c "$SD; src_dirty $E && echo 拒 || echo 放"); echo b >> $E/graphics/a.c; d1=$(bash -c "$SD; src_dirty $E && echo 拒 || echo 放")
 git -C $E checkout -q -- graphics/a.c; mkdir -p $E/graphics/obj; echo o > $E/graphics/obj/x; echo '{}' > $E/engine.json; d2=$(bash -c "$SD; src_dirty $E && echo 拒 || echo 放")
 ck "源码树检查：开发树干净→放（${d0}）、开发树改了没提交→拒（${d1}）、发布快照带编译产物→放（${d2}）；ipa.sh 用它把关" '[ -n "$SD" ] && [ "$d0" = 放 ] && [ "$d1" = 拒 ] && [ "$d2" = 放 ] && grep -qF '"'"'src_dirty "$R" && { echo "【红】本树构建相关目录有未提交改动'"'"' "$H/pack/ipa.sh"'

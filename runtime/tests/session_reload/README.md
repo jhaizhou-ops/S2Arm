@@ -37,8 +37,8 @@ Android按产品合同返回不支持，真实join状态也只返回未join。
 
 ```sh
 make -j2 S2A_CS=0 S2A_MAC_FRONTEND=0 native-boot-input-probe
-build/probe_boot_inputs raw "$PWD/native"
-build/probe_boot_inputs table "$PWD/native"
+build/probe_boot_inputs raw "$PWD/runtime"
+build/probe_boot_inputs table "$PWD/runtime"
 build/probe_boot_inputs <已有改写模块目录> modules main subsdk0 sdk
 ```
 

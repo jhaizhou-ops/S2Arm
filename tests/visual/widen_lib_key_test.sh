@@ -5,7 +5,7 @@
 set -u; H=$(cd "$(dirname "$0")/../.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 LUT=compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures
-mk() { mkdir -p "$T/$1/gfx" "$T/$1/tools" "$T/$1/$LUT" && cp -R "$H/graphics/metal" "$H/graphics/third_party" "$T/$1/gfx/" && rm -rf "$T/$1/gfx/metal/tests" && cp "$H/tools/toolchain.env" "$T/$1/tools/" && cp "$H/$LUT/SmaaAreaTexture.bin" "$H/$LUT/SmaaSearchTexture.bin" "$T/$1/$LUT/"; }
+mk() { mkdir -p "$T/$1/graphics" "$T/$1/tools" "$T/$1/$LUT" && cp -R "$H/graphics/metal" "$H/graphics/third_party" "$T/$1/graphics/" && rm -rf "$T/$1/graphics/metal/tests" && cp "$H/tools/toolchain.env" "$T/$1/tools/" && cp "$H/$LUT/SmaaAreaTexture.bin" "$H/$LUT/SmaaSearchTexture.bin" "$T/$1/$LUT/"; }
 key() { bash "$H/tests/visual/widen_lib_key.sh" "$T/$1"; }
 mk a; mk b; mk c; mk e
 F="$T/b/gfx/metal/gal_present.m"

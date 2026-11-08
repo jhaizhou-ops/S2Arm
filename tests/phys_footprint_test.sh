@@ -28,7 +28,7 @@ ck "② 写满 300 MB 匿名内存：足迹 ${fb} KB ≥ 250 MB" '[ "${fb:-0}" -
 ck "取不到（进程不在）退出 1（rc=${r}）" '[ $r = 1 ]'
 kill $A $B 2>/dev/null; wait $A $B 2>/dev/null; A=; B=
 # ③ 真 run_mac.sh：依赖打桩
-R=$T/repo; mkdir -p $R/native $R/tools $R/build $T/in; cp "$H/runtime/run_mac.sh" $R/runtime/; cp "$H/tools/phys_footprint.py" "$H/tools/host_build.sh" $R/tools/; : > $T/in/main.patched.bin
+R=$T/repo; mkdir -p $R/runtime $R/tools $R/build $T/in; cp "$H/runtime/run_mac.sh" $R/runtime/; cp "$H/tools/phys_footprint.py" "$H/tools/host_build.sh" $R/tools/; : > $T/in/main.patched.bin
 printf 'import sys\nsys.exit(0)\n' > $R/tools/mac_chain_check.py
 echo 'mac_save_prep() { :; }' > $R/tools/mac_save.sh; printf 'mac_slot_acquire() { :; }\nmac_slot_release() { :; }\n' > $R/tools/mac_slot.sh; cp $H/tools/mac_slot_frozen.sh $H/tools/s2a_machine.sh $R/tools/; export S2A_MAC_SLOT_BIN=$R/tools/mac_slot.sh; echo 'cost_log() { :; }' > $R/tools/cost_log.sh
 printf 'host:\n\t@true\n' > $R/Makefile

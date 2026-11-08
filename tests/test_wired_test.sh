@@ -193,7 +193,7 @@ ck "⑧ C# 工程：\$(bash svc/test.sh) 里 cd 进 A.Tests 再 dotnet → 算�
 ck "⑧ \$( ) 里调的脚本照样跟进：svc/tests/t_sub.py 算接上" '! grep -Fq "t_sub.py 没有" <<< "$o"'
 ck "⑧ 库工程 Fixture.csproj 不算单测、不报" '! grep -Fq "Fixture.csproj" <<< "$o"'
 # ⑨ T140 / #936：按模块调用也算接线（python3 -m unittest tests.x / python3 -m tests.x / python3 -m unittest tests/x.py）
-R9=$T/r9; mkdir -p $R9/tools $R9/tests $R9/gfx; cp "$H/tools/test_wired_lint.py" "$H/tools/gate_decl.py" "$H/tools/gate_route.py" $R9/tools/
+R9=$T/r9; mkdir -p $R9/tools $R9/tests $R9/graphics; cp "$H/tools/test_wired_lint.py" "$H/tools/gate_decl.py" "$H/tools/gate_route.py" $R9/tools/
 echo 'print(1)' > $R9/tests/mod_a_test.py
 echo 'print(1)' > $R9/tests/mod_b_test.py
 echo 'print(1)' > $R9/tests/mod_c_test.py
@@ -284,7 +284,7 @@ M13='if __name__ == "__main__":\n    print(1)\n'
 printf "$M13" > $N/w/tests/stop_after_acquire.py; printf 'def helper():\n    return 1\n' > $N/w/tests/helper_mod.py; printf 'echo hi\n' > $N/w/tests/orphan.sh
 printf "import subprocess, sys\nfrom pathlib import Path\nsubprocess.run([sys.executable, str(Path(__file__).with_name('child.py'))])\n$M13" > $N/vk/foo-tests/run.py; printf "$M13" > $N/vk/foo-tests/child.py
 printf "$M13" > $N/pk/tests/test_a.py; printf "$M13" > $N/pk/tests/test_b.py; printf "$M13" > $N/pk/tests/other_c.py; printf "$M13" > $N/pk2/tests/test_d.py
-mkdir -p $N/gfx; printf "python3 vk/foo-tests/run.py\npython3 -m unittest discover -s pk/tests -p 'test_*.py'\npython3 -m unittest discover -s pk2/tests -p \"\$P\"\n" > $N/graphics/gate.sh
+mkdir -p $N/graphics; printf "python3 vk/foo-tests/run.py\npython3 -m unittest discover -s pk/tests -p 'test_*.py'\npython3 -m unittest discover -s pk2/tests -p \"\$P\"\n" > $N/graphics/gate.sh
 o=$(fixture_lint $N/tools/test_wired_lint.py $N 2>&1); r=$?
 ck "⑬ 临时仓库退出 1（rc=${r}）" '[ $r = 1 ]'
 for t in w/tests/stop_after_acquire.py w/tests/orphan.sh pk/tests/other_c.py pk2/tests/test_d.py; do
@@ -305,7 +305,7 @@ for t in fake.py bare.py echoed.py gen.py printed.py; do printf "$M13" > $P/w/te
 printf 'echo hook\n' > $P/tests/visual/gate.sh
 printf 'here=$(cd "$(dirname "$0")" && pwd)\nsource "$here/lib.sh"\n[ 1 = 1 ] || { . "$(dirname "$0")/keep.sh"; }\n# source w/tests/commented.sh\nH=$(cd "$(dirname "$0")/../.." && pwd)\nexport X="python3 $H/w/tests/fake.py" Y="$H/w/tests/bare.py"\nZ="echo python3 w/tests/echoed.py" python3 w/tests/run_gen.py\n' > $P/w/tests/run.sh
 printf "import subprocess, sys\nfrom pathlib import Path\nROOT = Path(__file__).resolve().parents[2]\ngen = ROOT / 'w' / 'tests' / 'gen.py'\nsubprocess.run([sys.executable, str(gen)])\nprinted = ROOT / 'w' / 'tests' / 'printed.py'\nprint(str(printed))\n$M13" > $P/w/tests/run_gen.py
-mkdir -p $P/gfx; printf 'bash w/tests/run.sh\n' > $P/graphics/gate.sh
+mkdir -p $P/graphics; printf 'bash w/tests/run.sh\n' > $P/graphics/gate.sh
 o=$(fixture_lint $P/tools/test_wired_lint.py $P 2>&1); r=$?
 ck "⑭ 临时仓库退出 1（rc=${r}）" '[ $r = 1 ]'
 for t in tests/visual/gate.sh w/tests/lib.sh w/tests/keep.sh w/tests/fake.py w/tests/gen.py w/tests/run_gen.py; do

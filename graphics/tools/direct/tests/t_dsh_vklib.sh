@@ -38,7 +38,7 @@ export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 cat "$T/test.out"
 ck() { if [ "$2" = "$3" ]; then echo "✓ $1"; else echo "✗ $1：期望 $2，实际 $3"; bad=1; fi; }
 ne() { if [ -n "$2" ] && [ -n "$3" ] && [ "$2" != "$3" ]; then echo "✓ $1"; else echo "✗ $1：改前 $2，改后 $3"; bad=1; fi; }
-fp() { "$DN" msbuild "$1/gfx/tools/direct/vklib/S2A.DshVkLib.csproj" -t:VkFpPrint -nologo 2> /dev/null | sed -n 's/^ *VKFP=//p'; }
+fp() { "$DN" msbuild "$1/graphics/tools/direct/vklib/S2A.DshVkLib.csproj" -t:VkFpPrint -nologo 2> /dev/null | sed -n 's/^ *VKFP=//p'; }
 F0=$(fp "$R")
 [[ $F0 =~ ^[0-9a-f]{16}$ ]] || red "VkFpPrint 没打出 16 位指纹（实 ${F0}）"
 ck "⑥ 编进工具的源码部分与 VkFpPrint 相同（${F0}）" "$F0" "$(sed -n 's/^VKFP_SRC=//p' "$T/test.out")"
