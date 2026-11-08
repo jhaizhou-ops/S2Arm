@@ -1,0 +1,25 @@
+{
+  "sourceCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+  "package": "org.s2arm.android",
+  "apkBytes": 3252766,
+  "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+  "csServices": "0",
+  "jdkBuild": "17.0.21+9",
+  "gradle": "9.8.1",
+  "ndk": "29.0.14206865",
+  "cmake": "3.31.6",
+  "testPython": "3.12.10",
+  "capstoneModule": "5.0.7",
+  "capstoneDistribution": "5.0.7",
+  "lz4": "4.4.5",
+  "uiautomator2": "3.7.1",
+  "verify-apkExit": 0,
+  "apksignerExit": 0,
+  "lint": {
+    "errors": 0,
+    "warnings": 2
+  },
+  "nativeLibraries": [
+    "lib/arm64-v8a/libs2arm_android.so"
+  ]
+}

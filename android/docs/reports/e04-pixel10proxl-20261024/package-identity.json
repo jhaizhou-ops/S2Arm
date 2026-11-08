@@ -1,0 +1,42 @@
+{
+  "sourceCommit": "cc16b5fef4f699d043d95e65d8270ef00df89e2a",
+  "package": "org.s2arm.android",
+  "apkBytes": 3252766,
+  "apkSha256": "ce73f6791197ca1eb4f3742c28c2ac7921c5c0f3169dd3cbb4e1fe54b7d7be3f",
+  "csServices": "0",
+  "jdkBuild": "23.0.2",
+  "gradle": "9.8.1",
+  "ndk": "29.0.14206865",
+  "cmake": "3.31.6",
+  "nativeLibraries": [
+    "lib/arm64-v8a/libs2arm_android.so"
+  ],
+  "verifyApkExit": 0,
+  "signatureVerifyExit": 0,
+  "lint": {
+    "errors": 0,
+    "warnings": 3,
+    "issues": [
+      {
+        "id": "AndroidGradlePluginVersion",
+        "severity": "Warning"
+      },
+      {
+        "id": "SetTextI18n",
+        "severity": "Warning"
+      },
+      {
+        "id": "SetTextI18n",
+        "severity": "Warning"
+      }
+    ]
+  },
+  "testToolchain": {
+    "python": "3.12.10",
+    "capstoneModuleVersion": "5.0.7",
+    "capstoneDistributionMetadata": "5.0.9",
+    "lz4ModuleVersion": "4.4.5",
+    "uiautomator2Distribution": "3.7.1",
+    "note": "Historical diagnostic environment; PR-side fixture equivalence rerun uses the repository-pinned capstone distribution 5.0.7 and produces identical three files."
+  }
+}

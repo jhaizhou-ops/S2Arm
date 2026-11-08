@@ -1,0 +1,282 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.ExecOperations
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import javax.inject.Inject
+
+plugins { id 'com.android.application' }
+
+// #1456 capprobe：known-bad 名单唯一来源在 runtime/capprobe/，打包时拷进
+// assets/capprobe/ 供 MainActivity 交给 native（运行时可读、不内嵌进二进制）。
+abstract class CapProbeAssetsTask extends DefaultTask {
+    @InputFile abstract RegularFileProperty getKnownBadList()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+
+    @TaskAction void generate() {
+        def capprobe = new File(outputDirectory.get().asFile, 'capprobe')
+        if (!capprobe.isDirectory() && !capprobe.mkdirs())
+            throw new GradleException('Cannot create capprobe assets directory')
+        Files.copy(knownBadList.get().asFile.toPath(), new File(capprobe, 'known-bad.txt').toPath(),
+            StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+// #1456 capprobe 助手：独立探测进程按 lib*.so 进 jniLibs。AGP 只把 CMake 的
+// shared library 目标打进 APK，可执行件借 jniLibs 源目录以 lib*.so 名字进
+// lib/<abi>/，STORED+16 KB 页对齐留在包内（useLegacyPackaging=false）。
+// native 不直接 exec 它——posix_spawn 以系统 linker64 为目标、把
+// "<sourceDir>!/lib/arm64-v8a/libs2a_capprobe.so" 作 argv[1] 交给它装载
+// （bionic Android 10 起认 apk!/ 内路径，#1482：应用私有目录 files/ 里的
+// 可执行件在 targetSdk≥29 被禁 exec，真机读数 exit:127）。
+abstract class CapProbeJniLibsTask extends DefaultTask {
+    @Inject abstract ExecOperations getExecOps()
+    @InputFile abstract RegularFileProperty getPackageScript()
+    @InputFile abstract RegularFileProperty getProbeSource()
+    @InputFile abstract RegularFileProperty getSpvHeader()
+    @InputFile abstract RegularFileProperty getNdkToolchain()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+
+    @TaskAction void generate() {
+        // The NDK path is resolved inside package.sh by ndk_toolchain.sh —
+        // the same pinned-NDK resolver every gate script uses; there is no
+        // readable ndkDirectory property on the decorated AGP extension.
+        execOps.exec {
+            executable 'bash'
+            args packageScript.get().asFile.absolutePath
+            environment 'OUT', outputDirectory.get().asFile.absolutePath
+            workingDir packageScript.get().asFile.parentFile
+        }
+        File helper = new File(outputDirectory.get().asFile, 'arm64-v8a/libs2a_capprobe.so')
+        if (!helper.isFile() || helper.length() == 0)
+            throw new GradleException("capprobe packaging produced no libs2a_capprobe.so under ${outputDirectory.get().asFile}")
+    }
+}
+
+abstract class RewriterLicensesTask extends DefaultTask {
+    @InputFile abstract RegularFileProperty getCapstoneLicense()
+    @InputFile abstract RegularFileProperty getLlvmLicense()
+    @InputFile abstract RegularFileProperty getLz4Source()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+
+    @TaskAction void generate() {
+        def capstone = capstoneLicense.get().asFile.getText('UTF-8')
+        def llvm = llvmLicense.get().asFile.getText('UTF-8')
+        def source = lz4Source.get().asFile.getText('UTF-8')
+        def end = source.indexOf('*/')
+        // The sdist root LICENSE belongs to the Python wrapper, not the C library.
+        if (!source.startsWith('/*') || end < 0)
+            throw new GradleException('Fixed LZ4 C source has no leading license comment')
+        def lz4 = source.substring(0, end + 2)
+        if (!capstone.trim() || !llvm.trim() || !lz4.contains('BSD 2-Clause License') || !lz4.contains('Yann Collet'))
+            throw new GradleException('Fixed preparation license source is empty or unrecognized')
+        def licenses = new File(outputDirectory.get().asFile, 'licenses')
+        if (!licenses.isDirectory() && !licenses.mkdirs())
+            throw new GradleException('Cannot create preparation license assets')
+        new File(licenses, 'capstone-LICENSE.txt').setText(capstone + '\n' + llvm, 'UTF-8')
+        new File(licenses, 'lz4-LICENSE.txt').setText(lz4 + '\n', 'UTF-8')
+    }
+}
+
+// Per-game APK (implementation plan §2.3 / §8.2): S2ARM_ANDROID_GAME_DIR or -Ps2arm.gameDir, the
+// output of tools/game_apk.py (relative to the repository), gives the app the game's own identity
+// and its rewritten modules as assets. Unset: org.s2arm.android; nativeMode=game can consume imported revisions.
+def gameDirName = project.findProperty('s2arm.gameDir') ?: System.getenv('S2ARM_ANDROID_GAME_DIR')
+def nativeMode = project.findProperty('s2arm.nativeMode') ?: 'diagnostic'
+def vammLayout = project.findProperty('s2arm.vammLayout') ?: 'alias'
+if (!(vammLayout in ['alias', 'balanced'])) throw new GradleException('s2arm.vammLayout must be alias or balanced')
+if (!(nativeMode in ['diagnostic', 'game'])) throw new GradleException('s2arm.nativeMode must be diagnostic or game')
+def gameDir = null
+def game = new Properties()
+if (gameDirName) {
+    gameDir = new File(gameDirName).isAbsolute() ? file(gameDirName) : file("${rootDir}/../../${gameDirName}")
+    file("${gameDir}/game.properties").withInputStream { game.load(it) }
+    if (!(game.titleId ==~ /[0-9A-F]{16}/)) throw new GradleException("${gameDir}/game.properties: titleId is not 16 hex digits")
+}
+
+
+// Preparation is experimental and opt-in. Disabled builds do not inspect or
+// require the fixed rewriter dependency tree, nor package another library.
+def rewriterFlag = project.hasProperty('s2arm.rewriter')
+        ? project.property('s2arm.rewriter').toString() : System.getenv('S2ARM_ANDROID_REWRITER')
+if (rewriterFlag != null && !(rewriterFlag in ['0', '1']))
+    throw new GradleException('s2arm.rewriter / S2ARM_ANDROID_REWRITER must be 0 or 1')
+def rewriterEnabled = rewriterFlag == '1'
+def rewriterDeps = null
+def rewriterLicenseSources = [:]
+def rewriterAssets = layout.buildDirectory.dir('generated/rewriter-assets')
+if (rewriterEnabled) {
+    def location = project.findProperty('s2arm.rewriterDeps') ?: System.getenv('S2A_REWRITER_DEPS')
+    if (!location) throw new GradleException('Preparation JNI requires existing S2A_REWRITER_DEPS (or -Ps2arm.rewriterDeps); no download is performed')
+    rewriterDeps = file(location).canonicalFile
+    rewriterLicenseSources = [
+        capstone: new File(rewriterDeps, 'capstone-5.0.7/src/LICENSE.TXT'),
+        llvm: new File(rewriterDeps, 'capstone-5.0.7/src/LICENSE_LLVM.TXT'),
+        lz4: new File(rewriterDeps, 'lz4-4.4.5/lz4libs/lz4.c')
+    ]
+    rewriterLicenseSources.each { name, source ->
+        if (!source.isFile() || source.length() == 0)
+            throw new GradleException("Preparation dependency lacks real nonempty license source: ${source}")
+    }
+}
+def rewriterLicenseTask = null
+if (rewriterEnabled) {
+    rewriterLicenseTask = tasks.register('prepareRewriterLicenses', RewriterLicensesTask) {
+        capstoneLicense.set(rewriterLicenseSources.capstone)
+        llvmLicense.set(rewriterLicenseSources.llvm)
+        lz4Source.set(rewriterLicenseSources.lz4)
+        outputDirectory.set(rewriterAssets)
+    }
+}
+
+// 玩家包发布签名（10-31 总指挥：玩家安卓包必须是正式发布构建）：密钥在本机生成、长期复用，不进仓库、不进发布物。
+//   放在 ANDROID_USER_HOME（docker 后端在持久缓存卷 /cache/android-user，本机构建缺省 ~/.android），按机器一份；
+//   换了密钥，机上已装的同款包就覆盖不了，所以只在第一次出正式包时生成，以后一直复用。
+//   S2ARM_ANDROID_RELEASE_KEYSTORE 可指到别处（例如多台出包机共用一把）；口令在同名 .pass 文件里（仅属主可读）。
+def releaseKeystore = file(System.getenv('S2ARM_ANDROID_RELEASE_KEYSTORE')
+    ?: "${System.getenv('ANDROID_USER_HOME') ?: System.getProperty('user.home') + '/.android'}/s2arm-release.p12")
+def releasePassFile = file(releaseKeystore.path + '.pass')
+def releaseRequested = gradle.startParameter.taskNames.any { it.toLowerCase(Locale.ROOT).contains('release') }
+// Explicit test installs may coexist with the player's app; never change game identity.
+def testAppIdSuffix = project.findProperty('s2arm.testAppIdSuffix')
+if (testAppIdSuffix != null) {
+    testAppIdSuffix = testAppIdSuffix.toString()
+    if (testAppIdSuffix != '.w2')
+        throw new GradleException('s2arm.testAppIdSuffix must be the fixed debug test suffix .w2')
+    // Fail before release signing can create or inspect a new credential.
+    if (releaseRequested)
+        throw new GradleException('s2arm.testAppIdSuffix is debug-only; remove it for release builds')
+    // Aggregate tasks and Gradle abbreviations are only resolved in the task graph.
+    gradle.taskGraph.whenReady { graph ->
+        if (graph.allTasks.any { it.project == project && it.name.toLowerCase(Locale.ROOT).contains('release') })
+            throw new GradleException('s2arm.testAppIdSuffix is debug-only; remove it for release builds')
+    }
+}
+if (releaseRequested && !releaseKeystore.isFile()) {
+    if (releasePassFile.exists()) throw new GradleException("Release keystore missing but its password file exists: ${releaseKeystore}")
+    releaseKeystore.parentFile.mkdirs()
+    def bytes = new byte[24]; new java.security.SecureRandom().nextBytes(bytes)
+    def secret = bytes.encodeHex().toString()
+    releasePassFile.text = secret
+    releasePassFile.setReadable(false, false); releasePassFile.setReadable(true, true)
+    releasePassFile.setWritable(false, false); releasePassFile.setWritable(true, true)
+    def keytool = "${System.getProperty('java.home')}/bin/keytool"
+    def run = [keytool, '-genkeypair', '-storetype', 'PKCS12', '-keystore', releaseKeystore.path, '-alias', 's2arm',
+               '-keyalg', 'RSA', '-keysize', '3072', '-validity', '36500', '-dname', 'CN=S2Arm player build',
+               '-storepass:file', releasePassFile.path, '-keypass:file', releasePassFile.path].execute()   // 口令不上命令行
+    run.waitForProcessOutput(System.out, System.err)
+    if (run.exitValue() != 0 || !releaseKeystore.isFile()) {
+        releasePassFile.delete(); releaseKeystore.delete()
+        throw new GradleException("Release keystore generation failed (keytool exit ${run.exitValue()})")
+    }
+    releaseKeystore.setReadable(false, false); releaseKeystore.setReadable(true, true)
+}
+
+android {
+    namespace 'org.s2arm.android'
+    buildFeatures { buildConfig true }
+    compileSdk 36
+    ndkVersion '29.0.14206865'
+    defaultConfig {
+        // One app per game, keyed by the stable title id (an application id segment starts with a letter).
+        applicationId gameDir ? "org.s2arm.game.t${game.titleId.toLowerCase()}" : 'org.s2arm.android'
+        manifestPlaceholders = [appLabel: gameDir ? '@string/game_name' : '@string/app_name',
+                                appIcon: gameDir ? '@drawable/ic_launcher' : '@drawable/ic_s2arm',
+                                screenOrientation: gameDir ? 'sensorLandscape' : 'unspecified']
+        testInstrumentationRunner project.findProperty('s2arm.testRunner') ?: 'org.s2arm.android.GamepadMappingInstrumentation'
+        minSdk 29
+        targetSdk 36
+        versionCode gameDir ? Integer.parseInt(game.versionCode ?: '1') : 1   // game_apk.py --version-code
+        versionName gameDir ? "${game.version} (S2Arm 0.1.0-dev)" : '0.1.0-dev'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild { cmake {
+            arguments "-DS2A_ANDROID_NATIVE_MODE=${nativeMode}"
+            arguments "-DS2A_ANDROID_VAMM_LAYOUT=${vammLayout}"
+            arguments "-DS2A_ANDROID_REWRITER=${rewriterEnabled ? 'ON' : 'OFF'}"
+            if (rewriterEnabled) {
+                targets 's2arm_android', 's2arm_rewriter'
+                arguments "-DS2A_REWRITER_DEPS=${rewriterDeps}"
+            } else {
+                targets 's2arm_android'
+            }
+            // cs/build.sh mode; "static" links the NativeAOT service layer into the host library
+            arguments "-DS2A_CS_SERVICES=${System.getenv('S2ARM_ANDROID_CS_SERVICES') ?: '0'}"
+            arguments "-DS2A_ANDROID_EXPERIMENTAL_TOUCH=${project.findProperty('s2arm.experimentalTouch') == 'true' ? 'ON' : 'OFF'}"
+            // 共享 NVN 前端 + 生产 direct provider + nvn_vk 后端的编译门（默认关闭；直连包用
+            // S2ARM_ANDROID_VK_ENGINE=1 打开）。名字是历史遗留，旧 d2r 引擎已删除。
+            arguments "-DS2A_ANDROID_VK_ENGINE=${System.getenv('S2ARM_ANDROID_VK_ENGINE') == '1' ? 'ON' : 'OFF'}"
+            // 前端 mtl_* 的后端只剩 nvn_vk（S2Arm 自己的 Vulkan 后端 + mtl_vk_shim.c）
+            arguments "-DS2ARM_ANDROID_VK_BACKEND=${System.getenv('S2ARM_ANDROID_VK_BACKEND') ?: 'nvn_vk'}"
+        } }
+    }
+    externalNativeBuild {
+        cmake {
+            path '../CMakeLists.txt'
+            version '3.31.6'
+        }
+    }
+    // NativeAOT probe from cs/build.sh (docker/build.sh runs it first); absent = not packaged
+    // ... and the license / notice files of what they package (assets/licenses)
+    sourceSets { main {
+        jniLibs.srcDirs += ["${rootDir}/../../build/android-cs/jniLibs"]
+        assets.srcDirs += ["${rootDir}/../../build/android-cs/assets"]
+        if (gameDir) {
+            assets.srcDirs += ["${gameDir}/assets"]
+            res.srcDirs += ["${gameDir}/res"]
+        }
+    } }
+    // Module images stay uncompressed in the APK, so AAsset_getBuffer reads them in place.
+    androidResources { noCompress 'bin' }
+    // useLegacyPackaging=false（extractNativeLibs=false）：原生库 STORED+16 KB
+    // 页对齐留在 APK 里——capprobe 探测助手靠系统 linker64 直接装载
+    // "<sourceDir>!/lib/arm64-v8a/libs2a_capprobe.so"（bionic Android 10 起
+    // 认 apk!/ 路径），不整包落盘、不改全局打包（#1482：files/ exec 被禁；
+    // nativeLibraryDir 方案要全包 extractNativeLibs=true，owner 否决）。
+    packaging { jniLibs { useLegacyPackaging false } }
+    def capprobeAssetTask = tasks.register('capprobeAssets', CapProbeAssetsTask) {
+        knownBadList.set(layout.file(provider { file("${rootDir}/runtime/capprobe/known-bad.txt") }))
+        outputDirectory.set(layout.buildDirectory.dir('generated/capprobe-assets'))
+    }
+    def capprobeJniTask = tasks.register('capprobeJniLibs', CapProbeJniLibsTask) {
+        packageScript.set(layout.file(provider { file("${rootDir}/runtime/capprobe/package.sh") }))
+        probeSource.set(layout.file(provider { file("${rootDir}/runtime/capprobe/capprobe.c") }))
+        spvHeader.set(layout.file(provider { file("${rootDir}/runtime/capprobe/capprobe_spv.h") }))
+        ndkToolchain.set(layout.file(provider { file("${rootDir}/tools/ndk_toolchain.sh") }))
+        outputDirectory.set(layout.buildDirectory.dir('generated/capprobe-jnilibs'))
+    }
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            variant.sources.assets.addGeneratedSourceDirectory(capprobeAssetTask) { task -> task.outputDirectory }
+            variant.sources.jniLibs.addGeneratedSourceDirectory(capprobeJniTask) { task -> task.outputDirectory }
+        }
+    }
+    signingConfigs {
+        release {
+            storeFile releaseKeystore
+            storeType 'pkcs12'
+            storePassword releasePassFile.isFile() ? releasePassFile.text.trim() : ''
+            keyAlias 's2arm'
+            keyPassword releasePassFile.isFile() ? releasePassFile.text.trim() : ''
+        }
+    }
+    // 正式构建：BuildConfig.DEBUG=false、不可调试、原生走 CMake 发布配置（编译参数在构建后核，见 pack/targets/android/package.py）
+    buildTypes { release { minifyEnabled false; debuggable false; jniDebuggable false; signingConfig signingConfigs.release } }
+    buildTypes { debug { if (testAppIdSuffix != null) applicationIdSuffix testAppIdSuffix } }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+
+if (rewriterEnabled) {
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            variant.sources.assets.addGeneratedSourceDirectory(rewriterLicenseTask) { task -> task.outputDirectory }
+        }
+    }
+}

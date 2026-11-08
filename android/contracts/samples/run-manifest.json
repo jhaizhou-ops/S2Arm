@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "runId": "run-20261022-0001",
+  "createdAt": "2026-10-22T08:20:00Z",
+  "app": {
+    "applicationId": "org.s2arm.android",
+    "versionCode": 1,
+    "versionName": "0.1.0-dev",
+    "commit": "aecf7a8f",
+    "buildType": "debug"
+  },
+  "artifact": {
+    "titleId": "0100000000ABCDEF",
+    "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "artifact": "game-build-artifact.json",
+    "artifactSha256": "d178984337f2b7f7d992a68b89fb9895e6a0cc27814c5f57bcf931a61461ff26",
+    "rewriteAbi": "android-sp-safe-v1",
+    "target": "android",
+    "backend": "vulkan"
+  },
+  "input": {
+    "manifestSha256": "f5c7d100c36ba2f6784656fa2f2df569ad587cfdee360451de14281177c2f080",
+    "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "modules": [
+    {
+      "name": "main",
+      "source": "apk-asset",
+      "buildId": "0123456789abcdef0123456789abcdef01234567",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "sdk",
+      "source": "apk-asset",
+      "buildId": "89abcdef0123456789abcdef0123456789abcdef",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "device": {
+    "manufacturer": "Synthetic",
+    "model": "contract-sample",
+    "apiLevel": 35,
+    "abi": "arm64-v8a",
+    "pageSize": 16384,
+    "memoryBytes": 8589934592
+  },
+  "driver": {
+    "name": "synthetic-vulkan",
+    "version": "1.0.0",
+    "vendor": "S2Arm",
+    "source": "unknown"
+  },
+  "session": {
+    "id": "session-sample-1",
+    "mode": "diagnostic",
+    "route": "contract-sample",
+    "clock": "deterministic",
+    "saveMode": "readonly",
+    "cacheMode": "cold"
+  },
+  "profile": {
+    "backend": "vulkan",
+    "rulesVersion": "1",
+    "tuning": "sample",
+    "deviceCapsSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "effectiveProfileSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "references": {
+    "deviceCaps": "device-caps.json",
+    "effectiveProfile": "effective-profile.json",
+    "hostLog": "host.log",
+    "lifecycle": "lifecycle.jsonl",
+    "frames": "frames.tsv",
+    "compileEvents": "compile_events.jsonl",
+    "cacheReport": "cache_report.json",
+    "memory": "memory.tsv",
+    "power": "power.json",
+    "result": "result.json",
+    "truth": "truth.tsv",
+    "shots": "shots/"
+  }
+}

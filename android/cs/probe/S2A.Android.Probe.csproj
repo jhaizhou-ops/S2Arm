@@ -1,0 +1,16 @@
+<!-- NativeAOT on Android (linux-bionic-arm64) feasibility probe: a shared library exporting
+     s2a_cs_probe, loaded by the diagnostic shell. Built by android/cs/build.sh. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>libs2a_cs_probe</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <!-- linux-bionic is not a supported NativeAOT target yet; the runtime pack exists on nuget.org -->
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,18 @@
+{
+  "originalSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "adaptedSha256": "5109587f1a07c09e94e5ce6ca6617be148117a207b67b4d77c207752e91daeb3",
+  "screen": [
+    2520,
+    1080
+  ],
+  "surface": [
+    2423,
+    981
+  ],
+  "adaptation": [
+    "Separate screen and Surface sizes",
+    "Translate live layout coordinates by current content bounds",
+    "Bound app visibility by original 15-second timeout; preserve failed visibility hierarchy privately"
+  ],
+  "checksUnchanged": "Six case assertions, process/thread/surface/input checks retained"
+}

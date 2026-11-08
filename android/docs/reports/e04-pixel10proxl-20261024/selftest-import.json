@@ -1,0 +1,32 @@
+[
+  {
+    "file": "patched.bin",
+    "bytes": 65776,
+    "sha256": "7642ee98142d2c8f1a6fa855ff3fff9433ba6cd8618d95d7e07a66225e2e6725",
+    "hashObservations": [
+      "497cb2a26c50b29679730b1a47d4e2a316a1d238d1265796859207962acdb538",
+      "7642ee98142d2c8f1a6fa855ff3fff9433ba6cd8618d95d7e07a66225e2e6725"
+    ],
+    "seconds": 0.6
+  },
+  {
+    "file": "fixups.tsv",
+    "bytes": 279,
+    "sha256": "cee038038789efa55e0d502ff537d2442474517543baa07a465eb7b6fb665850",
+    "hashObservations": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "cee038038789efa55e0d502ff537d2442474517543baa07a465eb7b6fb665850"
+    ],
+    "seconds": 0.602
+  },
+  {
+    "file": "gates.tsv",
+    "bytes": 20,
+    "sha256": "75da3805ab673ddb914956bd6713328d9d8a8e08d2d886862f4ff4bcccedfc78",
+    "hashObservations": [
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "75da3805ab673ddb914956bd6713328d9d8a8e08d2d886862f4ff4bcccedfc78"
+    ],
+    "seconds": 0.56
+  }
+]

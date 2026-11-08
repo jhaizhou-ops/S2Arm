@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "runtimeCommit": "d663483350c40c1f6894afd5735f1fd16cd4fc8f",
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass"
+    },
+    {
+      "name": "buttons",
+      "status": "pass"
+    },
+    {
+      "name": "sticks",
+      "status": "pass"
+    },
+    {
+      "name": "rotation",
+      "status": "pass"
+    },
+    {
+      "name": "home-reset",
+      "status": "pass"
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "release-touch",
+      "status": "pass"
+    },
+    {
+      "name": "stop-diagnostic-app",
+      "status": "pass"
+    },
+    {
+      "name": "restore-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "apkSha256": "3be424e8e408fee91a23a6e583adabe998a3d31a4d5fe53911f19bb049b6d447",
+  "device": {
+    "ro.product.model": "Pixel 8 Pro",
+    "ro.product.device": "husky",
+    "ro.build.version.release": "16"
+  },
+  "status": "pass"
+}

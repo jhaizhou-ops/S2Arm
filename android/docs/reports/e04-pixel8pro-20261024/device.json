@@ -1,0 +1,47 @@
+{
+  "model": "Google Pixel 8 Pro",
+  "device": "husky",
+  "socProperty": "Tensor G3",
+  "android": "16",
+  "api": 36,
+  "securityPatchProperty": "2025-11-05",
+  "abi": "arm64-v8a",
+  "pageBytes": 4096,
+  "memTotalKiB": 11827196,
+  "dataAvailableKiBAtPreflight": 25663764,
+  "memoryScope": "System MemTotal; not application or game memory limit",
+  "display": {
+    "physicalPortrait": [
+      1344,
+      2992
+    ],
+    "landscapeScreenshotAndSurface": [
+      2992,
+      1344
+    ],
+    "contentOrigin": [
+      0,
+      0
+    ],
+    "physicalDensity": 480,
+    "existingDensityOverride": 544,
+    "rotationTransforms": {
+      "1": "0x2",
+      "3": "0x8"
+    }
+  },
+  "applicationGpu": {
+    "source": "S2Arm diagnostic process log",
+    "name": "Mali-G715",
+    "apiMajorMinor": "1.4"
+  },
+  "systemGpu": {
+    "source": "cmd gpu vkjson (shell; separate from app observation)",
+    "name": "Mali-G715",
+    "apiVersionRaw": 4210991,
+    "apiVersion": "1.4.303",
+    "driverVersionRaw": 226492416,
+    "driverName": "Mali-G715",
+    "driverInfo": "v1.r54p0-00eac0.2eb223a75a2b3d1d3ecd5a6eb1b0b63d"
+  }
+}

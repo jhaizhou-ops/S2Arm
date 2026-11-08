@@ -1,0 +1,70 @@
+<!-- Android NativeAOT feasibility (linux-bionic-arm64): the service layer plus Ryujinx's Vulkan
+     backend, mirroring services/aot/S2A.Aot.csproj without the Apple renderer. The game
+     composition uses the real service, Vulkan and AAudio consumers. Shared (default): its own .so. Static (cs/build.sh with
+     S2ARM_ANDROID_CS_SERVICES=static): a library CMake links into libs2arm_android.so, with
+     s2a_native bound at link time as on iOS. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>libs2a_cs</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);S2A_ANDROID</DefineConstants>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PredefinedCulturesOnly>false</PredefinedCulturesOnly>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <NoWarn>$(NoWarn);CA1416;IL2026;IL2072;IL2075;IL2080;IL3050</NoWarn>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(RepoRoot)android/core-runtime/*.cs" />
+    <Compile Include="$(RepoRoot)android/cs/video/*.cs" />
+    <Compile Include="../savecommit/AndroidDirectoryTransaction.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/runtime/AndroidVulkanRuntime.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/runtime/StartupWait.cs" />
+    <!-- S2 offline pack: the same pure-C# layout/manifest/installer the producer and host tests use -->
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackLayout.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackManifest.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackArchive.cs" />
+    <Compile Include="$(RepoRoot)graphics/vulkan/cache/ShaderPackInstaller.cs" />
+    <Compile Include="$(RepoRoot)graphics/metal/cs/NxTrack.cs" />
+    <ProjectReference Include="$(RepoRoot)services/S2A.Services/S2A.Services.csproj" />
+    <!-- Direct shader compiler: same source as the offline CLI (graphics/tools/direct/compiler). -->
+    <ProjectReference Include="$(RepoRoot)graphics/tools/direct/compiler/S2A.DirectCompiler.csproj" />
+    <!-- 运行时补编的翻译器（dmsh_xlate，参考实现 的 Ryujinx 叉）与 compat/tree 同名，带 Aliases 隔离 -->
+    <ProjectReference Include="$(RepoRoot)graphics/tools/direct/dsh/S2A.Dsh.csproj" Aliases="dsh" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Graphics.Vulkan/Ryujinx.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Graphics.Nvdec.FFmpeg/Ryujinx.Graphics.Nvdec.FFmpeg.csproj" />
+    <ProjectReference Include="../audio/S2A.Audio.AAudio.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(NativeLib)' == 'Static'">
+    <DirectPInvoke Include="s2a_native" />
+    <DirectPInvoke Include="s2arm_android" />   <!-- the host's own functions (AAudio sink) -->
+    <!-- Opus (Horizon hwopus) and VP8 (Nvdec) decoding: the shims + libraries from codecs/build.sh,
+         listed in link.txt by cs/build.sh, as services/aot links them on Apple -->
+    <DirectPInvoke Include="s2a_opus" />
+    <DirectPInvoke Include="s2a_vpx" />
+  </ItemGroup>
+  <!-- The static library holds only the managed code. Record the runtime pieces and system
+       libraries the SDK would link (in its order) for CMake to link after it. -->
+  <Target Name="S2AWriteStaticLinkInputs" AfterTargets="SetupOSSpecificProps"
+          Condition="'$(NativeLib)' == 'Static' and '$(S2ALinkInputs)' != ''">
+    <WriteLinesToFile File="$(S2ALinkInputs)" Overwrite="true"
+                      Lines="@(NativeLibrary);@(NativeSystemLibrary->'-l%(Identity)')" />
+  </Target>
+  <ItemGroup>
+    <UnmanagedEntryPointsAssembly Include="S2A.Services" />
+    <UnmanagedEntryPointsAssembly Include="S2A.Dsh" />   <!-- s2a_direct_bundle_v1（Android 运行时补编） -->
+    <!-- the module initializer that sets Exports.AudioFactory lives here (same as S2A.Aot on Apple) -->
+    <TrimmerRootAssembly Include="libs2a_cs" />
+    <TrimmerRootAssembly Include="Ryujinx.HLE" />
+    <TrimmerRootAssembly Include="Ryujinx.Horizon" />
+    <TrimmerRootAssembly Include="S2A.Services" />
+    <TrimmerRootAssembly Include="Ryujinx.Graphics.Vulkan" />
+    <TrimmerRootAssembly Include="S2A.DirectCompiler" />
+  </ItemGroup>
+</Project>

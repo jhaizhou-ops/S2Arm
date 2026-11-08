@@ -1,0 +1,40 @@
+--- device_round.py
++++ device_round.py
+@@ -135,3 +135,8 @@
+-        require(
+-            visible_app(self.device.dump_hierarchy()), "App not visible/unlocked; unlock on device"
+-        )
++        def ready():
++            hierarchy = self.device.dump_hierarchy()
++            if visible_app(hierarchy):
++                return True
++            self.report["visibilityRetries"] = self.report.get("visibilityRetries", 0) + 1
++            (self.args.out / "visibility-last.private.xml").write_text(hierarchy)
++            return False
++        self.wait(ready, "App visible/unlocked; unlock on device")
+@@ -160 +165,12 @@
+-            return controls_from_log(self.texts(), size)
++            controls = controls_from_log(self.texts(), size)
++            import xml.etree.ElementTree as ET
++            nodes = [node for node in ET.fromstring(self.device.dump_hierarchy()).iter("node")
++                     if node.get("package") == PACKAGE and node.get("resource-id") == "android:id/content"]
++            require(len(nodes) == 1, "Expected one diagnostic content window")
++            left, top, right, bottom = map(int, re.findall(r"\d+", nodes[0].get("bounds", "")))
++            require((right - left, bottom - top) == (2423, 981), "Unexpected content window")
++            controls = {name: (x + left, y + top, radius)
++                        for name, (x, y, radius) in controls.items()}
++            validate_controls(controls, size)
++            self.report.setdefault("contentWindows", []).append([left, top, right, bottom])
++            return controls
+@@ -171 +187 @@
+-                and self.device.window_size() == (2400, 1080)
++                and self.device.window_size() == (2520, 1080)
+@@ -180 +196 @@
+-        require(struct.unpack(">II", data[16:24]) == (2400, 1080), "Screenshot in transition")
++        require(struct.unpack(">II", data[16:24]) == (2520, 1080), "Screenshot in transition")
+@@ -242 +258 @@
+-        self.expect(r"HostApi display 2400x1080 rotation 1")
++        self.expect(r"HostApi display 2423x981 rotation 1")
+@@ -282 +298 @@
+-            self.expect(f"HostApi display 2400x1080 rotation {rotation}", cursor)
++            self.expect(f"HostApi display 2423x981 rotation {rotation}", cursor)

@@ -1,0 +1,135 @@
+# Private source label: fold-out-to-in.private.log
+         1792820493.993 15381 15381 I S2Arm   : Page size: 4096 bytes
+         1792820493.993 15381 15381 I S2Arm   : Shared-memory alias: available
+         1792820493.993 15381 15381 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792820493.993 15381 15381 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792820493.993 15381 15381 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792820493.993 15381 15381 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792820493.993 15381 15381 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792820493.993 15381 15381 I S2Arm   : Adreno (TM) 730 (1.1)
+         1792820494.058 15381 15381 I S2Arm   : touchpad layout: LSTICK=(315,549,r142) RSTICK=(1769,785,r118) DPAD=(654,804,r118) A=(2253,549,r54) B=(2108,662,r54) X=(2108,437,r54) Y=(1963,549,r54) LS=(501,422,r37) RS=(1602,677,r37) L=(412,147,r49) R=(2011,147,r49) ZL=(170,147,r49) ZR=(2253,147,r49) +=(1405,118,r39) −=(1018,118,r39)
+         1792820494.058 15381 15381 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792820494.060 15381 15381 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2423 × 981
+         1792820494.064 15381 15381 I S2Arm   : Vulkan surface generation 1: 2423 × 981, rotation 90°, 120 Hz; HostApi display 2423x981 rotation 1 120.000 Hz 422x418 dpi, handheld
+         1792820494.066 15381 15425 I S2Arm   : Vulkan present: device Adreno (TM) 730, queue family 0
+         1792820494.093 15381 15425 I S2Arm   : Vulkan present: swapchain 2423x981, format 37, 4 images, FIFO, transform 0x1 (window 2423x981), build 1
+         1792820494.093 15381 15425 I S2Arm   : Vulkan present: surface generation 1
+         1792820494.100 15381 15425 I S2Arm   : Vulkan present: 1 frames, interval avg 0.00 ms max 0.00 ms over 0, 2423x981 transform 0x1, 1 builds, 0 acquire timeouts
+         1792820494.106 15381 15381 I S2Arm   : Vulkan surface generation 1: 2423 × 981, rotation 90°, 120 Hz; HostApi display 2423x981 rotation 1 120.000 Hz 422x418 dpi, handheld
+         1792820494.119 15381 15425 I S2Arm   : Vulkan present: swapchain 981x2423, format 37, 4 images, FIFO, transform 0x2 (window 2423x981), build 2
+         1792820496.104 15381 15425 I S2Arm   : Vulkan present: 147 frames, interval avg 13.78 ms max 40.19 ms over 145, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820498.116 15381 15425 I S2Arm   : Vulkan present: 269 frames, interval avg 16.50 ms max 20.13 ms over 122, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820500.122 15381 15425 I S2Arm   : Vulkan present: 390 frames, interval avg 16.58 ms max 21.72 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820502.126 15381 15425 I S2Arm   : Vulkan present: 511 frames, interval avg 16.56 ms max 21.60 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820504.127 15381 15425 I S2Arm   : Vulkan present: 632 frames, interval avg 16.54 ms max 21.96 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820506.133 15381 15425 I S2Arm   : Vulkan present: 753 frames, interval avg 16.58 ms max 19.77 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820508.136 15381 15425 I S2Arm   : Vulkan present: 874 frames, interval avg 16.56 ms max 20.19 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820510.137 15381 15425 I S2Arm   : Vulkan present: 995 frames, interval avg 16.54 ms max 19.22 ms over 121, 981x2423 transform 0x2, 2 builds, 0 acquire timeouts
+         1792820512.176 15381 15425 I S2Arm   : Vulkan presenter: no surface (1112 frames presented so far)
+         1792820512.177 15381 15381 I S2Arm   : Surface generation 1 detached in 1 ms
+         1792820513.835 15381 15381 I S2Arm   : Vulkan surface generation 2 offered to the render thread: 2423 × 981
+         1792820513.837 15381 15381 I S2Arm   : Vulkan surface generation 2: 2423 × 981, rotation 90°, 120 Hz; HostApi display 2423x981 rotation 1 120.000 Hz 422x418 dpi, handheld
+         1792820513.843 15381 15425 I S2Arm   : Vulkan present: swapchain 981x2423, format 37, 4 images, FIFO, transform 0x2 (window 2423x981), build 3
+         1792820513.843 15381 15425 I S2Arm   : Vulkan present: surface generation 2
+         1792820513.843 15381 15425 I S2Arm   : Vulkan present: 1113 frames, interval avg 16.55 ms max 21.86 ms over 117, 981x2423 transform 0x2, 3 builds, 1 acquire timeouts
+         1792820515.930 15381 15381 I S2Arm   : Vulkan surface generation 2: 2072 × 1817, rotation 90°, 120 Hz; HostApi display 2072x1817 rotation 1 120.000 Hz 422x418 dpi, handheld
+         1792820515.933 15381 15381 I S2Arm   : touchpad layout: LSTICK=(269,1018,r263) RSTICK=(1513,1454,r218) DPAD=(559,1490,r218) A=(1927,1018,r100) B=(1803,1226,r100) X=(1803,809,r100) Y=(1678,1018,r100) LS=(615,781,r69) RS=(1204,1254,r69) L=(352,273,r91) R=(1720,273,r91) ZL=(145,273,r91) ZR=(1927,273,r91) +=(1202,218,r73) −=(870,218,r73)
+         1792820515.966 15381 15425 I S2Arm   : Vulkan present: 1259 frames, interval avg 14.54 ms max 173.26 ms over 146, 981x2423 transform 0x2, 3 builds, 4 acquire timeouts
+         1792820515.973 15381 15425 I S2Arm   : Vulkan present: swapchain 2072x1817, format 37, 4 images, FIFO, transform 0x1 (window 2072x1817), build 4
+         1792820515.981 15381 15381 I S2Arm   : Vulkan surface generation 2: 2072 × 1817, rotation 90°, 120 Hz; HostApi display 2072x1817 rotation 1 120.000 Hz 422x418 dpi, handheld
+         1792820517.233 15381 15425 I S2Arm   : Vulkan presenter: no surface (1322 frames presented so far)
+         1792820517.233 15381 15381 I S2Arm   : Surface generation 2 detached in 2 ms
+# Private source label: fold-out-to-in-2.private.log
+         1792820573.374 15381 15425 I S2Arm   : Vulkan present: 1813 frames, interval avg 16.74 ms max 23.43 ms over 120, 2072x1817 transform 0x1, 6 builds, 7 acquire timeouts
+         1792820575.382 15381 15425 I S2Arm   : Vulkan present: 1933 frames, interval avg 16.74 ms max 22.54 ms over 120, 2072x1817 transform 0x1, 6 builds, 7 acquire timeouts
+# Private source label: inner-explore.private.log
+         1792820615.548 15381 15425 I S2Arm   : Vulkan present: 4333 frames, interval avg 16.69 ms max 19.86 ms over 120, 2072x1817 transform 0x1, 6 builds, 7 acquire timeouts
+         1792820617.561 15381 15425 I S2Arm   : Vulkan present: 4453 frames, interval avg 16.78 ms max 21.46 ms over 120, 2072x1817 transform 0x1, 6 builds, 7 acquire timeouts
+         1792820618.217 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 90°, 60 Hz; HostApi display 2072x1817 rotation 1 60.000 Hz 422x418 dpi, handheld
+         1792820618.235 15381 15425 I S2Arm   : Vulkan present: swapchain 2072x1817, format 37, 4 images, FIFO, transform 0x4 (window 2072x1817), build 7
+         1792820618.249 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 270°, 60 Hz; HostApi display 2072x1817 rotation 3 60.000 Hz 422x418 dpi, handheld
+         1792820618.359 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 270°, 60 Hz; HostApi display 2072x1817 rotation 3 60.000 Hz 422x418 dpi, handheld
+         1792820619.568 15381 15425 I S2Arm   : Vulkan present: 4569 frames, interval avg 17.38 ms max 92.13 ms over 115, 2072x1817 transform 0x4, 7 builds, 7 acquire timeouts
+         1792820620.961 15381 15425 I S2Arm   : Vulkan present: swapchain 2072x1817, format 37, 4 images, FIFO, transform 0x1 (window 2072x1817), build 8
+         1792820620.973 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 90°, 60 Hz; HostApi display 2072x1817 rotation 1 60.000 Hz 422x418 dpi, handheld
+         1792820620.984 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 90°, 60 Hz; HostApi display 2072x1817 rotation 1 60.000 Hz 422x418 dpi, handheld
+         1792820621.007 15381 15381 I S2Arm   : Vulkan surface generation 3: 2072 × 1817, rotation 90°, 60 Hz; HostApi display 2072x1817 rotation 1 60.000 Hz 422x418 dpi, handheld
+         1792820621.579 15381 15425 I S2Arm   : Vulkan present: 4687 frames, interval avg 17.12 ms max 76.95 ms over 117, 2072x1817 transform 0x1, 8 builds, 7 acquire timeouts
+         1792820623.584 15381 15425 I S2Arm   : Vulkan present: 4807 frames, interval avg 16.72 ms max 23.33 ms over 120, 2072x1817 transform 0x1, 8 builds, 7 acquire timeouts
+# Private source label: fold-in-to-out.private.log
+         1792820701.489 18368 18368 I S2Arm   : Page size: 4096 bytes
+         1792820701.489 18368 18368 I S2Arm   : Shared-memory alias: available
+         1792820701.489 18368 18368 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792820701.489 18368 18368 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792820701.489 18368 18368 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792820701.489 18368 18368 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792820701.489 18368 18368 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792820701.489 18368 18368 I S2Arm   : Adreno (TM) 730 (1.1)
+         1792820701.577 18368 18368 I S2Arm   : touchpad layout: LSTICK=(269,1018,r263) RSTICK=(1513,1454,r218) DPAD=(559,1490,r218) A=(1927,1018,r100) B=(1803,1226,r100) X=(1803,809,r100) Y=(1678,1018,r100) LS=(615,781,r69) RS=(1204,1254,r69) L=(352,273,r91) R=(1720,273,r91) ZL=(145,273,r91) ZR=(1927,273,r91) +=(1202,218,r73) −=(870,218,r73)
+         1792820701.577 18368 18368 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792820701.581 18368 18368 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2072 × 1817
+         1792820701.582 18368 18368 I S2Arm   : Vulkan surface generation 1: 2072 × 1817, rotation 90°, 120 Hz; HostApi display 2072x1817 rotation 1 120.000 Hz 360x359 dpi, handheld
+         1792820701.596 18368 18414 I S2Arm   : Vulkan present: device Adreno (TM) 730, queue family 0
+         1792820701.614 18368 18414 I S2Arm   : Vulkan present: swapchain 1817x2072, format 37, 4 images, FIFO, transform 0x8 (window 2072x1817), build 1
+         1792820701.614 18368 18414 I S2Arm   : Vulkan present: surface generation 1
+         1792820701.616 18368 18414 I S2Arm   : Vulkan present: 1 frames, interval avg 0.00 ms max 0.00 ms over 0, 1817x2072 transform 0x8, 1 builds, 0 acquire timeouts
+         1792820701.642 18368 18414 I S2Arm   : Vulkan present: swapchain 2072x1817, format 37, 4 images, FIFO, transform 0x1 (window 2072x1817), build 2
+         1792820701.667 18368 18368 I S2Arm   : Vulkan surface generation 1: 2072 × 1817, rotation 90°, 120 Hz; HostApi display 2072x1817 rotation 1 120.000 Hz 360x359 dpi, handheld
+         1792820703.625 18368 18414 I S2Arm   : Vulkan present: 134 frames, interval avg 15.16 ms max 36.81 ms over 132, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820705.634 18368 18414 I S2Arm   : Vulkan present: 254 frames, interval avg 16.74 ms max 21.42 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820707.643 18368 18414 I S2Arm   : Vulkan present: 374 frames, interval avg 16.74 ms max 19.73 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820709.651 18368 18414 I S2Arm   : Vulkan present: 494 frames, interval avg 16.73 ms max 20.45 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820711.659 18368 18414 I S2Arm   : Vulkan present: 614 frames, interval avg 16.73 ms max 24.22 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820713.666 18368 18414 I S2Arm   : Vulkan present: 734 frames, interval avg 16.73 ms max 19.87 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820715.676 18368 18414 I S2Arm   : Vulkan present: 854 frames, interval avg 16.75 ms max 20.84 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820717.683 18368 18414 I S2Arm   : Vulkan present: 974 frames, interval avg 16.73 ms max 19.89 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820718.706 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-24009,22299) R=(0,0)
+         1792820718.767 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-24220,22069) R=(0,0)
+         1792820718.785 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-24562,21688) R=(0,0)
+         1792820718.802 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-25040,21134) R=(0,0)
+         1792820718.819 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-25522,20550) R=(0,0)
+         1792820718.833 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-25983,19964) R=(0,0)
+         1792820718.850 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-26361,19462) R=(0,0)
+         1792820718.867 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-26694,19003) R=(0,0)
+         1792820718.883 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27006,18557) R=(0,0)
+         1792820718.900 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27275,18160) R=(0,0)
+         1792820718.917 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27512,17797) R=(0,0)
+         1792820718.934 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27710,17487) R=(0,0)
+         1792820718.950 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27853,17259) R=(0,0)
+         1792820718.967 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-27881,17213) R=(0,0)
+         1792820718.984 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28152,16767) R=(0,0)
+         1792820719.018 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28256,16592) R=(0,0)
+         1792820719.035 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28358,16416) R=(0,0)
+         1792820719.051 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28439,16276) R=(0,0)
+         1792820719.068 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28604,15984) R=(0,0)
+         1792820719.084 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28698,15815) R=(0,0)
+         1792820719.101 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28789,15647) R=(0,0)
+         1792820719.118 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28940,15367) R=(0,0)
+         1792820719.134 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29036,15184) R=(0,0)
+         1792820719.151 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29152,14961) R=(0,0)
+         1792820719.169 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29234,14801) R=(0,0)
+         1792820719.185 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29294,14682) R=(0,0)
+         1792820719.201 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29235,14797) R=(0,0)
+         1792820719.218 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29116,15031) R=(0,0)
+         1792820719.235 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-29036,15186) R=(0,0)
+         1792820719.251 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28935,15377) R=(0,0)
+         1792820719.268 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28874,15491) R=(0,0)
+         1792820719.283 18368 18368 I S2Arm   : input: buttons=0x0000 L=(-28850,15536) R=(0,0)
+         1792820719.284 18368 18368 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792820719.692 18368 18414 I S2Arm   : Vulkan present: 1094 frames, interval avg 16.74 ms max 23.14 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820721.701 18368 18414 I S2Arm   : Vulkan present: 1214 frames, interval avg 16.74 ms max 21.06 ms over 120, 2072x1817 transform 0x1, 2 builds, 0 acquire timeouts
+         1792820721.939 18368 18368 I S2Arm   : Vulkan surface generation 1: 2423 × 981, rotation 90°, 60 Hz; HostApi display 2423x981 rotation 1 60.000 Hz 360x359 dpi, handheld
+         1792820721.942 18368 18368 I S2Arm   : touchpad layout: LSTICK=(315,549,r142) RSTICK=(1769,785,r118) DPAD=(654,804,r118) A=(2253,549,r54) B=(2108,662,r54) X=(2108,437,r54) Y=(1963,549,r54) LS=(501,422,r37) RS=(1602,677,r37) L=(412,147,r49) R=(2011,147,r49) ZL=(170,147,r49) ZR=(2253,147,r49) +=(1405,118,r39) −=(1018,118,r39)
+         1792820721.989 18368 18414 I S2Arm   : Vulkan present: swapchain 981x2423, format 37, 4 images, FIFO, transform 0x8 (window 2423x981), build 3
+         1792820722.155 18368 18414 I S2Arm   : Vulkan presenter: no surface (1230 frames presented so far)
+         1792820722.155 18368 18368 I S2Arm   : Surface generation 1 detached in 0 ms
+         1792820724.021 18368 18368 I S2Arm   : Vulkan surface generation 2: 2423 × 981, rotation 90°, 120 Hz; HostApi display 2423x981 rotation 1 120.000 Hz 360x359 dpi, handheld
+         1792820724.033 18368 18414 I S2Arm   : Vulkan present: swapchain 2423x981, format 37, 4 images, FIFO, transform 0x1 (window 2423x981), build 4
+         1792820724.033 18368 18414 I S2Arm   : Vulkan present: surface generation 2
+         1792820724.019 18368 18368 I S2Arm   : Vulkan surface generation 2 offered to the render thread: 2423 × 981
+         1792820724.034 18368 18414 I S2Arm   : Vulkan present: 1231 frames, interval avg 28.25 ms max 183.37 ms over 15, 2423x981 transform 0x1, 4 builds, 3 acquire timeouts
+         1792820724.055 18368 18414 I S2Arm   : Vulkan present: swapchain 981x2423, format 37, 4 images, FIFO, transform 0x2 (window 2423x981), build 5
+         1792820724.413 18368 18368 I S2Arm   : Vulkan surface generation 2: 2423 × 981, rotation 90°, 60 Hz; HostApi display 2423x981 rotation 1 60.000 Hz 360x359 dpi, handheld
+         1792820726.039 18368 18414 I S2Arm   : Vulkan present: 1361 frames, interval avg 15.48 ms max 33.33 ms over 129, 981x2423 transform 0x2, 5 builds, 3 acquire timeouts
+         1792820727.354 18368 18368 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792820727.464 18368 18368 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)

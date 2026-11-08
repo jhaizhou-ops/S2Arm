@@ -1,0 +1,4 @@
+# 只压 llvmpipe 在销毁队列 / 线程池时的 pthread mutex/cond destroy 竞争（TSan 栈顶就是这两个函数，
+# 下层在 libvulkan_lvp 里没有符号）。本后端自己不调用 pthread_mutex_destroy / cond_destroy。
+race:pthread_mutex_destroy
+race:pthread_cond_destroy

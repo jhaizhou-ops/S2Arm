@@ -1,0 +1,48 @@
+# E04-Xiaomi17 incremental input supplement: selected original messages, not complete logcat
+# Frozen implementation: f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47
+# Frozen APK SHA-256: c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe
+# This later session is P2/PID 30754; it is not the original P1/PID29051 round.
+# Relative timestamps and stable anonymous threads; payloads retained verbatim; unselected intermediate axis rows omitted.
+# 8 automatic cases passed; two manual combinations were not observed. No full-game verdict.
+# Raw log SHA-256: c36333d410033744d7be6bb8b2ac0496c64090ae8e13d95743951e816c5bfa8f
+
+[+000.007s P2/T1] Adreno (TM) 840 (1.4)
+[+000.031s P2/T1] touchpad layout: LSTICK=(159,2303,r99) RSTICK=(891,2467,r82) DPAD=(329,2481,r82) A=(1135,2303,r38) B=(1061,2382,r38) X=(1061,2225,r38) Y=(988,2303,r38) LS=(288,2215,r26) RS=(774,2392,r26) L=(207,2023,r34) R=(1013,2023,r34) ZL=(85,2023,r34) ZR=(1135,2023,r34) +=(708,2003,r27) −=(512,2003,r27)
+[+000.031s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+000.033s P2/T3] Vulkan present: device Adreno (TM) 840, queue family 0
+[+000.593s P2/T1] touchpad layout: LSTICK=(289,2340,r87) RSTICK=(931,2484,r72) DPAD=(439,2496,r72) A=(1145,2340,r33) B=(1081,2409,r33) X=(1081,2271,r33) Y=(1017,2340,r33) LS=(403,2262,r23) RS=(829,2418,r23) L=(332,2095,r30) R=(1038,2095,r30) ZL=(225,2095,r30) ZR=(1145,2095,r30) +=(771,2077,r24) −=(599,2077,r24)
+[+000.594s P2/T1] touchpad layout: LSTICK=(476,720,r148) RSTICK=(1979,964,r122) DPAD=(827,985,r122) A=(2481,720,r56) B=(2330,837,r56) X=(2330,603,r56) Y=(2180,720,r56) LS=(669,588,r39) RS=(1806,852,r39) L=(576,303,r51) R=(2230,303,r51) ZL=(325,303,r51) ZR=(2481,303,r51) +=(1603,272,r41) −=(1203,272,r41)
+[+005.076s P2/T1] input: buttons=0x0001 L=(0,0) R=(0,0)
+[+005.412s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+005.527s P2/T1] input: buttons=0x0000 L=(4263,18) R=(0,0)
+[+005.851s P2/T1] input: buttons=0x0000 L=(32767,18) R=(0,0)
+[+005.968s P2/T1] input: buttons=0x0000 L=(32767,13) R=(0,0)
+[+005.979s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+006.109s P2/T1] input: buttons=0x0000 L=(-4461,18) R=(0,0)
+[+006.434s P2/T1] input: buttons=0x0000 L=(-32767,17) R=(0,0)
+[+006.550s P2/T1] input: buttons=0x0000 L=(-32767,13) R=(0,0)
+[+006.560s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+006.675s P2/T1] input: buttons=0x0000 L=(49,3967) R=(0,0)
+[+007.000s P2/T1] input: buttons=0x0000 L=(49,32767) R=(0,0)
+[+007.124s P2/T1] input: buttons=0x0000 L=(36,32767) R=(0,0)
+[+007.126s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+007.232s P2/T1] input: buttons=0x0000 L=(49,-4319) R=(0,0)
+[+007.556s P2/T1] input: buttons=0x0000 L=(48,-32767) R=(0,0)
+[+007.681s P2/T1] input: buttons=0x0000 L=(36,-32767) R=(0,0)
+[+007.683s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+007.831s P2/T1] input: buttons=0x0000 L=(0,0) R=(4660,107)
+[+008.156s P2/T1] input: buttons=0x0000 L=(0,0) R=(32767,105)
+[+008.272s P2/T1] input: buttons=0x0000 L=(0,0) R=(32767,80)
+[+008.274s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+008.388s P2/T1] input: buttons=0x0000 L=(0,0) R=(-4188,107)
+[+008.713s P2/T1] input: buttons=0x0000 L=(0,0) R=(-32767,107)
+[+008.838s P2/T1] input: buttons=0x0000 L=(0,0) R=(-32767,80)
+[+008.840s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+009.062s P2/T1] input: buttons=0x0000 L=(0,0) R=(-102,4622)
+[+009.387s P2/T1] input: buttons=0x0000 L=(0,0) R=(-100,32767)
+[+009.512s P2/T1] input: buttons=0x0000 L=(0,0) R=(-75,32767)
+[+009.514s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+009.620s P2/T1] input: buttons=0x0000 L=(0,0) R=(-102,-4174)
+[+009.944s P2/T1] input: buttons=0x0000 L=(0,0) R=(-102,-32767)
+[+010.069s P2/T1] input: buttons=0x0000 L=(0,0) R=(-76,-32767)
+[+010.071s P2/T1] input: buttons=0x0000 L=(0,0) R=(0,0)

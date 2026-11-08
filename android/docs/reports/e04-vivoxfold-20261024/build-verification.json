@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+  "assembleDebugExit": 0,
+  "lintDebugExit": 0,
+  "lint": {
+    "errors": 0,
+    "warnings": 2,
+    "warningIds": [
+      "SetTextI18n",
+      "SetTextI18n"
+    ]
+  },
+  "verifyApk": "arm64-v8a, 16 KB ELF segments and APK ZIP alignment passed",
+  "apksignerVerifyExit": 0,
+  "offlineBuildSeconds": 24.72,
+  "androidGateExit": 0,
+  "originalDeviceRoundNegativeTests": {
+    "passed": 8,
+    "exit": 0
+  },
+  "failedBuildAttempt": "External Gradle cache could not create a jars-9 directory; retained privately. Successful build reused existing internal cache.",
+  "storage": "APK, synthetic inputs and private evidence on user-authorized external disk; source build in managed worktree using existing internal cache"
+}

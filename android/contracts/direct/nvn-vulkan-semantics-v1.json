@@ -1,0 +1,74 @@
+{
+ "schema": "s2a-nvn-vulkan-semantics-v1",
+ "comment": "Android Vulkan execution coverage, separate from the upstream entry classification. An entry may be added only with a real decoder path and a named test/evidence. Record-level evidence does not imply the full NVN object graph (tex_t/pool/view) is implemented.",
+ "functions": {
+  "nvnCommandBufferClearBuffer": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_CLEAR_BUF -> vkCmdFillBuffer -> guest readback; device output vk-record: ok"
+  },
+  "nvnCommandBufferCopyBufferToBuffer": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_COPY_B2B -> staging vkCmdCopyBuffer -> guest readback; device output vk-record: ok"
+  },
+  "nvnCommandBufferClearTexture": {
+   "status": "executed",
+   "evidence": "full clear + partial region (temp image copy) + channel mask (GPU readback/update/writeback); device RGBA8I/RGBA8/RGBA32I including INT_MIN/MAX/±16777217"
+  },
+  "nvnCommandBufferClearTexturei": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_CLEAR_TEX INT full mip/all channels -> vkCmdClearColorImage; device sint=-128,-1,0,127"
+  },
+  "nvnCommandBufferClearTextureui": {
+   "status": "unsupported",
+   "evidence": "uint clear path not yet exercised on device; partial regions/channel masks are rejected by vk_record.c"
+  },
+  "nvnCommandBufferSetRenderTargets": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_SET_RT state consumed by ClearColor/Draw; no-view full targets only"
+  },
+  "nvnCommandBufferClearColor": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_SET_RT + OP_CLEAR_COLOR -> vkCmdClearColorImage; device rt0=26,51,77,255 rt1=102,128,153,255"
+  },
+  "nvnCommandBufferClearColori": {
+   "status": "unsupported",
+   "evidence": "integer render-target clear path not yet exercised on device"
+  },
+  "nvnCommandBufferClearColorui": {
+   "status": "unsupported",
+   "evidence": "uint render-target clear path not yet exercised on device"
+  },
+  "nvnCommandBufferBindProgram": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_BIND_PROGRAM selects a registered Vulkan pipeline; prog_t/keys translation not yet implemented"
+  },
+  "nvnCommandBufferDrawArrays": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_BIND_PROGRAM + OP_DRAW -> vkCmdDraw; device center=143,143,0,255 (hand-computed 8x8 uv); no vertex/UBO/texture state yet"
+  },
+  "nvnCommandBufferDrawElements": {
+   "status": "unsupported",
+   "evidence": "indexed draw path not yet wired"
+  },
+  "nvnCommandBufferDispatchCompute": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_BIND_PROGRAM + OP_DISPATCH -> vkCmdDispatch with registered pipeline/descriptor; device first=1 last=190 bad=0"
+  },
+  "nvnCommandBufferDispatchComputeIndirect": {
+   "status": "unsupported",
+   "evidence": "indirect dispatch needs GPU-written group counts; vk_record rejects ind != 0"
+  },
+  "nvnCommandBufferCopyTextureToTexture": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_CLEAR_TEX + OP_COPY_T2T full/no-view -> vkCmdCopyImage; device pixel=255,0,0,255"
+  },
+  "nvnCommandBufferCopyBufferToTexture": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_COPY_B2T -> vkCmdCopyBufferToImage; device texture green=0,255,0,255"
+  },
+  "nvnCommandBufferCopyTextureToBuffer": {
+   "status": "executed",
+   "evidence": "android/tests/vk_record_test.c: OP_COPY_T2B full/no-view/row+image stride -> vkCmdCopyImageToBuffer -> guest; device red"
+  }
+ }
+}

@@ -1,0 +1,24 @@
+// Minimal probe APK for WP17 V1-b: runs the V1 probe sections inside an app process.
+// Native code is prebuilt by ../build.sh; -Pv1.out points at its output directory.
+plugins { id 'com.android.application' }
+
+def v1Out = project.findProperty('v1.out') ?: "${rootDir}/../../../../../build/android-probes/v1_external_memory"
+layout.buildDirectory.set(file("${v1Out}/apk"))
+
+android {
+    namespace 'org.s2arm.probe.v1'
+    compileSdk 36
+    defaultConfig {
+        applicationId 'org.s2arm.probe.v1'
+        minSdk 35
+        targetSdk 36
+        versionCode 1
+        versionName '1'
+    }
+    sourceSets { main { jniLibs.srcDirs = ["${v1Out}/jniLibs"] } }
+    packaging { jniLibs { useLegacyPackaging false } }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -1,0 +1,361 @@
+[
+  {
+    "round": "outer-1",
+    "note": "Screen size was incorrectly used as the expected Surface size; native probe assertions passed before display timeout.",
+    "result": {
+      "schema": 1,
+      "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+      "cases": [
+        {
+          "name": "native-probes",
+          "status": "fail",
+          "error": "Timed out: HostApi display 2520x1080 rotation 1"
+        },
+        {
+          "name": "buttons",
+          "status": "not_run"
+        },
+        {
+          "name": "sticks",
+          "status": "not_run"
+        },
+        {
+          "name": "rotation",
+          "status": "not_run"
+        },
+        {
+          "name": "home-reset",
+          "status": "not_run"
+        },
+        {
+          "name": "finish-reopen",
+          "status": "not_run"
+        }
+      ],
+      "cleanup": [
+        {
+          "name": "release-touch",
+          "status": "pass"
+        },
+        {
+          "name": "stop-diagnostic-app",
+          "status": "pass"
+        },
+        {
+          "name": "restore-stay-awake",
+          "status": "pass"
+        }
+      ],
+      "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+      "device": {
+        "ro.product.model": "V2178A",
+        "ro.product.device": "PD2178",
+        "ro.build.version.release": "13"
+      },
+      "error": "Timed out: HostApi display 2520x1080 rotation 1",
+      "status": "fail"
+    }
+  },
+  {
+    "round": "outer-2",
+    "note": "Screen turned off and surface detached; no landscape observation; not counted as a passing device round.",
+    "result": {
+      "schema": 1,
+      "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+      "cases": [
+        {
+          "name": "native-probes",
+          "status": "fail",
+          "error": "Timed out: HostApi display 2423x981 rotation 1"
+        },
+        {
+          "name": "buttons",
+          "status": "not_run"
+        },
+        {
+          "name": "sticks",
+          "status": "not_run"
+        },
+        {
+          "name": "rotation",
+          "status": "not_run"
+        },
+        {
+          "name": "home-reset",
+          "status": "not_run"
+        },
+        {
+          "name": "finish-reopen",
+          "status": "not_run"
+        }
+      ],
+      "cleanup": [
+        {
+          "name": "release-touch",
+          "status": "pass"
+        },
+        {
+          "name": "stop-diagnostic-app",
+          "status": "pass"
+        },
+        {
+          "name": "restore-stay-awake",
+          "status": "pass"
+        }
+      ],
+      "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+      "device": {
+        "ro.product.model": "V2178A",
+        "ro.product.device": "PD2178",
+        "ro.build.version.release": "13"
+      },
+      "error": "Timed out: HostApi display 2423x981 rotation 1",
+      "status": "fail"
+    }
+  },
+  {
+    "round": "outer-3",
+    "note": "Five groups passed; immediate app visibility check failed before group six; a system notification was visible in a private screenshot. Exact cause not established.",
+    "result": {
+      "schema": 1,
+      "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+      "cases": [
+        {
+          "name": "native-probes",
+          "status": "pass"
+        },
+        {
+          "name": "buttons",
+          "status": "pass"
+        },
+        {
+          "name": "sticks",
+          "status": "pass"
+        },
+        {
+          "name": "rotation",
+          "status": "pass"
+        },
+        {
+          "name": "home-reset",
+          "status": "pass"
+        },
+        {
+          "name": "finish-reopen",
+          "status": "fail",
+          "error": "App not visible/unlocked; unlock on device"
+        }
+      ],
+      "cleanup": [
+        {
+          "name": "release-touch",
+          "status": "pass"
+        },
+        {
+          "name": "stop-diagnostic-app",
+          "status": "pass"
+        },
+        {
+          "name": "restore-stay-awake",
+          "status": "pass"
+        }
+      ],
+      "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+      "device": {
+        "ro.product.model": "V2178A",
+        "ro.product.device": "PD2178",
+        "ro.build.version.release": "13"
+      },
+      "contentWindows": [
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ]
+      ],
+      "error": "App not visible/unlocked; unlock on device",
+      "status": "fail"
+    }
+  },
+  {
+    "round": "outer-4",
+    "note": "All six groups and three cleanup steps passed using separate Surface/screen sizes, live content offset and bounded visibility wait.",
+    "result": {
+      "schema": 1,
+      "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+      "cases": [
+        {
+          "name": "native-probes",
+          "status": "pass"
+        },
+        {
+          "name": "buttons",
+          "status": "pass"
+        },
+        {
+          "name": "sticks",
+          "status": "pass"
+        },
+        {
+          "name": "rotation",
+          "status": "pass"
+        },
+        {
+          "name": "home-reset",
+          "status": "pass"
+        },
+        {
+          "name": "finish-reopen",
+          "status": "pass"
+        }
+      ],
+      "cleanup": [
+        {
+          "name": "release-touch",
+          "status": "pass"
+        },
+        {
+          "name": "stop-diagnostic-app",
+          "status": "pass"
+        },
+        {
+          "name": "restore-stay-awake",
+          "status": "pass"
+        }
+      ],
+      "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+      "device": {
+        "ro.product.model": "V2178A",
+        "ro.product.device": "PD2178",
+        "ro.build.version.release": "13"
+      },
+      "contentWindows": [
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ],
+        [
+          97,
+          99,
+          2520,
+          1080
+        ]
+      ],
+      "status": "pass"
+    }
+  },
+  {
+    "round": "inner-1",
+    "note": "All six groups and three cleanup steps passed using explored inner-panel dimensions and transforms.",
+    "result": {
+      "schema": 1,
+      "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+      "cases": [
+        {
+          "name": "native-probes",
+          "status": "pass"
+        },
+        {
+          "name": "buttons",
+          "status": "pass"
+        },
+        {
+          "name": "sticks",
+          "status": "pass"
+        },
+        {
+          "name": "rotation",
+          "status": "pass"
+        },
+        {
+          "name": "home-reset",
+          "status": "pass"
+        },
+        {
+          "name": "finish-reopen",
+          "status": "pass"
+        }
+      ],
+      "cleanup": [
+        {
+          "name": "release-touch",
+          "status": "pass"
+        },
+        {
+          "name": "stop-diagnostic-app",
+          "status": "pass"
+        },
+        {
+          "name": "restore-stay-awake",
+          "status": "pass"
+        }
+      ],
+      "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+      "device": {
+        "ro.product.model": "V2178A",
+        "ro.product.device": "PD2178",
+        "ro.build.version.release": "13"
+      },
+      "contentWindows": [
+        [
+          88,
+          99,
+          2160,
+          1916
+        ],
+        [
+          88,
+          99,
+          2160,
+          1916
+        ],
+        [
+          88,
+          99,
+          2160,
+          1916
+        ],
+        [
+          88,
+          99,
+          2160,
+          1916
+        ]
+      ],
+      "status": "pass"
+    }
+  }
+]

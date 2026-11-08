@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "runtimeCommit": "137fa0917902cf80ea125cde7a4f2872b9a7ff53",
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass"
+    },
+    {
+      "name": "buttons",
+      "status": "pass"
+    },
+    {
+      "name": "sticks",
+      "status": "pass"
+    },
+    {
+      "name": "rotation",
+      "status": "pass"
+    },
+    {
+      "name": "home-reset",
+      "status": "pass"
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "release-touch",
+      "status": "pass"
+    },
+    {
+      "name": "stop-diagnostic-app",
+      "status": "pass"
+    },
+    {
+      "name": "restore-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "apkSha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7",
+  "device": {
+    "ro.product.model": "V2178A",
+    "ro.product.device": "PD2178",
+    "ro.build.version.release": "13"
+  },
+  "contentWindows": [
+    [
+      97,
+      99,
+      2520,
+      1080
+    ],
+    [
+      97,
+      99,
+      2520,
+      1080
+    ],
+    [
+      97,
+      99,
+      2520,
+      1080
+    ],
+    [
+      97,
+      99,
+      2520,
+      1080
+    ]
+  ],
+  "status": "pass"
+}

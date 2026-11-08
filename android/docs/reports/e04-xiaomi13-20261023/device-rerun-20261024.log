@@ -1,0 +1,76 @@
+# Selected original log lines from the 2026-10-24 real-device rerun.
+# Not a complete log; stick motion sequences retain first and last samples.
+# Full private log SHA-256 is recorded in device-rerun-20261024.json.
+
+         1792798196.353 19855 19855 I S2Arm   : Page size: 4096 bytes
+         1792798196.353 19855 19855 I S2Arm   : Shared-memory alias: available
+         1792798196.353 19855 19855 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792798196.353 19855 19855 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792798196.353 19855 19855 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792798196.353 19855 19855 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792798196.353 19855 19855 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792798196.462 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798196.467 19855 19855 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2400 × 1080
+         1792798196.468 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798196.527 19855 19953 I S2Arm   : Vulkan present: swapchain 2400x1080, format 37, 4 images, FIFO, transform 0x1 (window 2400x1080), build 1
+         1792798196.527 19855 19953 I S2Arm   : Vulkan present: surface generation 1
+         1792798196.529 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798196.542 19855 19953 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 2
+         1792798199.034 19855 19855 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792798199.139 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.181 19855 19855 I S2Arm   : input: buttons=0x0002 L=(0,0) R=(0,0)
+         1792798199.285 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.334 19855 19855 I S2Arm   : input: buttons=0x0004 L=(0,0) R=(0,0)
+         1792798199.439 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.488 19855 19855 I S2Arm   : input: buttons=0x0008 L=(0,0) R=(0,0)
+         1792798199.592 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.640 19855 19855 I S2Arm   : input: buttons=0x0010 L=(0,0) R=(0,0)
+         1792798199.744 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.798 19855 19855 I S2Arm   : input: buttons=0x0020 L=(0,0) R=(0,0)
+         1792798199.901 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798199.950 19855 19855 I S2Arm   : input: buttons=0x0040 L=(0,0) R=(0,0)
+         1792798200.054 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798200.099 19855 19855 I S2Arm   : input: buttons=0x0080 L=(0,0) R=(0,0)
+         1792798200.202 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798200.246 19855 19855 I S2Arm   : input: buttons=0x0100 L=(0,0) R=(0,0)
+         1792798200.350 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798200.395 19855 19855 I S2Arm   : input: buttons=0x0200 L=(0,0) R=(0,0)
+         1792798200.498 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798200.542 19855 19855 I S2Arm   : input: buttons=0x0400 L=(0,0) R=(0,0)
+         1792798200.645 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798200.692 19855 19855 I S2Arm   : input: buttons=0x0800 L=(0,0) R=(0,0)
+         1792798200.796 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798201.257 19855 19855 I S2Arm   : input: buttons=0x0000 L=(3835,1659) R=(0,0)
+         1792798202.511 19855 19855 I S2Arm   : input: buttons=0x0000 L=(25684,12797) R=(0,0)
+         1792798202.520 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798202.759 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(3583,1838)
+         1792798204.029 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25797,12947)
+         1792798204.039 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798204.280 19855 19953 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x8 (window 2400x1080), build 3
+         1792798204.286 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 270°, 120 Hz; HostApi display 2400x1080 rotation 3 120.000 Hz 414x414 dpi, handheld
+         1792798204.287 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 270°, 120 Hz; HostApi display 2400x1080 rotation 3 120.000 Hz 414x414 dpi, handheld
+         1792798206.447 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798206.449 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798206.462 19855 19953 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 4
+         1792798208.746 19855 19855 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792798208.861 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798209.946 19855 19855 I S2Arm   : Surface generation 1 detached in 1 ms
+         1792798210.623 19855 19855 I S2Arm   : Vulkan surface generation 2 offered to the render thread: 2400 × 1080
+         1792798210.624 19855 19855 I S2Arm   : Vulkan surface generation 2: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798210.637 19855 19953 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 5
+         1792798210.637 19855 19953 I S2Arm   : Vulkan present: surface generation 2
+         1792798214.448 19855 19855 I S2Arm   : Surface generation 2 detached in 1 ms
+         1792798214.862 19855 19855 I S2Arm   : Page size: 4096 bytes
+         1792798214.862 19855 19855 I S2Arm   : Shared-memory alias: available
+         1792798214.862 19855 19855 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792798214.862 19855 19855 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792798214.862 19855 19855 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792798214.862 19855 19855 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792798214.862 19855 19855 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792798214.937 19855 19855 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792798214.939 19855 19855 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2400 × 1080
+         1792798214.945 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798214.959 19855 19855 I S2Arm   : Vulkan surface generation 1: 2400 × 1080, rotation 90°, 120 Hz; HostApi display 2400x1080 rotation 1 120.000 Hz 414x414 dpi, handheld
+         1792798214.963 19855 20444 I S2Arm   : Vulkan present: swapchain 2400x1080, format 37, 4 images, FIFO, transform 0x1 (window 2400x1080), build 1
+         1792798214.963 19855 20444 I S2Arm   : Vulkan present: surface generation 1
+         1792798214.976 19855 20444 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 2

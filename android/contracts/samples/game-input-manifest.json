@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "titleId": "0100000000ABCDEF",
+  "name": "S2Arm synthetic",
+  "displayVersion": "0.1",
+  "base": {
+    "contentId": "0100000000ABCDEF",
+    "version": "0",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "update": null,
+  "dlc": [],
+  "systemData": null,
+  "modules": [
+    {
+      "name": "main",
+      "type": "exefs",
+      "buildId": "0123456789abcdef0123456789abcdef01234567",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "sdk",
+      "type": "exefs",
+      "buildId": "89abcdef0123456789abcdef0123456789abcdef",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "romfs": {
+    "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "files": 2,
+    "bytes": 1024
+  },
+  "tool": {
+    "name": "pack/nx_unpack",
+    "version": "1"
+  },
+  "createdAt": "2026-10-22T05:28:00Z"
+}

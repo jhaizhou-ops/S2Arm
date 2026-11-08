@@ -1,0 +1,37 @@
+{
+  "sourceCommit": "d663483350c40c1f6894afd5735f1fd16cd4fc8f",
+  "package": "org.s2arm.android",
+  "apkBytes": 3284326,
+  "apkSha256": "3be424e8e408fee91a23a6e583adabe998a3d31a4d5fe53911f19bb049b6d447",
+  "nativeMode": "diagnostic",
+  "csServices": "0",
+  "experimentalTouch": false,
+  "jdkBuild": "17.0.21+9",
+  "gradle": "9.8.1",
+  "agp": "9.4.1",
+  "ndk": "29.0.14206865",
+  "cmake": "3.31.6",
+  "nativeLibraries": [
+    "lib/arm64-v8a/libs2arm_android.so"
+  ],
+  "lintIssues": [
+    {
+      "id": "SetTextI18n",
+      "severity": "Warning"
+    },
+    {
+      "id": "SetTextI18n",
+      "severity": "Warning"
+    },
+    {
+      "id": "SetTextI18n",
+      "severity": "Warning"
+    },
+    {
+      "id": "SetTextI18n",
+      "severity": "Warning"
+    }
+  ],
+  "verifyApkExit": 0,
+  "apksignerVerifyExit": 0
+}

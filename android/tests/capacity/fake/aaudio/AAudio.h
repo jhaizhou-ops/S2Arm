@@ -1,0 +1,32 @@
+#pragma once
+#include <stdint.h>
+typedef int32_t aaudio_result_t;
+typedef int32_t aaudio_data_callback_result_t;
+typedef struct AAudioStream AAudioStream;
+typedef struct AAudioStreamBuilder AAudioStreamBuilder;
+enum { AAUDIO_OK=0, AAUDIO_ERROR_INTERNAL=-1, AAUDIO_ERROR_NO_MEMORY=-2, AAUDIO_ERROR_ILLEGAL_ARGUMENT=-3, AAUDIO_ERROR_DISCONNECTED=-4, AAUDIO_ERROR_INVALID_FORMAT=-5, AAUDIO_CALLBACK_RESULT_CONTINUE=0, AAUDIO_DIRECTION_OUTPUT=0, AAUDIO_FORMAT_PCM_I16=1, AAUDIO_FORMAT_PCM_FLOAT=2, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY=1, AAUDIO_SHARING_MODE_EXCLUSIVE=1, AAUDIO_USAGE_GAME=1, AAUDIO_CONTENT_TYPE_SONIFICATION=1 };
+aaudio_result_t AAudio_createStreamBuilder(AAudioStreamBuilder **);
+void AAudioStreamBuilder_setDirection(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setFormat(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setSampleRate(AAudioStreamBuilder *, int32_t);
+void AAudioStreamBuilder_setChannelCount(AAudioStreamBuilder *, int32_t);
+void AAudioStreamBuilder_setPerformanceMode(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setSharingMode(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setUsage(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setContentType(AAudioStreamBuilder *, int);
+void AAudioStreamBuilder_setDataCallback(AAudioStreamBuilder *, aaudio_data_callback_result_t (*)(AAudioStream *,void *,void *,int32_t),void *);
+void AAudioStreamBuilder_setErrorCallback(AAudioStreamBuilder *, void (*)(AAudioStream *,void *,aaudio_result_t),void *);
+aaudio_result_t AAudioStreamBuilder_openStream(AAudioStreamBuilder *, AAudioStream **);
+aaudio_result_t AAudioStreamBuilder_delete(AAudioStreamBuilder *);
+int32_t AAudioStream_getFormat(AAudioStream *);
+int32_t AAudioStream_getSampleRate(AAudioStream *);
+int32_t AAudioStream_getChannelCount(AAudioStream *);
+int32_t AAudioStream_getFramesPerBurst(AAudioStream *);
+int32_t AAudioStream_setBufferSizeInFrames(AAudioStream *,int32_t);
+int32_t AAudioStream_getXRunCount(AAudioStream *);
+int32_t AAudioStream_getBufferSizeInFrames(AAudioStream *);
+int32_t AAudioStream_getSharingMode(AAudioStream *);
+aaudio_result_t AAudioStream_requestStart(AAudioStream *);
+aaudio_result_t AAudioStream_requestPause(AAudioStream *);
+aaudio_result_t AAudioStream_requestStop(AAudioStream *);
+aaudio_result_t AAudioStream_close(AAudioStream *);

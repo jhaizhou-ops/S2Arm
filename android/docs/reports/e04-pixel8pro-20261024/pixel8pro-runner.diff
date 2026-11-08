@@ -1,0 +1,14 @@
+--- device_round.py
++++ device_round.py
+@@ -171 +171 @@
+-                and self.device.window_size() == (2400, 1080)
++                and self.device.window_size() == (2992, 1344)
+@@ -180 +180 @@
+-        require(struct.unpack(">II", data[16:24]) == (2400, 1080), "Screenshot in transition")
++        require(struct.unpack(">II", data[16:24]) == (2992, 1344), "Screenshot in transition")
+@@ -242 +242 @@
+-        self.expect(r"HostApi display 2400x1080 rotation 1")
++        self.expect(r"HostApi display 2992x1344 rotation 1")
+@@ -282 +282 @@
+-            self.expect(f"HostApi display 2400x1080 rotation {rotation}", cursor)
++            self.expect(f"HostApi display 2992x1344 rotation {rotation}", cursor)

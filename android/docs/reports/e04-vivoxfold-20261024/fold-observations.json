@@ -1,0 +1,68 @@
+{
+  "method": "Device holder physically unfolded/folded; no device_state override",
+  "outToIn": {
+    "before": {
+      "state": "0",
+      "wmSize": "Physical size: 1080x2520",
+      "density": "Physical density: 480",
+      "pid": "15381",
+      "screen": [
+        2520,
+        1080
+      ],
+      "rotation": 1,
+      "screenOn": true,
+      "contentBounds": [
+        "[97,99][2520,1080]"
+      ]
+    },
+    "after": {
+      "state": "1",
+      "wmSize": "Physical size: 1916x2160",
+      "density": "Physical density: 480",
+      "pid": "15381",
+      "screen": [
+        2160,
+        1916
+      ],
+      "rotation": 1,
+      "screenOn": true,
+      "contentBounds": [
+        "[88,99][2160,1916]"
+      ]
+    },
+    "sameProcess": true,
+    "status": "observed-with-display-interruption",
+    "observation": "PID 15381; Surface generation 2 resized from 2423x981 to 2072x1817. Display-off/detach occurred during handling. Same PID resumed on the inner display; inner exploration and screenshots recorded afterward.",
+    "samplingNote": "First polling trigger observed a transient value and its immediate after snapshot still read state 0; not used as the stable inner state. Stable wm-size polling confirmed state 1.",
+    "logs": [
+      "fold-selected-logcat.txt"
+    ]
+  },
+  "inToOut": {
+    "before": {
+      "state": "1",
+      "pid": "18368",
+      "screen": [
+        2160,
+        1916
+      ],
+      "rotation": 1
+    },
+    "after": {
+      "state": "0",
+      "wmSize": "Physical size: 1080x2520",
+      "pid": "18368",
+      "screen": [
+        2520,
+        1080
+      ],
+      "rotation": 1,
+      "contentBounds": "[97,99][2520,1080]"
+    },
+    "sameProcess": true,
+    "postFoldAPressRelease": "pass",
+    "status": "pass"
+  },
+  "scope": "One physical transition per direction; no uninterrupted presentation, latency or repeated folding endurance certification"
+}

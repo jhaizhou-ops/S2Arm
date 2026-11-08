@@ -1,0 +1,6 @@
+{
+  "baseCommit": "cc16b5fef4f699d043d95e65d8270ef00df89e2a",
+  "originalSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "adaptedSha256": "d4eaf1a19a7f844d674f40ec24bfe7b103df4e114a04bbba22f40efd39b0bc9a",
+  "adaptation": "Only expected full-display dimensions: 2400x1080 -> measured Pixel landscape 2992x1344; no runtime code changed."
+}

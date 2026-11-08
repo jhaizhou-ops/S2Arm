@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "cache_root": "/cache",
+  "gradle_cache": "/cache/gradle",
+  "nuget_cache": "/cache/nuget",
+  "offline": true
+}

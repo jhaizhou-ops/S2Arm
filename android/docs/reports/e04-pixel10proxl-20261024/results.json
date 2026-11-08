@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "runtimeCommit": "cc16b5fef4f699d043d95e65d8270ef00df89e2a",
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass"
+    },
+    {
+      "name": "buttons",
+      "status": "pass"
+    },
+    {
+      "name": "sticks",
+      "status": "pass"
+    },
+    {
+      "name": "rotation",
+      "status": "pass"
+    },
+    {
+      "name": "home-reset",
+      "status": "pass"
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "release-touch",
+      "status": "pass"
+    },
+    {
+      "name": "stop-diagnostic-app",
+      "status": "pass"
+    },
+    {
+      "name": "restore-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "apkSha256": "ce73f6791197ca1eb4f3742c28c2ac7921c5c0f3169dd3cbb4e1fe54b7d7be3f",
+  "device": {
+    "ro.product.model": "Pixel 10 Pro XL",
+    "ro.product.device": "mustang",
+    "ro.build.version.release": "16"
+  },
+  "status": "pass"
+}

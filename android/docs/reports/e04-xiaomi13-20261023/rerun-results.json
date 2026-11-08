@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "runtimeCommit": "ce9db716c393d6a78ea0f6925415d7637dadc9d5",
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass"
+    },
+    {
+      "name": "buttons",
+      "status": "pass"
+    },
+    {
+      "name": "sticks",
+      "status": "pass"
+    },
+    {
+      "name": "rotation",
+      "status": "pass"
+    },
+    {
+      "name": "home-reset",
+      "status": "pass"
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "release-touch",
+      "status": "pass"
+    },
+    {
+      "name": "stop-diagnostic-app",
+      "status": "pass"
+    },
+    {
+      "name": "restore-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "apkSha256": "1978aeb6a6380ed15fa899ea43510a6a5f5389a293088f27524b1c603be10873",
+  "device": {
+    "ro.product.model": "2211133C",
+    "ro.product.device": "fuxi",
+    "ro.build.version.release": "16"
+  },
+  "status": "pass",
+  "runnerSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "provenance": "Cleaned device_round.py real-device rerun, 2026-10-23; distinct from merged first-round results.json."
+}

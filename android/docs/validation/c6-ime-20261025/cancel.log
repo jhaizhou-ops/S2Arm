@@ -1,0 +1,39 @@
+--------- beginning of main
+10-25 14:56:13.280 16069 16069 I S2Arm   : MainActivity onCreate: pkg=org.s2arm.android directCompileSelftest=false
+10-25 14:56:13.316 16069 16069 I S2Arm   : libs2arm_android.so loaded in 2 ms
+10-25 14:56:14.146 16069 16069 I S2Arm   : Page size: 4096 bytes
+10-25 14:56:14.146 16069 16069 I S2Arm   : Shared-memory alias: available
+10-25 14:56:14.146 16069 16069 I S2Arm   : 39-bit / 64 GiB address window: available
+10-25 14:56:14.146 16069 16069 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+10-25 14:56:14.146 16069 16069 I S2Arm   : Rewrite self-test: no module imported (android/tools/device_selftest.sh)
+10-25 14:56:14.146 16069 16069 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+10-25 14:56:14.146 16069 16069 I S2Arm   : Handlers without SA_ONSTACK: 7 34 36 38
+10-25 14:56:14.146 16069 16069 I S2Arm   : C# diagnostic link (NativeAOT static, native providers are stubs, S2A_Init not executed): ok; runtime started + first call 36 ms, RSS +30 MiB; C#->C value ok, C#->C string ok, C++ exception ok; runtime=.NET 10.0.9; s2a_screen_w=2400; exceptions=caught with trace; null-ref=caught; gc=ok; clock=present; det=absent; game_ready=false
+10-25 14:56:14.146 16069 16069 I S2Arm   : Audio (AAudio backend): ok; driver=AAudioHardwareDeviceDriver; played 19200/19200 frames in 445 ms (400 ms of audio); update event set; burst 960, device buffer 1920 frames, shared; padded 0 frames, xruns 0; feeder wakeups 3 while playing, 0 in 300 ms paused
+10-25 14:56:14.146 16069 16069 I S2Arm   : Codecs: ok; Opus (libopus 1.6.1): 25 packets / 6460 bytes; single-stream ok (delay 312 samples, SNR 40.6 / 44.6 dB); multistream ok (delay 312 samples, SNR 40.6 / 44.6 dB); VP8 (v1.15.0): key frame exact, inter frame exact (64x48, against the reference decoder); damaged frame refused
+10-25 14:56:14.146 16069 16069 I S2Arm   : Handlers without SA_ONSTACK after .NET: 2 3 7 18 34 36 38
+10-25 14:56:14.146 16069 16069 I S2Arm   : Signal census (17 held; kernel handler owner, app view if different): 2 INT libs2arm_android.so; 3 QUIT libs2arm_android.so; 4 ILL linker64 onstack; 5 TRAP linker64 onstack; 6 ABRT linker64 onstack; 7 BUS libsigchain.so (app sees libandroid_runtime.so) onstack; 8 FPE libs2arm_android.so onstack; 11 SEGV libsigchain.so (app sees libs2arm_android.so) onstack; 16 STKFLT linker64 onstack; 18 CONT libs2arm_android.so; 31 SYS libsigchain.so (app sees linker64) onstack; 34 RT34 libopenjdk.so; 35 RT35 linker64 onstack; 36 RT36 libc.so; 38 RT38 libperfetto_hprof.so; 39 RT39 libc.so onstack; 42 RT42 libs2arm_android.so onstack
+10-25 14:56:14.146 16069 16069 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+10-25 14:56:14.146 16069 16069 I S2Arm   : Vulkan:
+10-25 14:56:14.146 16069 16069 I S2Arm   : Adreno (TM) 730 (1.1)
+10-25 14:56:14.148 16069 16069 I S2Arm   : HostApi v1 (capabilities 0x4f): user en-US / US / Asia/Shanghai; memory 11159 MiB total, 2569 MiB available, 159 MiB resident; input ok; HostApi display 0x0 rotation 0 0.000 Hz 443x444 dpi, handheld
+10-25 14:56:14.154 16069 16099 I S2Arm   : Games: none installed (import a package, or adb push one into /storage/emulated/0/Android/data/org.s2arm.android/files/import/<name>/)
+10-25 14:56:14.188 16069 16069 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 1220 × 2712
+10-25 14:56:14.189 16069 16109 I S2Arm   : Vulkan present: device Adreno (TM) 730, queue family 0
+10-25 14:56:14.193 16069 16069 I S2Arm   : Vulkan surface generation 1: 1220 × 2712, rotation 0°, 120 Hz; HostApi display 1220x2712 rotation 0 120.000 Hz 443x444 dpi, handheld
+10-25 14:56:14.194 16069 16109 I S2Arm   : Vulkan present: swapchain 1220x2712, format 37, 5 images, FIFO, transform 0x1 (window 1220x2712), build 1
+10-25 14:56:14.194 16069 16109 I S2Arm   : Vulkan present: surface generation 1
+10-25 14:56:14.196 16069 16109 I S2Arm   : Vulkan present: 1 frames, interval avg 0.00 ms max 0.00 ms over 0, 1220x2712 transform 0x1, 1 builds, 0 acquire timeouts
+10-25 14:56:14.249 16069 16069 I S2Arm   : Vulkan surface generation 1: 1220 × 2712, rotation 0°, 120 Hz; HostApi display 1220x2712 rotation 0 120.000 Hz 443x444 dpi, handheld
+10-25 14:56:15.368 16069 16069 I S2Arm   : Keyboard selftest request: id=1 mode=5 min=1 max=16
+10-25 14:56:15.368 16069 16069 I S2Arm   : keyboard selftest begin: 1
+10-25 14:56:15.401 16069 16069 I S2Arm   : Keyboard request shown: mode=5, min=1, max=16
+10-25 14:56:15.431 16069 16069 I S2Arm   : Keyboard focus=true ime=false
+10-25 14:56:15.502 16069 16069 I S2Arm   : Vulkan surface generation 1: 1220 × 2712, rotation 0°, 120 Hz; HostApi display 1220x2712 rotation 0 120.000 Hz 443x444 dpi, handheld
+10-25 14:56:16.202 16069 16109 I S2Arm   : Vulkan present: 246 frames, interval avg 8.19 ms max 21.53 ms over 245, 1220x2712 transform 0x1, 1 builds, 0 acquire timeouts
+10-25 14:56:18.209 16069 16109 I S2Arm   : Vulkan present: 489 frames, interval avg 8.26 ms max 10.36 ms over 243, 1220x2712 transform 0x1, 1 builds, 0 acquire timeouts
+10-25 14:56:19.138 16069 16137 I S2Arm   : Keyboard selftest reply: rc=0 status=cancel bytes=58 (text not logged)
+10-25 14:56:19.138 16069 16069 I S2Arm   : Keyboard request completed: cancel, result=0
+10-25 14:56:19.203 16069 16069 I S2Arm   : Vulkan surface generation 1: 1220 × 2712, rotation 0°, 120 Hz; HostApi display 1220x2712 rotation 0 120.000 Hz 443x444 dpi, handheld
+10-25 14:56:19.426 16069 16069 I S2Arm   : Vulkan surface generation 1: 1220 × 2712, rotation 0°, 120 Hz; HostApi display 1220x2712 rotation 0 120.000 Hz 443x444 dpi, handheld
+10-25 14:56:20.217 16069 16109 I S2Arm   : Vulkan present: 732 frames, interval avg 8.26 ms max 12.00 ms over 243, 1220x2712 transform 0x1, 1 builds, 0 acquire timeouts

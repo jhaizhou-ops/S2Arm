@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "jobId": "job-20261023-0001",
+  "taskId": "job-20261023-0001",
+  "seq": 1,
+  "timestamp": "2026-10-23T09:00:00.123456+00:00",
+  "type": "stage",
+  "operation": "import",
+  "gameId": "0100000000ABCDEF",
+  "stage": "inspect",
+  "stageIndex": 1,
+  "stageCount": 3,
+  "state": "running",
+  "doneUnits": null,
+  "totalUnits": null,
+  "done": null,
+  "total": null,
+  "unit": null,
+  "elapsed": 0.012,
+  "message": "reading container metadata",
+  "milestone": null
+}

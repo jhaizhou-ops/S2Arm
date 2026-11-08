@@ -1,0 +1,15 @@
+{
+  "sourceCommit": "d663483350c40c1f6894afd5735f1fd16cd4fc8f",
+  "sourcePath": "android/tools/device_round.py",
+  "originalSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "adaptedSha256": "d4eaf1a19a7f844d674f40ec24bfe7b103df4e114a04bbba22f40efd39b0bc9a",
+  "adaptation": "Only expected display/Surface/screenshot size changes from 2400x1080 to observed 2992x1344. Live button layout, original transform checks and all six case assertions retained.",
+  "expectedRotationTransforms": {
+    "1": "0x2",
+    "3": "0x8"
+  },
+  "contentOrigin": [
+    0,
+    0
+  ]
+}

@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform PC { uint v; } pc;
+layout(set = 0, binding = 0) writeonly buffer B { uint v[]; } b;
+void main() { b.v[gl_GlobalInvocationID.x] = pc.v + gl_GlobalInvocationID.x; }

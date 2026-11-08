@@ -1,0 +1,20 @@
+<!-- SPDX-License-Identifier: Apache-2.0; Copyright 2026 S2Arm contributors -->
+<!-- 门禁手动：由 ../run-managed-host.sh 在 Linux 显式运行，含真实 native、缺绑定和去登记负控；不代表 Android 验收。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>annotations</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <!-- Compile the production contract and startup registration, never a test replica. -->
+    <Compile Include="../../../../../compat/tree/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs" Link="S2AHostFileSystem.cs" />
+    <Compile Include="../../AndroidDirectoryTransaction.cs" Link="AndroidDirectoryTransaction.cs" />
+    <Compile Include="../../../aot/AndroidSaveCommit.cs" Link="AndroidSaveCommit.cs" Condition="'$(OmitSaveCommitRegistration)' != 'true'" />
+  </ItemGroup>
+</Project>

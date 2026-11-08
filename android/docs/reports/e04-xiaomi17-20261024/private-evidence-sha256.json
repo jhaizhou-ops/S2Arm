@@ -1,0 +1,262 @@
+{
+  "apk-signature-01.json": {
+    "sha256": "7be40501d54afe81a43ff2ec24ec81122fd0da6bf5242740b0c8819d915d2825",
+    "bytes": 626,
+    "visibility": "private; contents not uploaded"
+  },
+  "apk-signature-01.log": {
+    "sha256": "804bb733836e7ca643d803c2b7de04d4c81327782a0221f4dae0455c9c52834c",
+    "bytes": 955,
+    "visibility": "private; contents not uploaded"
+  },
+  "apk-verify-01.json": {
+    "sha256": "201357c02faa9dba4c4b82b605b31bb15eae1d7af22cb84cde77a28d83647f6a",
+    "bytes": 458,
+    "visibility": "private; contents not uploaded"
+  },
+  "apk-verify-01.log": {
+    "sha256": "856ee2653d8b3a54d9db72da52a511c76c4e4667fc84ae40bf14e8ab7f5bb871",
+    "bytes": 62,
+    "visibility": "private; contents not uploaded"
+  },
+  "assemble-lint-01.json": {
+    "sha256": "cf50648b0e7bfd916602319ac94d5b97ad0c8dc9bc322066ad2d984a1aca3697",
+    "bytes": 752,
+    "visibility": "private; contents not uploaded"
+  },
+  "assemble-lint-01.log": {
+    "sha256": "3db3373107ac8ae98fd00f248e9b71df4f62e27f937df680e1256073e5828172",
+    "bytes": 3529,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-preflight.json": {
+    "sha256": "268fc0d7a94b737120f257e5dcdbde40b945a4829778f6658cc96a143ad66d31",
+    "bytes": 191,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-01/app-logcat.txt": {
+    "sha256": "72ee68fdc4d3d31016ae51c13f3a14ecfda8843fd14312b718c1fa886876d6d2",
+    "bytes": 4051,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-01/results.json": {
+    "sha256": "9a9c21d7c0f819e1309c053e9bd067cb35a299afa322ef56d3d5bf30213d7c4b",
+    "bytes": 3381,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-02/app-logcat.txt": {
+    "sha256": "501364d58f0bd9b7ed28f27079c0a15ce7bb4bb14bdfbbfa96e917bc027f427a",
+    "bytes": 6476,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-02/landscape.png": {
+    "sha256": "1fe4d064fa2b828053e427c00ec274430ba2b81aeecfad2ab7a4b6b4b31ee921",
+    "bytes": 150587,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-02/results.json": {
+    "sha256": "f5e2bccf97896480137bd810874fb770cb8a093515904cfbcda1aa87bff5dd03",
+    "bytes": 4353,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/app-logcat.txt": {
+    "sha256": "b5b518c814d77193f10b2d465cb5f6d53e90836bccbd26431d4a29281538714a",
+    "bytes": 25523,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/crash-buffer-tested-pid.txt": {
+    "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "bytes": 1,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/home-restored.png": {
+    "sha256": "e462539b8860ad1dac3c3b38e27821b1581d823ce2181ee544ddcbad5ef2d3bd",
+    "bytes": 147374,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/landscape.png": {
+    "sha256": "5af0dcee15c093cee7583730036e70597900bf8a40bcfa9f688c8c7eb8d791f0",
+    "bytes": 151167,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/reopened-diagnostics.png": {
+    "sha256": "d7b3f6afcd55103d476fe132ef78aa66f8e2ac0413de4d0d28f1953fbb96d7b0",
+    "bytes": 460153,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/results.json": {
+    "sha256": "b7a640cc3a93e7e7604d4b30015c39f81b93d515479280b8a1cd283839ff1f15",
+    "bytes": 10861,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/reverse-landscape.png": {
+    "sha256": "55724c7acc0242406f41ccb5a3b5a19393d0d01b7a5df611e0a0191862dbc394",
+    "bytes": 145427,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-round-03/visual-review.json": {
+    "sha256": "4bb5aaee64c65a798c343077cb41c2eb3c169ade47a548462fa65f8145782043",
+    "bytes": 616,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-selftest-01.json": {
+    "sha256": "cfc7584ca3b31e3575c05d72a8b1b29645361101636c2bcc41bf77af40eeae3f",
+    "bytes": 507,
+    "visibility": "private; contents not uploaded"
+  },
+  "device-selftest-01.log": {
+    "sha256": "89ab69e45058fa25942e5917745687ae6bdcca8dc17ce549f941818e6529e197",
+    "bytes": 229,
+    "visibility": "private; contents not uploaded"
+  },
+  "e04-offline-tests-01.json": {
+    "sha256": "8cbf5b7fdaf13d971094c46dbdbe4de90c0dbd41a5d4303b0bec205b0cec997f",
+    "bytes": 411,
+    "visibility": "private; contents not uploaded"
+  },
+  "e04-offline-tests-01.log": {
+    "sha256": "c6352adff70a6982c739a1cd77bbb43d2425eefd2dc2112b92b0ceebf2a6ca31",
+    "bytes": 106,
+    "visibility": "private; contents not uploaded"
+  },
+  "focus-diagnostic-activity.txt": {
+    "sha256": "e5bbf4a2658e0700e0e4d9567cf00eab9e8c6e14868c75a9d24c306d01d94c41",
+    "bytes": 114406,
+    "visibility": "private; contents not uploaded"
+  },
+  "focus-diagnostic-app-logcat.txt": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "visibility": "private; contents not uploaded"
+  },
+  "focus-diagnostic-policy.txt": {
+    "sha256": "75ae4a43b83cced4373bdae555277c12f448fe0996414068c17a7e5e23526ed9",
+    "bytes": 12988,
+    "visibility": "private; contents not uploaded"
+  },
+  "focus-diagnostic-window.txt": {
+    "sha256": "6dda6f7d89f1f76c0353a631e6a79d97bd04703b3e26191afa683ee896f25100",
+    "bytes": 93106,
+    "visibility": "private; contents not uploaded"
+  },
+  "focus-diagnostic-windowAll.txt": {
+    "sha256": "71ec9f4fde1adb0a286c6ae26fc445575266d39a124bd241ca729880cc139d50",
+    "bytes": 97960,
+    "visibility": "private; contents not uploaded"
+  },
+  "host-tests-01.json": {
+    "sha256": "80d4f43b2810d00a5f427dcb2de73ba0021d0adb2cde7a8fb33505fb79e57038",
+    "bytes": 628,
+    "visibility": "private; contents not uploaded"
+  },
+  "host-tests-01.log": {
+    "sha256": "7e8f08f45f63219fb87b33a3052647de7090d777ec6c2940f97f173b47dba6bb",
+    "bytes": 858,
+    "visibility": "private; contents not uploaded"
+  },
+  "input-diagnostic-01-app-logcat.txt": {
+    "sha256": "835af1b104992132dd4faff899e2329a552435e19e699812fa65e5a174038a96",
+    "bytes": 3556,
+    "visibility": "private; contents not uploaded"
+  },
+  "input-diagnostic-01.json": {
+    "sha256": "bc95ef93e02790d5a9625a5dafcaacf28a8a2c985b956ad441316e210132c501",
+    "bytes": 759,
+    "visibility": "private; contents not uploaded"
+  },
+  "input-diagnostic-02.json": {
+    "sha256": "27e1eb01cf903b8232439ff21ce8e597a28b1cd5daa5be834021aa39aca2ca02",
+    "bytes": 1635,
+    "visibility": "private; contents not uploaded"
+  },
+  "metadata-final.json": {
+    "sha256": "27d40d1bad3a80da76ec5a831da7bcb19762cb3fa3d8c11d262d70be39359dbb",
+    "bytes": 8490,
+    "visibility": "private; contents not uploaded"
+  },
+  "metadata.json": {
+    "sha256": "626f61b518d1d19ee77151697c37d953838cc0116c348fbe304af5a29c181f4b",
+    "bytes": 6210,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-install-01.json": {
+    "sha256": "70053a04bcc63b2558e4d27cf994cbd8859bc7628f672a0b084159d6cb1cb520",
+    "bytes": 14697,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-install-02.json": {
+    "sha256": "e5fc97a47c790002bc8ab6c1a58bb77723323170e010ac7c73a888e6f32339ff",
+    "bytes": 15207,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-01.json": {
+    "sha256": "a9a7b295e709e6b354a256ce079e1b1633423407bacdec8c8627cf1638d615d5",
+    "bytes": 770,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-01.log": {
+    "sha256": "5f57da485302f570e190126574ea2906a1b5eb81ce3e792576efc906cd057712",
+    "bytes": 43,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-02.json": {
+    "sha256": "cedcc17ee0da552a96053f24d27fa31e45402e43d2fc24a1647f9fbe76608773",
+    "bytes": 770,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-02.log": {
+    "sha256": "557b535617764df268e889eaeed771e96e5418b005f3099cdeb57c98068db6e3",
+    "bytes": 43,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-03.json": {
+    "sha256": "b6f403aea357bf3fb542a74f570bb4f1b9a1ae7c5965272edd3c1e7941cc4b2b",
+    "bytes": 771,
+    "visibility": "private; contents not uploaded"
+  },
+  "phone-round-03.log": {
+    "sha256": "a1b33143f4ecb549b43670584ec22c96361c9b65042bc41c5c508a5411dc5a3e",
+    "bytes": 93,
+    "visibility": "private; contents not uploaded"
+  },
+  "rewriter-deps-01.json": {
+    "sha256": "7a0440066ada45378b485df7ca157e137e411b451b519577949bc9670ce8193e",
+    "bytes": 501,
+    "visibility": "private; contents not uploaded"
+  },
+  "rewriter-deps-01.log": {
+    "sha256": "8fe4c269d5d78c8cf08ce4efe188755eb5244ece9c511aff4dbdd7784dafaef4",
+    "bytes": 744,
+    "visibility": "private; contents not uploaded"
+  },
+  "synthetic-guest-01.json": {
+    "sha256": "ff001a8f551a917f8530344987f6ca584c6674aea38e091219205173d7841642",
+    "bytes": 578,
+    "visibility": "private; contents not uploaded"
+  },
+  "synthetic-guest-01.log": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "visibility": "private; contents not uploaded"
+  },
+  "synthetic-rewrite-01.json": {
+    "sha256": "2e0eda9109a03d438d5b07e548cdd8aff207371d5c753a394df2e8e355b51b3c",
+    "bytes": 724,
+    "visibility": "private; contents not uploaded"
+  },
+  "synthetic-rewrite-01.log": {
+    "sha256": "59aac560f79fe4fddbff4aa2bd176b0f1f94461598876cefd36c30227f7cc8a0",
+    "bytes": 164,
+    "visibility": "private; contents not uploaded"
+  },
+  "collector/device_round_usb.py": {
+    "sha256": "fefc8108c95d33a8d3d14c8a17535b6db8ef7b16f6bf1993404a70787fbbf0c2",
+    "bytes": 13606,
+    "visibility": "private local collector; not a new project tool"
+  },
+  "collector/run_logged.py": {
+    "sha256": "a72a9d831e9449575010ea291b778fb2b84400039edd9745c5e19ca05cb2abd8",
+    "bytes": 1857,
+    "visibility": "private local collector; not a new project tool"
+  }
+}

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "S2Arm F01 touch layout v1",
+  "description": "Structural schema. Runtime additionally checks unique/required button ids, unique stick ids, cornerRadius <= min(width,height)/2, activation bounds and disjoint stick regions. See docs/触屏布局_F01.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "buttons",
+    "sticks"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]+$"
+    },
+    "buttons": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "x",
+          "y",
+          "width",
+          "height",
+          "cornerRadius"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "A",
+              "B",
+              "X",
+              "Y",
+              "LS",
+              "RS",
+              "L",
+              "R",
+              "ZL",
+              "ZR",
+              "PLUS",
+              "MINUS",
+              "LEFT",
+              "UP",
+              "RIGHT",
+              "DOWN"
+            ]
+          },
+          "x": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "y": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "width": {
+            "type": "number",
+            "minimum": 0.04,
+            "maximum": 0.4
+          },
+          "height": {
+            "type": "number",
+            "minimum": 0.04,
+            "maximum": 0.4
+          },
+          "cornerRadius": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 0.2
+          }
+        }
+      }
+    },
+    "sticks": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "activation",
+          "radius"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "left",
+              "right"
+            ]
+          },
+          "activation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "width": {
+                "type": "number",
+                "minimum": 0.01,
+                "maximum": 1
+              },
+              "height": {
+                "type": "number",
+                "minimum": 0.01,
+                "maximum": 1
+              }
+            }
+          },
+          "radius": {
+            "type": "number",
+            "minimum": 0.04,
+            "maximum": 0.3
+          }
+        }
+      }
+    }
+  }
+}

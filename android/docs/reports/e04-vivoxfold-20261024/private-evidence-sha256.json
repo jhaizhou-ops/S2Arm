@@ -1,0 +1,234 @@
+{
+  "android-gate.private.log": {
+    "bytes": 1106,
+    "sha256": "d5c3ad93ccf70d6cf78fadb8c589eac0aaf4c53665371b0fc79a527f8b3cbc75"
+  },
+  "apksigner.private.log": {
+    "bytes": 955,
+    "sha256": "727c7525c71d168eb9ece4fcfd7bf93c647631344119f65b58c83bbd0845c5cc"
+  },
+  "build-apfs.private.log": {
+    "bytes": 3508,
+    "sha256": "d7930dc22423ef190eda2b67503e6b1f799b6ef29a1a5ba71c161de45a837e0b"
+  },
+  "build.private.log": {
+    "bytes": 1233,
+    "sha256": "35bffc3348f937ea6c801a503192a4cfec4b7e39d6e87df040991aa20f82aefe"
+  },
+  "cleanup-verification.json": {
+    "bytes": 1088,
+    "sha256": "c1dcf55102aefc11da78f09cea7377626960c53374271d150e546a7cf36d3be3"
+  },
+  "crash-after.private.log": {
+    "bytes": 1724,
+    "sha256": "a2387d9b51ecb7fb8c267e126d066ab56c03157a83ed8ddeacf28a71fcb48be5"
+  },
+  "crash-before.private.log": {
+    "bytes": 1724,
+    "sha256": "a2387d9b51ecb7fb8c267e126d066ab56c03157a83ed8ddeacf28a71fcb48be5"
+  },
+  "device-info.json": {
+    "bytes": 849,
+    "sha256": "f85445d7ecaded91f7bfee61ac2166a346dc4ab7fd84515f5d5e9a69200bdced"
+  },
+  "device-round-test.private.log": {
+    "bytes": 106,
+    "sha256": "75ff54e727b57e4bd7b88956ed0c92c4b9a416e6f0976707e8fb54aa385ac0bd"
+  },
+  "device_round_inner.py": {
+    "bytes": 18863,
+    "sha256": "1ae3bea62cc4b7c2be18e3fb012fddcf8cb9867d3176b91cd61b943d1adbf5dd"
+  },
+  "device_round_outer.py": {
+    "bytes": 17766,
+    "sha256": "62c9425728bb42c84bedd95cc8c0e64366b7e8ec136b20b93939b0e631b236b0"
+  },
+  "device_round_outer_v2.py": {
+    "bytes": 18581,
+    "sha256": "54b9d2ebc0224224ba5d70a1afd4887cf4713f7cd9fe7e2374c882079cd2e444"
+  },
+  "device_round_outer_v3.py": {
+    "bytes": 18860,
+    "sha256": "5109587f1a07c09e94e5ce6ca6617be148117a207b67b4d77c207752e91daeb3"
+  },
+  "diagnostic-app-debug.apk": {
+    "bytes": 3252766,
+    "sha256": "d0b37fa1263bca9443b1ae9d9b11bb5189f67fc0b9526b0f37034c00de2a7bb7"
+  },
+  "fixture-import.json": {
+    "bytes": 959,
+    "sha256": "0141c75efddcd09d0c6cd6ba94e94d8c9095ebd1c07803194009cd5fd91e7b0a"
+  },
+  "fold-after-stable.json": {
+    "bytes": 241,
+    "sha256": "6323d225bf398b6d90b5c8ebec8dd96de13396f685549e56a449d3c6764c8702"
+  },
+  "fold-after-stable.private.png": {
+    "bytes": 748280,
+    "sha256": "be42eced581519e4904dedcbf240ff57f695677d9af8c976fabf16453ae48da1"
+  },
+  "fold-after.json": {
+    "bytes": 214,
+    "sha256": "8ca3ccd2aadc9e185c50b1e782582ee4f053eb50a96bf24716be4d6a11371994"
+  },
+  "fold-before.json": {
+    "bytes": 241,
+    "sha256": "023064861ef7dbf230d2838d0943c9de8e75366f2968059538018606e80b8c97"
+  },
+  "fold-before.private.png": {
+    "bytes": 436003,
+    "sha256": "ca42dcc594235d9752f4a7a0ce1a34054f91a67e8b217cec732baa398e5ebc1f"
+  },
+  "fold-in-to-out.private.log": {
+    "bytes": 11376,
+    "sha256": "c0be5ff6b7b3b81c6fb345935dfee616f22314ccf7ef6b5d1722809826a0fa90"
+  },
+  "fold-out-to-in-2.private.log": {
+    "bytes": 380,
+    "sha256": "8d366a02cbe32feffc28b13d87aa17c85651cf4c7d1764379e8ed574c928fc51"
+  },
+  "fold-out-to-in.private.log": {
+    "bytes": 7678,
+    "sha256": "1ce88919f919302f8f35a1d4d32d0dd531ecce9e409ff48e69f89ef4343d64c9"
+  },
+  "fold-return.json": {
+    "bytes": 407,
+    "sha256": "de483f0df7fb7bc56a53dc4a9614879e45ba000823d040967acfe874112d05e4"
+  },
+  "fold-return.private.png": {
+    "bytes": 441435,
+    "sha256": "48d744b614fb614c958fe851d6d9e53e27542b26c5b0af0a59de3e0d0697e28b"
+  },
+  "inner-explore-landscape.private.png": {
+    "bytes": 725197,
+    "sha256": "aca819f41d88ecf37e2c595e56c189ab73caef14689d31e384d7afcc036208da"
+  },
+  "inner-explore-reverse-landscape.private.png": {
+    "bytes": 784021,
+    "sha256": "3cb351a42c6338c38862ce6e4e9d2bf398b2f920d965d9188435f6ade592cfed"
+  },
+  "inner-explore.private.log": {
+    "bytes": 2859,
+    "sha256": "f066ef50805138db6b2f55809a2340543a8e13f828e17b255c4e66c96ceb97cc"
+  },
+  "installed-package.json": {
+    "bytes": 135,
+    "sha256": "d517c593c3649c761340b9638780bb4898adf9b2b18c914ed492bb8b194c3b2c"
+  },
+  "package-identity.json": {
+    "bytes": 621,
+    "sha256": "10e4dce5f3e15f5faeb8ab9047556b0452ed76a47ce72977c1801e08efc0452d"
+  },
+  "runs/inner-1/app-logcat.txt": {
+    "bytes": 30443,
+    "sha256": "d3a5dcca598722dd27fe81c020b5dc4e7afd61cac9d0c9c051aed0d1c56a28c9"
+  },
+  "runs/inner-1/home-restored.png": {
+    "bytes": 236452,
+    "sha256": "793c8f7b1f13fa3b508a50e5251c07b09aeda3da30fd218796ae26ecf8e362d3"
+  },
+  "runs/inner-1/landscape.png": {
+    "bytes": 225443,
+    "sha256": "912e32703aaab05c0d62aa912a6083d4a3811cf8ee98104d723544676eae8052"
+  },
+  "runs/inner-1/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/inner-1/reopened-diagnostics.png": {
+    "bytes": 861819,
+    "sha256": "ec66c42d948df86e04818d1a0503dd74da0aa7391f6dc4a1add7f2b2fe8247ad"
+  },
+  "runs/inner-1/results.json": {
+    "bytes": 1188,
+    "sha256": "8c886dbdecb33f7f42b6bdc522e2cb524adb007df1bdac96825acb4d6c557d40"
+  },
+  "runs/inner-1/reverse-landscape.png": {
+    "bytes": 236373,
+    "sha256": "138641dd20431bd7fd4f77f074b4f08e81f69b3c4b250ef82860e92d791089d6"
+  },
+  "runs/outer-1/app-logcat.txt": {
+    "bytes": 5259,
+    "sha256": "2c3bb4b090c5fe3a86d1f8f4bf7842f47958fb9bf9edd7ff80a4a34517f265af"
+  },
+  "runs/outer-1/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/outer-1/results.json": {
+    "bytes": 1081,
+    "sha256": "be23be203a6e8ad112c39bc3c9a1c335497d86035d228dc92b5963f2ee5867f9"
+  },
+  "runs/outer-2/app-logcat.txt": {
+    "bytes": 3906,
+    "sha256": "74bb7874dd1d5c8f1dabf17760dac9aefc8e09584222198f5abacbd138c28a22"
+  },
+  "runs/outer-2/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/outer-2/results.json": {
+    "bytes": 1079,
+    "sha256": "d6c89a78a4d9a279aafe4d7f9c4cb7fbd52c04dd7a058cbd8a9b39d0a9f8f798"
+  },
+  "runs/outer-3/app-logcat.txt": {
+    "bytes": 24101,
+    "sha256": "3628042ed5c1ea878d6dd01dd920b847023606722f11bf1bb799bc3e54204d1a"
+  },
+  "runs/outer-3/home-restored.png": {
+    "bytes": 184290,
+    "sha256": "6d202fd354d96ebcea7cf9de23cf817a5b87a3aa99d42a982aa7fbd09f77392f"
+  },
+  "runs/outer-3/landscape.png": {
+    "bytes": 127760,
+    "sha256": "cdf6c65ea6a312be965848d579e8be98689f280d33a368f9c5edd0e513cfc3a2"
+  },
+  "runs/outer-3/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/outer-3/results.json": {
+    "bytes": 1306,
+    "sha256": "9e63f8ceff353a7837319e768568bd40a005f03262507b64c79cb8b5b67195ae"
+  },
+  "runs/outer-3/reverse-landscape.png": {
+    "bytes": 126620,
+    "sha256": "370afb8bbe136503fc4e7db69b3b015d7b8f55ee0e331b60dc0b31e312a99ca1"
+  },
+  "runs/outer-4/app-logcat.txt": {
+    "bytes": 27983,
+    "sha256": "0645d2b23e2d4995ba77c3c7a77ec2306d0565fab0562393977d0511ed0663a2"
+  },
+  "runs/outer-4/home-restored.png": {
+    "bytes": 139887,
+    "sha256": "2ad374a184e9c0d4a5458b037d28fdc9d20c7e64fe21b8659857267cd8160f2c"
+  },
+  "runs/outer-4/landscape.png": {
+    "bytes": 141123,
+    "sha256": "60c6190da87c90a4020db3cc223f817c0c17db81014ebf052e5ac5da250780bc"
+  },
+  "runs/outer-4/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/outer-4/reopened-diagnostics.png": {
+    "bytes": 469357,
+    "sha256": "ad4d4d2a35d38fbbca2d2a394c7d459f9b8220f5013352d484bfc557ef97adb4"
+  },
+  "runs/outer-4/results.json": {
+    "bytes": 1188,
+    "sha256": "3127b592887400d63efd96ce31deb5e16e01c31484d159c25e2c953b088502a7"
+  },
+  "runs/outer-4/reverse-landscape.png": {
+    "bytes": 139151,
+    "sha256": "10ef2eadbcbd52969b307d10d72f1b00f0f218bea17bf25987d5f91cc620395b"
+  },
+  "verify-apk.private.log": {
+    "bytes": 62,
+    "sha256": "856ee2653d8b3a54d9db72da52a511c76c4e4667fc84ae40bf14e8ab7f5bb871"
+  },
+  "vkjson.private.json": {
+    "bytes": 42763,
+    "sha256": "3d85e7d060ad65cb40455e7bf6e210187c70abbc83961c3a5faf6b0e57d70fa0"
+  }
+}

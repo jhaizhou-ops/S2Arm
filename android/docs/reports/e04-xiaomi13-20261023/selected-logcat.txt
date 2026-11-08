@@ -1,0 +1,64 @@
+# Selected original diagnostic log lines
+# Selection only; not a complete log and not rewritten as a new run.
+# Stick motion sequences retain only their first and last original samples.
+
+# native-probes; source: evidence/device-round-unlocked/logcat.txt
+         1792754720.339 14483 14483 I S2Arm   : Shared-memory alias: available
+         1792754720.339 14483 14483 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792754720.339 14483 14483 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792754720.339 14483 14483 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792754720.339 14483 14483 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792754720.339 14483 14483 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+
+# input-lifecycle; source: evidence/device-round-input-lifecycle/logcat.txt
+         1792754720.420 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754720.425 14483 14483 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2400 × 1080
+         1792754720.447 14483 14583 I S2Arm   : Vulkan present: swapchain 2400x1080, format 37, 4 images, FIFO, transform 0x1 (window 2400x1080), build 1
+         1792754720.447 14483 14583 I S2Arm   : Vulkan present: surface generation 1
+         1792754720.495 14483 14583 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 2
+         1792754755.773 14483 14483 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792754755.880 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754794.564 14483 14483 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792754794.670 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754795.023 14483 14483 I S2Arm   : input: buttons=0x0002 L=(0,0) R=(0,0)
+         1792754795.133 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754795.474 14483 14483 I S2Arm   : input: buttons=0x0004 L=(0,0) R=(0,0)
+         1792754795.580 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754795.953 14483 14483 I S2Arm   : input: buttons=0x0008 L=(0,0) R=(0,0)
+         1792754796.059 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754796.414 14483 14483 I S2Arm   : input: buttons=0x0010 L=(0,0) R=(0,0)
+         1792754796.520 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754796.881 14483 14483 I S2Arm   : input: buttons=0x0020 L=(0,0) R=(0,0)
+         1792754796.986 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754797.325 14483 14483 I S2Arm   : input: buttons=0x0040 L=(0,0) R=(0,0)
+         1792754797.431 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754797.788 14483 14483 I S2Arm   : input: buttons=0x0080 L=(0,0) R=(0,0)
+         1792754797.895 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754798.241 14483 14483 I S2Arm   : input: buttons=0x0100 L=(0,0) R=(0,0)
+         1792754798.347 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754798.688 14483 14483 I S2Arm   : input: buttons=0x0200 L=(0,0) R=(0,0)
+         1792754798.794 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754799.159 14483 14483 I S2Arm   : input: buttons=0x0400 L=(0,0) R=(0,0)
+         1792754799.265 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754799.635 14483 14483 I S2Arm   : input: buttons=0x0800 L=(0,0) R=(0,0)
+         1792754799.740 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754800.466 14483 14483 I S2Arm   : input: buttons=0x0000 L=(3849,1659) R=(0,0)
+         1792754801.721 14483 14483 I S2Arm   : input: buttons=0x0000 L=(25666,12779) R=(0,0)
+         1792754801.729 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754802.299 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(3587,1842)
+         1792754803.570 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25827,12978)
+         1792754803.579 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754804.144 14483 14583 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x8 (window 2400x1080), build 3
+         1792754804.818 14483 14583 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 4
+         1792754805.382 14483 14483 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792754805.547 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754806.627 14483 14483 I S2Arm   : Surface generation 1 detached in 11 ms
+         1792754807.483 14483 14483 I S2Arm   : Vulkan surface generation 2 offered to the render thread: 2400 × 1080
+         1792754807.487 14483 14583 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 5
+         1792754807.487 14483 14583 I S2Arm   : Vulkan present: surface generation 2
+         1792754809.516 14483 14483 I S2Arm   : Surface generation 2 detached in 2 ms
+         1792754810.143 14483 14483 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792754810.145 14483 14483 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2400 × 1080
+         1792754810.159 14483 16039 I S2Arm   : Vulkan present: swapchain 2400x1080, format 37, 4 images, FIFO, transform 0x1 (window 2400x1080), build 1
+         1792754810.159 14483 16039 I S2Arm   : Vulkan present: surface generation 1
+         1792754810.196 14483 16039 I S2Arm   : Vulkan present: swapchain 1080x2400, format 37, 4 images, FIFO, transform 0x2 (window 2400x1080), build 2

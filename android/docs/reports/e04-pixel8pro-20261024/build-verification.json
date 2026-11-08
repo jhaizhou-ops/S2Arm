@@ -1,0 +1,23 @@
+{
+  "exitCode": 0,
+  "seconds": 22.6,
+  "sourceCommit": "d663483350c40c1f6894afd5735f1fd16cd4fc8f",
+  "csServices": "0",
+  "nativeMode": "diagnostic",
+  "experimentalTouch": false,
+  "offline": true,
+  "jdk": "17.0.21+9",
+  "lintErrors": 0,
+  "lintWarnings": 4,
+  "lintWarningId": "SetTextI18n",
+  "verifyApk": "arm64-v8a, 16 KB ELF segments and APK ZIP alignment passed",
+  "apksignerVerifyExit": 0,
+  "fixtureToolchain": {
+    "python": "3.12.10",
+    "capstoneModule": "5.0.7",
+    "capstoneDistribution": "5.0.7",
+    "lz4": "4.4.5"
+  },
+  "uiAutomation": "uiautomator2 3.7.1",
+  "hostGateEvidence": "Contribution self-check summary in PR body; routed Android gate executed there, not rerun separately"
+}

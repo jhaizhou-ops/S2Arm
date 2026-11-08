@@ -1,0 +1,126 @@
+{
+  "android-gate-jdk17.private.log": {
+    "bytes": 1106,
+    "sha256": "1ec47f277e7d8ec1cd17a81e8922d9791c5665310360e25c10f2a274d713d1ab"
+  },
+  "android-test-jdk23.private.log": {
+    "bytes": 858,
+    "sha256": "6cbc29e758de8d0d6d0fc535013af94202e034486f1069af7023bff22d9d7847"
+  },
+  "apksigner.private.log": {
+    "bytes": 955,
+    "sha256": "727c7525c71d168eb9ece4fcfd7bf93c647631344119f65b58c83bbd0845c5cc"
+  },
+  "app-logcat.txt": {
+    "bytes": 30160,
+    "sha256": "4d4a3f61396f523cdea0cbf3e1cffe2af634fcf27c771d61e59ddf36857fd1b1"
+  },
+  "build-offline.private.log": {
+    "bytes": 2846,
+    "sha256": "b244e2d990c758d86707598c9b4dbac5d873406a2b801bb4d7b73d544d268b84"
+  },
+  "build-online.private.log": {
+    "bytes": 4067,
+    "sha256": "1b35667ae40dc25d0bf1419b222ad8a7d4fcf06c2eae0827d0f3029cb72ec430"
+  },
+  "cleanup-verification.json": {
+    "bytes": 292,
+    "sha256": "a07983e1dab4873fd4e821f5d6dd0e6e19fb9de3a9f4d49d9a0eea8e0218bb71"
+  },
+  "crash-after.private.txt": {
+    "bytes": 6834,
+    "sha256": "153ae3f4335c20cf9cc29592bce4fe6c73c5c5c3b93187232261be7d6915c9a6"
+  },
+  "crash-before.private.txt": {
+    "bytes": 6834,
+    "sha256": "153ae3f4335c20cf9cc29592bce4fe6c73c5c5c3b93187232261be7d6915c9a6"
+  },
+  "crash-window-summary.json": {
+    "bytes": 176,
+    "sha256": "0edbdb471291ebdd927732d09d5edc4600ba634af1dda84d0fee35543cebe8ea"
+  },
+  "device-info.json": {
+    "bytes": 765,
+    "sha256": "328b5849f9dbf3a426d13b030545d2192dd710222ce0d1262311dd3a9d37a501"
+  },
+  "device-selftest-2.private.log": {
+    "bytes": 41,
+    "sha256": "1913558f392c9e64ce3443d1bb72f03b6e7cd1a020ee83b340e9f943dcaff8c2"
+  },
+  "device-selftest-3-trace.private.log": {
+    "bytes": 3095,
+    "sha256": "7b6dd349ecddb49bc6d030a6fb2fb3aa9393ffc5d9a7f0dad7e249943f16b49e"
+  },
+  "device-selftest.private.log": {
+    "bytes": 82,
+    "sha256": "cfdcd568815e2ecc1e1e6222adbe4db8b66513d4125e3cef4958424c7c2966ef"
+  },
+  "diagnostic-app-debug.apk": {
+    "bytes": 3252766,
+    "sha256": "ce73f6791197ca1eb4f3742c28c2ac7921c5c0f3169dd3cbb4e1fe54b7d7be3f"
+  },
+  "first-launch-app-logcat.private.txt": {
+    "bytes": 3382,
+    "sha256": "1a7325921c4909519e528c00a1d2cc1f11dcab37cc75b814f3d36d2684bf96d2"
+  },
+  "gpu-vkjson.private.json": {
+    "bytes": 112734,
+    "sha256": "39bc291bba4048dc0dd48f03a87610b1841cacced77eefaf104a850bd80ec9e0"
+  },
+  "home-restored.png": {
+    "bytes": 167948,
+    "sha256": "340acd1fe87e7bde9d3f48d4d619bc87a7aa3682008e9b1af5eda9ce63f2df3f"
+  },
+  "installed-package.json": {
+    "bytes": 220,
+    "sha256": "a92174f04b94ddc6d0aac1fd76284c9612c002188c523f2a19c49af4c0dd78b3"
+  },
+  "jdk-package.json": {
+    "bytes": 2138,
+    "sha256": "94416094bcef4442c8de79830f17c6c77d7c753b91708280ffed744160150322"
+  },
+  "landscape.png": {
+    "bytes": 166240,
+    "sha256": "a13186d645fa2cbacff8dd83f2318f6d70b8bfa9b7f3cca9aea430470f16e67e"
+  },
+  "logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "package-identity.json": {
+    "bytes": 752,
+    "sha256": "919178db0e0a6c6c2d9ac9fb1ffaf5cc8a84afd7e08ee524e67e197ed4440e15"
+  },
+  "pixel-runner.diff": {
+    "bytes": 1768,
+    "sha256": "27f4c9df2f2f9819a546349968e50a45ebaf7a7412d5c78b4475c4986da35290"
+  },
+  "reopened-diagnostics.png": {
+    "bytes": 557731,
+    "sha256": "9603719a86f56121141eae62ed1b3e2f185e23dafbcae21cf7f44e5de7759b5a"
+  },
+  "results.json": {
+    "bytes": 948,
+    "sha256": "8a289971aaa096e14c3d1d0263702f2f746569b83538305f55bd17e9c10dcac3"
+  },
+  "reverse-landscape.png": {
+    "bytes": 167388,
+    "sha256": "4c91dc03cc41d59729398f495284de7c628ef4551494982450772f8045bf1f8d"
+  },
+  "round-1-console.private.log": {
+    "bytes": 93,
+    "sha256": "a1b33143f4ecb549b43670584ec22c96361c9b65042bc41c5c508a5411dc5a3e"
+  },
+  "runner-identity.json": {
+    "bytes": 369,
+    "sha256": "6e80a27cef6fd1837587d75f1a3fda512c6f79ef005ca4ed9662d75c14ff37fd"
+  },
+  "selftest-import.json": {
+    "bytes": 1008,
+    "sha256": "0fd916529781567af646cac0bce683af814b07b0be64c60b9dc218eb35402b2b"
+  },
+  "verify-apk.private.log": {
+    "bytes": 62,
+    "sha256": "856ee2653d8b3a54d9db72da52a511c76c4e4667fc84ae40bf14e8ab7f5bb871"
+  }
+}

@@ -1,0 +1,250 @@
+         1792850989.528 12475 12475 I S2Arm   : Page size: 4096 bytes
+         1792850989.528 12475 12475 I S2Arm   : Shared-memory alias: available
+         1792850989.528 12475 12475 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792850989.528 12475 12475 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792850989.528 12475 12475 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792850989.528 12475 12475 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792850989.528 12475 12475 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792850989.528 12475 12475 I S2Arm   : Mali-G715 (1.4)
+         1792850989.558 12475 12475 I S2Arm   : touchpad layout: LSTICK=(175,2579,r109) RSTICK=(981,2759,r90) DPAD=(363,2775,r90) A=(1250,2579,r41) B=(1169,2665,r41) X=(1169,2492,r41) Y=(1089,2579,r41) LS=(318,2481,r29) RS=(853,2677,r29) L=(228,2270,r38) R=(1116,2270,r38) ZL=(94,2270,r38) ZR=(1250,2270,r38) +=(780,2248,r30) −=(564,2248,r30)
+         1792850989.558 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850989.559 12475 12475 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 1344 × 2992
+         1792850989.560 12475 12475 I S2Arm   : Vulkan surface generation 1: 1344 × 2992, rotation 0°, 120 Hz; HostApi display 1344x2992 rotation 0 120.000 Hz 488x490 dpi, handheld
+         1792850989.564 12475 12506 I S2Arm   : Vulkan present: device Mali-G715, queue family 0
+         1792850989.573 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x1 (window 1344x2992), build 1
+         1792850989.573 12475 12506 I S2Arm   : Vulkan present: surface generation 1
+         1792850989.574 12475 12506 I S2Arm   : Vulkan present: 1 frames, interval avg 0.00 ms max 0.00 ms over 0, 1344x2992 transform 0x1, 1 builds, 0 acquire timeouts
+         1792850989.971 12475 12475 I S2Arm   : touchpad layout: LSTICK=(306,2616,r97) RSTICK=(1022,2776,r80) DPAD=(473,2790,r80) A=(1260,2616,r37) B=(1189,2693,r37) X=(1189,2539,r37) Y=(1117,2616,r37) LS=(433,2529,r25) RS=(908,2703,r25) L=(354,2342,r33) R=(1141,2342,r33) ZL=(235,2342,r33) ZR=(1260,2342,r33) +=(843,2322,r27) −=(652,2322,r27)
+         1792850989.971 12475 12475 I S2Arm   : Vulkan surface generation 1: 1344 × 2992, rotation 90°, 120 Hz; HostApi display 1344x2992 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792850989.974 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 90°, 120 Hz; HostApi display 2992x1344 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792850989.979 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792850989.990 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x2 (window 2992x1344), build 2
+         1792850991.575 12475 12506 I S2Arm   : Vulkan present: 243 frames, interval avg 8.27 ms max 37.65 ms over 241, 1344x2992 transform 0x2, 2 builds, 0 acquire timeouts
+         1792850993.287 12475 12475 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792850993.391 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850993.573 12475 12475 I S2Arm   : input: buttons=0x0002 L=(0,0) R=(0,0)
+         1792850993.582 12475 12506 I S2Arm   : Vulkan present: 484 frames, interval avg 8.33 ms max 13.95 ms over 241, 1344x2992 transform 0x2, 2 builds, 0 acquire timeouts
+         1792850993.681 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850993.736 12475 12475 I S2Arm   : input: buttons=0x0004 L=(0,0) R=(0,0)
+         1792850993.845 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850993.912 12475 12475 I S2Arm   : input: buttons=0x0008 L=(0,0) R=(0,0)
+         1792850994.017 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.071 12475 12475 I S2Arm   : input: buttons=0x0010 L=(0,0) R=(0,0)
+         1792850994.175 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.231 12475 12475 I S2Arm   : input: buttons=0x0020 L=(0,0) R=(0,0)
+         1792850994.337 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.404 12475 12475 I S2Arm   : input: buttons=0x0040 L=(0,0) R=(0,0)
+         1792850994.514 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.572 12475 12475 I S2Arm   : input: buttons=0x0080 L=(0,0) R=(0,0)
+         1792850994.678 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.738 12475 12475 I S2Arm   : input: buttons=0x0100 L=(0,0) R=(0,0)
+         1792850994.844 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850994.906 12475 12475 I S2Arm   : input: buttons=0x0200 L=(0,0) R=(0,0)
+         1792850995.012 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850995.070 12475 12475 I S2Arm   : input: buttons=0x0400 L=(0,0) R=(0,0)
+         1792850995.175 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850995.229 12475 12475 I S2Arm   : input: buttons=0x0800 L=(0,0) R=(0,0)
+         1792850995.336 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850995.584 12475 12506 I S2Arm   : Vulkan present: 724 frames, interval avg 8.34 ms max 11.48 ms over 240, 1344x2992 transform 0x2, 2 builds, 0 acquire timeouts
+         1792850996.005 12475 12475 I S2Arm   : input: buttons=0x0000 L=(3656,1690) R=(0,0)
+         1792850996.021 12475 12475 I S2Arm   : input: buttons=0x0000 L=(4032,1858) R=(0,0)
+         1792850996.038 12475 12475 I S2Arm   : input: buttons=0x0000 L=(4272,2113) R=(0,0)
+         1792850996.055 12475 12475 I S2Arm   : input: buttons=0x0000 L=(4692,2037) R=(0,0)
+         1792850996.071 12475 12475 I S2Arm   : input: buttons=0x0000 L=(4828,2282) R=(0,0)
+         1792850996.088 12475 12475 I S2Arm   : input: buttons=0x0000 L=(5258,2471) R=(0,0)
+         1792850996.105 12475 12475 I S2Arm   : input: buttons=0x0000 L=(5416,2676) R=(0,0)
+         1792850996.121 12475 12475 I S2Arm   : input: buttons=0x0000 L=(5847,2618) R=(0,0)
+         1792850996.138 12475 12475 I S2Arm   : input: buttons=0x0000 L=(5986,2859) R=(0,0)
+         1792850996.155 12475 12475 I S2Arm   : input: buttons=0x0000 L=(6442,3063) R=(0,0)
+         1792850996.172 12475 12475 I S2Arm   : input: buttons=0x0000 L=(6571,3250) R=(0,0)
+         1792850996.189 12475 12475 I S2Arm   : input: buttons=0x0000 L=(7001,3199) R=(0,0)
+         1792850996.206 12475 12475 I S2Arm   : input: buttons=0x0000 L=(7144,3436) R=(0,0)
+         1792850996.222 12475 12475 I S2Arm   : input: buttons=0x0000 L=(7567,3626) R=(0,0)
+         1792850996.238 12475 12475 I S2Arm   : input: buttons=0x0000 L=(7718,3816) R=(0,0)
+         1792850996.255 12475 12475 I S2Arm   : input: buttons=0x0000 L=(8193,3780) R=(0,0)
+         1792850996.272 12475 12475 I S2Arm   : input: buttons=0x0000 L=(8313,4024) R=(0,0)
+         1792850996.289 12475 12475 I S2Arm   : input: buttons=0x0000 L=(8744,4214) R=(0,0)
+         1792850996.305 12475 12475 I S2Arm   : input: buttons=0x0000 L=(8887,4404) R=(0,0)
+         1792850996.321 12475 12475 I S2Arm   : input: buttons=0x0000 L=(9339,4361) R=(0,0)
+         1792850996.339 12475 12475 I S2Arm   : input: buttons=0x0000 L=(9487,4616) R=(0,0)
+         1792850996.355 12475 12475 I S2Arm   : input: buttons=0x0000 L=(9894,4789) R=(0,0)
+         1792850996.372 12475 12475 I S2Arm   : input: buttons=0x0000 L=(10045,4981) R=(0,0)
+         1792850996.389 12475 12475 I S2Arm   : input: buttons=0x0000 L=(10525,4942) R=(0,0)
+         1792850996.405 12475 12475 I S2Arm   : input: buttons=0x0000 L=(10628,5177) R=(0,0)
+         1792850996.422 12475 12475 I S2Arm   : input: buttons=0x0000 L=(11115,5400) R=(0,0)
+         1792850996.438 12475 12475 I S2Arm   : input: buttons=0x0000 L=(11212,5567) R=(0,0)
+         1792850996.455 12475 12475 I S2Arm   : input: buttons=0x0000 L=(11671,5523) R=(0,0)
+         1792850996.472 12475 12475 I S2Arm   : input: buttons=0x0000 L=(11786,5754) R=(0,0)
+         1792850996.488 12475 12475 I S2Arm   : input: buttons=0x0000 L=(12236,5960) R=(0,0)
+         1792850996.505 12475 12475 I S2Arm   : input: buttons=0x0000 L=(12387,6161) R=(0,0)
+         1792850996.522 12475 12475 I S2Arm   : input: buttons=0x0000 L=(12819,6104) R=(0,0)
+         1792850996.539 12475 12475 I S2Arm   : input: buttons=0x0000 L=(12957,6344) R=(0,0)
+         1792850996.555 12475 12475 I S2Arm   : input: buttons=0x0000 L=(13384,6534) R=(0,0)
+         1792850996.571 12475 12475 I S2Arm   : input: buttons=0x0000 L=(13562,6491) R=(0,0)
+         1792850996.589 12475 12475 I S2Arm   : input: buttons=0x0000 L=(13995,6743) R=(0,0)
+         1792850996.605 12475 12475 I S2Arm   : input: buttons=0x0000 L=(14127,6933) R=(0,0)
+         1792850996.622 12475 12475 I S2Arm   : input: buttons=0x0000 L=(14561,7123) R=(0,0)
+         1792850996.638 12475 12475 I S2Arm   : input: buttons=0x0000 L=(14700,7072) R=(0,0)
+         1792850996.655 12475 12475 I S2Arm   : input: buttons=0x0000 L=(15157,7324) R=(0,0)
+         1792850996.671 12475 12475 I S2Arm   : input: buttons=0x0000 L=(15285,7510) R=(0,0)
+         1792850996.688 12475 12475 I S2Arm   : input: buttons=0x0000 L=(15746,7715) R=(0,0)
+         1792850996.706 12475 12475 I S2Arm   : input: buttons=0x0000 L=(15856,7653) R=(0,0)
+         1792850996.722 12475 12475 I S2Arm   : input: buttons=0x0000 L=(16282,7886) R=(0,0)
+         1792850996.738 12475 12475 I S2Arm   : input: buttons=0x0000 L=(16446,8091) R=(0,0)
+         1792850996.755 12475 12475 I S2Arm   : input: buttons=0x0000 L=(16900,8292) R=(0,0)
+         1792850996.772 12475 12475 I S2Arm   : input: buttons=0x0000 L=(17002,8234) R=(0,0)
+         1792850996.789 12475 12475 I S2Arm   : input: buttons=0x0000 L=(17389,8440) R=(0,0)
+         1792850996.814 12475 12475 I S2Arm   : input: buttons=0x0000 L=(17644,8707) R=(0,0)
+         1792850996.831 12475 12475 I S2Arm   : input: buttons=0x0000 L=(17945,8815) R=(0,0)
+         1792850996.846 12475 12475 I S2Arm   : input: buttons=0x0000 L=(18165,8815) R=(0,0)
+         1792850996.863 12475 12475 I S2Arm   : input: buttons=0x0000 L=(18668,9079) R=(0,0)
+         1792850996.880 12475 12475 I S2Arm   : input: buttons=0x0000 L=(18760,9243) R=(0,0)
+         1792850996.897 12475 12475 I S2Arm   : input: buttons=0x0000 L=(19186,9435) R=(0,0)
+         1792850996.913 12475 12475 I S2Arm   : input: buttons=0x0000 L=(19351,9395) R=(0,0)
+         1792850996.930 12475 12475 I S2Arm   : input: buttons=0x0000 L=(19805,9648) R=(0,0)
+         1792850996.946 12475 12475 I S2Arm   : input: buttons=0x0000 L=(19933,9834) R=(0,0)
+         1792850996.963 12475 12475 I S2Arm   : input: buttons=0x0000 L=(20394,10039) R=(0,0)
+         1792850996.980 12475 12475 I S2Arm   : input: buttons=0x0000 L=(20504,9976) R=(0,0)
+         1792850996.997 12475 12475 I S2Arm   : input: buttons=0x0000 L=(20959,10225) R=(0,0)
+         1792850997.013 12475 12475 I S2Arm   : input: buttons=0x0000 L=(21091,10412) R=(0,0)
+         1792850997.030 12475 12475 I S2Arm   : input: buttons=0x0000 L=(21549,10617) R=(0,0)
+         1792850997.047 12475 12475 I S2Arm   : input: buttons=0x0000 L=(21676,10557) R=(0,0)
+         1792850997.064 12475 12475 I S2Arm   : input: buttons=0x0000 L=(22137,10814) R=(0,0)
+         1792850997.080 12475 12475 I S2Arm   : input: buttons=0x0000 L=(22246,10986) R=(0,0)
+         1792850997.096 12475 12475 I S2Arm   : input: buttons=0x0000 L=(22701,11193) R=(0,0)
+         1792850997.113 12475 12475 I S2Arm   : input: buttons=0x0000 L=(22848,11138) R=(0,0)
+         1792850997.131 12475 12475 I S2Arm   : input: buttons=0x0000 L=(23283,11387) R=(0,0)
+         1792850997.147 12475 12475 I S2Arm   : input: buttons=0x0000 L=(23405,11563) R=(0,0)
+         1792850997.163 12475 12475 I S2Arm   : input: buttons=0x0000 L=(23888,11786) R=(0,0)
+         1792850997.180 12475 12475 I S2Arm   : input: buttons=0x0000 L=(23990,11719) R=(0,0)
+         1792850997.197 12475 12475 I S2Arm   : input: buttons=0x0000 L=(24446,11968) R=(0,0)
+         1792850997.213 12475 12475 I S2Arm   : input: buttons=0x0000 L=(24577,12155) R=(0,0)
+         1792850997.230 12475 12475 I S2Arm   : input: buttons=0x0000 L=(25005,12345) R=(0,0)
+         1792850997.247 12475 12475 I S2Arm   : input: buttons=0x0000 L=(25150,12300) R=(0,0)
+         1792850997.263 12475 12475 I S2Arm   : input: buttons=0x0000 L=(25632,12561) R=(0,0)
+         1792850997.280 12475 12475 I S2Arm   : input: buttons=0x0000 L=(25746,12743) R=(0,0)
+         1792850997.290 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850997.585 12475 12506 I S2Arm   : Vulkan present: 964 frames, interval avg 8.34 ms max 13.02 ms over 240, 1344x2992 transform 0x2, 2 builds, 0 acquire timeouts
+         1792850997.622 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(3905,1851)
+         1792850997.638 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(4054,1778)
+         1792850997.657 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(4301,2085)
+         1792850997.672 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(4495,2012)
+         1792850997.688 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(5064,2313)
+         1792850997.706 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(5236,2553)
+         1792850997.722 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(5445,2480)
+         1792850997.738 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(5695,2777)
+         1792850997.755 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(6245,3020)
+         1792850997.773 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(6398,2948)
+         1792850997.797 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(6672,3286)
+         1792850997.813 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(6802,3182)
+         1792850997.830 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(7416,3489)
+         1792850997.847 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(7568,3714)
+         1792850997.863 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(7798,3650)
+         1792850997.881 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(8027,3939)
+         1792850997.897 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(8577,4187)
+         1792850997.914 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(8733,4118)
+         1792850997.930 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(8963,4408)
+         1792850997.947 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(9210,4352)
+         1792850997.964 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(9697,4630)
+         1792850997.980 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(9903,4879)
+         1792850997.997 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(10146,4820)
+         1792850998.015 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(10355,5097)
+         1792850998.030 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(10863,5330)
+         1792850998.047 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(11087,5288)
+         1792850998.064 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(11307,5582)
+         1792850998.080 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(11537,5522)
+         1792850998.097 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(12088,5825)
+         1792850998.113 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(12244,6051)
+         1792850998.130 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(12491,5990)
+         1792850998.147 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(12717,6289)
+         1792850998.164 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(13277,6537)
+         1792850998.180 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(13423,6458)
+         1792850998.197 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(13652,6757)
+         1792850998.214 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(13865,6692)
+         1792850998.230 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(14115,6985)
+         1792850998.247 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(14662,7229)
+         1792850998.264 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(14818,7160)
+         1792850998.281 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(15031,7434)
+         1792850998.297 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(15280,7394)
+         1792850998.314 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(15862,7712)
+         1792850998.330 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(15980,7915)
+         1792850998.347 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(16213,7862)
+         1792850998.363 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(16460,8160)
+         1792850998.381 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(17011,8404)
+         1792850998.397 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(17146,8330)
+         1792850998.414 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(17416,8648)
+         1792850998.430 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(17619,8564)
+         1792850998.447 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(18213,8888)
+         1792850998.472 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(18267,9032)
+         1792850998.488 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(18556,9032)
+         1792850998.505 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(18810,9340)
+         1792850998.522 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(19334,9565)
+         1792850998.539 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(19516,9500)
+         1792850998.555 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(19741,9804)
+         1792850998.572 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(19954,9734)
+         1792850998.588 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(20467,10015)
+         1792850998.605 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(20686,10281)
+         1792850998.623 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(20906,10202)
+         1792850998.638 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(21120,10480)
+         1792850998.655 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(21702,10749)
+         1792850998.672 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(21843,10670)
+         1792850998.689 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(22072,10965)
+         1792850998.705 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(22301,10904)
+         1792850998.722 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(22817,11190)
+         1792850998.738 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(22994,11419)
+         1792850998.756 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(23260,11372)
+         1792850998.772 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(23464,11655)
+         1792850998.788 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(24012,11904)
+         1792850998.805 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(24191,11840)
+         1792850998.821 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(24416,12139)
+         1792850998.838 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(24664,12074)
+         1792850998.855 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25193,12377)
+         1792850998.872 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25371,12626)
+         1792850998.897 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25520,12542)
+         1792850998.913 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(25819,12840)
+         1792850998.921 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792850999.262 12475 12475 I S2Arm   : touchpad layout: LSTICK=(369,749,r169) RSTICK=(2074,1029,r140) DPAD=(767,1052,r140) A=(2642,749,r64) B=(2472,883,r64) X=(2472,614,r64) Y=(2301,749,r64) LS=(591,597,r44) RS=(1876,900,r44) L=(483,270,r58) R=(2358,270,r58) ZL=(199,270,r58) ZR=(2642,270,r58) +=(1648,235,r47) −=(1193,235,r47)
+         1792850999.262 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 270°, 120 Hz; HostApi display 2992x1344 rotation 3 120.000 Hz 488x490 dpi, handheld
+         1792850999.262 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 270°, 120 Hz; HostApi display 2992x1344 rotation 3 120.000 Hz 488x490 dpi, handheld
+         1792850999.281 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x8 (window 2992x1344), build 3
+         1792850999.295 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x2 (window 2992x1344), build 4
+         1792850999.305 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x8 (window 2992x1344), build 5
+         1792850999.591 12475 12506 I S2Arm   : Vulkan present: 1205 frames, interval avg 8.27 ms max 29.30 ms over 238, 1344x2992 transform 0x8, 5 builds, 0 acquire timeouts
+         1792851001.594 12475 12506 I S2Arm   : Vulkan present: 1445 frames, interval avg 8.34 ms max 17.98 ms over 240, 1344x2992 transform 0x8, 5 builds, 0 acquire timeouts
+         1792851002.002 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792851002.002 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 90°, 120 Hz; HostApi display 2992x1344 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792851002.003 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 90°, 120 Hz; HostApi display 2992x1344 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792851002.025 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x2 (window 2992x1344), build 6
+         1792851003.602 12475 12506 I S2Arm   : Vulkan present: 1686 frames, interval avg 8.27 ms max 30.41 ms over 240, 1344x2992 transform 0x2, 6 builds, 0 acquire timeouts
+         1792851005.063 12475 12475 I S2Arm   : input: buttons=0x0001 L=(0,0) R=(0,0)
+         1792851005.159 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792851005.579 12475 12506 I S2Arm   : Vulkan presenter: no surface (1874 frames presented so far)
+         1792851005.579 12475 12475 I S2Arm   : Surface generation 1 detached in 4 ms
+         1792851005.594 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792851006.190 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792851006.191 12475 12475 I S2Arm   : Vulkan surface generation 2 offered to the render thread: 2992 × 1344
+         1792851006.191 12475 12475 I S2Arm   : Vulkan surface generation 2: 2992 × 1344, rotation 90°, 120 Hz; HostApi display 2992x1344 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792851006.206 12475 12506 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x2 (window 2992x1344), build 7
+         1792851006.206 12475 12506 I S2Arm   : Vulkan present: surface generation 2
+         1792851006.206 12475 12506 I S2Arm   : Vulkan present: 1875 frames, interval avg 8.33 ms max 16.10 ms over 188, 1344x2992 transform 0x2, 7 builds, 0 acquire timeouts
+         1792851008.210 12475 12506 I S2Arm   : Vulkan present: 2117 frames, interval avg 8.28 ms max 23.13 ms over 242, 1344x2992 transform 0x2, 7 builds, 0 acquire timeouts
+         1792851009.354 12475 12475 I S2Arm   : Surface generation 2 detached in 2 ms
+         1792851009.354 12475 12506 I S2Arm   : Vulkan presenter: no surface (2201 frames presented so far)
+         1792851009.399 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792851009.756 12475 12475 I S2Arm   : Page size: 4096 bytes
+         1792851009.756 12475 12475 I S2Arm   : Shared-memory alias: available
+         1792851009.756 12475 12475 I S2Arm   : 39-bit / 64 GiB address window: available
+         1792851009.756 12475 12475 I S2Arm   : Bionic key table: offset 0x0, thread-isolated
+         1792851009.756 12475 12475 I S2Arm   : Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+         1792851009.756 12475 12475 I S2Arm   : Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+         1792851009.756 12475 12475 I S2Arm   : Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+         1792851009.756 12475 12475 I S2Arm   : Mali-G715 (1.4)
+         1792851009.786 12475 12475 I S2Arm   : touchpad layout: LSTICK=(520,749,r169) RSTICK=(2225,1029,r140) DPAD=(918,1052,r140) A=(2793,749,r64) B=(2623,883,r64) X=(2623,614,r64) Y=(2452,749,r64) LS=(742,597,r44) RS=(2027,900,r44) L=(634,270,r58) R=(2509,270,r58) ZL=(350,270,r58) ZR=(2793,270,r58) +=(1799,235,r47) −=(1344,235,r47)
+         1792851009.786 12475 12475 I S2Arm   : input: buttons=0x0000 L=(0,0) R=(0,0)
+         1792851009.787 12475 12475 I S2Arm   : Vulkan surface generation 1 offered to the render thread: 2992 × 1344
+         1792851009.790 12475 12475 I S2Arm   : Vulkan surface generation 1: 2992 × 1344, rotation 90°, 120 Hz; HostApi display 2992x1344 rotation 1 120.000 Hz 488x490 dpi, handheld
+         1792851009.796 12475 12752 I S2Arm   : Vulkan present: device Mali-G715, queue family 0
+         1792851009.820 12475 12752 I S2Arm   : Vulkan present: swapchain 1344x2992, format 37, 5 images, FIFO, transform 0x2 (window 2992x1344), build 1
+         1792851009.820 12475 12752 I S2Arm   : Vulkan present: surface generation 1
+         1792851009.821 12475 12752 I S2Arm   : Vulkan present: 1 frames, interval avg 0.00 ms max 0.00 ms over 0, 1344x2992 transform 0x2, 1 builds, 0 acquire timeouts
+         1792851011.828 12475 12752 I S2Arm   : Vulkan present: 244 frames, interval avg 8.26 ms max 19.09 ms over 243, 1344x2992 transform 0x2, 1 builds, 0 acquire timeouts

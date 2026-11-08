@@ -1,0 +1,11 @@
+# 拆线程新套件中不进默认门禁的项（PR #498）。格式：路径<TAB>原因<TAB>单跑命令；<...> 需替换。
+# 默认门禁已接线：counter-tests、audio-lifetime-tests、metrics-tests、Runtime.Tests（跨平台）；run_lifecycle（Linux）。
+# C 测试 host_android_test / wsi_lease_test 已在 android/CMakeLists.txt 的 CTest 注册，test.sh 的 Linux 原生段会跑。
+graphics/vulkan/runtime/control-tests/run.py	需预构建 GAL/Vulkan 依赖；验收是十连（每次约 90 s，十连约 15 min），超出默认分钟级	python3 graphics/vulkan/runtime/control-tests/run.py --dotnet "$(command -v dotnet)" --dependencies <已构建依赖目录> --gpu-source compat/tree/src/Ryujinx.Graphics.Gpu --output <仓库外新目录>
+android/core-link/runtime-tests/writers-gate/run.py	需 Linux ARM64 + Android/Bionic 头（fault.c 用 TPIDR2_MAGIC/tpidr2_context；glibc 头编不过）	python3 android/core-link/runtime-tests/writers-gate/run.py --out <仓库外新目录>
+android/native/runtime/fault/tests/run_thread.py	需 Linux ARM64 + Android/Bionic 头（同上）	python3 android/native/runtime/fault/tests/run_thread.py --out <仓库外新目录>
+# run_lifecycle.py 在 Linux 门禁直接跑；macOS 自动跳过，macOS 单跑需 Linux/容器：
+# python3 android/native/runtime/platform/tests/run_lifecycle.py --out <仓库外新目录>
+android/native/runtime/platform/tests/run_shutdown_consumer.py	需Linux ARM64与含TPIDR2_MAGIC的UAPI头；真实thread/fault/lifecycle联合收尾，macOS默认门禁由shutdown_wait_test.py覆盖退出调用方竞争	python3 android/native/runtime/platform/tests/run_shutdown_consumer.py --out <仓库外新目录>
+android/codecs/tests/native_test.py	需按 build.sh 固定 SHA 显式预置 libavc 源压缩包、ARM64 CMake/Clang；门禁不联网；含 P0 PPS-only ASan 回归	python3 android/codecs/tests/run.py --archive <libavc-d380d04a.tar.gz> --out <仓库外新目录> && python3 android/codecs/tests/run.py --archive <libavc-d380d04a.tar.gz> --out <仓库外新目录-asan> --sanitize-shim
+android/tests/capture/run_tests.py	完整JPEG链需显式JDK17、SDK36、NDK29、.NET10及匹配宿主的Skia托管/原生库路径；不隐式下载，纯像素32911项已接test.sh默认门禁	python3 android/tests/capture/run_tests.py --jdk <JDK17目录> --android-sdk <SDK36目录> --ndk <NDK29目录> --dotnet-root <DOTNET_ROOT> --skia-managed <匹配的SkiaSharp.dll> --skia-native <匹配宿主的Skia原生库> --cxx <宿主C++编译器> --output <仓库外新目录>

@@ -1,0 +1,20 @@
+date: 2026-10-25T14:56:30+08:00
+branch: android/direct-c6-ime
+head_at_capture: 1865a435
+code_commit: 1865a435
+apk_sha256: 70323314bad5e2a93b7543bcaa3dde4d5ab3e24e8342521dd395c37695cd0e4b
+model: 22081212C
+android: 16
+sdk: 36
+wm_size: Physical size: 1220x2712
+wm_density: Physical density: 480
+ime_version: versionName=18.4.1.985164140-release-arm64-v8a
+default_ime: com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME
+ime: com.google.android.gms/.autofill.service.AutofillInputMethodServiceProxy
+ime: com.qianwen.ime/com.ucpro.feature.voice.ime.VoiceInputMethodService
+ime: com.google.android.tts/com.google.android.apps.speech.tts.googletts.settings.asr.voiceime.VoiceInputMethodService
+ime: com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME
+subtype: i=0 item=ImeSubtypeListItem{mImeName=Gboard mSubtypeName=简体中文 mLayoutName=9 键 mSubtypeIndex=144 mShowInImeSwitcherMenu=true mIsAuxiliary=false mSuitableForHardware=true}
+subtype: i=1 item=ImeSubtypeListItem{mImeName=Gboard mSubtypeName=English (US) mLayoutName= mSubtypeIndex=145 mShowInImeSwitcherMenu=true mIsAuxiliary=false mSuitableForHardware=true}
+subtype: i=2 item=ImeSubtypeListItem{mImeName=千问输入法 mSubtypeName=null mLayoutName=null mSubtypeIndex=-1 mShowInImeSwitcherMenu=true mIsAuxiliary=false mSuitableForHardware=true}
+subtype: i=0 item=ImeSubtypeListItem{mImeName=Gboard mSubtypeName=简体中文 mLayoutName=9 键 mSubtypeIndex=144 mShowInImeSwitcherMenu=true mIsAuxiliary=false mSuitableForHardware=true}

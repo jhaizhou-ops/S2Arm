@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s2arm.local/contracts/job-request.v1.schema.json",
+  "title": "S2Arm local job request v1",
+  "description": "Versioned local job request accepted by pack/jobs/main.py. Core fields are stable; operation-specific fields are allowed and validated by the operation.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "taskId",
+    "operation",
+    "privateRoot"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "jobId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$",
+      "description": "Alias for taskId; if both are present they must match."
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "preflight",
+        "prepareEngine",
+        "setup",
+        "keys",
+        "import",
+        "catalog",
+        "remove",
+        "clean",
+        "diagnostics",
+        "saveInput",
+        "build",
+        "launch"
+      ]
+    },
+    "privateRoot": {
+      "type": "string",
+      "pattern": "^/.*$"
+    },
+    "engineDir": {
+      "type": "string",
+      "pattern": "^/.*$"
+    },
+    "library": {
+      "type": "string",
+      "pattern": "^/.*$"
+    },
+    "libraryId": {
+      "type": "string"
+    },
+    "gameId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "developerDir": {
+      "type": "string",
+      "pattern": "^/.*$"
+    },
+    "parentPid": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "diagnostics": {
+      "type": "boolean"
+    }
+  }
+}

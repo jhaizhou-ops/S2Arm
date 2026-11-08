@@ -1,0 +1,14 @@
+# NativeAOT 工具链 NuGet 包 SHA-512 固定表（#1131 复审第 5 条）。
+# packages.lock.json 只记 libraries 条目；runtime pack 是 downloadDependencies，
+# 不落锁文件——所以这里把两类一起钉死，恢复后由 cs/nuget_verify.py 逐包核对
+# NuGet 缓存里 .nupkg.metadata 的 contentHash（与锁文件 contentHash 同一口径），
+# 并重算 .nupkg 字节与 .nupkg.sha512 记录一致。列：包 id、固定版本、SHA-512。
+# 版本升级时整表换；散列取自 nuget.org 已验签下载。
+microsoft.dotnet.ilcompiler	10.0.14	CDQ/+XRT1JT/0u87j9exR1AociehKUzxae4KCOWxCQ1PIKbYS0F8ovxaCrqRlkylGmbhywKxV/zbbrEhWa5NXg==
+microsoft.net.illink.tasks	10.0.14	YlTamXppEQls6DYWt7RdUuwWDb0lyw/vXCaGeQpLCpsLmfwGuCkOz/vIGgMTV7ECsJcavkCOkxZXv9s8rdAHkQ==
+microsoft.netcore.app.host.linux-bionic-arm64	10.0.14	r0FqFoOIcsB2I17ZAioN+Em0k5MCJnhtO16qt3gZ3f3eWZMlw0AR42aPFnGIZG7k86ct7P21yDAz78wpFQd0Yg==
+microsoft.netcore.app.runtime.linux-bionic-arm64	10.0.14	GF5yGrU6gQuHwHxbXl5L/L2GpfL4cQCGQwqhFr1aO0U0CFcv1exZAITrsrOuFpZX5rAekboUVXuA6JUZIoS9FQ==
+microsoft.netcore.app.runtime.nativeaot.linux-bionic-arm64	10.0.14	79IcN80PRw9lDEXIqVmIVZ2hmyqlrTcVG9VgSSh0NlmQyitHoq9Qd9RHWoSgMDQjGT1zAe4NysqIRdxb7OklXQ==
+runtime.linux-arm64.microsoft.dotnet.ilcompiler	10.0.14	isbxZoQqudzmr2SwwjgNE0W/pMa8bQw/6tdL6wxnk+v1/1+aqdLJwrE6RD7wg8pMR07Vz4n1qVSR0AIsM6B1wA==
+runtime.linux-x64.microsoft.dotnet.ilcompiler	10.0.14	RbHp9HXSvTnYCy1X8LUQmL0LcW++jP8Crqvt6ZjSH2MXqJ7w3FBHS9sUf1iFuCD6ztYdAQNd/QgMpDGZE/aRIA==
+runtime.osx-arm64.microsoft.dotnet.ilcompiler	10.0.14	t4T2d4Ye79r1GTjP9JuJHkA874jiKCvdhcsj8HAUD5U2XF8GpjRsT6YSusy67My5V12iydckl0D4qC9iZsmpvQ==

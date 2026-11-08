@@ -1,0 +1,29 @@
+// BC1–BC7 compute 解码（Granite MIT 着色器，源码 graphics/nvn/third_party/granite/decode/）。
+// 用在 bc_native_mask 里没有原生 SAMPLED_IMAGE 支持的 NVN BC 格式：把压缩块经一次性
+// 提交（staging→输入图→dispatch→dst 存储视图，等 fence）解成未压缩图像。
+// 契约与 nvn_vk_texcache.c upload() 相同：返回 0 = 完成；-1 = 没有提交成功（临时资源已回收）；
+// -2 = 已提交但没有完成证明（临时资源转入模块内保留账本，图像由调用方保留）。
+// 解码失败（建模块/管线/dispatch/写原因）在 why 里写明 BC 族名（s3tc/rgtc/bc6/bc7）。
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include <vulkan/vulkan.h>
+
+struct s2a_vk_device;
+struct nvn_vk_bcdec;
+
+// 建四条族的全部管线变体；任何一族失败返回非零，why 写明族名（整局不进直连的上层凭此报红）。
+int nvn_vk_bcdec_create(struct s2a_vk_device *d, struct nvn_vk_bcdec **out, char *why, size_t why_size);
+void nvn_vk_bcdec_destroy(struct s2a_vk_device *d, struct nvn_vk_bcdec *bc);
+
+// nvn 格式 → 解码路由。返回 1 时给出：dst 存储视图格式、采样（逻辑）格式、物理建图格式、
+// BC 族名、每块字节数。sRGB 格式物理图是 UNORM（移动端 sRGB+STORAGE 普遍不支持），SRGB 只放视图。
+int nvn_vk_bcdec_route(uint32_t nvn_format, VkFormat *storage_view_fmt, VkFormat *decoded_fmt,
+                       VkFormat *image_fmt, const char **family, int *block_bytes);
+
+// 把 blocks（bw×bh 块，bb 字节/块，紧凑排布）解码进 dst 的 mip/layer（w×h 目标像素）。
+// dst 必须带 STORAGE 与 MUTABLE_FORMAT usage；调用后 dst 该子资源处于 GENERAL、含解码结果。
+int nvn_vk_bcdec_decode(struct nvn_vk_bcdec *bc, struct s2a_vk_device *d,
+                        VkImage dst, uint32_t nvn_format, uint32_t w, uint32_t h,
+                        uint32_t mip, uint32_t layer, const void *blocks, size_t bytes,
+                        char *why, size_t why_size);

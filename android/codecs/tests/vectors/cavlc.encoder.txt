@@ -1,0 +1,31 @@
+[in#0/rawvideo @ 0x79eb024000] Estimating duration from bitrate, this may be inaccurate
+Input #0, rawvideo, from '<source.yuv>':
+  Duration: 00:00:00.27, start: 0.000000, bitrate: 27647 kb/s
+  Stream #0:0: Video: rawvideo (I420 / 0x30323449), yuv420p, 320x240, 27648 kb/s, 30 tbr, 30 tbn
+Stream mapping:
+  Stream #0:0 -> #0:0 (rawvideo (native) -> h264 (libx264))
+Press [q] to stop, [?] for help
+[libx264 @ 0x79eb02ca80] using cpu capabilities: ARMv8 NEON DotProd I8MM
+[libx264 @ 0x79eb02ca80] profile High, level 1.3, 4:2:0, 8-bit
+Output #0, h264, to 'cavlc.h264':
+  Metadata:
+    encoder         : Lavf63.1.102
+  Stream #0:0: Video: h264, yuv420p(tv, progressive), 320x240, q=2-31, 30 fps, 30 tbn
+    Metadata:
+      encoder         : Lavc63.1.102 libx264
+    Side data:
+      CPB properties: bitrate max/min/avg: 0/0/0 buffer size: 0 vbv_delay: N/A
+[out#0/h264 @ 0x79eb028240] video:12KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.000000%
+frame=    8 fps=0.0 q=-1.0 Lsize=      12KiB time=00:00:00.26 bitrate= 369.4kbits/s speed=31.8x elapsed=0:00:00.00    
+[libx264 @ 0x79eb02ca80] frame I:1     Avg QP:26.90  size:  3521
+[libx264 @ 0x79eb02ca80] frame P:7     Avg QP:27.50  size:  1256
+[libx264 @ 0x79eb02ca80] mb I  I16..4: 77.3% 13.3%  9.3%
+[libx264 @ 0x79eb02ca80] mb P  I16..4: 62.9%  1.6%  0.1%  P16..4: 33.6%  1.3%  0.5%  0.0%  0.0%    skip: 0.0%
+[libx264 @ 0x79eb02ca80] 8x8 transform intra:4.4% inter:42.1%
+[libx264 @ 0x79eb02ca80] coded y,uvDC,uvAC intra: 4.8% 52.6% 4.5% inter: 0.6% 100.0% 11.4%
+[libx264 @ 0x79eb02ca80] i16 v,h,dc,p:  0%  3%  0% 97%
+[libx264 @ 0x79eb02ca80] i8 v,h,dc,ddl,ddr,vr,hd,vl,hu:  1% 40% 10% 45%  0%  0%  0%  3%  2%
+[libx264 @ 0x79eb02ca80] i4 v,h,dc,ddl,ddr,vr,hd,vl,hu:  6% 14% 48% 32%  0%  0%  0%  1%  0%
+[libx264 @ 0x79eb02ca80] i8c dc,h,v,p:  2% 11%  9% 77%
+[libx264 @ 0x79eb02ca80] ref P L0: 96.0%  2.5%  0.6%  0.9%
+[libx264 @ 0x79eb02ca80] kb/s:369.36

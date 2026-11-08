@@ -1,0 +1,28 @@
+<!-- SPDX-License-Identifier: Apache-2.0; Copyright 2026 S2Arm contributors -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>libs2a_savecommit_managed</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>annotations</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <PublishAotUsingRuntimePack>true</PublishAotUsingRuntimePack>
+    <DisableUnsupportedError>true</DisableUnsupportedError>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Probe.cs" />
+    <Compile Include="../../../../../../compat/tree/src/Ryujinx.HLE/FileSystem/S2AHostFileSystem.cs" Link="S2AHostFileSystem.cs" />
+    <Compile Include="../../../AndroidDirectoryTransaction.cs" Link="AndroidDirectoryTransaction.cs" />
+    <Compile Include="../../../../aot/AndroidSaveCommit.cs" Link="AndroidSaveCommit.cs" />
+    <DirectPInvoke Include="s2a_native" />
+    <LinkerArg Include="-Wl,-soname,libs2a_savecommit_managed.so" />
+    <NativeLibrary Include="$(SaveCommitNativeObject)" Condition="'$(SaveCommitNativeObject)' != ''" />
+  </ItemGroup>
+  <Target Name="RequireProductionNative" BeforeTargets="IlcCompile">
+    <Error Condition="'$(SaveCommitNativeObject)' == '' Or !Exists('$(SaveCommitNativeObject)')" Text="SaveCommitNativeObject must name the production s2a_savecommit.c object compiled for the target." />
+  </Target>
+</Project>

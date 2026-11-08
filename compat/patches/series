@@ -74,6 +74,7 @@
 0076-ipc-record-c-returned-size.patch
 0077-tail-chain-flatten.patch
 0078-nifm-offline-no-interface.patch
+0079-gpu-macro-table-m3.patch
 0080-dram-below-application-pool.patch
 0081-single-wake-sleep.patch
 0082-shader-match-sampler-type.patch

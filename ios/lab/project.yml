@@ -1,0 +1,70 @@
+name: S2ArmInputLab
+options:
+  deploymentTarget:
+    iOS: "18.0"
+targets:
+  S2ArmInputLab:
+    type: application
+    platform: iOS
+    sources:
+      - ios/lab/Lab.m
+      - ios/vpad.m
+      - ios/vpad_layout.m
+      - ios/vpad_settings.m
+      - ios/app_settings.m
+      - ios/cpatch_settings.m
+      - ios/cpatch_model.m
+      - ios/settings.m
+      - ios/controller.m
+      - ios/phone_motion.m
+      - ios/diag.m
+      - ios/diagzip.m
+      - ios/diagredact.m
+      - runtime/src/pad.c
+      - runtime/src/caps.c
+      - runtime/src/sesdiag.c
+      - runtime/src/patch.c
+      - runtime/src/launchctx.c
+      - runtime/src/phone_axes.c
+      - runtime/src/phone_rumble_mailbox.c
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: GameController.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreHaptics.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: MetricKit.framework
+      - sdk: Metal.framework
+      - sdk: libz.tbd
+    info:
+      path: build/f01-lab/Info.plist
+      properties:
+        CFBundleDisplayName: F01 Input Lab
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIRequiresFullScreen: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: InputLab
+                UISceneDelegateClassName: S2AInputLabScene
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: local.s2arm.inputlab
+      TARGETED_DEVICE_FAMILY: "1,2"
+      CODE_SIGN_STYLE: Automatic
+      INFOPLIST_FILE: "$(SRCROOT)/Info.plist"
+      ENABLE_DEBUG_DYLIB: NO
+      CLANG_ENABLE_OBJC_ARC: YES
+      GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", S2A_INPUT_LAB=1]
+      HEADER_SEARCH_PATHS:
+        - "$(SRCROOT)/../../native/include"
+        - "$(SRCROOT)/../../native/src"
+        - "$(SRCROOT)/../../native/ios"
+        - "$(SRCROOT)/../../native/ns2pro/include"
+      OTHER_LDFLAGS: ["$(inherited)", "$(S2A_LAB_WEAK)"]   # 放行参数由 build.sh 按源码「弱链接[lab]」登记生成后传入（tools/weak_link_decl.py flags lab）

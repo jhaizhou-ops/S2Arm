@@ -1,0 +1,6 @@
+#version 450
+#extension GL_EXT_shader_image_load_formatted : require
+layout(local_size_x = 4, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly uniform uimageBuffer ib;
+layout(set = 0, binding = 1) buffer Output { uint values[]; } output_data;
+void main() { uint i = gl_GlobalInvocationID.x; output_data.values[i] = imageLoad(ib, int(i)).x; }

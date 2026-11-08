@@ -1,0 +1,163 @@
+# Android codecs
+
+`build.sh --prepare-sources [local-directory]` explicitly prepares pinned source
+archives. Without a directory this preparation command may download; with a
+directory it only imports locally supplied tarballs and never falls back to the
+network. Normal `build.sh` and `--avc-only` builds are offline and fail when a
+source archive is missing or fails its pinned identity check. They build arm64-v8a/API29 static
+archives with NDK 29.0.14206865. Its stdout contains archive paths only. The
+NativeAOT static build links all three into `libs2arm_android.so`.
+
+libavc is AOSP `android-16.0.0_r4`, commit
+`d380d04a78c6c08702e36aca86d0fd4baee390f9`. Its canonical content SHA is pinned in `build.sh`.
+Gitiles archives have no outer directory. A verified local source archive can be
+provided with `S2A_AVC_ARCHIVE`; this never changes the expected content hash. To prepare
+only libavc, run `bash android/codecs/build.sh --avc-only` with
+`ANDROID_HOME`, `S2A_BUILD_CACHE` and CMake 3.31.6 configured. First prepare all three sources separately (or pass a verified local libavc
+archive for `--avc-only`). Gates and tests never download.
+
+The default codec and Q19 cache is `$HOME/.cache/s2arm-build`, outside the
+checkout. Set `S2A_BUILD_CACHE` to override it; if neither it nor `HOME` is
+available, the builder fails rather than using the checkout. The Docker builder
+explicitly uses `/cache` for its persistent volume.
+
+The source cache is content addressed at
+`$S2A_BUILD_CACHE/codecs/sources/<sha256>.tar.gz` and verified on every build.
+Artifact manifests verify the library, headers and notices before reuse; corrupt
+or incomplete cache entries fail explicitly. Each codec has an independent
+recipe key containing its source SHA, exact NDK/compiler identity, ABI/API and
+recipe. libavc also includes CMake identity/options, the shared `cache.sh` and
+`build.sh` helper layer, and shim C/header bytes, so helper-side flag/toolchain
+changes cannot silently reuse an old archive. Opus/VPX keys do not include the
+libavc recipe or the dispatcher. `--cache-keys` prints the keys without building;
+`--check-sources` verifies all prepared source archives without a compiler or
+network access. A build with a missing shim source fails instead of publishing a
+bare `libavcdec.a`. LICENSE, NOTICE and provenance are copied to APK assets.
+
+## H.264 contract and validation
+
+`AvcH264Decoder` lives under `android/cs/video/` and is registered by
+`AndroidVideo.Register()` before `Exports.Initialize` (#1069); Apple keeps
+VideoToolbox/libvpx via its own registration. Unregistered factories use a
+decoder that reports `【红】` and returns false. There is no FFmpeg or
+MediaCodec fallback. NativeAOT imports bind directly to `s2arm_android`; the C
+provenance function retains the marker used by the APK license audit even
+after ELF stripping.
+
+The C ABI is version 1 (config 16, diagnostic 56, plane 32, view 120 bytes on
+64-bit). All calls for a handle belong to the same Nvdec owner sequence. A
+successful public Decode consumes one complete progressive picture, outputs one
+I420 image with the current token, and lends bounded planes only until the next
+Decode/Dispose. The caller finishes SurfaceWriter synchronously. Failure poisons
+that context, clears its old view and never writes the guest destination.
+
+The first implementation accepts 8-bit progressive 4:2:0 I/P/B, CABAC/CAVLC,
+multiple slices and reference pictures, POC 0/2 and IDR sequence/size changes.
+It rejects field/MBAFF, POC 1, partitioned/extension NALs, non-IDR SPS changes,
+known high bit depth/chroma conflicts, malformed data and any libavc error
+(including concealment). An in-band PPS declaring FMO/ASO
+(`num_slice_groups_minus1 > 0`) is rejected by the shim's PPS parser. Nvdec's
+H.264 `PictureInfo` has no FMO/ASO fields (`PictureInfo.Convert` always supplies
+`NumSliceGroupsMinus1=0` and `FmoAsoEnable=false`), so a production stream whose
+FMO PPS is not in-band cannot be pre-flighted; that is a documented limitation,
+not a claimed production rejection. SPS scaling matrices in an original in-band
+SPS are explicitly unsupported; matrices reconstructed in the PPS are validated.
+Without original SPS, Nvdec metadata does not carry profile/bit depth: support
+is limited to its 8-bit contract, not universal High10 detection. Dimensions are
+bounded to 8192 per axis, AU to 64 MiB, parameter sets to 512 bytes. These bounds
+are validation limits, not a claim that all such dimensions fit device memory.
+The reconstruction work buffer covers the worst-case scaling-list syntax; a
+reconstructed SPS or PPS over the native 512-byte limit is a `【红】` failure and
+never an exception escaping `Decode`.
+
+Identical reconstructed SPS/PPS are cached rather than resubmitted. PPS-only
+updates prefix only PPS to the current AU, preserving DPB. SPS changes require
+an IDR and a new decoder instance. In particular, resending the fixed Level31
+SPS after libavc has corrected its level at coded 1920x1088 returns RES_CHANGED
+and would reset DPB; the explicit resend mutation must fail the vector suite.
+
+Default Android gate runs `tests/build_test.py` and `tests/managed_test.py`
+without network access. The latter compiles real Nvdec/H264Decoder/SurfaceWriter,
+PictureInfo.Convert and the reconstruction source; a bounded fixture guest-memory
+manager supplies only the memory boundary. It tests routes, actual red logger
+output through `tools/redline.py`, missing library/entry, no-backend no-write,
+and cache cleanup after a write exception. An isolated baseline FFmpeg decoder
+probe records the old avutil failure. It does not install FFmpeg into the APK.
+
+Explicit second layer (pre-download the fixed archive with build.sh; no test
+fetches source):
+
+```sh
+python3 android/codecs/tests/run.py --archive <pinned.tar.gz> --out <new-output>
+python3 android/codecs/tests/run.py --archive <pinned.tar.gz> --out <new-output> --sanitize
+python3 android/codecs/tests/run.py --archive <pinned.tar.gz> --out <new-output> --sanitize-shim
+python3 android/codecs/tests/managed_test.py --library <output/libs2arm_android.so> --out <new-output>
+```
+
+The real-library suite requires ARM64, CMake and Clang. Run it on Linux ARM64
+for ARMv8 implementation coverage; macOS ARM64 is additional host evidence.
+`--sanitize` instruments the pinned library and shim with ASan/UBSan and executes
+a native driver (no sanitizer injection into Python/.NET). Native fault injection
+covers output flags/token/consumption/bounds and every callback/wrapper allocation.
+A 16x16 slice-only IDR AU plus a 47-byte production-reconstructed PPS is run
+under `--sanitize-shim` to cover the PPS-only prefix reallocation. An in-band PPS
+declaring FMO and an AU whose second slice changes `slice_type` while every other
+identity field is equal must be rejected by the input preflight (UNSUPPORTED /
+CONTRACT). Display-order, swapped-UV and repeated-SPS mutations must be rejected.
+
+Vectors are original CC0 mathematical patterns. `generate_vectors.py` explicitly
+runs FFmpeg/libx264, captures exact tool versions/parameters/source SHA, and maps
+reference display-order frames to Annex B AU decode indices using packet offsets.
+The encoder's reference usage percentages show actual multiple-reference use and
+B-reference pictures, beyond header declarations. They do not claim 16 distinct
+references are simultaneously used or long-term-reference coverage.
+`generate_reconstructed.py` independently decodes streams with production-emitted
+headers and a PPS-only chroma-QP update at decode index 4; every original,
+reconstructed and PPS-updated frame has separate Y/U/V and combined SHA values.
+Changing initial QP would also change CABAC initialization, so that is not used
+as a valid slice-preserving PPS update.
+
+Generation is explicit, never part of gates. To regenerate header oracles, build
+`tests/managed/Avc.Tests.csproj`, run its DLL with `<vector-dir> <header-output>`,
+then `generate_reconstructed.py --headers <header-output>` using the recorded
+reference tool version. Normal tests need neither encoder nor reference decoder.
+
+Host evidence does not establish Bionic runtime/device performance, game playback,
+iOS regression, memory/PSS peaks, long-term refs, or full H.264 conformance.
+Device acceptance is separate and must use a leased device.
+
+Sanitizer results must be read strictly: `--sanitize` instruments the upstream with recoverable UBSan so all findings
+remain visible, while the shim and driver use `-fno-sanitize-recover=all`. An
+exact pinned source/file/line/type list in `tests/upstream-ubsan.json` records
+known upstream findings; any other diagnostic fails even on exit zero. Full
+upstream UBSan is explicitly reported as not clean. The pinned
+upstream has host UBSan findings (null-pointer offset and signed shifts) that
+must be reported, not suppressed. `--sanitize-shim` is the separately labelled
+scope: upstream instrumented with ASan, shim/driver with strict ASan+UBSan. It is
+not a replacement for or a green verdict on full-upstream UBSan.
+
+The `b-1080-crop` fixture has a 1920x1088 coded surface and a 1920x1080 original
+cropped display. Its original display oracle and reconstructed coded-size oracle
+are separate. Passing original cropped SPS as the requested coded-size native
+contract is a negative test; the production Nvdec path uses its real reconstructed
+uncropped SPS and compares all 1088 rows against the independent reference.
+
+To seed an offline build, place `opus-1.6.1.tar.gz`, `libvpx-1.15.0.tar.gz` and
+`libavc-d380d04a78c6c08702e36aca86d0fd4baee390f9.tar.gz` in one local directory,
+then run the explicit preparation command against the cache used by the build.
+Sources may also be imported into the Docker cache volume using the fixed build
+image with that directory mounted read-only and `--network none`. Formal build
+source preparation must finish before starting Gradle/NativeAOT.
+
+Gitiles may emit different gzip/tar timestamps for the same libavc commit.
+The libavc source verifier pins the complete sorted set of paths, file bytes,
+entry types and permission bits, and rejects duplicate paths, links, traversal
+and unexpected entries. It ignores archive timestamps and gzip headers. The
+legacy archive-SHA cache is still accepted after the same content verification;
+the build verifies its own private copy before extraction. Opus and VPX retain
+their existing archive-byte pins.
+
+The prior script included the entire dispatcher SHA in both Opus and VPX keys.
+Adding libavc therefore invalidated unrelated artifacts, and its temporary-only
+fetch path retried the network during the formal build. This is covered by
+independent-key, missing-source, corrupt-source and forbidden-network fixtures.

@@ -1,0 +1,51 @@
+{
+  "checks": {
+    "stay_awake": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "rotation": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "auto_rotation": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "screen_off_timeout": {
+      "before": "120000",
+      "after": "120000",
+      "matches": true
+    },
+    "wm_size": {
+      "before": "Physical size: 1080x2520",
+      "after": "Physical size: 1080x2520",
+      "matches": true
+    },
+    "wm_density": {
+      "before": "Physical density: 480",
+      "after": "Physical density: 480",
+      "matches": true
+    },
+    "device_state": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    }
+  },
+  "diagnosticAppStopped": true,
+  "uiautomatorStopped": true,
+  "newCrashBufferLines": 0,
+  "newDiagnosticProcessCrashLines": 0,
+  "fixtureFilesKiB": 87,
+  "keptForRetest": [
+    "Installed diagnostic APK",
+    "Synthetic fixture files"
+  ],
+  "status": "pass",
+  "taskOwnedAdb5038Stopped": true,
+  "originalAdb5037Untouched": true
+}

@@ -1,0 +1,14 @@
+<!-- Android audio output for Ryujinx (IHardwareDeviceDriver) over AAudio. The real-time
+     callback is C in the host library (runtime/aaudio_sink.c); this side only feeds its ring. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
+    <ProjectReference Include="$(RepoRoot)compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

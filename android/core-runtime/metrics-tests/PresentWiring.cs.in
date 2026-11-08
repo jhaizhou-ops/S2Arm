@@ -1,0 +1,199 @@
+// Exact production decision/callback slices are inserted by run.py. Hardware observations
+// and the outer GPU loop are controlled; this does not execute a Vulkan driver or game.
+using System;
+using System.IO;
+using System.Text.Json;
+using S2A.Android.Aot;
+using S2Arm.Backends.Vulkan.Wsi;
+
+internal static class WiringChecks
+{
+    private static int _checks;
+    private static void Check(bool value, string name)
+    { if (!value) throw new Exception("FAIL " + name); _checks++; }
+    public static void Main(string[] args)
+    {
+        Directory.CreateDirectory(args[0]);
+        long now = 1_000_000;
+        using var metrics = new AndroidRunMetrics(args[0], 9, () => now);
+        var runtime = new RuntimeBoundary();
+        ServiceBoundary.Open(metrics, runtime);
+        void Frame(Result outer, Result inner, bool chain = true, bool retiring = false, bool foreground = true)
+        {
+            var window = new WindowBoundary(outer, inner, chain, retiring, foreground);
+            runtime.Set(window);
+            try { runtime.Present(); }
+            catch (InvalidOperationException) when (outer == Result.ErrorUnknown || inner == Result.ErrorUnknown) { }
+        }
+        Frame(Result.Success, Result.Success);
+        now += 33_334;
+        Frame(Result.Success, Result.SuboptimalKhr);
+        now += 33_334;
+        Frame(Result.SuboptimalKhr, Result.Success);
+        now += 33_334;
+        Frame(Result.SuboptimalKhr, Result.SuboptimalKhr);
+        int before = File.ReadAllLines(Path.Combine(metrics.DirectoryPath, "frames.tsv")).Length;
+        Check(before == 5, "success/suboptimal callback must write four rows");
+        Frame(Result.Success, Result.Success, chain: false);
+        Frame(Result.Success, Result.Success, retiring: true);
+        Frame(Result.Success, Result.Success, foreground: false);
+        Frame(Result.ErrorUnknown, Result.Success);
+        Frame(Result.Success, Result.ErrorUnknown);
+        Frame(Result.ErrorUnknown, Result.ErrorUnknown);
+        Frame(Result.ErrorOutOfDateKhr, Result.Success);
+        Frame(Result.Success, Result.ErrorSurfaceLostKhr);
+        Check(File.ReadAllLines(Path.Combine(metrics.DirectoryPath, "frames.tsv")).Length == before,
+            "empty or failed present must not write a row");
+        var mixed = new WindowBoundary(Result.ErrorOutOfDateKhr, Result.ErrorUnknown, true, false, true);
+        runtime.Set(mixed);
+        bool mixedFatal = false;
+        try { runtime.Present(); } catch (InvalidOperationException) { mixedFatal = true; }
+        Check(mixedFatal, "mixed stale/unknown present must remain fatal");
+        mixed = new WindowBoundary(Result.ErrorUnknown, Result.ErrorSurfaceLostKhr, true, false, true);
+        runtime.Set(mixed); mixedFatal = false;
+        try { runtime.Present(); } catch (InvalidOperationException) { mixedFatal = true; }
+        Check(mixedFatal, "mixed unknown/stale present must remain fatal");
+        metrics.RequestMark();
+        now += 750_000; // Controlled CPU/acquire wait; callback occurs only after next queued frame.
+        Frame(Result.Success, Result.Success);
+        string[] lines = File.ReadAllLines(Path.Combine(metrics.DirectoryPath, "frames.tsv"));
+        Check(lines[^1].Split('\t')[1] == "750000", "wait must remain in next interval");
+        Check(lines.Length == before + 1, "exactly one row after wait");
+        runtime.FramePresented = null;
+        Frame(Result.Success, Result.Success);
+        Check(File.ReadAllLines(Path.Combine(metrics.DirectoryPath, "frames.tsv")).Length == lines.Length,
+            "disabled observer must not write");
+        long last = now;
+        now += 2_000_000;
+        ServiceBoundary.Clean();
+        Check(Host.AudioDisposed && Host.DeviceDisposed, "audio workers stopped before driver disposal");
+        using var metadata = JsonDocument.Parse(File.ReadAllText(Path.Combine(metrics.DirectoryPath, "runtime-metrics.json")));
+        Check(metadata.RootElement.GetProperty("lastFrameBootUs").GetInt64() == last, "last frame retained");
+        Check(metadata.RootElement.GetProperty("endBootUs").GetInt64() == now, "stop clock includes tail");
+        Check(metadata.RootElement.GetProperty("markFrame").GetInt64() == 4, "mark stays linked to successful callback");
+        using var failed = new AndroidRunMetrics(args[0], 10, () => now);
+        ServiceBoundary.Open(failed, new RuntimeBoundary { StopFails = true });
+        bool rejected = false;
+        try { ServiceBoundary.Clean(); } catch (IOException) { rejected = true; }
+        Check(rejected, "unproven GPU stop must reject cleanup");
+        using var incomplete = JsonDocument.Parse(File.ReadAllText(Path.Combine(failed.DirectoryPath, "runtime-metrics.json")));
+        Check(incomplete.RootElement.GetProperty("status").GetString() == "capturing" && incomplete.RootElement.GetProperty("endBootUs").GetInt64() == -1,
+            "failed GPU stop must not close capture");
+        Check(!Host.AudioDisposed && !Host.DeviceDisposed, "failed GPU stop must retain audio and driver");
+        Console.WriteLine($"Present wiring: {_checks}/{_checks} PASS; exact production slices, controlled driver/clock, no device.");
+    }
+}
+internal sealed class RuntimeBoundary
+{
+    public Action<ulong> FramePresented { get; set; }
+    internal bool StopFails;
+    internal void Stop() { if (StopFails) throw new IOException("controlled GPU stop failure"); }
+    private readonly SurfaceBoundary _surface = new();
+    private readonly DeviceBoundary _device = new();
+    internal void Set(WindowBoundary window) { _surface.Set(window); _device.Window = window; }
+    internal void Present()
+    {
+RUNTIME_PRESENT_BODY
+    }
+}
+internal sealed class SurfaceBoundary
+{
+    private WindowBoundary _window;
+    internal void Set(WindowBoundary window) => _window = window;
+SURFACE_COUNTER
+}
+internal sealed class DeviceBoundary
+{
+    internal WindowBoundary Window;
+    internal void PresentFrame(object unused) => Window.Present(new TextureView(), default, null);
+}
+internal sealed unsafe class WindowBoundary
+{
+    private bool _surfaceLost;
+    private sealed class Chain
+    {
+        internal SwapchainRecord Record;
+        internal Result LastPresent, LastPresentSwapchain;
+        internal string RetirementReason;
+    }
+    private readonly Driver _renderer = new();
+    private readonly WsiHost _host = new();
+    private readonly LeaseBoundary Lease = new();
+    private readonly RetirementLedger Ledger = new(9, 1);
+    private Chain _current;
+    public ulong QueuedGamePresents { get; private set; }
+    internal WindowBoundary(Result outer, Result inner, bool chain, bool retiring, bool foreground)
+    {
+        _renderer.SwapchainApi.Outer = outer; _renderer.SwapchainApi.Inner = inner;
+        Lease.Allowed = foreground;
+        if (chain) _current = new Chain { Record = Ledger.RegisterSwapchain(Lease.State.Stamp, 1, RetirementMode.Reacquire) };
+        if (retiring) Ledger.RetireSwapchain(_current.Record);
+    }
+    private void Poll() { }
+    private static void s2a_frame_log_present_timed(ulong acquireNs, ulong presentNs) { }
+    internal void Present(ITexture texture, ImageCrop crop, Action swapBuffersCallback)
+    {
+WINDOW_ADMISSION
+        // Only acquire/submit outcomes are fixture setup; acceptance/counter below is production.
+        AcquireRecord record = Ledger.BeginAcquire(chain.Record, 1);
+        ulong acquireNs = 0;
+        Ledger.FinishAcquire(record, AcquireOutcome.Acquired, 0);
+        Ledger.SubmitQueued(record);
+        Result perSwapchain = Result.ErrorUnknown;
+        PresentInfoKHR present = new() { PResults = &perSwapchain };
+WINDOW_ACCEPTANCE
+    }
+}
+internal enum Result { Success, SuboptimalKhr, ErrorUnknown, ErrorOutOfDateKhr, ErrorSurfaceLostKhr, ErrorDeviceLost }
+internal interface ITexture { }
+internal sealed class TextureView : ITexture { }
+// Controlled timing observation for the production present slice (Ryujinx.Graphics.Vulkan.S2AFrameTrace is native-backed).
+internal static class S2AFrameTrace { internal static long Begin() => 0; internal static ulong ElapsedNs(long started) => 0; }
+internal struct ImageCrop { }
+internal struct State { internal WindowStamp Stamp => new(9, 1, 1); }
+internal sealed class LeaseBoundary { internal bool Allowed; internal State State; internal bool MayPresent(WindowStamp stamp) => Allowed; }
+internal sealed class WsiHost { internal bool HasPresentFences => false; }
+internal sealed class Driver { internal object QueueLock = new(); internal int Queue; internal QueueApi SwapchainApi = new(); }
+internal unsafe struct PresentInfoKHR { internal Result* PResults; }
+internal sealed unsafe class QueueApi
+{
+    internal Result Outer, Inner;
+    internal Result QueuePresent(int queue, in PresentInfoKHR present) { *present.PResults = Inner; return Outer; }
+}
+
+// The production composition binding and complete Cleanup method are injected unchanged.
+// Only native shutdown/InputPump/HLE disposal boundaries below are controlled observations.
+internal static class ServiceBoundary
+{
+    private static readonly object CleanupLock = new();
+    private static bool _cleanupDone;
+    private static Exception _cleanupFailure;
+    private static AndroidRunMetrics _metrics;
+    private static RuntimeBoundary _gpu;
+    internal static void Open(AndroidRunMetrics metrics, RuntimeBoundary gpu)
+    {
+        _cleanupDone = false; _cleanupFailure = null; _metrics = metrics; _gpu = gpu; Host.Reset();
+SERVICE_BINDING
+    }
+    private static void StopGpu() => _gpu.Stop();
+    internal static void Clean() => Cleanup();
+SERVICE_CLEANUP
+}
+internal static class InputPump { internal static void Stop() { } }
+internal static class Host
+{
+    internal static bool AudioDisposed, DeviceDisposed;
+    internal static IDisposable Device = new DriverBoundary();
+    internal static void Reset() { AudioDisposed = DeviceDisposed = false; }
+    internal static void DisposeAudioForShutdown() => AudioDisposed = true;
+    private sealed class DriverBoundary : IDisposable
+    {
+        public void Dispose()
+        {
+            if (!AudioDisposed) throw new Exception("FAIL audio workers must stop before driver event disposal");
+            DeviceDisposed = true;
+        }
+    }
+}
+namespace Ryujinx.Common { internal static class S2AShutdown { internal static void Request() { } } }
+namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger { internal static class S2AFramePacing { internal static Action<float> FrameIntervalChanged; } }

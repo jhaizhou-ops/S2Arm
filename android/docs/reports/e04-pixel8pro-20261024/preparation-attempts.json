@@ -1,0 +1,26 @@
+[
+  {
+    "stage": "adb-enumeration",
+    "observation": "Mac USB inventory identified Pixel 8 Pro while ADB initially listed no device. Reconnecting exposed offline, then unauthorized state.",
+    "resolution": "Device holder explicitly allowed USB debugging; actual device information collected afterward.",
+    "countedAsDeviceRound": false
+  },
+  {
+    "stage": "exploration-preflight",
+    "observation": "After APK and fixture verification, UI preflight observed screen off and stopped before launching diagnostic activity.",
+    "resolution": "Wake check confirmed credential lock; device holder unlocked. Temporary stay-awake used and later restored.",
+    "countedAsDeviceRound": false
+  },
+  {
+    "stage": "fixture-import",
+    "observation": "patched.bin and fixups.tsv reached the exact expected SHA on the second poll; gates.tsv matched on the first. All observations retained in fixture-import.json.",
+    "resolution": "Bounded full-SHA polling completed before app launch; no integrity checks bypassed.",
+    "countedAsDeviceRound": false
+  },
+  {
+    "stage": "device-rounds",
+    "observation": "Two complete rounds; no failed six-group rounds or retry exclusions.",
+    "completedRounds": 2,
+    "passedCasesPerRound": 6
+  }
+]

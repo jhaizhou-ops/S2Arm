@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s2arm.local/contracts/job-event.v1.schema.json",
+  "title": "S2Arm local job event v1",
+  "description": "One NDJSON event from pack/jobs/main.py. Core identity/sequence fields are stable; type-specific fields are allowed.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "jobId",
+    "seq",
+    "timestamp",
+    "type",
+    "state"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "jobId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "heartbeat",
+        "check",
+        "cache",
+        "stage",
+        "diagnostic",
+        "plan",
+        "progress",
+        "result"
+      ]
+    },
+    "operation": {
+      "type": "string"
+    },
+    "gameId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stage": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stageIndex": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "stageCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "needs_input",
+        "cancelling",
+        "cancelled",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "doneUnits": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "totalUnits": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "done": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "total": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "unit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "elapsed": {
+      "type": "number",
+      "minimum": 0
+    },
+    "message": {
+      "type": "string"
+    },
+    "milestone": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cacheHit": {
+      "type": "boolean"
+    },
+    "logRef": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifactRef": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "diagnostic": {
+      "type": "object"
+    },
+    "error": {
+      "type": "object"
+    },
+    "result": {
+      "type": "object"
+    },
+    "check": {
+      "type": "object"
+    }
+  }
+}

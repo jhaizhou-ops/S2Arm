@@ -1,0 +1,83 @@
+{
+  "marketName": "vivo X Fold",
+  "manufacturer": "vivo",
+  "model": "V2178A",
+  "device": "PD2178",
+  "socProperty": "SM8450",
+  "android": "13",
+  "api": 33,
+  "securityPatchProperty": "2023-10-01",
+  "abis": [
+    "arm64-v8a",
+    "armeabi-v7a",
+    "armeabi"
+  ],
+  "pageBytes": 4096,
+  "memTotalKiB": 11608620,
+  "dataAvailableKiBAtPreflight": 303911392,
+  "memoryScope": "System MemTotal; not application or game memory limit",
+  "appGpu": {
+    "source": "S2Arm diagnostic log",
+    "name": "Adreno (TM) 730",
+    "apiMajorMinor": "1.1"
+  },
+  "systemGpu": {
+    "source": "cmd gpu vkjson (shell; separate from app observation)",
+    "name": "Adreno (TM) 730",
+    "apiVersionRaw": 4198528,
+    "apiVersion": "1.1.128",
+    "driverVersionRaw": 2150002688,
+    "driverName": "Qualcomm Technologies Inc. Adreno Vulkan Driver",
+    "driverInfo": "Driver Build: 8a6846845a, I724be88a7c, 1663840091\nDate: 09/22/22\nCompiler Version: EV031.36.08.11\nDriver Branch: \n"
+  },
+  "displays": {
+    "outer": {
+      "deviceState": 0,
+      "stateName": "CLOSED",
+      "physicalPortrait": [
+        1080,
+        2520
+      ],
+      "landscapeScreenshot": [
+        2520,
+        1080
+      ],
+      "landscapeSurface": [
+        2423,
+        981
+      ],
+      "contentOriginRotation1": [
+        97,
+        99
+      ],
+      "transforms": {
+        "1": "0x2",
+        "3": "0x8"
+      }
+    },
+    "inner": {
+      "deviceState": 1,
+      "physicalPortrait": [
+        1916,
+        2160
+      ],
+      "landscapeScreenshot": [
+        2160,
+        1916
+      ],
+      "landscapeSurface": [
+        2072,
+        1817
+      ],
+      "contentOriginRotation1": [
+        88,
+        99
+      ],
+      "transforms": {
+        "1": "0x1",
+        "3": "0x4"
+      }
+    }
+  },
+  "density": 480
+}

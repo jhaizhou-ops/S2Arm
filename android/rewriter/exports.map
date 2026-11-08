@@ -1,0 +1,4 @@
+S2ARM_REWRITER {
+    global: Java_org_s2arm_android_NativeRewriter_rewrite0;
+    local: *;
+};

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "taskId": "job-20261023-0001",
+  "jobId": "job-20261023-0001",
+  "operation": "import",
+  "privateRoot": "/tmp/s2arm-job/private",
+  "engineDir": "/home/user/S2Arm",
+  "library": "/tmp/s2arm-job/library",
+  "libraryId": "lib-sample",
+  "gameId": "0100000000ABCDEF",
+  "parentPid": 4242,
+  "diagnostics": false
+}

@@ -1,0 +1,17 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 S2Arm contributors -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NvdecProject Condition="'$(NvdecProject)' == ''">$(MSBuildThisFileDirectory)../../../../compat/tree/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj</NvdecProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(NvdecProject)" />
+    <!-- android-registered resolves the migrated implementations the real platform assembly registers. -->
+    <Compile Include="../*.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0; Copyright 2026 S2Arm contributors -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.s2arm.probe.savecommit.moongrant" android:versionCode="7" android:versionName="savecommit-tests">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="36" />
+    <application android:label="Savecommit primitive tests" android:debuggable="true"
+        android:allowBackup="false" android:extractNativeLibs="true" />
+    <instrumentation android:name=".NativeInstrumentation"
+        android:targetPackage="org.s2arm.probe.savecommit.moongrant" android:handleProfiling="false" />
+    <instrumentation android:name=".OpenReadInstrumentation"
+        android:targetPackage="org.s2arm.probe.savecommit.moongrant" android:handleProfiling="false" />
+    <instrumentation android:name=".ManagedInstrumentation"
+        android:targetPackage="org.s2arm.probe.savecommit.moongrant" android:handleProfiling="false" />
+</manifest>

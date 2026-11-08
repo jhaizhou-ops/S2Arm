@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <LangVersion>preview</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" /><Compile Include="FixtureMemory.cs" />
+    <!-- Compile the real Nvdec call path and SurfaceWriter in the test assembly. -->
+    <Compile Include="../../../../compat/tree/src/Ryujinx.Graphics.Nvdec/**/*.cs" Exclude="../../../../compat/tree/src/Ryujinx.Graphics.Nvdec/obj/**;../../../../compat/tree/src/Ryujinx.Graphics.Nvdec/bin/**" />
+    <!-- Android decoder implementations now live under the platform adapter (moved out of shared Nvdec, #1069). -->
+    <Compile Include="../../../cs/video/*.cs" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Device/Ryujinx.Graphics.Device.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Texture/Ryujinx.Graphics.Texture.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Video/Ryujinx.Graphics.Video.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Nvdec.FFmpeg/Ryujinx.Graphics.Nvdec.FFmpeg.csproj" />
+    <ProjectReference Include="../../../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Ryujinx.Graphics.Nvdec.Vp9.csproj" />
+  </ItemGroup>
+</Project>

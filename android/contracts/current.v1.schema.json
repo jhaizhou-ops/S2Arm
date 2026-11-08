@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s2arm.local/contracts/current.v1.schema.json",
+  "title": "S2Arm Android current.json v1",
+  "description": "Activation pointer at files/games/<titleId>/current.json. revisionDir must equal revisions/<contentRoot>; the runtime checks this after schema validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "titleId",
+    "contentRoot",
+    "revisionDir",
+    "artifact",
+    "artifactSha256",
+    "activatedAt"
+  ],
+  "properties": {
+    "extensions": {
+      "description": "Optional namespaced metadata. Unknown entries may be ignored; required behavior must be declared in requiredFeatures.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      },
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "requiredFeatures": {
+      "description": "Namespaced capabilities that every consumer must support; unknown features must be rejected.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      }
+    },
+    "version": {
+      "const": 1
+    },
+    "titleId": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{16}$"
+    },
+    "contentRoot": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "revisionDir": {
+      "type": "string",
+      "pattern": "^revisions/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "artifact": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+\\.json$"
+    },
+    "artifactSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "activatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "previousContentRoot": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    }
+  }
+}

@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s2arm.local/contracts/run-manifest.v1.schema.json",
+  "title": "S2Arm Android run manifest v1",
+  "description": "One completed or attempted run. It binds the app/artifact/input/module identity, device/driver/profile, session modes and the evidence files. Missing required fields mean the run is untested, not passed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "runId",
+    "createdAt",
+    "app",
+    "artifact",
+    "input",
+    "modules",
+    "device",
+    "driver",
+    "session",
+    "profile",
+    "references"
+  ],
+  "properties": {
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      },
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "requiredFeatures": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      }
+    },
+    "version": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{8,64}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "applicationId",
+        "versionCode",
+        "versionName",
+        "commit",
+        "buildType"
+      ],
+      "properties": {
+        "applicationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"
+        },
+        "versionCode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "versionName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "buildType": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "release"
+          ]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "titleId",
+        "contentRoot",
+        "artifact",
+        "artifactSha256",
+        "rewriteAbi",
+        "target",
+        "backend"
+      ],
+      "properties": {
+        "titleId": {
+          "type": "string",
+          "pattern": "^[0-9A-F]{16}$"
+        },
+        "contentRoot": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "artifact": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "artifactSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rewriteAbi": {
+          "type": "string",
+          "enum": [
+            "android-sp-safe-v1"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "enum": [
+            "android"
+          ]
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "vulkan"
+          ]
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifestSha256",
+        "contentRoot"
+      ],
+      "properties": {
+        "manifestSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "contentRoot": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "source",
+          "buildId",
+          "sha256"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,32}$"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "apk-asset",
+              "revision"
+            ]
+          },
+          "buildId": {
+            "type": "string",
+            "pattern": "^([0-9a-f]{32}|[0-9a-f]{40})$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manufacturer",
+        "model",
+        "apiLevel",
+        "abi",
+        "pageSize",
+        "memoryBytes"
+      ],
+      "properties": {
+        "manufacturer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apiLevel": {
+          "type": "integer",
+          "minimum": 29
+        },
+        "abi": {
+          "type": "string",
+          "enum": [
+            "arm64-v8a"
+          ]
+        },
+        "pageSize": {
+          "type": "integer",
+          "enum": [
+            4096,
+            16384
+          ]
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "driver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "vendor",
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vendor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "system",
+            "vendor",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "mode",
+        "route",
+        "clock",
+        "saveMode",
+        "cacheMode"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{1,64}$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "formal",
+            "diagnostic"
+          ]
+        },
+        "route": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clock": {
+          "type": "string",
+          "enum": [
+            "real",
+            "deterministic"
+          ]
+        },
+        "saveMode": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "readonly",
+            "reset"
+          ]
+        },
+        "cacheMode": {
+          "type": "string",
+          "enum": [
+            "cold",
+            "warm",
+            "preserve"
+          ]
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "rulesVersion",
+        "tuning",
+        "deviceCapsSha256",
+        "effectiveProfileSha256"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "vulkan"
+          ]
+        },
+        "rulesVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tuning": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceCapsSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "effectiveProfileSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviceCaps",
+        "effectiveProfile",
+        "hostLog",
+        "lifecycle",
+        "frames",
+        "compileEvents",
+        "cacheReport",
+        "memory",
+        "power",
+        "result",
+        "truth",
+        "shots"
+      ],
+      "properties": {
+        "deviceCaps": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "effectiveProfile": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "hostLog": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "lifecycle": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "frames": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "compileEvents": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "cacheReport": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "power": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "result": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "truth": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        },
+        "shots": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+$"
+        }
+      }
+    }
+  }
+}

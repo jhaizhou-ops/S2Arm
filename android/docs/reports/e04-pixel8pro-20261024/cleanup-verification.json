@@ -1,0 +1,42 @@
+{
+  "checks": {
+    "stay_awake": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "rotation": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "auto_rotation": {
+      "before": "0",
+      "after": "0",
+      "matches": true
+    },
+    "screen_off_timeout": {
+      "before": "120000",
+      "after": "120000",
+      "matches": true
+    },
+    "wm_size": {
+      "before": "Physical size: 1344x2992",
+      "after": "Physical size: 1344x2992",
+      "matches": true
+    },
+    "wm_density": {
+      "before": "Physical density: 480\nOverride density: 544",
+      "after": "Physical density: 480\nOverride density: 544",
+      "matches": true
+    }
+  },
+  "diagnosticAppStopped": true,
+  "uiautomatorStopped": true,
+  "newCrashBufferLines": 0,
+  "newDiagnosticProcessCrashLines": 0,
+  "fixtureFilesKiB": 87,
+  "status": "pass",
+  "taskOwnedAdb5039Stopped": true,
+  "otherAdbServicesUntouched": true
+}

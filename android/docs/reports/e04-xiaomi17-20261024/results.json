@@ -1,0 +1,333 @@
+{
+  "task": "E04-Xiaomi17",
+  "author": "fengbird",
+  "status": "first-round diagnostic pass; awaiting maintainer review",
+  "implementationCommit": "f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47",
+  "reportBranchBaseCommit": "cc16b5fef4f699d043d95e65d8270ef00df89e2a",
+  "runtimeRerun": false,
+  "runtimeRerunReason": "Only build-closure tooling/report metadata changed after the frozen implementation; no Android runtime files changed",
+  "apk": {
+    "package": "org.s2arm.android",
+    "versionCode": 1,
+    "versionName": "0.1.0-dev",
+    "sha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe",
+    "installedHashMatches": true,
+    "CS_SERVICES": "0",
+    "gameResourcesIncluded": false,
+    "installedSha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe"
+  },
+  "device": {
+    "model": "小米17 / 25113PN0EC",
+    "socReported": "SM8850",
+    "android": "16 / API 36",
+    "abi": "arm64-v8a",
+    "pageBytes": 4096,
+    "memTotalKB": 15373316,
+    "memoryNote": "系统可见总内存，不是游戏可用上限",
+    "gpuObserved": "Adreno (TM) 840",
+    "vulkanApiObserved": "1.4",
+    "driverVersion": "未记录",
+    "landscapePixels": [
+      2656,
+      1220
+    ]
+  },
+  "startedAt": "2026-10-24T11:23:05.608245+08:00",
+  "finishedAt": "2026-10-24T11:23:28.666908+08:00",
+  "applicationPid": 29051,
+  "selectedLogAnonymousPid": {
+    "P1": 29051
+  },
+  "selectedLogThreadAliases": {
+    "T1": 29051,
+    "T2": 30111,
+    "T3": 30120,
+    "T4": 30767,
+    "T5": 30783
+  },
+  "selectedLogOriginalLineNumbers": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    10,
+    13,
+    15,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    27,
+    28,
+    30,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    59,
+    105,
+    106,
+    107,
+    152,
+    153,
+    156,
+    157,
+    158,
+    162,
+    163,
+    164,
+    166,
+    168,
+    169,
+    170,
+    174,
+    175,
+    176,
+    177,
+    179,
+    180,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187,
+    189,
+    192,
+    194,
+    198,
+    199,
+    200,
+    201,
+    202,
+    203,
+    204,
+    206
+  ],
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass",
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 2,
+          "lastLine": 31
+        },
+        {
+          "firstLine": 182,
+          "lastLine": 206
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/reopened-diagnostics.png",
+          "sha256": "d7b3f6afcd55103d476fe132ef78aa66f8e2ac0413de4d0d28f1953fbb96d7b0"
+        }
+      ],
+      "screenshotLimitation": "diagnostic panel captured after reopen, not a cold-boot frame"
+    },
+    {
+      "name": "buttons",
+      "status": "pass",
+      "buttonsTested": [
+        "A",
+        "B",
+        "X",
+        "Y",
+        "LS",
+        "RS",
+        "L",
+        "R",
+        "ZL",
+        "ZR",
+        "+",
+        "−"
+      ],
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 32,
+          "lastLine": 57
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/landscape.png",
+          "sha256": "5af0dcee15c093cee7583730036e70597900bf8a40bcfa9f688c8c7eb8d791f0"
+        }
+      ],
+      "screenshotLimitation": "shared layout reference only; no dedicated action screenshot was captured; actions evidenced by logs and collector assertions"
+    },
+    {
+      "name": "sticks",
+      "status": "pass",
+      "scope": "right-up drag and release on each stick; not all directions/multitouch",
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 59,
+          "lastLine": 153
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/landscape.png",
+          "sha256": "5af0dcee15c093cee7583730036e70597900bf8a40bcfa9f688c8c7eb8d791f0"
+        }
+      ],
+      "screenshotLimitation": "shared layout reference only; no dedicated action screenshot was captured; actions evidenced by logs and collector assertions"
+    },
+    {
+      "name": "rotation",
+      "status": "pass",
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 154,
+          "lastLine": 164
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/landscape.png",
+          "sha256": "5af0dcee15c093cee7583730036e70597900bf8a40bcfa9f688c8c7eb8d791f0"
+        },
+        {
+          "evidence": "device-round-03/reverse-landscape.png",
+          "sha256": "55724c7acc0242406f41ccb5a3b5a19393d0d01b7a5df611e0a0191862dbc394"
+        }
+      ]
+    },
+    {
+      "name": "home-reset",
+      "status": "pass",
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 166,
+          "lastLine": 178
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/home-restored.png",
+          "sha256": "e462539b8860ad1dac3c3b38e27821b1581d823ce2181ee544ddcbad5ef2d3bd"
+        }
+      ]
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass",
+      "pid": 29051,
+      "originalLog": "device-round-03/app-logcat.txt",
+      "originalLogLineRanges": [
+        {
+          "firstLine": 179,
+          "lastLine": 206
+        }
+      ],
+      "screenshots": [
+        {
+          "evidence": "device-round-03/reopened-diagnostics.png",
+          "sha256": "d7b3f6afcd55103d476fe132ef78aa66f8e2ac0413de4d0d28f1953fbb96d7b0"
+        }
+      ],
+      "retirementEvidence": "collector asserted old render TID 30120 absent under run-as before reopen; separate command stdout was not retained; new render TID 30783 appears in original log"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "stop-app",
+      "status": "pass"
+    },
+    {
+      "name": "unchanged-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "buildChecks": [
+    {
+      "name": "host-tests-01",
+      "exitCode": 0
+    },
+    {
+      "name": "e04-offline-tests-01",
+      "exitCode": 0
+    },
+    {
+      "name": "assemble-lint-01",
+      "exitCode": 0
+    },
+    {
+      "name": "apk-verify-01",
+      "exitCode": 0
+    },
+    {
+      "name": "apk-signature-01",
+      "exitCode": 0
+    },
+    {
+      "name": "synthetic-guest-01",
+      "exitCode": 0
+    },
+    {
+      "name": "synthetic-rewrite-01",
+      "exitCode": 0
+    }
+  ],
+  "notTested": [
+    "16KB页宿主",
+    "Mali",
+    "实体手柄",
+    "多指组合",
+    "摇杆全部方向和边界",
+    "NativeAOT/OpenSSL/编解码/完整服务层",
+    "真实guest HID消费",
+    "正式游戏渲染、声画、存档",
+    "游戏帧率、功耗、温控和长期压力",
+    "Linux原生CTest与Windows/WSL出口"
+  ],
+  "crashCheck": {
+    "entriesForTestedProcessDuringRound": 0,
+    "scope": "仅本轮窗口；不是长期稳定性结论"
+  },
+  "failureHistory": [
+    "手机首次拒绝USB安装，用户开启后安装成功",
+    "第一轮本地焦点读取兼容性错误；改读完整window输出",
+    "第二轮分离DOWN/UP注入未获输入日志确认；定点swipe对照有效",
+    "仅修正仓库外采集方式；第三轮6/6通过，未修改App或验收阈值"
+  ],
+  "scope": "CS_SERVICES=0 resource-free native diagnostics; no full NativeAOT or game acceptance",
+  "rawArtifactsUploaded": false
+}

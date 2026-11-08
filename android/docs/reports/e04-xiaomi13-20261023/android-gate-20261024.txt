@@ -1,0 +1,43 @@
+Date: 2026-10-24 (Asia/Shanghai)
+Tested PR source commit: 57cc1825219c1f45e28552828f3c49da8549a906
+Command: bash android/gate.sh
+Scope: macOS device-free Android gate; Linux-only native tests skipped by the existing entry point.
+
+openjdk version "17.0.21" 2026-10-20
+OpenJDK Runtime Environment Homebrew (build 17.0.21+0)
+OpenJDK 64-Bit Server VM Homebrew (build 17.0.21+0, mixed mode, sharing)
+
+门禁 JDK：/opt/homebrew/opt/openjdk@17/bin/javac（javac 17.0.21）
+Android gamepad: Npad mapping, axis direction, clamping, independent sources, reset passed
+BootContract: ok
+BootSpec: ok
+BootSpec schema: ok
+GamePack: ok
+GameInstall: ok
+App 纯 Java 类编译：ok
+ok samples/current.json
+ok samples/game-build-artifact.json
+ok samples/game-input-manifest.json
+ok samples/boot-spec.json
+ok samples/run-manifest.json
+ok samples/job-request.json
+ok samples/job-event.json
+ok cross-file invariants
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 1.170s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.002s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.001s
+
+OK
+安卓外壳 Java 单测 / App 纯 Java 类编译 / python 契约（test.sh 跳 native）：期望 全过 → 真结果 通过
+
+Exit code: 0

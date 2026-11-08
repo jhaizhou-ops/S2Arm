@@ -1,0 +1,114 @@
+import Foundation
+import Testing
+import S2ArmShellBridge
+import ShellUI
+@testable import S2ArmShellHost
+
+// 期望值按 Fixtures/catalogue.json 手算：8 条里重复的 Alpha 丢弃 → 7 条；状态按字段逐条对位
+@Test func catalogueFixture() throws {
+    let url = try #require(Bundle.module.url(forResource: "catalogue", withExtension: "json", subdirectory: "Fixtures"))
+    let c = Catalogue.load(path: url.path)
+    #expect(c.tiles.map(\.id) == ["0100000000010000", "0100000000020000", "0100000000030000", "0100000000040000",
+                                  "0100000000050000", "bad", "0100000000060000"])
+    #expect(c.tiles[0].title == "Alpha" && c.tiles[0].subtitle == "1.2.0" && c.tiles[0].banner == nil)
+    #expect(c.tiles[0].state == .playable)
+    #expect(c.tiles[1].state == .needsGameData)
+    #expect(c.tiles[2].state == .needsAppUpdate)
+    #expect(c.tiles[3].state == .broken(reason: "R", detail: "D"))
+    #expect(c.tiles[4].state == .broken(reason: "", detail: "", technical: "未知状态 \"flying\""))
+    if case .broken = c.tiles[5].state {} else { Issue.record("非法 title_id 应显示为不可用") }
+    #expect(c.tiles[6].state == .playable)   // 缺 state 按可运行
+    #expect(c.problems.count == 2)           // 重复 1 + 非法 id 1
+}
+
+@Test func catalogueBadInputs() {
+    let base = URL(fileURLWithPath: "/")
+    #expect(Catalogue.parse(Data("not json".utf8), baseDirectory: base).tiles.isEmpty)
+    #expect(Catalogue.parse(Data(#"{"schema":2,"games":[]}"#.utf8), baseDirectory: base).problems.count == 1)
+    #expect(Catalogue.load(path: "/nonexistent/s2a.json").problems.count == 1)
+}
+
+@MainActor @Test func playOnlyForPlayable() {
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B","state":"needs_game_data"}]}"#.utf8)
+    var played: [String] = []
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) })
+    model.actions.onPlay("0100000000010000")
+    model.actions.onPlay("0100000000020000")
+    model.actions.onPlay("FFFFFFFFFFFFFFFF")
+    #expect(played == ["0100000000010000"])
+}
+
+// 资源包不在机上（11-07 Duo「游戏没能启动」）：清单写 playable 也显示需要游戏数据、Play 不放行而是要导入说明；放好后重判 → 可运行、放行。
+//   清单本来写 needs_game_data 的款不因资源包在就变可运行（以清单为底）
+@MainActor @Test func gameDataMissingBlocksPlay() {
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B","state":"needs_game_data"}]}"#.utf8)
+    var ready: Set<String> = ["0100000000020000"]
+    var played: [String] = [], picked: [String] = []
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
+                                    gameDataReady: { ready.contains($0) }, pickGameData: { picked.append($0) })
+    #expect(model.games.map(\.game.state) == [.needsGameData, .needsGameData])
+    model.actions.onPlay("0100000000010000")
+    #expect(played.isEmpty && picked == ["0100000000010000"])
+    model.actions.onPickGameData("0100000000010000")
+    #expect(picked == ["0100000000010000", "0100000000010000"])
+    ready.insert("0100000000010000"); model.refreshGameData()
+    #expect(model.games.map(\.game.state) == [.playable, .needsGameData])
+    model.actions.onPlay("0100000000010000")
+    #expect(played == ["0100000000010000"])
+    ready.remove("0100000000010000")              // 库开着时资源包被拿走：Play 当场重判、不放行
+    model.actions.onPlay("0100000000010000")
+    #expect(played == ["0100000000010000"] && picked.count == 3)
+}
+
+// 宿主「重新检查」→ s2a_shell_refresh → 登记的处理函数
+nonisolated(unsafe) private var refreshed = 0
+@Test func cBridgeRefresh() {
+    s2a_shell_set_refresh_handler(nil, nil); s2a_shell_refresh(); #expect(refreshed == 0)
+    s2a_shell_set_refresh_handler({ _ in refreshed += 1 }, nil); s2a_shell_refresh(); #expect(refreshed == 1)
+    s2a_shell_set_refresh_handler(nil, nil)
+    #expect(s2a_shell_game_data_ready("0100000000010000") == 1)   // 不链宿主时弱定义缺省：按就绪
+}
+
+// C 出口：没登记 → 0；登记后 → 1 且处理函数拿到同一个 id
+nonisolated(unsafe) private var lastPlayed = ""
+@Test func cBridgeForwards() {
+    s2a_shell_set_play_handler(nil, nil)
+    #expect(s2a_shell_play("0100000000010000") == 0)
+    s2a_shell_set_play_handler({ id, _ in lastPlayed = String(cString: id!) }, nil)
+    #expect(s2a_shell_play("0100000000020000") == 1)
+    #expect(lastPlayed == "0100000000020000")
+    s2a_shell_set_play_handler(nil, nil)
+}
+
+// 每款游戏的设置行（S2ArmGameSettings，11-07 jhz）：临时偏好，期望值手算
+@MainActor @Test func gameSettingsRows() throws {
+    let tag = UUID().uuidString
+    let app = try #require(UserDefaults(suiteName: "s2a.test.app." + tag))
+    var games: [String: UserDefaults] = [:]
+    let stores = S2ArmGameSettings.Stores(game: { id in
+        if let d = games[id] { return d }
+        let d = UserDefaults(suiteName: "s2a.test.game.\(tag).\(id)"); games[id] = d; return d }, app: app)
+    defer { app.removePersistentDomain(forName: "s2a.test.app." + tag); for (id, _) in games { UserDefaults().removePersistentDomain(forName: "s2a.test.game.\(tag).\(id)") } }
+    func row(_ s: [SettingSection], _ id: String) -> SettingRow? { s.flatMap(\.rows).first { $0.id == id } }
+    // 缺省：60 帧开、宽屏强制关、透明度 100、布局默认，没有「我的布局」时选项 = 默认 + 调整位置
+    var s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s, "fps60")?.value == "on" && row(s, "widenForce")?.value == "off" && row(s, "vpadOpacity")?.value == "100")
+    if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "edit"]) } else { Issue.record("布局行应是多选") }
+    // 改：G1 关 60 帧、开宽屏强制、透明度 40 → G1 两项变了、G2 不变；透明度全局 0.4
+    #expect(!S2ArmGameSettings.apply(id: "G1", setting: "fps60", value: "off", stores: stores))
+    S2ArmGameSettings.apply(id: "G1", setting: "widenForce", value: "on", stores: stores)
+    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "40.0", stores: stores)
+    s = S2ArmGameSettings.sections(for: "G1", stores: stores, state: .init(selected: "mine", hasMine: true))
+    #expect(row(s, "fps60")?.value == "off" && row(s, "widenForce")?.value == "on" && row(s, "vpadOpacity")?.value == "40")
+    #expect(games["G1"]?.object(forKey: "S2AFps60") as? Bool == false && games["G1"]?.bool(forKey: "S2AWidenForce") == true)
+    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.4) < 1e-9)
+    if case .choice(let o) = row(s, "vpadLayout")?.kind { #expect(o.map(\.id) == ["default", "mine", "edit"]) }
+    #expect(row(s, "vpadLayout")?.value == "mine")
+    let s2 = S2ArmGameSettings.sections(for: "G2", stores: stores, state: .init(selected: "default", hasMine: false))
+    #expect(row(s2, "fps60")?.value == "on" && row(s2, "widenForce")?.value == "off" && row(s2, "vpadOpacity")?.value == "40")
+    // 透明度钳在 10–100：给 5 存成 0.1
+    S2ArmGameSettings.apply(id: "G1", setting: "vpadOpacity", value: "5", stores: stores)
+    #expect(abs((app.object(forKey: "S2AVPadOpacity") as? Double ?? 0) - 0.1) < 1e-9)
+    // 选「调整位置…」= 打开编辑页，不存值
+    #expect(S2ArmGameSettings.apply(id: "G1", setting: "vpadLayout", value: "edit", stores: stores))
+}

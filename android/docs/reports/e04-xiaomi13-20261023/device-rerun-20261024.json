@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "runtimeCommit": "ce9db716c393d6a78ea0f6925415d7637dadc9d5",
+  "cases": [
+    {
+      "name": "native-probes",
+      "status": "pass"
+    },
+    {
+      "name": "buttons",
+      "status": "pass"
+    },
+    {
+      "name": "sticks",
+      "status": "pass"
+    },
+    {
+      "name": "rotation",
+      "status": "pass"
+    },
+    {
+      "name": "home-reset",
+      "status": "pass"
+    },
+    {
+      "name": "finish-reopen",
+      "status": "pass"
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "release-touch",
+      "status": "pass"
+    },
+    {
+      "name": "stop-diagnostic-app",
+      "status": "pass"
+    },
+    {
+      "name": "restore-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "apkSha256": "1978aeb6a6380ed15fa899ea43510a6a5f5389a293088f27524b1c603be10873",
+  "device": {
+    "ro.product.model": "2211133C",
+    "ro.product.device": "fuxi",
+    "ro.build.version.release": "16",
+    "ro.build.version.sdk": "36",
+    "ro.build.version.incremental": "OS3.0.309.0.WMCCNXM",
+    "ro.build.version.security_patch": "2026-08-01"
+  },
+  "status": "pass",
+  "runnerCommit": "539b9a07199d7568c30312c4535596eb6f70b4c4",
+  "runnerSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "startedAtUTC": "2026-10-23T23:29:52.976217+00:00",
+  "finishedAtUTC": "2026-10-23T23:30:16.870896+00:00",
+  "dateLocal": "2026-10-24 (Asia/Shanghai)",
+  "postRun": {
+    "stayAwakeRestoredValue": "2",
+    "diagnosticAppStopped": true,
+    "newCrashRecordCount": 0,
+    "manualLandscapeAndReverseMarkers": "pass"
+  },
+  "privateEvidenceSha256": {
+    "run-metadata.json": "a97964b6726d3c9fba2d78d4f8411c00b6d7646cc6f5fc49a69cb554b294f883",
+    "artemis-diagnosis.json": "dfe6066581649aeb021f9928bab28279c160e1913620191b75a42b637ab41f11",
+    "artemis-hierarchy.txt": "a82f79efcd8723f47977cc4f7e1890e215ef2be63802f5687c17b5ec5c8ff811",
+    "post-run-checks.json": "c7364f411a3aaf18eac40449d845b02ba8e42057cd04dcafd21314636e0d7998",
+    "crash-buffer-since-run.txt": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "device-run-1/results.json": "938b1c86e77a0dbd3df11a647ec5c86066100e1c49b3dfd2dcd0fadb169389f9",
+    "device-run-1/app-logcat.txt": "661aef7e632f54e31e91016397786f59d1b5e0bd778c239e1eca0d7ef6759cbc",
+    "device-run-1/landscape.png": "98b57d58645f6095024055f92ba8861e7e246f14a3c4e43e62ef6bef8a023642",
+    "device-run-1/reverse-landscape.png": "af5b018390e5a7926beaa48a432064f0fbdf8c73fd16bf8bec6e7a5091153deb",
+    "device-run-1/home-restored.png": "a200a386b53bd285490739cef7894ac98ab1eb40f19f86e9f73f15c9b8c87cdd",
+    "device-run-1/reopened-diagnostics.png": "dc8cb571dae90414f345921c22e233a1dca69e41f60e8615b9ab73b2cf95897f"
+  },
+  "scope": "Resource-free native diagnostic APK, same ce9db716 runtime and APK as first round; no complete-game acceptance."
+}

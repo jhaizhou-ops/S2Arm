@@ -1,0 +1,148 @@
+## host-tests-01
+exit_code=0
+Android gamepad: Npad mapping, axis direction, clamping, independent sources, reset passed
+GameTouch: viewport, multi-contact, cancel, overflow, failure checks passed
+TouchPad: ok
+TouchRouting: ok
+BootContract: ok
+BootSpec: ok
+BootSpec schema: ok
+GamePack: ok
+GameInstall: ok
+App 纯 Java 类编译：ok
+ok samples/current.json
+ok samples/game-build-artifact.json
+ok samples/game-input-manifest.json
+ok samples/boot-spec.json
+ok samples/run-manifest.json
+ok samples/job-request.json
+ok samples/job-event.json
+ok cross-file invariants
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 1.574s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.002s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.001s
+
+OK
+
+## e04-offline-tests-01
+exit_code=0
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.003s
+
+OK
+
+## assemble-lint-01
+exit_code=0
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:generateDebugResources
+> Task :app:packageDebugResources
+> Task :app:processDebugNavigationResources
+> Task :app:javaPreCompileDebug
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets
+> Task :app:compressDebugAssets
+> Task :app:parseDebugLocalResources
+> Task :app:generateDebugGlobalSynthetics
+> Task :app:generateDebugRFile
+> Task :app:checkDebugDuplicateClasses
+> Task :app:compileDebugKotlin NO-SOURCE
+
+> Task :app:compileDebugJavaWithJavac
+注: 某些输入文件使用或覆盖了已过时的 API。
+注: 有关详细信息, 请使用 -Xlint:deprecation 重新编译。
+
+> Task :app:processDebugJavaRes NO-SOURCE
+> Task :app:desugarDebugFileDependencies
+> Task :app:mergeDebugJavaResource
+> Task :app:mergeLibDexDebug
+> Task :app:checkDebugAarMetadata
+> Task :app:mapDebugSourceSetPaths
+> Task :app:mergeExtDexDebug
+> Task :app:compileDebugNavigationResources
+> Task :app:createDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksDebug
+> Task :app:processDebugMainManifest
+> Task :app:mergeDebugResources
+> Task :app:processDebugManifest
+> Task :app:configureCMakeDebug[arm64-v8a]
+> Task :app:buildCMakeDebug[arm64-v8a][s2arm_android]
+> Task :app:mergeDebugJniLibFolders
+> Task :app:processDebugManifestForPackage
+> Task :app:mergeDebugNativeLibs
+> Task :app:stripDebugDebugSymbols
+> Task :app:validateSigningDebug
+> Task :app:writeDebugAppMetadata
+> Task :app:writeDebugSigningConfigVersions
+> Task :app:preDebugAndroidTestBuild SKIPPED
+> Task :app:extractProguardFiles
+> Task :app:processDebugResources
+> Task :app:generateDebugLintReportModel
+> Task :app:dexBuilderDebug
+> Task :app:bundleDebugClassesToCompileJar
+> Task :app:mergeProjectDexDebug
+> Task :app:generateDebugAndroidTestLintModel
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:generateDebugUnitTestLintModel
+> Task :app:packageDebug
+> Task :app:createDebugApkListingFileRedirect
+> Task :app:assembleDebug
+> Task :app:lintAnalyzeDebugAndroidTest
+> Task :app:lintAnalyzeDebugUnitTest
+> Task :app:lintAnalyzeDebug
+
+> Task :app:lintReportDebug
+Wrote HTML report to file://<repo>/platforms/android/app/build/reports/lint-results-debug.html
+Wrote SARIF report to file://<repo>/platforms/android/app/build/reports/lint-results-debug.sarif
+
+> Task :app:lintDebug
+
+[Incubating] Problems report is available at: file://<repo>/platforms/android/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.8.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 1m 56s
+47 actionable tasks: 47 executed
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.8.1/userguide/configuration_cache_enabling.html
+
+## apk-verify-01
+exit_code=0
+APK verified: arm64-v8a, 16 KB ELF segments and APK alignment
+
+## apk-signature-01
+exit_code=0
+Verifies
+Verified using v1 scheme (JAR signing): false
+Verified using v2 scheme (APK Signature Scheme v2): true
+Verified using v3 scheme (APK Signature Scheme v3): false
+Verified using v3.1 scheme (APK Signature Scheme v3.1): false
+Verified using v4 scheme (APK Signature Scheme v4): false
+Verified for SourceStamp: false
+Number of signers: 1
+Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+Signer #1 certificate SHA-256 digest: 2a2bbf93dcfd4053b6246cdfa01ef23bf40d673162aa36879c103d7923f1d03f
+Signer #1 certificate SHA-1 digest: 0a455f348f1b9c84d87e9a61bb77db1e6d7e7270
+Signer #1 certificate MD5 digest: d837249efe136ce8e19d39f9002292ca
+Signer #1 key algorithm: RSA
+Signer #1 key size (bits): 2048
+Signer #1 public key SHA-256 digest: 17ae79d3fadc21472dcea9473af43df2863175972a232e3749cc0fc30ee4effd
+Signer #1 public key SHA-1 digest: 9ca55d27f22d58337c6fb36dc015bb159ee767e5
+Signer #1 public key MD5 digest: 44db4c9ec4bd2285a96f5d972eb5d105

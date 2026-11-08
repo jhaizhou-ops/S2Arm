@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://s2arm.local/contracts/boot-spec.v1.schema.json",
+  "title": "S2Arm Android boot spec v1",
+  "description": "Session configuration frozen by the Android shell before guest start. It references one installed revision; it is not part of the package.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "sessionId",
+    "titleId",
+    "contentRoot",
+    "gameRoot",
+    "revisionDir",
+    "artifact",
+    "artifactSha256",
+    "user",
+    "screen",
+    "paths",
+    "mode",
+    "consoleMode",
+    "network"
+  ],
+  "properties": {
+    "extensions": {
+      "description": "Optional namespaced metadata. Unknown entries may be ignored; required behavior must be declared in requiredFeatures.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      },
+      "additionalProperties": {
+        "type": "object"
+      }
+    },
+    "requiredFeatures": {
+      "description": "Namespaced capabilities that every consumer must support; unknown features must be rejected.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+      }
+    },
+    "version": {
+      "const": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "titleId": {
+      "type": "string",
+      "pattern": "^[0-9A-F]{16}$"
+    },
+    "contentRoot": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "gameRoot": {
+      "type": "string",
+      "pattern": "^/",
+      "description": "Absolute private game root from Context (getFilesDir()/getExternalFilesDir()); /data/user/<n> and /mnt/expand/<uuid>/... are allowed."
+    },
+    "revisionDir": {
+      "type": "string",
+      "pattern": "^revisions/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "artifact": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)[A-Za-z0-9._/-]+\\.json$"
+    },
+    "artifactSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "language",
+        "timezone"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "language": {
+          "type": "string",
+          "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$",
+          "description": "LocaleList.getDefault().get(0).toLanguageTag(); may be zh-Hans-CN."
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "description": "Optional ISO 3166-1 alpha-2. Omit when Locale.getCountry() is empty; the shared layer derives a default from the language."
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical IANA name after android.icu.util.TimeZone.getCanonicalID; the shell maps fixed offsets to Etc/GMT±N or falls back to UTC with a diagnostic. The name must exist in the system-data lock."
+        }
+      }
+    },
+    "screen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "densityDpi",
+        "refreshHz"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "densityDpi": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refreshHz": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Display.getRefreshRate() at session preparation."
+        }
+      },
+      "description": "The game Surface actual pixel size prepared for this session (first version landscape, §7.4), not the Display size. Whether system bars/cutouts are included is defined with the §7.4 input mapping."
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "userRoot",
+        "saveRoot",
+        "cacheRoot"
+      ],
+      "properties": {
+        "userRoot": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute persistent user root from Context."
+        },
+        "saveRoot": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute persistent save root; LibHac semantics, outside the revision."
+        },
+        "cacheRoot": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute cache root only (e.g. Context.getCacheDir()). Backend derives cache/shaders/<profileHash> and cache/gpu/<driverKey>/<profileHash> after device creation; do not put a GPU name or profile in BootSpec."
+        }
+      }
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "game",
+        "diagnostic"
+      ]
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logDir": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "statsSchema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtimeLibrary": {
+          "description": "Which libs2arm_android.so this process runs (RuntimeLibrary.json()); dev-override is a development run: no readings, no formal receipt",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {"kind": {"const": "apk"}}
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "sha256", "baseApkSha256", "sourceCommit", "dirty", "diffSha256", "ilcConfig", "aotHost"],
+              "properties": {
+                "kind": {"const": "dev-override"},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "baseApkSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "dirty": {"type": "boolean"},
+                "diffSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "ilcConfig": {"enum": ["Release", "Debug"]},
+                "aotHost": {"enum": ["linux-arm64", "linux-x64"]}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "consoleMode": {
+      "type": "string",
+      "enum": [
+        "handheld",
+        "docked"
+      ],
+      "description": "Handheld/docked setting; the shell supplies it, default handheld.",
+      "default": "handheld"
+    },
+    "network": {
+      "type": "string",
+      "enum": [
+        "offline",
+        "online"
+      ],
+      "description": "Networking policy; the shell supplies it, default offline.",
+      "default": "offline"
+    }
+  }
+}

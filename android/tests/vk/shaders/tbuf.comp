@@ -1,0 +1,5 @@
+#version 450
+layout(local_size_x = 4, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform usamplerBuffer tb;
+layout(set = 0, binding = 1) writeonly buffer O { uint v[]; } o;
+void main() { o.v[gl_GlobalInvocationID.x] = texelFetch(tb, int(gl_GlobalInvocationID.x)).x; }

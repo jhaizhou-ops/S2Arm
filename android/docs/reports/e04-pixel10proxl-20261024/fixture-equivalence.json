@@ -1,0 +1,25 @@
+{
+  "sourceCommit": "cc16b5fef4f699d043d95e65d8270ef00df89e2a",
+  "python": "3.12.10",
+  "capstoneModule": "5.0.7",
+  "capstoneDistribution": "5.0.7",
+  "lz4": "4.4.5",
+  "files": [
+    {
+      "file": "patched.bin",
+      "sha256": "7642ee98142d2c8f1a6fa855ff3fff9433ba6cd8618d95d7e07a66225e2e6725",
+      "matchesTestedInput": true
+    },
+    {
+      "file": "fixups.tsv",
+      "sha256": "cee038038789efa55e0d502ff537d2442474517543baa07a465eb7b6fb665850",
+      "matchesTestedInput": true
+    },
+    {
+      "file": "gates.tsv",
+      "sha256": "75da3805ab673ddb914956bd6713328d9d8a8e08d2d886862f4ff4bcccedfc78",
+      "matchesTestedInput": true
+    }
+  ],
+  "allMatch": true
+}

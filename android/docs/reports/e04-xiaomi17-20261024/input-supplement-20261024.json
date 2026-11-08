@@ -1,0 +1,124 @@
+{
+  "startedAt": "2026-10-24T12:43:20.551448+08:00",
+  "implementationCommit": "f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47",
+  "apkSha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe",
+  "automaticCases": [
+    {
+      "name": "LSTICK-right",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(32767,18) R=(0,0)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 112
+    },
+    {
+      "name": "LSTICK-left",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(-32767,17) R=(0,0)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 112
+    },
+    {
+      "name": "LSTICK-up",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(49,32767) R=(0,0)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 112
+    },
+    {
+      "name": "LSTICK-down",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(48,-32767) R=(0,0)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 112
+    },
+    {
+      "name": "RSTICK-right",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(0,0) R=(32767,105)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 136
+    },
+    {
+      "name": "RSTICK-left",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(0,0) R=(-32767,107)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 136
+    },
+    {
+      "name": "RSTICK-up",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(0,0) R=(-100,32767)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 136
+    },
+    {
+      "name": "RSTICK-down",
+      "status": "pass",
+      "outsideRadiusFactor": 1.35,
+      "saturatedInput": "input: buttons=0x0000 L=(0,0) R=(-102,-32767)",
+      "releasedToZero": true,
+      "orthogonalBoundFromHalfPixelCenterRounding": 136
+    }
+  ],
+  "manualCases": [
+    {
+      "name": "simultaneous-A-and-B",
+      "status": "not_observed",
+      "combinedInput": null
+    },
+    {
+      "name": "left-stick-and-A",
+      "status": "not_observed",
+      "combinedInput": null
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "stop-app",
+      "status": "pass"
+    },
+    {
+      "name": "unchanged-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "originalStayAwake": "15",
+  "pid": "30754",
+  "inputReadinessAttempts": [
+    {
+      "attempt": 1,
+      "observed": false
+    },
+    {
+      "attempt": 2,
+      "observed": true
+    }
+  ],
+  "manualCursor": 455,
+  "error": "Manual input combinations not fully observed within bounded window",
+  "finishedAt": "2026-10-24T12:46:35.110187+08:00",
+  "status": "partial",
+  "task": "E04-Xiaomi17",
+  "purpose": "incremental cardinal directions, range clamp and release; not a rerun of the original six groups",
+  "originalSixGroupsUnchanged": true,
+  "rawLog": "supplement-01/input-boundaries-02/app-logcat.txt",
+  "overallInterpretation": "partial: system driver collected and 8 automatic checks passed; two manual combinations not observed before bounded timeout",
+  "orthogonalAxisInterpretation": "MainActivity logs center/radius with %.0f. Each center coordinate can have 0.5px rounding error; bound=ceil(32767*0.5/(loggedRadius-0.5)+0.5). Actual orthogonal values retained. This is collector coordinate quantization, not a changed runtime deadzone.",
+  "failureHistory": [
+    "First automatic attempt observed no input after injection and timed out; not classified as an App failure",
+    "Control attempt: first A probe unobserved; later diagonal and cardinal gestures produced valid input",
+    "Cardinal control showed main-axis saturation with small nonzero orthogonal values; %.0f layout-center quantization confirmed from existing source",
+    "Second attempt used a bounded readiness check (first unobserved, second observed), preserved raw orthogonal values, and passed 8/8 automatic cases",
+    "Manual window 180 seconds elapsed without the two required press-and-release combinations; collector returned nonzero and reported partial"
+  ],
+  "screenshotLimitation": "private layout screenshots only; no dedicated per-direction action screenshots; original PNGs not uploaded",
+  "runtimeScope": "same frozen CS_SERVICES=0 APK; no full NativeAOT, guest HID, game or performance verdict"
+}

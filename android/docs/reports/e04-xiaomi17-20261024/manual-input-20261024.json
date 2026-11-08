@@ -1,0 +1,56 @@
+{
+  "startedAt": "2026-10-24T12:56:31.228072+08:00",
+  "task": "E04-Xiaomi17",
+  "implementationCommit": "f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47",
+  "apkSha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe",
+  "cleanup": [
+    {
+      "name": "stop-app",
+      "status": "pass"
+    },
+    {
+      "name": "unchanged-stay-awake",
+      "status": "pass"
+    }
+  ],
+  "inputInjection": false,
+  "originalSixGroupsUnchanged": true,
+  "previousAutomaticEightUnchanged": true,
+  "installedApkSha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe",
+  "originalStayAwake": "15",
+  "pid": "5085",
+  "manualStartedAt": "2026-10-24T12:56:34.217896+08:00",
+  "finishedAt": "2026-10-24T12:58:40.676179+08:00",
+  "status": "pass",
+  "manualCases": [
+    {
+      "name": "simultaneous-A-and-B",
+      "status": "pass",
+      "combinedInput": "input: buttons=0x0003 L=(0,0) R=(0,0)",
+      "releasedToZero": true,
+      "combinedRawLogLine": 1041,
+      "releaseRawLogLine": 1043,
+      "releaseInput": "input: buttons=0x0000 L=(0,0) R=(0,0)",
+      "combinedToAllZeroMilliseconds": 73
+    },
+    {
+      "name": "left-stick-and-A",
+      "status": "pass",
+      "combinedInput": "input: buttons=0x0001 L=(-31981,7133) R=(0,0)",
+      "releasedToZero": true,
+      "combinedRawLogLine": 289,
+      "releaseRawLogLine": 945,
+      "releaseInput": "input: buttons=0x0000 L=(0,0) R=(0,0)",
+      "combinedToAllZeroMilliseconds": 5326
+    }
+  ],
+  "rawLog": "supplement-01/manual-input-01/app-logcat.txt",
+  "rawLogSha256": "923cdb2a04755a00bdfbfd9c849f8590c95959f615334e8677387d01555ceda4",
+  "processLabel": "P3",
+  "source": "physical user touch; manual-only collector, no injected input",
+  "durationLimitation": "Combined input and subsequent all-zero release observed; no minimum one-second hold assertion or long-press verdict",
+  "screenshotLimitation": "Two private context screenshots (ready and after actions), not simultaneous-contact frames; action evidence is the input log",
+  "previousAttempt": "input-supplement-20261024.json remains partial/not_observed for its original window; this is a new session",
+  "runtimeScope": "same frozen CS_SERVICES=0 diagnostic APK; not guest HID, game, performance or full E04 acceptance",
+  "privateEvidence": "manual-private-evidence-sha256.json"
+}

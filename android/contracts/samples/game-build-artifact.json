@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "titleId": "0100000000ABCDEF",
+  "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "target": "android",
+  "guestAbi": "aarch64",
+  "rewriteAbi": "android-sp-safe-v1",
+  "runtime": {
+    "version": "0.1.0",
+    "backend": "vulkan"
+  },
+  "package": {
+    "manifest": "manifest.json",
+    "indexSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "files": 5,
+    "bytes": 4096
+  },
+  "npdm": "exefs/main.npdm",
+  "control": "ctl/control.nacp",
+  "romfs": "romfs",
+  "systemData": "systemdata",
+  "aoc": {
+    "index": "aoc.tsv",
+    "root": "aoc"
+  },
+  "shaders": "shaders",
+  "modules": [
+    {
+      "name": "main",
+      "image": "main.patched.bin",
+      "fixups": "main.fixups.tsv",
+      "gates": "main.gates.tsv",
+      "widen": "main.widen.tsv",
+      "buildId": "0123456789abcdef0123456789abcdef01234567",
+      "target": "android",
+      "source": "apk-asset"
+    },
+    {
+      "name": "sdk",
+      "image": "sdk.patched.bin",
+      "fixups": "sdk.fixups.tsv",
+      "gates": "sdk.gates.tsv",
+      "buildId": "89abcdef0123456789abcdef0123456789abcdef",
+      "target": "android",
+      "source": "apk-asset"
+    }
+  ],
+  "createdAt": "2026-10-22T05:29:00Z",
+  "toolchain": {
+    "rewriter": "runtime/rewriter@android-sp-safe-v1",
+    "packer": "android/tools/make_pack.py@1"
+  },
+  "apk": {
+    "packageName": "org.s2arm.game.t0100000000abcdef",
+    "versionCode": 1,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "signingCertSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "assetRoot": "game/modules"
+  },
+  "extensions": {
+    "org.s2arm.build": {
+      "synthetic": true
+    }
+  },
+  "requiredFeatures": [],
+  "input": {
+    "manifest": "game-input-manifest.json",
+    "manifestSha256": "f5c7d100c36ba2f6784656fa2f2df569ad587cfdee360451de14281177c2f080",
+    "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "titleId": "0100000000ABCDEF"
+  }
+}

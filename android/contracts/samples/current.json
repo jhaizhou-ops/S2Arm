@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "titleId": "0100000000ABCDEF",
+  "contentRoot": "sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "revisionDir": "revisions/sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "artifact": "game-build-artifact.json",
+  "artifactSha256": "d178984337f2b7f7d992a68b89fb9895e6a0cc27814c5f57bcf931a61461ff26",
+  "activatedAt": "2026-10-22T05:30:00Z",
+  "previousContentRoot": null
+}

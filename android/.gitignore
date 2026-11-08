@@ -1,0 +1,9 @@
+.gradle/
+.cxx/
+.idea/
+local.properties
+*.iml
+captures/
+
+cs/**/bin/
+cs/**/obj/

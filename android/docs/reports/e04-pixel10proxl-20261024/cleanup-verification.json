@@ -1,0 +1,14 @@
+{
+  "stayAwake": "0",
+  "rotation": "0",
+  "autoRotation": "0",
+  "wmDensity": "Physical density: 480\nOverride density: 544",
+  "wmSize": "Physical size: 1344x2992",
+  "appPid": null,
+  "automationProcesses": [],
+  "settingsRestored": true,
+  "appStopped": true,
+  "uiautomatorStopped": true,
+  "appPidObservation": "No diagnostic process after cleanup",
+  "automationObservation": "No com.wetest.uia2.Main process after cleanup"
+}

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+    <Compile Include="../../../services/S2A.Services/Native.cs" Link="Production/Native.cs" />
+    <Compile Include="../../../services/S2A.Services/Red.cs" Link="Production/Red.cs" />
+    <Compile Include="../../../services/S2A.Services/NativeTickSource.cs" Link="Production/NativeTickSource.cs" />
+    <Compile Include="../../../compat/tree/src/Ryujinx.Cpu/ITickSource.cs" Link="Production/ITickSource.cs" />
+    <Compile Include="../../../compat/tree/src/ARMeilleure/State/ICounter.cs" Link="Production/ICounter.cs" />
+    <Compile Include="../../cs/aot/AndroidSelfTest.cs" Link="Production/AndroidSelfTest.cs" />
+  </ItemGroup>
+</Project>

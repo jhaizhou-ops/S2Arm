@@ -1,0 +1,8 @@
+/build/
+/logs/
+/*.o
+/*.so
+/smoke
+/open_read_smoke
+/native-fixture-*/
+/openread-fixture-*/

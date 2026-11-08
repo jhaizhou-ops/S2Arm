@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../compat/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
+    <Compile Include="Program.cs" />
+    <Compile Include="../../../compat/tree/src/Ryujinx.Horizon/Audio/AudioManagers.cs" Link="AudioManagers.cs" />
+    <Compile Include="../../../services/S2A.Services/HorizonAudioLifetime.cs" Link="HorizonAudioLifetime.cs" />
+  </ItemGroup>
+</Project>

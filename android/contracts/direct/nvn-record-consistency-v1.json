@@ -1,0 +1,95 @@
+{
+ "checks": [
+  {
+   "evidence": "#define BIND_BUF_DEFER 0x100   // p_bind_buf.stage 的标记位：Bind*BuffersDeferred，addr = 游戏的 NVNbufferRange 地址，回放进状态时再读（nvn_mtl.m state_op）",
+   "file": "graphics/nvn/gfx/nvn/nvn_obj.h",
+   "line": 137,
+   "name": "defer-marker-defined",
+   "ok": true
+  },
+  {
+   "evidence": "(int32_t)st | BIND_BUF_DEFER",
+   "file": "graphics/nvn/gfx/nvn/hle_nvn.c",
+   "line": 1090,
+   "name": "defer-marker-recorded",
+   "ok": true
+  },
+  {
+   "evidence": "addr = address of NVNbufferRange, read at replay",
+   "file": "graphics/nvn/gfx/nvn/hle_nvn.c",
+   "line": 1090,
+   "name": "defer-saves-range-address",
+   "ok": true
+  },
+  {
+   "evidence": "bb_fresh reads the guest NVNbufferRange when the record executes",
+   "file": "graphics/nvn/gfx/nvn/nvn_mtl.m",
+   "line": 3532,
+   "name": "defer-read-at-execution",
+   "ok": true
+  },
+  {
+   "evidence": "enum { CLEAR_TEX_FLOAT, CLEAR_TEX_UINT, CLEAR_TEX_INT };",
+   "file": "graphics/nvn/gfx/nvn/nvn_obj.h",
+   "line": 174,
+   "name": "clear-value-types-defined",
+   "ok": true
+  },
+  {
+   "evidence": "p_clear_tex.value_type + c.f/c.u/c.i",
+   "file": "graphics/nvn/gfx/nvn/nvn_obj.h",
+   "line": null,
+   "name": "clear-record-has-value-type",
+   "ok": true
+  },
+  {
+   "evidence": "nvnCommandBufferClearTexture records value_type=CLEAR_TEX_FLOAT and copies from c.f",
+   "file": "graphics/nvn/gfx/nvn/hle_nvn.c",
+   "line": 1161,
+   "name": "clear-clear_tex_float-recorded",
+   "ok": true
+  },
+  {
+   "evidence": "nvnCommandBufferClearTexturei records value_type=CLEAR_TEX_INT and copies from c.i",
+   "file": "graphics/nvn/gfx/nvn/hle_nvn.c",
+   "line": 1164,
+   "name": "clear-clear_tex_int-recorded",
+   "ok": true
+  },
+  {
+   "evidence": "nvnCommandBufferClearTextureui records value_type=CLEAR_TEX_UINT and copies from c.u",
+   "file": "graphics/nvn/gfx/nvn/hle_nvn.c",
+   "line": 1167,
+   "name": "clear-clear_tex_uint-recorded",
+   "ok": true
+  },
+  {
+   "evidence": "no classifier may read the removed is_uint field",
+   "file": "graphics/nvn/gfx/nvn/{nvn_obj.h,hle_nvn.c,nvn_mtl.m}",
+   "line": null,
+   "name": "clear-old-is-uint-gone",
+   "ok": true
+  },
+  {
+   "evidence": "Metal clear picks float/uint/int from value_type; Vulkan must use the matching VkClearColorValue member",
+   "file": "graphics/nvn/gfx/nvn/nvn_mtl.m",
+   "line": 7645,
+   "name": "clear-metal-selects-type",
+   "ok": true
+  },
+  {
+   "evidence": "all 48 opcodes have a case",
+   "file": "graphics/nvn/gfx/nvn/nvn_mtl.m",
+   "line": null,
+   "name": "metal-handles-all-records",
+   "ok": true
+  }
+ ],
+ "schema": "s2a-nvn-record-consistency-v1",
+ "sources": [
+  "graphics/nvn/gfx/nvn/nvn_obj.h",
+  "graphics/nvn/gfx/nvn/hle_nvn.c",
+  "graphics/nvn/gfx/nvn/nvn_mtl.m"
+ ],
+ "vulkanExecution": "not-implemented: this tool only proves the shared record layout and the Metal replay agree"
+}

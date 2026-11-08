@@ -1,0 +1,11 @@
+# 名单来源：#1456 读数（Mali-G710 r32p1 实测 DEVICE_LOST 读数与最小复现签名）。
+# Known-bad list for the GS+occlusion capability probe.
+# One entry per line: vendorID driverVersion [# comment]
+# vendorID: VkPhysicalDeviceProperties.vendorID, hex (0x…) or decimal.
+# driverVersion: VkPhysicalDeviceProperties.driverVersion, exact decimal.
+# A fingerprint matching a line exactly is unsupported WITHOUT probing
+# (on these drivers the probe itself ends in DEVICE_LOST).
+#
+# Mali-G710 MC10 r32p1 (9000): GS+occlusion DEVICE_LOST, precise and
+# imprecise alike, reproduced 3x per arm with the minimal fixture.
+0x13b5 134221824

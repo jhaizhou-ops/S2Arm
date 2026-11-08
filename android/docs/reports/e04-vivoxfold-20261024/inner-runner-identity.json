@@ -1,0 +1,24 @@
+{
+  "originalSha256": "21cc88ee341c19e82a0643a6bbb69578e7e79f866f1b474b98b8f84021767e21",
+  "adaptedSha256": "1ae3bea62cc4b7c2be18e3fb012fddcf8cb9867d3176b91cd61b943d1adbf5dd",
+  "screen": [
+    2160,
+    1916
+  ],
+  "surface": [
+    2072,
+    1817
+  ],
+  "rotationTransforms": {
+    "1": "0x1",
+    "3": "0x4"
+  },
+  "observedBeforeRound": "inner-explore.private.log and screenshots",
+  "adaptation": [
+    "Separate screen and Surface sizes",
+    "Translate live layout coordinates by current content bounds",
+    "Bound app visibility by original 15-second timeout",
+    "Use actual inner-panel swapchain transforms for rotation 1 and 3"
+  ],
+  "checksUnchanged": "Six groups retained; require rotation 1/3, same PID and matching present transform; verify marker orientation visually"
+}

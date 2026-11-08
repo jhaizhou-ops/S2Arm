@@ -1,0 +1,42 @@
+{
+  "manual-input-01.json": {
+    "sha256": "3b53ac2ffe113dea357c40997aeef53d46baba2aed3e1908440aebf61032d03d",
+    "bytes": 439,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "manual-input-01.log": {
+    "sha256": "7480edd77936f6b2fef0f6dba8615933b266794dadcc4037dcb98b8c22879416",
+    "bytes": 431,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/manual-input-01/after-manual-combinations.png": {
+    "sha256": "a628e6e86e8262fd9414c3be988a5b012e12595f1cec46e9e33049f6100e014e",
+    "bytes": 145535,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/manual-input-01/app-logcat.txt": {
+    "sha256": "923cdb2a04755a00bdfbfd9c849f8590c95959f615334e8677387d01555ceda4",
+    "bytes": 104513,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/manual-input-01/layout-ready.png": {
+    "sha256": "20e6a8cc5b9547fdfb17814599229de54062acd19d4589a49c0521ae6d98c6ba",
+    "bytes": 148562,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/manual-input-01/results.json": {
+    "sha256": "5655006063a4b45f9921bae5f4ff1fee61a390330a8cf8552232aa1f50dad57b",
+    "bytes": 3103,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "collector/export_manual.py": {
+    "sha256": "351b505d944b5b801483a3032ad707dc0b91bf4d7bd16c90491e2c4e699dd480",
+    "bytes": 4563,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "collector/manual_input.py": {
+    "sha256": "8a99706eba33e654aaa85401ff6193822560ddaaafb3938a40a86b86abd52e3a",
+    "bytes": 7892,
+    "visibility": "private; raw contents not uploaded"
+  }
+}

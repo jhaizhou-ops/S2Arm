@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "future_key": "ignored",
+  "games": [
+    { "title_id": "0100000000010000", "name": "Alpha", "display_version": "1.2.0", "state": "playable", "banner": "missing.jpg" },
+    { "title_id": "0100000000020000", "name": "Beta", "state": "needs_game_data" },
+    { "title_id": "0100000000030000", "name": "Gamma", "state": "needs_app_update" },
+    { "title_id": "0100000000040000", "name": "Delta", "state": "broken", "reason": "R", "detail": "D" },
+    { "title_id": "0100000000050000", "name": "Epsilon", "state": "flying" },
+    { "title_id": "0100000000010000", "name": "Alpha again" },
+    { "title_id": "bad", "name": "Bad id" },
+    { "title_id": "0100000000060000", "name": "Zeta" }
+  ]
+}

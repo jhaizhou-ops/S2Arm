@@ -1,0 +1,94 @@
+# E04-Xiaomi17 脱敏精选应用日志（不是完整 logcat）
+# 源码: android/integration@f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47
+# APK SHA-256: c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe
+# 本轮: 2026-10-24 11:23:05–11:23:28，Asia/Shanghai。
+# +时间相对本日志首条应用记录；P1为同一应用进程，T编号为稳定匿名线程标记。
+# 保留行的消息正文逐字来自原始日志；省略未选中的行，不补写App输出。
+# 连续摇杆中间点省略，仅保留每段首/末值和归零；12键按下/释放记录保留。
+# 未附路径、序列号、PID/TID、用户地区/语言、原生处理器地址或系统窗口转储。
+# Bionic槽偏移、ESR、按键bit和Vulkan transform是技术读数，保留原值。
+# CS_SERVICES=0：NativeAOT未加载是本包范围限制；无完整游戏运行结论。
+# 原始完整应用日志 SHA-256: b5b518c814d77193f10b2d465cb5f6d53e90836bccbd26431d4a29281538714a
+
+[+000.000s P1/T1] libs2arm_android.so loaded in 4 ms
+[+000.007s P1/T1] Page size: 4096 bytes
+[+000.007s P1/T1] Shared-memory alias: available
+[+000.007s P1/T1] 39-bit / 64 GiB address window: available
+[+000.007s P1/T1] Bionic key table: offset 0x0, thread-isolated
+[+000.007s P1/T1] Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+[+000.007s P1/T1] Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+[+000.007s P1/T1] C# NativeAOT: not loaded (dlopen failed: library "libs2a_cs_probe.so" not found)
+[+000.007s P1/T1] Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+[+000.007s P1/T1] Adreno (TM) 840 (1.4)
+[+000.033s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+000.035s P1/T1] Vulkan surface generation 1 offered to the render thread: 1220 × 2656
+[+000.035s P1/T1] Vulkan surface generation 1: 1220 × 2656, rotation 0°, 120 Hz; HostApi display 1220x2656 rotation 0 120.000 Hz 460x460 dpi, handheld
+[+000.037s P1/T3] Vulkan present: device Adreno (TM) 840, queue family 0
+[+000.040s P1/T3] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x1 (window 1220x2656), build 1
+[+000.040s P1/T3] Vulkan present: surface generation 1
+[+000.607s P1/T1] Vulkan surface generation 1: 1220 × 2656, rotation 90°, 120 Hz; HostApi display 1220x2656 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+000.608s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+000.617s P1/T3] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x2 (window 2656x1220), build 2
+[+002.721s P1/T1] input: buttons=0x0001 L=(0,0) R=(0,0)
+[+003.062s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+003.137s P1/T1] input: buttons=0x0002 L=(0,0) R=(0,0)
+[+003.486s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+003.573s P1/T1] input: buttons=0x0004 L=(0,0) R=(0,0)
+[+003.919s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+004.042s P1/T1] input: buttons=0x0008 L=(0,0) R=(0,0)
+[+004.393s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+004.483s P1/T1] input: buttons=0x0010 L=(0,0) R=(0,0)
+[+004.834s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+004.924s P1/T1] input: buttons=0x0020 L=(0,0) R=(0,0)
+[+005.275s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+005.357s P1/T1] input: buttons=0x0040 L=(0,0) R=(0,0)
+[+005.708s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+005.809s P1/T1] input: buttons=0x0080 L=(0,0) R=(0,0)
+[+006.164s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+006.267s P1/T1] input: buttons=0x0100 L=(0,0) R=(0,0)
+[+006.615s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+006.707s P1/T1] input: buttons=0x0200 L=(0,0) R=(0,0)
+[+007.056s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+007.156s P1/T1] input: buttons=0x0400 L=(0,0) R=(0,0)
+[+007.505s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+007.604s P1/T1] input: buttons=0x0800 L=(0,0) R=(0,0)
+[+007.954s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+008.302s P1/T1] input: buttons=0x0000 L=(3908,1947) R=(0,0)
+[+008.684s P1/T1] input: buttons=0x0000 L=(26183,13085) R=(0,0)
+[+008.685s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+008.843s P1/T1] input: buttons=0x0000 L=(0,0) R=(3890,2082)
+[+009.225s P1/T1] input: buttons=0x0000 L=(0,0) R=(26015,13031)
+[+009.226s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+009.507s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 270°, 120 Hz; HostApi display 2656x1220 rotation 3 120.000 Hz 460x460 dpi, handheld
+[+009.508s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 270°, 120 Hz; HostApi display 2656x1220 rotation 3 120.000 Hz 460x460 dpi, handheld
+[+009.518s P1/T3] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x8 (window 2656x1220), build 3
+[+011.662s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+011.662s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+011.678s P1/T3] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x2 (window 2656x1220), build 4
+[+013.851s P1/T1] input: buttons=0x0001 L=(0,0) R=(0,0)
+[+014.086s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+014.759s P1/T1] Surface generation 1 detached in 2 ms
+[+014.759s P1/T3] Vulkan presenter: no surface (1692 frames presented so far)
+[+016.974s P1/T1] Vulkan surface generation 2 offered to the render thread: 2656 × 1220
+[+016.974s P1/T1] Vulkan surface generation 2: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+016.976s P1/T3] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x2 (window 2656x1220), build 5
+[+016.976s P1/T3] Vulkan present: surface generation 2
+[+019.619s P1/T3] Vulkan presenter: no surface (1932 frames presented so far)
+[+019.626s P1/T1] Surface generation 2 detached in 8 ms
+[+020.012s P1/T1] Page size: 4096 bytes
+[+020.012s P1/T1] Shared-memory alias: available
+[+020.012s P1/T1] 39-bit / 64 GiB address window: available
+[+020.012s P1/T1] Bionic key table: offset 0x0, thread-isolated
+[+020.012s P1/T1] Rewrite self-test (S2A_TARGET=android): 6 rewrite kinds x 2 guest threads ok, key offsets via plat_tsd_offset; guest mask blocked 0 non-SA_ONSTACK signals, libc kept unblocked: 34 36 38
+[+020.012s P1/T1] Signal red zone (112 B below sp): ok; without SA_ONSTACK 12/14 words kept (lost sp-8,sp-16); SA_ONSTACK 14/14 on alt stack; write fault via sigchain 14/14 on alt stack
+[+020.012s P1/T1] C# NativeAOT: not loaded (dlopen failed: library "libs2a_cs_probe.so" not found)
+[+020.012s P1/T1] Fault ESR in the signal frame: write / read distinguishable; write ESR 0x92000047 (EC 0x24, WnR 1), read ESR 0x92000007 (EC 0x24, WnR 0)
+[+020.012s P1/T1] Adreno (TM) 840 (1.4)
+[+020.030s P1/T1] input: buttons=0x0000 L=(0,0) R=(0,0)
+[+020.031s P1/T1] Vulkan surface generation 1 offered to the render thread: 2656 × 1220
+[+020.033s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+020.034s P1/T5] Vulkan present: device Adreno (TM) 840, queue family 0
+[+020.038s P1/T1] Vulkan surface generation 1: 2656 × 1220, rotation 90°, 120 Hz; HostApi display 2656x1220 rotation 1 120.000 Hz 460x460 dpi, handheld
+[+020.041s P1/T5] Vulkan present: swapchain 2656x1220, format 37, 4 images, FIFO, transform 0x1 (window 2656x1220), build 1
+[+020.041s P1/T5] Vulkan present: surface generation 1
+[+020.052s P1/T5] Vulkan present: swapchain 1220x2656, format 37, 4 images, FIFO, transform 0x2 (window 2656x1220), build 2

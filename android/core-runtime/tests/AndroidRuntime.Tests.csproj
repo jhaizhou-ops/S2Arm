@@ -1,0 +1,46 @@
+<!-- Compile the real Android composition against previously built production assemblies.
+     Required paths are explicit; a missing Vulkan/runtime dependency is never stubbed. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DefineConstants>$(DefineConstants);FULL_RUNTIME;S2A_ANDROID</DefineConstants>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <Target Name="RequireProductionAssemblies" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(ServicesDirectory)/S2A.Services.dll')" Text="ServicesDirectory must contain a real S2A.Services build and dependencies." />
+    <Error Condition="!Exists('$(AudioAssembly)')" Text="AudioAssembly must identify the real S2A.Audio.AAudio.dll." />
+    <Error Condition="!Exists('$(VulkanAssembly)')" Text="VulkanAssembly must identify the real Vulkan assembly including the Android WSI adapter." />
+    <Error Condition="!Exists('$(GpuAssembly)')" Text="GpuAssembly must identify the real GPU assembly including the Android backing-change seam." />
+    <Error Condition="!Exists('$(MemoryAssembly)')" Text="MemoryAssembly must identify the real Memory assembly including Android alias admission." />
+    <Error Condition="!Exists('$(GpuSourceRoot)/graphics/vulkan/runtime/AndroidVulkanRuntime.cs')" Text="GpuSourceRoot must contain the actual Android GPU composition." />
+  </Target>
+  <ItemGroup>
+    <Reference Include="$(ServicesDirectory)/*.dll" Exclude="$(ServicesDirectory)/Ryujinx.Graphics.Gpu.dll;$(ServicesDirectory)/Ryujinx.Memory.dll" />
+    <Reference Include="$(GpuAssembly)" />
+    <Reference Include="$(MemoryAssembly)" />
+    <Reference Include="$(AudioAssembly)" />
+    <Reference Include="$(VulkanAssembly)" />
+    <!-- dev v2 direct compiler (DirectCompileNative/DirectProfileNative) -->
+    <ProjectReference Include="$(GpuSourceRoot)/graphics/tools/direct/compiler/S2A.DirectCompiler.csproj" />
+    <Compile Include="Program.cs" />
+    <Compile Include="ArpRegistrationTests.cs" />
+    <Compile Include="HorizonStartupTests.cs" />
+    <Compile Include="AttachThreadTests.cs" />
+    <Compile Include="ShutdownTests.cs" />
+    <Compile Include="SharedMemoryTests.cs" />
+    <Compile Include="HostUiTests.cs" />
+    <Compile Include="../*.cs" />
+    <Compile Include="$(GpuSourceRoot)/android/cs/video/*.cs" />   <!-- AndroidGameRuntime 起局登记视频解码工厂（S2A.Android.Video，同 cs/aot 工程） -->
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/runtime/AndroidVulkanRuntime.cs" />
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/runtime/StartupWait.cs" />
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/cache/ShaderPackLayout.cs" />
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/cache/ShaderPackManifest.cs" />
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/cache/ShaderPackArchive.cs" />
+    <Compile Include="$(GpuSourceRoot)/graphics/vulkan/cache/ShaderPackInstaller.cs" />
+
+    <Compile Include="$(GpuSourceRoot)/graphics/metal/cs/NxTrack.cs" />
+  </ItemGroup>
+</Project>

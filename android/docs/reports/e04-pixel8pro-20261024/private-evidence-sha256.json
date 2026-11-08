@@ -1,0 +1,142 @@
+{
+  "apksigner.private.log": {
+    "bytes": 955,
+    "sha256": "727c7525c71d168eb9ece4fcfd7bf93c647631344119f65b58c83bbd0845c5cc"
+  },
+  "build-offline.private.log": {
+    "bytes": 3508,
+    "sha256": "d0ab39372703a05062932f74a88b19a30055ba4ba48e3dc49fa1582b18172157"
+  },
+  "cleanup-verification.json": {
+    "bytes": 955,
+    "sha256": "07eb9e5234dfd521515e22b7a0aa2f1da7a1525c1a0cee62805aa16d639d4181"
+  },
+  "crash-after.private.log": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "crash-before.private.log": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "device-info.json": {
+    "bytes": 682,
+    "sha256": "118c9968b7c24d8ac0b6a938aeddc9e0b34460e655bb512b8c198570ab8a6b85"
+  },
+  "device_round_pixel8pro.py": {
+    "bytes": 17766,
+    "sha256": "d4eaf1a19a7f844d674f40ec24bfe7b103df4e114a04bbba22f40efd39b0bc9a"
+  },
+  "diagnostic-app-debug.apk": {
+    "bytes": 3284326,
+    "sha256": "3be424e8e408fee91a23a6e583adabe998a3d31a4d5fe53911f19bb049b6d447"
+  },
+  "exploration.json": {
+    "bytes": 563,
+    "sha256": "8bd7e76100118ec80bdf1e4d9807c6641eade9feb3a4db5633dcbcac02f64ede"
+  },
+  "explore-landscape.private.png": {
+    "bytes": 528212,
+    "sha256": "6994d1f96e1b880feef5cacf9f138ec16bdaa1fc024c489740123154797dccb2"
+  },
+  "explore-reverse-landscape.private.png": {
+    "bytes": 561199,
+    "sha256": "e3ef3ce23f190cc4a0fba4b21d38028c1da22ea202ed0c532b45ffbf1c35d58d"
+  },
+  "explore.private.log": {
+    "bytes": 6548,
+    "sha256": "17bd8f9e3aa62eed38684f2190f179eaa80fa6f7c239e7f360e78cf803dd2026"
+  },
+  "fixture-import.json": {
+    "bytes": 905,
+    "sha256": "3de157a3397f62410653ce17c083920bc4234490ac861cdbf6b4c6c89d839392"
+  },
+  "fixture-rewrite.private.log": {
+    "bytes": 164,
+    "sha256": "59aac560f79fe4fddbff4aa2bd176b0f1f94461598876cefd36c30227f7cc8a0"
+  },
+  "install.private.log": {
+    "bytes": 36,
+    "sha256": "781a31c82430c97897af612ece5e0ca2205e301cb5ff121ce2660541ea5182c7"
+  },
+  "installed-package.json": {
+    "bytes": 135,
+    "sha256": "6aae36cc633a72a9727c53a3a554bc31014421264d13f5fc8497827eaea7bfc1"
+  },
+  "runner-identity.json": {
+    "bytes": 603,
+    "sha256": "8c4e013952cbfe814cb908d692813033c014be3f23ba6854ae36378de36337f5"
+  },
+  "runs/round-1/app-logcat.txt": {
+    "bytes": 31798,
+    "sha256": "02e1e6413099655986e62e1b5bf13a353ed4fe65a8e968722489c945a373d47f"
+  },
+  "runs/round-1/home-restored.png": {
+    "bytes": 173435,
+    "sha256": "fe5a323132a6bd4cc143436024d403f0d9f9d0bab1d2919a4e6feb534e0ed53a"
+  },
+  "runs/round-1/landscape.png": {
+    "bytes": 165001,
+    "sha256": "b888dd987efdccd7d0b196aed0eaa2dba0b45556c711aea8ae2952697544dfd7"
+  },
+  "runs/round-1/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/round-1/reopened-diagnostics.png": {
+    "bytes": 558191,
+    "sha256": "86396ec0b84904c1bf5e5e019da08cf9ac0f7f5cebd5540d7637bce6614f3289"
+  },
+  "runs/round-1/results.json": {
+    "bytes": 942,
+    "sha256": "44b21d08e38f1e5bf2689e1f07ba28472c807e5636f0c55ee470dde2392521f3"
+  },
+  "runs/round-1/reverse-landscape.png": {
+    "bytes": 176933,
+    "sha256": "0300cf0806089e26e82f082f74f9f0348273a25e86836099cc9cea87e0bf78ea"
+  },
+  "runs/round-2/app-logcat.txt": {
+    "bytes": 30103,
+    "sha256": "94de8184af701e42371409268ceeb88c86ff077e7c8920919f92e21a9cbd7217"
+  },
+  "runs/round-2/home-restored.png": {
+    "bytes": 178165,
+    "sha256": "c23aed8d9803848671be2bc91113ac0f63db53c0314e5ea18af944f92879f2c8"
+  },
+  "runs/round-2/landscape.png": {
+    "bytes": 176648,
+    "sha256": "c4d8a3c40960b91e2fc0f99581f669b5e93e0b35c7072faf641c5a66c83d7509"
+  },
+  "runs/round-2/logcat-stderr.txt": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runs/round-2/reopened-diagnostics.png": {
+    "bytes": 558569,
+    "sha256": "f1e873c32674cdb2462fe9709619417cba37a914b67ad58fe5bf5e49aab93915"
+  },
+  "runs/round-2/results.json": {
+    "bytes": 942,
+    "sha256": "44b21d08e38f1e5bf2689e1f07ba28472c807e5636f0c55ee470dde2392521f3"
+  },
+  "runs/round-2/reverse-landscape.png": {
+    "bytes": 178345,
+    "sha256": "90f5fdcf38a806d0d64c1592ccfaad1a7bc7fdbc91a497f4029a2e14224ac1ed"
+  },
+  "verify-apk.private.log": {
+    "bytes": 62,
+    "sha256": "856ee2653d8b3a54d9db72da52a511c76c4e4667fc84ae40bf14e8ab7f5bb871"
+  },
+  "vkjson.private.json": {
+    "bytes": 122727,
+    "sha256": "2320bbf256879ef56a9642de941ab9e0c99e92e405893a51cdb81e6c27c34635"
+  },
+  "window-policy-after-wake.private.txt": {
+    "bytes": 2944,
+    "sha256": "be2069f524c76c4e1a11da5439fa5eb8e2822aab1059526c7c2406e7d35c7466"
+  },
+  "window-policy.private.txt": {
+    "bytes": 2946,
+    "sha256": "aa910d2e11fb8836b83d5565c55386696e70ef89e841268a0f9f963b4c9ddfaa"
+  }
+}

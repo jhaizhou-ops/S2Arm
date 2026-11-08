@@ -1,0 +1,209 @@
+package org.s2arm.android;
+
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
+import android.view.View;
+
+/**
+ * Draws TouchPad over the game surface and feeds it the touches. Built in code only (no XML
+ * constructor), and a gamepad surface rather than a clickable control: every touch is pad input,
+ * so there is no click to report.
+ */
+@android.annotation.SuppressLint({"ViewConstructor", "ClickableViewAccessibility"})
+final class TouchPadView extends View {
+    interface Listener { void onTouchPad(TouchPad pad); }
+
+    private final TouchPad pad = new TouchPad();
+    private final Listener listener;
+    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private int lastButtons;
+    private final long[] viewport = new long[8];
+    private final GameTouch gameTouch = new GameTouch(this::publishGameTouch);
+    private boolean controlsVisible = true;
+    private boolean trace;
+    void setTrace(boolean enabled) { trace = enabled; TouchInputBridge.touchTrace(enabled); }
+
+    boolean gameTouchEnabled() { return gameTouch.enabled(); }
+    void setControlsVisible(boolean visible) {
+        if (controlsVisible == visible) return;
+        release();
+        controlsVisible = visible;
+        invalidate();
+    }
+
+    void setGameTouchEnabled(boolean enabled) {
+        release();
+        int result = TouchInputBridge.touchEnable(enabled);
+        if (result != 0) throw new IllegalStateException("experimental touch unavailable: " + result);
+        gameTouch.enable(enabled);
+    }
+
+    // A-W6 candidate: Switch touch region, excluding widescreen extensions.
+    // Handheld mode only; compositor supplies geometry/rotation, never guessed here.
+    // The diagnostic presenter intentionally never calls it.
+    void setGameViewport(long generation, long revision, float left, float top, float width, float height) {
+        gameTouch.viewport(generation, revision, left, top, width, height);
+    }
+
+    void revokeGameViewport() {
+        gameTouch.revokeViewport();
+        TouchInputBridge.touchViewportRevoke();
+    }
+
+    void retireGameViewport() {
+        gameTouch.revokeViewport();
+        TouchInputBridge.touchViewportRetire();
+    }
+
+    private int publishGameTouch(int[] points, int count, int flags, long ns) {
+        int result = TouchInputBridge.touchFrame(points, count, flags, ns, viewport[0], viewport[1]);
+        if (trace) android.util.Log.i("S2Arm", "touch publish: count=" + count + " flags=" + flags
+            + " result=" + result + (count == 0 ? "" : " first=" + points[0] + ":" + points[1] + "," + points[2]));
+        // A compositor change raced this event. Native code already cancelled
+        // the old contacts; do not publish coordinates from the previous image.
+        if (result == -3) return 0;
+        return result;
+    }
+
+    private void refreshGameViewport() {
+        if (!gameTouch.enabled()) return;
+        int result = TouchInputBridge.touchViewport(viewport);
+        if (trace) android.util.Log.i("S2Arm", "touch viewport: result=" + result + " generation=" + viewport[0]
+            + " revision=" + viewport[1] + " rect=" + viewport[2] + "," + viewport[3] + "," + viewport[4] + "," + viewport[5]
+            + " buffer=" + viewport[6] + "x" + viewport[7] + " view=" + getWidth() + "x" + getHeight());
+        if (result == -4 || viewport[6] != getWidth() || viewport[7] != getHeight()) {
+            gameTouch.revokeViewport();
+            return;
+        }
+        if (result != 0) throw new IllegalStateException("touch viewport unavailable: " + result);
+        setGameViewport(viewport[0], viewport[1], viewport[2], viewport[3], viewport[4], viewport[5]);
+    }
+
+    private void movePointer(int id, float x, float y) {
+        TouchRouting.move(pad, gameTouch, id, x, y);
+    }
+
+    TouchPadView(Context context, Listener listener) {
+        super(context);
+        this.listener = listener;
+        ring.setStyle(Paint.Style.STROKE);
+        ring.setStrokeWidth(3 * context.getResources().getDisplayMetrics().density);
+        ring.setColor(0x99FFFFFF);
+        text.setColor(0xCCFFFFFF);
+        text.setTextAlign(Paint.Align.CENTER);
+    }
+
+    private int insetLeft, insetTop, insetRight, insetBottom;
+
+    TouchPad pad() { return pad; }
+
+    /** System bars / cutouts: keep the controls out from under them. */
+    void setInsets(int left, int top, int right, int bottom) {
+        insetLeft = left; insetTop = top; insetRight = right; insetBottom = bottom;
+        relayout();
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) { relayout(); }
+
+    private void relayout() {
+        if (getWidth() == 0 || getHeight() == 0) return;
+        pad.cancel();
+        revokeGameViewport();
+        pad.layout(insetLeft, insetTop, getWidth() - insetLeft - insetRight, getHeight() - insetTop - insetBottom);
+        listener.onTouchPad(pad);
+        invalidate();
+    }
+
+    @Override public boolean onTouchEvent(MotionEvent e) {
+        try {
+            return handleTouchEvent(e);
+        } catch (IllegalArgumentException | IllegalStateException error) {
+            // Invalid/overflowing contacts or a failed JNI publisher cancel the
+            // experiment; they must not crash the Activity or leave controls held.
+            gameTouch.enable(false);
+            TouchInputBridge.touchEnable(false);
+            release();
+            android.util.Log.e("S2Arm", "Experimental touch disabled: " + error.getMessage());
+            return true;
+        }
+    }
+
+    private boolean handleTouchEvent(MotionEvent e) {
+        refreshGameViewport();
+        int index = e.getActionIndex();
+        // Pointer transitions also carry updated positions of the other contacts.
+        if (gameTouch.enabled() && e.getActionMasked() != MotionEvent.ACTION_MOVE)
+            for (int i = 0; i < e.getPointerCount(); i++)
+                if (gameTouch.owns(e.getPointerId(i)))
+                    gameTouch.move(e.getPointerId(i), e.getX(i), e.getY(i));
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                TouchRouting.down(pad, gameTouch, controlsVisible,
+                        e.getPointerId(index), e.getX(index), e.getY(index));
+                break;
+            case MotionEvent.ACTION_MOVE:
+                for (int h = 0; gameTouch.enabled() && h < e.getHistorySize(); h++) {
+                    for (int i = 0; i < e.getPointerCount(); i++)
+                        movePointer(e.getPointerId(i), e.getHistoricalX(i, h), e.getHistoricalY(i, h));
+                    gameTouch.publish(e.getHistoricalEventTime(h) * 1_000_000L);
+                }
+                for (int i = 0; i < e.getPointerCount(); i++) movePointer(e.getPointerId(i), e.getX(i), e.getY(i));
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                TouchRouting.up(pad, gameTouch, e.getPointerId(index));
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                android.util.Log.i("S2Arm", "touch MotionEvent ACTION_CANCEL");
+                release();
+                return true;
+            default:
+                return true;
+        }
+        gameTouch.publish(e.getEventTime() * 1_000_000L);
+        int pressed = pad.buttons() & ~lastButtons;
+        if (pressed != 0) performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+        lastButtons = pad.buttons();
+        listener.onTouchPad(pad);
+        invalidate();
+        return true;
+    }
+
+    /** Lifted fingers we never saw (focus loss, pause): release everything. */
+    void release() {
+        pad.cancel();
+        gameTouch.cancel();
+        lastButtons = 0;
+        listener.onTouchPad(pad);
+        invalidate();
+    }
+
+    @Override protected void onDraw(Canvas canvas) {
+        if (!controlsVisible) return;
+        for (TouchPad.Control c : pad.controls()) {
+            fill.setColor(c.pressed ? 0x66FFFFFF : 0x26FFFFFF);
+            canvas.drawCircle(c.x, c.y, c.radius, fill);
+            canvas.drawCircle(c.x, c.y, c.radius, ring);
+            if (c.kind == TouchPad.STICK) {
+                fill.setColor(c.pressed ? 0xAAFFFFFF : 0x55FFFFFF);
+                canvas.drawCircle(c.x + c.knobX * c.radius, c.y + c.knobY * c.radius, c.radius * 0.45f, fill);
+            } else if (c.kind == TouchPad.DPAD) {
+                float a = c.radius * 0.55f;
+                text.setTextSize(c.radius * 0.45f);
+                canvas.drawText("▲", c.x, c.y - a + text.getTextSize() / 3, text);
+                canvas.drawText("▼", c.x, c.y + a + text.getTextSize() / 3, text);
+                canvas.drawText("◀", c.x - a, c.y + text.getTextSize() / 3, text);
+                canvas.drawText("▶", c.x + a, c.y + text.getTextSize() / 3, text);
+            } else {
+                text.setTextSize(c.radius * 0.8f);
+                canvas.drawText(c.label, c.x, c.y + text.getTextSize() / 3, text);
+            }
+        }
+    }
+}

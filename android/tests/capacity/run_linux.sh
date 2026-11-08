@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run on Linux; exercises the production affinity implementation with synthetic
+# capacity files, real pthread inheritance and the fake AAudio API.
+set -euo pipefail
+H=$(cd "$(dirname "$0")/../../.." && pwd)
+O=${1:?pass a private output directory}
+mkdir -p "$O"
+CXX=${CXX:-c++}; CC=${CC:-cc}
+"$CXX" -std=c++17 -Wall -Wextra -Werror -DS2A_CAPACITY_TEST=1 "$H/android/native/capacity_affinity.cpp" "$H/android/tests/capacity/affinity_test.cpp" -pthread -Wl,--wrap=sched_getaffinity,--wrap=sched_setaffinity -o "$O/affinity"
+"$O/affinity"
+"$CXX" -std=c++17 -Wall -Wextra -Werror -DS2A_CAPACITY_TEST=1 -DS2A_CAPACITY_WRAP=1 "$H/android/native/capacity_affinity.cpp" "$H/android/tests/capacity/inheritance_test.cpp" -pthread -Wl,--wrap=pthread_create -o "$O/inheritance"
+"$O/inheritance"
+"$CC" -std=c11 -Wall -Wextra -Werror -I"$H/android/tests/capacity/fake" -c "$H/android/native/aaudio_sink.c" -o "$O/aaudio.o"
+"$CC" -std=c11 -Wall -Wextra -Werror -c "$H/android/native/pcm_ring.c" -o "$O/pcm.o"
+"$CC" -std=c11 -Wall -Wextra -Werror -I"$H/android/tests/capacity/fake" -c "$H/android/tests/capacity/aaudio_fake.c" -o "$O/aaudio-fake.o"
+"$CXX" -std=c++17 -Wall -Wextra -Werror -DS2A_CAPACITY_TEST=1 -DS2A_CAPACITY_WRAP=1 -I"$H/android/tests/capacity/fake" "$H/android/native/capacity_affinity.cpp" "$H/android/tests/capacity/aaudio_route_test.cpp" "$O/aaudio.o" "$O/pcm.o" "$O/aaudio-fake.o" -pthread -Wl,--wrap=pthread_create -o "$O/aaudio-route"
+"$O/aaudio-route"
+echo 'capacity Linux host tests passed'

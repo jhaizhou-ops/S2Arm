@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- A named test APK lets device installers identify the package being approved. -->
+    <application android:label="S2Arm Input Tests" />
+</manifest>

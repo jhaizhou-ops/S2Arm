@@ -1,0 +1,112 @@
+{
+  "supplement-01/app-driver-maps-summary.json": {
+    "sha256": "32a290e42e2e83a04e3898c3175d937d1436be3310aa9bd5dfa2494923096e8f",
+    "bytes": 143,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/app-maps.stderr.txt": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/app-maps.stdout.txt": {
+    "sha256": "f9d439614736e2d30fc6fc5f172e0e21755bc960cbc25e078bf7bc305e01a79e",
+    "bytes": 410364,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/capture.json": {
+    "sha256": "bbe51156fb96975f53523f4089b79f70941d4a030d06a7bb2cd83e0e560bc242",
+    "bytes": 2361,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/driver-summary.json": {
+    "sha256": "ceecdd564a307187d3c5569c8d0623bf5ba98bad302d20f856e36dcd80e2f2ff",
+    "bytes": 640,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-01/app-logcat.txt": {
+    "sha256": "4404d2c81470f64851eb75e45619cdd351e34863fd88f227bf5c094e8f00b8c5",
+    "bytes": 5451,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-01/layout-before-input.png": {
+    "sha256": "886866edc77bf8e831bf5a7601331e82a16e3cf1fa5b14673cb2efedcb0bcc70",
+    "bytes": 144789,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-01/results.json": {
+    "sha256": "116e72ac1dcfa068fc472899d826f42935857ba0fc3b933ca4f4b04bb34153e0",
+    "bytes": 3824,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-02/app-logcat.txt": {
+    "sha256": "c36333d410033744d7be6bb8b2ac0496c64090ae8e13d95743951e816c5bfa8f",
+    "bytes": 60433,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-02/layout-after-directions.png": {
+    "sha256": "e79c55190fdbad5061c1807c664c4e47fd1a00da6639a1217642ba3e421fed91",
+    "bytes": 147685,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-02/layout-before-input.png": {
+    "sha256": "61bf017405fec4f35f682755bdfa7da3434af9ae8e8dd399687cf7a7efa33692",
+    "bytes": 145749,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-02/manual-ready.json": {
+    "sha256": "3ff23de7423794f85376c9784cc8267fcc1af3a6edcaf4dd356a41187e1a4cb4",
+    "bytes": 205,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-boundaries-02/results.json": {
+    "sha256": "7251d091160b7b7faf55a319b1ece546510933e1e6ca321a3e6e50350def8013",
+    "bytes": 8104,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/input-control-01.json": {
+    "sha256": "c2cc1f8810e6816bc893ddfb363392ee1185a9404e889ce1f61448b13243b57b",
+    "bytes": 16801,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/system-vkjson.json": {
+    "sha256": "e118d965ea6566249abad19a072bed47297e05628670e082aac3f82372f10e4f",
+    "bytes": 86869,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/system-vkjson.stderr.txt": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "supplement-01/system-vkjson.stdout.txt": {
+    "sha256": "a48ce0ca320b0732a507acba9ca014286d9320c60b23a5b3004491300ab4c100",
+    "bytes": 73960,
+    "visibility": "private; raw contents not uploaded"
+  },
+  "input-supplement-01.json": {
+    "sha256": "77dcd7afa0fd0d7fdb9f609c222884f52b99ffc36945a2415d6cb9bfca41a5a2",
+    "bytes": 446,
+    "visibility": "private collector command result"
+  },
+  "input-supplement-01.log": {
+    "sha256": "492e31b1dc42ed0b127d5e6674710b998a32655ed9b13953733fb6424d61a2d8",
+    "bytes": 58,
+    "visibility": "private collector command result"
+  },
+  "input-supplement-02.json": {
+    "sha256": "a680fac7d6a85cd982d210ed607b866de53d2566a814a7704781b3bb243149b1",
+    "bytes": 447,
+    "visibility": "private collector command result"
+  },
+  "input-supplement-02.log": {
+    "sha256": "2a1693b6035322c464ccdd66f0abf485ceb1b9869f9379d0a994bfe121bccd13",
+    "bytes": 274,
+    "visibility": "private collector command result"
+  },
+  "collector/supplement_input.py": {
+    "sha256": "3548484a930735853e18ce571ee0e5df6833128dea6b929f0b8f40716868b4a2",
+    "bytes": 11692,
+    "visibility": "private final supplement collector; not a project runtime change"
+  }
+}

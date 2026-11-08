@@ -1,0 +1,14 @@
+Fixture: tiny.h264.hex (raw Annex B bytes, 701 bytes, SHA-256
+4f4749cd6677ff46a95575c3f3d6ad077afe85b685801046a3fea27a2c873c19).
+Generated from a 16x16 black yuv420p pattern with:
+
+ffmpeg -f lavfi -i color=c=black:s=16x16:r=30,format=yuv420p -frames:v 2 \
+  -c:v libx264 -preset medium \
+  -x264-params aud=1:repeat-headers=1:ref=1:bframes=0:cabac=1 -f h264 tiny.h264
+
+It is used only by the P0 regression in tests/run.py: the IDR access unit is a
+18-byte slice-only AU (4-byte start code), so the first decode allocates a
+44-byte scratch buffer. The 47-byte PPS span from b-refs4.headers then exercises
+the PPS-only prefix path with a larger parameter set than that buffer.
+Generated fixture bitstream, dedicated to the public domain under CC0-1.0; no
+game, third-party video or private data is used.

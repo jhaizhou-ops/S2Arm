@@ -1,0 +1,26 @@
+{
+  "source": "adb shell cmd gpu vkjson; system-side physical-device query",
+  "deviceName": "Adreno (TM) 840",
+  "vendorID": 20803,
+  "deviceID": 1141180977,
+  "apiVersionRaw": 4210983,
+  "apiVersionStandardDecode": "1.4.295",
+  "driverVersionRaw": 2150932524,
+  "driverVersionHex": "0x8034a02c",
+  "driverName": "Qualcomm Technologies Inc. Adreno Vulkan Driver",
+  "driverInfo": "Driver Build: c68cddd35e, I5623c5269d, 1785403797\nDate: 07/30/26\nCompiler Version: E031.50.19.29\nDriver Branch: \n",
+  "interpretation": "driverVersion is vendor-defined; not decoded as a generic Vulkan version; no claim about app enabled capabilities",
+  "capturedAt": "2026-10-24T12:37:24.702375+08:00",
+  "implementationCommit": "f0ab33d1e2bad4cdb8332b5bc73c33eb06159a47",
+  "frozenApkSha256": "c3b71254eeb11181dcaa4ceb82bfd37c327dd7a59a6932e4227e3fd444f4bebe",
+  "applicationMappingObservation": {
+    "pid": "30754",
+    "exitCode": 0,
+    "driverLibraryPaths": [
+      "/system/lib64/libvulkan.so",
+      "/vendor/lib64/hw/vulkan.adreno.so"
+    ]
+  },
+  "originalRoundDriverVersion": "not collected in the original 11:23 round; not retroactively filled",
+  "evidence": "supplement-private-evidence-sha256.json"
+}

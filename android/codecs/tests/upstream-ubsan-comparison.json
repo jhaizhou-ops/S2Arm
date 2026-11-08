@@ -1,0 +1,20 @@
+[
+  {
+    "version": "main",
+    "commit": "e67b0aa3b0f5eb15b40c4d148c5d070d8a2c6828",
+    "sites_checked": 63,
+    "same_expression": 63
+  },
+  {
+    "version": "android-17.0.0_r1",
+    "commit": "4275faf783bc1ce1eb67fe56043f6f052c0de355",
+    "sites_checked": 63,
+    "same_expression": 63
+  },
+  {
+    "version": "android-security-16.0.0_r9",
+    "commit": "82092580f1dafe88defd88f873016b585bbd9e52",
+    "sites_checked": 63,
+    "same_expression": 63
+  }
+]

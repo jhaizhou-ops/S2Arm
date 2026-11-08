@@ -1,0 +1,7 @@
+{
+  "evidence/device-round-unlocked/logcat.txt": "d24b5db80cebc04a14428f01256136f60f14b214eb9e432ee4171c1a6346a524",
+  "evidence/device-round-input-lifecycle/logcat.txt": "065eb553b7df0190e418759c6588d90d284b268b891969ac68bea729c8488d0d",
+  "evidence/visual-stable/diagnostics.png": "78fce213c73fd5fbe28672bf064ae3aed1258688dc7f55821708dc5216aecef2",
+  "evidence/visual-stable/landscape.png": "e23ea0537241bf655fceda60ad70b4289722e94d72408639a8896ffe16a1ce06",
+  "evidence/visual-stable/reverse-landscape.png": "1abc08bb013b1912501a8eb755e7240d3a467694ac895a0c1aac6d60e02bb065"
+}

@@ -1,0 +1,3 @@
+[{"UIApplicationShortcutItemType":"dev.s2arm.save","UIApplicationShortcutItemTitle":"存档管理","UIApplicationShortcutItemIconSymbolName":"externaldrive"},
+ {"UIApplicationShortcutItemType":"dev.s2arm.diag","UIApplicationShortcutItemTitle":"导出诊断包","UIApplicationShortcutItemIconSymbolName":"doc.text.magnifyingglass"},
+ {"UIApplicationShortcutItemType":"dev.s2arm.settings","UIApplicationShortcutItemTitle":"设置","UIApplicationShortcutItemIconSymbolName":"gearshape"}]
