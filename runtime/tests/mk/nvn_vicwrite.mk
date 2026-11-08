@@ -3,7 +3,7 @@ NATIVE_TEST_OWN += nvn_vicwrite
 ifeq ($(shell uname -s),Darwin)
 # 交出 NvRmSurface 的贴图按 VIC 写的字节重传（hle_nvn.c nvnTextureGetNvRmSurfaceNVX，11-03 幻想水浒影片不出帧）；GPU 写过的部分保留；编码线程 0 / 1 各跑一遍
 $(BUILD)/tests/t_nvn_vicwrite: graphics/nvn/tests/t_nvn_vicwrite.m graphics/nvn/gfx/nvn/nvn_protos.h graphics/nvn/gfx/nvn/include/nvn.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_vicwrite.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

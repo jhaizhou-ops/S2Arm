@@ -7,7 +7,7 @@ ifeq ($(shell uname -s),Darwin)
 native-test-nvn2_codec:
 	@mkdir -p $(BUILD)/tests
 	vpx=$$(bash services/vpx/build.sh osx-arm64 | tail -1) && [ -f "$$vpx" ] && dav1d=$$(bash services/dav1d/build.sh osx-arm64 | tail -1) && [ -f "$$dav1d" ] && \
-	$(CC) $(CFLAGS) $(NATIVE_INC) -fobjc-arc -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/host -o $(BUILD)/tests/t_nvn2_codec \
+	$(CC) $(CFLAGS) $(NATIVE_INC) -fobjc-arc -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/host -o $(BUILD)/tests/t_nvn2_codec \
 	  graphics/nvn/tests/t_nvn2_codec.c graphics/nvn/gfx/nvn/nvn2_codec.c graphics/nvn/gfx/nvn/nvn2.c graphics/nvn/gfx/tex/nvn_deswizzle.c graphics/nvn/gfx/nvn/nvn_tex.c "$$vpx" "$$dav1d" \
 	  -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 	timeout 60 $(BUILD)/tests/t_nvn2_codec

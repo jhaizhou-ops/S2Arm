@@ -6,7 +6,7 @@ NVN_UDC_BINARY ?= $(BUILD)/tests/t_nvn_udc
 $(NVN_UDC_BINARY): graphics/nvn/tests/t_nvn_udc.m $(NVN_UDC_SOURCE) $(NVN_MTL_DEPS) $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -I$(abspath $(NVN_TEST_DIR)/nvn/gen) -DNVN_UDC_SOURCE='"$(abspath $(NVN_UDC_SOURCE))"' \
 	  -o $@ graphics/nvn/tests/t_nvn_udc.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \

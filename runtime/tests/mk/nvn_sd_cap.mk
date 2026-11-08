@@ -4,7 +4,7 @@ ifeq ($(shell uname -s),Darwin)
 # 写回预判附件表到上限（审计 #799 F-sd-att-10）：8 个颜色 + 组合深度模板一次 pass 记 10 条；ASan 编译，表写穿即中止；Metal 3/4、TBDR 关/开四路
 $(BUILD)/tests/t_nvn_sd_cap: graphics/nvn/tests/t_nvn_sd_cap.m $(NVN_MTL_DEPS) graphics/nvn/gfx/nvn/nvn_protos.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -fsanitize=address -fno-omit-frame-pointer -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -o $@ graphics/nvn/tests/t_nvn_sd_cap.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

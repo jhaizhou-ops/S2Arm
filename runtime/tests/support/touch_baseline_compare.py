@@ -56,7 +56,7 @@ for name, source in (("old", old), ("new", new)):
     path = OUT / f"{name}.m"
     path.write_text(prefix + dependencies + body + bridge + harness)
     command = ["xcrun", "--sdk", "macosx", "clang", "-O1", "-g", "-fobjc-arc",
-               "-Wall", "-Wextra", "-Wno-unused-parameter", "-Inative/include", "-Inative/src", "-Inative/ios",
+               "-Wall", "-Wextra", "-Wno-unused-parameter", "-Iruntime/include", "-Iruntime/src", "-Iios",
                "-framework", "Foundation", *WEAK,
                "-o", str(OUT / name), str(path), "runtime/src/pad.c", "ios/settings.m", "runtime/src/caps.c", "runtime/src/patch.c", "runtime/src/launchctx.c"]
     run(*command, env=environment)

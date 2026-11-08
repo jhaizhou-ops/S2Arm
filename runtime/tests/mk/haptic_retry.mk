@@ -4,6 +4,6 @@ NATIVE_TEST_OWN += haptic_retry
 .PHONY: native-test-haptic_retry
 native-test-haptic_retry:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -Inative/ios -o $(BUILD)/tests/t_haptic_retry runtime/tests/t_haptic_retry.c
+	$(CC) $(CFLAGS) -Iios -o $(BUILD)/tests/t_haptic_retry runtime/tests/t_haptic_retry.c
 	$(BUILD)/tests/t_haptic_retry ios/controller.m
 TEST_TARGETS += native-test-haptic_retry

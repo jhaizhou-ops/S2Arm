@@ -3,7 +3,7 @@ NATIVE_TEST_OWN += nvn_promote_keep
 ifeq ($(shell uname -s),Darwin)
 # GPU 贴图转随包贴图时留住 GPU 写过的级（巫师3 远景植被品红，11-04）：完整 bootstrap、录制、Metal 3/4 回放与提交内拷出。
 $(BUILD)/tests/t_nvn_promote_keep: graphics/nvn/tests/t_nvn_promote_keep.m graphics/nvn/gfx/nvn/nvn_protos.h graphics/nvn/gfx/nvn/include/nvn.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_promote_keep.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

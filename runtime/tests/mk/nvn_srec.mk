@@ -4,7 +4,7 @@ ifeq ($(shell uname -s),Darwin)
 # S 行只记用过的着色器（shader_used）：后台预取接收不记、第一次用到记一行
 $(BUILD)/tests/t_nvn_srec: graphics/nvn/tests/t_nvn_srec.m $(NVN_MTL_DEPS) $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -o $@ graphics/nvn/tests/t_nvn_srec.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

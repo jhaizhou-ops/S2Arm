@@ -24,7 +24,7 @@ def main():
     root = Path(__file__).resolve().parents[6]
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    flags = ["-D_GNU_SOURCE", "-std=gnu11", "-O2", "-g", "-Wall", "-Wextra", "-pthread", "-Inative/include"]
+    flags = ["-D_GNU_SOURCE", "-std=gnu11", "-O2", "-g", "-Wall", "-Wextra", "-pthread", "-Iruntime/include"]
     track = out / "track.o"
     binary = out / "tracking-test"
     registry_binary = out / "registry-test"
@@ -47,7 +47,7 @@ def main():
                 *[[str(binary), str(page)] for page in models],
                 [args.cc, *flags, "android/native/runtime/tracking/tests/registry_test.c", *sources[1:], str(track), "-ldl", "-o", str(registry_binary)],
                 [str(registry_binary)],
-                [args.cc, *flags, "-Igfx/track", "-Iplatforms/android/native", "-Iplatforms/android/native/runtime/tracking",
+                [args.cc, *flags, "-Igraphics/track", "-Iandroid/native", "-Iandroid/native/runtime/tracking",
                  "android/native/runtime/tracking/tests/module_precise_test.c", "android/native/module.c",
                  "android/native/runtime/tracking/readonly_copy.c", "android/native/runtime/vm/backing.c",
                  *sources[1:], str(track), "-ldl", "-o", str(module_binary)],

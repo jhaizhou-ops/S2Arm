@@ -8,7 +8,7 @@ ifeq ($(shell uname -s),Darwin)
 # 10-29 夜终版：归约变体不进库，设备上首遇后台编、编好前用 main0 替身（se_want / se_kick）：另两路 --async 核第一笔替身 / 编好后变体 / S2A_SE_SYNC=1 第一笔即变体，并核日志行格式
 $(BUILD)/tests/t_nvn_red: graphics/nvn/tests/t_nvn_red.m $(NVN_MTL_DEPS) graphics/nvn/gfx/nvn/nvn_red.h graphics/nvn/gfx/nvn/nvn_pso_skey.h graphics/nvn/host/dsh_miss.inc $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -o $@ graphics/nvn/tests/t_nvn_red.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

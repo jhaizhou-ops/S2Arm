@@ -3,6 +3,6 @@ NATIVE_TEST_OWN += nvn_drvscan
 .PHONY: native-test-nvn_drvscan
 native-test-nvn_drvscan:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -Igfx/nvn/gfx/nvn -o $(BUILD)/tests/t_nvn_drvscan graphics/nvn/tests/t_nvn_drvscan.c
+	$(CC) $(CFLAGS) -Igraphics/nvn/gfx/nvn -o $(BUILD)/tests/t_nvn_drvscan graphics/nvn/tests/t_nvn_drvscan.c
 	$(BUILD)/tests/t_nvn_drvscan
 TEST_TARGETS += native-test-nvn_drvscan

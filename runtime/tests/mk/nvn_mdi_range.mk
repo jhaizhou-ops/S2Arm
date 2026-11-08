@@ -4,7 +4,7 @@ ifeq ($(shell uname -s),Darwin)
 # 间接计数多绘超过 1,024 条整段一条记录、回放按 GPU 掩码分批（draw_multi，上游参考实现（MIT）c7ba23df）；Metal 4 / 3 两路
 $(BUILD)/tests/t_nvn_mdi_range: graphics/nvn/tests/t_nvn_mdi_range.m graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/gfx/nvn/nvn2_cmd.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -o $@ graphics/nvn/tests/t_nvn_mdi_range.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

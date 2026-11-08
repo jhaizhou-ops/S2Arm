@@ -20,10 +20,10 @@ native-fps-reload-probe: $(VAGUARD)
 native-sdk-stop-probe: $(VAGUARD)
 	@mkdir -p $(BUILD)/sdk-stop-probe
 	$(CC) $(CFLAGS) $(NATIVE_INC) -Dmain=s2a_app_main -c runtime/src/host_main.c -o $(BUILD)/sdk-stop-probe/host_main.o
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Inative/src -o $(BUILD)/probe_sdk_stop runtime/tests/probe_sdk_stop.c $(filter-out runtime/src/host_main.c,$(HOST_SRCS)) $(BUILD)/sdk-stop-probe/host_main.o $(HOST_LIBS) -Wl,-weak_library,$(VAGUARD) $(SDK_STOP_PROBE_UNDEFINED)
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iruntime/src -o $(BUILD)/probe_sdk_stop runtime/tests/probe_sdk_stop.c $(filter-out runtime/src/host_main.c,$(HOST_SRCS)) $(BUILD)/sdk-stop-probe/host_main.o $(HOST_LIBS) -Wl,-weak_library,$(VAGUARD) $(SDK_STOP_PROBE_UNDEFINED)
 
 native-tls-join-block-probe: $(VAGUARD)
 	@mkdir -p $(BUILD)/tls-join-block-probe
 	$(CC) $(CFLAGS) $(NATIVE_INC) -Dmain=s2a_app_main -c runtime/src/host_main.c -o $(BUILD)/tls-join-block-probe/host_main.o
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Inative/src -o $(BUILD)/probe_tls_join_block runtime/tests/probe_tls_join_block.c $(filter-out runtime/src/host_main.c,$(HOST_SRCS)) $(BUILD)/tls-join-block-probe/host_main.o $(HOST_LIBS) -Wl,-weak_library,$(VAGUARD) $(SDK_STOP_PROBE_UNDEFINED)
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iruntime/src -o $(BUILD)/probe_tls_join_block runtime/tests/probe_tls_join_block.c $(filter-out runtime/src/host_main.c,$(HOST_SRCS)) $(BUILD)/tls-join-block-probe/host_main.o $(HOST_LIBS) -Wl,-weak_library,$(VAGUARD) $(SDK_STOP_PROBE_UNDEFINED)
 endif

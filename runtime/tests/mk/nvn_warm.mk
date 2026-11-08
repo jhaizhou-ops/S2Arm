@@ -4,6 +4,6 @@ NATIVE_TEST_OWN += nvn_warm
 .PHONY: native-test-nvn_warm
 native-test-nvn_warm:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -o $(BUILD)/tests/t_nvn_warm -Igfx/nvn/gfx/nvn graphics/nvn/tests/t_nvn_warm.c -lm
+	$(CC) $(CFLAGS) -o $(BUILD)/tests/t_nvn_warm -Igraphics/nvn/gfx/nvn graphics/nvn/tests/t_nvn_warm.c -lm
 	timeout 30 $(BUILD)/tests/t_nvn_warm
 TEST_TARGETS += native-test-nvn_warm

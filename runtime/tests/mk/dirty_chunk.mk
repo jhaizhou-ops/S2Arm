@@ -3,6 +3,6 @@ NATIVE_TEST_OWN += dirty_chunk
 .PHONY: native-test-dirty_chunk
 native-test-dirty_chunk:   # 写跟踪分块保护：不需要 GPU / 游戏
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -Inative/include -o $(BUILD)/tests/t_dirty_chunk graphics/nvn/tests/t_dirty_chunk.c graphics/nvn/gfx/nvn/nvn_dirty.c
+	$(CC) $(CFLAGS) -Iruntime/include -o $(BUILD)/tests/t_dirty_chunk graphics/nvn/tests/t_dirty_chunk.c graphics/nvn/gfx/nvn/nvn_dirty.c
 	$(BUILD)/tests/t_dirty_chunk
 TEST_TARGETS += native-test-dirty_chunk

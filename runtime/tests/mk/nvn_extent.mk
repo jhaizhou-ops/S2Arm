@@ -4,7 +4,7 @@ NVN_EXTENT_BINARY ?= $(BUILD)/tests/t_nvn_extent
 $(NVN_EXTENT_BINARY): graphics/nvn/tests/t_nvn_extent.m $(NVN_MTL_DEPS) graphics/nvn/texture_extent.inc graphics/nvn/widen_glue.inc graphics/nvn/widen_fallback.inc $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
 	  $(if $(NVN_EXTENT_BACKEND_SOURCE),-I$(dir $(NVN_EXTENT_BACKEND_SOURCE))../../host,) \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  $(if $(NVN_EXTENT_BACKEND_SOURCE),-DNVN_EXTENT_BACKEND_SOURCE='"$(NVN_EXTENT_BACKEND_SOURCE)"',) \
 	  -o $@ graphics/nvn/tests/t_nvn_extent.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \

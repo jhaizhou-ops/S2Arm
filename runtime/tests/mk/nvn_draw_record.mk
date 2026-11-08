@@ -2,7 +2,7 @@
 NATIVE_TEST_OWN += nvn_draw_record
 ifeq ($(shell uname -s),Darwin)
 $(BUILD)/tests/t_nvn_draw_record: graphics/nvn/tests/t_nvn_draw_record.c graphics/nvn/gfx/nvn/nvn_obj.h graphics/nvn/gfx/nvn/nvn2_cmd.h graphics/nvn/gfx/nvn/nvn_protos.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_draw_record.c $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

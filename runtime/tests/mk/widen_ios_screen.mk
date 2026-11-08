@@ -6,7 +6,7 @@ ifeq ($(shell uname -s),Darwin)
 .PHONY: native-test-widen_ios_screen
 native-test-widen_ios_screen:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Inative/tests/support/ios_prewarm -DS2A_UNIT_TEST -o $(BUILD)/tests/t_widen_ios_screen runtime/tests/t_widen_ios_screen.c runtime/src/widen.c runtime/src/patch.c
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iruntime/tests/support/ios_prewarm -DS2A_UNIT_TEST -o $(BUILD)/tests/t_widen_ios_screen runtime/tests/t_widen_ios_screen.c runtime/src/widen.c runtime/src/patch.c
 	$(BUILD)/tests/t_widen_ios_screen
 TEST_TARGETS += native-test-widen_ios_screen
 endif

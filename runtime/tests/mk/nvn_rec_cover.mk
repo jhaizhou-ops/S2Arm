@@ -6,7 +6,7 @@ ifeq ($(shell uname -s),Darwin)
 $(BUILD)/tests/t_nvn_rec_cover.o: graphics/nvn/tests/t_nvn_rec_cover.m $(NVN_MTL_DEPS) graphics/nvn/gfx/nvn/nvn_rec.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  -c -o $@ graphics/nvn/tests/t_nvn_rec_cover.m
 $(BUILD)/tests/t_nvn_rec_cover: $(BUILD)/tests/t_nvn_rec_cover.o $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) -fobjc-arc -o $@ $(BUILD)/tests/t_nvn_rec_cover.o $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \

@@ -3,7 +3,7 @@ NATIVE_TEST_OWN += nvn_vpool
 ifeq ($(shell uname -s),Darwin)
 # 虚拟池一律按页表（hle_nvn.c vpool_*，11-03 火炬之光3 / Trine 5 / 无人深空）：不连续映射、负偏移、改映射、未映射建缓冲、超出预留、多池；编码线程 0 / 1 各跑一遍
 $(BUILD)/tests/t_nvn_vpool: graphics/nvn/tests/t_nvn_vpool.m graphics/nvn/gfx/nvn/nvn_protos.h graphics/nvn/gfx/nvn/include/nvn.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_vpool.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

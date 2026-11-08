@@ -3,7 +3,7 @@ NATIVE_TEST_OWN += nvn_vpool_ft
 ifeq ($(shell uname -s),Darwin)
 # 虚拟（稀疏）池上的贴图不进 CPU 写跟踪表（hle_nvn.c ft_add，上游 6121fd75）：CPU 没写不判成首用前写过；物理池对照；编码线程 0 / 1 各跑一遍
 $(BUILD)/tests/t_nvn_vpool_ft: graphics/nvn/tests/t_nvn_vpool_ft.m graphics/nvn/gfx/nvn/nvn_protos.h graphics/nvn/gfx/nvn/include/nvn.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_vpool_ft.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

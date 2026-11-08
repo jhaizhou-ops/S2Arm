@@ -4,9 +4,9 @@ ifeq ($(shell uname -s),Darwin)
 .PHONY: native-test-ios_root_ready
 native-test-ios_root_ready:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -x objective-c -fobjc-arc -fblocks -Inative/ios runtime/tests/t_ios_root_ready.c ios/root_ready.m -framework Foundation -o $(BUILD)/tests/t_ios_root_ready
+	$(CC) $(CFLAGS) -x objective-c -fobjc-arc -fblocks -Iios runtime/tests/t_ios_root_ready.c ios/root_ready.m -framework Foundation -o $(BUILD)/tests/t_ios_root_ready
 	@for mode in ready-first timeout render-first many-waiters main-wait notify; do $(BUILD)/tests/t_ios_root_ready $$mode || exit 1; done
-	$(CC) $(CFLAGS) -fblocks -Inative/ios runtime/tests/t_ios_root_ready.c runtime/tests/support/ios_root_ready_no_wait.c -framework CoreFoundation -o $(BUILD)/tests/t_ios_root_ready_no_wait
+	$(CC) $(CFLAGS) -fblocks -Iios runtime/tests/t_ios_root_ready.c runtime/tests/support/ios_root_ready_no_wait.c -framework CoreFoundation -o $(BUILD)/tests/t_ios_root_ready_no_wait
 	@for mode in render-first many-waiters; do \
 	  log=$(BUILD)/tests/ios_root_ready_no_wait-$$mode.log; \
 	  if $(BUILD)/tests/t_ios_root_ready_no_wait $$mode > $$log 2>&1; then cat $$log; echo "FAIL: no-wait counterexample passed $$mode"; exit 1; fi; \

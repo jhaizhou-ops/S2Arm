@@ -10,8 +10,8 @@ $(NVN_ABBA_STUBS):
 	$(MAKE) -s -C graphics/nvn OUT=$(abspath $(NVN_TEST_DIR)/nvn) widen-stubs
 $(BUILD)/tests/t_nvn_abba: graphics/nvn/tests/t_nvn_abba.m $(NVN_MTL_DEPS) graphics/nvn/tests/host_stubs.h $(NVN_ABBA_STUBS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
-	  $(NATIVE_INC) -Inative/src -Iplatforms -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
-	  -Igfx/nvn/tests -I$(NVN_TEST_DIR)/nvn/tests \
+	  $(NATIVE_INC) -Iruntime/src -Iplatforms -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
+	  -Igraphics/nvn/tests -I$(NVN_TEST_DIR)/nvn/tests \
 	  -o $@ graphics/nvn/tests/t_nvn_abba.m $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

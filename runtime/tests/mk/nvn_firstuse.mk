@@ -3,7 +3,7 @@ NATIVE_TEST_OWN += nvn_firstuse
 ifeq ($(shell uname -s),Darwin)
 # 首用取存储（tex_cpu_content / cpu_unc_drop，上游参考实现（MIT）37c7eaa8 + 75e5ddd8）：CPU 改写存储后同存储同描述新建的贴图读到新内容；编码线程 0 / 1 各跑一遍
 $(BUILD)/tests/t_nvn_firstuse: graphics/nvn/tests/t_nvn_firstuse.m graphics/nvn/gfx/nvn/nvn_protos.h graphics/nvn/gfx/nvn/include/nvn.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
-	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include \
+	$(CC) $(CFLAGS) -fobjc-arc $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include \
 	  -o $@ graphics/nvn/tests/t_nvn_firstuse.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
 	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \

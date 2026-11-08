@@ -15,7 +15,7 @@ S2A_WEAK_U = $(shell python3 tools/weak_link_decl.py flags $(1))
 NATIVE_SRCS := runtime/src/envfile.c $(filter-out runtime/src/envfile.c,$(sort $(wildcard runtime/src/*.c runtime/src/*.S)))
 APPLE_PLAT_SRCS := platform/apple/plat_apple.c
 HOST_SRCS   := $(NATIVE_SRCS) $(APPLE_PLAT_SRCS) $(HOST_SRCS)
-NATIVE_INC  := -Inative/include
+NATIVE_INC  := -Iruntime/include
 # 宿主弱符号放行参数的唯一来源（11-01 合入线：原先 5 个单测 mk、gfxmode 单测替身、Mac 图形 Python 测试各抄一份，加一个弱符号要改 7 处、漏一处就红）。
 #   Mac 宿主、原生单测、单测探针的链接行都用它；Python 测试按同一口径读源码注释（launchers/macos/gui_jobs/tests/test_graphics.py）。
 #   登记一致性由 tools/weak_link_decl.py 核（tests/weak_link_decl_test.sh）：runtime/src 里每个 weak_import 都要有「弱链接[host]」登记
@@ -77,7 +77,7 @@ ifeq ($(shell uname -s),Darwin)
 .PHONY: native-test-input_config_apple
 native-test-input_config_apple:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Inative/ios -fobjc-arc -o $(BUILD)/tests/t_input_config_apple runtime/tests/t_input_config_apple.m runtime/src/input_config.c ios/input_config.m -framework AppKit -framework CoreGraphics -framework GameController -framework QuartzCore
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iios -fobjc-arc -o $(BUILD)/tests/t_input_config_apple runtime/tests/t_input_config_apple.m runtime/src/input_config.c ios/input_config.m -framework AppKit -framework CoreGraphics -framework GameController -framework QuartzCore
 	$(BUILD)/tests/t_input_config_apple
 TEST_TARGETS += native-test-input_config_apple
 endif
@@ -153,7 +153,7 @@ endif
 .PHONY: ios ios-ns2pro ns2pro-test native-test-ns2pro native-test-touch_compat
 ios-ns2pro:
 	@mkdir -p $(NS2_FRAMEWORK)
-	@$(call ios_objs_cached,$(BUILD)/ios/obj_ns2pro,-fobjc-arc -fvisibility=hidden -Inative/ns2pro/include,$(NS2_SRCS))
+	@$(call ios_objs_cached,$(BUILD)/ios/obj_ns2pro,-fobjc-arc -fvisibility=hidden -Iruntime/ns2pro/include,$(NS2_SRCS))
 	$(IOS_LD_REPRO) $(IOS_CC) -fobjc-arc -dynamiclib -Wl,-oso_prefix,$(IOS_BUILD_ABS)/ \
 	  -install_name @rpath/NS2Pro.framework/NS2Pro -Wl,-exported_symbol,_ns2_module_api \
 	  -o $(NS2_FRAMEWORK)/NS2Pro $(call ios_objlist,$(BUILD)/ios/obj_ns2pro,$(NS2_SRCS)) -framework CoreBluetooth -framework Foundation
@@ -169,7 +169,7 @@ ios: ios-ns2pro
 	@rm -rf $(IOS_APP) && mkdir -p $(IOS_APP) $(BUILD)/ios
 	@mkdir -p $(IOS_APP)/Frameworks && cp -R $(NS2_FRAMEWORK) $(IOS_APP)/Frameworks/
 	@cp -R ios/Settings.bundle $(IOS_APP)/Settings.bundle
-	@$(call ios_objs_cached,$(BUILD)/ios/obj_app,-fobjc-arc $(NATIVE_INC) -Inative/src -Inative/ns2pro/include,$(IOS_SRCS))
+	@$(call ios_objs_cached,$(BUILD)/ios/obj_app,-fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include,$(IOS_SRCS))
 	$(IOS_LD_REPRO) $(IOS_CC) -fobjc-arc $(IOS_LD_DET) -Wl,-oso_prefix,$(IOS_BUILD_ABS)/ -o $(IOS_APP)/S2Arm $(call ios_objlist,$(BUILD)/ios/obj_app,$(IOS_SRCS)) $(IOS_LIBS) \
 	  -framework UIKit -framework Foundation -framework CoreGraphics $(IOS_SHELLUI_LINK) $(call S2A_WEAK_U,ios) -Wl,-S
 	@rm -rf $(BUILD)/ios/S2Arm.dSYM $(IOS_APP)/S2Arm.dSYM   # 主程序链接带 -Wl,-S（不留调试映射），没有调试符号包可出；函数符号表照留，atos / 宿主 dladdr 照常符号化

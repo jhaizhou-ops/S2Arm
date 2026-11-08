@@ -4,6 +4,6 @@ NATIVE_TEST_OWN += pad_liveness
 .PHONY: native-test-pad_liveness
 native-test-pad_liveness:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -Inative/ios -o $(BUILD)/tests/t_pad_liveness runtime/tests/t_pad_liveness.c
+	$(CC) $(CFLAGS) -Iios -o $(BUILD)/tests/t_pad_liveness runtime/tests/t_pad_liveness.c
 	$(BUILD)/tests/t_pad_liveness ios/controller.m
 TEST_TARGETS += native-test-pad_liveness

@@ -5,6 +5,6 @@ NATIVE_TEST_OWN += nvn_blend
 .PHONY: native-test-nvn_blend
 native-test-nvn_blend:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -o $(BUILD)/tests/t_nvn_blend graphics/nvn/tests/t_nvn_blend.c
+	$(CC) $(CFLAGS) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -o $(BUILD)/tests/t_nvn_blend graphics/nvn/tests/t_nvn_blend.c
 	timeout 30 $(BUILD)/tests/t_nvn_blend
 TEST_TARGETS += native-test-nvn_blend

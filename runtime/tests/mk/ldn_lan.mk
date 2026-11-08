@@ -4,6 +4,6 @@ NATIVE_TEST_OWN += ldn_lan
 .PHONY: native-test-ldn_lan
 native-test-ldn_lan:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Inative/src -fobjc-arc -framework Foundation -o $(BUILD)/tests/t_ldn_lan runtime/tests/t_ldn_lan.m
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Iruntime/src -fobjc-arc -framework Foundation -o $(BUILD)/tests/t_ldn_lan runtime/tests/t_ldn_lan.m
 	$(BUILD)/tests/t_ldn_lan
 TEST_TARGETS += native-test-ldn_lan

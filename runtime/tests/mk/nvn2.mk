@@ -3,6 +3,6 @@ NATIVE_TEST_OWN += nvn2
 .PHONY: native-test-nvn2
 native-test-nvn2:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) $(NATIVE_INC) -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/host -o $(BUILD)/tests/t_nvn2 graphics/nvn/tests/t_nvn2.c graphics/nvn/gfx/nvn/nvn2.c graphics/nvn/gfx/tex/nvn_deswizzle.c graphics/nvn/gfx/nvn/nvn_tex.c
+	$(CC) $(CFLAGS) $(NATIVE_INC) -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/host -o $(BUILD)/tests/t_nvn2 graphics/nvn/tests/t_nvn2.c graphics/nvn/gfx/nvn/nvn2.c graphics/nvn/gfx/tex/nvn_deswizzle.c graphics/nvn/gfx/nvn/nvn_tex.c
 	$(BUILD)/tests/t_nvn2
 TEST_TARGETS += native-test-nvn2

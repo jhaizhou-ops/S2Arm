@@ -4,7 +4,7 @@ NVN_SCISSORED_DS_BINARY ?= $(BUILD)/tests/t_nvn_scissored_ds
 $(NVN_SCISSORED_DS_BINARY): graphics/nvn/tests/t_nvn_scissored_ds.m $(NVN_MTL_DEPS) graphics/nvn/gfx/nvn/nvn_protos.h $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
 	$(CC) $(CFLAGS) -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
 	  $(if $(NVN_SCISSORED_DS_SOURCE),-I$(dir $(NVN_SCISSORED_DS_SOURCE))../../host,) \
-	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  $(NATIVE_INC) -Igraphics/nvn/host -Igraphics/nvn/gfx/nvn -Igraphics/nvn/gfx/nvn/include -Igraphics/nvn/third_party/vulkan-headers/include \
 	  $(if $(NVN_SCISSORED_DS_SOURCE),-DNVN_BACKEND_SOURCE='"$(NVN_SCISSORED_DS_SOURCE)"',) \
 	  -o $@ graphics/nvn/tests/t_nvn_scissored_ds.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
 	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
