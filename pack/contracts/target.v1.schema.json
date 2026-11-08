@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:s2a:contracts:target:v1",
+  "title": "Target v1",
+  "$defs": {
+    "hostVariant": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+        "os": {"type": "string", "minLength": 1},
+        "available": {"type": "boolean"},
+        "trackingIssue": {"type": "integer", "minimum": 1},
+        "description": {"type": "string", "minLength": 1}
+      },
+      "required": ["id", "os", "available", "trackingIssue", "description"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "s2a.target.v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "execution": {
+      "enum": [
+        "host",
+        "device"
+      ]
+    },
+    "host": {
+      "type": "object",
+      "properties": {
+        "variants": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/hostVariant"}
+        },
+        "requires": {
+          "type": "object",
+          "properties": {
+            "os": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "arch": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "os",
+            "arch",
+            "tools"
+          ]
+        }
+      },
+      "required": [
+        "requires"
+      ]
+    },
+    "device": {
+      "type": "object"
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recipes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "stages": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "id",
+          "operation",
+          "stages"
+        ]
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "implementation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "execution": {
+            "enum": [
+              "build",
+              "runtime"
+            ]
+          },
+          "startsGame": {
+            "type": "boolean"
+          },
+          "observation": {
+            "enum": [
+              "milestone",
+              "declared"
+            ]
+          },
+          "enabled": {"type": "boolean"},
+          "condition": {"type": "string", "minLength": 1},
+          "parallelGroup": {"type": "string", "minLength": 1},
+          "parentStage": {"type": "string", "minLength": 1},
+          "policy": {"type": "string", "minLength": 1}
+        },
+        "required": [
+          "id",
+          "description",
+          "implementation",
+          "execution",
+          "startsGame",
+          "observation"
+        ]
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "id",
+    "execution",
+    "host",
+    "device",
+    "entry",
+    "recipes",
+    "stages"
+  ],
+  "additionalProperties": true
+}

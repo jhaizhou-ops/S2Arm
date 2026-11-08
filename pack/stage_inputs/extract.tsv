@@ -1,0 +1,62 @@
+# extract 阶段的源码输入声明（总指挥 10-26 20:3x：键 = 本表「入」的文件内容 + 游戏输入 + Python / 解包库版本 + 配置档键，不再取整棵树对象号；pack/stage_keyfiles.sh 算键）
+# 「入」= 改了会改产物；「外」= 只是基础设施（排队、记账、进度、产物根管理），不进键，第三列写理由。
+# 起点：pack/stage_extract.sh。tests/stage_keys_test.sh 用 tools/stage_inputs.py 从起点扫依赖闭包，闭包里有本表没列的文件就报红（新依赖要在这里归类）。
+入	graphics/nvn/games/game.py
+入	translator/glslc_offline.py
+入	translator/oodle_needs_sdk.py
+入	translator/shader_split.py
+入	translator/uepak.py
+入	translator/ns2_shaders.py	Switch 2（NVN2）GLSLC 输出与控制段读取（shader_split 调用）
+入	translator/unityfs.py
+外	graphics/nvn/tools/gfx_api.py	只用它判出的类别：vulkan / gl 款没有 NVN 着色器、跳过抽取；抽取产物不依赖判定代码，类别本身进键（stage_extract.sh K），改判定规则不再让全款重抽取（11-01 总指挥）
+入	graphics/nvn/tools/lz4blk.py
+入	graphics/nvn/tools/nso_syms.py
+入	graphics/nvn/tools/romfs_list.py	仓库里唯一的 RomFS 遍历与文件头清单（11-03）：抽取 / 直连读哪些 RomFS 文件、文件头由它给（glslc_offline / nxsh_extract / ue_pak / spirv_msl / resource_input_key / direct_lib.sh 经它）
+入	graphics/tools/direct/extract.sh
+入	graphics/tools/shbake/casc_flat.py
+入	graphics/tools/shbake/cri_cpk.py
+入	graphics/tools/shbake/crilayla.c
+入	graphics/tools/shbake/nxdecomp.py
+入	graphics/tools/shbake/idtech_idcl.py
+入	graphics/tools/shbake/nso_zstd.py
+入	graphics/tools/shbake/nxsh_extract.py
+入	graphics/tools/shbake/hgpak.py	nxsh_extract 解 No Man's Sky 的 HGPAK 档案（Oodle 块走游戏自带解码器）
+入	graphics/tools/shbake/kitpak.py	nxsh_extract 解 Unravel Two 的 kit! 索引 + 数据卷（链式 LZ4，逐条 SHA-1 自证）
+入	graphics/tools/shbake/srcpack.py	S2Arm 抽取着色器字节的存放（src/*.pk，nxsh_extract 写、merge_extract 读）
+入	graphics/tools/nxfmt.py	Yaz0 解压与 SARC 读写（nxsh_extract、shader_split 调用）
+入	graphics/tools/yaz0dec.c	Yaz0 解码共享库源码
+入	graphics/tools/shbake/pak_crypto.py
+入	graphics/tools/shbake/pkz.py
+入	graphics/tools/shbake/re_pak.py
+入	graphics/tools/shbake/trpfs.py
+入	graphics/tools/shbake/telltale.py
+入	graphics/tools/shbake/unreal_pak.py
+入	graphics/tools/shbake/volition_vpp.py
+入	graphics/tools/shbake/zstd_lib.py
+入	graphics/tools/shbake/unity_res.py
+入	pack/direct_profile_stage.py
+外	pack/roots.sh	产物根版本管理（建 / 提交 / 回滚）
+外	pack/srcs.sh	找原件 / 取程序号
+外	tools/addr_need.py	pack/srcs.sh prog_id 经它读 main.npdm 的程序号（找原件用，同上一行；shell 里 python -c 引入，闭包扫不出，手写归类）
+入	pack/stage_direct_profile.sh
+入	pack/stage_extract.sh
+入	pack/decoder_need.sh	要不要游戏自带解码器的 RomFS 容器判据（11-07）：决定抽取前编不编 Mac 宿主，宿主缺了解码器款抽取 0 支，改了会改产物
+入	tools/host_build.sh	stage_extract.sh 编宿主（离线编 GLSLC / 解码器）的唯一入口（11-04）
+入	pack/ue_pak.py
+入	runtime/src/glslc_tool.c
+入	runtime/src/oodle_tool.c
+入	pack/gamedec/Guest.cs
+入	pack/gamedec/Locate.cs
+入	pack/gamedec/Nso.cs
+入	pack/gamedec/Program.cs
+入	pack/gamedec/gamedec.csproj
+入	runtime/src/native.h
+外	tools/clonedir.py	APFS 克隆工具，只搬文件
+外	tools/nostall.py	无进展看门狗，只决定挂死时停不停，不改产物
+外	tools/nospace.sh	无空格路径别名（编 Mac 宿主时给 make 用，不改产物）
+外	tools/progress.py	进度打印
+外	tools/progress.sh	进度打印
+外	pack/stage_keyfiles.sh	算键脚本本身（只读本表算键，不改产物）
+
+入	pack/resource_input_key.py	抽取/直连共用资源内容抽样键（P2-53）
+外	tools/machine.sh	只按名取开发机声明的 S2A_PY（解释器路径；解释器版本另按 Python / 解包库版本进键），不改产物

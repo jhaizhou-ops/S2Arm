@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:s2a:contracts:job-event:v1",
+  "title": "JobEvent v1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "contract": {
+      "const": "s2a.job-event.v1"
+    },
+    "jobId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "gameId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "stage": {
+      "type": "string"
+    },
+    "stageId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "stageIndex": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stageCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "enum": [
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "done": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "total": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "doneUnits": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "totalUnits": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "elapsed": {
+      "type": "number",
+      "minimum": 0
+    },
+    "message": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$"
+    },
+    "nextAction": {
+      "type": "string",
+      "minLength": 1
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "graphicsMode": {
+          "type": "string",
+          "description": "Actual produced artifact mode from the oneclick result, not request intent."
+        }
+      }
+    },
+    "requestedGraphicsMode": {
+      "type": "string",
+      "enum": [
+        "generic"
+      ],
+      "description": "IPA request intent, not the produced artifact graphicsMode."
+    }
+  },
+  "required": [
+    "schema",
+    "contract",
+    "jobId",
+    "seq",
+    "timestamp",
+    "type",
+    "operation",
+    "stage",
+    "stageId",
+    "state",
+    "message",
+    "description",
+    "code",
+    "nextAction"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "result"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "state": {
+            "enum": [
+              "succeeded",
+              "failed",
+              "cancelled"
+            ]
+          }
+        },
+        "required": [
+          "result"
+        ]
+      }
+    }
+  ]
+}

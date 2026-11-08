@@ -1,0 +1,16 @@
+# s2a-devpush：往已装 App 的容器里推 / 拉文件（Windows 没有 devicectl；Mac 不用它）。
+# 依赖只有 idevice（MIT，github.com/jkcoxson/idevice，钉在 Impactor v2.7.2 用的同一提交）：经 usbmuxd（USB / Wi-Fi）走 house_arrest + AFC。
+# 编：cargo build --release --manifest-path pack/devpush/Cargo.toml（Windows 上 pack/orch/oneclick_win.py 缺它会提示）
+[package]
+name = "s2a-devpush"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "5171e34e3a236842af1160a84d955d037ddca3af", default-features = false, features = ["house_arrest", "installation_proxy", "usbmuxd", "ring", "core_device", "core_device_proxy", "rsd", "tunnel_tcp_stack", "dvt"] }   # launch 用 core_device + core_device_proxy + rsd + 用户态隧道；dvt：钉的提交里 core_device 引用了它却没声明依赖
+plist = "1"   # launch 的环境变量字典（idevice 已依赖同一版本）
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "fs"] }   # idevice 的 AFC 用 block_in_place（要多线程运行时）
+
+[profile.release]
+strip = true

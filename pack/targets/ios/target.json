@@ -1,0 +1,242 @@
+{
+  "schema": "s2a.target.v1",
+  "id": "ios",
+  "execution": "host",
+  "entry": "pack/jobs/target_main.py",
+  "host": {
+    "requires": {
+      "os": [
+        "macos"
+      ],
+      "arch": [
+        "arm64"
+      ],
+      "tools": [
+        "xcode",
+        "metal",
+        "dotnet-sdk-10",
+        "python3"
+      ]
+    },
+    "variants": [
+      {
+        "id": "windows",
+        "os": "windows",
+        "available": false,
+        "trackingIssue": 179,
+        "description": "Windows 出 iOS 包：J05 可行性与原型尚未完成"
+      },
+      {
+        "id": "linux",
+        "os": "linux",
+        "available": false,
+        "trackingIssue": 179,
+        "description": "Linux 出 iOS 包：J05 可行性与原型尚未完成"
+      }
+    ]
+  },
+  "device": {
+    "os": [
+      "ios",
+      "ipados"
+    ],
+    "minVersion": 26,
+    "targetFields": [
+      "gpuArch",
+      "os"
+    ]
+  },
+  "recipes": [
+    {
+      "id": "ipa",
+      "operation": "ipa",
+      "stages": [
+        "input.validate",
+        "input.unpack",
+        "rewrite",
+        "sysdata",
+        "uilayout",
+        "aoc",
+        "romfsidx",
+        "direct",
+        "shaders",
+        "direct.library",
+        "direct.shader.package",
+        "bundle.ipa",
+        "widen.auto"
+      ],
+      "description": "refresh.sh 的阶段同名同序声明；前四段并行，随后索引、着色器、条件直连库。清单不是固定执行器。",
+      "policy": "出包缺省采用现行调用方的双轨选择；通用着色器用于兜底，尽量复用现行；S2A_SHADER_NO_PSO 可省略完整管线归档。实际开关与是否出库以旧管线为准。"
+    }
+  ],
+  "stages": [
+    {
+      "id": "input.validate",
+      "description": "检查游戏输入",
+      "implementation": "pack/jobs/ipa.py:build",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone"
+    },
+    {
+      "id": "input.unpack",
+      "description": "选择并解包游戏",
+      "implementation": "pack/oneclick/oneclick.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone"
+    },
+    {
+      "id": "rewrite",
+      "description": "改写游戏代码",
+      "implementation": "pack/stage_rewrite.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "parallelGroup": "refresh.independent"
+    },
+    {
+      "id": "sysdata",
+      "description": "准备系统数据",
+      "implementation": "pack/stage_sysdata.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "parallelGroup": "refresh.independent"
+    },
+    {
+      "id": "uilayout",
+      "description": "准备界面布局",
+      "implementation": "pack/stage_uilayout.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "parallelGroup": "refresh.independent"
+    },
+    {
+      "id": "aoc",
+      "description": "准备追加内容清单与数据",
+      "implementation": "pack/stage_aoc.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "parallelGroup": "refresh.independent"
+    },
+    {
+      "id": "romfsidx",
+      "description": "建立资源索引",
+      "implementation": "pack/stage_romfsidx.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "parallelGroup": "refresh.alongside-direct"
+    },
+    {
+      "id": "shaders",
+      "description": "直连单轨（缺省）下只记键、不出通用产物；兼容模式（S2A_DUAL=0）出通用全量，按现行口径复用，不因 main 前进强制重烘",
+      "implementation": "pack/stage_shaders.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "policy": "由现有阶段键、缓存口径和调用方环境决定复用或重烘；本清单不改脚本默认值。"
+    },
+    {
+      "id": "direct",
+      "description": "按直连配置出直连着色器库（双轨）",
+      "implementation": "pack/stage_direct.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "condition": "S2A_DUAL=1（缺省直连单轨，10-30 jhz：每款都出，不看有没有手写配置档，先零配置推导）；推导、抽取或出库做不成报红「直连单轨停在 <哪一步>」、refresh.sh 退出 1，不退成通用包。"
+    },
+    {
+      "id": "direct.library",
+      "description": "按原有构建配置将直连库链接进 App",
+      "implementation": "graphics/build.mk",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "direct.shader.package",
+      "description": "双轨时将实际已有的直连着色器库随 shaders 资源目录进包",
+      "implementation": "pack/ipa.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "availability": "existing_inputs_only",
+      "condition": "S2A_DUAL=1 且实际存在直连库；空产物不当作已交付。"
+    },
+    {
+      "id": "bundle.ipa",
+      "description": "构建、签名并打包 App 和资源包",
+      "implementation": "pack/ipa.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone"
+    },
+    {
+      "id": "widen.auto",
+      "description": "自动生成宽屏表（沿用原有异步触发）",
+      "implementation": "graphics/widen/scan/auto_kick.sh",
+      "execution": "build",
+      "startsGame": true,
+      "observation": "declared"
+    },
+    {
+      "id": "shader.extract",
+      "description": "找出着色器",
+      "implementation": "graphics/tools/shader_pack.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "parentStage": "shaders"
+    },
+    {
+      "id": "shader.translate",
+      "description": "翻译着色器",
+      "implementation": "graphics/tools/shader_pack.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "parentStage": "shaders"
+    },
+    {
+      "id": "shader.metal",
+      "description": "编译着色器",
+      "implementation": "graphics/tools/shader_pack.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "parentStage": "shaders"
+    },
+    {
+      "id": "shader.archive",
+      "description": "预建渲染管线",
+      "implementation": "graphics/tools/shader_pack.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "condition": "允许 S2A_SHADER_NO_PSO=1 省略完整管线归档；以实际交付为准，不声明必有归档。",
+      "parentStage": "shaders"
+    },
+    {
+      "id": "shader.dylib",
+      "description": "准备函数体动态库",
+      "implementation": "graphics/tools/shader_pack.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "milestone",
+      "parentStage": "shaders"
+    },
+    {
+      "id": "direct.ready.collect",
+      "description": "直连就绪收集（运行时接缝，非出包执行步骤）",
+      "implementation": "runtime/src/gfxmode.c:s2a_direct_ready",
+      "execution": "runtime",
+      "startsGame": false,
+      "observation": "declared",
+      "availability": "reader_only"
+    }
+  ]
+}

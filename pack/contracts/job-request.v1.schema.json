@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:s2a:contracts:job-request:v1",
+  "title": "JobRequest v1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "contract": {
+      "const": "s2a.job-request.v1"
+    },
+    "jobId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "privateRoot": {
+      "type": "string",
+      "minLength": 1
+    },
+    "engineDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "engineBundle": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resources": {
+      "type": "string",
+      "minLength": 1
+    },
+    "library": {
+      "type": "string",
+      "minLength": 1
+    },
+    "libraryId": {
+      "type": "string"
+    },
+    "gameId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "developerDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vammLayout": false,
+    "parentPid": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "targetId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "gpuArch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "os": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "graphicsMode": {
+      "type": "string",
+      "enum": [
+        "generic"
+      ],
+      "description": "IPA request intent, not the produced artifact graphicsMode."
+    },
+    "spaceOverride": {
+      "type": "boolean",
+      "description": "Player chose to continue after the disk-space preflight blocked this build: do not block, emit a warning diagnostic."
+    },
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "enum": [
+          "unpack",
+          "intermediate",
+          "shaders",
+          "mac",
+          "ipa"
+        ]
+      },
+      "description": "spaceFree: the parts of this game to delete (pack/jobs/library.py SPACE_PARTS); saves, logs, settings and game files are never offered."
+    }
+  },
+  "required": [
+    "schema",
+    "contract",
+    "operation",
+    "privateRoot"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "spaceFree"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "required": [
+          "gameId",
+          "library",
+          "parts"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "spaceOverride"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "build",
+              "ipa"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "ipa"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "required": [
+          "gameId",
+          "library",
+          "libraryId"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "graphicsMode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "ipa"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "rest": {
+                  "const": true
+                }
+              },
+              "required": [
+                "rest"
+              ]
+            },
+            "then": {
+              "properties": {
+                "graphicsMode": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

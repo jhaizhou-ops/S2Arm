@@ -53,7 +53,7 @@ exe,_=build('missing-operation-reset',('android/native/runtime/fault/tests/pause
        'pw_operation_thread=NULL;pw_operation=0;pw_has_deadline=0;',
        'pw_operation_thread=NULL;pw_operation=0;'))
 # 删除 begin reset 和 end reset：同 pthread 的新操作必须真实报 deadline 不同。
-q=out/'missing-operation-reset/adapter/platforms/android/native/runtime/fault/tests/pause_wait_test.inc'
+q=out/'missing-operation-reset/adapter/android/native/runtime/fault/tests/pause_wait_test.inc'
 q.write_text(q.read_text().replace('    pw_has_deadline=0;','    /* deliberately retain previous operation */',1))
 cc=['/usr/bin/clang','-O1','-g','-Wno-unused-function','-I'+str(q.parents[6]/'runtime/include'),
     str(out/'missing-operation-reset/adapter/test.c'),'-o',str(exe)]

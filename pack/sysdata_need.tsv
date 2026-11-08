@@ -1,0 +1,18 @@
+# 各款各构建向服务层要的系统数据号：只作统计（普查记录），出包不读它（10-25 起系统数据每款都提供，见 pack/sysdata_need.py）
+# 列：程序号	构建号（exefs/main 0x40 起 16 字节的十六进制，可只写前缀 ≥8 位）	版本	系统数据号（- = 已普查、不要额外系统数据）	用途	依据（局名 / 覆盖到哪）
+# 只登记游戏自己经 fs OpenDataStorageByDataId 要的号：服务层日志「[S2A 系统数据] <号> 在|缺 OpenDataStorageByDataId」。
+#   每局开头都有的「0100000000000823 缺 MountSystemData」是 Ryujinx 自带的 ngc:u 服务启动时挂屏蔽词表（compat/tree/src/Ryujinx.Horizon/ServiceTable.cs 第 53 行、
+#   Sdk/Ngc/Detail/ContentsReader.cs 第 92–109 行），与游戏无关：挂不上按「旧固件没有这个归档」返回成功，不登记。
+# 普查局：私有产物根（systemdata 只留字体 / 时区），10-24 测试出包线 run/s2arm/sysdata_survey/r2、r4（各 ≤300 秒）。「-」只说明到「依据」写的那一步为止没要过；没跑到可玩的款不登记（出包打黄「未普查」）。
+01006F8002326000	5d913cf71eb24cb22c5105b1fa3efd97	3.0.0	-	-	r4 带存档到岛上；r2 不带存档到新建角色起名键盘（确认名字前）
+01006F8002326000	15765149	2.0.6	0100000000000823	屏蔽词表 NgWord（游戏自己挂，检查名字 / 文字）	issue #99 retX0 局：起局约 11 秒 OpenDataStorageByDataId 找不到 0823 抛异常、游戏 Break（只知构建号前 8 位）
+0100152000022000	158c0c7399aabd7bf83795c2ef3484c7	4.0.1	0100000000000802	Mii 资源 MiiModel（NXTexture*.dat / Shape*.dat，画 Mii 用）	r4 mk8d：起局即 OpenDataStorageByDataId 找不到 0802、游戏 Break；issue #98 DanielZhangyc 同版本同现象
+0100726014352000	db0507f36b84200ac05f75d76ed5026f	1.0.34.0	-	-	r4 到场景内（自动玩家判在场景里 0.99）
+01001B300B9BE000	2607a74f5df7754cc0357b5df7e49693	2.7.7.92380	-	-	r4 到场景内（自动玩家判在场景里 0.99）
+010013C00E930000	fc9ea4ccc955d5799f37752b2d730b31	1.0.30000	-	-	r4 到场景内（自动玩家判在场景里 0.99）
+010074F013262000	82d187fe9ef9be921b8e1b1cddf7bd28	2.2.1	-	-	r4 不带存档到开场过场
+0100559011740000	4ce04f9a3c3c3a1ff3a3a132f584c972	3.9.0	0100000000000823	屏蔽词表 NgWord（游戏自己经 OpenDataStorageByDataId 要）	r5 到 MARK（第 2223 帧，场景内）：日志「0100000000000823 在 OpenDataStorageByDataId」
+0100A3501946E000	0d9649011312f62e93f6a5673a09d7e9	1.1.1	-	-	r4 到场景内（自动玩家判在场景里 0.99）：只有追加内容的 OpenDataStorageByDataId，没要系统数据
+01007EF00011E000	de0b6ac4efc1dda7f80f6d7598ec7a7d	1.8.2	-	-	10-25 真机局 botw_1025021039_1 到 MARK（第 1457 帧）：只有追加内容的 OpenDataStorageByDataId，没要系统数据
+010019C00E9CC000	1fee6f3f1d2a6a913139eacdbb7e15fd	4.04c	-	-	10-25 真机局 witcher3_1025001303_2 到 MARK（第 3801 帧）：只有 ngc:u 服务自己的 MountSystemData，游戏没经 OpenDataStorageByDataId 要
+01000FD00DB54000	ef68eacd8251cd988304a2e73b0010e6	1.0.3	0100000000000823	屏蔽词表 NgWord（游戏自己经 OpenDataStorageByDataId 要）	10-25 Air 直连局 gl-dm dm_2：起局约 14 秒 OpenDataStorageByDataId 找不到 0823 抛异常、游戏 Break（sdk+0x370f24）

@@ -1,0 +1,249 @@
+"""pack/jobs 单测公共夹具：私有目录 + 游戏库 + 真 worker 协议（main.py --request）+ 合成读取器。各 tests/test_<功能>.py 继承 JobCase。"""
+import contextlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+JOBS = Path(__file__).resolve().parents[1]
+ROOT = JOBS.parents[1]
+sys.path.insert(0, str(JOBS))
+from core import Context, atomic
+import library
+import toolchain
+
+
+def _windows_private_request(path, value):
+    """Create this synthetic request private from its first filesystem instant."""
+    import ctypes as C
+    from ctypes import wintypes as W
+    import msvcrt
+    import os
+    import uuid
+    api = C.WinDLL('advapi32', use_last_error=True)
+    kernel = C.WinDLL('kernel32', use_last_error=True)
+    def function(library, name, result, *types):
+        f = getattr(library, name); f.restype = result; f.argtypes = list(types)
+        return f
+    def checked(value):
+        if not value: raise C.WinError(C.get_last_error())
+        return value
+    close = function(kernel, 'CloseHandle', W.BOOL, W.HANDLE)
+    free = function(kernel, 'LocalFree', C.c_void_p, C.c_void_p)
+    token = W.HANDLE()
+    current = function(kernel, 'GetCurrentProcess', W.HANDLE)()
+    checked(function(api, 'OpenProcessToken', W.BOOL, W.HANDLE, W.DWORD, C.c_void_p)(current, 8, C.byref(token)))
+    try:
+        query = function(api, 'GetTokenInformation', W.BOOL, W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.c_void_p)
+        size = W.DWORD(); query(token, 1, None, 0, C.byref(size))
+        data = C.create_string_buffer(size.value); checked(query(token, 1, data, size, C.byref(size)))
+        sid = C.c_void_p.from_buffer(data)
+        text = C.c_void_p()
+        checked(function(api, 'ConvertSidToStringSidW', W.BOOL, C.c_void_p, C.c_void_p)(sid, C.byref(text)))
+        try: user = C.wstring_at(text)
+        finally: free(text)
+    finally: close(token)
+    descriptor = C.c_void_p()
+    sddl = 'O:' + user + 'D:P(A;;FA;;;' + user + ')(A;;FA;;;SY)(A;;FA;;;BA)'
+    checked(function(api, 'ConvertStringSecurityDescriptorToSecurityDescriptorW', W.BOOL,
+                     W.LPCWSTR, W.DWORD, C.c_void_p, C.c_void_p)(sddl, 1, C.byref(descriptor), None))
+    class Attributes(C.Structure):
+        _fields_ = [('length', W.DWORD), ('descriptor', C.c_void_p), ('inherit', W.BOOL)]
+    attributes = Attributes(C.sizeof(Attributes), descriptor, False)
+    temporary = path.with_name('.' + path.name + '.' + uuid.uuid4().hex + '.private')
+    handle = None
+    try:
+        handle = function(kernel, 'CreateFileW', W.HANDLE, W.LPCWSTR, W.DWORD, W.DWORD,
+                          C.c_void_p, W.DWORD, W.DWORD, W.HANDLE)(
+            str(temporary), 0x40000000, 0, C.byref(attributes), 1, 0x80, None)
+        if handle == C.c_void_p(-1).value:
+            handle = None
+            raise C.WinError(C.get_last_error())
+        fd = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+        handle = None  # CRT owns it
+        with os.fdopen(fd, 'w', encoding='utf-8') as output:
+            json.dump(value, output, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if handle is not None: close(handle)
+        free(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+class JobCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="s2arm-g01 ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.output = io.StringIO()
+        self.redirect = contextlib.redirect_stdout(self.output)
+        # Keep all direct Context events out of test output (including fixtures).
+        self.redirect.__enter__()
+        self.addCleanup(self.redirect.__exit__, None, None, None)
+        self.request = dict(schema=1, taskId="setup", operation="setup", engineDir=str(ROOT),
+                            privateRoot=str(self.root / "private"), library=str(self.root / "library"))
+        self.c = Context(self.request)
+        self.request.update(library.setup(self.c))
+        self.c.r.update(self.request)
+        self.sequence = 0
+
+    def worker(self, operation, *, entrypoint=None, **extra):
+        self.sequence += 1
+        path = self.root / "request.json"
+        if sys.platform == 'win32':
+            _windows_private_request(path, self.request | dict(taskId=f"g01-{self.sequence}", operation=operation) | extra)
+            result = subprocess.run([sys.executable, "-I", "-X", "utf8", "-B", str(entrypoint or JOBS / "main.py"), "--request", str(path)],
+                                    capture_output=True, text=True, encoding='utf-8', timeout=15)
+        else:
+            atomic(path, self.request | dict(taskId=f"g01-{self.sequence}", operation=operation) | extra)
+            result = subprocess.run([sys.executable, "-I", "-B", str(entrypoint or JOBS / "main.py"), "--request", str(path)],
+                                    capture_output=True, text=True, timeout=15)
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertTrue(events, result.stderr)
+        self.assertEqual([e["seq"] for e in events], list(range(1, len(events) + 1)))
+        return result, events[-1]
+
+    def assert_failure(self, terminal, code):
+        self.assertEqual(terminal["state"], "failed")
+        diagnostic = terminal["diagnostics"][-1]
+        self.assertEqual(diagnostic["code"], code)
+        self.assertTrue(diagnostic["suggestion"])
+        self.assertEqual(terminal["message"], diagnostic["summary"])
+        self.assertTrue(Path(diagnostic["logPath"]).is_file())
+        saved = json.loads((self.c.private / "jobs" / (terminal["taskId"] + ".json")).read_text())
+        self.assertEqual(saved["diagnostics"], terminal["diagnostics"])
+        return diagnostic
+
+    def import_keys(self):
+        source = self.root / "synthetic.keys"
+        source.write_text("header_key = " + "0" * 64 + "\n")
+        result, event = self.worker("keys", path=str(source))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(event["state"], "succeeded")
+
+    def install_reader_fixture(self):
+        # The worker launches this through its normal tool PATH. It reads only
+        # test bytes and emits the production reader's documented JSON shape.
+        binary = self.c.private / "Runtime/bin/dotnet"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
+source = pathlib.Path(sys.argv[4])
+if source.read_bytes() == b"unreadable fixture":
+    print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
+    print("Authorization: Bearer synthetic-bearer")
+    raise SystemExit(3)
+if source.read_bytes() == b"unknown exit fixture":
+    print("Unrecognized fixture error")
+    raise SystemExit(17)
+if source.read_bytes() == b"disappear fixture":
+    source.unlink()
+print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"Synthetic","display":"1.0","guestIsa":"aarch64","builds":{}}]}))
+''')
+        binary.chmod(0o700)
+        # Reader lookup is content-keyed in the actual worker too.
+        from core import digest
+        key = toolchain.reader_key(self.c)
+        actual = self.c.private / "tools" / key
+        actual.mkdir(parents=True)
+        (actual / "nx_unpack.dll").write_bytes(b"fixture")
+        atomic(actual / "ready.json", dict(schema=1, sha256=digest(actual / "nx_unpack.dll")))
+        if sys.platform == 'win32':
+            # A local copy of the installed interpreter runs the *same*
+            # synthetic reader script. This is not a real .NET reader.
+            import ctypes as C
+            from ctypes import wintypes as W
+            import shutil
+            exe = binary.with_suffix('.exe')
+            shutil.copyfile(sys._base_executable, exe)
+            kernel = C.WinDLL('kernel32', use_last_error=True)
+            module_name = kernel.GetModuleFileNameW
+            module_name.restype = W.DWORD; module_name.argtypes = [W.HANDLE, W.LPWSTR, W.DWORD]
+            name = C.create_unicode_buffer(32768)
+            if not module_name(sys.dllhandle, name, len(name)):
+                raise C.WinError(C.get_last_error())
+            dll = Path(name.value)
+            shutil.copyfile(dll, exe.parent / dll.name)
+            (exe.parent / (dll.stem + '._pth')).write_text(
+                str(Path(sys.base_prefix) / 'Lib') + '\n' + str(Path(sys.base_prefix) / 'DLLs') + '\n', encoding='utf-8')
+            script = binary.read_text().split('\n', 1)[1].replace('sys.argv[4]', 'sys.argv[3]')
+            (actual / 'nx_unpack.dll').write_text(script, encoding='utf-8')
+            atomic(actual / 'ready.json', dict(schema=1, sha256=digest(actual / 'nx_unpack.dll')))
+
+
+def synthetic_nup(path, app, packages):
+    """按 NUP v1 规格（a55uka/nup SPEC.md，同 tests/ns2_nup_test.py 的拼法，只用原样存）拼一个合成容器，期望值就是写进去的字节。
+    packages = [(类型 0 本体 / 1 更新 / 2 DLC, 标题号, 版本, exefs{名: 字节} 或 None, romfs{名: 字节} 或 None, 元数据{TLV 类型: 字节})]"""
+    import hashlib, struct
+    SUPER, TOC = struct.Struct('<4sHHQQ32sQQII16s32s'), struct.Struct('<4sIQQQQQ')
+    PKG, DIR, FILE, TLV = struct.Struct('<QIIIIBBHIQI20x'), struct.Struct('<IIIIQ'), struct.Struct('<IIQQQ32sBBH12x'), struct.Struct('<HHI')
+    NO_DIR = 0xFFFFFFFF
+    dirs, files, recs = [], [], []   # dirs: [名字, [(是目录, 下标)]]；files: [名字, 字节]
+
+    def mkdir(name, mapping=None):
+        dirs.append([name, []])
+        d = len(dirs) - 1
+        for fn, data in sorted((mapping or {}).items()):
+            files.append([fn.encode(), data])
+            dirs[d][1].append((False, len(files) - 1))
+        return d
+    for kind, tid, ver, exefs, romfs, meta in packages:
+        root = mkdir(b'')
+        e = r = NO_DIR
+        if exefs is not None:
+            e = mkdir(b'exefs', exefs); dirs[root][1].append((True, e))
+        if romfs is not None:
+            r = mkdir(b'romfs', romfs); dirs[root][1].append((True, r))
+        recs.append((tid, root, e, r, ver, kind, b''.join(TLV.pack(t, 0, len(v)) + v for t, v in sorted(meta.items()))))
+    pool, slots, drecs = bytearray(), [], []
+    def pname(b):
+        pool.extend(b); return len(pool) - len(b), len(b)
+    for name, kids in dirs:
+        o, n = pname(name)
+        drecs.append((o, n, len(slots), len(kids)))
+        slots += [i if isdir else len(dirs) + i for isdir, i in kids]
+    fnames = [pname(f[0]) for f in files]
+    pool_off = TOC.size + len(recs) * PKG.size + len(dirs) * DIR.size + len(files) * FILE.size + 4 * len(slots)
+    toc_size = pool_off + len(pool)
+    meta_off = 0x80 + toc_size
+    blob = (meta_off + sum(len(x[6]) for x in recs) + 15) & ~15
+    data, frecs = bytearray(), []
+    for (o, n), (_, raw) in zip(fnames, files):
+        if raw:
+            data += b'\0' * ((-(blob + len(data))) % 16)
+            frecs.append((o, n, len(raw), blob + len(data), len(raw), hashlib.sha256(raw).digest()))
+            data += raw
+        else:
+            frecs.append((o, n, 0, 0, 0, hashlib.sha256(b'').digest()))
+    toc = bytearray(TOC.pack(b'TOC\x01', len(recs), len(dirs), len(files), pool_off, len(pool), 0))
+    mo = meta_off
+    for tid, root, e, r, ver, kind, m in recs:
+        toc += PKG.pack(tid, root, e, r, ver, kind, 0, 0, 0, mo if m else 0, len(m)); mo += len(m)
+    for d in drecs:
+        toc += DIR.pack(*d, 0)
+    for f in frecs:
+        toc += FILE.pack(*f, 0, 0, 0)
+    toc += struct.pack(f'<{len(slots)}I', *slots) + pool
+    body = bytearray(SUPER.pack(b'NUP\x01', 0x80, 0, 0x80, toc_size, hashlib.sha256(toc).digest(), blob, blob + len(data), len(recs), 0, b'\0' * 16, b'\0' * 32))
+    body += toc + b''.join(x[6] for x in recs)
+    body += b'\0' * (blob - len(body)) + data
+    Path(path).write_bytes(bytes(body))
+
+
+def synthetic_npdm(app):   # 最小 META：0x70 处 ACI0 偏移 / 大小，ACI0+0x10 程序号（同 tests/ns2_nup_test.py）
+    import struct
+    b = bytearray(0x100)
+    b[:4] = b'META'
+    struct.pack_into('<II', b, 0x70, 0x80, 0x40)
+    b[0x80:0x84] = b'ACI0'
+    struct.pack_into('<Q', b, 0x90, app)
+    return bytes(b)
+
+
+def synthetic_nacp(title, display):   # 0x4000 字节：ApplicationTitle[0] 名字 0x200、0x3060 显示版本
+    b = bytearray(0x4000)
+    b[:len(title.encode())] = title.encode()
+    b[0x3060:0x3060 + len(display)] = display.encode()
+    return bytes(b)

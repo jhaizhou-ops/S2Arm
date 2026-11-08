@@ -1,0 +1,4 @@
+# 开源替代共享字体生成器（pack/fonts/make_open_fonts.py）的第三方依赖：版本钉死（产物逐字节可重现，换版本字形 / 表结构会变）。
+# 装 / 补：python3 launchers/macos/prepare_build.py（一并装进构建 venv），或 <你的 Python> -m pip install -r pack/fonts/requirements.txt；make_open_fonts.py 启动时核版本，不符报红。
+fonttools==4.67.0
+skia-pathops==0.9.2

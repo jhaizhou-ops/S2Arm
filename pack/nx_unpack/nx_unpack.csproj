@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <!-- 中间目录挪到别处编时（pack/jobs/toolchain.py 准备引擎：BaseIntermediateOutputPath=<私有根>/tools/<键>/obj），默认通配会把项目目录里残留的 obj/ bin/（就地编过一次留下的）生成的 .cs 也收进来，
+         同一组程序集属性编两遍 → CS0579 重复属性、准备引擎失败（11-01 #1104 验收）。排除它们，任何编法都不受残留影响 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ryujinx.LibHac" Version="0.21.0-alpha.133" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />   <!-- NCZ（nsz / xcz）的标准 zstd；NSO 的 ZBIC 段用自写的 ZbicDecoder.cs（11-04 换掉 ezhevita.ZstdSharp.Zbic） -->
+  </ItemGroup>
+</Project>

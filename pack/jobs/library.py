@@ -1,0 +1,1216 @@
+"""Managed game catalogue, immutable container imports and player data.
+
+Storage/interaction helpers adapted from LumaDock under MIT.
+"""
+from __future__ import annotations
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+import zipfile
+from core import Failure, atomic, contained, digest, prune_jobs, read
+import toolchain
+import winproc
+
+DIAGNOSTIC_JOB_LIMIT = 4 << 20
+
+
+# 游戏原始包：安装包 NSP 与卡带镜像 XCI，及它们的压缩版 NSZ / XCZ（nx_unpack 按内容认格式、还原压缩的 NCA）；
+#   Switch 2 的 NUP 容器（.nup，一个文件装本体 + 更新 + DLC，不加密、不要 prod.keys）由 pack/ns2_nup.py 认与展开，不走 nx_unpack
+SOURCE_SUFFIXES = (".nsp", ".xci", ".nsz", ".xcz", ".nup")
+NUP_SUFFIX = ".nup"
+
+
+def engine_tool(c, name):
+    """引擎里的单文件 Python 工具（pack/<name>.py）按路径载入：作业层与一键出包用同一份实现（Switch 2 的 ns2_nup / ns2_dump），不另写一套"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("s2a_" + name, c.engine / "pack" / (name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def is_nup(c, path):
+    """真 NUP（pack/ns2_nup.py --detect 同一判法 find_nup：按文件头魔数，不看扩展名）"""
+    return engine_tool(c, "ns2_nup").find_nup(str(path)) is not None
+
+
+def nup_inspect(c, source, icon_dir):
+    """NUP 容器 → 与读取器 --inspect 同形的包元数据（本体 / 最新更新 / 每个 DLC 各一条，同一原件；出包时 build.ensure_extract 整个容器一起展开）。
+    程序号、更新版本、DLC 由 ns2_nup.scan 认（同一键出包）；标题与显示版本取容器里的控制分区（NACP，后面的版本覆盖前面的），没带就用文件名去掉「 [程序号][版本]」
+    （同 pack/oneclick/oneclick.sh：ns2_dump 没有控制分区时拿它当标题）。程序位数不在这里判：出包解包后由 nx_unpack --npdm-isa 判（全仓唯一判法）"""
+    nup, dump = engine_tool(c, "ns2_nup"), engine_tool(c, "ns2_dump")
+    try:
+        with nup.Nup(str(source)) as n:
+            app, base, vers, dlc = nup.scan(n)
+            ver = max(vers, default=0)
+            meta = {}
+            for k in sorted((k for k in n.packages if k.kind in (nup.BASE, nup.UPDATE)), key=lambda k: (k.kind, k.version)):
+                meta.update(k.meta())
+            content = sum(n.tree_bytes(k.root) for k in [base, vers.get(ver), *dlc.values()] if k is not None)
+    except (nup.Error, OSError, ValueError) as e:
+        raise Failure(f"读不出这个 NUP 容器（{Path(source).name}）：{e}", code="content_invalid") from None
+    nacp = meta.get(nup.T_NACP) if len(meta.get(nup.T_NACP) or b"") == 0x4000 else None
+    name = ((dump.nacp_title(nacp, 0) or dump.nacp_title(nacp, 14) or dump.nacp_title(nacp, 13)) if nacp else None) \
+        or re.sub(r" \[.*$", "", Path(source).stem)
+    display = nacp[0x3060:0x3070].split(b"\0")[0].decode("ascii", "replace") if nacp else ""
+    icon = meta.get(nup.T_ICON) or nup.localized_icon(meta.get(nup.T_LICONS, b""))
+    if icon:
+        (Path(icon_dir) / f"{app:016X}.jpg").write_bytes(icon)
+    common = dict(baseId=f"{app:016X}", display=display, guestIsa="unknown", builds={}, contentBytes=content, format="nup")
+    out = [dict(common, titleId=f"{app:016X}", type="base", version=0, name=name)]
+    if ver:
+        out.append(dict(common, titleId=f"{app | 0x800:016X}", type="update", version=ver, name=name))
+    out += [dict(common, titleId=f"{tid:016X}", type="dlc", version=k.version, name="") for tid, k in sorted(dlc.items())]
+    return out
+
+
+def volume_format(path):
+    """游戏库所在卷的文件系统（apfs / exfat / msdos / hfs …，小写）；读不到给空串。路径还不存在时看最近一级已存在的上级目录。
+    df 取挂载点，再从 mount 的列表里取这一挂载点的格式（diskutil info 只认挂载点 / 设备，不认普通文件夹）"""
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    if os.name == "nt":   # Windows（11-07 启动器）：卷根 GetVolumePathNameW → 文件系统名 GetVolumeInformationW（ntfs / refs / exfat / fat32 …）
+        return _win_volume_format(str(p))
+    try:
+        mount_point = subprocess.run(["/bin/df", "-P", str(p)], capture_output=True, text=True, timeout=20).stdout.splitlines()[-1].split(None, 5)[5]
+        for line in subprocess.run(["/sbin/mount"], capture_output=True, text=True, timeout=20).stdout.splitlines():
+            m = re.match(r".+? on (.+) \(([^,)]+)", line)
+            if m and m.group(1) == mount_point:
+                return m.group(2).strip().lower()
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+# 游戏原件放哪块盘都行（exFAT 外接盘也行）：导入只记原件的位置与内容哈希，不复制、不改、不删，出包时原地只读（11-02 总指挥定）。
+# 游戏库 = S2Arm 的工作数据（清单、解包与出包产物、缓存、存档），要放 APFS：播种、发布要原子的「不覆盖改名」和克隆，exFAT / FAT 不支持。
+#   启动器选到非 APFS 的文件夹不拦：说明后游戏库放默认位置（内置盘），那块盘上的游戏照样原地导入；后端 setup 这里是最后一道（直接调接口的也拦）
+from libloc import LIBRARY_FORMAT_MESSAGE   # 文案单一来源在 libloc（Mac / Windows 共用的游戏库位置检查）
+
+
+def source_path(c, package):
+    """包的原件位置：导入时记的绝对路径（原件原地只读）；相对路径是 0.1.0-beta.3 及以前复制进游戏库 sources/ 的托管副本（contained 防越界）"""
+    path = Path(package["path"])
+    return path if path.is_absolute() else contained(c.library, c.library / path)
+
+
+def stage_sources(c, packages, stage):
+    """出包要的原件目录：每个原件软链进来（按内容哈希命名，去重整合版一个 xci 列两次的情况），不复制——原件在外接 exFAT 盘上也不用整份拷"""
+    stage.mkdir(parents=True, exist_ok=True)
+    for p in {p["sha256"]: p for p in packages}.values():
+        source = source_path(c, p)
+        os.symlink(source, stage / (p["sha256"] + source.suffix.lower()))
+
+
+def _win_volume_format(path):
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        root = ctypes.create_unicode_buffer(1024)
+        if not k32.GetVolumePathNameW(ctypes.c_wchar_p(path), root, 1024):
+            return ""
+        fs = ctypes.create_unicode_buffer(64)
+        if not k32.GetVolumeInformationW(root, None, 0, None, None, None, fs, 64):
+            return ""
+        return fs.value.strip().lower()
+    except (OSError, AttributeError, ValueError):
+        return ""
+
+
+def require_apfs(path):
+    """游戏库所在卷的格式：Mac 要 APFS（原错误码 library_not_apfs），Windows 要 NTFS / ReFS（library_bad_format，libloc.format_ok）；读不到格式不拦"""
+    import libloc
+    fmt = volume_format(path)
+    if os.name == "nt":
+        if not libloc.format_ok(fmt, system="Windows"):
+            raise Failure(libloc.WIN_FORMAT_MESSAGE.format(fmt=fmt.upper()), code="library_bad_format")
+        return fmt
+    if fmt and fmt != "apfs":
+        raise Failure(LIBRARY_FORMAT_MESSAGE.format(fmt=fmt.upper()), code="library_not_apfs")
+    return fmt
+
+
+def require_local(path):
+    """游戏库不能在云盘同步目录里（11-07 启动器，libloc.cloud_folder）：iCloud Drive / OneDrive / Dropbox 等会上传几十 GB 中间产物、
+    换成占位文件，出包中途读不到。预检已经提示（toolchain.preflight / winenv），这里是最后一道（直接调接口的也拦）"""
+    import libloc
+    system = "Windows" if os.name == "nt" else "Darwin"
+    cloud = libloc.cloud_folder(str(path), system=system, home=str(Path.home()), env=dict(os.environ), exists=os.path.exists)
+    if cloud:
+        raise Failure(libloc.CLOUD_MESSAGE.format(cloud=cloud), code="library_in_cloud")
+
+
+def setup(c):
+    c.begin("创建游戏库")
+    if c.library == Path(c.library.anchor) or c.library == Path.home() or c.library == c.engine:
+        raise Failure("请选择独立的游戏库文件夹。")
+    require_apfs(c.library)
+    require_local(c.library)
+    c.library.mkdir(parents=True, exist_ok=True)
+    marker = c.library / ".s2arm-library.json"
+    if marker.exists():
+        info = read(marker)
+        if info.get("schema") != 1 or not info.get("id"):
+            raise Failure("游戏库标识不完整。")
+    else:
+        if any(p.name != ".DS_Store" for p in c.library.iterdir()):
+            raise Failure("首次设置请选择空文件夹，已有文件保持原样。")
+        info = dict(schema=1, id=str(uuid.uuid4()))
+        atomic(marker, info)
+        atomic(c.library / "catalog.json", dict(schema=1, games=[]))
+    return dict(library=str(c.library), libraryId=info["id"])
+
+
+def validate_keys(path):
+    if Path(path).stat().st_size > 1 << 20:
+        raise Failure("密钥文件过大。", code="keys_invalid")
+    entries = {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    except UnicodeError:
+        raise Failure("密钥文件格式无效，请选择 prod.keys 文本文件。", code="keys_invalid") from None
+    for line in lines:
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.fullmatch(r"([A-Za-z0-9_]+)\s*=\s*((?:0x)?[a-fA-F0-9]{2,2048})", line)
+        if not m or len(m[2].removeprefix("0x")) % 2:
+            raise Failure("密钥文件格式无效，请选择 prod.keys 文本文件。", code="keys_invalid")
+        if m[1] in entries and entries[m[1]] != m[2]:
+            raise Failure("密钥文件存在冲突条目。", code="keys_invalid")
+        entries[m[1]] = m[2].removeprefix("0x")
+    if len(entries.get("header_key", "")) != 64:
+        raise Failure("缺少有效的 header_key。", code="keys_invalid")
+    return len(entries)
+
+
+def keys(c):
+    c.begin("导入玩家密钥")
+    source = Path(c.r["path"])
+    count = validate_keys(source)
+    c.keys.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = c.keys.with_name(c.task + ".candidate")
+    try:
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+            f.write(source.read_bytes())
+        verified = False
+        with c.lock("execution"), c.lock():
+            candidate = next((source_path(c, p) for g in c.catalog()["games"] for p in selected_packages(g)
+                              if p["type"] == "base" and p.get("format") != "nup" and source_path(c, p).is_file()), None)   # NUP 不加密，验不了密钥
+            if candidate:
+                with tempfile.TemporaryDirectory(dir=c.private) as icons:
+                    inspect(c, candidate, icons, keyfile=temporary)
+                verified = True
+            c.check()
+            os.replace(temporary, c.keys)
+    finally:
+        temporary.unlink(missing_ok=True)
+    atomic(c.private / "keys/status.json", dict(ready=True, verified=verified, imported=time.time()))
+    return dict(entries=count, verified=verified, message="已验证解密能力" if verified else "格式通过，首次读取游戏时验证解密能力")
+
+
+KEYS_CANNOT_DECRYPT = ("读不出这个游戏：你的 prod.keys 解不开它。多半是密钥太旧（导出密钥的 Switch 系统版本比游戏要求的低），"
+                       "请把 Switch 更新到最新系统后重新导出 prod.keys，到「设置 → 玩家密钥」重新导入，再放一次游戏。"
+                       "如果密钥是新的，可能是游戏文件不完整，请重新复制或下载后再试。")
+
+
+def inspect(c, source, icon_dir, keyfile=None):
+    keyfile = keyfile or c.keys
+    validate_keys(keyfile)
+    lines = []
+    try:
+        c.run(["dotnet", toolchain.reader(c), keyfile, "--inspect", source, icon_dir],
+              c.private / "logs" / (c.task + "-inspect.log"), on_line=lines.append)
+    except Failure:
+        # 读取器解不开（退出码 3，「could not be decrypted or verified. Check keys…」）：说成玩家能照做的话（10-23 内测前失败提示走查）
+        if any("could not be decrypted" in line or "Check keys" in line for line in lines):
+            raise Failure(KEYS_CANNOT_DECRYPT, code="content_unreadable") from None
+        raise
+    try:
+        output = json.loads(next(line for line in reversed(lines) if line.startswith("{")))
+        if output.get("schema") != 1 or not output["packages"]:
+            raise ValueError()
+        for package in output["packages"]:
+            if not re.fullmatch(r"[0-9A-F]{16}", package["titleId"]) or not re.fullmatch(r"[0-9A-F]{16}", package["baseId"]):
+                raise ValueError()
+            if package["type"] not in ("base", "update", "dlc") or not isinstance(package["version"], int):
+                raise ValueError()
+        return output["packages"]
+    except (KeyError, ValueError, StopIteration, TypeError):
+        raise Failure("内容读取器返回的元数据不完整。", code="content_invalid") from None
+
+
+def selected_packages(game):
+    bases = [p for p in game["packages"] if p["type"] == "base"]
+    updates = [p for p in game["packages"] if p["type"] == "update"]
+    result = ([max(bases, key=lambda p: p["version"])] if bases else [])
+    if updates:
+        result.append(max(updates, key=lambda p: p["version"]))
+    dlc = {}
+    for p in game["packages"]:
+        if p["type"] == "dlc" and (p["titleId"] not in dlc or dlc[p["titleId"]]["version"] < p["version"]):
+            dlc[p["titleId"]] = p
+    return result + [dlc[k] for k in sorted(dlc)]
+
+
+def input_identity(game):
+    return hashlib.sha256(json.dumps([(p["titleId"], p["version"], p["sha256"])
+                                     for p in selected_packages(game)], separators=(",", ":")).encode()).hexdigest()
+
+
+def _volume(path):
+    # 给提示用的磁盘名：/Volumes/<名> 下就是那块外接盘，否则是系统盘
+    parts = Path(path).resolve().parts
+    return parts[2] if len(parts) > 2 and parts[1] == "Volumes" else "系统盘"
+
+
+# 预检里没算进门槛、也量不准的开销（只列出来给玩家看，不编常数）
+SPACE_UNKNOWN = [
+    dict(id="shader_cache", role="library", label="着色器缓存", note="着色器缓存另占若干 GB，随游戏与设备而变，未量化，不计入门槛。"),
+]
+
+
+def compat_reason(text):
+    """直连没出成的原因翻成玩家看得懂的一句（「本款走兼容模式（…）」括号里那句；iPhone / Mac 两边共用，10-26 总指挥：黄字写清、不能静默）"""
+    t = text or ""
+    if "Unreal pak" in t:
+        return "直连抽取不支持：Unreal pak"
+    if "type tree" in t or "类型树" in t:
+        return "直连抽取不支持：Unity 资源缺类型树"
+    if "配置推导不支持" in t:
+        return "直连配置推导不支持本款"
+    m = __import__("re").search(r"直连缺口：([^，,）)]+)", t)
+    if m:
+        return "直连缺口：" + m.group(1).strip()
+    m = __import__("re").search(r"直连库失败：(.+)", t)
+    return (m.group(1).strip()[:80] if m else (t.strip()[:80] or "直连库这次没出成"))
+
+
+def direct_on():
+    """出不出直连包：缺省每款都出（10-25 jhz 直连优先、零配置，不再看有没有手写配置档 graphics/nvn/games/<程序号>/game.tsv）；
+    S2A_DUAL=0 = 显式只出通用。与一键出包（pack/oneclick/oneclick.sh）同一判据；出包计划 / 空间预算都用它"""
+    return os.environ.get("S2A_DUAL", "") != "0"
+
+
+def task_direct_on(c):
+    """任务内固定的 IPA 模式；其他操作保留现行 direct_on 行为。"""
+    return c.ipa_direct if hasattr(c, "ipa_direct") else direct_on()
+
+
+# 双轨包多占的空间（10-24 动森实测，RomFS 10.7 GB）：直连库中间缓存（S2A_DIRECT_CACHE，跨次复用）+ 包里的直连库，按游戏体积换算
+DIRECT_REF_BYTES, DIRECT_EXTRA_BYTES = int(10.7e9), int(4.0e9)   # 缓存 3.27 GB + 产物根里的库 0.37 GB + 资源包里一份 0.33 GB
+
+
+def _pack_input_bytes(packages):
+    # NSZ/XCZ按解包内容与原文件取大值；同一sha的原件只计一次。
+    return sum(max(p.get("size", 0), p.get("contentBytes", 0))
+               for p in {p["sha256"]: p for p in packages}.values())
+
+
+def _pack_direct_extra(size):
+    return int(DIRECT_EXTRA_BYTES * size / DIRECT_REF_BYTES)
+
+
+def pack_need_bytes(packages, direct):
+    """Context无关的既有出包门槛；packages应已按selected_packages选定。"""
+    size = _pack_input_bytes(packages)
+    return size * 2 + (10 << 30) + (_pack_direct_extra(size) if direct else 0)
+
+
+# 出包实测账（11-07 联合开发者旷野之息：外接盘 NX 剩 45 GB，经验门槛要 4x GB 拦下）：每次 Mac 打包 / 打 iPhone 包成功后，
+#   量这一款在游戏库所在卷上的整套占用，追加一行到 游戏库/space-usage.tsv（取最后一行，同 tools/disk_admit.py 的 est.tsv）；
+#   预检先用同款实测、再用同大小档实测比例 × 本款大小，都没有才退回经验规则。余量 × 1.1 同 tools/tianyan_lane.py need_bytes
+SPACE_LEDGER = "space-usage.tsv"
+SPACE_LEDGER_FIELDS = ("time", "gameId", "target", "direct", "inputBytes", "footprintBytes", "name")
+SPACE_MARGIN = 1.1
+
+
+def _space_target(c):
+    """实测账按目标分：打 iPhone 包 ipa，Mac 打包（build）mac——两边落盘的东西不同（Mac 运行版本整份落 RomFS，iPhone 出 IPA + 资源包）"""
+    return "ipa" if getattr(c, "operation", "") == "ipa" else "mac"
+
+
+def _space_band(size):
+    """输入大小档：按 2 的幂分（< 2 GiB、2–4、4–8、8–16、16–32 …）→ (下限 GiB, 上限 GiB)"""
+    low = 0
+    while (2 << low) << 30 <= size:
+        low += 1
+    return (0 if low == 0 else 1 << low, 2 << low)
+
+
+def disk_bytes(roots, device):
+    """这些目录在 device 卷上实际分配的字节：按 (卷, inode) 去重（硬链接只算一次；多个根互相包含也只算一次），
+    不跟软链（原件软链、@现行 指向）、不跨到别的卷（私有目录在内置盘时不计入外接盘游戏库的账）。
+    APFS 克隆（clonefile / cp -c）两份各有 inode、stat 看不出共享块，这里照两份算——量出来偏大、预算偏保守"""
+    seen, total, stack = set(), 0, [os.fspath(r) for r in roots]
+    while stack:
+        path = stack.pop()
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if st.st_dev != device or stat.S_ISLNK(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+            continue
+        seen.add((st.st_dev, st.st_ino))
+        blocks = getattr(st, "st_blocks", None)
+        total += blocks * 512 if blocks is not None else st.st_size
+        if stat.S_ISDIR(st.st_mode):
+            try:
+                with os.scandir(path) as it:
+                    stack.extend(e.path for e in it)
+            except OSError:
+                pass
+    return total
+
+
+def pack_footprint(c, gid):
+    """这一款出包在游戏库所在卷上的整套占用：iPhone 输出（产物根 / IPA / 资源包）、共用解包与 Mac 构建缓存（cache/<程序号>）、
+    Mac 运行版本（games/<程序号>），再加私有目录里本款的出包缓存（直连 / 翻译…，game_caches）——后者只在和游戏库同一卷时才算进来。
+    不含各款共用的编库缓存（air / pso / gal_dl_cache）、存档、运行时着色器缓存（runtime-cache，玩的时候才长）"""
+    shared = {c.private / "cache" / "air", c.private / "cache" / "pso", c.private / "run" / "gal_dl_cache"}
+    roots = [c.library / "iPhone" / gid, c.library / "cache" / gid, c.library / "games" / gid]
+    roots += [p for p in game_caches(c, gid) if p not in shared]
+    return disk_bytes(roots, c.library.stat().st_dev)
+
+
+def _space_rows(library_dir):
+    try:
+        lines = (Path(library_dir) / SPACE_LEDGER).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    rows = []
+    for line in lines:
+        cells = line.split("\t")
+        if line.startswith("#") or len(cells) < 6 or not (cells[4].isdigit() and cells[5].isdigit()) or int(cells[4]) <= 0:
+            continue
+        rows.append(dict(zip(SPACE_LEDGER_FIELDS, cells + [""] * (len(SPACE_LEDGER_FIELDS) - len(cells)))))
+    return rows
+
+
+def record_pack_usage(c, game):
+    """出包成功后（清中间产物之前）记一行实测：程序号、目标、直连与否、输入大小、整套占用。量不出来不影响这次出包，只少一行账"""
+    try:
+        size = _pack_input_bytes(selected_packages(game))
+        if size <= 0:
+            return None
+        footprint = pack_footprint(c, game["id"])
+        path = c.library / SPACE_LEDGER
+        name = re.sub(r"[\t\r\n]+", " ", game.get("name") or "")
+        row = [time.strftime("%Y-%m-%dT%H:%M:%S"), game["id"], _space_target(c), "1" if task_direct_on(c) else "0", str(size), str(footprint), name]
+        with path.open("a", encoding="utf-8") as f:
+            if f.tell() == 0:
+                f.write("# " + "\t".join(SPACE_LEDGER_FIELDS) + "\n")
+            f.write("\t".join(row) + "\n")
+        return footprint
+    except (OSError, KeyError, TypeError, ValueError):   # 清单记录不全 / 盘读不了：只少这一行账
+        return None
+
+
+def space_measured(c, game, size, direct):
+    """实测预估 → dict(estimate=整套预计占用, source=same|band, row=依据那一行) 或 None（没有可用实测）。
+    同款（同目标、同直连与否）最后一行优先，按本次输入大小等比换算（选的包没变就是原值）；没有就取同大小档最后一行的比例 × 本款大小"""
+    target, flag = _space_target(c), "1" if direct else "0"
+    rows = [r for r in _space_rows(c.library) if r["target"] == target and r["direct"] == flag]
+    same = [r for r in rows if r["gameId"] == game["id"]]
+    band = [r for r in rows if _space_band(int(r["inputBytes"])) == _space_band(size)]
+    row, source = (same[-1], "same") if same else ((band[-1], "band") if band else (None, None))
+    if row is None:
+        return None
+    return dict(estimate=int(int(row["footprintBytes"]) * size / int(row["inputBytes"])), source=source, row=row)
+
+
+def _gb(n):
+    return f"{n / 1e9:.0f} GB" if n >= 10e9 else f"{n / 1e9:.1f} GB"
+
+
+def space_budget(c, game):
+    """打包前的空间预算（纯计算，不拦）：每块要写的磁盘一条，标出需要 / 剩余 / 依据；只写盘名，不写绝对路径。
+    依据三档（11-07）：① 同款在这个游戏库的上次实测；② 同大小档别款的实测比例 × 本款大小；③ 都没有才用经验规则。
+    实测两档：need = 预计整套占用 × 1.1 − 本款已在盘上的占用（重试 / 再导一次时解包与产物根已在盘上，空闲空间里早扣过了），不低于 0。
+    经验规则：游戏大小 × 2 + 10 GB（10-23 Air 实测：丝之歌 6.4 GB 整套新占约 7 GB；奥德赛 5.9 GB 只量到上限 47 GB，克隆分不出；取保守），
+    直连另加按动森实测换算的直连库。打 iPhone 包与 Mac 打包共用 游戏库/cache/<程序号>/extract，没有跨卷暂存一项。"""
+    import shutil as _sh
+    packages, direct = selected_packages(game), task_direct_on(c)
+    size = _pack_input_bytes(packages)
+    rule, free = pack_need_bytes(packages, direct), _sh.disk_usage(c.library).free
+    measured = space_measured(c, game, size, direct) if size > 0 else None
+    if measured:
+        row = measured["row"]
+        existing = pack_footprint(c, game["id"])
+        need = max(int(measured["estimate"] * SPACE_MARGIN) - existing, 0)
+        who = "本款" if measured["source"] == "same" else "同大小档（{}–{} GB）的《{}》".format(*_space_band(size), row["name"] or row["gameId"])
+        note = (f"按{who}上次实测（{row['time'][:10]}，输入 {_gb(int(row['inputBytes']))} 整套占 {_gb(int(row['footprintBytes']))}）"
+                + ("" if measured["source"] == "same" and int(row["inputBytes"]) == size else f"，按大小换算成 {_gb(measured['estimate'])}")
+                + "，加 1 成余量" +(f"，减去本款已在盘上的 {_gb(existing)}" if existing else ""))
+        volume = dict(basis="measured", source=measured["source"], sourceGameId=row["gameId"], measuredBytes=measured["estimate"],
+                      existingBytes=existing, ruleBytes=rule)
+    else:
+        need = rule
+        note = "游戏大小 × 2 + 10 GB 经验门槛（10-23 Air 实测，偏保守）"
+        if direct:
+            extra = _pack_direct_extra(size)
+            note += f"；另加直连着色器库约 {extra / 1e9:.1f} GB（10-24 动森实测按体积换算）"
+        volume = dict(basis="rule")
+    volumes = [dict(role="library", volume=_volume(c.library), needBytes=need, freeBytes=free, enough=free >= need,
+                    note=note, unknown=["shader_cache"], **volume)]
+    return dict(gameBytes=size, volumes=volumes, unknown=[dict(u) for u in SPACE_UNKNOWN])
+
+
+def space_basis_text(v):
+    """拦截文案里的「依据」一句（玩家看）"""
+    if v.get("basis") != "measured":
+        direct = "再加直连库" if "直连" in v.get("note", "") else ""
+        return f"经验规则估算，游戏大小 × 2 + 10 GB {direct}，这个游戏库还没有同类实测、偏保守".replace(" ，", "，")
+    who = "这款游戏上次在这个游戏库实测" if v.get("source") == "same" else "同大小档别的游戏实测按比例换算"
+    tail = f"，已扣掉这款已在盘上的 {_gb(v['existingBytes'])}" if v.get("existingBytes") else ""
+    return f"{who}整套约 {_gb(v['measuredBytes'])}、加 1 成余量{tail}"
+
+
+def check_pack_space(c, game, *, compiler_policy=None):
+    """打包前的磁盘预检（Mac 打包与打 iPhone 包共用）：IPA 可先按已有保留规则尝试回收；发最终 space 事件（存任务文件），再按预算拦。
+    请求带 spaceOverride: true（玩家在失败页点「仍然继续」）：不拦，只记一条警告；真写满由出包中途的磁盘写满识别报错"""
+    budget = space_budget(c, game)
+    cache_result = None
+    if compiler_policy is not None:
+        from cache_retention import trim
+        # 缓存只释放 private 所在卷；不同卷的 library 不借用这笔 free。
+        device = c.private.stat().st_dev
+        relevant = budget["volumes"] if c.library.stat().st_dev == device else []
+        target = max([compiler_policy["min_free_bytes"], *(v["needBytes"] for v in relevant)])
+        if any(not v["enough"] for v in budget["volumes"]):
+            # 若不足的是另一卷，只统计缓存，不为它删除本卷冷条目。
+            floor = target if any(not v["enough"] for v in relevant) else 0
+            cache_result = trim(c.private, current_gid=game["id"],
+                                **dict(compiler_policy, min_free_bytes=floor))
+            budget = space_budget(c, game)
+            budget["compilerCache"] = cache_result
+        budget["compilerMinFreeBytes"] = target
+    override = getattr(c, "r", {}).get("spaceOverride") is True
+    if override and any(not v["enough"] for v in budget["volumes"]):
+        budget["override"] = True   # 失败页据此不再给「仍然继续」（这次已经是继续过的）
+    c.emit("space", "空间预检", space=budget)
+    cache_hint = ""
+    if cache_result is not None:
+        completeness = "" if cache_result["accountingComplete"] else "（扫描不完整，仅已知部分）"
+        cache_hint = (f" 编库缓存现存 {cache_result['retainedBytes']} 逻辑字节{completeness}；"
+                      "可在游戏库对对应游戏使用「清缓存」，再重试；最近保留款不会自动删除。")
+    for v in budget["volumes"]:
+        if v["enough"]:
+            continue
+        need, free = v["needBytes"], v["freeBytes"]
+        head = (f"游戏库所在的磁盘（{_volume(c.library)}）空间不够导出：预计还要 {need / 1e9:.0f} GB 空闲空间"
+                f"（依据：{space_basis_text(v)}），现在只剩 {free / 1e9:.0f} GB。")
+        if override:
+            c.diagnostic(head + "已按你的选择仍然继续；中途真写满会停下报错，游戏原件和存档不受影响。", code="disk_full", severity="warning")
+            continue
+        # 内置盘也不够时才提另分 APFS 分区（11-02 总指挥定）：游戏库换到外接盘的 APFS 分区上，原件不用动
+        raise Failure(head + "清出空间后再点一次，或点「仍然继续」照样开始（预计偏保守时可以试；中途真写满会停下报错，游戏原件和存档不受影响）；"
+                      "清不出来的话，可以在外接盘上用「磁盘工具」另分出一个 APFS 分区（盘上要有空闲空间，原有数据不动），"
+                      "再到「设置 → 游戏库与玩家数据」把游戏库换到那里，游戏原件不用动。" + cache_hint, code="disk_full")
+
+    return budget
+
+
+def guest_isa(selected):
+    # 真正跑的程序的指令集：最新更新的 ExeFS 是完整的，读得出就以它为准；读不出（unknown）才看本体。
+    # 有的游戏本体 32 位、更新后 64 位（马车8 1.0 AArch32 → 4.0.1 AArch64，10-23 一键出包曾按本体误拒）
+    upd = [p for p in selected if p["type"] == "update" and p.get("guestIsa") in ("aarch64", "aarch32")]
+    if upd:
+        return upd[0]["guestIsa"]
+    return next((p.get("guestIsa") for p in selected if p["type"] == "base"), "unknown")
+
+
+def requirements(c, game):
+    return [str(error) for error in requirement_errors(c, game)]
+
+
+def require_game(c, game):
+    errors = requirement_errors(c, game)
+    if errors:
+        for error in errors:
+            c.report_failure(error)
+        raise errors[-1]
+    wait_readable(c, [source_path(c, p) for p in selected_packages(game)])
+
+
+def wait_readable(c, paths, poll=5.0):
+    """开工前把每个原件读一下（S2Arm 10-31 出包管线深修 4.5：游戏库在「下载」/ 外接盘时，第一次读会弹系统的文件访问授权框，
+    框被别的窗口挡住，读就一直停在系统调用里——零 CPU、零磁盘，界面停在某一步不动；10-31 一位开发者冷出勇者斗恶龙 XI S 停了 15 分钟以上）。
+    每个原件在后台线程试读开头 4 KB；每 poll 秒没读到就在界面上说「在等什么、等了多久」；系统拒绝（权限错误）直接报出去哪里打开。"""
+    import threading
+    for path in paths:
+        box = {}
+        def probe(path=path):
+            try:
+                with open(path, "rb") as f: f.read(4096)
+                box["ok"] = True
+            except OSError as e: box["err"] = e
+        t = threading.Thread(target=probe, daemon=True); t0 = time.monotonic(); t.start()
+        while not t.join(poll) and t.is_alive():
+            c.check()
+            c.emit(message=f"在等系统的文件访问授权：读 {path.name}（已等 {int(time.monotonic() - t0)} 秒）。"
+                           "请在系统弹出的「允许访问」对话框里点「允许」；看不到对话框就把它从别的窗口后面切出来")
+        if "err" in box:
+            e = box["err"]
+            if isinstance(e, PermissionError):
+                raise Failure(f"系统不让 S2Arm 读 {path.name}（{path.parent}）：到「系统设置 › 隐私与安全性 › 文件与文件夹」"
+                              "或「完全磁盘访问权限」里打开 S2Arm，再点一次", code="input_permission")
+            raise Failure(f"读不了游戏文件 {path.name}：{e}", code="input_unreadable")
+
+
+def requirement_errors(c, game):
+    missing = []
+    selected = selected_packages(game)
+    if not any(p["type"] == "base" for p in selected):
+        missing.append(Failure("缺游戏本体：只放了更新或 DLC，把本体的 NSP / XCI 也放进来", code="input_base_missing"))
+    if guest_isa(selected) == "aarch32":
+        missing.append(Failure("这款游戏是 32 位程序，S2Arm 暂时只支持 64 位游戏，打不了包", code="guest_isa_unsupported"))
+    for p in selected:
+        source = source_path(c, p)
+        if not source.is_file():
+            missing.append(Failure(f"找不到游戏原件：{source}。原件所在的磁盘没接上，或文件被挪走 / 改名了；接上磁盘，或把原件重新放进来一次"
+                                   if Path(p["path"]).is_absolute() else "托管游戏文件缺失，请重新导入：" + p["titleId"], code="input_missing"))
+    return missing
+
+
+def import_games(c):
+    c.begin("检查导入文件")
+    c.require_library()
+    files = []
+    for raw in c.r["paths"]:
+        p = Path(raw).expanduser().resolve()
+        if p.is_dir():
+            # 软链照目标认（10-26 总指挥把 Downloads 的原件挪到外置盘、原位置留软链）：指向文件的算文件、软链目录跟进去，
+            #   记的是软链所在的路径（出包时照样跟到目标）；按真实路径记走过的目录，软链成环也不会转圈
+            seen = set()
+            for d, ds, fs in os.walk(p, followlinks=True):
+                real = os.path.realpath(d)
+                if real in seen:
+                    ds[:] = []
+                    continue
+                seen.add(real)
+                files.extend(Path(d) / f for f in fs if f.lower().endswith(SOURCE_SUFFIXES) and os.path.isfile(os.path.join(d, f))
+                             and (not f.lower().endswith(NUP_SUFFIX) or is_nup(c, Path(d) / f)))   # 文件夹里扩展名是 .nup 却不是 NUP 的照旧不认
+        elif p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and (p.suffix.lower() != NUP_SUFFIX or is_nup(c, p)):
+            files.append(p)
+        elif not p.exists():
+            raise Failure("所选游戏文件或文件夹不存在。", code="input_missing")
+        else:
+            raise Failure("请选择 NSP、XCI 文件或包含它们的文件夹。", code="input_type_unsupported")
+    files = list(dict.fromkeys(sorted(files)))
+    if not files:
+        raise Failure("所选位置没有 NSP 或 XCI 文件。", code="input_empty")
+    # prod.keys 只有 Switch 1 原件（NSP / XCI / NSZ / XCZ，要读取器解密）才要；只放 Switch 2 NUP 容器不要密钥
+    switch1 = [f for f in files if f.suffix.lower() != NUP_SUFFIX]
+    if switch1 and not c.keys.is_file():
+        raise Failure("请先导入 prod.keys。", code="keys_missing")
+    results = []
+    with c.lock():
+        cat = c.catalog()
+        with tempfile.TemporaryDirectory(prefix="icons-", dir=c.private) as icons:
+            for i, source in enumerate(files):
+                c.begin("读取游戏信息", i * 2 + 1, len(files) * 2)
+                packages = nup_inspect(c, source, icons) if source.suffix.lower() == NUP_SUFFIX else inspect(c, source, icons)
+                c.begin("校验游戏文件", i * 2 + 2, len(files) * 2)
+                sha = digest(source, c.progress)
+                for metadata in packages:
+                    tid = metadata["baseId"]
+                    game = next((g for g in cat["games"] if g["id"] == tid), None)
+                    if not game:
+                        game = dict(id=tid, name=metadata["name"] or tid, display="", packages=[], hidden=False)
+                        cat["games"].append(game)
+                    game["hidden"] = False
+                    same = [p for p in game["packages"] if p["sha256"] == sha and p["titleId"] == metadata["titleId"]]
+                    duplicate = bool(same)
+                    for p in same:
+                        # 同一份内容换了位置再放一次（挪了盘 / 改了文件夹）：改记新位置；复制进库的旧托管副本还在就照旧用（不改记成引用），
+                        #   已被「删除托管 NSP 副本」删掉的改记成这次放进来的原件（beta.3 升级上来想省空间的玩家：删副本 → 重放原件）
+                        if Path(p["path"]).is_absolute() or not source_path(c, p).is_file():
+                            p["path"] = str(source)
+                    if not duplicate:
+                        icon = Path(icons) / (metadata["titleId"] + ".jpg")
+                        if icon.is_file():
+                            target = contained(c.library, c.library / "games" / tid / "cover.jpg")
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(icon, target)
+                        metadata.pop("icon", None)
+                        game["packages"].append(metadata | dict(path=str(source), sha256=sha, size=source.stat().st_size))
+                        if metadata["name"]:
+                            game["name"] = metadata["name"]
+                    results.append(dict(id=tid, name=source.name, duplicate=duplicate))
+                c.check()
+                atomic(c.library / "catalog.json", cat)
+    if switch1:   # 读取器用这份密钥读通了 Switch 1 原件才算验证过；只导 NUP 没用到密钥，不改密钥状态
+        atomic(c.private / "keys/status.json", dict(ready=True, verified=True))
+    return {"imports": results}
+
+
+JOB_LIST_LIMIT = 200
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
+def catalog(c):
+    from build import validate_runtime
+    import toolchain
+    c.begin("读取游戏库")
+    cat = c.catalog()
+    input_supported, input_reason = toolchain.input_interface(c)
+    for game in cat["games"]:
+        game["missing"] = requirements(c, game)
+        game["requirementDiagnostics"] = [c.describe_failure(error) for error in requirement_errors(c, game)]
+        game["compatibility"] = "unsupported" if guest_isa(selected_packages(game)) == "aarch32" else "experimental"
+        current = c.library / "games" / game["id"] / "current"
+        try:
+            manifest = validate_runtime(c, current, full=False)
+            game["ready"] = manifest.get("memoryRequirementsVersion") == 2
+        except (Failure, OSError, ValueError):
+            manifest = {}
+            game["ready"] = False
+        engine_id = read(c.engine / "engine.json", {}).get("id")
+        game["needsPreparation"] = (not game["ready"] or manifest.get("inputIdentity") != input_identity(game)
+                                    or bool(engine_id and manifest.get("engineBundleId") != engine_id))
+        # F06：按宿主二进制真实能力报，不能一律 True（否则 UI 的「旧引擎缺接口」提示永远不出现）
+        game["inputConfig"] = toolchain.input_interface(c, current / "S2ArmGame.app/Contents/MacOS/s2arm-host")[0] if game["ready"] else input_supported
+        cover = c.library / "games" / game["id"] / "cover.jpg"
+        game["cover"] = str(cover) if cover.is_file() else ""
+        choices = [p for p in selected_packages(game) if p["type"] in ("base", "update")]
+        if choices:
+            game["display"] = max(choices, key=lambda p: p["version"])["display"]
+    try:
+        validate_keys(c.keys)
+        status = read(c.private / "keys/status.json", {}) | dict(ready=True)
+    except (Failure, OSError, UnicodeError):
+        status = dict(ready=False, verified=False)
+    status["message"] = "已验证解密能力" if status.get("verified") else "格式通过，首次读取游戏时验证解密能力" if status["ready"] else "尚未导入 prod.keys"
+    # 任务目录里还有各任务留存的请求（<任务>.request.json，J10 resume 用）：不是任务记录，没有 id / state；混进来启动器整个任务列表解码失败、一条都读不回
+    # 任务目录有上限（J10 保留规则：结束超过 14 天的清掉、最新 50 条总留着）：catalog 每次启动都跑，在这里顺手清，一天最多一次
+    #   （清理要把每条记录读一遍判结束没有），先清再读。只回最新 JOB_LIST_LIMIT 条：旧启动器的任务列表只看近期；
+    #   11-07 实测任务目录 1.5 万条记录时整份读 + 回传 7 MB 占 catalog 数秒。
+    marker = c.private / "jobs-pruned"
+    if time.time() - _mtime(marker) > 86400:
+        prune_jobs(c.private)
+        marker.touch()
+    records = sorted((p for p in (c.private / "jobs").glob("*.json") if p != c.jobpath and not p.name.endswith(".request.json")),
+                     key=_mtime, reverse=True)[:JOB_LIST_LIMIT]
+    jobs = [r for r in (read(p) for p in records) if isinstance(r, dict)]
+    return dict(games=cat["games"], profiles=[], keys=status, jobs=jobs,
+                engineInfo={"inputConfig": input_supported, "inputConfigReason": input_reason})
+
+
+# 这一款在私有目录里按程序号存的出包缓存（直连 / 翻译 / 追加内容 / 原件核对 / 宽屏；都在 S2A_RUN_ROOT = <私有>/run 下，pack/jobs/core.py Context.env）
+# 显式清理/删除含共享编库缓存；Q15 成功后的自动清理仅清本款中间产物，保留可复用编库条目。
+def game_caches(c, gid, *, include_compiler=True):
+    run = c.private / "run" / "s2arm"
+    low = gid.lower()
+    direct = run / "cache" / "direct" / gid.upper()
+    out = [direct] if include_compiler else direct_transients(c, direct)
+    for d, pat in ((run / "cache" / "bake", f"{low}-*"), (run / "cache" / "aoc", f"t{low}-*"), (run / "cache" / "srcver", f"t{low}-*"),
+                   (run / "widen", f"t{low}_*"), (run / "widen" / "auto", f"t{low}_*")):
+        out += sorted(d.glob(pat)) if d.is_dir() else []
+    if include_compiler:
+        out += [c.private / "cache" / "air", c.private / "cache" / "pso", c.private / "run" / "gal_dl_cache"]
+    return [p for p in out if p.exists() or p.is_symlink()]
+
+
+def direct_transients(c, direct):
+    """Only disposable direct-build work; never remove the store (store/, logs/) or unknown layouts.
+    S2Arm 11-01: the direct cache is one content-addressed store, one file per entry (C# dsh_batch build, store/dshb/); the former per-key trees
+    ios/ and mac/ (b-<chain>/, cas/…) and work/ are the old layout, which direct_lib.sh deletes on its next build anyway"""
+    from cache_retention import _safe_root
+    if _safe_root(c.private, direct) != 'safe':
+        return []
+    out = [direct / name for name in ('work', 'merged', 'mac', 'ios')]
+    for path in sorted(direct.glob('*.stage.*')):
+        name, _, pid = path.name.partition('.stage.')
+        if name not in ('work', 'mac', 'ios') or not pid.isdecimal() or int(pid) <= 0:
+            continue
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            out.append(path)
+        except (PermissionError, OverflowError):
+            pass  # unknown/live process: retain its in-progress stage
+    # Never pass a transient symlink to _rm: its contained() resolves links.
+    safe = []
+    for path in out:
+        try:
+            if not stat.S_ISLNK(path.lstat().st_mode):
+                safe.append(path)
+        except FileNotFoundError:
+            pass
+    return safe
+
+
+def _rm_direct_transient(c, direct, path):
+    """Remove only this lexical child, without resolving its final component."""
+    from cache_retention import _safe_root
+    if path.parent != direct or _safe_root(c.private, direct) != 'safe':
+        return False
+    # Pin the checked parent; rmtree's dir_fd implementation refuses a directory
+    # replaced by a symlink instead of traversing it. Global _rm stays unchanged.
+    if os.name == "nt":
+        with winproc.open_dir_nofollow(direct) as parent:
+            try:
+                winproc.remove_at(parent, path.name)
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    return False
+                raise
+        return True
+    fd = os.open(direct, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            mode = os.stat(path.name, dir_fd=fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(mode):
+            return False
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(path.name, dir_fd=fd)
+        else:
+            os.unlink(path.name, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _rmtree(p):
+    """删整棵目录；遇到只读目录（产物根的 RomFS 共享存储 roots/.romfs_store/ 整棵只读，pack/roots.sh）先给它加回写权限再删。
+    Windows 上封存不是只读位，是 ACL 里给当前用户的拒写项（pack/orch/roots.py seal → _win_acl），chmod 解不开：
+    按 roots 同一个函数把出错的项和它的父目录解封再删（11-07 天眼：启动器出包成功后清中间产物卡在 .romfs_store，WinError 5）"""
+    def unlock(func, path, _):
+        parent = os.path.dirname(path)
+        if os.name == "nt":
+            engine = str(Path(__file__).resolve().parents[2])
+            if engine not in sys.path:
+                sys.path.insert(0, engine)
+            from pack.orch import roots
+            for q in (parent, path):
+                if os.path.lexists(q) and not os.path.islink(q):
+                    roots._win_acl(q, False)
+        else:
+            os.chmod(parent, stat.S_IMODE(os.lstat(parent).st_mode) | stat.S_IRWXU)
+        func(path)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(p, onexc=unlock)
+    else:
+        shutil.rmtree(p, onerror=unlock)
+
+
+def _rm(c, root, p):
+    p = contained(root, p)
+    if p.is_dir() and not p.is_symlink():
+        _rmtree(p)
+    else:
+        p.unlink(missing_ok=True)
+
+
+def prune_build(c, gid, *, retain_compiler=True):
+    """成功后清本款中间产物，保留共享编库缓存；显式清缓存用 retain_compiler=False。失败不调用。
+    自动清理保留产物根里的现行版本（roots/*@现行 及其指向，11-02 多平台共用阶段：接着导 Mac 时克隆它起步、平台无关阶段按键跳过；
+    再导 iPhone 也从它增量刷新），只清旧版本——与 Mac 构建缓存「保留现行」一致；显式清缓存照旧整个删。
+    成功后的自动清理（retain_compiler=True，只在打 iPhone 包成功后调）先记一行出包实测（record_pack_usage）：要量清之前的整套占用"""
+    if retain_compiler:
+        game = next((g for g in read(c.library / "catalog.json", {}).get("games", []) if g.get("id") == gid), None)
+        if game:
+            record_pack_usage(c, game)
+    out = c.library / "iPhone" / gid
+    n = 0
+    if out.is_dir():
+        for p in out.iterdir():
+            if p.name == "logs" or p.name.endswith("资源包") or (p.is_file() and p.suffix == ".ipa"):
+                continue
+            if p.name == "roots" and retain_compiler and p.is_dir() and not p.is_symlink():
+                current = {q.name for q in p.glob("*@现行")} | {q.resolve().name for q in p.glob("*@现行") if q.is_symlink()}
+                for q in p.iterdir():
+                    # RomFS 共享存储：现行指向其中的身份，删了现行就断；没人指向的旧身份由下次提交清（pack/roots.sh root_romfs_sweep）
+                    if q.name not in current and q.name != ".romfs_store":
+                        _rm(c, c.library, q); n += 1
+                continue
+            _rm(c, c.library, p); n += 1
+    direct = c.private / 'run/s2arm/cache/direct' / gid.upper()
+    for p in game_caches(c, gid, include_compiler=not retain_compiler):
+        if retain_compiler and p.parent == direct:
+            n += _rm_direct_transient(c, direct, p)
+        else:
+            _rm(c, c.private, p); n += 1
+    return n
+
+
+def delete(c):
+    """删除这款游戏（连出包产物与缓存）：iPhone 输出整个目录（IPA / 资源包 / 中间产物）、Mac 构建缓存、game_caches，并从游戏库清单里删掉；
+    保留存档（library/saves/<程序号>）与游戏原件（原地导入的不碰；旧版复制进 library/sources 的托管副本另有「删除托管 NSP 副本」）。
+    执行锁可能还被这一款刚被取消的任务占着（启动器发删除前先结束它在跑的任务，进程退出要几秒）：拿不到就每 2 秒再试，最多 120 秒"""
+    t0 = time.time()
+    while True:
+        try:
+            with c.lock("execution"), c.lock():
+                gid = c.game()["id"]
+                c.begin("删除游戏与出包产物")
+                for p in (c.library / "iPhone" / gid, c.library / "cache" / gid):
+                    if p.exists():
+                        _rm(c, c.library, p)
+                for p in game_caches(c, gid):
+                    _rm(c, c.private, p)
+                cat = c.catalog()
+                cat["games"] = [g for g in cat["games"] if g["id"] != gid]
+                atomic(c.library / "catalog.json", cat)
+            return {}
+        except Failure as e:
+            if "另一个任务正在使用游戏库" not in str(e) or time.time() - t0 > 120:
+                raise
+            c.begin("等这款游戏在跑的任务结束"); time.sleep(2)
+
+
+def remove(c):
+    with c.lock():
+        cat = c.catalog()
+        for game in cat["games"]:
+            if game["id"] == c.r["gameId"]:
+                game["hidden"] = True
+        atomic(c.library / "catalog.json", cat)
+    return {}
+
+
+def clean(c):
+    with c.lock("execution"), c.lock():
+        game = c.game()
+        kind = c.r.get("kind")
+        if kind == "cache":
+            c.begin("清理构建缓存")
+            target = contained(c.library / "cache", c.library / "cache" / game["id"])
+            if target.is_dir():
+                _rmtree(target)
+            prune_build(c, game["id"], retain_compiler=False)   # 用户显式清缓存保留原有全清语义，不套用 Q15 自动保留策略
+        elif kind == "sources":
+            # 只删 0.1.0-beta.3 及以前复制进游戏库的托管副本；原地导入的原件是玩家的文件，只读、不删
+            other = {p["path"] for g in c.catalog()["games"] if g["id"] != game["id"] for p in g["packages"]}
+            for p in game["packages"]:
+                if not Path(p["path"]).is_absolute() and p["path"] not in other:
+                    contained(c.library / "sources", c.library / p["path"]).unlink(missing_ok=True)
+        else:
+            raise Failure("未知清理类型。")
+    return {}
+
+
+# —— 释放空间（11-07 启动器，参考 NX2Apple frontend FreeSpace.swift 的部件划分）——
+# 每款按部件列出占用，玩家勾选后删除。只列「下次出包会重建」的部件和已出好的包；存档、日志、配置、清单、游戏原件只报大小、不给删。
+#   直接删，不放废纸篓（废纸篓仍占同一块盘）。有任务在跑（执行锁拿不到）拒绝，不等。
+SPACE_PARTS = (
+    ("unpack", "解包与构建缓存", "下次出包会重新解包（多花几分钟）"),
+    ("intermediate", "出包中间产物", "下次出包会重新生成（多花几分钟到几十分钟）"),
+    ("shaders", "着色器与出包缓存", "下次出包会重新翻译着色器（大游戏要多花较长时间）"),
+    ("mac", "Mac 运行版本", "下次在 Mac 上玩之前会重新准备"),
+    ("ipa", "已出好的 iPhone 包", "删了要重新出包才能再装到 iPhone；已装好的游戏不受影响"),
+)
+SPACE_KEPT = ("saves", "logs")
+
+
+def _ipa_outputs(out):
+    return [p for p in out.iterdir() if (p.is_file() and p.suffix == ".ipa") or p.name.endswith("资源包")] if out.is_dir() else []
+
+
+def space_parts(c, gid):
+    """{部件 id: [路径…]}，外加不给删的 saves / logs。路径都在游戏库或私有目录之内；不存在的不列"""
+    out = c.library / "iPhone" / gid
+    shared = {c.private / "cache" / "air", c.private / "cache" / "pso", c.private / "run" / "gal_dl_cache"}   # 各款共用的编库缓存：不归任何一款
+    ipa = _ipa_outputs(out)
+    inter = [p for p in out.iterdir() if p.name != "logs" and p not in ipa] if out.is_dir() else []
+    parts = {
+        "unpack": [c.library / "cache" / gid],
+        "intermediate": inter,
+        "shaders": [p for p in game_caches(c, gid) if p not in shared],
+        "mac": [c.library / "games" / gid],
+        "ipa": ipa,
+        "saves": [c.library / "saves" / gid],
+        "logs": [out / "logs"],
+    }
+    return {k: [p for p in v if p.exists() or p.is_symlink()] for k, v in parts.items()}
+
+
+def _part_bytes(paths):
+    by_dev = {}
+    for p in paths:
+        try:
+            by_dev.setdefault(p.lstat().st_dev, []).append(p)
+        except OSError:
+            pass
+    return sum(disk_bytes(v, dev) for dev, v in by_dev.items())
+
+
+def space_survey(c):
+    """每款（gameId 给了只这一款）按部件的占用（字节，按所在卷实测）：parts 可勾选删除，kept 只报不删"""
+    games = c.catalog()["games"]
+    gid = c.r.get("gameId")
+    if gid:
+        games = [g for g in games if g["id"] == gid]
+        if not games:
+            raise Failure("游戏未登记在当前游戏库中。")
+    c.begin("统计各游戏占用的空间")
+    rows = []
+    for g in games:
+        c.check()
+        parts = space_parts(c, g["id"])
+        rows.append(dict(gameId=g["id"], name=g.get("name") or g["id"],
+                         parts=[dict(id=k, title=t, rebuild=r, bytes=_part_bytes(parts[k])) for k, t, r in SPACE_PARTS],
+                         kept=[dict(id=k, bytes=_part_bytes(parts[k])) for k in SPACE_KEPT]))
+    return dict(games=rows)
+
+
+def space_free(c):
+    """删这款勾选的部件（request.parts = 部件 id 列表，只认 SPACE_PARTS 里的）。有任务在跑拒绝；返回各部件删前字节与释放合计"""
+    want = c.r.get("parts")
+    ids = {k for k, _, _ in SPACE_PARTS}
+    if not isinstance(want, list) or not want or any(p not in ids for p in want):
+        raise Failure("要删除的部件不对：只能选" + "、".join(t for _, t, _ in SPACE_PARTS) + "。")
+    with c.lock("execution"), c.lock():
+        gid = c.game()["id"]
+        c.begin("释放空间")
+        parts = space_parts(c, gid)
+        freed, done = 0, []
+        for k in [k for k, _, _ in SPACE_PARTS if k in want]:
+            before = _part_bytes(parts[k])
+            for p in parts[k]:
+                root = c.private if p.is_relative_to(c.private) else c.library
+                _rm(c, root, p)
+            after = _part_bytes([p for p in parts[k] if p.exists() or p.is_symlink()])
+            freed += before - after
+            done.append(dict(id=k, bytes=before - after))
+        return dict(gameId=gid, parts=done, freedBytes=freed)
+
+
+def validate_input(config):
+    if not isinstance(config, dict) or config.get("schema") != 1:
+        raise Failure("不支持的输入映射格式。")
+    targets = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "PLUS", "MINUS",
+               "LEFT", "UP", "RIGHT", "DOWN", "LS_UP", "LS_DOWN", "LS_LEFT", "LS_RIGHT",
+               "RS_UP", "RS_DOWN", "RS_LEFT", "RS_RIGHT"}
+    pad = {"east", "south", "north", "west", "leftStick", "rightStick", "leftShoulder", "rightShoulder",
+           "leftTrigger", "rightTrigger", "menu", "options", "dpadLeft", "dpadUp", "dpadRight", "dpadDown"}
+    axes = {"leftX", "leftY", "rightX", "rightY"}
+    for name in ("keyboard", "mouse", "gamepad", "axes"):
+        if not isinstance(config.get(name), dict):
+            raise Failure("输入映射不完整。")
+        seen = set()
+        for target, binding in config[name].items():
+            if target not in ({"LX", "LY", "RX", "RY"} if name == "axes" else targets):
+                raise Failure("无效输入目标。")
+            if name == "keyboard":
+                if not isinstance(binding, dict) or type(binding.get("code")) is not int or not 0 <= binding["code"] <= 127 or type(binding.get("modifiers", 0)) is not int or not 0 <= binding.get("modifiers", 0) <= 7:
+                    raise Failure("无效键盘映射。")
+                token = (binding["code"], binding.get("modifiers", 0))
+            elif name == "mouse":
+                if type(binding) is not int or not 0 <= binding <= 4:
+                    raise Failure("无效鼠标映射。")
+                token = binding
+            elif name == "gamepad":
+                if not isinstance(binding, str) or binding not in pad:
+                    raise Failure("无效手柄映射。")
+                token = binding
+            else:
+                if not isinstance(binding, dict) or binding.get("source") not in axes or type(binding.get("invert", False)) is not bool:
+                    raise Failure("无效摇杆映射。")
+                token = binding["source"]
+            if token in seen:
+                raise Failure("输入映射存在重复绑定。")
+            seen.add(token)
+    if not isinstance(config.get("deadzone"), (int, float)) or not 0 <= config["deadzone"] < 1:
+        raise Failure("摇杆死区必须在 0 到 1 之间。")
+    options = config.get("mouseOptions")
+    if not isinstance(options, dict) or options.get("mode") not in ("camera", "off"):
+        raise Failure("无效鼠标选项。")
+    for name in ("sensitivityX", "sensitivityY"):
+        if type(options.get(name)) not in (int, float) or not .1 <= options[name] <= 10:
+            raise Failure("鼠标灵敏度必须在 0.1 到 10 之间。")
+    for name in ("invertX", "invertY", "recenter"):
+        if type(options.get(name, False)) is not bool:
+            raise Failure("无效鼠标选项。")
+    return config
+
+
+def save_input(c):
+    config = validate_input(c.r["config"])
+    if c.r.get("gameId"):
+        c.game()
+        target = contained(c.library, c.library / "mappings" / (c.r["gameId"] + ".json"))
+    else:
+        target = c.private / "default-input.json"
+    atomic(target, config)
+    return {}
+
+
+def diagnostics(c):
+    # Keep one path/rule engine, with UI truncation disabled for exported files.
+    import platform
+    import plistlib
+    import subprocess
+
+    def redact(value):
+        return c.redact(value, limit=None)
+
+    task_prefix = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+    def redact_member_component(value):
+        # This position is a generated task ID, not a device identifier.
+        match = task_prefix.match(value)
+        return match[0] + redact(value[match.end():]) if match else redact(value)
+
+    def redact_fields(value):
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {key: redact_fields(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact_fields(item) for item in value]
+        return value
+
+    def probe(args):
+        try:
+            result = subprocess.run(args, env=c.env(), capture_output=True, text=True, timeout=10)
+            if result.returncode:
+                return {"error": f"命令失败（退出码 {result.returncode}）"}
+            return result.stdout.strip() or {"error": "命令输出为空"}
+        except subprocess.TimeoutExpired:
+            return {"error": "命令超过 10 秒"}
+        except OSError:
+            return {"error": "命令无法执行"}
+
+    def launcher_version():
+        # Installed Jobs live below Contents/Resources; source runs have no
+        # launcher identity and must say so rather than invent a version.
+        contents = next((p for p in Path(__file__).resolve().parents if p.name == "Contents"), None)
+        if contents is None:
+            return {"error": "源码运行，没有启动器 Info.plist"}
+        try:
+            info = plistlib.loads((contents / "Info.plist").read_bytes())
+            value = info.get("CFBundleShortVersionString")
+            return value if isinstance(value, str) and value.strip() else {"error": "启动器版本字段缺失"}
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            return {"error": "启动器 Info.plist 无法读取"}
+
+    destination = Path(c.r["path"]).expanduser().resolve()
+    if c.private == destination or c.private in destination.parents or c.library == destination or c.library in destination.parents:
+        raise Failure("诊断包请选择应用数据和游戏库以外的位置。")
+    descriptors = []
+    temporary = None
+    try:
+        flags = 0 if os.name == "nt" else os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+        private_fd = winproc.open_dir_nofollow(c.private) if os.name == "nt" else os.open(c.private, flags)
+        descriptors.append(private_fd)
+        roots = {}
+        # begin persists jobs; reject static root links before that write occurs.
+        for name in ("jobs", "logs"):
+            try:
+                roots[name] = winproc.open_dir_nofollow(name, private_fd) if os.name == "nt" else os.open(name, flags, dir_fd=private_fd)
+                descriptors.append(roots[name])
+            except FileNotFoundError:
+                roots[name] = None
+        c.begin("导出脱敏诊断")
+        if roots["jobs"] is None:
+            roots["jobs"] = winproc.open_dir_nofollow("jobs", private_fd) if os.name == "nt" else os.open("jobs", flags, dir_fd=private_fd)
+            descriptors.append(roots["jobs"])
+
+        fd, name = tempfile.mkstemp(prefix="." + destination.name + ".", suffix=".partial", dir=destination.parent)
+        temporary = Path(name)
+        with os.fdopen(fd, "w+b") as output:
+            created = os.fstat(output.fileno())
+            with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                def write_file(parent_fd, name, member, job=False):
+                    c.check()
+                    info = winproc.stat_at(name, parent_fd) if os.name == "nt" else os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        return
+                    if os.name == "nt":
+                        source_file = winproc.open_file(name, parent_fd)
+                    else:
+                        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                        source_file = os.fdopen(file_fd, "rb")
+                    with source_file as source:
+                        opened = winproc.file_info(source) if os.name == "nt" else os.fstat(source.fileno())
+                        if not stat.S_ISREG(opened.st_mode):
+                            return
+                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                            raise Failure("诊断文件在导出期间发生变化，请重试。")
+                        if job:
+                            limit = DIAGNOSTIC_JOB_LIMIT
+                            if opened.st_size > limit:
+                                raise Failure("诊断任务文件超过 4 MiB 上限，未生成诊断包。")
+                            data = source.read(limit + 1)
+                            if len(data) > limit:
+                                raise Failure("诊断任务文件超过 4 MiB 上限，未生成诊断包。")
+                        else:
+                            source.seek(max(0, opened.st_size - 16000))
+                            data = source.read(16000)
+                    stem, suffix = os.path.splitext(member)
+                    # Archive separators are known structure, not email local-part characters.
+                    public_member = "/".join(redact_member_component(part) for part in stem.split("/")) + suffix
+                    if public_member in archive.namelist() or public_member == "manifest.json":
+                        raise Failure("脱敏后的诊断文件名重复，未生成诊断包。")
+                    # These allowlisted job/log files are text. Invalid UTF-8 is
+                    # replaced, never copied as raw bytes around redaction.
+                    archive.writestr(public_member, redact(data.decode(errors="replace")))
+
+                if roots["jobs"] is not None:
+                    for name in sorted(winproc.listdir(roots["jobs"]) if os.name == "nt" else os.listdir(roots["jobs"])):
+                        if name.endswith(".json"):
+                            write_file(roots["jobs"], name, "jobs/" + name[:-5] + ".txt", job=True)
+
+                def logs(directory_fd, relative=""):
+                    for name in sorted(winproc.listdir(directory_fd) if os.name == "nt" else os.listdir(directory_fd)):
+                        c.check()
+                        info = winproc.stat_at(name, directory_fd) if os.name == "nt" else os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        member = relative + name
+                        if stat.S_ISDIR(info.st_mode):
+                            child = winproc.open_dir_nofollow(name, directory_fd) if os.name == "nt" else os.open(name, flags, dir_fd=directory_fd)
+                            try:
+                                opened = child.info if os.name == "nt" else os.fstat(child)
+                                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                                    raise Failure("诊断目录在导出期间发生变化，请重试。")
+                                logs(child, member + "/")
+                            finally:
+                                winproc.close(child) if os.name == "nt" else os.close(child)
+                        elif name.endswith(".log"):
+                            write_file(directory_fd, name, "logs/" + member)
+                if roots["logs"] is not None:
+                    logs(roots["logs"])
+                manifest = dict(launcher_version=launcher_version(),
+                                macos_version=platform.mac_ver()[0] or {"error": "macOS 版本不可用"},
+                                xcode_version=probe(["/usr/bin/xcodebuild", "-version"]),
+                                mac_model=probe(["/usr/sbin/sysctl", "-n", "hw.model"]))
+                manifest = redact_fields(manifest)
+                # These names have already been sanitized; redacting them again
+                # would hide task UUIDs and break the archive index.
+                manifest["files"] = sorted(archive.namelist() + ["manifest.json"])
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        c.check()
+        current = temporary.stat(follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (created.st_dev, created.st_ino):
+            raise Failure("诊断临时文件在导出期间发生变化，请重试。")
+        os.replace(temporary, destination)
+    except OSError:
+        raise Failure("无法安全读取或写入诊断文件，未更新诊断包。") from None
+    finally:
+        for descriptor in reversed(descriptors):
+            winproc.close(descriptor) if os.name == "nt" else os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return dict(outputPath=str(destination))

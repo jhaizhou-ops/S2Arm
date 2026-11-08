@@ -1,0 +1,98 @@
+# 出包目标表（唯一一处）：每行一个（平台, 系统大版本, GPU 架构），管线归档 / 函数体动态库按行出。新增系统版本、新机型只改这里。
+# 列：平台	系统大版本	GPU 架构	Metal	状态
+#   Metal：4 = Metal 4 系统（iOS / macOS 26 起，A14 / M1 起的 GPU）；3 = Metal 3（iOS 18、macOS 15，以及 26 / 27 上 A12 / A13）：
+#     运行时走 Metal 3（通用出包 shader_pack.sh 自动切 Metal 3 老格式）
+#   状态：出 = Xcode 27.1 工具链出得来；拒：<原因>：<工具链原话> = 不出这个组合（无此组合 / 工具链拒绝），推导到它就报红，不静默跳过
+# 依据（10-29 wire-c 实测，Xcode 27.1 / Metal 工具链 32023.921）：
+#   iOS 候选取 Xcode 设备库 device_traits.db 的 DeploymentVariant：18 = 18.0 行，26 = 26.0 行，27 = 26.0 ∪ 27.0 行（库只在特征变化时记一行，26 起的新 iPad 只有 26.0 行）；
+#   macOS 候选 g13–g18 × g/s/c/d，metal-tt 报 invalid architecture 的名字不进表（例 g14c、g15c、g16c）。
+#   每行用 metal-tt -<平台>-version-min <版本>.0 出一支动态库，Metal 4 行再用 applegpu-nt -platform_version <平台> <版本>.0 -N 出一份 MTL4 归档，都过记「出」。
+#   macOS 15 的 g17* / g18g、macOS 26 的 g17d / g18g：工具链按部署目标拒（这些芯片随更新的系统发布）；g13c：工具链没有它的翻译器；iOS 18 g9p：编译器内部错误。
+# 平台	系统大版本	GPU 架构	Metal	状态
+ios	18	applegpu_g11p	3	出
+ios	18	applegpu_g12p	3	出
+ios	18	applegpu_g13g	3	出
+ios	18	applegpu_g13p	3	出
+ios	18	applegpu_g14g	3	出
+ios	18	applegpu_g14p	3	出
+ios	18	applegpu_g15g	3	出
+ios	18	applegpu_g15p	3	出
+ios	18	applegpu_g16g	3	出
+ios	18	applegpu_g16p	3	出
+ios	18	applegpu_g17p	3	出
+ios	18	applegpu_g9p	3	拒：工具链拒绝（编译器内部错误）：note: Internal compiler error.
+ios	26	applegpu_g11p	3	出
+ios	26	applegpu_g12p	3	出
+ios	26	applegpu_g13g	4	出
+ios	26	applegpu_g13p	4	出
+ios	26	applegpu_g14g	4	出
+ios	26	applegpu_g14p	4	出
+ios	26	applegpu_g15g	4	出
+ios	26	applegpu_g15p	4	出
+ios	26	applegpu_g16g	4	出
+ios	26	applegpu_g16p	4	出
+ios	26	applegpu_g17g	4	出
+ios	26	applegpu_g17p	4	出
+ios	26	applegpu_g18p	4	出
+ios	27	applegpu_g11p	3	出
+ios	27	applegpu_g12p	3	出
+ios	27	applegpu_g13g	4	出
+ios	27	applegpu_g13p	4	出
+ios	27	applegpu_g14g	4	出
+ios	27	applegpu_g14p	4	出
+ios	27	applegpu_g15g	4	出
+ios	27	applegpu_g15p	4	出
+ios	27	applegpu_g16g	4	出
+ios	27	applegpu_g16p	4	出
+ios	27	applegpu_g17g	4	出
+ios	27	applegpu_g17p	4	出
+ios	27	applegpu_g18p	4	出
+ios	27	applegpu_g19p	4	出
+macos	15	applegpu_g13c	3	拒：工具链拒绝（Xcode 27.1 没有这个架构的翻译器）：No available translator for 'applegpu_g13c'
+macos	15	applegpu_g13d	3	出
+macos	15	applegpu_g13g	3	出
+macos	15	applegpu_g13s	3	出
+macos	15	applegpu_g14d	3	出
+macos	15	applegpu_g14g	3	出
+macos	15	applegpu_g14s	3	出
+macos	15	applegpu_g15d	3	出
+macos	15	applegpu_g15g	3	出
+macos	15	applegpu_g15s	3	出
+macos	15	applegpu_g16g	3	出
+macos	15	applegpu_g16s	3	出
+macos	15	applegpu_g17d	3	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 15.0': 'applegpu_g17d'
+macos	15	applegpu_g17g	3	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 15.0': 'applegpu_g17g'
+macos	15	applegpu_g17s	3	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 15.0': 'applegpu_g17s'
+macos	15	applegpu_g18g	3	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 15.0': 'applegpu_g18g'
+macos	26	applegpu_g13c	4	拒：工具链拒绝（Xcode 27.1 没有这个架构的翻译器）：No available translator for 'applegpu_g13c'
+macos	26	applegpu_g13d	4	出
+macos	26	applegpu_g13g	4	出
+macos	26	applegpu_g13s	4	出
+macos	26	applegpu_g14d	4	出
+macos	26	applegpu_g14g	4	出
+macos	26	applegpu_g14s	4	出
+macos	26	applegpu_g15d	4	出
+macos	26	applegpu_g15g	4	出
+macos	26	applegpu_g15s	4	出
+macos	26	applegpu_g16g	4	出
+macos	26	applegpu_g16s	4	出
+macos	26	applegpu_g17d	4	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 26.0': 'applegpu_g17d'
+macos	26	applegpu_g17g	4	出
+macos	26	applegpu_g17s	4	出
+macos	26	applegpu_g18g	4	拒：无此组合（这块芯片随更新的系统发布，工具链按部署目标拒）：Architectures not supported for deployment target 'macOS 26.0': 'applegpu_g18g'
+macos	27	applegpu_g13c	4	拒：工具链拒绝（Xcode 27.1 没有这个架构的翻译器）：No available translator for 'applegpu_g13c'
+macos	27	applegpu_g13d	4	出
+macos	27	applegpu_g13g	4	出
+macos	27	applegpu_g13s	4	出
+macos	27	applegpu_g14d	4	出
+macos	27	applegpu_g14g	4	出
+macos	27	applegpu_g14s	4	出
+macos	27	applegpu_g15d	4	出
+macos	27	applegpu_g15g	4	出
+macos	27	applegpu_g15s	4	出
+macos	27	applegpu_g16g	4	出
+macos	27	applegpu_g16s	4	出
+macos	27	applegpu_g17d	4	出
+macos	27	applegpu_g17g	4	出
+macos	27	applegpu_g17s	4	出
+macos	27	applegpu_g18g	4	出

@@ -1,0 +1,14 @@
+# 款 → 中文短名，只给兼容性报告（tools/compatibility_report.py 玩家名单的 name 列）用。11-04 起 App 桌面显示名不再查本表：一律取游戏自带 control.nacp 标题（pack/display_name.py）
+acnh	动森
+botw	塞尔达
+d3	暗黑3
+d2r	暗黑2
+witcher3	巫师3
+octopath2	八方2
+mhrise	怪猎
+mk8d	马车8
+silksong	丝之歌
+xc3	异度神剑3
+smg2	银河2
+t0100000000010000	奥德赛
+t010092a0172e4000	双人成行

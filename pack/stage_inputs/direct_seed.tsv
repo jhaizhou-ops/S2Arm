@@ -1,0 +1,19 @@
+# direct_seed 阶段（pack/stage_direct_seed.sh，审计 #1534 P1-54 B3：管线种子表轻阶段）的源码输入声明：键 = 直连库阶段键 + 跑局知识 seen.tsv 内容 + 本表「入」的文件（pack/stage_keyfiles.sh stage_files_key）。
+# 「入」= 改了会改产物（pso_manifest.tsv）；「外」= 基础设施或效果已按内容进键，第三列写理由。
+# 起点：pack/stage_direct_seed.sh。tests/stage_keys_test.sh 用 tools/stage_inputs.py 从起点扫依赖闭包，闭包里有本表没列的文件就报红（新依赖要在这里归类）。
+入	pack/stage_direct_seed.sh
+入	graphics/tools/direct/pso_seed.py	生成种子表
+入	graphics/tools/direct/pso_layout.py	量 R 行字节数（交 pso_seed.py 核长度）
+入	graphics/tools/direct/pso_layout.json	同上
+外	graphics/tools/direct/run_knowledge.py	出 seen.tsv：seen.tsv 按内容进键，推导改了而内容没变的款不重出
+外	graphics/tools/direct/fout_want.py	run_knowledge.py 引入，只出直连库阶段的输出类型变体表，不进 seen.tsv
+外	graphics/tools/direct/se_want.py	同上（采样模拟变体表）
+外	graphics/tools/direct/run_pairs.py	同上（配对表；run_knowledge.py 只借它的键格式与来源列举，来源列举的效果在 seen.tsv 内容里）
+外	graphics/tools/direct/pso_layout_gen.m	只在 Mac 上导出 pso_layout.json（已进键）
+外	tools/addr_need.py	run_knowledge.py 经它读程序号、定来源目录：读到的内容按 seen.tsv 进键
+外	pack/roots.sh	产物根版本管理（建 / 提交 / 回滚）
+外	pack/stage_keyfiles.sh	算键脚本本身
+外	tools/clonedir.py	roots.sh 用的 APFS 克隆工具，只搬文件
+外	tools/direct_shards.py	roots.sh 提交后记直连库分片清点日志，不改产物
+外	tools/nso_plain.py	tools/addr_need.py 引入（读 NSO），种子阶段只用它读 main.npdm 程序号
+外	tools/plock.sh	roots.sh 的提交锁

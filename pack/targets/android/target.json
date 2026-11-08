@@ -1,0 +1,123 @@
+{
+  "schema": "s2a.target.v1",
+  "id": "android",
+  "execution": "host",
+  "entry": "pack/jobs/target_main.py",
+  "host": {
+    "requires": {
+      "os": [
+        "macos",
+        "linux"
+      ],
+      "arch": [
+        "arm64",
+        "x64"
+      ],
+      "tools": [
+        "dotnet-sdk-10",
+        "python3",
+        "android-sdk"
+      ]
+    }
+  },
+  "device": {
+    "os": [
+      "android"
+    ],
+    "minVersion": 29
+  },
+  "recipes": [
+    {
+      "id": "android",
+      "operation": "android",
+      "stages": [
+        "input.validate",
+        "input.unpack",
+        "sysdata",
+        "aoc",
+        "romfsidx",
+        "direct",
+        "rewrite",
+        "shaders",
+        "bundle.apk"
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "id": "input.validate",
+      "description": "检查所选游戏",
+      "implementation": "pack/targets/android/adapter.py:build",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "input.unpack",
+      "description": "选择并解包",
+      "implementation": "pack/oneclick/oneclick.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "sysdata",
+      "description": "系统数据",
+      "implementation": "pack/refresh.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "aoc",
+      "description": "追加内容",
+      "implementation": "pack/refresh.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "romfsidx",
+      "description": "资源索引",
+      "implementation": "pack/refresh.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "direct",
+      "description": "离线 Vulkan 直连库（NVN 款）",
+      "implementation": "pack/stage_direct.sh",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "enabled": false,
+      "condition": "S2A_PACK_PLAT=android（#783）：出库 / 发布目标 android，产物根 shaders/direct/b-<链>-vk/；本段之前先跑抽取阶段（pack/stage_extract.sh，抽取没成就不跑本段）。enabled=false（11-04）：安卓运行时未读这份 LibPack，出包跳过它专用的抽取与本段，进度 / 汇总标 skipped、不伪称预编；已存在的有效 shaders/vulkan/direct 离线库照常纳入与校验，独立出库 / 诊断入口照留。恢复条件写死：#1434 接上运行时读库的同一个 PR 把 enabled 改回 true（默认开）；开着时抽取与本段任何非 0 都打黄、照常出包（安卓运行时现编）。"
+    },
+    {
+      "id": "rewrite",
+      "description": "安卓改写",
+      "implementation": "android/tools/make_pack.py",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    },
+    {
+      "id": "shaders",
+      "description": "离线 Vulkan 着色器包（VKPB）",
+      "implementation": "android/tools/bake_shaders.py（package.py 出包期执行；同共享流水线的 nxsh_extract / 程序表读取器 / S2A.ShBake bake --vulkan-profile），产物经 android/tools/attach_shaders.py 挂进资源包并经 game_apk.py --shader-pack 打成 APK assets/game/shaders.zip",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared",
+      "condition": "S2A_VULKAN_PROFILE=<真机导出的 profile.json>（运行时按 S2A_SHADER_PROFILE_OUT 写出，host 不能猜设备能力）；S2A_VULKAN_REFS 为空格分隔的真机参考缓存目录列表，可省。包 manifest 绑定安装 revision 的内容根（index 去 shaders/ 行），要等 bundle.apk 里 make_pack 写出 index 才存在，所以在出包期执行而不在 refresh 共享阶段；未提供 profile 时明示跳过、不出离线包（不伪造），设备端按现行口径首遇现编。"
+    },
+    {
+      "id": "bundle.apk",
+      "description": "构建签名及资源账本",
+      "implementation": "pack/targets/android/package.py",
+      "execution": "build",
+      "startsGame": false,
+      "observation": "declared"
+    }
+  ]
+}
