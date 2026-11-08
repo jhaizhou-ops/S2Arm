@@ -83,7 +83,7 @@ class InputsKey(unittest.TestCase):
         for p, b in {"runtime/src/a.c": "int a;", "runtime/src/b.h": "#define B", "docs/x.md": "doc", "Makefile": "all:"}.items():
             (self.r / p).parent.mkdir(parents=True, exist_ok=True); (self.r / p).write_text(b)
         (self.r / "pack/stage_inputs").mkdir(parents=True)
-        (self.r / "pack/stage_inputs/shell.tsv").write_text("# 表\n入\tnative/src\n入\tMakefile\n外\tdocs/x.md\n")
+        (self.r / "pack/stage_inputs/shell.tsv").write_text("# 表\n入\truntime/src\n入\tMakefile\n外\tdocs/x.md\n")
         self.commit()
 
     def commit(self):
@@ -109,7 +109,7 @@ class InputsKey(unittest.TestCase):
         self.assertNotEqual(self.key(), k3)
 
     def test_missing_path_reported(self):
-        (self.r / "pack/stage_inputs/shell.tsv").write_text("入\tnative/gone.c\n"); self.commit()
+        (self.r / "pack/stage_inputs/shell.tsv").write_text("入\truntime/gone.c\n"); self.commit()
         sys.path.insert(0, str(ROOT)); from pack.shell import manifest
         with self.assertRaises(manifest.ShellError): manifest.inputs_key(self.r)
 

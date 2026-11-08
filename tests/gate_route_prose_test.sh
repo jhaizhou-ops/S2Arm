@@ -15,7 +15,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; bad=0
 ck() { if [ "$2" = "$3" ]; then echo "通 $1：期望 $3 → 真结果 $2"; else echo "不通 $1：期望 $3 → 真结果 $2"; bad=1; fi; }
 R=$T/r; mkdir -p $R/tools $R/tests; cd $R || exit 1; git init -q
-cp "$H/tools/gate_route.py" tools/; printf '# 合成路由表\nios\tnative/\n' > tools/gate_route.tsv
+cp "$H/tools/gate_route.py" tools/; printf '# 合成路由表\nios\truntime/\n' > tools/gate_route.tsv
 for f in b d h s t u v; do echo 'echo x' > tools/$f.sh; done; for f in f q; do echo 'print(1)' > tools/$f.py; done; echo 'echo r' > tools/r.sh
 printf '#!/bin/bash\necho "【红】缺产物（先跑 tools/b.sh）"; exit 1\n' > tools/a.sh
 printf '#!/bin/bash\nbash -c '"'"'source tools/d.sh; d_run 单测'"'"'\n' > tools/c.sh

@@ -73,7 +73,7 @@ rm -rf "$T"
 T=$(mktemp -d); git clone -q --shared "$H" "$T/c" 2> /dev/null && (cd "$T/c" && git checkout -q "$(git -C "$H" rev-parse HEAD)" 2> /dev/null
   cp "$H/tools/gate_route.py" "$H/tools/gate_decl.py" tools/ && cp "$H/android/core-link/gate.sh" android/core-link/gate.sh
   #   按行首删整行，不写死行尾文件清单（11-01：#1209 往这行加了 nvn_dirty.c，整行精确匹配删不掉，负对照假红）
-  sed -i.bak '/^# 门禁路由：native\/src\/ /d' android/core-link/gate.sh
+  sed -i.bak '/^# 门禁路由：runtime\/src\/ /d' android/core-link/gate.sh
   rm -f android/core-link/gate.sh.bak
   grep -q '^# 门禁路由：runtime/src/' android/core-link/gate.sh && echo "负对照没删掉 runtime/src/ 登记行"
   python3 tools/gate_route.py hooks runtime/src/alt.c) > "$T/o" 2>&1

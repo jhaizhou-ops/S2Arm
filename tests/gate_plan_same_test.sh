@@ -128,7 +128,7 @@ check_tier '.github/ISSUE_TEMPLATE/request.yaml' doc
 check_tier 'android/README.md' doc
 check_tier 'docs/ordinary.json' doc   # 非指定敏感路径仍维持原规则
 check_tier $'docs/名单_60帧.tsv\nREADME.md' tool
-check_tier $'skills/gfx-triage/SKILL.md\nnative/src/example.c' full
+check_tier $'skills/gfx-triage/SKILL.md\nruntime/src/example.c' full
 check_tier 'tools/example.py' tool
 check_tier 'tests/visual/example.sh' full
 check_tier $'docs/名单_60帧.tsv\ndocs/发布验收.tsv' tool

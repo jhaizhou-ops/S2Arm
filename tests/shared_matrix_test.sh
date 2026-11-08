@@ -123,7 +123,7 @@ ck "新增共用模块安卓没接 → 红（rc=${r}）" '[ $r != 0 ] && echo "$
 printf 'runtime/src/late.c\t补登记\ttester\t2026-01-02\n' >> "$R/docs/安卓接入矩阵_例外.tsv"
 o=$(run --check); r=$?
 ck "新缺口登记例外后 → 绿（rc=${r}）" '[ $r = 0 ]'
-sed_edit '/^native\/src\/late.c/d' "$R/docs/安卓接入矩阵_例外.tsv"
+sed_edit '/^runtime\/src\/late.c/d' "$R/docs/安卓接入矩阵_例外.tsv"
 
 # 把 oldgap 接上：进 core 名单 + 安卓调用方 → 缺口收窄 → 基线条目变旧 → 【黄】但绿
 sed_edit 's/set(core alpha)/set(core alpha oldgap)/' "$R/android/CMakeLists.txt"

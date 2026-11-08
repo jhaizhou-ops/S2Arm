@@ -32,7 +32,7 @@ class BuildTests(JobCase):
     def test_developer_run_mac_preserves_iphone_va_default_and_overrides(self):
         # Run the real adapter with a synthetic host; no game, saves or GPU.
         repo = self.root / "dev repo"
-        for directory in ("native", "tools", "build", "input", "home"):
+        for directory in ("runtime", "tools", "build", "input", "home"):
             (repo / directory).mkdir(parents=True)
         shutil.copyfile(ROOT / "runtime/run_mac.sh", repo / "runtime/run_mac.sh")
         (repo / "input/main.patched.bin").touch()

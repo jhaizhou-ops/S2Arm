@@ -15,6 +15,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import archs
 
+REAL_DEVICES = bool(os.environ.get('S2A_OUR_DEVICES')) or (Path(archs.ROOT) / 'pack' / 'our_devices.tsv').exists()
+NO_REAL = '我方真机表 pack/our_devices.tsv 是维护方私有（S2A_OUR_DEVICES 指它才测）'
 ENV = ('S2A_PSO_ARCHS', 'S2A_PSO_ARCHS_ALL', 'S2A_PACK_PURPOSE', 'S2A_PSO_OS', 'S2A_MAC_OS', 'S2A_PSO_TARGETS', 'S2A_OUR_DEVICES', 'S2A_HOST_PAIR')
 
 
@@ -39,10 +41,12 @@ class TestPairs(unittest.TestCase):
             os.environ['S2A_OUR_DEVICES'] = str(d)
 
     # ---- 仓库真表 ----
+    @unittest.skipUnless(REAL_DEVICES, NO_REAL)
     def test_real_ios_dev_is_test_phones(self):
         """测试机包只有在用测试机那一对：两台 iPhone 17 Pro Max 都是 g18p / iOS 27；Duo（g19p）标不在用，不出（10-29 总指挥）"""
         self.assertEqual(archs.pairs('ios', 'pso')[0], [('applegpu_g18p', 27, 4)])
 
+    @unittest.skipUnless(REAL_DEVICES, NO_REAL)
     def test_real_mac_dev_each_run_machine(self):
         """普查三台：各台只出自己那一对，且三对都是 Metal 4「出」（缺桩 0）——不是三架构 × 两版本的 6 对"""
         want = [('applegpu_g17s', 26, 4), ('applegpu_g15g', 27, 4), ('applegpu_g16s', 27, 4)]
@@ -58,6 +62,7 @@ class TestPairs(unittest.TestCase):
         with self.assertRaisesRegex(archs.TargetError, 'applegpu_g17s.macos15'):
             archs.pairs('macos', 'pso')
 
+    @unittest.skipUnless(REAL_DEVICES, NO_REAL)
     def test_real_our_devices_archs_ios_only(self):
         """pack/jobs/target.py 用的我方 iPhone 架构集合：表里加了 Mac 行也只取 iOS"""
         self.assertEqual(archs.our_devices_archs(), ['applegpu_g18p', 'applegpu_g19p'])

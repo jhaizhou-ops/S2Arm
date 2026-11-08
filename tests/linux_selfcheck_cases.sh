@@ -205,7 +205,7 @@ class LinuxSelfcheck(unittest.TestCase):
             shutil.copyfile(H / 'tools' / f, self.r / 'tools' / f)
         self.write('tools/gate_route.py', 'import glob, subprocess, sys\nc = sys.argv[1]\n'
                    'if c == "why": print("fixture")\nelif c == "tests": print("\\n".join(sorted(glob.glob("tests/*_test.sh"))))\n'
-                   'elif c == "ios": print("yes")\nelif c == "hooks": print("runtime/gate.sh\\nplatforms/android/gate.sh")\n')
+                   'elif c == "ios": print("yes")\nelif c == "hooks": print("runtime/gate.sh\\nandroid/gate.sh")\n')
         self.git('add', '.'); self.git('commit', '-qm', 'pre fixture'); self.git('branch', '-M', 'main')
         bare = self.r.parent / (self.r.name + '-origin.git')
         subprocess.run(['git', 'clone', '-q', '--bare', str(self.r), str(bare)], check=True)

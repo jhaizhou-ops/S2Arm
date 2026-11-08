@@ -15,7 +15,7 @@ trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 R=$T/r; mkdir -p "$R/tools" "$R/runtime/src/tests" "$R/android" "$R/graphics/nvn/gfx/nvn" "$R/docs"
 cp "$H/tools/layer_edge.py" "$H/tools/layer_map.py" "$R/tools/"
-printf 'runtime/src/\t核心\t原生\t共用层\nplatforms/plat.h\t平台接口\t契约\t共用层\nplatforms/android/\t平台壳\t安卓\t安卓自己\ngfx/nvn/gfx/nvn/\t图形后端\t直连前端\t共用层\ntools/\t工具与测试\t工具\t工具与文档\ndocs/\t文档与约定\t文档\t工具与文档\n' > "$R/tools/layer_map.tsv"
+printf 'runtime/src/\t核心\t原生\t共用层\nplatform/plat.h\t平台接口\t契约\t共用层\nandroid/\t平台壳\t安卓\t安卓自己\ngraphics/nvn/gfx/nvn/\t图形后端\t直连前端\t共用层\ntools/\t工具与测试\t工具\t工具与文档\ndocs/\t文档与约定\t文档\t工具与文档\n' > "$R/tools/layer_map.tsv"
 echo '// 契约' > "$R/platform/plat.h"; echo '// 安卓私有' > "$R/android/fault.h"
 echo '// 公开' > "$R/graphics/nvn/gfx/nvn/nvn_backend.h"; echo '// 内部' > "$R/graphics/nvn/gfx/nvn/nvn_mtl.h"; echo x > "$R/docs/a.md"
 printf '#include "../../platform/plat.h"\nint a;\n' > "$R/runtime/src/a.c"
@@ -24,7 +24,7 @@ chk() { (cd "$R" && git add -A > /dev/null && python3 tools/layer_edge.py check 
 printf '#include "../../platform/plat.h"\n#include "../../android/fault.h"\nint a;\n' > "$R/runtime/src/a.c"
 o1=$(chk); r1=$?
 ck "① 核心 → 安卓 → 红、点名 a.c:2 与 R-01；含契约 plat.h 不红（rc=${r1}）" '[ $r1 = 1 ] && grep -q "【红】runtime/src/a.c:2 核心反向包含平台实现 android/fault.h（R-01" <<< "$o1" && ! grep -q "plat.h" <<< "$o1"'
-printf '# 表头\nR-01\tnative/src/a.c\tplatforms/android/fault.h\t单测登记：清零条件 删 include\n' > "$R/tools/layer_exempt.tsv"
+printf '# 表头\nR-01\truntime/src/a.c\tandroid/fault.h\t单测登记：清零条件 删 include\n' > "$R/tools/layer_exempt.tsv"
 o2=$(chk); r2=$?
 ck "② 登记进豁免表 → 绿（rc=${r2}）" '[ $r2 = 0 ] && grep -q "豁免 1 行；未登记 0、豁免过时 0" <<< "$o2"'
 printf '#include "../../platform/plat.h"\nint a;\n' > "$R/runtime/src/a.c"
