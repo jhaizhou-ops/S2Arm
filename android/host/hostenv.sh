@@ -14,7 +14,7 @@ hostenv_android_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # （#1207 复审三条）：ANDROID_HOME → ANDROID_SDK_ROOT → local.properties 的
 # sdk.dir（多行末行生效、值取 = 后整行可含空格）→ Darwin ~/Library/Android/sdk
 # → 其它 ~/Android/Sdk。本脚本不再各自解析，避免与出包口径漂移。
-hostenv_repo=$(cd "$hostenv_android_dir/../.." && pwd -P)
+hostenv_repo=$(cd "$hostenv_android_dir/.." && pwd -P)
 hostenv_py=${S2A_PY:-${PY:-python3}}
 [ -f "$hostenv_repo/pack/targets/android/package.py" ] \
     || hostenv_fail "缺 $hostenv_repo/pack/targets/android/package.py（SDK 路径解析唯一实现）"

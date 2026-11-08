@@ -17,7 +17,7 @@
 # usual host cache (~/.gradle) and the debug signing key stays in ~/.android.
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")/.." && pwd -P)
-repo_dir=$(cd "$android_dir/../.." && pwd -P)
+repo_dir=$(cd "$android_dir/.." && pwd -P)
 cd "$android_dir"
 
 # SDK 解析 + 固定包核对 + JDK 17 + 缓存目录 + .NET 透传：与 prepare.sh / gate-apk.sh 共用。

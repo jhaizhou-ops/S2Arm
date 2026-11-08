@@ -7,7 +7,7 @@
 # install/prepare commands (owner rule), never a silent skip.
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")/.." && pwd -P)
-repo_dir=$(cd "$android_dir/../.." && pwd -P)
+repo_dir=$(cd "$android_dir/.." && pwd -P)
 red() { printf '【红】安卓宿主 APK 门禁：%s\n' "$1" >&2; exit 1; }
 # 宿主门禁只在 macOS 有意义（sandbox-exec 断网、NDK darwin prebuilt）；Linux 主机走
 # docker 后端，本步骤不适用直接过。

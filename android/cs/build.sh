@@ -8,7 +8,7 @@
 # (default $HOME/.cache/s2arm-build) and build/.
 set -euo pipefail
 cs_dir=$(cd "$(dirname "$0")" && pwd -P)
-repo_dir=$(cd "$cs_dir/../../.." && pwd -P)
+repo_dir=$(cd "$cs_dir/../.." && pwd -P)
 out=$repo_dir/build/android-cs
 # 可复现：托管编译把仓库根映射为固定虚拟路径。Roslyn 给 [GeneratedRegex] 的 file 局部类型名
 # 带源文件路径哈希（如 <RegexGenerator_g>F…__名字），不映射会随挂载目录/两路而变。

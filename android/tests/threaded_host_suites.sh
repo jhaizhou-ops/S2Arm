@@ -5,7 +5,7 @@
 # 不在默认门禁的 control-tests 十连、writers-gate、run_thread 登记在 tests/gate_not_default.tsv。
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")/.." && pwd -P)
-repo_dir=$(cd "$android_dir/../.." && pwd -P)
+repo_dir=$(cd "$android_dir/.." && pwd -P)
 test_python=${S2A_PY:-python3}
 dotnet_bin=${DOTNET:-$(command -v dotnet || true)}
 [ -n "$dotnet_bin" ] || { echo "🔴 拆线程主机套件：找不到 dotnet（需要 .NET 10 SDK；可设 DOTNET=<路径>）"; exit 1; }

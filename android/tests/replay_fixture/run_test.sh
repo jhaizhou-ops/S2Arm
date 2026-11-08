@@ -5,7 +5,7 @@
 #   与提交的 samples/ 逐字节比（证明生成器与金样一致、可重现）。
 set -euo pipefail
 D=$(cd "$(dirname "$0")" && pwd)
-R=$(cd "$D/../../../.." && pwd)
+R=$(cd "$D/../../.." && pwd)
 CC=${CC:-cc}
 CF="-std=c11 -Wall -Wextra -Werror -O1 -I$D -I$R/graphics/nvn/gfx/nvn -I$R/graphics/nvn/gfx/nvn/include"
 out=$(mktemp -d "${TMPDIR:-/tmp}/rfx-build.XXXXXX")

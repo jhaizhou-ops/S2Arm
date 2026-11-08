@@ -222,8 +222,8 @@ android {
     // NativeAOT probe from cs/build.sh (docker/build.sh runs it first); absent = not packaged
     // ... and the license / notice files of what they package (assets/licenses)
     sourceSets { main {
-        jniLibs.srcDirs += ["${rootDir}/../../build/android-cs/jniLibs"]
-        assets.srcDirs += ["${rootDir}/../../build/android-cs/assets"]
+        jniLibs.srcDirs += ["${rootDir}/../build/android-cs/jniLibs"]
+        assets.srcDirs += ["${rootDir}/../build/android-cs/assets"]
         if (gameDir) {
             assets.srcDirs += ["${gameDir}/assets"]
             res.srcDirs += ["${gameDir}/res"]

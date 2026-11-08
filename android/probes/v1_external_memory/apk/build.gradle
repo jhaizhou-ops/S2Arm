@@ -2,7 +2,7 @@
 // Native code is prebuilt by ../build.sh; -Pv1.out points at its output directory.
 plugins { id 'com.android.application' }
 
-def v1Out = project.findProperty('v1.out') ?: "${rootDir}/../../../../../build/android-probes/v1_external_memory"
+def v1Out = project.findProperty('v1.out') ?: "${rootDir}/../../../../build/android-probes/v1_external_memory"
 layout.buildDirectory.set(file("${v1Out}/apk"))
 
 android {

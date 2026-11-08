@@ -252,7 +252,7 @@ if [ -n "$FX" ]; then
 for d in sys.argv[2:]:
     i = romfs_list.scan(d).identity if os.path.isdir(d) else "-"
     if i is None: sys.exit(1)
-    print(d, i)' "$P/../gfx/nvn/tools" romfs aoc && { [ ! -f aoc.tsv ] || shasum -a 256 < aoc.tsv; }) || die "盘点不了 $FX 的 romfs/ 或 aoc/"
+    print(d, i)' "$P/../graphics/nvn/tools" romfs aoc && { [ ! -f aoc.tsv ] || shasum -a 256 < aoc.tsv; }) || die "盘点不了 $FX 的 romfs/ 或 aoc/"
   K=$( { cat "$FX/unpack.tsv"; echo "$KM"; echo "$KA"; } | shasum -a 256 | cut -c1-16); X=$FX
   lap 解包; t "③ 解包：用给的解包目录 ${FX}（不解）"; UNPACK=reused
 else

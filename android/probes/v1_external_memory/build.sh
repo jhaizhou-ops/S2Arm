@@ -11,7 +11,7 @@
 # Gradle cache (the APK build runs `gradle --offline`, so the cache must already hold AGP 9.4.1).
 set -euo pipefail
 probe_dir=$(cd "$(dirname "$0")" && pwd)
-repo_dir=$(cd "$probe_dir/../../../.." && pwd)
+repo_dir=$(cd "$probe_dir/../../.." && pwd)
 image=${S2A_ANDROID_IMAGE:-sha256:4cbb20d3398c3a28eb95c07bf99352834bb622951426976ca8438a7fb2498321}
 cache=${S2A_ANDROID_CACHE:-s2arm-owned-pr-android-cache}
 rel=android/probes/v1_external_memory

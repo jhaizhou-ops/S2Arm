@@ -63,8 +63,8 @@ targets:
       CLANG_ENABLE_OBJC_ARC: YES
       GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", S2A_INPUT_LAB=1]
       HEADER_SEARCH_PATHS:
-        - "$(SRCROOT)/../../native/include"
-        - "$(SRCROOT)/../../native/src"
-        - "$(SRCROOT)/../../native/ios"
-        - "$(SRCROOT)/../../native/ns2pro/include"
+        - "$(SRCROOT)/../../runtime/include"
+        - "$(SRCROOT)/../../runtime/src"
+        - "$(SRCROOT)/../../ios"
+        - "$(SRCROOT)/../../runtime/ns2pro/include"
       OTHER_LDFLAGS: ["$(inherited)", "$(S2A_LAB_WEAK)"]   # 放行参数由 build.sh 按源码「弱链接[lab]」登记生成后传入（tools/weak_link_decl.py flags lab）

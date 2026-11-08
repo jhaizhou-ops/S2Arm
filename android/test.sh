@@ -3,7 +3,7 @@
 # pinned offline rewriter sources and Python Capstone 5.0.7 / LZ4 4.4.5.
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")" && pwd)
-repo_dir=$(cd "$android_dir/../.." && pwd)
+repo_dir=$(cd "$android_dir/.." && pwd)
 # 输出目录按运行隔离（#919）：同树两份门禁并行、或上一次运行被中断时，
 # 固定目录 build/android-host-tests 里的半写 .class / 半写 boot-spec 会被当成输入，
 # 红成 java.lang.ClassFormatError: Truncated class file / JSONDecodeError。
@@ -346,7 +346,7 @@ s2a_gate_step java -cp "$out/java" org.s2arm.android.GameSessionAdmissionTest
 s2a_gate_step java -cp "$out/java" org.s2arm.android.GameFingerprintTest
 s2a_gate_step "$PY" "$android_dir/tests/android_file_stamp_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/verified_source_test.py"
-s2a_gate_step "$PY" "$android_dir/../../graphics/vulkan/wsi/tests/startup_surface_test.py"
+s2a_gate_step "$PY" "$android_dir/../graphics/vulkan/wsi/tests/startup_surface_test.py"
 # 11-01 接线（扫描分母按 tests 目录后查出没人调）：离线宿主回归 + 固定 NDK 只编译不执行，本机负载 30 时合计约 40 秒。
 s2a_gate_step "$PY" "$android_dir/core-link/alt-tests/run.py" --out "$out/alt-tests"
 s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/writers-gate/renew_model.py" --out "$out/renew-model"

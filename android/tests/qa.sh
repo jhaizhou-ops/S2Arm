@@ -17,7 +17,7 @@
 set -euo pipefail
 
 android_dir=$(cd "$(dirname "$0")/.." && pwd)
-repo_dir=$(cd "$android_dir/../.." && pwd)
+repo_dir=$(cd "$android_dir/.." && pwd)
 out=$repo_dir/build/qa
 skip_apk=0
 skip_build=0

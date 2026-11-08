@@ -7,7 +7,7 @@
 # S2A_ANDROID_IMAGE overrides the image (default: the s2arm-android-build:1 digest below).
 set -euo pipefail
 probe_dir=$(cd "$(dirname "$0")" && pwd)
-repo_dir=$(cd "$probe_dir/../../../.." && pwd)
+repo_dir=$(cd "$probe_dir/../../.." && pwd)
 image=${S2A_ANDROID_IMAGE:-sha256:4cbb20d3398c3a28eb95c07bf99352834bb622951426976ca8438a7fb2498321}
 rel=android/probes/v0_external_memory
 out_rel=build/android-probes/v0_external_memory

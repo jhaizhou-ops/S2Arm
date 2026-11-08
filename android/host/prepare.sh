@@ -6,7 +6,7 @@
 # dependency-identity receipt into S2A_BUILD_CACHE atomically, last.
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")/.." && pwd -P)
-repo_dir=$(cd "$android_dir/../.." && pwd -P)
+repo_dir=$(cd "$android_dir/.." && pwd -P)
 cd "$android_dir"
 . "$android_dir/tools/ndk_toolchain.sh"
 . "$android_dir/host/hostenv.sh"

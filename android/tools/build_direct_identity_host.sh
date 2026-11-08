@@ -5,7 +5,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 android=$(cd "$here/.." && pwd)
-repo=$(cd "$android/../.." && pwd)
+repo=$(cd "$android/.." && pwd)
 [ "$#" = 1 ] || { echo 'usage: build_direct_identity_host.sh OUTPUT' >&2; exit 2; }
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
   -I"$android/native" -I"$repo/runtime/include" -I"$repo/graphics/nvn/gfx/nvn/include" \

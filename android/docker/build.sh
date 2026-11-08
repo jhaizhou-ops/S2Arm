@@ -2,7 +2,7 @@
 # Build only: this container receives no device, USB, adb, or host-network access.
 set -euo pipefail
 android_dir=$(cd "$(dirname "$0")/.." && pwd)
-repo_dir=$(cd "$android_dir/../.." && pwd)
+repo_dir=$(cd "$android_dir/.." && pwd)
 image=${S2ARM_ANDROID_IMAGE:-s2arm-android-build:1}
 cache=${S2ARM_ANDROID_CACHE:-s2arm-android-build-cache}
 . "$android_dir/tools/versions.sh"
