@@ -9,12 +9,12 @@
 #include "../../runtime/include/s2a_direct_host.h"
 #include "../../runtime/include/s2a_docs.h"   // 文档根唯一取法（S2A_DOCS，否则 $HOME/Documents）
 #include "../track/s2a_track.h"
-#include "graphics/nvn/nvn_count.h"
-#include "graphics/nvn/nvn_drvscan.h"      // dm_nvn_driver_api：游戏自带驱动报的 NVN API 版本；dm_nvn_driver_nvrm_rgba8：驱动的 NvColorFormat 编码
-#include "graphics/nvn/nvn2.h"            // Switch 2：NVN2 控制段（dsh_miss.inc 不现编）、dm_nvn2_driver_item
-#include "graphics/nvn/dmsh_chain.h"      // DMSH_CHAIN：外置着色器包要带本链号的库目录才用
-#include "graphics/nvn/shader_overlay.h"  // 着色器包外置：文档目录 gal/<程序号>/shaders
-#include "graphics/nvn/nvn_present_fit.h"   // pf_viewport：出图层在视图里的摆放与出图层内画面的摆放同一条规则（差 < 1% 铺满）
+#include "gfx/nvn/nvn_count.h"
+#include "gfx/nvn/nvn_drvscan.h"      // dm_nvn_driver_api：游戏自带驱动报的 NVN API 版本；dm_nvn_driver_nvrm_rgba8：驱动的 NvColorFormat 编码
+#include "gfx/nvn/nvn2.h"            // Switch 2：NVN2 控制段（dsh_miss.inc 不现编）、dm_nvn2_driver_item
+#include "gfx/nvn/dmsh_chain.h"      // DMSH_CHAIN：外置着色器包要带本链号的库目录才用
+#include "gfx/nvn/shader_overlay.h"  // 着色器包外置：文档目录 gal/<程序号>/shaders
+#include "gfx/nvn/nvn_present_fit.h"   // pf_viewport：出图层在视图里的摆放与出图层内画面的摆放同一条规则（差 < 1% 铺满）
 #include <TargetConditionals.h>
 #include <sys/stat.h>
 #include <dlfcn.h>

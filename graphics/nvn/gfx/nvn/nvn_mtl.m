@@ -186,7 +186,7 @@ static inline int gpu_go(void) {
     if (!atomic_load_explicit(&g_gpu_halt, memory_order_relaxed)) { atomic_fetch_add_explicit(&g_gpu_commits, 1, memory_order_relaxed); return 1; }
     atomic_fetch_add_explicit(&g_gpu_refused, 1, memory_order_relaxed); return 0;
 }
-int mtl_gpu_go(void) { return gpu_go(); }   // Vulkan / GL 前端（graphics/vk/hle_vk.m、graphics/gl/gl_draw.m）同一道门
+int mtl_gpu_go(void) { return gpu_go(); }   // Vulkan / GL 前端（gfx/vk/hle_vk.m、gfx/gl/gl_draw.m）同一道门
 // 判错误是不是本进程自己的 GPU 挂死 / 超时 / 缺页：1 = 是；0 = 连带错误（InnocentVictim / SubmissionsIgnored）或别的错误。各层 underlying 错误都看：
 //   IOGPU 层的原因名（kIOGPUCommandBufferCallbackError*）不随系统语言翻译；Metal 3 旧队列的 MTLCommandBufferErrorDomain 另按错误码（Timeout 2 / PageFault 3）
 static void gpu_err_walk(NSError *e, int depth, int *fatal, int *victim) {
@@ -2500,7 +2500,7 @@ static void ghost_finish_submission(void) {
 //   真机两边是同一块显存：NVN 纹理的格式 / 尺寸 / 级数取 GL 纹理的（构建器上那几项不看），存储就是 GL 那张。本层把 GL 层交出的 MTLTexture 登记在这个序号下，
 //   NVN 的拷贝 / 采样 / 渲染目标解析（tex_mtl）直接拿到它；GL 内部格式换成 NVN 格式后，按 NVN 格式该用的 Metal 格式核一遍，对不上不登记（报红，免得按错格式解释同一份字节）。
 //   原先只记名字，NVN 纹理格式 0、0×0，「texture format 0 has no Metal equivalent」，两次拷贝都落空，界面画不到屏上
-id<MTLTexture> gl_tex_export(uint32_t name, uint32_t *internal, uint32_t *levels);   // graphics/gl/gl_tex.m
+id<MTLTexture> gl_tex_export(uint32_t name, uint32_t *internal, uint32_t *levels);   // gfx/gl/gl_tex.m
 static int gl_internal_to_nvn(uint32_t f) {
     switch (f) {
         case 0x8058: return NVN_FORMAT_RGBA8; case 0x8C43: return NVN_FORMAT_RGBA8_SRGB; case 0x881A: return NVN_FORMAT_RGBA16F; case 0x8814: return NVN_FORMAT_RGBA32F;

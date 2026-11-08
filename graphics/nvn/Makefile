@@ -17,8 +17,8 @@ AA_LUT := $(ROOT)/compat/tree/src/Ryujinx.Graphics.Vulkan/Effects/Textures
 AA_LUTH := $(OUT)/gen/nvn_aa_lut.h
 # S2Arm tessellation: CHWTessellator（graphics/metal/gal_tess_d3d.h）嵌成头文件 $(OUT)/gen/gal_tess_msl.h（k_nvn_tess_core），被 nvn_builtin.h include
 GENH  := $(OUT)/gen/gal_tess_msl.h
-SRCS  := $(sort $(wildcard graphics/nvn/*.c graphics/nvn/*.m graphics/nvn/*.S graphics/tex/*.c graphics/tex/*.m graphics/vk/*.m graphics/gl/*.m)) host_adapt.m graphics_session.c   # graphics/vk：Vulkan 款（直连层 hle_vk.m，10-24 搬入）
-HDRS  := $(wildcard graphics/nvn/*.h graphics/nvn/*.inc graphics/nvn/include/*.h graphics/tex/*.h graphics/vk/*.h graphics/vk/*.inc graphics/gl/*.h host/*.h host/*.inc) graphics_session.h ../track/s2a_track.h texture_extent.inc widen_glue.inc widen_fallback.inc fe_stat.h lib_pack.inc $(ROOT)/graphics/widen/export/s2a_widen.h $(ROOT)/graphics/metal/fit_judge.h $(ROOT)/runtime/src/native.h $(ROOT)/runtime/include/s2a_gfx_mode.h $(AA_MSLH) $(AA_LUTH) $(GENH)
+SRCS  := $(sort $(wildcard gfx/nvn/*.c gfx/nvn/*.m gfx/nvn/*.S gfx/tex/*.c gfx/tex/*.m gfx/vk/*.m gfx/gl/*.m)) host_adapt.m graphics_session.c   # graphics/vk：Vulkan 款（直连层 hle_vk.m，10-24 搬入）
+HDRS  := $(wildcard gfx/nvn/*.h gfx/nvn/*.inc gfx/nvn/include/*.h gfx/tex/*.h gfx/vk/*.h gfx/vk/*.inc gfx/gl/*.h host/*.h host/*.inc) graphics_session.h ../track/s2a_track.h texture_extent.inc widen_glue.inc widen_fallback.inc fe_stat.h lib_pack.inc $(ROOT)/graphics/widen/export/s2a_widen.h $(ROOT)/graphics/metal/fit_judge.h $(ROOT)/runtime/src/native.h $(ROOT)/runtime/include/s2a_gfx_mode.h $(AA_MSLH) $(AA_LUTH) $(GENH)
 # 源 / 头清单戳（11-05 合入运维线：门禁常驻工作树跨批增量编，某批分支删 / 改名一个源文件后，余下源都比库旧、库不重建，
 #   旧库里留着已删文件的目标文件，引用的宿主符号已不在 → 偶发「Undefined symbols」（nvn_rec_cover 构建失败 12 次，干净重跑就绿）。
 #   清单变了就改写戳（内容不变不改写，不触发重编），各库依赖它
@@ -69,10 +69,10 @@ $(OUT)/ios/libnvn.a: $(SRCS) $(HDRS) Makefile $(SRCSTAMP)
 	  && (cd "$$d" && for f in $(addprefix $(ROOT)/graphics/nvn/,$(SRCS)); do clang $(PFX) -std=gnu11 -Os -g -fobjc-arc $(IOS_FLAGS) $(WARN) $(INC) -c $$f -o $$(echo $$f | sed 's|.*/gfx/nvn/||; s|/|_|g').o || exit 1; done) \
 	  && ar rcs $@.$$$$ "$$d"/*.o && { $(LIBCHK); } && mv -f $@.$$$$ $@
 
-# GL 层运行时兜底的 GLSL 翻译（graphics/gl/gl_xlate.c，含改写层 gl_glsl_es.c）+ glslang 静态库 → libglx.a：只链进宿主与 iOS App（graphics/build.mk）。
+# GL 层运行时兜底的 GLSL 翻译（gfx/gl/gl_xlate.c，含改写层 gl_glsl_es.c）+ glslang 静态库 → libglx.a：只链进宿主与 iOS App（graphics/build.mk）。
 #   不进 libnvn（只链 libnvn 的单测不带 glslang / SPIRV-Cross，GL 层弱引用 s2a_gl_xlate）；spvc_* 在最终链接时取 libnxgal 那份 SPIRV-Cross。
 #   glslang 官方 tag 原样构建、按脚本内容缓存（graphics/third_party/glslang/build.sh，要 cmake / ninja）
-GLX_DEP := graphics/gl/gl_xlate.c graphics/gl/gl_glsl_es.c graphics/gl/gl_glsl_es.h $(ROOT)/graphics/third_party/glslang/build.sh $(ROOT)/graphics/third_party/spirv_cross/spirv_cross_c.h Makefile
+GLX_DEP := gfx/gl/gl_xlate.c gfx/gl/gl_glsl_es.c gfx/gl/gl_glsl_es.h $(ROOT)/graphics/third_party/glslang/build.sh $(ROOT)/graphics/third_party/spirv_cross/spirv_cross_c.h Makefile
 GLX_CF := -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I$(ROOT)/graphics/third_party/spirv_cross
 glx-mac: $(OUT)/mac/libglx.a
 glx-ios: $(OUT)/ios/libglx.a

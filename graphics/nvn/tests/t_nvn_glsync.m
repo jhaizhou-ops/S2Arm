@@ -24,7 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t EGLint; typedef uint32_t EGLBoolean, GLenum, GLbitfield; typedef uint64_t GLuint64; typedef struct __GLsync *GLsync;   // GL / EGL 的 C 类型（同 graphics/gl/gl_int.h）
+typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t EGLint; typedef uint32_t EGLBoolean, GLenum, GLbitfield; typedef uint64_t GLuint64; typedef struct __GLsync *GLsync;   // GL / EGL 的 C 类型（同 gfx/gl/gl_int.h）
 extern void *h_nvnBootstrapLoader(const char *name);
 extern void *gl_lookup(const char *name);
 #include <dlfcn.h>

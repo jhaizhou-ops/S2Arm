@@ -63,7 +63,7 @@ void *nvn2_vi_entry(const char *name);
 // ---------- 设备 ----------
 // nvnDeviceGetInteger 的 NVN2 答复：处理了返回 1（*out 已填）；返回 0 = 交回 Switch 1 那张表（NVN2 运行时从 GPU 读的项，宿主照 X1 表）
 int nvn2_device_integer(unsigned item, int *out);
-// nvnDeviceInitialize 时调：贴图 GOB 内次序切到 Switch 2（graphics/tex/nvn_deswizzle.h nvn_gob_switch2），记一行日志
+// nvnDeviceInitialize 时调：贴图 GOB 内次序切到 Switch 2（gfx/tex/nvn_deswizzle.h nvn_gob_switch2），记一行日志
 void nvn2_device_init(void);
 void nvn2_vi_vsync_register(void *f);   // nvn2_codec.c 构造函数登记 vi::GetDisplayVsyncEvent 的实现（nvn2.c 不对视频解码有链接依赖）
 

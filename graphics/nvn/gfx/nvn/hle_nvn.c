@@ -2390,7 +2390,7 @@ static NVNqueue *g_err_queue;   // 最近一次提交的队列（nvnDeviceWaitFo
 //   DeviceInitialize x2 对得上），真实现在系统固件驱动里、游戏包里没有；参数类型照 main 的调用点（main+0x8fd0dc：x0 = NVNsync*，x1 = 存 GL 同步句柄的 8 字节；main+0x8fc4c0：x0 = NVNsync*，
 //   x1 = NVNdevice*，x2 = glFenceSync 的返回值，x3 = 4 字节输出）。返回值两处调用都不读，按 NVN 惯例回 NVNboolean（没有反汇编依据）。
 #if !defined(__ANDROID__)
-uint64_t gl_sync_from_event(void *ev, uint64_t val); int gl_sync_event(uint64_t h, void **ev, uint64_t *val, int *committed);   // graphics/gl/gl_draw.m
+uint64_t gl_sync_from_event(void *ev, uint64_t val); int gl_sync_event(uint64_t h, void **ev, uint64_t *val, int *committed);   // gfx/gl/gl_draw.m
 static void sync_ext_queue_wait(const sync_t *s) {
     void *ev; uint64_t v; if (!sync_ext(s, &ev, &v)) return;
     pthread_mutex_lock(&g_sub_mu); nvn_be_queue_wait_event(ev, v); pthread_mutex_unlock(&g_sub_mu);   // 与提交互斥：等待排在本线程此后的提交之前
