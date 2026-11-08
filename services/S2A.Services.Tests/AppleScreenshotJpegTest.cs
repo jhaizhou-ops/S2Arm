@@ -70,7 +70,7 @@ namespace S2A.Services.Tests
                 Directory.CreateDirectory(Path.Combine(root, "exefs"));
                 Directory.CreateDirectory(Path.Combine(root, "ctl"));
                 Directory.CreateDirectory(Path.Combine(root, "romfs"));
-                File.Copy(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../ryujinx/tree/src/Ryujinx.HLE/Homebrew.npdm")), Path.Combine(root, "exefs", "main.npdm"));
+                File.Copy(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../compat/tree/src/Ryujinx.HLE/Homebrew.npdm")), Path.Combine(root, "exefs", "main.npdm"));
                 File.WriteAllBytes(Path.Combine(root, "ctl", "control.nacp"), new byte[0x4000]);
                 Host.Device.System.ServiceTable.WaitServicesReady();
                 Application.Register(Host.Device, root);

@@ -104,7 +104,7 @@ namespace S2A.Services.Tests
         private static void RegisterLdnProcessMetadata()
         {
             string npdmPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-                "../../../../../ryujinx/tree/src/Ryujinx.HLE/Homebrew.npdm"));
+                "../../../../../compat/tree/src/Ryujinx.HLE/Homebrew.npdm"));
             MetaLoader metaLoader = new();
             metaLoader.Load(File.ReadAllBytes(npdmPath)).ThrowIfFailure();
             metaLoader.GetNpdm(out Npdm npdm).ThrowIfFailure();

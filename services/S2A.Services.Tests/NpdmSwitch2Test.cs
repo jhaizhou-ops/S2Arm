@@ -15,7 +15,7 @@ namespace S2A.Services.Tests
         [SoloTest("--npdm-switch2")]
         private static int NpdmSwitch2()
         {
-            byte[] s1 = File.ReadAllBytes(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../ryujinx/tree/src/Ryujinx.HLE/Homebrew.npdm")));
+            byte[] s1 = File.ReadAllBytes(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../compat/tree/src/Ryujinx.HLE/Homebrew.npdm")));
             int aci = (int)BinaryPrimitives.ReadUInt32LittleEndian(s1.AsSpan(0x70)), acid = (int)BinaryPrimitives.ReadUInt32LittleEndian(s1.AsSpan(0x78));
             int acidSize = (int)BinaryPrimitives.ReadUInt32LittleEndian(s1.AsSpan(0x7C));
             byte[] s2 = new byte[s1.Length + 0x100];

@@ -71,7 +71,7 @@ namespace S2A.Services.Tests
                 Directory.CreateDirectory(Path.Combine(game, "ctl"));
                 Directory.CreateDirectory(Path.Combine(game, "romfs"));
                 AttachTestTimeZone(game);
-                string fixture = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../ryujinx/tree/src/Ryujinx.HLE/Homebrew.npdm"));
+                string fixture = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../compat/tree/src/Ryujinx.HLE/Homebrew.npdm"));
                 File.Copy(fixture, Path.Combine(game, "exefs", "main.npdm"));
                 File.WriteAllBytes(Path.Combine(game, "ctl", "control.nacp"), new byte[0x4000]);
                 var invalid = new HostConfiguration(game, state, SystemLanguage.Japanese, RegionCode.Japan, zoneRace ? "Asia/Tokyo" : "NoSuchZone", false, new HostUi());

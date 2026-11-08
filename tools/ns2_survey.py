@@ -682,7 +682,7 @@ def main():
     ap = argparse.ArgumentParser(description='新 Switch 2 游戏的系统服务 / 系统调用缺口普查（静态）')
     ap.add_argument('dump', help='解包目录或其 exefs/（要 main、sdk、main.npdm）')
     ap.add_argument('--out', default='.', help='输出目录（缺省当前目录）')
-    ap.add_argument('--src', default=os.path.join(ROOT, 'ryujinx', 'tree', 'src'), help='我方源码树（缺省本仓库 compat/tree/src）')
+    ap.add_argument('--src', default=os.path.join(ROOT, 'compat', 'tree', 'src'), help='我方源码树（缺省本仓库 compat/tree/src）')
     ap.add_argument('--eden', help='外部 Eden 对照表 TSV：SDK 接口、命令号、实|空、命令名（不进仓库）')
     a = ap.parse_args()
     exefs = a.dump if os.path.exists(os.path.join(a.dump, 'main.npdm')) else os.path.join(a.dump, 'exefs')

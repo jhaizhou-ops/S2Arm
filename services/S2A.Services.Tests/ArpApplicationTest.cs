@@ -15,7 +15,7 @@ namespace S2A.Services.Tests
                 Directory.CreateDirectory(Path.Combine(root, "ctl"));
                 Directory.CreateDirectory(Path.Combine(root, "romfs"));
                 string fixture = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-                    "../../../../../ryujinx/tree/src/Ryujinx.HLE/Homebrew.npdm"));
+                    "../../../../../compat/tree/src/Ryujinx.HLE/Homebrew.npdm"));
                 File.Copy(fixture, Path.Combine(root, "exefs", "main.npdm"));
                 byte[] nacp = new byte[0x4000]; nacp[0] = 0x53;
                 File.WriteAllBytes(Path.Combine(root, "ctl", "control.nacp"), nacp);

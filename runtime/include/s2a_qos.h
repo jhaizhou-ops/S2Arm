@@ -1,5 +1,5 @@
 // 全进程线程调度档（QoS）一张表（11-06 Switch2 线 71，总指挥令：各处散设的 QoS 收到这里，按角色取值）。
-// 只在 Apple 上用（Android 不 include）。宿主（runtime/src）与图形层（graphics/nvn）共用：runtime/src 以 "s2a_qos.h"、graphics/nvn 以相对路径 "../../../../native/include/s2a_qos.h"（host_adapt.m "s2a_qos.h"）引。
+// 只在 Apple 上用（Android 不 include）。宿主（runtime/src）与图形层（graphics/nvn）共用：runtime/src 以 "s2a_qos.h"、graphics/nvn 以相对路径 "../../../../runtime/include/s2a_qos.h"（host_adapt.m "s2a_qos.h"）引。
 //
 // 为什么要统一：iPhone 只有 2 个性能核。系统按 QoS 和负载把线程排到性能核 / 能效核；低于 USER_INITIATED 的线程发热时基本只在能效核上跑，
 //   能效核主频约为性能核一半、每周期指令也低。实测：

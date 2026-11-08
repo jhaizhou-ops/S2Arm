@@ -11,7 +11,7 @@
 退出码：0 写了表 / 1 不适用（不是 UE4、变量找不到或不唯一）/ 2 输入读不出"""
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'gfx', 'nvn', 'games'))
+sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'graphics', 'nvn', 'games'))
 CVARS = (('t.MaxFPS', 'f32', '60', 't.MaxFPS（引擎限帧上限）', True),   # 末列：必需（找不到 / 不唯一就整张表不写）
          ('r.VSync', 'i32', '0', 'r.VSync 关（游戏自己的垂直同步等待；出图节拍由宿主管）', False),
          ('r.DynamicRes.FrameTimeBudget', 'f32', '16.6667', '动态分辨率帧预算 1000/60 ms（原预算按 30 帧算会在 60 帧下判不超预算、不降分辨率）', False))
