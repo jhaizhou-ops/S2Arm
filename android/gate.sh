@@ -2,7 +2,7 @@
 # 门禁层：合入后
 # 门禁路由：android/ runtime/rewriter/ runtime/src/svc_mem.c runtime/src/det.c runtime/src/layout.c runtime/include/ graphics/track/
 # 门禁本机：linux 安卓 Linux runtime CTest 要 aarch64 Linux：本机进 colima 虚拟机跑（android/linux_ctest.sh），mini 没有 colima；10-28 main 上 guest_page_test 链接红（svc_mem.c 新外部符号漏补桩）门禁没拦下
-# 门禁路由：services/S2A.Services/Native.cs services/S2A.Services/InputPump.cs services/S2A.Services/ControllerFeedback.cs services/aot/ services/build.mk runtime/include/s2a_native.h compat/tree/src/Ryujinx.Graphics.Nvdec/ graphics/vulkan/wsi/AndroidWindow.cs
+# 门禁路由：services/S2A.Services/Native.cs services/S2A.Services/InputPump.cs services/S2A.Services/ControllerFeedback.cs services/aot/ services/build.mk runtime/include/s2a_native.h compat/tree/src/Ryujinx.Graphics.Nvdec/ graphics/vulkan/
 # 门禁本机：apk 安卓单库 APK 构建按宿主选后端——macOS 走 host/gate-apk.sh 离线宿主门禁（不碰 Docker），Linux 走 docker 镜像；mini 没有 colima，本机另跑
 # 门禁本机：vkreal 真 Vulkan 收尾探针（android/tests/nvn_vk_real_teardown_test.sh）在 macOS 上经 tests/vulkan/run.sh 进 docker（colima）跑，mini 没有 docker 自报 75（11-07：mini 安卓钩子从 11-04 起每次 75、退回本机补跑）；本机另跑
 # 门禁路由：graphics/nvn/gfx/nvn/include/nvn.h
