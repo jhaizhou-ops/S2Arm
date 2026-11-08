@@ -1640,7 +1640,7 @@ namespace S2A.Services.Tests
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 // 旧翻译器版本的着色器磁盘缓存（夹具：动森实局写出的 9370 支，头里版本 7354 ≠ 当前）：登记前放进数据根
-                string staleFixture = Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run/s2arm/fixtures/acnh_shader_cache_7354");
+                string staleFixture = Path.Combine(Environment.GetEnvironmentVariable("S2A_RUN_ROOT") ?? Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run"), "s2arm/fixtures/acnh_shader_cache_7354");
                 string shaderCacheDir = Path.Combine(Ryujinx.Common.Configuration.AppDataManager.GamesDirPath, "01006f8002326000", "cache", "shader");
                 bool haveStale = Directory.Exists(staleFixture);
                 long staleCount = 0;
@@ -2538,7 +2538,7 @@ namespace S2A.Services.Tests
             }
 
             // ---- 系统数据按号（fsp-srv OpenDataStorageByDataId）：马车8 产物根的 0100000000000802 Mii 资源 ----
-            string sysRoot = Environment.GetEnvironmentVariable("S2A_TEST_SYSTEMDATA") ?? Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run/s2arm/roots/mk8d@现行/systemdata");
+            string sysRoot = Environment.GetEnvironmentVariable("S2A_TEST_SYSTEMDATA") ?? Path.Combine(Environment.GetEnvironmentVariable("S2A_RUN_ROOT") ?? Path.Combine(Environment.GetEnvironmentVariable("HOME"), ".s2arm/run"), "s2arm/roots/mk8d@现行/systemdata");
 
             if (Directory.Exists(Path.Combine(sysRoot, "0100000000000802")))
             {

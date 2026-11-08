@@ -168,7 +168,7 @@ namespace S2A.Services.Tests
             {
                 foreach ((string g, string tid) in new[] { ("acnh", "01006f8002326000"), ("botw", "01007ef00011e000") })
                 {
-                    corpora.Add((g, System.IO.Path.Combine(home, ".s2arm/run/s2arm/roots", g + "@现行", "shaders/shcache", tid)));
+                    corpora.Add((g, System.IO.Path.Combine(Environment.GetEnvironmentVariable("S2A_RUN_ROOT") ?? System.IO.Path.Combine(home, ".s2arm/run"), "s2arm/roots", g + "@现行", "shaders/shcache", tid)));
                 }
             }
 
