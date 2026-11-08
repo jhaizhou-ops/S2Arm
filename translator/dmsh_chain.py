@@ -24,7 +24,7 @@
 import shutil, os, re, sys, json, hashlib, subprocess
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.join(os.path.dirname(HERE), 'graphics', 'nvn', 'gfx'); HOME = os.path.expanduser('~')
-ROOT = os.path.normpath(os.path.join(GFX, '.'))   # repository root (graphics/nvn/gfx → .)
+ROOT = os.path.normpath(os.path.join(GFX, '../../..'))   # repository root (graphics/nvn/gfx → .)
 DSH_PROJ = os.path.join(ROOT, 'graphics/tools/direct/dsh/S2A.Dsh.csproj')
 # 翻译器指纹输入只有一份：S2A.Dsh.csproj 的 DshXfpInput（11-02 总指挥 / 出包线）。生产的翻译缓存键（dsh_batch ToolFingerprint 里的 DshChain.Xfp）由它在编译期算；
 #   这里用 dotnet msbuild -getItem 取 MSBuild 自己展开的同一份清单、按同一算法（「仓库相对路径 \t sha256 \n」按路径排序拼起来再 sha256 取前 16 位）算，两边相等
@@ -65,7 +65,7 @@ def version(abi=None):   # V: the library version the host loads, from ABI alone
     return hashlib.sha256(f'dmsh-abi-{ABI if abi is None else abi} {options()}'.encode()).hexdigest()[:12]
 
 def load_game():   # the current game profile (DM_GAME), only for what needs one: the version itself does not
-    sys.path.insert(0, os.path.join(GFX, 'graphics/nvn/games')); import game
+    sys.path.insert(0, os.path.join(GFX, '../games')); import game
     return game.load()
 
 def profile_rows(g):   # the profile keys that change how a shader is built (nvn_*, shader_*)
