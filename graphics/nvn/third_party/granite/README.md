@@ -3,7 +3,7 @@
 bitextract.h。许可见 LICENSE（MIT，作者 Hans-Kristian Arntzen）。
 
 用途：不支持 BC 压缩格式的安卓 GPU 上，直连层用 compute 着色器把 BC 纹理解压成普通纹
-理（platforms/android/native/nvn/nvn_vk_bcdec.c）。本地差异（若有）在文件内以
+理（android/native/nvn/nvn_vk_bcdec.c）。本地差异（若有）在文件内以
 `S2ARM LOCAL` 注记逐处标明；其余内容与上游提交逐字节一致。
 
 本地改动清单：

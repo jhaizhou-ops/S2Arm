@@ -1,7 +1,7 @@
 #!/bin/bash
-# Windows 出包机（天眼，Git Bash）用的 glslangValidator 命令行：直连库 OpenGL 款离线翻译（gfx/nvn/gfx/tools/gl_shaders.py，GLSL → SPIR-V）要它，
+# Windows 出包机（天眼，Git Bash）用的 glslangValidator 命令行：直连库 OpenGL 款离线翻译（translator/gl_shaders.py，GLSL → SPIR-V）要它，
 #   Mac 用 Homebrew 的同版本，Windows 没有 Homebrew，用同一份官方源码编（11-05 Windows 出包线：天眼普查 OpenGL 款直连库原先整支出不了）。
-# 用法：bash gfx/third_party/glslang/build_cli_win.sh → 最后一行输出 glslangValidator.exe 路径（Windows 写法）。天眼上编好后拷进 R:\s2a\deps\glslang-<版本>\、
+# 用法：bash graphics/third_party/glslang/build_cli_win.sh → 最后一行输出 glslangValidator.exe 路径（Windows 写法）。天眼上编好后拷进 R:\s2a\deps\glslang-<版本>\、
 #   加进机器环境 R:\s2a\bin\tianyan_env.cmd 的 PATH（11-05 已装 16.6.0）；pack/orch/oneclick_win.py --check 核版本与 build.sh 一致。
 # 版本与 sha256 只钉在 build.sh 一处（这里按行读出，不另写一份）；ENABLE_HLSL=OFF、ENABLE_OPT=OFF（gl_shaders.py 不带优化参数，SPIR-V 与带 SPIRV-Tools 的构建同），
 #   只编命令行（glslang-standalone 目标），不出单测。编译器用 PATH 上的 clang / clang++（天眼 D:\tools\LLVM，机器环境 tianyan_env.cmd 放进 PATH）、生成器 Ninja。
@@ -11,7 +11,7 @@ H=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$H/../../.." && pwd)
 VER=$(sed -n 's/^VER=\([^;]*\);.*/\1/p' "$H/build.sh"); SHA=$(sed -n 's/^VER=[^;]*; *SHA=\([0-9a-f]*\).*/\1/p' "$H/build.sh")
 [ -n "$VER" ] && [ ${#SHA} = 64 ] || { echo "🔴 glslang：$H/build.sh 里读不出 VER / SHA" >&2; exit 1; }
 for t in cmake ninja clang clang++; do command -v $t > /dev/null || { echo "🔴 glslang：PATH 上没有 ${t}（天眼先 call R:\\s2a\\bin\\tianyan_env.cmd）" >&2; exit 1; }; done
-source "$ROOT/platforms/android/tools/fetch_source.sh"
+source "$ROOT/android/tools/fetch_source.sh"
 C=${S2A_GLSLANG_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/glslang}; mkdir -p "$C"
 ID=$( { cat "$0"; echo "$VER $SHA"; clang++ --version | head -1; } | sha256sum | cut -c1-12)
 OUT=$C/win-cli-$VER-$ID; EXE=$OUT/glslangValidator.exe

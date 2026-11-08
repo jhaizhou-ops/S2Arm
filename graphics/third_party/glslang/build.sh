@@ -1,15 +1,15 @@
 #!/bin/bash
-# glslang（Khronos 官方 GLSL 前端，BSD-3 / Apache-2.0 等，见源码包 LICENSE.txt）静态库：给直连 GL 层运行时兜底（gfx/nvn/gfx/gl/gl_xlate.c → libglx：库里没有的 GLSL 首遇时 GLSL → SPIR-V）用。
-# 用法：bash gfx/third_party/glslang/build.sh [osx-arm64|ios-arm64] → 最后一行输出 libs2a_glslang.a 路径（libglslang + 缺省资源上限合成一个库）；头文件在同目录 include/（#include <glslang/Include/glslang_c_interface.h>）。
+# glslang（Khronos 官方 GLSL 前端，BSD-3 / Apache-2.0 等，见源码包 LICENSE.txt）静态库：给直连 GL 层运行时兜底（graphics/nvn/gfx/gl/gl_xlate.c → libglx：库里没有的 GLSL 首遇时 GLSL → SPIR-V）用。
+# 用法：bash graphics/third_party/glslang/build.sh [osx-arm64|ios-arm64] → 最后一行输出 libs2a_glslang.a 路径（libglslang + 缺省资源上限合成一个库）；头文件在同目录 include/（#include <glslang/Include/glslang_c_interface.h>）。
 # 官方 tag 原样构建、不维护裁剪分支：16.6.0（与出包离线链 Homebrew glslangValidator 同版本），ENABLE_HLSL=OFF、ENABLE_OPT=OFF（不带 SPIRV-Tools）、不出命令行程序 / 单测。
-# 源码包按固定版本 + sha256 取（GitHub 官方 tag 归档），按 sha256 缓存在 ${S2A_BUILD_CACHE:-~/.cache/s2arm-build}/sources/（platforms/android/tools/fetch_source.sh，同 services/opus|vpx/build.sh）；
+# 源码包按固定版本 + sha256 取（GitHub 官方 tag 归档），按 sha256 缓存在 ${S2A_BUILD_CACHE:-~/.cache/s2arm-build}/sources/（android/tools/fetch_source.sh，同 services/opus|vpx/build.sh）；
 #   构建产物按「本脚本内容 + 部署下限 + 平台」缓存在 ~/.s2arm/run/s2arm/cache/glslang，各工作树共用，命中秒过。
-# 安卓不用：安卓 GL 款运行时由系统驱动编 GLSL（gfx/tools/direct/direct_lib.sh 安卓分支不出 GL 库），GL 层（gfx/nvn/gfx/gl/*.m）只在苹果平台编。
+# 安卓不用：安卓 GL 款运行时由系统驱动编 GLSL（graphics/tools/direct/direct_lib.sh 安卓分支不出 GL 库），GL 层（graphics/nvn/gfx/gl/*.m）只在苹果平台编。
 set -euo pipefail
 PLAT=${1:-osx-arm64}
 VER=16.6.0; SHA=9c09b901149c729df745057dafa815278aaa101b84d2b6e14f16a42de52f97f2
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
-source "$ROOT/platforms/android/tools/fetch_source.sh"
+source "$ROOT/android/tools/fetch_source.sh"
 C=${S2A_GLSLANG_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/glslang}; mkdir -p "$C"
 TCE=$ROOT/tools/toolchain.env; MMAC=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p' "$TCE"); MIOS=$(sed -n 's/^IPHONEOS_DEPLOYMENT_TARGET=//p' "$TCE")
 [ -n "$MMAC" ] && [ -n "$MIOS" ] || { echo "🔴 glslang：$TCE 里没有部署目标" >&2; exit 1; }
