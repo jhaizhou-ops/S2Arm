@@ -114,7 +114,7 @@ static NSString *pack_fp(void) {
 }
 static NSString *game_name(void) {   // 款名：包名 io.s2arm.<款> 的最后一段；别的包名用显示名
     NSString *b = NSBundle.mainBundle.bundleIdentifier ?: @"";
-    if ([b hasPrefix:@"io.s2arm."]) return [b substringFromIndex:11];
+    if ([b hasPrefix:@"io.s2arm."]) return [b substringFromIndex:@"io.s2arm.".length];
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleDisplayName"] ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: @"s2arm";
 }
 // 进文件名的款名：空白和路径 / 命令行不友好的字符换成下划线（显示名「空洞骑士 丝之歌」→「空洞骑士_丝之歌」；manifest 里仍写原名）

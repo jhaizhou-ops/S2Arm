@@ -14,7 +14,7 @@ Ryujinx（compat/tree，以及 graphics/vulkan/wsi）
 Copyright (c) Ryujinx Team and Contributors
 MIT License. 许可全文：compat/tree/LICENSE.txt
 
-the reference port / 直连图形层（graphics/nvn）
+直连图形层部分代码（graphics/nvn，以及 compat 中标注「Ported (MIT, Copyright (c) 2026 seedds …)」的文件）
 Copyright (c) 2026 seedds
 MIT License. 许可全文：graphics/nvn/LICENSE
 
@@ -53,7 +53,7 @@ MIT License.
 
 LumaDock 移植（launchers/macos、pack/jobs 中对应部分）
 Copyright (c) 2026 LumaDock contributors
-Copyright (c) 2026 jhaizhou (reference-port-derived portions)
+Copyright (c) 2026 jhaizhou (derived portions)
 MIT License. 全文：launchers/macos/LICENSE.LumaDock.txt，以及 launchers/macos/README.md
 
 LibHac 0.21.0-alpha.133（compat/packages 内 nupkg）

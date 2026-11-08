@@ -163,7 +163,7 @@ def bahs_shaders(d, label):
         code, ctl = d[region + off:region + off + n], d[c:c + csz]
         st = ns2.stage(ctl) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
-        # NVN2: the scan also hits words that only look like an entry (Bananza 6 of the 16,279 entries its BAHS files give, Raiders 7 of 21,474: control "lengths" 0x80 ../graphics/nvn/gfx 0x2800, code areas that are not shaders). A real entry is the tail
+        # NVN2: the scan also hits words that only look like an entry (Bananza 6 of the 16,279 entries its BAHS files give, Raiders 7 of 21,474: control "lengths" 0x80 .. 0x2800, code areas that are not shaders). A real entry is the tail
         #   of a binary record {u32 record size, u32 kind (0 vertex, 1 fragment, 2 geometry, 3 compute), two u32, the entry}: every one of the 37,740 others has a record size of at least 0x20
         #   and the kind of its control section's stage; every stray one fails that (record layout: upstream shader_split.py bahs_variations, 777a5f6c, MIT)
         if nvn2:
@@ -958,7 +958,7 @@ def ue_legacy_shaders(path, rel, names, out, key=None):
     pk = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path, key))
     for name in names:
         d = pk.read(name, decode=oodle)
-        ue_inline_shaders(d, f'/{rel}#{re.sub(r"^(\.\./)+", "", posixpath.normpath(pk.mount + name))}', out)   # pak 内路径一律 /：os.path 在 Windows 上换成 \、前缀 ../graphics/nvn/gfx/ 去不掉（11-05 天眼勇者斗恶龙 XI S 来源列全是 ..\graphics\，分组全落 *_other）
+        ue_inline_shaders(d, f'/{rel}#{re.sub(r"^(\.\./)+", "", posixpath.normpath(pk.mount + name))}', out)   # pak 内路径一律 /：os.path 在 Windows 上换成 \、前缀 ../ 去不掉（11-05 天眼勇者斗恶龙 XI S 来源列全是 ..\graphics\，分组全落 *_other）
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 OODLE_HEAD = re.compile(b'[\x8c\xcc][\x06\x0a\x0b\x0c]')

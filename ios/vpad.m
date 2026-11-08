@@ -1,4 +1,4 @@
-// 触屏虚拟手柄（基础版，设计稿 nx2ios 分支 touch/design 的 docs/原生触摸方案设计.md §6.1）：完整 Switch 按键 + 左右摇杆，掌机模式下经 InputPump.InputHook 喂给 Ryujinx HID。
+// 触屏虚拟手柄（基础版，设计稿参考分支 touch/design 的 docs/原生触摸方案设计.md §6.1）：完整 Switch 按键 + 左右摇杆，掌机模式下经 InputPump.InputHook 喂给 Ryujinx HID。
 //   左半屏空白处按下 = 浮动左摇杆（按下点为中心，拖 60 pt 推满，松手消失）；右半屏空白处按下 = 浮动右摇杆（同上，转镜头）；
 //   摇杆按下 LS / RS 三种按法：看得见的 LS / RS 键（默认布局：LS 在十字键上方、RS 在 ABXY 左下，照 Switch 手柄原位）；
 //   浮动摇杆点一下不拖（≤0.25 秒、≤10 点）= 按一下；双击左 / 右半屏（第二下按住）= 按住。ABXY 右下按 Switch 原位（A 右、B 下、X 上、Y 左）；十字键左上；ZL L / R ZR 上缘两侧；－ ＋ 顶部中间。

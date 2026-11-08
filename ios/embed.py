@@ -4,7 +4,7 @@
 #   不经 Apple 链接器，Windows / Mac 同一写法、同输入逐字节相同；文件自带预留签名区与链接器式 ad-hoc 签名，重签工具原地替换。
 # 每个模块切 3–4 块：
 #   x0   原 text：[0, 圆整16K(TEXT_END))；有装载偏置 LOAD_BIAS = b 时块首先补 b 个零字节、取 [−b, 网格圆整(TEXT_END))
-#   W    可写：[圆整16K(TEXT_END), PATCH_OFF)（非 FAR）或 [../runtime, FILE_IMAGE_LEN)（FAR）：ro 余部 + data（+ bss）
+#   W    可写：[圆整16K(TEXT_END), PATCH_OFF)（非 FAR）或 [.., FILE_IMAGE_LEN)（FAR）：ro 余部 + data（+ bss）
 #   x1   补丁区
 #   x2   双补丁岛的另一个岛（表头有 PATCH2_OFF 才有）：patched.bin 末尾 PATCH2_LEN 字节，补到 16K
 # 布局：全部代码块（x0 / x1 / x2）依次进 __TEXT,__swcode（纯指令节），全部 W 块依次进 __SWDATA,__img，每块起点与长度都是 16K 整数倍；

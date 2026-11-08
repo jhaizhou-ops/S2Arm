@@ -118,9 +118,9 @@ if(ANDROID)
         target_sources(s2arm_android PRIVATE ${game_sources})
         # Bionic exposes process_vm_readv (used by crash.c's safe frame read)
         # only with GNU feature declarations; Android minSdk 29 exceeds API 23.
-        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/native/src/crash.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
+        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/crash.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
         # thread.c 用到 pthread_getname_np（bionic 在 _GNU_SOURCE 下才声明），与 crash.c 同一处理。
-        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/native/src/thread.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
+        set_property(SOURCE "${S2A_ANDROID_RUNTIME_ROOT}/runtime/src/thread.c" APPEND PROPERTY COMPILE_DEFINITIONS _GNU_SOURCE)
         target_include_directories(s2arm_android PRIVATE .. ../runtime/src native ../graphics/track)
         target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_GAME_RUNTIME=1)
         # Reuse the shared layout policy. Balanced trades alias capacity for a larger heap;
