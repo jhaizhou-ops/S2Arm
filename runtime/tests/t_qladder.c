@@ -1,0 +1,51 @@
+// 档位梯子判定单测（runtime/src/qladder.c）：喂时间序列，期望按规则手算——
+//   窗口 = 局内画面 30 秒；降档：慢帧（> 目标 × 1.5）> 5% 或中位 > 目标 × 1.05；热状态只有 3 强降；
+//   升档：热 ≤ 1 且 GPU 占比 × 2 < 70% 攒满 2 分钟、离上次换档 ≥ 5 分钟（危急热降后 ≥ 10 分钟）；稳定 = 本档 2 分钟没降
+#include "s2a_qladder.h"
+#include <stdio.h>
+static int bad;
+#define CHECK(c, ...) do { if (!(c)) { printf("✗ " __VA_ARGS__); printf("\n"); bad++; } else { printf("✓ " __VA_ARGS__); printf("\n"); } } while (0)
+static double T, G;   // 当前时刻（秒）、GPU 忙累计（毫秒）
+// 喂 sec 秒、每帧 ms 毫秒；game 局内画面；gpu GPU 忙占比；th 热状态；itv 游戏自设间隔。返回第一次换到的档（-1 没换），*at 换档时刻
+static int feed(double sec, double ms, int game, double gpu, int th, int itv, double *at) {
+    int got = -1;
+    for (double end = T + sec; T < end - 1e-9; ) { T += ms / 1000; G += ms * gpu;
+        int r = s2a_ql_frame((uint64_t)(T * 1e9), game, (uint64_t)(ms * 1e6), G, th, itv);
+        if (r >= 0 && got < 0) { got = r; if (at) *at = T; } }
+    return got;
+}
+static void fresh(int kind, int tier) { s2a_ql_setup(kind, tier); T = 1000; G = 0; }
+int main(void) {
+    double at = 0; int r;
+    fresh(S2A_QL_FPS, 0);
+    CHECK(s2a_ql_tiers() == 3 && s2a_ql_docked(0) && s2a_ql_fps60(0) && s2a_ql_docked(1) && !s2a_ql_fps60(1) && !s2a_ql_docked(2) && !s2a_ql_fps60(2), "三档款：主机60 / 主机30 / 掌机30");
+    r = feed(110, 16.667, 1, 0.5, 0, 1, 0); CHECK(r < 0 && !s2a_ql_stable_now(), "主机60 稳 60 帧 110 秒：不换档、还没稳（2 分钟才算）");
+    r = feed(15, 16.667, 1, 0.5, 0, 1, 0); CHECK(r < 0 && s2a_ql_stable_now() && !s2a_ql_stable_now(), "满 120 秒（第 4 个窗口）报稳一次、之后不重复报");
+    fresh(S2A_QL_FPS, 0); r = feed(40, 33.333, 1, 0.9, 0, 1, &at);
+    CHECK(r == 1 && s2a_ql_why() == S2A_QL_WHY_FPS && at - 1000 > 29.9 && at - 1000 < 30.1, "主机60 只跑出 30 帧：满一个窗口（30 秒）那一刻降到主机30（实 档 %d，第 %.2f 秒）", r, at - 1000);
+    // 每 30 帧里 1 帧 33.3 ms（3.3% 慢帧）、中位 16.7：不降；每 10 帧 1 帧慢（10%）：降
+    fresh(S2A_QL_FPS, 0); r = -1; for (int i = 0; i < 100 && r < 0; i++) { r = feed(0.4833, 16.667, 1, 0.5, 0, 1, 0); if (r < 0) r = feed(0.0333, 33.333, 1, 0.5, 0, 1, 0); }
+    CHECK(r < 0, "慢帧约 3.3%%（每 29 帧 16.7 ms 夹 1 帧 33.3 ms）：不降（实 %d）", r);
+    fresh(S2A_QL_FPS, 0); r = -1; for (int i = 0; i < 200 && r < 0; i++) { r = feed(0.15, 16.667, 1, 0.5, 0, 1, 0); if (r < 0) r = feed(0.0333, 33.333, 1, 0.5, 0, 1, 0); }
+    CHECK(r == 1, "慢帧约 10%%（每 9 帧夹 1 帧 33.3 ms）：降到主机30（实 %d）", r);
+    fresh(S2A_QL_FPS, 0); CHECK(feed(120, 16.667, 1, 0.9, 2, 1, 0) < 0, "热状态 2、帧率跟得上：不降（热机稳 60 是目标）");
+    fresh(S2A_QL_FPS, 0); r = feed(1, 16.667, 1, 0.5, 3, 1, &at); CHECK(r == 1 && s2a_ql_why() == S2A_QL_WHY_HOT && at - 1000 < 0.02, "热状态 3：第一帧强降一档（实 %d，%.3f 秒）", r, at - 1000);
+    r = feed(20, 16.667, 1, 0.5, 3, 1, 0); CHECK(r < 0, "危急热降后 30 秒内不再连降");
+    r = feed(15, 16.667, 1, 0.5, 3, 1, &at); CHECK(r == 2 && at - 1000 > 29.9 && at - 1000 < 30.1, "危急持续：离上次 30 秒再降到掌机30（实 %d，第 %.2f 秒）", r, at - 1000);
+    // 升档：主机30 档、30 帧跟得上、GPU 20%（× 2 = 40% < 70%）、热 0：达标攒满 2 分钟，但离换档要 5 分钟 → 第 300 秒那个窗口升
+    fresh(S2A_QL_FPS, 0); feed(30.01, 33.333, 1, 0.2, 0, 1, &at); double t0 = at;
+    r = feed(320, 33.333, 1, 0.2, 0, 1, &at); CHECK(r == 0 && s2a_ql_why() == S2A_QL_WHY_UP && at - t0 > 299 && at - t0 < 301, "主机30 余量足：离换档 5 分钟那个窗口升回主机60（实 %d，换档后 %.1f 秒）", r, at - t0);
+    fresh(S2A_QL_FPS, 1); CHECK(feed(600, 33.333, 1, 0.4, 0, 1, 0) < 0, "主机30、GPU 40%%（× 2 = 80%% ≥ 70%%）：10 分钟不升");
+    fresh(S2A_QL_FPS, 1); CHECK(feed(600, 33.333, 1, 0.2, 2, 1, 0) < 0, "主机30、热状态 2：不升");
+    fresh(S2A_QL_FPS, 0); feed(1, 16.667, 1, 0.5, 3, 1, &at); t0 = at;   // 危急热降到主机30，之后凉下来、余量足
+    r = feed(700, 33.333, 1, 0.2, 0, 1, &at); CHECK(r == 0 && at - t0 > 599 && at - t0 < 631, "危急热降后：要等 10 分钟才升（实 %d，降后 %.1f 秒）", r, at - t0);
+    fresh(S2A_QL_FPS, 0); CHECK(feed(120, 33.333, 0, 0.9, 0, 1, 0) < 0, "菜单 / 加载（非局内画面）30 帧 2 分钟：不降");
+    fresh(S2A_QL_FPS, 2); CHECK(feed(120, 50, 1, 0.9, 0, 1, 0) < 0, "最低档（掌机30）跟不上：没处可降，不换");
+    fresh(S2A_QL_MODE, 0);
+    CHECK(s2a_ql_tiers() == 2 && s2a_ql_docked(0) && !s2a_ql_docked(1) && !s2a_ql_fps60(0), "两档款：主机 / 掌机，帧率归游戏");
+    CHECK(feed(120, 33.333, 1, 0.5, 0, 2, 0) < 0, "原生 30 帧（游戏间隔 2）跑 30 帧：跟得上，不降");
+    r = feed(40, 50, 1, 0.9, 0, 2, 0); CHECK(r == 1, "原生 30 帧只跑出 20 帧：降到掌机（实 %d）", r);
+    fresh(S2A_QL_MODE, 0); CHECK(feed(40, 33.333, 1, 0.9, 0, 1, 0) == 1, "原生 60 帧（间隔 1）只跑出 30：降到掌机");
+    printf("%s t_qladder：%d 项不符\n", bad ? "✗" : "✓", bad);
+    return bad ? 1 : 0;
+}

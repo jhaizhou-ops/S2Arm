@@ -1,0 +1,6 @@
+编号	模块	位	类别	段名	许可	来源	数据写入	缺省开
+widescreen:e712a07043861394	main	0	ultrawide	2208x1204 Docked	none(未声明)	patches_r2/Fl4sh9174__Switch-Emulator-Ultrawide-FPS-Mods/Mario Kart 8 Deluxe [0100152000022000][mods].zip/[2208x1240 v4.0.1]/exefs/4.0.1.pchtxt		0
+widescreen:596d8b8800ab84e6	main	1	ultrawide	Force the game run at 60FPS in all split screen modes	none(未声明)	patches_r2/Fl4sh9174__Switch-Emulator-Ultrawide-FPS-Mods/Mario Kart 8 Deluxe [0100152000022000][mods].zip/[60FPS Split Screen v4.0.1]/exefs/4.0.1.pchtxt		0
+widescreen:7851c65e30e67e48	main	2	ultrawide	Removed depth of field	none(未声明)	patches_r2/Fl4sh9174__Switch-Emulator-Ultrawide-FPS-Mods/Mario Kart 8 Deluxe [0100152000022000][mods].zip/[Disable Dof v4.0.1]/exefs/4.0.1.pchtxt		0
+widescreen:c55265572777508a	main	3	ultrawide	Disabled dynamic resolution	none(未声明)	patches_r2/Fl4sh9174__Switch-Emulator-Ultrawide-FPS-Mods/Mario Kart 8 Deluxe [0100152000022000][mods].zip/[Disable Dynamic Resolution v4.0.1]/exefs/4.0.1.pchtxt		1
+widescreen:b26418e7dac5640e	main	4	ultrawide	Improved lodbias	none(未声明)	patches_r2/Fl4sh9174__Switch-Emulator-Ultrawide-FPS-Mods/Mario Kart 8 Deluxe [0100152000022000][mods].zip/[Level of Detail v4.0.1]/exefs/4.0.1.pchtxt		0

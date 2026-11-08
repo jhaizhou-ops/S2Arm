@@ -1,0 +1,16 @@
+# native-test-nvn_bindstale：本单测的构建规则（runtime/build.mk 末尾按 runtime/tests/mk/*.mk 收进来；新单测只新增一个分片，不改 build.mk）
+NATIVE_TEST_OWN += nvn_bindstale
+ifeq ($(shell uname -s),Darwin)
+# 按阶段绑定沿用的旧程序被游戏释放后再换绑（暗黑3 10-26 冷局 keys_hash 崩溃）：生产 bind_stages，反证子进程照旧路径读失效对象必崩
+$(BUILD)/tests/t_nvn_bindstale: graphics/nvn/tests/t_nvn_bindstale.m $(NVN_MTL_DEPS) $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
+	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
+	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  -o $@ graphics/nvn/tests/t_nvn_bindstale.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
+	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
+	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \
+	  -framework ImageIO -framework UniformTypeIdentifiers -lc++
+.PHONY: native-test-nvn_bindstale
+native-test-nvn_bindstale: $(BUILD)/tests/t_nvn_bindstale
+	$(BUILD)/tests/t_nvn_bindstale
+TEST_TARGETS += native-test-nvn_bindstale
+endif

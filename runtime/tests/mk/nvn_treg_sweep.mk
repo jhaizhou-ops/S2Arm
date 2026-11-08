@@ -1,0 +1,17 @@
+# native-test-nvn_treg_sweep：本单测的构建规则（runtime/build.mk 末尾按 runtime/tests/mk/*.mk 收进来；新单测只新增一个分片，不改 build.mk）
+NATIVE_TEST_OWN += nvn_treg_sweep
+ifeq ($(shell uname -s),Darwin)
+# 贴图登记表按序号反查：被删 / 被覆写放掉的贴图只看登记了它的编号，结果同改前全表扫、工作量与表大小无关；neg 是负对照（反查表清空必须红）
+$(BUILD)/tests/t_nvn_treg_sweep: graphics/nvn/tests/t_nvn_treg_sweep.m $(NVN_MTL_DEPS) $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN)
+	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -Wno-unused-function -Wno-unguarded-availability-new -Wno-unguarded-availability \
+	  $(NATIVE_INC) -Igfx/nvn/host -Igfx/nvn/gfx/nvn -Igfx/nvn/gfx/nvn/include -Igfx/nvn/third_party/vulkan-headers/include \
+	  -o $@ graphics/nvn/tests/t_nvn_treg_sweep.m $(NVN_TEST_HOST_OBJS) $(NVN_TEST_LIB) $(NVN_TEST_WIDEN) \
+	  -Wl,-rpath,@executable_path/nvn/widen $(NVN_TEST_WEAK) \
+	  -framework Metal -framework Foundation -framework QuartzCore -framework CoreGraphics \
+	  -framework ImageIO -framework UniformTypeIdentifiers -lc++
+.PHONY: native-test-nvn_treg_sweep
+native-test-nvn_treg_sweep: $(BUILD)/tests/t_nvn_treg_sweep
+	$(BUILD)/tests/t_nvn_treg_sweep
+	$(BUILD)/tests/t_nvn_treg_sweep neg
+TEST_TARGETS += native-test-nvn_treg_sweep
+endif

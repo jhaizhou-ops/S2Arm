@@ -1,0 +1,47 @@
+// 开发浮层目标帧率（runtime/src/hud.c hud_target，#619 审计 F-hud-cap-above-game）单测：桩出图形模式与前端回报的游戏帧率，读 s2a_hud_text 的「目标 N」。
+// 期望手写，不跑被测实现：目标 = 实际生效周期 max(游戏间隔周期, 1/上限) 对应的帧率 = min(游戏帧率, 上限)；游戏不锁（GL 交换间隔 0）时 = 上限；
+//   上限只认整串 0/30/60/120（同 graphics/nvn nvn_fps.c），非法值不进浮层；两者都没有 = 「未取得」（记 0）
+#include "../src/native.h"
+#include "../include/s2a_hud.h"
+#include "../include/s2a_gfx_mode.h"
+#include <math.h>
+_Atomic uint64_t g_s2a_hud_ft[2048], g_s2a_hud_fn;   // 上屏时间戳环（生产在 ap_host.c）：空环 = 慢帧「未测」，不影响目标
+static int g_mode = S2A_GFX_DIRECT, g_gl = -1, g_nv = 60;
+int s2a_gfx_mode(void) { return g_mode; }
+const char *s2a_gfx_mode_brief(void) { return "单测"; }
+int s2a_widen_full(void) { return 0; }
+int s2a_widen_game(void) { return 0; }
+int s2a_energy_snap(s2a_esnap *s) { (void)s; return 1; }
+int nvn_gl_game_fps(void) { return g_gl; }   // 浮层按名字取（dlsym），这里给强定义当 GL 前端
+int nvn_game_fps(void) { return g_nv; }
+static int fails;
+static int target(void) {
+    char t[4096]; s2a_hud_host h = {.thermal = "单测", .build_id = "t_hud", .battery_rate_pm = NAN, .battery_level = -1};
+    s2a_hud_text(t, sizeof t, &h);
+    const char *p = strstr(t, "目标 "); int v = -1;
+    if (p && !strncmp(p + strlen("目标 "), "未取得", strlen("未取得"))) v = 0; else if (p) sscanf(p, "目标 %d", &v);
+    return v;
+}
+int main(void) {
+    static const struct { int mode; const char *cap; int gl, nv, want; const char *what; } c[] = {
+        {S2A_GFX_DIRECT, "120", 0, 60, 120, "GL 交换间隔 0 + 上限 120 → 120（不是 nvn_game_fps 缺省 60）"},
+        {S2A_GFX_DIRECT, "30", 60, 60, 30, "GL 交换间隔 1 + 上限 30 → 30"},
+        {S2A_GFX_DIRECT, "120", 60, 60, 60, "GL 交换间隔 1 + 上限 120 → 60（上限不解除原生锁）"},
+        {S2A_GFX_DIRECT, "60", 30, 60, 30, "GL 交换间隔 2 + 上限 60 → 30"},
+        {S2A_GFX_DIRECT, NULL, 0, 60, 0, "GL 交换间隔 0 + 不限 → 未取得"},
+        {S2A_GFX_DIRECT, "0", 0, 60, 0, "GL 交换间隔 0 + S2A_FPS=0 → 未取得"},
+        {S2A_GFX_DIRECT, "30abc", 0, 60, 0, "GL 交换间隔 0 + 非法 30abc → 未取得（不按 atoi 读成 30）"},
+        {S2A_GFX_DIRECT, "120", -1, 60, 60, "非 GL 直连（NVN 回 60）+ 上限 120 → 60"},
+        {S2A_GFX_DIRECT, "30", -1, 60, 30, "非 GL 直连（NVN 回 60）+ 上限 30 → 30"},
+        {S2A_GFX_DIRECT, "120", -1, 30, 30, "非 GL 直连（NVN 回 30）+ 上限 120 → 30"},
+        {S2A_GFX_GENERIC, "120", 0, 60, 120, "通用模式（读不到游戏帧率）+ 上限 120 → 120"},
+        {S2A_GFX_GENERIC, NULL, 0, 60, 0, "通用模式 + 不限 → 未取得"},
+    };
+    for (size_t i = 0; i < sizeof c / sizeof c[0]; i++) {
+        g_mode = c[i].mode; g_gl = c[i].gl; g_nv = c[i].nv;
+        if (c[i].cap) setenv("S2A_FPS", c[i].cap, 1); else unsetenv("S2A_FPS");
+        int got = target(); printf("%s 期望 %d → 真结果 %d\n", c[i].what, c[i].want, got); if (got != c[i].want) fails++;
+    }
+    if (fails) printf("✗ t_hud：%d 项不符\n", fails); else printf("✓ t_hud：浮层目标 = min(游戏帧率, 上限)，GL 不锁时 = 上限，非法上限不进浮层，全过\n");
+    return fails != 0;
+}

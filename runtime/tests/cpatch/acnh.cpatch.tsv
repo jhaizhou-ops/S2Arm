@@ -1,0 +1,3 @@
+编号	模块	位	类别	段名	许可	来源	数据写入	缺省开
+fps:5ccba382ea81b769	sdk	0	60fps	Present interval: swap interval of each queued frame 2 -> 1 (surface setting ignored), 30 -> 60 FPS		patches/src_tmouh_acnh-60fps/ryujinx/mods/contents/01006F8002326000/ACNH 60 FPS + SpeedFix/exefs/enabler_sdk.pchtxt		0
+fps:cd56d66bee6471a6	main	0	60fps	120 FPS enabler hook: both copies of the present method call the enabler routine just before the frame is queued		patches/src_tmouh_acnh-60fps/ryujinx/mods/contents/01006F8002326000/ACNH 120 FPS + SpeedFix/exefs/speedfix120_main.pchtxt	1000:00000000:00000001 2000:00000001:00000002 3000:00000002:00000003 4000:00000003:00000004 5000:00000004:00000005 6000:00000005:00000006	0

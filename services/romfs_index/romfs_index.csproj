@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- 出包时生成 RomFS 预建索引（romfs.s2aidx，格式见 S2A.Services/RomFsIndex.cs） -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S2A.Services/S2A.Services.csproj" />
+  </ItemGroup>
+</Project>

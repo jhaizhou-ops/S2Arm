@@ -1,0 +1,9 @@
+编号	模块	位	类别	段名	许可	来源	数据写入	缺省开
+fps:29c3b0414064db75	main	0	60fps	60fps in game (dynamic), 30fps Cutscenes WIP10		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/Xenoblade Chronicles 3/[010074F013262000]/2.2.0/60-30fps.rar/60-30fps/exefs/2.2.0.pchtxt		1
+gfx:2650ee6bf8178da9	main	1	other-gfx	Xenoblade Chronicles 3 - Graphics		patches_r2/cucholix__NX-IPS-romfs-compilation/X/Xenoblade Chronicles 3/release_2.2.1.rar/atmosphere/exefs_patches/Xenoblade Chronicles 3 - Graphics/82D187FE9EF9BE921B8E1B1CDDF7BD287CDB22C1.ips		0
+gfx:62a23f9c4a54cce2	main	2	other-gfx	Disables resolution scaling, Game will display 1080p, and 720p respectively. All cutscenes are 720p		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Disable_Scaling.rar/Disable Scaling/exefs/2.2.0.pchtxt		0
+gfx:d83915246a3c3bcd	main	3	other-gfx	Increases the shadow resolution		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Improve_Shadows_v2.rar/Improve Shadows v2/exefs/2.2.0.pchtxt		0
+gfx:b37a633f3efd001e	main	4	other-gfx	Improves Depth of Field for resolution mods (2K+)		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Improved_DOF.rar/Improved DOF/exefs/2.2.0.pchtxt		0
+gfx:d8924cd2d83361d7	main	5	other-gfx	Removes effect from cutscenes		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Remove_Chromatic_Aberration.rar/Remove Chromatic Aberration/exefs/2.2.0.pchtxt		0
+gfx:311904557b081df7	main	6	other-gfx	Removes all motion blur		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Remove_Motion_Blur.rar/Remove Motion Blur/exefs/2.2.0.pchtxt		1
+gfx:ae54675e6f5fe2f1	main	7	other-gfx	Remove outlines around characters		patches_r2/ADEMOLA200__Switch-Emulator-Mod-Database/xb3/2.2.0/Remove_Outlines.rar/Remove Outlines/exefs/2.2.0.pchtxt		0

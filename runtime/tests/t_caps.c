@@ -1,0 +1,136 @@
+// 包内能力清单单测（10-28 全能力出包）：造临时 s2a_caps.tsv，核 widen / fps60 设环境变量、优先级（启动环境 > 清单 > 缺省；用户设置先于清单写，见 t_ios_settings）
+#include "../src/native.h"
+#include <unistd.h>
+#include <sys/wait.h>
+
+#include "../include/caps.h"
+
+static int fails;
+static void expect(const char *what, const char *want, const char *got) {
+    printf("%s 期望 %s → 真结果 %s\n", what, want ? want : "(null)", got ? got : "(null)");
+    int match = (want && got && !strcmp(want, got)) || (!want && !got);
+    if (!match) fails++;
+}
+
+int main(void) {
+    char T[] = "/tmp/t_caps_XXXXXX";
+    if (!mkdtemp(T)) return 1;
+
+    // ① 没有 s2a_caps.tsv：不报错，不设任何环境变量
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_WIDEN_CAPS"); unsetenv("S2A_FPS60");
+                s2a_caps_apply(T); _exit(getenv("S2A_WIDEN_CAPS") || getenv("S2A_FPS60") ? 1 : 0); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("① 无 s2a_caps.tsv：不设环境变量", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // 造 s2a_caps.tsv：widen 1、fps60 1
+    char path[700]; snprintf(path, sizeof path, "%s/s2a_caps.tsv", T);
+    FILE *f = fopen(path, "w");
+    fprintf(f, "# 单测能力清单\nwiden\t1\t# 有表\nfps60\t1\t# 有表\ngyro\t0\t# 无（测试行）\n");
+    fclose(f);
+
+    // ② widen / fps60 都未设：都设上
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_WIDEN_CAPS"); unsetenv("S2A_FPS60");
+                s2a_caps_apply(T);
+                _exit((getenv("S2A_WIDEN_CAPS") && !strcmp(getenv("S2A_WIDEN_CAPS"), "1") &&
+                       getenv("S2A_FPS60") && !strcmp(getenv("S2A_FPS60"), "1")) ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("② widen / fps60 都未设：清单都设 1", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // ③ S2A_WIDEN_CAPS 已设 0（启动环境）：不覆盖
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { setenv("S2A_WIDEN_CAPS", "0", 1); unsetenv("S2A_FPS60");
+                s2a_caps_apply(T);
+                _exit((getenv("S2A_WIDEN_CAPS") && !strcmp(getenv("S2A_WIDEN_CAPS"), "0") &&
+                       getenv("S2A_FPS60") && !strcmp(getenv("S2A_FPS60"), "1")) ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("③ S2A_WIDEN_CAPS=0（启动环境）：不覆盖，fps60 设 1", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // ④ S2A_FPS60 已设 0（启动环境）：不覆盖
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_WIDEN_CAPS"); setenv("S2A_FPS60", "0", 1);
+                s2a_caps_apply(T);
+                _exit((getenv("S2A_WIDEN_CAPS") && !strcmp(getenv("S2A_WIDEN_CAPS"), "1") &&
+                       getenv("S2A_FPS60") && !strcmp(getenv("S2A_FPS60"), "0")) ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("④ S2A_FPS60=0（启动环境）：不覆盖，widen 设 1", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // ⑤ 清单里 widen 0（能力不可用）：不设环境变量
+    f = fopen(path, "w");
+    fprintf(f, "widen\t0\t# 无表\nfps60\t1\t# 有表\n");
+    fclose(f);
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_WIDEN_CAPS"); unsetenv("S2A_FPS60");
+                s2a_caps_apply(T);
+                _exit((getenv("S2A_WIDEN_CAPS") && !strcmp(getenv("S2A_WIDEN_CAPS"), "0") &&
+                       getenv("S2A_FPS60") && !strcmp(getenv("S2A_FPS60"), "1")) ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑤ 清单 widen 0（发布包未验）：S2A_WIDEN_CAPS 设 0（显式关），fps60 设 1", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // ⑥ 清单 fps60 0（发布包未验）：S2A_FPS60 设 0；已设 S2A_FPS60=1（启动环境）时不覆盖
+    f = fopen(path, "w"); fprintf(f, "fps60\t0\t# 未验：无登记\n"); fclose(f);
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_FPS60"); s2a_caps_apply(T); _exit(getenv("S2A_FPS60") && !strcmp(getenv("S2A_FPS60"), "0") ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑥ 清单 fps60 0：S2A_FPS60 设 0", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { setenv("S2A_FPS60", "1", 1); s2a_caps_apply(T); _exit(!strcmp(getenv("S2A_FPS60"), "1") ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑥ 启动环境 S2A_FPS60=1 时清单的 0 不覆盖", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+    // ⑦ 普查同局 A/B 模式（S2A_FPS_AB=1）：清单 fps60 0 → 另设 DM_PRESENT_INTERVAL=display（平时由 fps.c 降档原因 3 退回原帧率）；没开 A/B 模式、或已显式给了间隔都不设
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_FPS60"); unsetenv("DM_PRESENT_INTERVAL"); setenv("S2A_FPS_AB", "1", 1); s2a_caps_apply(T);
+                _exit(getenv("DM_PRESENT_INTERVAL") && !strcmp(getenv("DM_PRESENT_INTERVAL"), "display") ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑦ 普查 A/B 模式、清单 fps60 0：设 DM_PRESENT_INTERVAL=display", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_FPS60"); unsetenv("DM_PRESENT_INTERVAL"); unsetenv("S2A_FPS_AB"); s2a_caps_apply(T); _exit(getenv("DM_PRESENT_INTERVAL") ? 1 : 0); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑦ 没开 A/B 模式：不设 DM_PRESENT_INTERVAL", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+    { pid_t p = fork(); if (p < 0) return 1;
+      if (!p) { unsetenv("S2A_FPS60"); setenv("DM_PRESENT_INTERVAL", "game", 1); setenv("S2A_FPS_AB", "1", 1); s2a_caps_apply(T); _exit(!strcmp(getenv("DM_PRESENT_INTERVAL"), "game") ? 0 : 1); }
+      int ws = 0; waitpid(p, &ws, 0);
+      expect("⑦ 已显式给 DM_PRESENT_INTERVAL=game：不覆盖", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩"); }
+
+    // ⑧ 补丁（runtime/src/patch.c，补丁包 v1 第 12.7 节优先级：启动环境 / 设置 > [except] > 补丁 [caps] > 包内清单）：
+    //   包内清单 widen 0、fps60 1；补丁 [except] fps60 0、[caps] fps60 1 + widen 1。期望（手算）：S2A_WIDEN_CAPS=1（补丁压过包内 0）、S2A_FPS60=0（例外压过补丁 [caps] 与包内 1）；
+    //   ⑨ 启动环境已给 S2A_FPS60=1 → 照旧 1（玩家 / 调度最高）；⑩ 补丁程序号不对 → 整份不用 → 包内清单 widen 0、fps60 1
+    f = fopen(path, "w"); fprintf(f, "widen\t0\t# 包内\nfps60\t1\t# 包内\n"); fclose(f);
+    { uint8_t npdm[0x98] = {0}; memcpy(npdm, "META", 4); uint32_t ao = 0x80; memcpy(npdm + 0x70, &ao, 4); memcpy(npdm + 0x80, "ACI0", 4);
+      uint64_t pid = 0x0100000000000042ull; memcpy(npdm + 0x90, &pid, 8);
+      char q[800]; snprintf(q, sizeof q, "%s/main.npdm", T); FILE *g = fopen(q, "wb"); fwrite(npdm, 1, sizeof npdm, g); fclose(g);
+      snprintf(q, sizeof q, "mkdir -p %s/patches/0100000000000042", T); (void)!system(q);
+      snprintf(q, sizeof q, "%s/patches", T); setenv("S2A_PATCH_DIR", q, 1); }
+    for (int k = 0; k < 3; k++) {
+        char q[800]; snprintf(q, sizeof q, "%s/patches/0100000000000042/patch.tsv", T); FILE *g = fopen(q, "w");
+        fprintf(g, "schema\t1\nprogram\t%s\nbuild\tabc\n[caps]\nfps60\t1\t# 补丁开\nwiden\t1\t# 补丁开\n[except]\nfps60\t0\t# 强信号：逻辑速度红\n", k == 2 ? "0100000000000099" : "0100000000000042"); fclose(g);
+        fflush(stdout); pid_t p = fork(); if (p < 0) return 1;
+        if (!p) { unsetenv("S2A_WIDEN_CAPS"); if (k == 1) setenv("S2A_FPS60", "1", 1); else unsetenv("S2A_FPS60");
+                  s2a_caps_apply(T); const char *w = getenv("S2A_WIDEN_CAPS"), *x = getenv("S2A_FPS60");
+                  const char *ww = k == 2 ? "0" : "1", *wx = k == 0 ? "0" : "1";
+                  _exit(w && x && !strcmp(w, ww) && !strcmp(x, wx) ? 0 : 1); }
+        int ws = 0; waitpid(p, &ws, 0);
+        expect(k == 0 ? "⑧ 补丁：满屏取补丁 1、60 帧取例外 0" : k == 1 ? "⑨ 启动环境 S2A_FPS60=1 压过补丁例外" : "⑩ 补丁程序号不对：整份不用、按包内清单",
+               "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩");
+    }
+    // ⑪ 补丁 [fps]：写成 <补丁目录>/.fps.tsv（首行 build = 补丁编写构建），S2A_FPS_TABLE 指过去；⑫ 启动环境已给 S2A_FPS_TABLE → 不覆盖
+    for (int k = 0; k < 2; k++) {
+        char q[800]; snprintf(q, sizeof q, "%s/patches/0100000000000042/patch.tsv", T); FILE *g = fopen(q, "w");
+        fprintf(g, "schema\t1\nprogram\t0100000000000042\nbuild\tabcdef0123456789\n[fps]\nw main 0x1028 i32 61 *0x8*0x10\n"); fclose(g);
+        fflush(stdout); pid_t p = fork(); if (p < 0) return 1;
+        if (!p) { if (k) setenv("S2A_FPS_TABLE", "/x/given.tsv", 1); else unsetenv("S2A_FPS_TABLE");
+                  s2a_caps_apply(T); const char *e = getenv("S2A_FPS_TABLE"); char want[800]; snprintf(want, sizeof want, "%s/patches/0100000000000042/.fps.tsv", T);
+                  if (k) _exit(e && !strcmp(e, "/x/given.tsv") ? 0 : 1);
+                  FILE *r = e ? fopen(e, "r") : NULL; char b[256] = ""; if (r) { (void)!fread(b, 1, sizeof b - 1, r); fclose(r); }
+                  _exit(e && !strcmp(e, want) && !strcmp(b, "build\tabcdef0123456789\nw main 0x1028 i32 61 *0x8*0x10\n") ? 0 : 1); }
+        int ws = 0; waitpid(p, &ws, 0);
+        expect(k ? "⑫ 启动环境已给 S2A_FPS_TABLE：补丁 [fps] 不覆盖" : "⑪ 补丁 [fps]：写 .fps.tsv 并设 S2A_FPS_TABLE", "0", WIFEXITED(ws) ? (WEXITSTATUS(ws) ? "1" : "0") : "崩");
+    }
+    { char q[800]; snprintf(q, sizeof q, "rm -rf %s/patches %s/main.npdm", T, T); (void)!system(q); unsetenv("S2A_PATCH_DIR"); }
+
+    unlink(path);
+    if (fails) { printf("✗ %d 项失败\n", fails); return 1; }
+    printf("✓ t_caps\n");
+    return 0;
+}

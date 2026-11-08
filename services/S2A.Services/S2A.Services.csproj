@@ -1,0 +1,18 @@
+<!-- S2Arm 服务承载层（服务接入线）：Ryujinx Switch 侧在同进程的入口、服务请求同线程直调分发器、游戏内存视图、报红。
+     Ryujinx 源码只引用 compat/tree（上游 + 补丁，见 compat/README.md）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>S2A.Services</AssemblyName>
+    <RootNamespace>S2A.Services</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsAotCompatible>false</IsAotCompatible>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
+    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
+    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Input/Ryujinx.Input.csproj" />
+  </ItemGroup>
+</Project>

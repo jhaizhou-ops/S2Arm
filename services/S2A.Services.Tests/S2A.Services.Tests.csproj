@@ -1,0 +1,35 @@
+<!-- 服务层单测（控制台程序，可 JIT 跑也可 NativeAOT 发布后跑：每帧零分配门禁要在 NativeAOT 上量） -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- NativeAOT 发布版（H05 #150）：每帧零分配要在发布版上量，JIT 量不到值元组排序等隐藏分配。
+         写在工程里而不是 publish -p：全局属性会波及 Ryujinx 的源码生成器工程（netstandard2.0，不能 AOT），
+         报 NETSDK1207（照 services/aot/S2A.Aot.csproj 的写法）。只在显式要求时开：不改门禁的默认编译口径。 -->
+    <PublishAot Condition="'$(S2AAotTests)' == '1'">true</PublishAot>
+    <!-- 编译期常量给 Program.cs：AOT 版跳过走 DispatchProxy 的死锁用例（AOT 不支持运行时生成 IL） -->
+    <DefineConstants Condition="'$(S2AAotTests)' == '1'">$(DefineConstants);S2A_AOT_TESTS</DefineConstants>
+    <!-- AOT 发布版下 AccountManager 解析嵌入资源会碰卫星资源程序集，预定义区域限制会抛 CultureNotFoundException（同 services/aot/S2A.Aot.csproj 的原生层实测） -->
+    <PredefinedCulturesOnly Condition="'$(S2AAotTests)' == '1'">false</PredefinedCulturesOnly>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S2A.Services/S2A.Services.csproj" />
+    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Audio.Backends.Apple/Ryujinx.Audio.Backends.Apple.csproj" />
+    <ProjectReference Include="../../platforms/apple/cs/S2A.Apple.csproj" />   <!-- 单测宿主（Mac）的平台装配：苹果宿主目录原语等 -->
+  </ItemGroup>
+  <ItemGroup>
+    <!-- libvpx 官方 VP8 测试向量（BSD，15 KB）与逐帧 I420 MD5 -->
+    <None Include="data/**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(S2AAotTests)' == '1'">
+    <!-- Ryujinx 旧 HLE 服务靠反射建实例（Activator.CreateInstance 找无参构造）与分发命令：
+         裁剪器默认会把这些构造裁掉，AOT 版起局就 MissingMethodException。整程序集保留（同 services/aot/S2A.Aot.csproj）。
+         本工程自己也要保留：Program 的用例经反射调服务（Program.cs 里 GetMethod / GetField 那几处）。 -->
+    <TrimmerRootAssembly Include="S2A.Services.Tests" />
+    <TrimmerRootAssembly Include="Ryujinx.HLE" />
+    <TrimmerRootAssembly Include="Ryujinx.Horizon" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,22 @@
+# 塞尔达传说 王国之泪 1.4.3（主程序构建号 277178b7dba1b6d4949a84778d4abc58；资料盘原件 [v1.4.3] (1G+1U).xci sha256 f1b655fbec88c105…）：60 帧
+# 位置与含义取自上游参考实现（MIT）对同一构建号指出的事实，逐处在本构建号的主程序上反汇编核过（原字 33/33 一致，满屏补丁线 11-06）；指令按语义自写。
+# 游戏的普通动画、逻辑已按帧控制器（FrameRateMgr）的实测步长走（60 帧时它自己选 0.5），所以不需要像旷野之息那样改速度函数；
+#   要改的是：①帧间隔选择把下限夹在 2 个显示节拍（30 帧）；②布料 / 头发的第二时钟每渲染帧按 {倍率 / 30, 倍率} 写死，60 帧下快一倍。
+# 槽：2040 = 实测步长（30 帧为 1，60 帧 0.5），2041 = 同一步长换成秒（÷ 30），宿主 runtime/src/fps.c 的 speed 行每次出图写。
+build 277178b7dba1b6d4
+present display
+speed 2040 0.5 2.0 2041   # 实测步长与秒（布料 / 头发时钟改读这两槽）
+# ① 帧间隔选择（帧控制器）：原来把交换间隔下限夹到 w8（[x20] / [x20,#0x44] 存的最小间隔 2），改成下限 1
+c main 0x2db204 word 6b08015f 7100055f   # cmp w10, w8 → cmp w10, #1
+c main 0x2db208 word 1a89b10a 1a9fa52a   # csel w10, w8, w9, lt → csinc w10, w9, wzr, ge（间隔 = max(w9, 1)）
+c main 0x2db22c word b940468a d503201f   # ldr w10, [x20, #0x44]（取最小间隔）→ nop
+c main 0x2db340 word b9400288 52800028   # ldr w8, [x20]（最小间隔）→ mov w8, #1
+c main 0x2db34c word 2a0a03f5 1a9fa555   # mov w21, w10 → csinc w21, w10, wzr, ge（至少 1）
+c main 0x2db360 word 6b0801bf 710005bf   # cmp w13, w8 → cmp w13, #1
+c main 0x2db36c word 1a88c1ac 1a9fc5ac   # csel w12, w13, w8, gt → csinc w12, w13, wzr, gt（至少 1）
+# ② 布料 / 头发第二时钟：游戏写 {倍率 × 1/30（s 常量 0x3d088889）→ 秒, 倍率 → 比率}；改成 {实测秒 × 倍率, 实测比率 × 倍率}。
+#    x8 / s4 作临时：后面原指令第一条就覆盖 x8；调用点上 s4 不是参数（0x2a0e40 入口先存 s2 / s3，往后 200 条不碰 s4、首条覆盖 x8）
+c main 0x246eac veneer 1e200940 adrp:x8 bd7fc100 1e200940 bd0367e0 bd7fc900 1e200940   # 内联一：ldr s0,槽2040; fmul s0,s10,s0; str s0,[sp,#0x364]（比率）; ldr s0,槽2041; fmul s0,s10,s0（秒，原 0x246eb8 存 sp+0x360）
+c main 0x345904 veneer 1e210801 adrp:x8 bd7fc101 1e210801 bd0117e1 bd7fc901 1e210801   # 内联二：同上，倍率在 s0，比率存 sp+0x114，秒留 s1（原 0x34590c 存 sp+0x110）
+c main 0x24944c veneer 94015e7d adrp:x8 bd7fc104 1e240842 1e240863 bl:2a0e40   # 调用点一：s2、s3 乘实测比率再调原函数 0x2a0e40
+c main 0x28bc98 veneer 9400546a adrp:x8 bd7fc104 1e240842 1e240863 bl:2a0e40   # 调用点二：同上

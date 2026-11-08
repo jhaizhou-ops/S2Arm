@@ -1,0 +1,248 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.IO.Hashing;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+
+namespace S2A.Services;
+
+public static partial class SaveTransfer
+{
+    private sealed class Archive : IDisposable
+    {
+        internal readonly FileStream Source;
+        internal readonly ZipArchive Zip;
+        internal readonly JsonObject Manifest;
+        internal readonly string Sha;
+        internal Archive(string path)
+        {
+            Source = ReadFile(path);
+            try
+            {
+                Require(Source.Length <= MaxBytes + (64 << 20), "备份文件过大。");
+                var directory = ZipBounds(Source);
+                Sha = Hash(Source);
+                Source.Position = 0;
+                Zip = new ZipArchive(Source, ZipArchiveMode.Read, leaveOpen: true, entryNameEncoding: Encoding.UTF8);
+                try
+                {
+                    Require(Zip.Entries.Count == directory.Count, "ZIP 目录数量发生变化。");
+                    for (int i = 0; i < directory.Count; i++)
+                    {
+                        var expected = directory[i];
+                        var entry = Zip.Entries[i];
+                        Require(entry.FullName == expected.Name && entry.Length == (long)expected.Size &&
+                            entry.CompressedLength == (long)expected.Compressed && entry.Crc32 == expected.Crc &&
+                            (uint)entry.ExternalAttributes == expected.Attributes, "ZIP 公开目录解析与预校验不一致。");
+                    }
+                    Manifest = Validate(this);
+                    Source.Position = 0;
+                    Require(Hash(Source) == Sha, "检查期间备份发生变化。", "save_changed");
+                }
+                catch { Zip.Dispose(); throw; }
+            }
+            catch { Source.Dispose(); throw; }
+        }
+        public void Dispose() { Zip.Dispose(); Source.Dispose(); }
+    }
+    private static byte[] EntryBytes(Archive archive, string name)
+    {
+        var entry = archive.Zip.GetEntry(name);
+        Require(entry != null && entry.Length <= MaxMetadata, "备份元数据缺失或过大。");
+        using var stream = entry.Open();
+        using var memory = new MemoryStream();
+        CopyEntry(stream, memory, entry.Length, null, entry.Crc32);
+        return memory.ToArray();
+    }
+    private static void CopyEntry(Stream source, Stream destination, long length, string expectedHash, uint expectedCrc)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var crc = new Crc32();
+        byte[] buffer = new byte[1 << 20];
+        long count = 0;
+        int size;
+        while ((size = source.Read(buffer)) != 0)
+        {
+            count = checked(count + size);
+            Require(count <= length, "备份内容超过声明大小。");
+            hash.AppendData(buffer, 0, size);
+            crc.Append(buffer.AsSpan(0, size));
+            destination.Write(buffer, 0, size);
+        }
+        Require(count == length && crc.GetCurrentHashAsUInt32() == expectedCrc &&
+            (expectedHash == null || Convert.ToHexStringLower(hash.GetHashAndReset()) == expectedHash), "备份文件 CRC 或 SHA-256 校验失败。");
+    }
+    private static JsonObject Validate(Archive archive)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in archive.Zip.Entries)
+        {
+            Name(entry.FullName);
+            int type = (entry.ExternalAttributes >> 16) & 0xf000;
+            Require(names.Add(entry.FullName) && !entry.IsEncrypted && type is 0 or 0x8000 &&
+                (entry.ExternalAttributes & (int)FileAttributes.Directory) == 0 && entry.Length >= 0, "ZIP 含重复路径、链接、目录、加密或特殊条目。");
+        }
+        var node = Parse(EntryBytes(archive, "manifest.json"));
+        Require(node is JsonObject && Str(node, "format") == "S2ArmSave" && node["schema"].GetValue<int>() == 1 &&
+            Str(node, "layout") == "ryujinx-data-v1", "不支持此存档格式或版本。");
+        Require(node["files"] is JsonArray && node["directories"] is JsonArray, "备份清单无效。");
+        var files = node["files"].AsArray();
+        var dirs = node["directories"].AsArray();
+        Require(files.Count is > 0 and <= MaxFiles && dirs.Count <= MaxFiles, "备份文件或目录数量无效。");
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var expected = new HashSet<string>(StringComparer.Ordinal) { "manifest.json" };
+        long total = 0;
+        foreach (var item in dirs)
+        {
+            string name = item.GetValue<string>();
+            Name(name);
+            Require(Allowed(name, true) && paths.Add(name), "备份目录清单无效。");
+        }
+        foreach (var item in files)
+        {
+            string name = Str(item, "path");
+            Name(name);
+            long size = item["size"].GetValue<long>();
+            string sha = Str(item, "sha256");
+            Require(Allowed(name) && paths.Add(name) && size >= 0 && Hex(sha, 64), "备份文件清单无效。");
+            fileNames.Add(name);
+            expected.Add("payload/" + name);
+            total = checked(total + size);
+            var entry = archive.Zip.GetEntry("payload/" + name);
+            Require(total <= MaxBytes && entry != null && entry.Length == size, "备份大小或文件清单不符。");
+        }
+        foreach (string name in paths)
+        {
+            string parent = name;
+            while (parent.Contains('/'))
+            {
+                parent = parent[..parent.LastIndexOf('/')];
+                Require(!fileNames.Contains(parent), "备份文件与目录冲突。");
+            }
+        }
+        Require(expected.SetEquals(archive.Zip.Entries.Select(e => e.FullName)) && fileNames.Contains(Profile) &&
+            fileNames.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), "备份缺少必要文件或含额外条目。");
+        foreach (var item in files)
+        {
+            var entry = archive.Zip.GetEntry("payload/" + Str(item, "path"));
+            using var stream = entry.Open();
+            CopyEntry(stream, Stream.Null, entry.Length, Str(item, "sha256"), entry.Crc32);
+        }
+        Profiles(EntryBytes(archive, "payload/" + Profile));
+        var entries = Entries(name => EntryBytes(archive, "payload/" + name), files.Select(f => Str(f, "path")), dirs.Select(d => d.GetValue<string>()));
+        if (node.AsObject().ContainsKey("saveEntries"))
+            Require(JsonNode.DeepEquals(node["saveEntries"], entries) && JsonNode.DeepEquals(node["users"], Users(entries)), "备份账号归属与 LibHac 索引不符。");
+        node["saveEntries"] = entries;
+        node["users"] = Users(entries);
+        if (node.AsObject().ContainsKey("deviceSettings")) Require(node["deviceSettings"] is JsonObject, "设备设置元信息无效。");
+        node["deviceSettings"] = Settings(node["deviceSettings"]);
+        return (JsonObject)node;
+    }
+    private static void Identity(Context c, JsonNode manifest)
+    {
+        Require(string.Equals(Str(manifest["game"], "id"), Str(c.Game, "id"), StringComparison.OrdinalIgnoreCase), "备份属于另一款游戏。", "save_wrong_game");
+        Require(manifest["game"]["version"].GetValue<long>() == c.Game["version"].GetValue<long>() &&
+            Str(manifest["game"], "contentIdentity") == Str(c.Game, "contentIdentity"), "备份的游戏版本或 DLC 组合不符。", "save_version");
+        var scan = Scan(c.Root);
+        if (!scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal))) return;
+        var target = Entries(name => SmallFile(Path.Combine(c.Root, name)), scan.Files.Keys, scan.Directories);
+        var incoming = manifest["saveEntries"].AsArray();
+        static Dictionary<string, HashSet<string>> Owners(JsonArray entries) => entries.GroupBy(e => Str(e, "programId") + "/" + Str(e, "type"))
+            .ToDictionary(g => g.Key, g => g.Select(e => Str(e, "userId")).ToHashSet(StringComparer.Ordinal));
+        var a = Owners(target); var b = Owners(incoming);
+        foreach (string group in a.Keys.Intersect(b.Keys))
+            Require(a[group].SetEquals(b[group]), "备份与目标存档账号归属不同。", "save_wrong_user");
+    }
+    private static string Source(Context c)
+    {
+        string path = Absolute(Str(c.Request, "path"));
+        Require(!Within(path, c.Root) && (Str(c.Request, "operation") != "export" || !Within(path, c.Work)), "请从数据与事务目录以外选择备份。");
+        return path;
+    }
+    private static JsonObject Inspect(Context c)
+    {
+        using var archive = new Archive(Source(c));
+        Identity(c, archive.Manifest);
+        return new() { ["manifest"] = Copy(archive.Manifest), ["archiveSha256"] = archive.Sha,
+            ["targetFingerprint"] = Fingerprint(c.Root), ["fileCount"] = archive.Manifest["files"].AsArray().Count,
+            ["totalBytes"] = archive.Manifest["files"].AsArray().Sum(f => f["size"].GetValue<long>()) };
+    }
+    private static JsonObject MakeManifest(Context c, string root, out Snapshot scan)
+    {
+        scan = Scan(root);
+        Require(scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), "此游戏尚无可备份存档。", "save_empty");
+        Profiles(SmallFile(Path.Combine(root, Profile)));
+        var entries = Entries(name => SmallFile(Path.Combine(root, name)), scan.Files.Keys, scan.Directories);
+        return new() { ["format"] = "S2ArmSave", ["schema"] = 1, ["layout"] = "ryujinx-data-v1", ["platform"] = "ios",
+            ["createdAt"] = DateTimeOffset.UtcNow.ToString("O"), ["game"] = Copy(c.Game), ["saveEntries"] = entries,
+            ["users"] = Users(entries), ["deviceSettings"] = Settings(c.Request["deviceSettings"]),
+            ["directories"] = new JsonArray(scan.Directories.Where(n => Allowed(n, true)).Select(n => (JsonNode)JsonValue.Create(n)).ToArray()), ["files"] = new JsonArray() };
+    }
+    private static JsonObject WriteArchive(Context c, string root, string path)
+    {
+        CheckLinks(path);
+        Require(!File.Exists(path) && !Directory.Exists(path), "同名备份已存在。", "save_exists");
+        var manifest = MakeManifest(c, root, out var scan);
+        long total = scan.Files.Where(p => Allowed(p.Key)).Sum(p => p.Value);
+        Space(Path.GetDirectoryName(path), total + (64 << 20));
+        string before = Fingerprint(root);
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".partial";
+        try
+        {
+            using (var output = NewFile(temporary))
+            {
+                using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var file in scan.Files.Where(p => Allowed(p.Key)))
+                    {
+                        var entry = zip.CreateEntry("payload/" + file.Key, CompressionLevel.Fastest);
+                        entry.ExternalAttributes = 0x180 << 16;
+                        using var source = ReadFile(Path.Combine(root, file.Key));
+                        Require(source.Length == file.Value, "备份期间存档变化。", "save_changed");
+                        using var target = entry.Open();
+                        using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                        byte[] buffer = new byte[1 << 20];
+                        int size; long copied = 0;
+                        while ((size = source.Read(buffer)) != 0)
+                        {
+                            copied += size;
+                            Require(copied <= file.Value, "备份期间存档变化。", "save_changed");
+                            sha.AppendData(buffer, 0, size); target.Write(buffer, 0, size);
+                        }
+                        Require(copied == file.Value, "备份期间存档变化。", "save_changed");
+                        manifest["files"].AsArray().Add((JsonNode)new JsonObject { ["path"] = file.Key, ["size"] = copied, ["sha256"] = Convert.ToHexStringLower(sha.GetHashAndReset()) });
+                    }
+                    using var metadata = zip.CreateEntry("manifest.json").Open();
+                    metadata.Write(Encoding.UTF8.GetBytes(manifest.ToJsonString()));
+                }
+                output.Flush(flushToDisk: true);
+            }
+            Require(Fingerprint(root) == before, "备份期间存档变化。", "save_changed");
+            using (var verified = new Archive(temporary)) Require(JsonNode.DeepEquals(manifest, verified.Manifest), "导出后校验失败。");
+            File.Move(temporary, path, overwrite: false);
+            SyncDirectory(Path.GetDirectoryName(path));
+            return manifest;
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+    private static JsonObject Export(Context c)
+    {
+        string path = Source(c);
+        Require(Directory.Exists(Path.GetDirectoryName(path)), "备份目标目录不存在。");
+        var manifest = WriteArchive(c, c.Root, path);
+        return new() { ["outputPath"] = path, ["fileCount"] = manifest["files"].AsArray().Count };
+    }
+    private static FileStream NewFile(string path) => new(path, new FileStreamOptions { Mode = FileMode.CreateNew,
+        Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite });
+    private static void Space(string path, long bytes)
+    {
+        var drive = DriveInfo.GetDrives().Where(d => Within(path, d.RootDirectory.FullName.TrimEnd('/')) || d.RootDirectory.FullName == "/")
+            .OrderByDescending(d => d.RootDirectory.FullName.Length).First();
+        Require(drive.AvailableFreeSpace >= bytes, "磁盘空间不足，无法保留旧存档。", "save_space");
+    }
+}

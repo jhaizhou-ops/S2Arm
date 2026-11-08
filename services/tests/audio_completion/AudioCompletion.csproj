@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AudioSourceRoot Condition="'$(AudioSourceRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../..'))</AudioSourceRoot>
+  </PropertyGroup>
+  <Import Project="$(AudioSourceRoot)/compat/tree/Directory.Build.props" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(AudioSourceRoot)/compat/tree/src/Ryujinx.Audio.Backends.Apple/Ryujinx.Audio.Backends.Apple.csproj" />
+    <ProjectReference Include="$(AudioSourceRoot)/compat/tree/src/Ryujinx.Memory/Ryujinx.Memory.csproj" />
+  </ItemGroup>
+</Project>

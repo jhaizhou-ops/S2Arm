@@ -1,0 +1,48 @@
+// 首次进游戏的加载页：进度模型（平台无关；iOS 页面 ios/loadpage.m 只读它画，10-30 jhz 批准）。
+// 三段：准备游戏数据（起局到预热开始）→ 为你的设备优化画面（直连管线预热，已编 / 总数）→ 进入游戏（预热完到首帧上屏）。
+// 剩余时间按本机实测速率估：进度只进不退；显示的剩余时间每次至多按流逝时间往下走，实测持续变慢（新估计比显示值高 25% 以上连续 3 秒）才往上修正。
+// 「什么时候不再等」由这里定（直连层 nvn_mtl.m 每 50 ms 调 s2a_front_warm_tick 问）：玩家点了「先开始玩」、长时间没有进展、超过宽松上限 → 返回 1，
+//   剩下的管线转后台继续编（#800 B 近似顶替 + 后台编译）。默认编完直接进游戏，没有硬上限；护栏只防异常，绝不卡死。
+// 时间由调用方传（纳秒，单调时钟）；配置走环境变量，缺省值等真机实测后定：
+//   S2A_LOAD_SKIP_S（缺省 8）  预热进行多少秒后出现「先开始玩，后台继续优化」（剩余估计不到 5 秒时不出）
+//   S2A_LOAD_STALL_S（缺省 30）已编数多少秒没涨就自动进游戏
+//   S2A_LOAD_MAX_S（缺省 = 直连层首帧上限 DM_PSO_PREPARE_MAX_MS，30 秒） 预热总共等多少秒就自动进游戏；剩余时间也按它封顶
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+enum { S2A_LOAD_DATA = 0, S2A_LOAD_OPTIMIZE = 1, S2A_LOAD_ENTER = 2, S2A_LOAD_DONE = 3 };   // 阶段；DONE = 首帧已上屏，页面收起
+enum { S2A_LOAD_GO_NONE = 0, S2A_LOAD_GO_DONE, S2A_LOAD_GO_USER, S2A_LOAD_GO_STALL, S2A_LOAD_GO_MAX, S2A_LOAD_GO_HOST };   // HOST（11-06）：直连层自己放行（s2a_front_warm_released）；为什么不再等预热
+typedef struct {
+    int stage;            // S2A_LOAD_*
+    int first_run;        // 1 = 首次（完整加载页）；0 = 之后的启动（简短启动画面）
+    long done, total;     // 预热已编 / 总数（阶段 OPTIMIZE 起有效）
+    double frac;          // 总进度 0..1，只进不退（三段按 5% / 90% / 5% 摊）
+    int eta_s;            // 剩余秒数；-1 = 还在估算 / 不显示
+    int can_skip;         // 1 = 显示「先开始玩，后台继续优化」
+    int go_reason;        // S2A_LOAD_GO_*
+} s2a_load_view;
+// 起局时调（iOS：场景连上之前）：first_run = 本包是否还没完整预热过（s2a_load_first_run）
+void s2a_load_begin(uint64_t now, int first_run);
+// 直连层预热节拍（任意线程，约每 50 ms；开始一次 (0, total)、结束一次 (total, total)）：返回 1 = 现在进游戏、剩下的转后台
+int s2a_load_warm_tick(uint64_t now, long done, long total);
+// 首帧上屏（ap_host.c）：阶段 → DONE；预热还在等（OPTIMIZE）时只记首帧已到，预热结束时才 → DONE（直连层先过首帧回调、后在首次提交里等预热）。「本包已完整预热」在收到 (total, total) 时记（首帧前编完或后台编完，直连层保证只发一次）
+void s2a_load_first_frame(uint64_t now);
+// 玩家点了「先开始玩」（主线程）
+void s2a_load_user_skip(void);
+// 页面读当前快照（主线程，约每 0.25 秒）
+void s2a_load_snapshot(uint64_t now, s2a_load_view *out);
+// 本包是否还没完整预热过：<Documents>/wire/warm_done 里记的出包指纹 ≠ pack_fp（或没有）= 1
+int s2a_load_first_run(const char *pack_fp);
+// 剩余时间文案（「约 1 分 20 秒」「约 40 秒」「不到 5 秒」「正在估算剩余时间」），写进 out
+void s2a_load_eta_text(int eta_s, char *out, size_t n);
+// 直连层调的入口（画面线 wire-c/warm-progress：开始一次 (0, total)、预热等待循环里周期调、全部编完时 (total, total) 一次，后者可能在后台队列线程）：
+//   只回 0（继续等）/ 1（现在进游戏）；nvn_mtl.m 的弱定义回 -1 = 没链前端、直连层自己兜底。内部取单调时钟转给 s2a_load_warm_tick，加锁极短、不阻塞
+int s2a_front_warm_tick(long done, long total);
+// 直连层自己不再等了（上限到点，或清单全部领走、只剩在编的几条；不是这里的节拍说的）：页面转「进入游戏」，首帧已到过就直接收起
+void s2a_front_warm_released(void);
+#ifdef __cplusplus
+}
+#endif

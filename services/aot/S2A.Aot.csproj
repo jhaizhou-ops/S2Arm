@@ -1,0 +1,50 @@
+<!-- S2Arm 进程内唯一的 NativeAOT 镜像（一个进程只能有一份）：服务层 S2A.Services + 显卡线的 Metal 渲染器适配 NxGal 合编成一个静态库。
+     构建入口 services/nxaot.sh（按源码哈希缓存）。Ryujinx 只用 compat/tree 一份：NxGal 的 RyuGpu 指过来。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>S2A.Aot</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- 不变区域设置下 AccountManager 解析嵌入资源时会碰到卫星资源程序集，预定义区域限制会抛 CultureNotFoundException（原生层实测） -->
+    <PredefinedCulturesOnly>false</PredefinedCulturesOnly>
+    <!-- 写在工程里而不是 publish -p：全局属性会波及 Ryujinx 的源码生成器工程（netstandard2.0，不能 AOT） -->
+    <PublishAot>true</PublishAot>
+    <NativeLib>Static</NativeLib>
+    <!-- iOS 的 NativeAOT 运行时只以运行时包形式提供（旧库出包线 nxaot.sh 同此） -->
+    <PublishAotUsingRuntimePack Condition="'$(RuntimeIdentifier)' == 'ios-arm64'">true</PublishAotUsingRuntimePack>
+    <NoWarn>$(NoWarn);CA1416;IL2026;IL2072;IL2075;IL2080;IL3050</NoWarn>
+    <RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../'))</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../S2A.Services/S2A.Services.csproj" />
+    <ProjectReference Include="$(RepoRoot)platform/apple/cs/S2A.Apple.csproj" />   <!-- 苹果平台实现（视频解码等），Compose 登记 -->
+    <ProjectReference Include="$(RepoRoot)graphics/metal/cs/NxGal.csproj" />
+    <ProjectReference Include="$(RepoRoot)graphics/loop/S2A.Gfx.csproj" />
+    <ProjectReference Include="$(RepoRoot)graphics/widen/gal/S2Arm.Gfx.Widen.Gal.csproj" />   <!-- 宽屏包装层（画幅线） -->
+    <ProjectReference Include="$(RepoRoot)tests/visual/galrec/S2Arm.GalRec.csproj" />   <!-- GAL 调用流录像（画幅线），S2A_GALREC 开 -->
+    <!-- 直连兜底现编（s2a_dsh_compile，graphics/tools/direct/dsh）：与本程序集同用 compat/tree 的着色器翻译器 -->
+    <ProjectReference Include="$(RepoRoot)graphics/tools/direct/dsh/S2A.Dsh.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- 库模式只导出主程序集的 [UnmanagedCallersOnly]；引用程序集要点名，否则 S2A_Init 不导出（编译照样成功） -->
+    <UnmanagedEntryPointsAssembly Include="S2A.Services" />
+    <UnmanagedEntryPointsAssembly Include="S2Arm.Gfx.Widen.Gal" />   <!-- s2a_ap_cam（画幅线，自动玩家在线读镜头位姿） -->
+    <UnmanagedEntryPointsAssembly Include="S2Arm.Gfx.Widen" />   <!-- s2a_widen_*（画幅线，宽屏核心 C 接口，直连回放层调：graphics/widen/export/s2a_widen.h） -->
+    <UnmanagedEntryPointsAssembly Include="S2A.Dsh" />   <!-- s2a_dsh_compile（直连兜底现编，回放层调：graphics/tools/direct/dsh/DshCApi.cs） -->
+    <!-- Ryujinx 旧 HLE 服务靠反射建实例、分发命令（IpcService.CmifCommands / sm 服务名表）：整程序集保留 -->
+    <!-- 根程序集自己也要保留：否则 Compose 的模块初始化（登记渲染器工厂 / 渲染循环）被裁掉 -->
+    <TrimmerRootAssembly Include="S2A.Aot" />
+    <TrimmerRootAssembly Include="Ryujinx.HLE" />
+    <TrimmerRootAssembly Include="Ryujinx.Horizon" />
+    <TrimmerRootAssembly Include="S2A.Services" />
+    <TrimmerRootAssembly Include="NxGal" />
+    <!-- 原生层 s2a_* 与渲染器 nxgal_* 都静态链在同一进程，不走 dlopen -->
+    <DirectPInvoke Include="s2a_native" />
+    <DirectPInvoke Include="nxgal" />
+    <DirectPInvoke Include="s2a_vpx" />   <!-- libvpx VP8 解码（services/vpx，build.mk 链 libs2a_vpx.a） -->
+    <!-- libopus 解码（Horizon hwopus，services/opus，build.mk 链 libs2a_opus.a） -->
+    <DirectPInvoke Include="s2a_opus" />
+  </ItemGroup>
+</Project>
