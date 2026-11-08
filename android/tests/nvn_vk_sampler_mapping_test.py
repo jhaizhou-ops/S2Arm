@@ -16,11 +16,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-SOURCE = HERE.parent / 'runtime/nvn/nvn_vk_sampler.c'
+SOURCE = HERE.parent / 'native/nvn/nvn_vk_sampler.c'
 FIXTURE = HERE / 'nvn_vk_sampler_mapping_test.c'
 
 INCLUDES = [
-    HERE / 'vkhost', HERE / 'hostvk', HERE.parent / 'native', HERE.parent / 'runtime/nvn',
+    HERE / 'vkhost', HERE / 'hostvk', HERE.parent / 'native', HERE.parent / 'native/nvn',
     ROOT / 'graphics/nvn/gfx/nvn', ROOT / 'graphics/nvn/gfx/nvn/include', ROOT / 'graphics/nvn/gfx/tex',
     ROOT / 'graphics/nvn/third_party/vulkan-headers/include',
 ]

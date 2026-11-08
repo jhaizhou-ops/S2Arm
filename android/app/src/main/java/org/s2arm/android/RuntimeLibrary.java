@@ -262,7 +262,7 @@ final class RuntimeLibrary {
 
     /**
      * The JNI ABI the Java side was compiled with: SHA-256 over "Class.method(Param,...)Return" of every
-     * native method, sorted, one per line (simple type names). runtime/jni_abi.py computes the same from
+     * native method, sorted, one per line (simple type names). native/jni_abi.py computes the same from
      * the Java sources at CMake time and bakes it into the library (NativeBridge.jniAbi()).
      */
     static String jniAbi(Class<?>... classes) {

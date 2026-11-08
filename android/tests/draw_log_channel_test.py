@@ -22,8 +22,8 @@ ANDROID = HERE.parent
 CC = shutil.which('cc') or shutil.which('clang')
 
 INCLUDES = [HERE, HERE / 'vkhost', HERE / 'hostvk',
-            ANDROID / 'native', ANDROID / 'runtime/direct',
-            ANDROID / 'runtime/nvn',
+            ANDROID / 'native', ANDROID / 'native/direct',
+            ANDROID / 'native/nvn',
             REPO / 'graphics/nvn/gfx/nvn', REPO / 'graphics/nvn/gfx/nvn/include',
             REPO / 'graphics/nvn/third_party/vulkan-headers/include']
 
@@ -48,10 +48,10 @@ class DrawLogChannelTest(unittest.TestCase):
     def test_diag_call_site_is_behind_channel(self):
         # 诊断函数本身（边界实现）归 draw_diag；调用点必须由 fd_verbose() 把关，
         # 默认关时整段不执行。
-        first_draw = (ANDROID / 'runtime/nvn/nvn_vk_first_draw.c').read_text()
+        first_draw = (ANDROID / 'native/nvn/nvn_vk_first_draw.c').read_text()
         call = 'if (fd_verbose()) s2a_first_draw_diag('
         self.assertEqual(first_draw.count(call), 1)
-        diag = (ANDROID / 'runtime/nvn/nvn_vk_draw_diag.c').read_text()
+        diag = (ANDROID / 'native/nvn/nvn_vk_draw_diag.c').read_text()
         signature = diag[diag.index('void s2a_first_draw_diag'):]
         signature = signature[:signature.index(')') + 1]
         self.assertNotIn('verbose', signature, '边界实现不应带开关参数，开关只在调用点')
@@ -70,7 +70,7 @@ class DrawLogChannelTest(unittest.TestCase):
                         start.index('exportPreviousShaderCache()'))
         self.assertIn('static native void setDrawLog(int value);',
                       (java / 'NativeBridge.java').read_text())
-        bridge = (ANDROID / 'runtime/bridge.cpp').read_text()
+        bridge = (ANDROID / 'native/bridge.cpp').read_text()
         self.assertIn('Java_org_s2arm_android_NativeBridge_setDrawLog', bridge)
         self.assertIn('s2a_fd_set_draw_log((int)draw_log);', bridge)
 

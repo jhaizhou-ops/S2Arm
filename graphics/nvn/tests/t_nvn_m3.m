@@ -12,7 +12,7 @@
 //   ③c Metal 3 地址反查（m3_buf_at）：池中一点的 GPU 地址反查回同一缓冲与偏移；不在任何常驻缓冲里的地址查不到并报红；
 //   ④ 上屏：外部纹理经上屏线程画到离屏 CAMetalLayer 的可绘制体，且必须等外部事件（Metal 4 队列等事件 / Metal 3 命令缓冲内等事件）：
 //      事件 300 ms 后才由 CPU 置位，上屏完成（完成回调推进上屏号）早于此即红。
-// 不需要游戏；宿主符号在本文件打桩（直连层不起宿主）。用法：make -C graphics/nvn test（末行 ✓ / ✗）
+// 不需要游戏；宿主符号在本文件打桩（直连层不起宿主）。用法：make -C gfx/nvn test（末行 ✓ / ✗）
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <ImageIO/ImageIO.h>

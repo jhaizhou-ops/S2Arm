@@ -122,7 +122,7 @@ static inline int __android_log_print(int,const char*,const char*fmt,...){
 }
 ''')
     (out/'harness.cpp').write_text(HARNESS)
-    source = (ANDROID/'runtime/lan_discovery.cpp').read_text().replace('../../runtime/include/', str(ROOT/'runtime/include')+'/')
+    source = (ANDROID/'native/lan_discovery.cpp').read_text().replace('../../runtime/include/', str(ROOT/'runtime/include')+'/')
     # Test-only JNI invocation table: execute the real Env failure paths without
     # adding a production hook or changing Android's JavaVM.
     source += r'''

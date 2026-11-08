@@ -21,7 +21,7 @@ Apple M5 Pro / macOS 27.0、Xcode 27.1、.NET 10.0.402 上，两项查询共 410
 
 两项分别做错误输出反证：临时将对应生产 getter 改为返回 NULL，按函数名过滤运行，均在 Set/Get 阶段的指针相等断言失败、退出 1。恢复生产实现后全组 410 条断言再次通过。原始日志留在本地 `build/nvn-d-{first,mutation-callback,mutation-data,restored}.log`。
 
-共享构建集成验证：`make native-test-nvn_a native-test-nvn_d` 在同一次调用中通过 A 组 360 条与 D 组 410 条断言；`make -C graphics/nvn mac` 和 `dotnet publish` 在该构建日志中各出现 1 次。两组使用同一套 `NVN_TEST_HOST_OBJS` / `NVN_TEST_LIB` / `NVN_TEST_WIDEN`，D 组只增加链接与运行目标。证据为 `build/nvn-ad-shared.log`；生产 bootstrap 为 446 个语义入口 + 14 个空操作，未实现 76。
+共享构建集成验证：`make native-test-nvn_a native-test-nvn_d` 在同一次调用中通过 A 组 360 条与 D 组 410 条断言；`make -C gfx/nvn mac` 和 `dotnet publish` 在该构建日志中各出现 1 次。两组使用同一套 `NVN_TEST_HOST_OBJS` / `NVN_TEST_LIB` / `NVN_TEST_WIDEN`，D 组只增加链接与运行目标。证据为 `build/nvn-ad-shared.log`；生产 bootstrap 为 446 个语义入口 + 14 个空操作，未实现 76。
 
 ## 正式分类工具核准
 

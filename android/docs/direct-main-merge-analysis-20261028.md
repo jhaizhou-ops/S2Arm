@@ -45,7 +45,7 @@
 
 这些是提交可达性计数，包含 merge 和文档，不是功能数。此前 329 的读数针对 `d9ef64083`；本线新增 `5ac1affaa` 文档提交后为 330。挑选提交、改写实现可能有等价内容，因此不能单凭计数判某项功能不存在；本文另做树内容和源码核对。
 
-**写作期间追加核验 A2**：本线进入 `93fe941d9` 后重新执行三方预演，48 个冲突路径集合完全相同；共同改动/相同结果/不同结果仍为 679/458/221。A2 相对 C 改动路径变为 1068，独立 `runtime/nvn` 新文件变为 50 个（新增 driver cache C/H）；原 CPU 反例涉及的 `OP_BIND_VBUF` 分支原文 SHA-256 在 A/A2 均为 `04595b10d0690f7b06961322b56216fc9c767552d10d26365041cedab025c8a4`。这只更新静态合流范围，不验证新 driver cache 或计时的运行行为。
+**写作期间追加核验 A2**：本线进入 `93fe941d9` 后重新执行三方预演，48 个冲突路径集合完全相同；共同改动/相同结果/不同结果仍为 679/458/221。A2 相对 C 改动路径变为 1068，独立 `native/nvn` 新文件变为 50 个（新增 driver cache C/H）；原 CPU 反例涉及的 `OP_BIND_VBUF` 分支原文 SHA-256 在 A/A2 均为 `04595b10d0690f7b06961322b56216fc9c767552d10d26365041cedab025c8a4`。这只更新静态合流范围，不验证新 driver cache 或计时的运行行为。
 
 **实际集成应分两次预演**：先在独立集成工作树固定 T02 与当时 main 的接收基线，再与本线冻结头合流。下面的 48 路径只属于 A/B，不能当作加入 main 的 206 个后续提交后仍然不变的总冲突数。
 
@@ -78,7 +78,7 @@ Linux x86_64 / Git 2.56.0；临时 bare 仓库通过 alternates 读取源仓库�
 | 事项 | 本线 A | T02 B | 合流要求 |
 |---|---|---|---|
 | 图形前端 | 共享 NVN API/对象/命令记录 | guest Vulkan 入口与动态查询、VI 窗口 | 按实际输入识别前端，分别保留 |
-| 执行 | `runtime/nvn/nvn_vk_*` 与 `runtime/direct/vk_record.c` | `runtime/direct_vk.c`、`direct_objects.inc`、`direct_wsi.inc`、guest callback | 不把 guest Vulkan handle 当 NVN 后端对象 |
+| 执行 | `native/nvn/nvn_vk_*` 与 `native/direct/vk_record.c` | `native/direct_vk.c`、`direct_objects.inc`、`direct_wsi.inc`、guest callback | 不把 guest Vulkan handle 当 NVN 后端对象 |
 | 准入 | `direct/selection.c`、descriptor、attempt、provider | `direct_session.c` 的 requested/frozen/mode 与 `direct-vulkan.txt` | 将前端准入接入同一权威选择事务，迁移全部消费者 |
 | 图形模式查询 | `plat_android.c::s2a_gfx_mode/s2a_direct_lookup` | game 下由 `direct_session.c` 定义同名全局符号 | 最终只定义一次，按已冻结前端分派 |
 | HLE 组合 | services v2 显式携带图形表；direct 禁用 generic GPU 循环 | services v1 启动中查询 `Native.GfxMode`；direct service renderer | 统一版本和启动顺序，保留必要 HLE 外壳 |
@@ -161,7 +161,7 @@ Android shader 生产继续消费 `s2a-direct-program-v1`。T02 `direct_lib.sh` 
 
 | 工作位置 | 后续变更方式 | 不应扩散的内容 |
 |---|---|---|
-| `runtime/nvn/`、`runtime/direct/` | 渲染、缓存、编译和资源细节继续在独立模块；通过既有 provider/adapter 接入 | 不往 UI/runtime 添加逐 draw 开关和实现分支 |
+| `native/nvn/`、`native/direct/` | 渲染、缓存、编译和资源细节继续在独立模块；通过既有 provider/adapter 接入 | 不往 UI/runtime 添加逐 draw 开关和实现分支 |
 | `graphics/nvn` | 对齐目标 `nvn_be_*`；Android 源捕获/阶段事实保留最小钩子，所有记录消费者同批更新 | 不大范围改名或重排共享文件，不回退目标 API 成果 |
 | CMake/单库 | 新后端文件只登记到约定源组，审计复用生产清单 | 不在多个脚本复制一份独立文件列表 |
 | runtime/managed/Java 接缝 | 一个语义变更同步头文件、调用方、生成摘要和负例，独立提交 | 不通过约定未声明的整数、reserved 位或全局变量传第二种含义 |
@@ -972,11 +972,11 @@ main 把后端接口从 `mtl_*` 统一成 `nvn_be_*`（`graphics/gate.sh` 有棘
 
 **`android/CMakeLists.txt`：+289 / −8**
 
-删除行都是本线把源清单展开（`bridge.cpp`/`touch_jni`/`selftest`/`guest_signal`/`host_ui_*`/`wsi_probe`）与 `plat_test` 扩源所致；main 的 `runtime/s2a_native_stub.c`（diagnostic 模式）、`VK_USE_PLATFORM_ANDROID_KHR`（移入 `NvnDirect.cmake`）、`plat_test` 的 `../../runtime/include` 均保留。
+删除行都是本线把源清单展开（`bridge.cpp`/`touch_jni`/`selftest`/`guest_signal`/`host_ui_*`/`wsi_probe`）与 `plat_test` 扩源所致；main 的 `native/s2a_native_stub.c`（diagnostic 模式）、`VK_USE_PLATFORM_ANDROID_KHR`（移入 `NvnDirect.cmake`）、`plat_test` 的 `../../runtime/include` 均保留。
 
 **本线新增、main 无对应物的文件**（不构成对 main 的风险）
 
-`android/native/direct/vk_record.c`、`runtime/nvn/mtl_vk_shim.c`、`runtime/nvn/vk_nvn_adapter.c`、`runtime/nvn/nvn_be_compat.h`、`graphics/third_party/d2r_vulkan_engine/nvn_vk.c`、`xbg_game.cpp`、`android/tests/vk_record_test.c`。
+`android/native/direct/vk_record.c`、`native/nvn/mtl_vk_shim.c`、`native/nvn/vk_nvn_adapter.c`、`native/nvn/nvn_be_compat.h`、`graphics/third_party/d2r_vulkan_engine/nvn_vk.c`、`xbg_game.cpp`、`android/tests/vk_record_test.c`。
 
 **复核中发现并修掉的一处自伤**
 

@@ -19,8 +19,8 @@ REPO = HERE.parents[1]
 CC = shutil.which('cc') or shutil.which('clang')
 
 INCLUDES = [HERE, HERE / 'vkhost', HERE / 'hostvk',
-            HERE.parent / 'native', HERE.parent / 'runtime/direct',
-            HERE.parent / 'runtime/nvn',
+            HERE.parent / 'native', HERE.parent / 'native/direct',
+            HERE.parent / 'native/nvn',
             REPO / 'graphics/nvn/gfx/nvn', REPO / 'graphics/nvn/gfx/nvn/include',
             REPO / 'graphics/nvn/third_party/vulkan-headers/include']
 
@@ -36,7 +36,7 @@ class FirstDrawDiagBoundsTest(unittest.TestCase):
             for directory in INCLUDES:
                 cmd += ['-I', str(directory)]
             cmd += [str(HERE / 'first_draw_diag_bounds_test.c'),
-                    str(HERE.parent / 'runtime/nvn/nvn_vk_draw_diag.c'),
+                    str(HERE.parent / 'native/nvn/nvn_vk_draw_diag.c'),
                     '-o', str(binary)]
             subprocess.run(cmd, check=True)
             # 两个平台统一成「崩溃即带信号退出」：夹具用 WIFSIGNALED 判修前基线如期崩溃。

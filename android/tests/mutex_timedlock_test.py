@@ -23,7 +23,7 @@ class MutexTimedlockTest(unittest.TestCase):
                 with self.subTest(portable=bool(extra)):
                     exe = Path(td) / ('t' + ('-portable' if extra else '-native'))
                     subprocess.run([cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-pthread', *extra,
-                                    '-I' + str(HERE.parent / 'runtime/nvn'), str(HERE / 'mutex_timedlock_test.c'),
+                                    '-I' + str(HERE.parent / 'native/nvn'), str(HERE / 'mutex_timedlock_test.c'),
                                     '-o', str(exe)], check=True)
                     r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
                     print(('portable' if extra else 'native') + '\n' + r.stdout + r.stderr)

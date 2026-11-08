@@ -63,10 +63,10 @@ def main():
     run('java-android-compile', [args.jdk/'bin/javac', '--release', '17', '-cp', jar, '-d', out/'android',
         java/'CapturePixels.java', java/'CaptureEncoder.java'])
     run('native-android-compile', [ndk_bin/'clang++', '--target=aarch64-linux-android29', '-std=c++17',
-        '-Wall', '-Wextra', '-Werror', '-fPIC', '-c', runtime/'capture_jpeg.cpp', '-o', out/'capture-arm64.o'])
+        '-Wall', '-Wextra', '-Werror', '-fPIC', '-c', native/'capture_jpeg.cpp', '-o', out/'capture-arm64.o'])
     run('jni-host-build', [args.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
         '-I'+str(args.jdk/'include'), '-I'+str(args.jdk/'include'/include_os), '-I'+str(native),
-        runtime/'capture_jpeg.cpp', here/'capture_jni_test.cpp', '-L'+str(args.jdk/'lib/server'), '-ljvm',
+        native/'capture_jpeg.cpp', here/'capture_jni_test.cpp', '-L'+str(args.jdk/'lib/server'), '-ljvm',
         '-Wl,-rpath,'+str(args.jdk/'lib/server'), '-o', out/'capture-jni-test'])
     run('jni-real-jpeg', [out/'capture-jni-test', out, scratch])
     common = [args.dotnet_root/'dotnet', 'exec', csc, '-noconfig', '-nostdlib+', '-unsafe+', '-target:exe',

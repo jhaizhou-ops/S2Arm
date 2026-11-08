@@ -83,7 +83,7 @@ APK 只装模块（107 MB），资源包 3.9 GB 单独导入——与计划的"�
 | JNI | `bridge.cpp` 的 16 个 `Java_..._NativeBridge_*` | 无 boot / run / start |
 | APK 内容 | `unzip -l app-debug.apk` | 只有 `libs2arm_android.so`（601 KB，宿主层）、`libs2a_cs_probe.so`（1.2 MB，运行时探针）、`libcrypto/libssl`、`assets/game/modules`（90.5 MB）——**没有 `libs2a_cs.so`** |
 | 构建默认 | `android/docker/build.sh:18` | `S2ARM_ANDROID_CS_SERVICES=${S2ARM_ANDROID_CS_SERVICES:-0}`，默认只出 probe；服务层（`S2A.Services` + Ryujinx HLE）要用 `1` 或 `static` 才编 |
-| 原生核心 | `android/CMakeLists.txt:37` | `S2A_CS_SERVICES=static` 时链 `runtime/s2a_native_stub.c`，注释写明 "until the native core runs here"；`../../runtime/src` 只加 include 路径，**一个 `.c` 都没编** |
+| 原生核心 | `android/CMakeLists.txt:37` | `S2A_CS_SERVICES=static` 时链 `native/s2a_native_stub.c`，注释写明 "until the native core runs here"；`../../runtime/src` 只加 include 路径，**一个 `.c` 都没编** |
 | stub | `s2a_native_stub.c`（59 行） | 除 `s2a_screen_w` / `s2a_boot_mark` 外全部 `unbacked()`，首次调用打 `link stub, the native core does not run on Android yet` |
 | 启动入口 | `services/S2A.Services/Exports.cs:26` | `[UnmanagedCallersOnly(EntryPoint = "S2A_Init")]` → `Host.Boot(renderer, audio, baseDir)`；**Android 侧没有任何代码调用它** |
 
@@ -170,7 +170,7 @@ void s2a_host_run(const char *root);   // load_modules → widen → mem_init �
 | 改动 | 位置 | 原因 |
 |---|---|---|
 | `targets 's2arm_android', 's2a_native'` | `app/build.gradle` | Gradle 只编声明过的 target，不加不会产出 `libs2a_native.so` |
-| `add_library(s2a_native SHARED runtime/s2a_native_stub.c)` + `target_link_libraries(... log)` | `android/CMakeLists.txt` | 让 `DllImport("s2a_native")` 能解析；stub 用了 `__android_log_print`，要链 `log` |
+| `add_library(s2a_native SHARED native/s2a_native_stub.c)` + `target_link_libraries(... log)` | `android/CMakeLists.txt` | 让 `DllImport("s2a_native")` 能解析；stub 用了 `__android_log_print`，要链 `log` |
 | `libs2a_native.so` 加进白名单 | `verify-apk.py` | 否则 `APK verification failed` |
 
 另外 `dlopen` 顺序有讲究：先 `libs2a_native.so`（`RTLD_GLOBAL`）再 `libs2a_cs.so`，

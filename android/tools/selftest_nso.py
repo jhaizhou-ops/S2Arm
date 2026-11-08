@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synthetic NSO for the on-device rewrite self-test (runtime/selftest.c).
+"""Synthetic NSO for the on-device rewrite self-test (native/selftest.c).
 Usage: selftest_nso.py <output.nso>
 
 Code starts at module offset 0x100; each function is `<instruction>; ret`:

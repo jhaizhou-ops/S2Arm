@@ -11,7 +11,7 @@
 #include "graphics/nvn/host/game_profile.h"
 
 #define TAG "S2Arm"
-// 弱定义：真实运行时（runtime/src、runtime/runtime）里有同名强符号时以它为准。
+// 弱定义：真实运行时（runtime/src、native/runtime）里有同名强符号时以它为准。
 #define S2A_HOST_WEAK __attribute__((weak))
 
 // 刷新率由 JNI 探针从 Java Display 传进来；不写死 60，也不在没值时假装知道。

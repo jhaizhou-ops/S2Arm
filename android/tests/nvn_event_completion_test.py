@@ -21,8 +21,8 @@ class EventCompletionTest(unittest.TestCase):
         cc = shutil.which('cc')
         self.assertIsNotNone(cc, 'C compiler required for event completion regression')
         includes = [
-            HERE / 'hostvk', HERE / 'vkhost', HERE.parent / 'native', HERE.parent / 'runtime/direct',
-            HERE.parent / 'runtime/nvn', ROOT / 'runtime/include', ROOT / 'graphics/nvn/gfx/nvn',
+            HERE / 'hostvk', HERE / 'vkhost', HERE.parent / 'native', HERE.parent / 'native/direct',
+            HERE.parent / 'native/nvn', ROOT / 'runtime/include', ROOT / 'graphics/nvn/gfx/nvn',
             ROOT / 'graphics/nvn/gfx/nvn/include', ROOT / 'graphics/nvn/gfx/tex',
             ROOT / 'graphics/nvn/third_party/vulkan-headers/include',
         ]
@@ -31,7 +31,7 @@ class EventCompletionTest(unittest.TestCase):
             cmd = ([cc, '-std=gnu11', '-ffunction-sections', '-fdata-sections'] +
                    [f'-I{x}' for x in includes] +
                    [str(HERE / 'nvn_event_completion_test.c'),
-                    str(HERE.parent / 'runtime/nvn/nvn_vk_exec_owner.c'),
+                    str(HERE.parent / 'native/nvn/nvn_vk_exec_owner.c'),
                     ('-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections'),
                     '-pthread', '-o', str(binary)])
             if sys.platform == 'darwin':

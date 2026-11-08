@@ -16,7 +16,7 @@
  * only for a fallback warning.
  *
  * debug.s2a.gs_path={compute|hardware} forces the leg, behind both
- * debug gates (runtime/debug_gate.h: Debug build's
+ * debug gates (native/debug_gate.h: Debug build's
  * S2A_ANDROID_DEBUG_ENV + the debug.s2a.debug_env=1 property), so it
  * is inert in player builds and cannot be set by ordinary apps.
  *

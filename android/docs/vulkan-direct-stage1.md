@@ -9,7 +9,7 @@
 
 ## 已实现
 
-原生前端 `runtime/direct_vk.c` 通过 `s2a_android_vk_configure` 接收唯一、进程生命周期
+原生前端 `native/direct_vk.c` 通过 `s2a_android_vk_configure` 接收唯一、进程生命周期
 不变的宿主 owner。首批链接进 game native 目标，但不改变默认通用图形启动。
 
 - 静态入口、`vkGetInstanceProcAddr`、`vkGetDeviceProcAddr` 都先核驱动可用性和已审查

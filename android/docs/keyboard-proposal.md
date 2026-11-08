@@ -23,7 +23,7 @@ v6 首个接线候选（APK `ea16106ffab245be5a4c2d5632aace97faca1309bc21b0250df
 - `core-runtime/AndroidKeyboard.cs`、`AndroidHostUi.cs`、`AndroidGameRuntime.cs`：映射实际 SoftwareKeyboardUIArgs，验证应答，再返回真正确认/取消；其他 applet 保持 Unsupported。
 - `runtime/host_ui_android.{h,c}`：显式委托原 broker，绝不把 `api.host=&g` 强转成 broker；Activity 代际和停止所有权。
 - `runtime/host_android.{h,c}`：注册前 producer-ready 才提供 UI capability；stop 先撤销 broker 等待。
-- `runtime/host_ui_jni.cpp`、`app/.../NativeBridge.java`：有界 UTF-8 byte[] 通路，保留原 request ID。
+- `native/host_ui_jni.cpp`、`app/.../NativeBridge.java`：有界 UTF-8 byte[] 通路，保留原 request ID。
 - `app/.../HostKeyboard.java`、`MainActivity.java`：主线程弹框；Activity 失活撤销，旧代际/重复完成被拒绝；不记录输入内容。
 - `w4-tests/keyboard_owner_test.c`、`core-runtime/keyboard-tests/`：所有权、取消、传输、UTF-8、边界与错误负控。
 - `core-link/audit.py`、`test_audit.py`：接受 NativeAOT 含空格的合法原符号名，保持 provider/导出/启动节检查。

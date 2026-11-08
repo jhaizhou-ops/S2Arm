@@ -74,7 +74,7 @@
 ### 2026-10-25 / ANDROID-DIRECT-C5-RUNTIME-BUNDLE-001 / 真机首次运行时补编：SetShaders 现场出 `.xgs`，引擎读到并进入能力校验
 
 - 变更：前端 `nvnProgramSetShaders` 加通用弱钩子 `dm_shader_survey`；Android 侧
-  `runtime/nvn/shader_survey.c` 在 `debug.s2a.compile_shaders=1` 时逐阶段调 AOT
+  `native/nvn/shader_survey.c` 在 `debug.s2a.compile_shaders=1` 时逐阶段调 AOT
   `s2a_direct_bundle_v1`；AOT 用 `DshVk`（dmsh_xlate 翻译 + XGS 打包）写
   `<control 键>.xgs` 到引擎 shader 目录；provider 设 `S2A_SHADER_DIR`。
 - 真机（暗黑 3，新 APK，显式 direct）：到 `nnMain`，survey 对单阶段程序产出多份
@@ -194,7 +194,7 @@
   1. 新增 `tools/filecopy.py`：复制前先试 Linux `FICLONE`（btrfs/XFS；APFS/不支持的文件系统自动回退
      `shutil.copy2`）。`make_pack.write_pack` 在克隆成功时只读源算哈希（内容与普通复制一致），
      `game_apk.py --resources` 同样用 `copy_file`。
-  2. `runtime/direct/json.c` 的 `number/is_unsigned/uvalue` 显式初始化。`parse_number` 成功时三项都写，
+  2. `native/direct/json.c` 的 `number/is_unsigned/uvalue` 显式初始化。`parse_number` 成功时三项都写，
      这里只是消除 GCC 15 `-O1 -Werror=maybe-uninitialized` 的误报；调用方仍然只在返回 0 后读。
 - 提交：本条。
 - 验证（Linux btrfs，`cp --reflink=always` 可用）：
@@ -226,7 +226,7 @@
      为模板**（真实合法 NPDM：META+ACID+ACI0 齐全），只改三处：META 地址空间类型位（+0x0C = 6，64-bit）、
      ACI0 程序号（+0x10）、ACID 的 ProgramIdMin/Max。之前手工拼的 NPDM 被 LibHac 判
      `ResultLoaderInvalidMeta (2009-0004)`。
-  2. `runtime/direct/selection.c` 新增 `s2a_direct_finish(int normal)`：commit 后记住 (state_dir, key)，
+  2. `native/direct/selection.c` 新增 `s2a_direct_finish(int normal)`：commit 后记住 (state_dir, key)，
      会话正常收尾（guest 返回 / 用户停止）时清 attempt 锁，崩溃/被杀保留锁。`runtime.c` 的
      `s2a_android_runtime_run_v2` 在 `run_common` 返回后调用它。
 - 真机证据（4c6229ab / 22081212C / Android 16，per-game APK + 合成 direct 包）：
@@ -309,7 +309,7 @@
 
 - 关联：C1（provider 生命周期）、C2（编译 provider 绑定）。这是 activate 第一次被**真正的调用者**执行。
 - 变更：
-  - `runtime/direct/compiler_bind.c`（新）+ `s2a_direct.h` 的 `s2a_direct_bound_compile()`：实现
+  - `native/direct/compiler_bind.c`（新）+ `s2a_direct.h` 的 `s2a_direct_bound_compile()`：实现
     `s2a_direct_bind_compiler_v1(context, compile)` —— 最多 4 个 context 登记，重复绑定覆盖同一个 context，
     表满返回 `INTERNAL`（不覆盖别人的会话）；native 侧以后要"现场编一条 guest 着色器"就取这个指针。
   - `core-runtime/AndroidGameRuntime.cs` 的 direct 分支：表校验 → `DirectSession` → `BindCompiler`
@@ -428,11 +428,11 @@
   "native Vulkan direct composition is not implemented in this build"），不调 activate。
   （更正：`core-runtime` 里有 DirectAbi 消费者，见下一条 C1-MANAGED-SESSION-001。）
 - 变更：
-  - `runtime/direct/provider_vk.h`（新）：`s2a_direct_vk_context {game_data_dir, state_dir, display_hz, lease_api}`
+  - `native/direct/provider_vk.h`（新）：`s2a_direct_vk_context {game_data_dir, state_dir, display_hz, lease_api}`
     + 弱符号 `s2a_direct_provider_vk_configure()`。
-  - `runtime/runtime/runtime.c`：选择前把 revision 根/状态目录/lease_api 交给 provider（display_hz 记 0，
+  - `native/runtime/runtime.c`：选择前把 revision 根/状态目录/lease_api 交给 provider（display_hz 记 0，
     外壳还没把刷新率带进来）。
-  - `runtime/direct/provider_vk.c`：`activate()` 用候选 device/queue 调 `dm_vk_initialize`，
+  - `native/direct/provider_vk.c`：`activate()` 用候选 device/queue 调 `dm_vk_initialize`，
     着色器目录取 `<revision>/shaders/vulkan/direct`；`request_stop()`/`destroy()` 先 `xbg_game_shutdown()`
     再销毁 device；present 回调在窗口 lease 没接过来时**明确失败并写原因**（引擎会因此 fatal，不静默丢帧）。
 - 验证：`-Ps2arm.nativeMode=game` + 引擎开关构建通过；设备上 direct 仍能 commit
@@ -451,18 +451,18 @@
 - 状态：部分完成。**commit 与"故障下局 generic"已在真机跑通**；activate（把引擎接到游戏 WSI/present）
   仍是明确 UNSUPPORTED，所以还没有 direct 出图。
 - 变更：
-  - 新增 `runtime/direct/provider_vk.c`（只在引擎开关构建设里编）：`available()`=1（本文件参与编译即代表
+  - 新增 `native/direct/provider_vk.c`（只在引擎开关构建设里编）：`available()`=1（本文件参与编译即代表
     引擎+前端+Vulkan owner 都在）、`prepare()` 用 `s2a_vk_device_create` 真建 device/queue 并填表
     （activate/request_stop/query/poll/destroy，计数 devices=1 queues=1）、`activate()` 因为还没有
     "游戏 WSI/present 归属"**明确返回 `S2A_DIRECT_RES_UNSUPPORTED` 并写明原因**（不静默成功）、
     `destroy()` 释放 device；并补齐 runtime 的弱符号 `s2a_direct_frontend_ready()`
     （只有共享前端真的链接进来才为真——用 `h_nvnBootstrapLoader("nvnDeviceGetInteger")` 实测）。
-  - `runtime/direct/attempt.c`：**真 bug 修复**。原来 `ensure_dir` 从 `/` 逐级 `lstat`，
+  - `native/direct/attempt.c`：**真 bug 修复**。原来 `ensure_dir` 从 `/` 逐级 `lstat`，
     Android 上 `/data/user/0` 这类系统前缀对 App 是链接/受保护视图，被判成"不是目录" →
     `mkdir` 前就返回 `S2A_ATTEMPT_IO (errno=20 ENOTDIR)`，于是 `attempt` 锁永远写不下去、
     AUTO 永远退回 generic。改成 `stat`（跟随链接，只拒绝"存在但不是目录"），并加
     `s2a_direct_attempt_last_errno()` 与失败路径打印（只在失败时输出）。
-  - `runtime/direct/selection.c`：锁写失败的原因里带上错误码与 errno；`runtime.c` 在选择前打印
+  - `native/direct/selection.c`：锁写失败的原因里带上错误码与 errno；`runtime.c` 在选择前打印
     state dir（定位路径问题用）。
   - 新增 `tools/direct_provider_commit_probe.sh`：全新安装 per-game APK（清锁）→ 装资源包 →
     两局 A/B：第一局断言 `graphics selection: direct (direct committed before relocation), devices=1 queues=1`，
@@ -484,7 +484,7 @@
 - 状态：部分完成。引擎与共享前端已经和**游戏运行时**同编一个 DSO 并在设备上初始化成功；
   **还没有 provider**（`s2a_direct_provider_default` 仍是空），所以 direct 仍然选不上。
 - 变更：
-  - `runtime/nvn/vk_engine_host_shim.c` 全部宿主桩改成 `__attribute__((weak))`：与游戏运行时同编时，
+  - `native/nvn/vk_engine_host_shim.c` 全部宿主桩改成 `__attribute__((weak))`：与游戏运行时同编时，
     运行时自己的强定义（`module_of`、`s2a_core_block_begin/end` 等）优先；诊断包仍用这些桩。
     加引擎开关 + game 模式前，链接报的重复符号正好是这三个（`module_of`/`s2a_core_block_begin`/
     `s2a_core_block_end`），改弱之后一次链接通过。
@@ -709,7 +709,7 @@
     `nvn_tex.c`/`nvn_deswizzle.c`/`nvn_dirty.c`/`nvn_names_android.c` 与探针宿主 shim 编进
     `libs2arm_android.so`。导入代码与共享前端不跟本仓 `-Werror`（只降级为警告），
     `xbg_texture.c` 仍是 `-fsigned-char`、C++ 侧 `-fno-strict-aliasing`。
-  - 新增 `runtime/nvn/vk_engine_host_shim.c`：与测试用 `frontend_test_host.c` 同源，但去掉 App 已经
+  - 新增 `native/nvn/vk_engine_host_shim.c`：与测试用 `frontend_test_host.c` 同源，但去掉 App 已经
     提供的 `now_ns`/`guest_ns`/`module_of`（直接编会 duplicate symbol）；`front_display_refresh`
     改由 Java 传进来的 `Display.getRefreshRate()`（不写死 60），`module_of` 如实返回 NULL，
     未实现入口/直连失败打到 logcat。
@@ -771,7 +771,7 @@
     没有已导入游戏，未丢游戏数据；旧包 82,623,561 B / SHA-256 `70323314…6cd0e4b` 已备份到
     `/tmp/s2a-installed.apk`，不入仓）。
   - `android/test.sh` 在本机需要 `cmake` 在 PATH（可用 `$ANDROID_HOME/cmake/3.31.6/bin`），
-    且会在 `runtime/memory.c` 的 Linux 专有 `mremap` 处失败（`plat_test` 也引用同一文件）——
+    且会在 `native/memory.c` 的 Linux 专有 `mremap` 处失败（`plat_test` 也引用同一文件）——
     Linux 宿主仍是该 native 主机测试子集的权威门禁；macOS 上改跑 C2/C5/C6 的主机套件。
   - 只在 macOS 宿主出包；Linux/Docker 路径未重跑；direct/game 的 APK 集成仍未开始。
 
@@ -1160,7 +1160,7 @@
 
 - 关联：C2/#247/#198；控制段 +0x748/+0x754。
 - 状态：完成一小项。compute 请求的 `computeState` 必须与控制段一致；缺字段/零线程组/超 1024/超 64 KiB/不一致均拒绝，不回填 1×1×1。
-- 变更：`DirectShaderCompiler.ValidateComputeControl`，与 `runtime/direct/control.c`、`merge_extract.py:cs_facts` 同口径；测试生成真实控制段并覆盖 mismatch/zero 负例。
+- 变更：`DirectShaderCompiler.ValidateComputeControl`，与 `native/direct/control.c`、`merge_extract.py:cs_facts` 同口径；测试生成真实控制段并覆盖 mismatch/zero 负例。
 - 验证：`direct-compiler: ok (108 checks)`；CLI 字节一致与 spirv-val 仍过。
 - 限制：只校验，不用它单独驱动翻译；graphics 控制段/C1 仍未进请求。
 ### 2026-10-25 / ANDROID-DIRECT-C6-SPAN / 输入框组字结束刷新提交状态
@@ -1312,7 +1312,7 @@
 - 关联：C1 / DV1；实施契约 §2.1、§2.2、§8。分支 `android/direct-mode-d2r`。
 - 状态：部分完成。选择事务、故障锁、v2 请求/服务入口、artifact graphics feature 已实现并过主机与 ARM64 合成验证；真实 Vulkan provider、NativeAOT direct 合成与真机包路径未接，不能报 C1 全绿。
 - 变更：
-  - 新增 `runtime/direct/{json,graphics,sha256,attempt,selection}.c`：
+  - 新增 `native/direct/{json,graphics,sha256,attempt,selection}.c`：
     - 严格 JSON（UTF-8/代理对/重复顶层键/数值/1 MiB/深度/尾随字节负例）；
     - `graphics.v1.json` 只接受 `s2a-graphics-v1` / `nvn` / `vulkan-direct` / directABI=1 / `s2a-direct-compile-v1`，校验 titleId、`sha256-…` 身份与 1..8 个 profileHash；
     - attempt/failure 固定写入 `<state>/graphics/direct/<implementationKey>/`，temp→fsync(file)→rename→fsync(parent)，测试注入每个落盘步骤失败；
@@ -1353,7 +1353,7 @@
 - 限制：
   - 覆盖表只做静态清点，“有实现/有 Metal 分支”不等于 Android Vulkan 语义已实现，也没有把函数分成只读/无副作用/未支持四类；那是后续 NVN adapter 的验收内容。
   - ARM64 探针证明的是 AAPCS64 调用约定与头文件布局，不是 `graphics/nvn/hle_nvn.c` 以 ELF 编入并走现有 xstack；Mach 依赖替换和 ELF thunk 未开始。
-  - v2 入口目前只有声明与布局；runtime/runtime 与托管 Start 尚未消费，error 路径与重复 start 负例在 C1 补。
+  - v2 入口目前只有声明与布局；native/runtime 与托管 Start 尚未消费，error 路径与重复 start 负例在 C1 补。
 ### 2026-10-26 / ANDROID-THREADED-R3 / 最终兜底独立、续期跨生命周期、音频和计数回调收尾
 
 - 状态：本地实现，未 push、未上真机；普通 merge 合入 integration f95446f2，保留开发替换库与拆线程接线，补丁仍0271。
@@ -1413,7 +1413,7 @@
   - **P1 符号链接绕过**：先判链接再规范化；`files/dev-runtime` 本身、`<sha>/`、库、清单都不得是链接。目录、库、清单都不得有写位，改用 POSIX 位判断，root 下也成立。
   - **P1 singleTop 静默沿用**：`onNewIntent` 的库选择必须与进程已加载的一致，否则报红并结束会话；单纯的 finish 请求不受此限。
   - **P1 机器侧贯通**：BootSpec `diagnostics.runtimeLibrary` 改为封闭结构（`kind` 等字段），并带负控。外壳写 `<state>/runtime-library.json`，按 PID 绑定。`metrics.py export` 拒收开发局和缺这份记录的局。
-  - **P1 JNI/Java 一致性**：`runtime/jni_abi.py` 在 CMake 时从 Java native 声明算出 hash 并嵌进库，加载后与反射算出的 hash 比对，APK 内的库同样受检。
+  - **P1 JNI/Java 一致性**：`native/jni_abi.py` 在 CMake 时从 Java native 声明算出 hash 并嵌进库，加载后与反射算出的 hash 比对，APK 内的库同样受检。
   - **P1 正式路径不变**：APK 内的库照旧按 soname 取 `native_owner`，只有替换库按 dladdr 路径取。
   - **P2**：
     - 加载的是在 code_cache 里用 NOFOLLOW 打开、边复制边哈希的只读副本，防 TOCTOU；
@@ -1707,13 +1707,13 @@
 - 变更：`S2ARM_ANDROID_CS_SERVICES=static`：NativeAOT 静态库 + SDK 列出的运行时件链进 `libs2arm_android.so`，`DirectPInvoke s2a_native / s2arm_android`；运行时自带的 libunwind 89 个符号改名，与 NDK 的 C++ 展开器各用各的。
 - 提交：PR #10（`fc8e8645d`）。
 - 验证：载入 2–3 ms，运行时启动 + 首次调用 11 ms（RSS +14 MiB）；C#→C 传值、传串正确；.NET 异常（带栈）、空引用、压缩 GC 与 C++ 异常都正常。
-- 限制：原生核心未接，`runtime/s2a_native_stub.c` 代替 20 个导入函数。
+- 限制：原生核心未接，`native/s2a_native_stub.c` 代替 20 个导入函数。
 
 ### 2026-10-22 / ANDROID-AUD-001 / Ryujinx 音频驱动接 AAudio
 
 - 关联：A2；§6.2 音频。
 - 状态：已集成（短音自测）。
-- 变更：`cs/audio` 实现 Ryujinx `IHardwareDeviceDriver`，组合入口装为 `Exports.AudioFactory`；AAudio 实时回调在 C 里只读无锁环（`runtime/aaudio_sink.c`、`runtime/pcm_ring.c`），C# 会话记账同苹果；喂数线程按缓冲播完事件唤醒，暂停或无数据时不醒。
+- 变更：`cs/audio` 实现 Ryujinx `IHardwareDeviceDriver`，组合入口装为 `Exports.AudioFactory`；AAudio 实时回调在 C 里只读无锁环（`native/aaudio_sink.c`、`native/pcm_ring.c`），C# 会话记账同苹果；喂数线程按缓冲播完事件唤醒，暂停或无数据时不醒。
 - 提交：PR #11（`50b4b97c5`）。
 - 验证：经 Ryujinx 会话接口放 0.4 s 音调，19200/19200 帧、479 ms、更新事件已置、0 xrun；共享模式，burst 192 帧，设备缓冲 384 帧；喂数唤醒播放中 3 次、暂停 300 ms 内 0 次。
 - 限制：未测游戏 audren 负载、焦点 / 路由切换、功耗。
@@ -1994,7 +1994,7 @@
 - 关联：#58 / A-W9，Draft PR #66；只新增本线工具并追加本记录。
 - 变更：复用现有 `nxsh_extract.py` CLI 的资源与 NSO 入口，记录内容摘要、来源、诊断和可校验产物；解析失败、部分提取失败、空结果或输入变化不发布成功产物。源码指纹递归收集提取器辅助文件，并复用 MSBuild 闭包读取实际翻译源码字节。
 - 验证：macOS 合成 gzip 资源/NSO 真实提取、跨路径与不同并发数一致、混合损坏输入拒绝、内容篡改拒绝；W9 48 项测试通过。现有翻译工程 MSBuild 闭包求值成功（1,592 个输入）。
-- 限制：源码指纹不等于编译器二进制闭包；未封装完整 runtime/runtime 依赖，自动缓存复用关闭；提取覆盖标记 unverified。真实翻译、正式 state/profile 映射与 W12 消费仍待对接。
+- 限制：源码指纹不等于编译器二进制闭包；未封装完整 native/runtime 依赖，自动缓存复用关闭；提取覆盖标记 unverified。真实翻译、正式 state/profile 映射与 W12 消费仍待对接。
 
 ### 2026-10-23 / ANDROID-A5-W9-004 / 输入包与 W5/W12 对口材料
 
@@ -2470,7 +2470,7 @@
 - 限制：**客体执行未接**。逐层核对（文档 §4.1）：APK 里只有 `libs2arm_android.so`（601 KB 宿主层）
   与 `libs2a_cs_probe.so`（1.2 MB 运行时探针），**没有 `libs2a_cs.so`**——`docker/build.sh` 默认
   `S2ARM_ANDROID_CS_SERVICES=0`，服务层（`S2A.Services` + Ryujinx HLE）根本没进包；原生核心侧
-  `android/CMakeLists.txt:37` 只链 `runtime/s2a_native_stub.c`（59 行，除 `s2a_screen_w` /
+  `android/CMakeLists.txt:37` 只链 `native/s2a_native_stub.c`（59 行，除 `s2a_screen_w` /
   `s2a_boot_mark` 外全是 `unbacked()`），`../../runtime/src` 只加 include 路径；启动入口
   `Exports.cs:26` 的 `S2A_Init` 在 Android 侧没有任何调用者。应用界面自述
   `Game execution is not connected yet`。该项取决于 A2 的真实原生核心与 A1/A3 接线（文档 §4.2 列了

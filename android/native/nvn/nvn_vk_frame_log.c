@@ -174,7 +174,7 @@ static struct s2a_frame_log g_fl;
 static int g_fl_on = -1;   // 开关缓存：属性一次性读入，之后每帧/每等只比标志
 
 // 诊断开关（默认关）：Android 走两道门（编译期 S2A_ANDROID_DEBUG_ENV + 运行期
-// debug.s2a.debug_env=1，见 runtime/debug_gate.h）后还要看 debug.s2a.frame_log=1——
+// debug.s2a.debug_env=1，见 native/debug_gate.h）后还要看 debug.s2a.frame_log=1——
 // 写法同 nvn_vk_compute_bridge.c 的 debug.s2a.compute_trace；正式构建门关着，
 // 玩家包里本开关恒为缺省关。宿主探针走同名环境变量——与 vk_device.c prop_int 同一惯例。
 static int s2a_fl_enabled(void) {

@@ -37,7 +37,7 @@
 
 C6 旁路已按独立 commit 合入主链：`87447084`（HostKeyboard/IME 可服务、mode5 候选、selftest 参数）、`3ceb033f`（中文确认/取消/Stop 证据与脚本）。没有整支 merge；旁路代码未改主链 C5 文件。C6 仍不替代 C7 游戏验收。
 
-**宿主更换（2026-10-25）**：执行机从 Linux 换到 macOS arm64。本机装了 NDK r29 darwin、cmdline-tools、platform 36、build-tools 36.0.0、cmake 3.31.6、JDK 17，`S2ARM_ANDROID_CS_SERVICES=static bash android/host/build.sh` 可在本机出 APK（AOT 静态库需用 NDK `llvm-ar` 重归档，见 CHANGELOG `ANDROID-DIRECT-BUILD-MACOS-001`）。设备 `4c6229ab`（Redmi 22081212C / Android 16 / Adreno 730）上新包（48,862,027 B / sha256 `5053b685…`）已复跑：C2 设备 AOT 逐字节一致（26087 B）、C6 中文 IME 确认/取消/Stop、C4 WSI 两代 swapchain 全过；C0/C1/C3/C5 的探针证据见 `ANDROID-DIRECT-NDK-HOST-001`。`android/test.sh` 在 macOS 上受 `runtime/memory.c` 的 Linux 专有 `mremap` 限制，该 native 子集仍以 Linux 为准。
+**宿主更换（2026-10-25）**：执行机从 Linux 换到 macOS arm64。本机装了 NDK r29 darwin、cmdline-tools、platform 36、build-tools 36.0.0、cmake 3.31.6、JDK 17，`S2ARM_ANDROID_CS_SERVICES=static bash android/host/build.sh` 可在本机出 APK（AOT 静态库需用 NDK `llvm-ar` 重归档，见 CHANGELOG `ANDROID-DIRECT-BUILD-MACOS-001`）。设备 `4c6229ab`（Redmi 22081212C / Android 16 / Adreno 730）上新包（48,862,027 B / sha256 `5053b685…`）已复跑：C2 设备 AOT 逐字节一致（26087 B）、C6 中文 IME 确认/取消/Stop、C4 WSI 两代 swapchain 全过；C0/C1/C3/C5 的探针证据见 `ANDROID-DIRECT-NDK-HOST-001`。`android/test.sh` 在 macOS 上受 `native/memory.c` 的 Linux 专有 `mremap` 限制，该 native 子集仍以 Linux 为准。
 
 ## 1. 历史接管结论
 

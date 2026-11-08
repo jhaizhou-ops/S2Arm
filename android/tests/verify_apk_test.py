@@ -20,7 +20,7 @@ PAGE = 16384
 
 # RELRO fixtures must satisfy the independently checked production JNI ABI,
 # otherwise they fail before reaching the page-protection assertions.
-spec = importlib.util.spec_from_file_location('jni_abi', ANDROID / 'runtime/jni_abi.py')
+spec = importlib.util.spec_from_file_location('jni_abi', ANDROID / 'native/jni_abi.py')
 jni = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(jni)
 JNI_SOURCES = [ANDROID / 'app/src/main/java/org/s2arm/android' / name

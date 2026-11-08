@@ -11,7 +11,7 @@ import javax.inject.Inject
 
 plugins { id 'com.android.application' }
 
-// #1456 capprobe：known-bad 名单唯一来源在 runtime/capprobe/，打包时拷进
+// #1456 capprobe：known-bad 名单唯一来源在 native/capprobe/，打包时拷进
 // assets/capprobe/ 供 MainActivity 交给 native（运行时可读、不内嵌进二进制）。
 abstract class CapProbeAssetsTask extends DefaultTask {
     @InputFile abstract RegularFileProperty getKnownBadList()

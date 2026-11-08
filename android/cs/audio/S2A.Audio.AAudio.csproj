@@ -1,5 +1,5 @@
 <!-- Android audio output for Ryujinx (IHardwareDeviceDriver) over AAudio. The real-time
-     callback is C in the host library (runtime/aaudio_sink.c); this side only feeds its ring. -->
+     callback is C in the host library (native/aaudio_sink.c); this side only feeds its ring. -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>

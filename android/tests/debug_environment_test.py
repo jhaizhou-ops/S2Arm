@@ -20,7 +20,7 @@ class DebugEnvironmentTest(unittest.TestCase):
         self.assertIn('if (BuildConfig.DEBUG && getIntent() != null && getIntent().hasExtra(DebugEnvironment.EXTRA))', cold)
         hot = activity[activity.index('    @Override protected void onNewIntent'):]
         self.assertNotIn('configureDebugEnvironment(', hot)
-        bridge = (ANDROID/'runtime/bridge.cpp').read_text()
+        bridge = (ANDROID/'native/bridge.cpp').read_text()
         for entry, first_effect in [('create', 's2a_redirect_stderr_once();'),
                                     ('createGame', 'std::lock_guard<std::mutex> lock(g_game_create_lock);'),
                                     ('registerHost', 's2a_redirect_stderr_once();')]:
@@ -57,7 +57,7 @@ int main() {
                 if debug: cmd += ['-DS2A_ANDROID_DEBUG_ENV=1']
                 subprocess.run(cmd, check=True)
                 subprocess.run([str(root/'qa')], check=True)
-        bridge = (ANDROID/'runtime/bridge.cpp').read_text()
+        bridge = (ANDROID/'native/bridge.cpp').read_text()
         self.assertIn('s2a_wsi_qa_disable_maintenance(s2a_debug_entries_open()', bridge)
         self.assertIn('S2A_QA_NO_PRESENT_FENCE', bridge)
         surface = (ANDROID.parent.parent/'graphics/vulkan/wsi/AndroidVulkanSurface.cs').read_text()
@@ -75,7 +75,7 @@ int main() {
                 mode.mkdir()
                 (mode / 'BuildConfig.java').write_text('package org.s2arm.android; final class BuildConfig { static final boolean DEBUG = ' + str(debug).lower() + '; }')
                 subprocess.run(['javac', '-d', str(mode), str(mode/'BuildConfig.java'), str(JAVA/'DebugEnvironment.java'), str(ANDROID/'tests/DebugEnvironmentTest.java')], check=True)
-                source = (ANDROID/'runtime/bridge.cpp').read_text()
+                source = (ANDROID/'native/bridge.cpp').read_text()
                 onload = source[source.index('extern "C" int JNI_OnLoad'):]
                 (mode/'onload.inc').write_text(onload)
                 lib = mode / ('libdebugenv.dylib' if os.uname().sysname == 'Darwin' else 'libdebugenv.so')

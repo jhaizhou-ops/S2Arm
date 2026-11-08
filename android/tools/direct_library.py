@@ -23,7 +23,7 @@ Layout (contract: android/docs/direct-mode-contracts.md §8, fast-generic-v3 §4
 <identity> is the 64 lowercase hex of the runtime's S2AI1 v3 content identity (the same value
 the device hashes in nvn_vk_draw.c and uses for its private cache file name). The .program
 file is the *same S2APC1 v2 container* the runtime's private cache uses
-(runtime/direct/program_cache.c: 88-byte header = magic/version/header/identity/result
+(native/direct/program_cache.c: 88-byte header = magic/version/header/identity/result
 SHA-256/payload length, then the s2a-direct-program-v1 bytes). That is deliberate: the future
 read-only consumer can call s2a_program_cache_load(<lib>/<abi>/<profileHash>, identity, ...)
 unchanged, so an entry that passes this tool's checks is exactly what the runtime already
@@ -35,7 +35,7 @@ control || complete guest code, texture facts, graphics facts), while a compile 
 already stripped the 0x30-byte NVN graphics header (nvn_vk_draw.c). A host therefore cannot
 recompute the device identity from a request alone. The capture side must export it:
 
-    # suggested dump change (runtime/nvn/nvn_vk_draw.c, A-line owns that file; NOT applied here).
+    # suggested dump change (native/nvn/nvn_vk_draw.c, A-line owns that file; NOT applied here).
     # nvk_program_compile_inner already has entry->input_sha (filled in nvk_program_lookup):
     char idhex[65];
     for (int i = 0; i < 32; i++) snprintf(idhex + 2 * i, 3, "%02x", entry->input_sha[i]);
@@ -116,7 +116,7 @@ FRONTEND = 'nvn'
 BACKEND = 'vulkan-direct'
 GRAPHICS_FEATURE = 'org.s2arm.graphics.v1'
 
-# runtime/direct/program_cache.c: the private-cache container, reused verbatim for the library.
+# native/direct/program_cache.c: the private-cache container, reused verbatim for the library.
 PCACHE_MAGIC = b'S2APC1\n\x00'
 PCACHE_VERSION = 2
 PCACHE_HEADER = 88
@@ -409,7 +409,7 @@ def storage_stages_for_result(result):
 
 def load_descriptor(path):
     """Parse and check a graphics.v1.json. Field rules mirror make_pack.load_graphics and the
-    native consumer (runtime/direct/graphics.c); files[] is checked here because no consumer
+    native consumer (native/direct/graphics.c); files[] is checked here because no consumer
     used to look inside it."""
     raw = _read_file(path, 'graphics descriptor', MAX_DESCRIPTOR)
     doc = _object(parse_json(raw, f'graphics descriptor {path}'), f'graphics descriptor {path}')
@@ -893,7 +893,7 @@ def validate_result(raw, what, request=None, descriptor=None, expected_profile=N
 
 
 # ---------------------------------------------------------------------------------------
-# S2APC1 v2 container (runtime/direct/program_cache.c format)
+# S2APC1 v2 container (native/direct/program_cache.c format)
 # ---------------------------------------------------------------------------------------
 
 def encode_container(identity_hex, payload):

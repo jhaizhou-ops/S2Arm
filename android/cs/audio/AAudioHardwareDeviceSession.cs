@@ -9,7 +9,7 @@ namespace S2A.Audio.AAudio
     // Queue accounting as in Ryujinx.Audio.Backends.Apple's session (S2Arm): queued buffers as
     // (identifier, sample count), only the head partly played, the update event set when one
     // finishes. The device side differs: AAudio pulls from a native ring in its real-time C
-    // callback (runtime/aaudio_sink.c) and never waits for managed code. Samples go into the ring
+    // callback (native/aaudio_sink.c) and never waits for managed code. Samples go into the ring
     // as soon as they are queued, from the queueing thread or the feeder thread, which also
     // turns the frames the callback took into played samples. A GC pause of the feeder delays
     // that bookkeeping; playback continues from the ring.

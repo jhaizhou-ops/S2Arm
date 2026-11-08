@@ -182,7 +182,7 @@ sudo unshare -n -- sudo -u ubuntu -H env -i PATH=/usr/bin:/bin HOME=/tmp \
 
 第一次 `test.sh`：`PATH` 以 JDK 17 的 `bin` 开头，`JAVA_HOME` 指向该 JDK，`PY=/usr/bin/python3`。退出码 1。默认 `/usr/bin/cc` 是 Clang 18.1.3，`/usr/bin/c++` 链接试编译失败：`cannot find -lstdc++`。CMake 停在 Configuring incomplete，没有进入 ctest 或 Java 契约。同机 `g++`（g++-13）可以链接一个空 `main`；`libstdc++.so` 在 `/usr/lib/gcc/x86_64-linux-gnu/13/`。
 
-第二次：同一 JDK / `PY`，并设 `CC=gcc`、`CXX=g++`。CMake 识别 GNU 13.3.0，配置完成。编译 `guest_page_test` 时失败：`runtime/src/det.c:384` 在 `__ANDROID__` 分支使用 `((ucontext_t *)ctx)->uc_mcontext.pc`，x86_64 宿主的 `mcontext_t` 没有成员 `pc`。`android/CMakeLists.txt` 在 Linux 上把 `det.c` 的编译定义设为 `__ANDROID__`。`cmake --build` 失败，`test.sh` 退出码 2。没有 ctest 结果，也没有进入后面的 Java 步骤。本分片不改 `CMakeLists.txt` 或 `runtime/`。
+第二次：同一 JDK / `PY`，并设 `CC=gcc`、`CXX=g++`。CMake 识别 GNU 13.3.0，配置完成。编译 `guest_page_test` 时失败：`runtime/src/det.c:384` 在 `__ANDROID__` 分支使用 `((ucontext_t *)ctx)->uc_mcontext.pc`，x86_64 宿主的 `mcontext_t` 没有成员 `pc`。`android/CMakeLists.txt` 在 Linux 上把 `det.c` 的编译定义设为 `__ANDROID__`。`cmake --build` 失败，`test.sh` 退出码 2。没有 ctest 结果，也没有进入后面的 Java 步骤。本分片不改 `CMakeLists.txt` 或 `native/`。
 
 另一次只为看 Java 契约能走到哪：`S2A_TEST_NO_NATIVE=1`，JDK 17 与 `PY=/usr/bin/python3`。这不是完整 `test.sh` 的通过记录。真结果退出码 1。在停之前打印了 `Android gamepad: ... passed`、`BootContract: ok`、`BootSpec: ok`、`BootSpec schema: ok`、`GamePack: ok`、`GameInstall: ok`、`App 纯 Java 类编译：ok`。使用的 `javac` 是 `/usr/lib/jvm/java-17-openjdk-amd64/bin/javac`，版本 `17.0.20.1`。随后 `native_rewriter_test.py` 报红退出：Capstone/LZ4 固定依赖在 `S2A_REWRITER_DEPS`、`build/rewriter-deps` 和默认运行目录都不存在，脚本声明不自动下载。
 

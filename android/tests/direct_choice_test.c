@@ -1,7 +1,7 @@
 // #274：direct-vulkan.txt 只有一份解析（direct_choice.c）。同一份描述，s2a_vk_descriptor_read、
 // 就绪判定 s2a_vk_lib_ready、AUTO 判定 s2a_vk_auto_resolve 给同一结论；AUTO 回通用的原因点名读到的文件；
 // attempt 标记原子写、正常结束删；fail 只在手动直连正常结束时清（s2a_vk_session_end）。手动直连的会话侧（session_prepare 对坏描述返回错误）由
-// runtime/direct-vk-tests/session_test.c 证，这里另查 direct_session.c 里没有第二份解析。
+// native/direct-vk-tests/session_test.c 证，这里另查 direct_session.c 里没有第二份解析。
 // 使用临时目录；不含游戏数据。用法：direct_choice_test <android/native/direct_session.c>
 #define _GNU_SOURCE
 #include "../native/direct_choice.h"

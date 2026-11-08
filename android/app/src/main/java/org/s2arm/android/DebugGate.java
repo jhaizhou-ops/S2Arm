@@ -13,7 +13,7 @@ import java.util.ArrayList;
 /**
  * 调试入口两道门（10-31 总指挥）：调试构建（BuildConfig.DEBUG）且系统属性 debug.s2a.debug_env=1。
  * 普通 App 设不了 debug.* 属性，只有 adb shell 能开；正式构建（玩家包）里第一道门就关着。
- * 门没开时，MainActivity 收到的 intent 先剥掉全部调试参数，后面的读取点一律读不到；原生侧另有同名的第二道核对（runtime/debug_gate.h）。
+ * 门没开时，MainActivity 收到的 intent 先剥掉全部调试参数，后面的读取点一律读不到；原生侧另有同名的第二道核对（native/debug_gate.h）。
  */
 final class DebugGate {
     static final String PROPERTY = "debug.s2a.debug_env";

@@ -14,7 +14,7 @@ import java.util.stream.Stream;
 /**
  * RuntimeLibrary: the APK's library unless a debuggable launch names a verified development override;
  * every failed check refuses the launch (Rejected) and never falls back to the APK's library.
- * Argument: the hash runtime/jni_abi.py prints for tests/JniAbiFixture.java (test.sh passes it).
+ * Argument: the hash native/jni_abi.py prints for tests/JniAbiFixture.java (test.sh passes it).
  */
 public final class RuntimeLibraryTest {
     private static int checks;
@@ -286,7 +286,7 @@ public final class RuntimeLibraryTest {
         rejected(() -> { RuntimeLibrary.verifyLoaded(RuntimeLibrary.APK, "", apkPath, null, libDir); return null; },
             "no path", "dladdr gave no path");
 
-        // JNI ABI: reflection here == runtime/jni_abi.py over the source (the hash baked into the library).
+        // JNI ABI: reflection here == native/jni_abi.py over the source (the hash baked into the library).
         String abi = RuntimeLibrary.jniAbi(JniAbiFixture.class);
         check(abi.matches("[0-9a-f]{64}"), "jniAbi is a SHA-256");
         if (fixtureAbi != null) check(abi.equals(fixtureAbi), "reflection " + abi + " != jni_abi.py " + fixtureAbi);

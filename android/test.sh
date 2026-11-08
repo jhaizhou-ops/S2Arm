@@ -94,7 +94,7 @@ s2a_gate_step "$PY" "$android_dir/tests/compile_events_reader_test.py"
 s2a_gate_step bash "$android_dir/tools/nvn_vk_threadbuf_test.sh"
 # CMake 挑选规则的宿主单测（假 cmake，可移植，始终跑）
 s2a_gate_step bash "$android_dir/tools/cmake_pick_test.sh"
-# S2A_TEST_NO_NATIVE 只跳过 Linux runtime CTest 阶段（runtime/memory.c 使用
+# S2A_TEST_NO_NATIVE 只跳过 Linux runtime CTest 阶段（native/memory.c 使用
 # Linux mremap / MREMAP_MAYMOVE，macOS 编不了）；可移植改写器矩阵始终执行。
 if [ -z "${S2A_TEST_NO_NATIVE:-}" ]; then
     s2a_cmake_pick || { s2a_gate_note "【红】安卓宿主测试找不到 CMake（见上一行）"; exit 1; }
@@ -222,7 +222,7 @@ s2a_gate_step javac -encoding UTF-8 -d "$out/java" -cp "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/RuntimeLibrary.java" \
     "$android_dir/tests/JniAbiFixture.java" \
     "$android_dir/tests/RuntimeLibraryTest.java"
-# The JNI ABI hash from source (runtime/jni_abi.py, baked into the library) must equal the reflection one.
+# The JNI ABI hash from source (native/jni_abi.py, baked into the library) must equal the reflection one.
 s2a_gate_step java -cp "$out/java" org.s2arm.android.RuntimeLibraryTest \
     "$("$PY" "$android_dir/native/jni_abi.py" "$android_dir/tests/JniAbiFixture.java" | tail -1)"
 s2a_gate_step "$PY" "$android_dir/native/jni_abi.py" "$android_dir/app/src/main/java/org/s2arm/android/NativeBridge.java" \

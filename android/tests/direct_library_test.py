@@ -98,7 +98,7 @@ class StorageStageTest(unittest.TestCase):
             src = root / 'probe.c'
             src.write_text('''#include <stdio.h>\n#include <stdlib.h>\n#include "spirv_storage.h"\nint main(int n,char **v){if(n!=3)return 2;FILE*f=fopen(v[1],"rb");if(!f)return 3;unsigned char b[4096];size_t z=fread(b,1,sizeof b,f);fclose(f);int r=s2a_spirv_storage_need(b,z,(uint32_t)atoi(v[2]));printf("%d\\n",r);return 0;}\n''')
             binary = root / 'probe'
-            subprocess.run([CC, '-Wall', '-Wextra', '-Werror', '-I', str(HERE.parent / 'runtime/direct'),
+            subprocess.run([CC, '-Wall', '-Wextra', '-Werror', '-I', str(HERE.parent / 'native/direct'),
                             str(src), '-o', str(binary)], check=True)
             def op(code, *args): return struct.pack('<%dI' % (len(args) + 1), (len(args) + 1) << 16 | code, *args)
             for i, (data, expected) in enumerate(((self.module(), 0), (self.module(False), 1),
@@ -160,7 +160,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(VkDevice d,const VkShaderMod
 int main(int n,char**v){if(n!=3)return 2;FILE*f=fopen(v[1],"rb");if(!f)return 3;unsigned char b[4096];size_t z=fread(b,1,sizeof b,f);fclose(f);VkShaderModuleCreateInfo ci={0};ci.codeSize=z;ci.pCode=(const uint32_t*)b;VkShaderModule m=VK_NULL_HANDLE;VkResult rc=s2a_vk_create_checked_vertex(VK_NULL_HANDLE,atoi(v[2]),&ci,&m,NULL);printf("%d %d\n",(int)rc,submits);return 0;}
 ''')
             binary = root / 'vkprobe'
-            subprocess.run([CC, '-Wall', '-Wextra', '-Werror', '-I', str(HERE.parent / 'runtime/direct'),
+            subprocess.run([CC, '-Wall', '-Wextra', '-Werror', '-I', str(HERE.parent / 'native/direct'),
                             '-I', str(HERE / 'vkhost'), '-I', str(REPO / 'graphics/nvn/third_party/vulkan-headers/include'),
                             str(src), '-o', str(binary)], check=True)
             shader = root / 'shader'; shader.write_bytes(self.valid_module('store'))
@@ -179,15 +179,15 @@ int main(int n,char**v){if(n!=3)return 2;FILE*f=fopen(v[1],"rb");if(!f)return 3;
             root = Path(td)
             binary = root / 'storage-chain'
             includes = [HERE / 'hostvk', HERE / 'vkhost', REPO / 'graphics/nvn/third_party/vulkan-headers/include',
-                        HERE.parent / 'native', HERE.parent / 'runtime/nvn', HERE.parent / 'runtime/direct',
+                        HERE.parent / 'native', HERE.parent / 'native/nvn', HERE.parent / 'native/direct',
                         REPO / 'graphics/nvn/gfx/nvn', REPO / 'graphics/nvn/gfx/nvn/include', REPO / 'runtime/include']
             cmd = [CC, '-std=gnu11', '-ffunction-sections', '-fdata-sections']
             for directory in includes: cmd += ['-I', str(directory)]
             cmd += [str(HERE / 'storage_stage_chain_test.c'),
-                    str(HERE.parent / 'runtime/nvn/nvn_vk_first_draw.c'),
-                    str(HERE.parent / 'runtime/nvn/nvn_vk_program_result.c'),
-                    str(HERE.parent / 'runtime/direct/graphics.c'), str(HERE.parent / 'runtime/direct/json.c'),
-                    str(HERE.parent / 'runtime/direct/sha256.c'),
+                    str(HERE.parent / 'native/nvn/nvn_vk_first_draw.c'),
+                    str(HERE.parent / 'native/nvn/nvn_vk_program_result.c'),
+                    str(HERE.parent / 'native/direct/graphics.c'), str(HERE.parent / 'native/direct/json.c'),
+                    str(HERE.parent / 'native/direct/sha256.c'),
                     '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections', '-o', str(binary)]
             subprocess.run(cmd, check=True)
             fragment = base64.b64encode(self.valid_module('fragment')).decode()
@@ -1145,8 +1145,8 @@ int main(int argc, char **argv) {
 }
 ''')
         binary = self.base / 'loader'
-        sources = [str(loader_c), str(HERE.parent / 'runtime/direct/program_cache.c'),
-                   str(HERE.parent / 'runtime/direct/sha256.c')]
+        sources = [str(loader_c), str(HERE.parent / 'native/direct/program_cache.c'),
+                   str(HERE.parent / 'native/direct/sha256.c')]
         subprocess.run([CC, '-O1', '-Wall', '-Wextra', '-Werror', '-D_GNU_SOURCE',
                         '-I', str(HERE.parent / 'native'), '-I', str(REPO / 'runtime/include'),
                         *sources, '-pthread', '-o', str(binary)], check=True)

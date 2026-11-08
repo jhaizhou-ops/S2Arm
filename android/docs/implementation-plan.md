@@ -158,7 +158,7 @@ flowchart TD
 
 ### 5.3 真正的模块启动
 
-复用共用 loader 与 host 启动顺序，抽出 Android 可调用的启动入口；自测 `runtime/module.c` 不能升级名义后充当完整 loader。
+复用共用 loader 与 host 启动顺序，抽出 Android 可调用的启动入口；自测 `native/module.c` 不能升级名义后充当完整 loader。
 
 1. 原生 bootstrap 先校验 artifact/输入清单、NPDM、模块 build ID/hash、改写目标与执行 ABI，识别全部主/辅助/SDK 模块；在首次启动 NativeAOT/Vulkan 前探测并持续持有低于 39-bit 限制的所需虚拟窗口。这一步不依赖尚未形成的最终 BootSpec。
 2. 按 §8.2 完成窗口、profile 与设备资源准备后，冻结并校验最终 BootSpec；再按 NPDM 排堆、栈、TLS、别名及共享区，区分虚拟预留与实际提交。

@@ -28,7 +28,7 @@ class ComputePipeline(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='compute-pipeline-') as temp:
             out=Path(temp); (out/'vulkan').symlink_to(vulkan)
             (out/'vk_video').symlink_to(vulkan.parent/'vk_video')
-            source=(runtime/'nvn/nvn_vk_compute.c').read_text()
+            source=(native/'nvn/nvn_vk_compute.c').read_text()
             variants={'positive':source,
               'negative_true_uses_false_binding':source.replace('r->kind == 1 && p.has_unaligned_storage_buffer', '0'),
               'negative_original_span_copyback':source.replace('o->guest.write(o->guest.opaque, b->guest, b->mapped, (size_t)b->size)', 'o->guest.write(o->guest.opaque, b->guest + (b->size == 12 ? 4 : 0), (uint8_t *)b->mapped + (b->size == 12 ? 4 : 0), (size_t)b->size - (b->size == 12 ? 4 : 0))'),
@@ -65,8 +65,8 @@ class ComputePipeline(unittest.TestCase):
                 (out/'nvn/nvn_vk_compute.c').write_text(code)
                 exe=out/name
                 cmd=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror']
-                cmd+=['-I'+str(p) for p in (out,native,runtime/'nvn',runtime/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
-                cmd += [str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(runtime/'nvn/nvn_vk_compute_texture.c'),str(runtime/'direct/texture_facts.c'),'-o',str(exe)]
+                cmd+=['-I'+str(p) for p in (out,native,native/'nvn',native/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
+                cmd += [str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(native/'nvn/nvn_vk_compute_texture.c'),str(native/'direct/texture_facts.c'),'-o',str(exe)]
                 host_link.run(cmd,check=True)
                 result=subprocess.run([str(exe)],capture_output=True,text=True)
                 print(name,result.returncode,result.stdout.strip(),result.stderr.strip())
@@ -77,8 +77,8 @@ class ComputePipeline(unittest.TestCase):
             (out/'nvn/nvn_vk_compute.c').write_text(source)
             exe2=out/'positive_no_pool_seam'
             cmd2=[os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function']
-            cmd2+=['-I'+str(q) for q in (out,native,runtime/'nvn',runtime/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
-            cmd2+=['-DS2A_TEST_NO_POOL_FIND',str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(runtime/'nvn/nvn_vk_compute_texture.c'),str(runtime/'direct/texture_facts.c'),'-o',str(exe2)]
+            cmd2+=['-I'+str(q) for q in (out,native,native/'nvn',native/'direct',ROOT/'graphics/nvn/gfx/nvn',ROOT/'graphics/nvn/gfx/nvn/include')]
+            cmd2+=['-DS2A_TEST_NO_POOL_FIND',str(ROOT/'android/tests/w2_compute_pipeline_test.c'),str(native/'nvn/nvn_vk_compute_texture.c'),str(native/'direct/texture_facts.c'),'-o',str(exe2)]
             host_link.run(cmd2,check=True)
             result=subprocess.run([str(exe2)],capture_output=True,text=True)
             print('positive_no_pool_seam',result.returncode,result.stdout.strip(),result.stderr.strip())

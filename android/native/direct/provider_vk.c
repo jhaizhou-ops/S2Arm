@@ -512,7 +512,7 @@ static int32_t activate(void *context) {
         ctx->error = S2A_DIRECT_RES_ARGUMENT;
         return S2A_DIRECT_RES_ARGUMENT;
     }
-    // 运行时补编（runtime/nvn/shader_survey.c）用的目录：与本局引擎一致，不另建。
+    // 运行时补编（native/nvn/shader_survey.c）用的目录：与本局引擎一致，不另建。
     setenv("S2A_SHADER_DIR", ctx->shader_dir, 1);
     // F5.3：离线库按 <revision>/shaders/vulkan/direct/<abi>/<profileHash>/<identity>.program 定位，
     // 消费端需要 revision 根（S2A_SHADER_DIR 是它的 shaders/vulkan/direct 子目录）。

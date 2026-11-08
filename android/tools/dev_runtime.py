@@ -5,7 +5,7 @@ manifest generator and the pusher. A development run is no reading and no formal
   dev_runtime.py manifest --lib <stripped .so> --apk <app-debug.apk> --out <dir>
                           [--aot-host linux-arm64|linux-x64] [--ilc Release|Debug]
       Checks the library the way the app does (AArch64 ELF64, 16 KB LOAD segments, DT_SONAME
-      libs2arm_android.so) and that it carries this tree's JNI ABI (runtime/jni_abi.py), then writes
+      libs2arm_android.so) and that it carries this tree's JNI ABI (native/jni_abi.py), then writes
       <out>/libs2arm_android.so and <out>/dev-runtime.json: libSha256, baseApkSha256 (the APK the
       library is bound to: install exactly that one), sourceCommit (HEAD, 40 hex), sourceTree /
       dirty / diffSha256 (the working tree as git sees it, untracked files included).
@@ -98,7 +98,7 @@ def elf_problem(path):
 
 
 def jni_abi():
-    spec = importlib.util.spec_from_file_location("jni_abi", ANDROID / "runtime/jni_abi.py")
+    spec = importlib.util.spec_from_file_location("jni_abi", ANDROID / "native/jni_abi.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     java = ANDROID / "app/src/main/java/org/s2arm/android"

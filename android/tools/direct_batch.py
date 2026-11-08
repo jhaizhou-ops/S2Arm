@@ -9,7 +9,7 @@
      "entries": [{"identity": "<64hex>", "request": "req/0001.json"}, …]}
 
 身份（identity）由产生请求的一侧给出（它是完整规范输入的摘要，见
-runtime/direct/input_identity.c），本工具不重算、不猜。translatorClosure 必须等于
+native/direct/input_identity.c），本工具不重算、不猜。translatorClosure 必须等于
 本机编译器构建身份（cli identity），否则拒绝——不接受按游戏手写的假身份。
 
 批编在宿主完成；编译产物由同一 DirectShaderCompiler 产生。装库复用

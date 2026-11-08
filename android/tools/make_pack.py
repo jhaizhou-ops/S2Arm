@@ -36,7 +36,7 @@ RUNTIME_VERSION = '0.1.0'
 # 直连（NVN->Vulkan）产物：requiredFeatures 里唯一允许出现的能力，descriptor 位置由 BootContract 固定。
 GRAPHICS_FEATURE = 'org.s2arm.graphics.v1'
 GRAPHICS_MANIFEST = direct_library.DESCRIPTOR_REL
-DIRECT_ABI = 1                      # runtime/direct/s2a_direct.h S2A_DIRECT_ABI
+DIRECT_ABI = 1                      # native/direct/s2a_direct.h S2A_DIRECT_ABI
 
 
 def load_graphics(path):

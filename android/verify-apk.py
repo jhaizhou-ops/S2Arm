@@ -11,8 +11,8 @@ JNI_SOURCES = [HERE / 'app/src/main/java/org/s2arm/android' / n for n in ('Nativ
 
 
 def jni_abi():
-    """The JNI ABI hash of this tree's Java native declarations (runtime/jni_abi.py)."""
-    spec = importlib.util.spec_from_file_location('jni_abi', HERE / 'runtime/jni_abi.py')
+    """The JNI ABI hash of this tree's Java native declarations (native/jni_abi.py)."""
+    spec = importlib.util.spec_from_file_location('jni_abi', HERE / 'native/jni_abi.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.identity(JNI_SOURCES)[1]

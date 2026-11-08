@@ -254,10 +254,10 @@ int main(void) {
             cc = os.environ.get("CC", "cc")
             subprocess.run([cc, "-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror",
                             "-I", str(ANDROID / "native"),
-                            "-I", str(ANDROID / "runtime/nvn"),
-                            "-I", str(ANDROID / "runtime/direct"),
+                            "-I", str(ANDROID / "native/nvn"),
+                            "-I", str(ANDROID / "native/direct"),
                             "-o", str(exe), str(harness),
-                            str(ANDROID / "runtime/direct/sha256.c")], check=True)
+                            str(ANDROID / "native/direct/sha256.c")], check=True)
             out = subprocess.run([str(exe)], capture_output=True, text=True,
                                  check=True).stdout
         cap = dfl.parse(out)[0]

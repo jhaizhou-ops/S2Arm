@@ -101,7 +101,7 @@ static int s2a_vk_adapter_shutdown(void){shutdown_calls++;return shutdown_error;
 static void release_lease_window(void*p){(void)p;}
 static void mock_free(void*p){(void)p;free_calls++;}
 
-// 读回 staging 缓存的收尾（真实实现见 runtime/nvn/nvn_vk_readback.c:233；与
+// 读回 staging 缓存的收尾（真实实现见 native/nvn/nvn_vk_readback.c:233；与
 // nvn_vk_session_release_order_test.c 同口径：设备子对象全部用确定性替身，本用例不碰设备）。
 // 生产顺序是“设备空闲证明成功之后、s2a_vk_device_destroy 之前”（nvn_vk_session.c:284），
 // 这里顺带记录这两个前置条件，由成功用例断言；旧 ref 没有这次调用，所以断言按

@@ -34,8 +34,8 @@ class EventFileContract(unittest.TestCase):
             exe = td/'fixture'
             cmd = [os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
                    '-DS2A_CE_TESTING', '-pthread', str(source),
-                   str(ANDROID/'runtime/nvn/nvn_vk_compile_events.c'),
-                   str(ANDROID/'runtime/direct/sha256.c'), '-o', str(exe)]
+                   str(ANDROID/'native/nvn/nvn_vk_compile_events.c'),
+                   str(ANDROID/'native/direct/sha256.c'), '-o', str(exe)]
             subprocess.run(cmd, check=True, timeout=30, capture_output=True, text=True)
             env = {**os.environ, 'S2A_CE_TEST_ENABLE':'1'}
             proc = subprocess.run([str(exe), str(td)], env=env, check=True, capture_output=True, text=True, timeout=10)
@@ -61,8 +61,8 @@ class EventFileContract(unittest.TestCase):
                 'if (s2a_ce_record(1, 2, start, end) != 0) return 12;',
                 'for (int i = 0; i < 4100; i++) if (s2a_ce_record(1, 2, start, end) != 0) return 12;'))
             subprocess.run([os.environ.get('CC','cc'), '-std=c11','-Wall','-Wextra','-Werror',
-                '-DS2A_CE_TESTING','-pthread',str(source), str(ANDROID/'runtime/nvn/nvn_vk_compile_events.c'),
-                str(ANDROID/'runtime/direct/sha256.c'),'-o',str(exe)],check=True,timeout=30)
+                '-DS2A_CE_TESTING','-pthread',str(source), str(ANDROID/'native/nvn/nvn_vk_compile_events.c'),
+                str(ANDROID/'native/direct/sha256.c'),'-o',str(exe)],check=True,timeout=30)
             disabled=td/'disabled'; disabled.mkdir()
             subprocess.run([str(exe),str(disabled)],env={**os.environ,'S2A_CE_TEST_ENABLE':'0'},check=True,timeout=10)
             self.assertEqual(list(disabled.glob('compile-events-*.jsonl')),[])
@@ -96,8 +96,8 @@ int main(int argc, char **argv) {
         with tempfile.TemporaryDirectory(prefix='ce-hits-') as td:
             root=Path(td); source=root/'test.c'; exe=root/'test'; source.write_text(harness)
             subprocess.run([os.environ.get('CC','cc'),'-std=c11','-Wall','-Wextra','-Werror',
-                '-DS2A_CE_TESTING','-pthread',str(source),str(ANDROID/'runtime/nvn/nvn_vk_compile_events.c'),
-                str(ANDROID/'runtime/direct/sha256.c'),'-o',str(exe)],check=True,timeout=30)
+                '-DS2A_CE_TESTING','-pthread',str(source),str(ANDROID/'native/nvn/nvn_vk_compile_events.c'),
+                str(ANDROID/'native/direct/sha256.c'),'-o',str(exe)],check=True,timeout=30)
             env={**os.environ,'S2A_CE_TEST_ENABLE':'1','S2A_CE_TEST_CAP':'5'}
             subprocess.run([str(exe),str(root)],env=env,check=True,timeout=30)
             raw=next(root.glob('compile-events-*.jsonl')).read_bytes()

@@ -1,4 +1,4 @@
-// 上游 dm/host/dm.h 的替身（直连图形层 graphics/nvn 用；改动见 docs/直连图形层_改动清单.md）：
+// 上游 dm/host/dm.h 的替身（直连图形层 gfx/nvn 用；改动见 docs/直连图形层_改动清单.md）：
 //   宿主公共部分（LOG / die / now_ns / module_t / module_of / 线程槽）取 S2Arm 原生层自己的 native.h，
 //   其余声明照上游原文（MIT，© seedds），实现由 S2Arm 原生层（runtime/src/dmhost.c）与适配层（graphics/nvn/host_adapt.m）给。
 #pragma once

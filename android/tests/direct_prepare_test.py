@@ -661,8 +661,8 @@ class NativeIdentityTests(unittest.TestCase):
         subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
             '-I' + str(android / 'native'), '-I' + str(repo / 'runtime/include'),
             '-I' + str(repo / 'graphics/nvn/gfx/nvn/include'), str(fixture),
-            str(android / 'runtime/direct/input_identity.c'), str(android / 'runtime/direct/texture_facts.c'),
-            str(android / 'runtime/direct/sha256.c'), '-o', str(exe)], check=True, capture_output=True)
+            str(android / 'native/direct/input_identity.c'), str(android / 'native/direct/texture_facts.c'),
+            str(android / 'native/direct/sha256.c'), '-o', str(exe)], check=True, capture_output=True)
         result = subprocess.run([str(exe)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         sys.path.insert(0, str(TOOL.parent))

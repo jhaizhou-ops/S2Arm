@@ -30,7 +30,7 @@ import java.util.concurrent.Executors;
  * the Storage Access Framework. Either way every file is copied with its size and SHA-256
  * checked, the revision is validated before it is activated, and a failure leaves the
  * previous version active. Game files are only ever read: rewritten modules are copied into
- * anonymous memory by runtime/module.c, never mapped executable from storage. All work runs
+ * anonymous memory by native/module.c, never mapped executable from storage. All work runs
  * on one background thread.
  */
 final class GameLibrary {

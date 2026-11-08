@@ -2,7 +2,7 @@
 //
 // 包内布局（实施契约 §8、统一方案 §4.1 第 5/6 步与 §5.3，生产端 = tools/direct_library.py）：
 //   <revision>/shaders/vulkan/direct/<directABI>/<profileHash>/<identity>.program
-// 每个 .program 是 S2APC1 v2 容器（与私有缓存 runtime/direct/program_cache.c 同一格式）：
+// 每个 .program 是 S2APC1 v2 容器（与私有缓存 native/direct/program_cache.c 同一格式）：
 // 88 B 头 = magic/version/header/identity/result SHA-256/负载长度，后接 s2a-direct-program-v1 字节。
 //
 // 身份载体选 **(a) 设备导出的完整身份**，条目不自带 request：

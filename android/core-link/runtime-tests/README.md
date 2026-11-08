@@ -2,7 +2,7 @@
 
 运行 `python3 android/core-link/runtime-tests/run.py --out <独立产物目录>`。
 
-直接编译生产 `runtime/runtime/runtime.c` 和共享 `runtime/src/guest_main.c`，测试端仅提供显式合成的 core/SDK/服务端点。25 个独立进程验证同一真实消费者的启动顺序、错误服务状态/身份/版本、停止请求、未解析导入、错 NPDM 身份和缺 SDK 导出等边界；额外变异负控删除生产 Ready 检查，应被 `false-ready` 用例拒绝。独立 argv 用例验证 Apple 调用方仍能传显式参数；Android 不覆盖 SDK 的默认 argv。
+直接编译生产 `native/runtime/runtime.c` 和共享 `runtime/src/guest_main.c`，测试端仅提供显式合成的 core/SDK/服务端点。25 个独立进程验证同一真实消费者的启动顺序、错误服务状态/身份/版本、停止请求、未解析导入、错 NPDM 身份和缺 SDK 导出等边界；额外变异负控删除生产 Ready 检查，应被 `false-ready` 用例拒绝。独立 argv 用例验证 Apple 调用方仍能传显式参数；Android 不覆盖 SDK 的默认 argv。
 
 这些用例不执行改写 guest、不切真实 guest 栈，也不验证 VM、Bionic TLS/信号、Vulkan 或退出清场。合成 provider 仅存在于本测试程序，不能链接 APK。`runtime/src/host_main.c` 已调用同一 `s2a_guest_main` 入口；没有第二份 Android SDK 初始化序列。
 

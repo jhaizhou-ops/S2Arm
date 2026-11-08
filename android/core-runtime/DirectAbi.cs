@@ -1,5 +1,5 @@
 // Direct-mode ABI v1 managed mirror（实施契约 §2.1）。
-// 与 runtime/direct/s2a_direct.h、runtime/runtime/services_abi.h、runtime.h 同字段同偏移；
+// 与 native/direct/s2a_direct.h、native/runtime/services_abi.h、runtime.h 同字段同偏移；
 // 布局由 direct-abi-tests 与 C 端 JSON 对拍，字段顺序/大小不得在此单方面调整。
 using System;
 using System.Runtime.InteropServices;

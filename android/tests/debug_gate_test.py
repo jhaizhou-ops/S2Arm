@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
-"""调试入口两道门（DebugGate.java + runtime/debug_gate.h）：真 JVM 跑剥参数逻辑（Android 类用最小替身），再核入口接线。
+"""调试入口两道门（DebugGate.java + native/debug_gate.h）：真 JVM 跑剥参数逻辑（Android 类用最小替身），再核入口接线。
 设备上属性门的正反对照见 android/README.md「调试入口」一节（本单测在宿主上，getprop 不存在 = 属性没开）。"""
 import os
 from pathlib import Path
@@ -97,7 +97,7 @@ class DebugGateTest(unittest.TestCase):
         self.assertIn('static native void setDrawLog(int value);', bridge)
 
     def test_native_side_refuses_non_default_values_when_closed(self):
-        bridge = (ANDROID / 'runtime/bridge.cpp').read_text()
+        bridge = (ANDROID / 'native/bridge.cpp').read_text()
         def body(name):
             return bridge.split('Java_org_s2arm_android_NativeBridge_' + name + '(')[1].split('extern "C"')[0]
         self.assertIn('if (!s2a_debug_entries_open()) return ENOTSUP;', body('configureDebugEnvironment'))
@@ -107,7 +107,7 @@ class DebugGateTest(unittest.TestCase):
                            ('configureReadonlyRangeCheck', '!enabled')]:
             self.assertIn(f'if ({cond} && !s2a_debug_entries_open()) return EPERM;', body(name), name)
         self.assertIn('if (value != "1" && !s2a_debug_entries_open()) return EPERM;', body('configureThreadedRenderer'))
-        gate = (ANDROID / 'runtime/debug_gate.h').read_text()
+        gate = (ANDROID / 'native/debug_gate.h').read_text()
         self.assertRegex(gate, r'#if defined\(S2A_ANDROID_DEBUG_ENV\) && defined\(__ANDROID__\)')
         self.assertIn('__system_property_get("debug.s2a.debug_env", value) == 1 && value[0] == \'1\'', gate)
         self.assertIn('$<$<CONFIG:Debug>:S2A_ANDROID_DEBUG_ENV=1>', (ANDROID / 'CMakeLists.txt').read_text())
@@ -115,7 +115,7 @@ class DebugGateTest(unittest.TestCase):
     def test_frame_log_property_read_is_behind_debug_gate(self):
         # debug.s2a.frame_log 同属调试入口：读属性前必须先过 s2a_debug_entries_open()
         # （同 nvn_vk_compute_bridge.c 的 debug.s2a.compute_trace 写法），否则正式包也能被 adb 打开。
-        src = (ANDROID / 'runtime/nvn/nvn_vk_frame_log.c').read_text()
+        src = (ANDROID / 'native/nvn/nvn_vk_frame_log.c').read_text()
         self.assertIn('#include "debug_gate.h"', src)
         body = src[src.index('static int s2a_fl_enabled'):src.index('int nvn_vk_frame_log_on')]
         self.assertLess(body.index('s2a_debug_entries_open()'), body.index('"debug.s2a.frame_log"'),

@@ -162,7 +162,7 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     // 名单/探测/运行时回写说不行（或无结果文件）就关，走已验证的转计算。
     // 直连执行层首版不建 GS 管线，此位只决定设备特性是否启用并如实进入 caps JSON。
     // #1482：s2a_vk_gs_path 内正向落 "graphics GS path: ..." 一行并内置
-    // debug.s2a.gs_path 双门强制开关（runtime/direct/gs_path.c）。符号弱引用：
+    // debug.s2a.gs_path 双门强制开关（native/direct/gs_path.c）。符号弱引用：
     // 只链 vk_device.c 的宿主探针照旧能链接（NULL→关 GS，与无判定文件同向安全）。
     enabled_features.geometryShader =
         s2a_vk_gs_path && s2a_vk_gs_path(features.geometryShader, NULL) ? VK_TRUE : VK_FALSE;

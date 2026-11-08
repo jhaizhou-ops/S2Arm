@@ -24,9 +24,9 @@
  * helper — every contract/stderr/exit case still runs through the real
  * spawn path.
  *
- * Build (see android/test.sh / runtime/capprobe/run_host_tests.sh):
- *   cc -std=gnu11 -Wall -Wextra -Werror -I runtime/capprobe \
- *      tests/capprobe_spawn_test.c runtime/capprobe/capprobe_host.c -lpthread
+ * Build (see android/test.sh / native/capprobe/run_host_tests.sh):
+ *   cc -std=gnu11 -Wall -Wextra -Werror -I native/capprobe \
+ *      tests/capprobe_spawn_test.c native/capprobe/capprobe_host.c -lpthread
  * CAPPROBE_FAKE_APK must point at a directory holding
  * lib/arm64-v8a/libs2a_capprobe.so (the compiled capprobe_fake_helper),
  * CAPPROBE_FAKE_LINKER at the compiled capprobe_fake_linker. */

@@ -44,7 +44,7 @@ final class NativeBridge {
 
     /** The file the dynamic linker loaded this library from (dladdr), as it recorded it. */
     private static native String loadedPath();
-    /** runtime/jni_abi.py's hash of the native declarations the library was built against. */
+    /** native/jni_abi.py's hash of the native declarations the library was built against. */
     private static native String jniAbi();
     /**
      * red.log 的落盘目录：当前应用 getExternalFilesDir()（取不到 / 不可写时 Java 侧退

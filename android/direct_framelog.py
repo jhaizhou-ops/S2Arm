@@ -6,7 +6,7 @@
 # 用法：python3 android/direct_framelog.py <logcat.txt> [<logcat2.txt> ...]
 #       adb logcat -d | python3 android/direct_framelog.py -
 #
-# 线格式（runtime/nvn/nvn_vk_frame_log.c 约定，logcat 时间戳/PID 前缀可带）：
+# 线格式（native/nvn/nvn_vk_frame_log.c 约定，logcat 时间戳/PID 前缀可带）：
 #   direct frame-log meta: v=2 clock=... unit=us endian=le rec=16 cap=N recorded=R \
 #       presents=P dropped=D first=F bytes=B chunks=C
 #   direct frame-log[i/C]:<base64 分片>           i = 1..C，各恰好一次且按序

@@ -56,7 +56,7 @@ def main():
         temp = Path(temp)
         # Both real bridge modes must compile, including game-only paths.
         # This catches declarations hidden behind the diagnostic preprocessor guard.
-        run([sys.executable, ANDROID / 'runtime/jni_abi.py', '--header', temp / 's2a_jni_abi.h',
+        run([sys.executable, ANDROID / 'native/jni_abi.py', '--header', temp / 's2a_jni_abi.h',
              ANDROID / 'app/src/main/java/org/s2arm/android/NativeBridge.java',
              ANDROID / 'app/src/main/java/org/s2arm/android/TouchInputBridge.java'])
         bridge_flags = ['-std=gnu++17', '-DS2A_CS_STATIC=1', '-DVK_USE_PLATFORM_ANDROID_KHR',
@@ -65,12 +65,12 @@ def main():
                         # #868：bridge.cpp 引 nvn/nvn_vk_first_draw.h → direct/vk_device.h、vk_record.h → nvn_obj.h …：正式编译里这些目录由
                         #   直连目标（core-link/NvnDirect.cmake s2a_android_direct_core 的 includes）给，这里照抄同一份
                         '-I', ROOT / 'graphics/nvn/gfx/nvn', '-I', ROOT / 'graphics/nvn/gfx/nvn/include', '-I', ROOT / 'graphics/nvn',
-                        '-I', ROOT / 'graphics/nvn/host', '-I', ROOT / 'graphics/nvn/gfx/tex', '-I', ANDROID / 'runtime/nvn',
-                        '-I', ANDROID / 'runtime/nvn/compat', '-I', ANDROID / 'runtime/direct',
+                        '-I', ROOT / 'graphics/nvn/host', '-I', ROOT / 'graphics/nvn/gfx/tex', '-I', ANDROID / 'native/nvn',
+                        '-I', ANDROID / 'native/nvn/compat', '-I', ANDROID / 'native/direct',
                         '-I', ROOT / 'graphics/track']
         for mode, extra in (('diagnostic', []), ('game', ['-DS2A_ANDROID_GAME_RUNTIME=1'])):
             run([ndk / 'aarch64-linux-android29-clang++', *bridge_flags, *extra, '-c',
-                 ANDROID / 'runtime/bridge.cpp', '-o', temp / (mode + '-bridge.o')])
+                 ANDROID / 'native/bridge.cpp', '-o', temp / (mode + '-bridge.o')])
         print('diagnostic and game bridge: NDK real C++ compilation passed')
         listing = temp / 'sources.txt'
         cmake = temp / 'sources.cmake'

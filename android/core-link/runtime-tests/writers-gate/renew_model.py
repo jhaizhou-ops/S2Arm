@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[4]
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--out',type=Path,required=True);p.add_argument('--cc',default='cc');p.add_argument('--depth',type=int,default=6)
 p.add_argument('--negative-cap',action='store_true');p.add_argument('--negative',choices=['pause','resume','observation-reset','stale-clock','owner','epoch','withdrawal','late-progress'])
 a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True)
-native=ROOT/'android/native';header=(runtime/'backing_wait.h').read_text();lease=(runtime/'wsi_lease.c').read_text()
+native=ROOT/'android/native';header=(native/'backing_wait.h').read_text();lease=(native/'wsi_lease.c').read_text()
 if a.negative_cap:
     header=header.replace('return idle < cap ? idle : cap;','(void)cap; return idle;')
 if a.negative=='pause':header=header.replace('if (!foreground) return UINT64_MAX;','(void)foreground;')
@@ -20,8 +20,8 @@ if a.negative=='late-progress':header=header.replace('if (!foreground || now < s
 if a.negative=='owner':header=header.replace('owner != b->owner || ','')
 if a.negative=='epoch':lease=lease.replace('writer == l->backing.writer','1')
 if a.negative=='withdrawal':lease=lease.replace('writer && writer == l->backing.writer && l->backing.owner','writer && writer == l->backing.writer && l->backing.owner && l->backing.active')
-(a.out/'backing_wait.h').write_text(header);(a.out/'wsi_lease.c').write_text(lease);shutil.copy2(runtime/'wsi_lease.h',a.out/'wsi_lease.h')
-renew=(runtime/'runtime/fault/thread_android.inc').read_text();renew=renew[renew.index('enum { ANDROID_VM_WAIT_SLICE_MS'):renew.index('// 仅内存SVC的锁外入口允许等待')]
+(a.out/'backing_wait.h').write_text(header);(a.out/'wsi_lease.c').write_text(lease);shutil.copy2(native/'wsi_lease.h',a.out/'wsi_lease.h')
+renew=(native/'runtime/fault/thread_android.inc').read_text();renew=renew[renew.index('enum { ANDROID_VM_WAIT_SLICE_MS'):renew.index('// 仅内存SVC的锁外入口允许等待')]
 prefix=r"""
 #include <stdint.h>
 #include <time.h>
@@ -132,5 +132,5 @@ for depth in range(a.depth):
    if tuple(actual)!=expected:raise AssertionError(f'REGRESSION events={trace+(e,)} actual={tuple(actual)} expected={expected}')
    if expected not in seen:seen.add(expected);nxt[expected]=trace+(e,)
  bydepth.append(len(nxt));frontier=nxt
-result=dict(passed=True,depth=a.depth,alphabet=20,states=len(seen),transitions=edges,states_by_depth=bydepth,source_sha256={str(q.relative_to(ROOT)):hashlib.sha256(q.read_bytes()).hexdigest() for q in [runtime/'backing_wait.h',runtime/'wsi_lease.h',runtime/'wsi_lease.c',runtime/'runtime/fault/thread_android.inc',Path(__file__)]},events=['begin','pulse','close','background','foreground','unobserved35s-cycle','new-epoch','350ms','5s','stale-close','admitted','late-first2500ms','30s+continuous-progress','1s+pulse','epoch-zero','managed-observe','native-observe','Stop','3250ms','1s'],scope='complete production WSI callbacks/authority + gate adapter; managed only opaque verdict. Lock internal interleaving separately authority_races; real Stop/barrier/roster separately gate suite. No Android/Vulkan/game.')
+result=dict(passed=True,depth=a.depth,alphabet=20,states=len(seen),transitions=edges,states_by_depth=bydepth,source_sha256={str(q.relative_to(ROOT)):hashlib.sha256(q.read_bytes()).hexdigest() for q in [native/'backing_wait.h',native/'wsi_lease.h',native/'wsi_lease.c',native/'runtime/fault/thread_android.inc',Path(__file__)]},events=['begin','pulse','close','background','foreground','unobserved35s-cycle','new-epoch','350ms','5s','stale-close','admitted','late-first2500ms','30s+continuous-progress','1s+pulse','epoch-zero','managed-observe','native-observe','Stop','3250ms','1s'],scope='complete production WSI callbacks/authority + gate adapter; managed only opaque verdict. Lock internal interleaving separately authority_races; real Stop/barrier/roster separately gate suite. No Android/Vulkan/game.')
 (a.out/'results.json').write_text(json.dumps(result,indent=2)+'\n');print('PASS native authority model',json.dumps(result))

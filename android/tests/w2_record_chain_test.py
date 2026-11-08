@@ -102,7 +102,7 @@ def main():
         # Explicit production source list and gate registration (weak hook is insufficient).
         links=(ROOT/'android/core-link/LinkSources.cmake').read_text()
         for source_name in ('nvn_vk_compute_bridge.c','nvn_vk_compute_request.c','nvn_vk_compute_lookup.c','nvn_vk_compile_facts.c'):
-            assert links.count('runtime/nvn/'+source_name)==1
+            assert links.count('native/nvn/'+source_name)==1
         assert 'w2_record_chain_test.py' in (ROOT/'android/test.sh').read_text()
         print('PASS: 8 dynamic record default-hook cases with real worker, 8 effective negative controls; concurrent bounded compute accounting')
 if __name__=='__main__':main()

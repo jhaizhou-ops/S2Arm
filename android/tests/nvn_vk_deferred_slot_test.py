@@ -4,12 +4,12 @@ import shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-SOURCE = HERE.parent / 'runtime/nvn/nvn_vk_first_draw.c'
+SOURCE = HERE.parent / 'native/nvn/nvn_vk_first_draw.c'
 class DeferredSlotTest(unittest.TestCase):
     def test_slot_proof_and_mutant(self):
         cc = shutil.which('cc')
         self.assertIsNotNone(cc)
-        includes = [HERE/'vkhost', HERE/'hostvk', HERE.parent/'native', HERE.parent/'runtime/direct', HERE.parent/'runtime/nvn', ROOT/'runtime/include', ROOT/'graphics/nvn/gfx/nvn', ROOT/'graphics/nvn/gfx/nvn/include', ROOT/'graphics/nvn/gfx/tex', ROOT/'graphics/nvn/third_party/vulkan-headers/include']
+        includes = [HERE/'vkhost', HERE/'hostvk', HERE.parent/'native', HERE.parent/'native/direct', HERE.parent/'native/nvn', ROOT/'runtime/include', ROOT/'graphics/nvn/gfx/nvn', ROOT/'graphics/nvn/gfx/nvn/include', ROOT/'graphics/nvn/gfx/tex', ROOT/'graphics/nvn/third_party/vulkan-headers/include']
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             # Mutate exactly the production failure branch: a missing proof is ignored.

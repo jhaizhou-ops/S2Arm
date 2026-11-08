@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""runtime/jni_abi.py: forms it cannot match to reflection are errors, never a silently different hash."""
+"""native/jni_abi.py: forms it cannot match to reflection are errors, never a silently different hash."""
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-TOOL = Path(__file__).resolve().parents[1] / "runtime/jni_abi.py"
+TOOL = Path(__file__).resolve().parents[1] / "native/jni_abi.py"
 
 
 def run(source):

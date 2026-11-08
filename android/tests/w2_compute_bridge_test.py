@@ -138,7 +138,7 @@ def main():
         # Explicit production source list and gate registration (weak hook is insufficient).
         links=(ROOT/'android/core-link/LinkSources.cmake').read_text()
         for source_name in ('nvn_vk_compute_bridge.c','nvn_vk_compute_request.c','nvn_vk_compute_lookup.c','nvn_vk_compute_texture.c'):
-            assert links.count('runtime/nvn/'+source_name)==1
+            assert links.count('native/nvn/'+source_name)==1
         assert 'w2_compute_bridge_test.py' in (ROOT/'android/test.sh').read_text()
         print('PASS: 31 bridge cases, %d effective negative controls, request/result diag pairing, import/gate registration'%(len(mutations)-1))
 if __name__=='__main__':main()

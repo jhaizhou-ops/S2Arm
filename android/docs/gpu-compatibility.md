@@ -51,7 +51,7 @@
 | 原生改写 | Android TSD 目标、缓存目标区分、合成模块两线程执行自测 | Linux 栈下暂存风险根治、全模块和完整游戏执行闭环 |
 | C# 运行时 | NativeAOT bionic、OpenSSL、静态单库 DirectPInvoke、异常/GC 的历史真机自测 | 正式原生核心替换 `s2a_native_stub.c`，所有宿主导出接通 |
 | 声音 | Ryujinx AAudio 驱动与 C 实时回调，事件唤醒喂数 | 游戏持续负载下与渲染/GC/生命周期联调 |
-| Android 测试呈现 | `runtime/presenter.cpp` 的清屏和角标、交换链、旋转、前后台记录 | 这是独立测试 device，不是 Ryujinx 的游戏帧输出；历史测量两台均为 Adreno |
+| Android 测试呈现 | `native/presenter.cpp` 的清屏和角标、交换链、旋转、前后台记录 | 这是独立测试 device，不是 Ryujinx 的游戏帧输出；历史测量两台均为 Adreno |
 | Vulkan 后端 | 仓内 Ryujinx 的 GAL 实现、格式与扩展探测、资源与同步 | Android 正式组合入口、统一能力启用、动态 surface 与设备缓存 |
 | 宽屏 | GAL 包装、投影/布局改写、按构建号的验证表 | 不同 GPU profile 下重新验证；固定画布页的内容不会凭空变宽 |
 | 测试设施 | GAL/IPC 录放、Windows 真值、路线、记分板、分配与读回闸门 | Android 严格数据契约、各 GPU 实机采集和能力兼容的回放 |

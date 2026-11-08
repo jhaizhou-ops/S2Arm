@@ -36,7 +36,7 @@ set(S2A_ANDROID_LINK_AVC_ARCHIVE "" CACHE FILEPATH "Real libavc archive for the 
 set(S2A_CS_STATIC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../build/android-cs/static" CACHE PATH
     "NativeAOT static service output (cs/build.sh), overridable for isolated link probes")
 
-add_library(s2arm_android_memory STATIC runtime/memory.c)
+add_library(s2arm_android_memory STATIC native/memory.c)
 set_target_properties(s2arm_android_memory PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(s2arm_android_memory PUBLIC native)
 target_compile_definitions(s2arm_android_memory PRIVATE _GNU_SOURCE)
@@ -72,15 +72,15 @@ if(ANDROID)
         set_property(SOURCE "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c" APPEND PROPERTY
             INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../graphics/nvn/gfx/nvn")
         set(s2a_frontend_c
-            runtime/nvn/portable.c runtime/nvn/s2a_vp_alias.c ../graphics/nvn/gfx/nvn/hle_nvn.c
+            native/nvn/portable.c native/nvn/s2a_vp_alias.c ../graphics/nvn/gfx/nvn/hle_nvn.c
             # Switch 2（NVN2）：hle_nvn.c 调 nvn2_on / nvn2_key / nvn2_device_*（graphics/nvn/gfx/nvn/nvn2.c，SHA-256 走 portable.c 的 CommonCrypto 兼容层）
             ../graphics/nvn/gfx/nvn/nvn2.c
             ../graphics/nvn/gfx/nvn/nvn_fps.c
-            "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c" runtime/nvn/nvn_be_android.c
+            "${CMAKE_CURRENT_BINARY_DIR}/nvn_names_android.c" native/nvn/nvn_be_android.c
             # App 已经提供 now_ns/guest_ns/module_of，所以用去掉这几项的探针宿主 shim
             # （frontend_test_host.c 直接编进来会 duplicate symbol）。
-            runtime/nvn/vk_engine_host_shim.c
-            runtime/nvn/shader_survey.c)
+            native/nvn/vk_engine_host_shim.c
+            native/nvn/shader_survey.c)
         # 共享前端同样不跟本仓 -Werror（格式化串/聚合初始化在 Android 上按 64 位 long 处理）。
         set_source_files_properties(${s2a_frontend_c} PROPERTIES COMPILE_OPTIONS "-Wno-error")
         # 共享前端的后端入口名是 main 的 nvn_be_*；本线 Android 后端仍以 mtl_* 实现。
@@ -88,15 +88,15 @@ if(ANDROID)
         target_compile_options(s2arm_android PRIVATE
             "$<$<COMPILE_LANGUAGE:C,CXX>:-include${CMAKE_CURRENT_SOURCE_DIR}/native/nvn/nvn_be_compat.h>")
         target_sources(s2arm_android PRIVATE ${s2a_frontend_c}
-            runtime/nvn/mtl_vk_shim.c
+            native/nvn/mtl_vk_shim.c
             # 帧时统计与 longframe 归因：Vulkan 侧模块，shim 只交本帧量到的数。
-            runtime/nvn/nvn_vk_frame_stats.c
+            native/nvn/nvn_vk_frame_stats.c
             # D 接口（批次 1）：提交完成事实/令牌持有（纯状态机，不碰 Vulkan；消费者在批次 2/3 接入）。
-            runtime/nvn/nvn_vk_completion.c
-            runtime/direct/provider_vk.c runtime/direct/profile_compose.c)
+            native/nvn/nvn_vk_completion.c
+            native/direct/provider_vk.c native/direct/profile_compose.c)
         target_compile_definitions(s2arm_android PRIVATE S2A_ANDROID_VK_ENGINE=1 S2A_ANDROID_VK_BACKEND_NVN_VK=1)
     endif()
-    # The JNI ABI this library is built against (runtime/jni_abi.py over the Java native declarations), a
+    # The JNI ABI this library is built against (native/jni_abi.py over the Java native declarations), a
     # build-time output: a change of either Java source regenerates it before bridge.cpp compiles.
     # NativeBridge.load refuses a library whose hash differs from the installed APK's Java side, and
     # verify-apk.py fails an APK whose library does not carry the hash of these sources.
@@ -130,7 +130,7 @@ if(ANDROID)
     else()
         s2a_android_diagnostic_sources(diagnostic_sources)
         target_sources(s2arm_android PRIVATE ${diagnostic_sources})
-        target_include_directories(s2arm_android PRIVATE ../graphics/track runtime/runtime/tracking)
+        target_include_directories(s2arm_android PRIVATE ../graphics/track native/runtime/tracking)
     endif()
     target_include_directories(s2arm_android PRIVATE ../runtime/include)
     target_compile_options(s2arm_android PRIVATE -Wall -Wextra -Werror)
@@ -199,12 +199,12 @@ else()
     target_include_directories(dma_read_config_test PRIVATE native)
     target_compile_options(dma_read_config_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_dma_read_config COMMAND dma_read_config_test)
-    add_executable(touch_input_test tests/touch_input_test.c runtime/touch_input.c)
+    add_executable(touch_input_test tests/touch_input_test.c native/touch_input.c)
     target_include_directories(touch_input_test PRIVATE native ../runtime/include)
     target_compile_options(touch_input_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(touch_input_test PRIVATE pthread)
     add_test(NAME android_touch_input COMMAND touch_input_test)
-    add_executable(game_touch_test tests/game_touch_test.c runtime/game_touch.c runtime/touch_input.c)
+    add_executable(game_touch_test tests/game_touch_test.c native/game_touch.c native/touch_input.c)
     target_include_directories(game_touch_test PRIVATE native ../runtime/include)
     target_compile_definitions(game_touch_test PRIVATE S2A_ANDROID_EXPERIMENTAL_TOUCH=1)
     target_compile_options(game_touch_test PRIVATE -Wall -Wextra -Werror)
@@ -214,7 +214,7 @@ else()
     # Linux errno/fd/filesystem contracts; reached by linux_ctest.sh, including
     # Darwin's Linux VM route. These are not Android device durability evidence.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        add_executable(savecommit_host_test cs/savecommit/tests/native_host_test.c runtime/s2a_savecommit.c)
+        add_executable(savecommit_host_test cs/savecommit/tests/native_host_test.c native/s2a_savecommit.c)
         target_compile_options(savecommit_host_test PRIVATE -Wall -Wextra -Werror -Wpedantic)
         target_link_options(savecommit_host_test PRIVATE
             -Wl,--wrap=fsetxattr -Wl,--wrap=fgetxattr -Wl,--wrap=mkdirat
@@ -222,7 +222,7 @@ else()
             -Wl,--wrap=syscall -Wl,--wrap=s2a_savecommit_exchange)
         target_link_libraries(savecommit_host_test PRIVATE Threads::Threads)
         add_test(NAME android_savecommit_host COMMAND savecommit_host_test "${CMAKE_CURRENT_BINARY_DIR}")
-        add_executable(savecommit_openread_test cs/savecommit/tests/open_read_host_test.c runtime/s2a_savecommit.c)
+        add_executable(savecommit_openread_test cs/savecommit/tests/open_read_host_test.c native/s2a_savecommit.c)
         target_compile_options(savecommit_openread_test PRIVATE -Wall -Wextra -Werror -Wpedantic)
         target_link_options(savecommit_openread_test PRIVATE
             -Wl,--wrap=open -Wl,--wrap=fstat -Wl,--wrap=s2a_savecommit_open_read)
@@ -246,56 +246,56 @@ else()
     target_compile_options(memory_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(memory_test PRIVATE s2arm_android_memory)
     add_test(NAME android_memory COMMAND memory_test)
-    add_executable(input_test tests/input_test.c runtime/input.c)
+    add_executable(input_test tests/input_test.c native/input.c)
     target_include_directories(input_test PRIVATE native)
     target_compile_options(input_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(input_test PRIVATE Threads::Threads)
     add_test(NAME android_input COMMAND input_test)
-    add_executable(tsd_test tests/tsd_test.c runtime/tsd.c)
+    add_executable(tsd_test tests/tsd_test.c native/tsd.c)
     target_include_directories(tsd_test PRIVATE native)
     target_compile_options(tsd_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_tsd COMMAND tsd_test)
-    add_executable(module_test tests/module_test.c runtime/module.c)
+    add_executable(module_test tests/module_test.c native/module.c)
     target_include_directories(module_test PRIVATE native)
     target_compile_options(module_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_module COMMAND module_test)
-    add_executable(guest_signal_test tests/guest_signal_test.c runtime/guest_signal.c runtime/redlog.c)
+    add_executable(guest_signal_test tests/guest_signal_test.c native/guest_signal.c native/redlog.c)
     target_include_directories(guest_signal_test PRIVATE native ../runtime/include)
     target_compile_options(guest_signal_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(guest_signal_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME android_guest_signal COMMAND guest_signal_test)
     # 红日志落盘（#1357）：注入目录后 red() 写 <dir>/red.log 与宿主日志 fd 各一行，abort 前 fsync。
-    add_executable(redlog_test tests/redlog_test.c runtime/redlog.c)
+    add_executable(redlog_test tests/redlog_test.c native/redlog.c)
     target_include_directories(redlog_test PRIVATE native ../runtime/include ../runtime/src)
     target_compile_options(redlog_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_redlog COMMAND redlog_test)
-    add_executable(hostapi_test tests/hostapi_test.c runtime/hostapi.c)
+    add_executable(hostapi_test tests/hostapi_test.c native/hostapi.c)
     target_include_directories(hostapi_test PRIVATE native ../runtime/include)
     target_compile_options(hostapi_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_hostapi COMMAND hostapi_test)
-    add_executable(host_ui_test w4-tests/host_ui_test.c w4-tests/wait_probe.c runtime/host_ui.c runtime/hostapi.c)
+    add_executable(host_ui_test w4-tests/host_ui_test.c w4-tests/wait_probe.c native/host_ui.c native/hostapi.c)
     target_include_directories(host_ui_test PRIVATE native ../runtime/include)
     target_compile_options(host_ui_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(host_ui_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME android_host_ui COMMAND host_ui_test)
-    add_executable(keyboard_owner_test w4-tests/keyboard_owner_test.c runtime/host_ui.c runtime/host_ui_android.c)
+    add_executable(keyboard_owner_test w4-tests/keyboard_owner_test.c native/host_ui.c native/host_ui_android.c)
     target_include_directories(keyboard_owner_test PRIVATE native ../runtime/include)
     target_compile_options(keyboard_owner_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(keyboard_owner_test PRIVATE Threads::Threads)
     add_test(NAME android_keyboard_owner COMMAND keyboard_owner_test)
-    add_executable(host_android_test tests/host_android_test.c runtime/host_android.c runtime/hostapi.c runtime/screen_metrics.c runtime/input.c runtime/wsi_lease.c runtime/host_ui.c runtime/host_ui_android.c)
+    add_executable(host_android_test tests/host_android_test.c native/host_android.c native/hostapi.c native/screen_metrics.c native/input.c native/wsi_lease.c native/host_ui.c native/host_ui_android.c)
     target_include_directories(host_android_test PRIVATE native ../runtime/include)
     target_compile_options(host_android_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(host_android_test PRIVATE Threads::Threads)
     add_test(NAME android_host_android COMMAND host_android_test)
     # 宿主 plat_test 不跑 JNI/WSI 探针（JNI 探针随诊断 Activity 一起移除）。
-    add_executable(plat_test tests/plat_test.c runtime/plat_android.c runtime/guest_signal.c runtime/redlog.c runtime/memory.c
-        runtime/direct/selection.c runtime/direct/attempt.c runtime/direct/graphics.c runtime/direct/json.c
-        runtime/direct/sha256.c runtime/direct/s2a_direct_abi.c
+    add_executable(plat_test tests/plat_test.c native/plat_android.c native/guest_signal.c native/redlog.c native/memory.c
+        native/direct/selection.c native/direct/attempt.c native/direct/graphics.c native/direct/json.c
+        native/direct/sha256.c native/direct/s2a_direct_abi.c
         # 应用池 s2a_app_pool：plat_android.c 的 layout_android.inc 经 S2A_HEAP_DEFAULT 读它
         ../runtime/src/layout.c)
     target_include_directories(plat_test PRIVATE native tests/hostvk ../runtime/include)
-    set_source_files_properties(runtime/memory.c PROPERTIES COMPILE_DEFINITIONS _GNU_SOURCE)
+    set_source_files_properties(native/memory.c PROPERTIES COMPILE_DEFINITIONS _GNU_SOURCE)
     target_compile_definitions(plat_test PRIVATE S2A_UNIT_TEST)
     target_compile_options(plat_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(plat_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
@@ -305,7 +305,7 @@ else()
     target_include_directories(crash_android_fatal_test PRIVATE ../runtime/include ../runtime/src)
     target_compile_options(crash_android_fatal_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_crash_android_fatal COMMAND crash_android_fatal_test)
-    add_executable(fps_provider_test tests/fps_provider_test.c runtime/fps_provider.c)
+    add_executable(fps_provider_test tests/fps_provider_test.c native/fps_provider.c)
     target_compile_options(fps_provider_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     target_link_libraries(fps_provider_test PRIVATE Threads::Threads)
     add_test(NAME android_fps_provider COMMAND fps_provider_test)
@@ -313,8 +313,8 @@ else()
     # thread/tracker boundaries are explicit test providers, not GPU evidence.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(fps_write_integration_test tests/fps_write_integration_test.c ../runtime/src/svc_mem.c
-                       ../runtime/src/layout.c ../graphics/track/track.c runtime/runtime/tracking/platform.c
-                       runtime/runtime/vm/backing.c runtime/runtime/tracking/runtime.c runtime/runtime/tracking/registry.c runtime/plat_android.c runtime/memory.c)
+                       ../runtime/src/layout.c ../graphics/track/track.c native/runtime/tracking/platform.c
+                       native/runtime/vm/backing.c native/runtime/tracking/runtime.c native/runtime/tracking/registry.c native/plat_android.c native/memory.c)
         target_compile_definitions(fps_write_integration_test PRIVATE S2A_UNIT_TEST _GNU_SOURCE)
         target_include_directories(fps_write_integration_test PRIVATE native ../runtime/include ../runtime/src)
         target_compile_options(fps_write_integration_test PRIVATE -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections)
@@ -322,8 +322,8 @@ else()
         target_link_libraries(fps_write_integration_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         add_test(NAME android_fps_write_integration COMMAND fps_write_integration_test)
         set_tests_properties(android_fps_write_integration PROPERTIES TIMEOUT 130)
-        add_executable(guest_page_test tests/guest_page_test.c ../runtime/src/svc_mem.c runtime/runtime/tracking/platform.c
-                       runtime/runtime/vm/backing.c ../runtime/src/det.c ../runtime/src/layout.c runtime/plat_android.c runtime/memory.c)
+        add_executable(guest_page_test tests/guest_page_test.c ../runtime/src/svc_mem.c native/runtime/tracking/platform.c
+                       native/runtime/vm/backing.c ../runtime/src/det.c ../runtime/src/layout.c native/plat_android.c native/memory.c)
         # svc_mem.c 的 __ANDROID__ 是「走安卓平台实现」（plat_vm_alias / 跟踪运行时），本测试正是链 plat_android.c 测这条路；
         # det.c 按「苹果 / Linux × aarch64 / x86_64」自己选，不冒充安卓（冒充后 x86_64 宿主走进 aarch64 寄存器分支，#1082）
         set_source_files_properties(../runtime/src/svc_mem.c PROPERTIES COMPILE_DEFINITIONS "__ANDROID__;S2A_UNIT_TEST;_GNU_SOURCE")
@@ -335,7 +335,7 @@ else()
         target_link_libraries(guest_page_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         add_test(NAME android_guest_page COMMAND guest_page_test)
         set_tests_properties(android_guest_page PROPERTIES SKIP_RETURN_CODE 77)
-        add_executable(alias_poison_test tests/alias_poison_test.c runtime/runtime/tracking/platform.c runtime/plat_android.c)
+        add_executable(alias_poison_test tests/alias_poison_test.c native/runtime/tracking/platform.c native/plat_android.c)
         target_compile_definitions(alias_poison_test PRIVATE S2A_UNIT_TEST _GNU_SOURCE)
         target_include_directories(alias_poison_test PRIVATE ../runtime/include ../graphics/track ../)
         target_compile_options(alias_poison_test PRIVATE -Wall -Wextra -Werror -ffunction-sections -fdata-sections)
@@ -343,17 +343,17 @@ else()
         target_link_libraries(alias_poison_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         add_test(NAME android_alias_poison COMMAND alias_poison_test)
     endif()
-    add_executable(pcm_ring_test tests/pcm_ring_test.c runtime/pcm_ring.c)
+    add_executable(pcm_ring_test tests/pcm_ring_test.c native/pcm_ring.c)
     target_include_directories(pcm_ring_test PRIVATE native)
     target_compile_options(pcm_ring_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(pcm_ring_test PRIVATE Threads::Threads)
     add_test(NAME android_pcm_ring COMMAND pcm_ring_test)
     # Fake only the Android API; compile and exercise the production audio sink.
-    add_executable(aaudio_format_test tests/aaudio_format_test.c runtime/aaudio_sink.c runtime/pcm_ring.c)
+    add_executable(aaudio_format_test tests/aaudio_format_test.c native/aaudio_sink.c native/pcm_ring.c)
     target_include_directories(aaudio_format_test PRIVATE tests/aaudio_stubs native)
     target_compile_options(aaudio_format_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
     add_test(NAME android_aaudio_format COMMAND aaudio_format_test)
-    add_executable(wsi_lease_test tests/wsi_lease_test.c runtime/wsi_lease.c)
+    add_executable(wsi_lease_test tests/wsi_lease_test.c native/wsi_lease.c)
     target_include_directories(wsi_lease_test PRIVATE native)
     target_compile_options(wsi_lease_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(wsi_lease_test PRIVATE Threads::Threads)
@@ -362,46 +362,46 @@ else()
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/direct_touch_generation_test.py")
     # C0：direct ABI 布局/校验/NVN 风格调用。ARM64 真机探针由 tools/direct_abi_check.sh
     # 用同一份源编译；这里只证明主机 LP64 与头文件一致，不能代替 ARM64。
-    add_executable(direct_abi_test tests/direct_abi_test.c runtime/direct/s2a_direct_abi.c)
+    add_executable(direct_abi_test tests/direct_abi_test.c native/direct/s2a_direct_abi.c)
     target_include_directories(direct_abi_test PRIVATE native ../runtime/include)
     target_compile_options(direct_abi_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_abi COMMAND direct_abi_test)
     # C1：严格 JSON / graphics 描述 / attempt 持久锁 / 选择事务。
-    add_executable(direct_json_test tests/direct_json_test.c runtime/direct/json.c)
+    add_executable(direct_json_test tests/direct_json_test.c native/direct/json.c)
     target_include_directories(direct_json_test PRIVATE native ../runtime/include)
     target_compile_options(direct_json_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_json_test PRIVATE m)
     add_test(NAME android_direct_json COMMAND direct_json_test)
     add_executable(direct_graphics_test tests/direct_graphics_test.c
-        runtime/direct/graphics.c runtime/direct/json.c runtime/direct/sha256.c runtime/direct/s2a_direct_abi.c)
+        native/direct/graphics.c native/direct/json.c native/direct/sha256.c native/direct/s2a_direct_abi.c)
     target_include_directories(direct_graphics_test PRIVATE native ../runtime/include)
     target_compile_options(direct_graphics_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_graphics_test PRIVATE m)
     add_test(NAME android_direct_graphics COMMAND direct_graphics_test)
-    add_executable(direct_attempt_test tests/direct_attempt_test.c runtime/direct/attempt.c runtime/direct/json.c)
+    add_executable(direct_attempt_test tests/direct_attempt_test.c native/direct/attempt.c native/direct/json.c)
     target_include_directories(direct_attempt_test PRIVATE native ../runtime/include)
     target_compile_definitions(direct_attempt_test PRIVATE S2A_DIRECT_TEST_FAULTS=1)
     target_compile_options(direct_attempt_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_attempt_test PRIVATE m)
     add_test(NAME android_direct_attempt COMMAND direct_attempt_test)
     add_executable(direct_selection_test tests/direct_selection_test.c
-        runtime/direct/selection.c runtime/direct/attempt.c runtime/direct/graphics.c
-        runtime/direct/json.c runtime/direct/sha256.c runtime/direct/s2a_direct_abi.c)
+        native/direct/selection.c native/direct/attempt.c native/direct/graphics.c
+        native/direct/json.c native/direct/sha256.c native/direct/s2a_direct_abi.c)
     target_include_directories(direct_selection_test PRIVATE native ../runtime/include)
     target_compile_definitions(direct_selection_test PRIVATE S2A_DIRECT_TEST_FAULTS=1)
     target_compile_options(direct_selection_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_selection_test PRIVATE m)
     add_test(NAME android_direct_selection COMMAND direct_selection_test)
     # #274：direct-vulkan.txt 唯一解析；就绪 / AUTO / 解析三处同一结论，AUTO 回通用点名文件，attempt 标记。
-    add_executable(direct_choice_test tests/direct_choice_test.c runtime/direct_choice.c)
+    add_executable(direct_choice_test tests/direct_choice_test.c native/direct_choice.c)
     target_include_directories(direct_choice_test PRIVATE native)
     target_compile_options(direct_choice_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_choice
         COMMAND direct_choice_test "${CMAKE_CURRENT_SOURCE_DIR}/native/direct_session.c")
     # F4.1：编译诊断只能写私有目录；安装 revision 的逐文件清单/摘要前后不变。
-    add_executable(direct_diag_test tests/direct_diag_test.c runtime/direct/diag.c runtime/direct/sha256.c)
+    add_executable(direct_diag_test tests/direct_diag_test.c native/direct/diag.c native/direct/sha256.c)
     add_executable(direct_program_cache_test tests/direct_program_cache_test.c
-        runtime/direct/program_cache.c runtime/direct/sha256.c)
+        native/direct/program_cache.c native/direct/sha256.c)
     target_include_directories(direct_program_cache_test PRIVATE native ../runtime/include)
     target_compile_definitions(direct_program_cache_test PRIVATE _GNU_SOURCE S2A_DIRECT_TEST_FAULTS)
     target_compile_options(direct_program_cache_test PRIVATE -Wall -Wextra -Werror)
@@ -409,14 +409,14 @@ else()
     add_test(NAME android_direct_program_cache COMMAND direct_program_cache_test)
     # F5.3：安装 revision 的只读离线库消费（命中/缺失/改名/截断/链接/只读 revision）。
     add_executable(direct_offline_library_test tests/direct_offline_library_test.c
-        runtime/direct/offline_library.c runtime/direct/program_cache.c runtime/direct/sha256.c)
+        native/direct/offline_library.c native/direct/program_cache.c native/direct/sha256.c)
     target_include_directories(direct_offline_library_test PRIVATE native ../runtime/include)
     target_compile_definitions(direct_offline_library_test PRIVATE _GNU_SOURCE)
     target_compile_options(direct_offline_library_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_offline_library_test PRIVATE pthread)
     add_test(NAME android_direct_offline_library COMMAND direct_offline_library_test)
     # W2.6：编译 provider 的登记身份——同指针幂等、换指针拒绝、Activate 冻结、销毁解绑、表满不覆盖。
-    add_executable(direct_compiler_bind_test tests/direct_compiler_bind_test.c runtime/direct/compiler_bind.c)
+    add_executable(direct_compiler_bind_test tests/direct_compiler_bind_test.c native/direct/compiler_bind.c)
     target_include_directories(direct_compiler_bind_test PRIVATE native ../runtime/include)
     target_compile_options(direct_compiler_bind_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_compiler_bind_test PRIVATE pthread)
@@ -427,14 +427,14 @@ else()
     # F4.3：查找/编译共用完整规范输入的身份编码（含 constantBufferUse 反例）。
     # input_identity 的纹理事实走 texture_facts.c 的定长索引映射（F4.2B），必须一起链接。
     add_executable(direct_input_identity_test tests/direct_input_identity_test.c
-        runtime/direct/input_identity.c runtime/direct/texture_facts.c runtime/direct/sha256.c)
+        native/direct/input_identity.c native/direct/texture_facts.c native/direct/sha256.c)
     target_include_directories(direct_input_identity_test PRIVATE native ../runtime/include
         ../graphics/nvn/gfx/nvn/include)
     target_compile_options(direct_input_identity_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_input_identity COMMAND direct_input_identity_test)
     # F4.2A/F4.3：源快照的完整内容摘要、短 key 一致性、按代际 pin/release。
     add_executable(direct_source_store_test tests/direct_source_store_test.c
-        runtime/direct/source_store.c runtime/direct/sha256.c)
+        native/direct/source_store.c native/direct/sha256.c)
     target_include_directories(direct_source_store_test PRIVATE native ../runtime/include)
     # 宿主夹具用小的 pinned 额外槽位跑“全 pin 后 keep 失败”，生产默认 16384。
     target_compile_definitions(direct_source_store_test PRIVATE S2A_SOURCE_MAX_PINNED=64)
@@ -444,10 +444,10 @@ else()
     # F4.3/P1：生产接缝回归——Draw 快照 → 编译事实/规范身份/P1 备忘键必须覆盖同一组事实。
     # 头文件经 vk_record.h 引 Vulkan 类型，但只用枚举；tests/vkhost 提供宿主侧 vulkan.h 入口。
     add_executable(direct_nvn_compile_facts_test tests/direct_nvn_compile_facts_test.c
-        runtime/nvn/nvn_vk_compile_facts.c runtime/nvn/nvn_vk_format.c runtime/nvn/nvn_vk_mrt.c
-        runtime/direct/input_identity.c runtime/direct/texture_facts.c
-        runtime/direct/source_store.c runtime/direct/sha256.c)
-    target_include_directories(direct_nvn_compile_facts_test PRIVATE native runtime/direct runtime/nvn
+        native/nvn/nvn_vk_compile_facts.c native/nvn/nvn_vk_format.c native/nvn/nvn_vk_mrt.c
+        native/direct/input_identity.c native/direct/texture_facts.c
+        native/direct/source_store.c native/direct/sha256.c)
+    target_include_directories(direct_nvn_compile_facts_test PRIVATE native native/direct native/nvn
         tests/vkhost ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
         ../graphics/nvn/third_party/vulkan-headers/include)
     target_compile_options(direct_nvn_compile_facts_test PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
@@ -457,19 +457,19 @@ else()
     # 与负控；原样链接生产 parser，不另写模型。
     # compute storage 地址来源解析（NVN / UBO_PTR / UBO_ADDRESS + 来源反例 + supportReads/c0Reads null）
     add_executable(direct_nvn_compute_storage_test tests/direct_nvn_compute_storage_test.c
-        runtime/nvn/nvn_vk_program_result.c runtime/direct/json.c)
-    target_include_directories(direct_nvn_compute_storage_test PRIVATE native runtime/direct runtime/nvn
+        native/nvn/nvn_vk_program_result.c native/direct/json.c)
+    target_include_directories(direct_nvn_compute_storage_test PRIVATE native native/direct native/nvn
         ../graphics/nvn/gfx/nvn)
     target_compile_options(direct_nvn_compute_storage_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_nvn_compute_storage COMMAND direct_nvn_compute_storage_test)
     add_executable(direct_nvn_program_result_test tests/direct_nvn_program_result_test.c
-        runtime/nvn/nvn_vk_program_result.c runtime/direct/json.c)
-    target_include_directories(direct_nvn_program_result_test PRIVATE native runtime/direct runtime/nvn)
+        native/nvn/nvn_vk_program_result.c native/direct/json.c)
+    target_include_directories(direct_nvn_program_result_test PRIVATE native native/direct native/nvn)
     target_compile_options(direct_nvn_program_result_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_nvn_program_result COMMAND direct_nvn_program_result_test)
     # READY 的 GPU 身份行：direct provider 必须打与 generic 同语义的真实设备行。
-    add_executable(direct_vk_identity_test tests/direct_vk_identity_test.c runtime/direct/vk_identity.c)
-    target_include_directories(direct_vk_identity_test PRIVATE native runtime/direct)
+    add_executable(direct_vk_identity_test tests/direct_vk_identity_test.c native/direct/vk_identity.c)
+    target_include_directories(direct_vk_identity_test PRIVATE native native/direct)
     target_compile_options(direct_vk_identity_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_vk_identity COMMAND direct_vk_identity_test)
     # #968：真实 first_draw 附件拒绝路径不清理未创建 trace 资源。
@@ -490,8 +490,8 @@ else()
     endif()
     # §8.5.11：管线对象缓存的完整规范配方 + 碰撞反例（hash 相同也必须逐字节相等）。
     add_executable(direct_nvn_pipe_recipe_test tests/direct_nvn_pipe_recipe_test.c
-        runtime/nvn/nvn_vk_pipe_recipe.c)
-    target_include_directories(direct_nvn_pipe_recipe_test PRIVATE native runtime/direct runtime/nvn
+        native/nvn/nvn_vk_pipe_recipe.c)
+    target_include_directories(direct_nvn_pipe_recipe_test PRIVATE native native/direct native/nvn
         tests/vkhost ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
         ../graphics/nvn/third_party/vulkan-headers/include)
     target_compile_options(direct_nvn_pipe_recipe_test PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
@@ -500,55 +500,55 @@ else()
     # 重复槽/尺寸不一致/不可作颜色附件的格式准确报红）与逐槽颜色混合状态。
     # 负控：测试内嵌“旧实现只接槽 0”的规则复刻，同一批正例在旧规则下必须全部报红。
     add_executable(direct_nvn_mrt_test tests/direct_nvn_mrt_test.c
-        runtime/nvn/nvn_vk_mrt.c runtime/nvn/nvn_vk_format.c)
-    target_include_directories(direct_nvn_mrt_test PRIVATE native runtime/direct runtime/nvn
+        native/nvn/nvn_vk_mrt.c native/nvn/nvn_vk_format.c)
+    target_include_directories(direct_nvn_mrt_test PRIVATE native native/direct native/nvn
         tests/vkhost ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
         ../graphics/nvn/third_party/vulkan-headers/include)
     target_compile_options(direct_nvn_mrt_test PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
     add_test(NAME android_direct_nvn_mrt COMMAND direct_nvn_mrt_test)
     # §8.5.11：驱动管线缓存落盘/恢复的文件层（UUID/版本隔离、损坏拒绝、原子覆盖）。
     add_executable(direct_nvn_driver_cache_test tests/direct_nvn_driver_cache_test.c
-        runtime/nvn/nvn_vk_driver_cache.c runtime/direct/sha256.c)
-    target_include_directories(direct_nvn_driver_cache_test PRIVATE native runtime/direct runtime/nvn)
+        native/nvn/nvn_vk_driver_cache.c native/direct/sha256.c)
+    target_include_directories(direct_nvn_driver_cache_test PRIVATE native native/direct native/nvn)
     target_compile_options(direct_nvn_driver_cache_test PRIVATE -Wall -Wextra -Werror -D_GNU_SOURCE)
     add_test(NAME android_direct_nvn_driver_cache COMMAND direct_nvn_driver_cache_test)
     # F4.2B：NVN 纹理格式/目标 → 编译器 TextureFormat/SamplerType（未映射一律拒绝）。
-    add_executable(direct_texture_facts_test tests/direct_texture_facts_test.c runtime/direct/texture_facts.c)
+    add_executable(direct_texture_facts_test tests/direct_texture_facts_test.c native/direct/texture_facts.c)
     target_include_directories(direct_texture_facts_test PRIVATE native ../runtime/include
         ../graphics/nvn/gfx/nvn/include)
     target_compile_options(direct_texture_facts_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_texture_facts COMMAND direct_texture_facts_test)
     # Bind*Deferred 句柄记录的回放解析（bh_fresh 语义）：重基、基址尾校验、读失败准确报红。
-    add_executable(direct_bind_defer_test tests/direct_bind_defer_test.c runtime/direct/bind_defer.c)
+    add_executable(direct_bind_defer_test tests/direct_bind_defer_test.c native/direct/bind_defer.c)
     target_include_directories(direct_bind_defer_test PRIVATE native ../runtime/include
         ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include)
     target_compile_options(direct_bind_defer_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_bind_defer COMMAND direct_bind_defer_test)
     # OP_COPY_T2T 的回放计划（flags/视图/区域 → copy 或 blit）：8E Wonder 在 READY+73.8s
     # 撞上 op=35 unsupported；全部组合只按计划器语义过/拒，不兜底。
-    add_executable(direct_t2t_plan_test tests/direct_t2t_plan_test.c runtime/direct/t2t_plan.c)
+    add_executable(direct_t2t_plan_test tests/direct_t2t_plan_test.c native/direct/t2t_plan.c)
     target_include_directories(direct_t2t_plan_test PRIVATE native ../runtime/include
         ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include)
     target_compile_options(direct_t2t_plan_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_t2t_plan COMMAND direct_t2t_plan_test)
     # op31 独立复制计划合同；尚未接 record，四类变异在 test.sh 的 Python 入口跑。
     add_executable(buffer_texture_plan_test tests/buffer_texture_plan_test.c
-        runtime/direct/buffer_texture_plan.c runtime/nvn/nvn_vk_format.c)
-    target_include_directories(buffer_texture_plan_test PRIVATE native runtime/nvn tests/vkhost
+        native/direct/buffer_texture_plan.c native/nvn/nvn_vk_format.c)
+    target_include_directories(buffer_texture_plan_test PRIVATE native native/nvn tests/vkhost
         ../graphics/nvn/gfx/nvn ../graphics/nvn/third_party/vulkan-headers/include)
     target_compile_options(buffer_texture_plan_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_buffer_texture_plan COMMAND buffer_texture_plan_test)
     # F4.4：有界需求编译 worker（去重/单槽/pause/Stop/超时/重启）。
-    add_executable(direct_compile_worker_test tests/direct_compile_worker_test.c runtime/direct/compile_worker.c)
+    add_executable(direct_compile_worker_test tests/direct_compile_worker_test.c native/direct/compile_worker.c)
     target_include_directories(direct_compile_worker_test PRIVATE native ../runtime/include)
     target_compile_options(direct_compile_worker_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(direct_compile_worker_test PRIVATE Threads::Threads)
     add_test(NAME android_direct_compile_worker COMMAND direct_compile_worker_test)
-    add_executable(direct_control_test tests/direct_control_test.c runtime/direct/control.c)
+    add_executable(direct_control_test tests/direct_control_test.c native/direct/control.c)
     target_include_directories(direct_control_test PRIVATE native ../runtime/include)
     target_compile_options(direct_control_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_direct_control COMMAND direct_control_test)
-    add_executable(ui_session_test tests/ui_session_test.c runtime/host_ui.c runtime/host_ui_android.c)
+    add_executable(ui_session_test tests/ui_session_test.c native/host_ui.c native/host_ui_android.c)
     target_include_directories(ui_session_test PRIVATE native ../runtime/include)
     target_compile_options(ui_session_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(ui_session_test PRIVATE pthread)
@@ -559,8 +559,8 @@ else()
     target_compile_options(nvn_program_pins_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_nvn_program_pins COMMAND nvn_program_pins_test)
     # 呈现/窗口生命周期纯决策：无 surface、generation 变化、旋转重建、呈现退休预算。
-    add_executable(nvn_vk_lifecycle_test tests/nvn_vk_lifecycle_test.c runtime/nvn/nvn_vk_lifecycle.c)
-    target_include_directories(nvn_vk_lifecycle_test PRIVATE runtime/nvn)
+    add_executable(nvn_vk_lifecycle_test tests/nvn_vk_lifecycle_test.c native/nvn/nvn_vk_lifecycle.c)
+    target_include_directories(nvn_vk_lifecycle_test PRIVATE native/nvn)
     target_compile_options(nvn_vk_lifecycle_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_nvn_vk_lifecycle COMMAND nvn_vk_lifecycle_test)
     # 真实呈现退休路径的宿主回归：fake Vulkan 驱动生产 nvn_vk_swapchain.c。
@@ -568,19 +568,19 @@ else()
     # acquire 超时跳过、maintenance1 准入；旋转/换代判定在 nvn_vk_lifecycle_test。
     # 真机驱动行为仍需设备验证。
     add_executable(nvn_vk_swapchain_host_test tests/nvn_vk_swapchain_host_test.c
-        runtime/nvn/nvn_vk_swapchain.c runtime/nvn/nvn_vk_surface.c runtime/game_touch.c)
+        native/nvn/nvn_vk_swapchain.c native/nvn/nvn_vk_surface.c native/game_touch.c)
     target_include_directories(nvn_vk_swapchain_host_test PRIVATE
-        native runtime/nvn runtime/direct ../runtime/include tests/hostvk tests/vkhost
+        native native/nvn native/direct ../runtime/include tests/hostvk tests/vkhost
         ../graphics/nvn/third_party/vulkan-headers/include
         ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include ../graphics/nvn
-        ../graphics/nvn/host ../graphics/nvn/gfx/tex runtime/nvn/compat ../runtime/src)
+        ../graphics/nvn/host ../graphics/nvn/gfx/tex native/nvn/compat ../runtime/src)
     target_link_libraries(nvn_vk_swapchain_host_test PRIVATE pthread)
     target_compile_definitions(nvn_vk_swapchain_host_test PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
     target_compile_options(nvn_vk_swapchain_host_test PRIVATE -Wall -Wextra -Werror -Wno-missing-field-initializers)
     add_test(NAME android_nvn_vk_swapchain_host COMMAND nvn_vk_swapchain_host_test)
     # F4.4：执行包 owner 控制（单包/挂起/恢复/Stop/换代/协议错误）。纯状态机，生产 adapter 共用。
-    add_executable(nvn_vk_exec_owner_test tests/nvn_vk_exec_owner_test.c runtime/nvn/nvn_vk_exec_owner.c)
-    target_include_directories(nvn_vk_exec_owner_test PRIVATE runtime/nvn)
+    add_executable(nvn_vk_exec_owner_test tests/nvn_vk_exec_owner_test.c native/nvn/nvn_vk_exec_owner.c)
+    target_include_directories(nvn_vk_exec_owner_test PRIVATE native/nvn)
     target_compile_options(nvn_vk_exec_owner_test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(nvn_vk_exec_owner_test PRIVATE Threads::Threads)
     add_test(NAME android_nvn_vk_exec_owner COMMAND nvn_vk_exec_owner_test)
@@ -588,16 +588,16 @@ else()
     # 3D depth slice 附件 2D 视图、array/cube 单层视图、越界仍准确拒绝。
     add_executable(nvn_vk_texview_plan_test tests/nvn_vk_texview_plan_test.c)
     target_include_directories(nvn_vk_texview_plan_test PRIVATE
-        runtime/nvn ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
+        native/nvn ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include
         tests/vkhost ../graphics/nvn/third_party/vulkan-headers/include)
     target_compile_options(nvn_vk_texview_plan_test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME android_nvn_vk_texview_plan COMMAND nvn_vk_texview_plan_test)
     # F4.4：driver pipeline worker（worker 创建、owner take、配方去重、设备代际、有界 Stop、cache 锁）。
     # fake Vulkan 直接驱动生产实现；热路径接线不在宿主覆盖范围，见报告。
     add_executable(nvn_vk_pipe_worker_test tests/nvn_vk_pipe_worker_test.c
-        runtime/nvn/nvn_vk_pipe_worker.c runtime/nvn/nvn_vk_pipe_recipe.c)
+        native/nvn/nvn_vk_pipe_worker.c native/nvn/nvn_vk_pipe_recipe.c)
     target_include_directories(nvn_vk_pipe_worker_test PRIVATE
-        native runtime/direct runtime/nvn tests/vkhost
+        native native/direct native/nvn tests/vkhost
         ../graphics/nvn/third_party/vulkan-headers/include
         ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include)
     target_compile_definitions(nvn_vk_pipe_worker_test PRIVATE _GNU_SOURCE)

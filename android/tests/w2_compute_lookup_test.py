@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix='w2-lookup-') as folder:
     # An unavailable provider must reject before cache/worker access, not succeed
     # through a fabricated context or silently use an offline entry.
     # 未定义弱引用解析为空是 ELF / Android 链接语义：macOS ld64 不接受未定义弱引用（要放行得手写链接参数，仓库规定只能走 weak_link_decl 登记、
-    # 而登记只收 runtime/ graphics/ 宿主源），所以这三例只在 Linux 宿主（安卓 Linux CTest）跑，Mac 上明说跳过
+    # 而登记只收 native/ graphics/ 宿主源），所以这三例只在 Linux 宿主（安卓 Linux CTest）跑，Mac 上明说跳过
     if sys.platform != 'darwin':
         absent_cmd = [arg for arg in cmd]
         absent_cmd.insert(1, '-DW2_NO_PROVIDER')

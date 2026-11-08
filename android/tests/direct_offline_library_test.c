@@ -1,4 +1,4 @@
-// F5.3 宿主回归：安装 revision 内离线程序库的只读消费（runtime/direct/offline_library.c）。
+// F5.3 宿主回归：安装 revision 内离线程序库的只读消费（native/direct/offline_library.c）。
 //
 // 反例基线（任一成立，运行时就会消费到不属于本请求或已被破坏的程序）：
 //   * 把“文件存在”当命中（不核容器内部身份 / 负载摘要 / 真实长度）；

@@ -3,7 +3,7 @@
 > 合流说明（2026-10-28）：本页合并双方已有说明与原验证记录；相关源码冲突尚待解决，原记录不代表本次候选重新通过。进度见 [合并分析 §13](../docs/direct-main-merge-analysis-20261028.md)。
 
 当前 Android `s2arm_android` 是诊断宿主。`S2A_CS_SERVICES=static` 把 NativeAOT
-服务组成链接进同一库；基础服务导入仍由 `runtime/s2a_native_stub.c` 接住，
+服务组成链接进同一库；基础服务导入仍由 `native/s2a_native_stub.c` 接住，
 纹理数组复用诊断所需的 `s2a_alt_phase` 则来自共享 `runtime/src/alt.c` 的真实实现。
 模块映射检查、C# 运行时自测、存在 `S2A_Init` 导出均不表示 `S2A_Init` 执行成功，
 更不表示可以执行 guest。

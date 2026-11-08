@@ -46,7 +46,7 @@ The preview reports real native checks: runtime page size, a shared-memory alias
 using Android shared backing and Linux `mremap(old_size=0)`, and a temporary
 64 GiB / 1 GiB aligned reservation wholly below the 39-bit guest-address limit,
 and the Bionic pthread key-table probe used by the Android rewrite target
-(`runtime/tsd.c`: table offset, second-key re-check, direct slot write read back
+(`native/tsd.c`: table offset, second-key re-check, direct slot write read back
 by `pthread_getspecific`, independent slot on another thread).
 The reservation and probe keys are released immediately. The Vulkan test
 presenter draws clear colours and orientation markers; it is not connected to
@@ -270,7 +270,7 @@ bash android/gate.sh
 Both `test.sh` and `gate.sh` always execute the real C/Python package matrix,
 including full package byte/SHA comparisons, rejection before old-package
 replacement, and Java consumers. `S2A_TEST_NO_NATIVE=1` skips only the Linux
-runtime CTest step (`runtime/memory.c` needs `mremap`); it does not skip the
+runtime CTest step (`native/memory.c` needs `mremap`); it does not skip the
 portable rewriter build or matrix. The matrix step in `test.sh` clears
 `S2A_REWRITER_C` / `S2A_REWRITER_BUNDLED` only in its subshell and uses its own
 fresh cache, forcing a build from this commit's source. Production selection
@@ -336,12 +336,12 @@ SERIAL=<device serial> PY=<python with capstone + lz4> \
 
 The script names the device explicitly, never clears logcat and touches only
 `org.s2arm.android`. On a shared phone, coordinate access before running it.
-`runtime/module.c` mapping is also host-tested (`tests/module_test.c`; pass
+`native/module.c` mapping is also host-tested (`tests/module_test.c`; pass
 `<dir> <name>` to map real rewriter output on the host).
 
 ## Vulkan presentation (render thread)
 
-`runtime/presenter.cpp` owns the Vulkan device, swapchain and frame loop on a
+`native/presenter.cpp` owns the Vulkan device, swapchain and frame loop on a
 render thread. Each frame is a time-varying clear colour plus two orientation
 markers: a red square at the user's top-left and a wider green bar at the user's
 top-right. They exercise acquire / present, swapchain recreation, pre-rotation
@@ -600,7 +600,7 @@ All of it is listed in one index.
     store is kept, so no file is ever stored twice. A file already stored is not
     read from the package again.
   - Game files are only read. Rewritten modules are copied into anonymous memory
-    by `runtime/module.c`, never mapped executable from storage.
+    by `native/module.c`, never mapped executable from storage.
 - **Load check:** the panel lists installed games, and maps each module through
   `module.c` (`TARGET android`, R|X). Nothing executes.
 
@@ -819,7 +819,7 @@ are; the replacement is bound to that exact installed APK.
   - If loading or verification fails, the process refuses another load attempt and must be
     restarted: a failed verification can leave the first native library mapped.
   - `NativeBridge.jniAbi()` must equal `RuntimeLibrary.jniAbi(NativeBridge, TouchInputBridge)`.
-    That is a SHA-256 over every native declaration. `runtime/jni_abi.py` computes it from the
+    That is a SHA-256 over every native declaration. `native/jni_abi.py` computes it from the
     Java sources as a build-time output, regenerated whenever either source changes, and
     the library carries it. Any modifier order, varargs and C-style arrays match the
     reflection form; anything the parser cannot match is a build error. `verify-apk.py`
@@ -909,7 +909,7 @@ Microsoft's release metadata. It then publishes NativeAOT shared libraries for
     A NativeAOT static library plus the runtime pieces the SDK lists (written to
     `build/android-cs/static/link.txt`) link into `libs2arm_android.so`, with
     `s2a_native` bound at link time (`DirectPInvoke`). Until the native core runs
-    on Android, `runtime/s2a_native_stub.c` provides the 20 imported functions,
+    on Android, `native/s2a_native_stub.c` provides the 20 imported functions,
     with signatures from `runtime/include/s2a_native.h`.
   - The runtime archive carries its own LLVM libunwind internals, which collide
     with the NDK's libunwind for C++ exceptions. `cs/build.sh` renames the runtime's
@@ -976,8 +976,8 @@ What integration needs, in the shared code:
 4. **Renderer and audio.** Silk.NET must get `libvulkan.so` explicitly, as PR #1
    does. Audio: `cs/audio` is a Ryujinx `IHardwareDeviceDriver` over AAudio, which
    the composition installs as `Exports.AudioFactory`. AAudio's real-time
-   callback is C (`runtime/aaudio_sink.c`) and only reads a lock-free ring
-   (`runtime/pcm_ring.c`). The C# session feeds that ring and keeps the Apple
+   callback is C (`native/aaudio_sink.c`) and only reads a lock-free ring
+   (`native/pcm_ring.c`). The C# session feeds that ring and keeps the Apple
    session's accounting, so a GC pause delays bookkeeping, not playback. Its feeder
    thread sleeps until the callback reports that the head buffer finished, so it
    wakes once per played game buffer, like Apple's per-buffer hand-back, and not
@@ -1034,7 +1034,7 @@ On Android and HarmonyOS, every signal handler that can run on a guest thread mu
 therefore use `SA_ONSTACK`, and each guest thread needs its own `sigaltstack`.
 Otherwise a signal frame can silently overwrite guest registers. The core
 (`runtime/src/crash.c`, `det.c`, the 256 KiB per-thread stack from `thread.c`) and
-xbl-android already work this way; `runtime/guest_signal.c` is the Android-side
+xbl-android already work this way; `native/guest_signal.c` is the Android-side
 equivalent used by the self-test's guest threads.
 
 Measured on the Redmi K50 Ultra (Android 15) by `s2a_android_redzone_check`:
@@ -1088,7 +1088,7 @@ Next integration work:
    per-thread key stamping, anonymous mapping + `mprotect` RX for rewritten
    images (targetSdk >= 29 forbids executable mappings of app-data files).
 3. Connect the shared Vulkan backend from PR #1 to the render thread's surface
-   lifecycle (`runtime/presenter.cpp`: hand-over, bounded release, pre-rotation);
+   lifecycle (`native/presenter.cpp`: hand-over, bounded release, pre-rotation);
    the presenter's clear colour is the placeholder for the renderer's frames.
 4. Compose the Ryujinx services / GPU layer for Android, replace Apple audio and
    memory diagnostics, and attach the existing Npad input hook. The snapshot
@@ -1097,7 +1097,7 @@ Next integration work:
    `games/<title id>/modules/` for the loader, the package as `S2A_GAME_DATA`.
    The on-screen gamepad and import are in place. The phone is shared:
    coordinate access before using it.
-6. Delete `runtime/s2a_native_stub.c` once the native core runs on Android, and
+6. Delete `native/s2a_native_stub.c` once the native core runs on Android, and
    link the core in its place for the single-library build.
 
 Outside this directory, only the rewriter target, the Apple loader's `TARGET`

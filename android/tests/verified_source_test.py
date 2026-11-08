@@ -13,7 +13,7 @@ JAVA = ANDROID/'app/src/main/java/org/s2arm/android'
 
 
 def main():
-    source = (ANDROID/'runtime/bridge.cpp').read_text()
+    source = (ANDROID/'native/bridge.cpp').read_text()
     callback = source[source.index('static bool verify_game_bytes('):source.index('static void *run_game(')]
     # Desktop JNI exposes void**, Android JNI exposes JNIEnv**. No production behavior is changed.
     callback = callback.replace('AttachCurrentThread(&env, nullptr)', 'AttachCurrentThread(reinterpret_cast<void **>(&env), nullptr)')
