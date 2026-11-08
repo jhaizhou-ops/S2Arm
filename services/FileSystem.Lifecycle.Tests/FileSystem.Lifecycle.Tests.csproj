@@ -10,6 +10,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../S2A.Services.Tests/FileSystemRestart.cs" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
   </ItemGroup>
 </Project>

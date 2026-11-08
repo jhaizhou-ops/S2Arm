@@ -332,8 +332,12 @@
     "binary_ascii_globs": [
       "translator/dmsh_xlate_bin/*.dll",
       "translator/dmsh_xlate_bin/*.pdb",
-      "translator/dmsh_xlate_bin/dmsh_xlate",
-      "runtime/tests/t_fps_default"
+      "translator/dmsh_xlate_bin/dmsh_xlate"
+    ],
+    "build_artifact_allow_globs": [
+      "translator/dmsh_xlate_bin/*",
+      "compat/tree/src/ARMeilleure/Native/libs/*.dylib",
+      "tests/fixtures/iml_signed/*"
     ],
     "reviewed_text_globs": [
       "graphics/widen/tables/*/来源.txt",

@@ -8,7 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../S2A.Services/MemDiag.cs" Link="MemDiag.cs" />
-    <Compile Include="../../ryujinx/tree/src/Ryujinx.Common/S2AShutdown.cs" Link="S2AShutdown.cs" />
-    <Compile Include="../../ryujinx/tree/src/Ryujinx.Common/S2AThreadAlloc.cs" Link="S2AThreadAlloc.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/S2AShutdown.cs" Link="S2AShutdown.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Common/S2AThreadAlloc.cs" Link="S2AThreadAlloc.cs" />
   </ItemGroup>
 </Project>

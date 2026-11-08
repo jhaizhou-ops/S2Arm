@@ -24,6 +24,8 @@ import sys
 
 RULES_PATH = Path(__file__).with_name('public_repo_scan_rules.json')
 MAX_BYTES = 16 * 1024 * 1024
+# 可执行 / 库文件头（Mach-O、Mach-O fat、ELF、PE、ar）：白名单外的一律记 build_artifact（构建产物不入仓）
+ARTIFACT_MAGIC = (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\x7fELF', b'MZ', b'!<arch>')
 
 
 class ScanError(Exception):
@@ -301,6 +303,10 @@ def scan(repo, ref, paths, list_only=False, base=None):
                 manifest.append({**location, 'decision': decision, 'size': size})
                 counts[decision] += 1
                 continue
+            if decision in ('binary_ascii', 'unreviewed_type') and size >= 4 and \
+                    not matches(path, rules['boundaries'].get('build_artifact_allow_globs', [])) and \
+                    reader.read(oid, size)[:8].startswith(ARTIFACT_MAGIC):
+                meta_categories = meta_categories + ['build_artifact']
             for category in meta_categories + (['windows_path'] if windows_path_illegal(path) else []):
                 findings.append({**location, 'status': 'changed' if path in changed and
                                  (path not in baseline or path in renames) else 'existing',

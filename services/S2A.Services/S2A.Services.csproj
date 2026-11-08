@@ -12,7 +12,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Input/Ryujinx.Input.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.HLE/Ryujinx.HLE.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Input/Ryujinx.Input.csproj" />
   </ItemGroup>
 </Project>

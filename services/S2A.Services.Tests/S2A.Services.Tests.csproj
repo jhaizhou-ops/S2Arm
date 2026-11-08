@@ -17,8 +17,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../S2A.Services/S2A.Services.csproj" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Audio.Backends.Apple/Ryujinx.Audio.Backends.Apple.csproj" />
-    <ProjectReference Include="../../platforms/apple/cs/S2A.Apple.csproj" />   <!-- 单测宿主（Mac）的平台装配：苹果宿主目录原语等 -->
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Audio.Backends.Apple/Ryujinx.Audio.Backends.Apple.csproj" />
+    <ProjectReference Include="../../platform/apple/cs/S2A.Apple.csproj" />   <!-- 单测宿主（Mac）的平台装配：苹果宿主目录原语等 -->
   </ItemGroup>
   <ItemGroup>
     <!-- libvpx 官方 VP8 测试向量（BSD，15 KB）与逐帧 I420 MD5 -->

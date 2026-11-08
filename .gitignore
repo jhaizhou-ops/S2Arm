@@ -1,5 +1,10 @@
 # 构建与语言工具缓存
 build/
+# 单测二进制编到 build/tests/，源码目录里不留（runtime/tests/t_fps_default 曾被误提交；扫描器 build_artifact 类同口径）
+/runtime/tests/t_*
+!/runtime/tests/t_*.*
+/graphics/nvn/tests/t_*
+!/graphics/nvn/tests/t_*.*
 bin/
 # tools/bin 存放随仓库维护的脚本，不是 .NET 产物
 !/tools/bin/

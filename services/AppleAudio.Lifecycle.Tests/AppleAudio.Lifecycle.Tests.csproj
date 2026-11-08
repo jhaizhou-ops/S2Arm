@@ -10,14 +10,14 @@
     <!-- The regression reflects the real backend callback handle. Keep its
          assembly identity when compiling an optional pre-fix source snapshot. -->
     <AssemblyName>Ryujinx.Audio.Backends.Apple</AssemblyName>
-    <BackendSource Condition="'$(BackendSource)' == ''">$(MSBuildThisFileDirectory)../../ryujinx/tree/src/Ryujinx.Audio.Backends.Apple</BackendSource>
+    <BackendSource Condition="'$(BackendSource)' == ''">$(MSBuildThisFileDirectory)../../compat/tree/src/Ryujinx.Audio.Backends.Apple</BackendSource>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="$(BackendSource)/**/*.cs" Exclude="$(BackendSource)/obj/**;$(BackendSource)/bin/**" />
     <Compile Include="../S2A.Services.Tests/AppleAudioDispose.cs" />
     <Compile Include="Program.cs" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
-    <ProjectReference Include="../../ryujinx/tree/src/Ryujinx.Cpu/Ryujinx.Cpu.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Audio/Ryujinx.Audio.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Cpu/Ryujinx.Cpu.csproj" />
   </ItemGroup>
 </Project>
