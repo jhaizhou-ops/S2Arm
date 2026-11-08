@@ -321,8 +321,8 @@ KEYED = ('U.Toc(p, key)', 'if key is None and \'encrypted and no key\' in str(e)
 old8 = src.replace(KEYED[0], 'U.Toc(p)').replace(KEYED[1], 'if False: red(')
 ck(all(k in src for k in KEYED) and old8 != src, '⑧ 拿到改前形态（Toc 不带密钥、加密容器不判红）')
 if old_src is not None:
-    os.makedirs(os.path.join(T, 'oldtree', 'gfx', 'nvn', 'gfx', 'tools'), exist_ok=True)
-    shutil.copy(os.path.join(H, 'translator', 'uepak.py'), os.path.join(T, 'oldtree', 'gfx', 'nvn', 'gfx', 'tools', 'uepak.py'))
+    os.makedirs(os.path.join(T, 'oldtree', 'translator'), exist_ok=True)
+    shutil.copy(os.path.join(H, 'translator', 'uepak.py'), os.path.join(T, 'oldtree', 'translator', 'uepak.py'))
     old8_py = os.path.join(T, 'oldtree', 'pack', 'ue_pak_old8.py'); open(old8_py, 'w').write(old8)
     rc8o, log8o = run_ue_pak(os.path.join(r8, 'romfs'), os.path.join(r8, 'out_old'), old8_py)
     ck(rc8o == 0 and listing(os.path.join(r8, 'out_old')) == [] and 'encrypted and no key' in log8o,
