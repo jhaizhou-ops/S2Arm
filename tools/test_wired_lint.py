@@ -10,7 +10,7 @@
 import ast, fnmatch, glob, os, re, shlex, subprocess, sys
 
 root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-SKIP = {'.git', 'build', 'ryujinx', 'node_modules', '.s2arm-local'}
+SKIP = {'.git', 'build', 'compat', 'node_modules', '.s2arm-local'}
 TEST = re.compile(r'(^|/)tests(/[^/]+)*/(t_[^/]+\.(py|sh)|[^/]+_test\.(py|sh))$')   # 10-28 质量线：*_test.py 也要接线（门禁只自动收 tests/*_test.sh；tests/widen_accept_test.py、#835 的 redact_cases_test.py 没人调也报 0 漏）
 # 分母不按命名（11-01 总指挥：只认 t_* / *_test 等于不按命名写的回归脚本没接线也查不出，#1243 graphics/vulkan/wsi/tests/stop_after_acquire.py）：
 #   tests 目录（任意层，含 *-tests / *_tests）下的测试入口——.sh，或带 shebang / __main__ 入口的 .py；纯被导入的模块不算入口，跟着导入它的单测走

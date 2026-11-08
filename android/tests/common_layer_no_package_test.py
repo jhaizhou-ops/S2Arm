@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DIRS = ("android/native", "native", "gfx")
+DIRS = ("android/native", "runtime", "ios", "graphics", "translator")
 SUFFIXES = {".c", ".h", ".cc", ".cpp", ".cxx", ".inc", ".s", ".m", ".mm"}
 NEEDLE = "org.s2arm.game.t"
 

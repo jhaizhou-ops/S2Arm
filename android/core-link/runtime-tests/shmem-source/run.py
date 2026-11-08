@@ -40,7 +40,7 @@ def main():
              "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
              "-Wno-unused-parameter", "-Wno-misleading-indentation", "-ffunction-sections",
              "-fdata-sections", "-pthread", "-I" + str(ROOT / "runtime/src"),
-             "-I" + str(ROOT / "runtime/include"), "-I" + str(ROOT / "platforms")]
+             "-I" + str(ROOT / "runtime/include"), "-I" + str(ROOT / "platform")]
     objects = []
     for index, source in enumerate(sources):
         obj = out / f"source-{index}.o"

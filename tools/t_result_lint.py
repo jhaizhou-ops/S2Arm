@@ -18,7 +18,7 @@ def changed(base):
 
 def mk_text():
     out = []
-    for top in ('native', 'gfx'):
+    for top in ('runtime', 'ios', 'graphics', 'translator'):
         for dp, _, fn in os.walk(top):
             for f in fn:
                 if f.endswith('.mk'):

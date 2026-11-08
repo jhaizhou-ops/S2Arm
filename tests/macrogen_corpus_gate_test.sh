@@ -13,7 +13,7 @@ source = Path(sys.argv[1]).read_bytes()
 checks = 0
 with tempfile.TemporaryDirectory(prefix="s2a-corpus-gate-") as temp:
     root = Path(temp)
-    (root / "gfx").mkdir()
+    (root / "graphics").mkdir()
     (root / "graphics/gate.sh").write_bytes(source)
     corpus = root / "graphics/tools/macrogen/corpus/synthetic"
     corpus.mkdir(parents=True)

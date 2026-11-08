@@ -18,7 +18,7 @@
 #   修剪版本后删没有任何版本（含 .tmp / 重放中的 .tmp.rb）再指向的身份（root_romfs_sweep）。整根往别处复制的读方（tools/clonedir.py 的快照、私有根起步、
 #   ipa.sh 只出程序、rsync 推远端）跟随这条软链拿到真目录，内容与原先逐字节相同。要改 RomFS 的阶段用 ROOT_OWN_ROMFS=1 root_begin 拿一份自己的真目录。
 # 禁止原地覆盖：已提交的版本目录不许再写（root_begin 对已存在的 <款>@<提交> 报红）。
-# 共享根只代表 origin/main（10-20 总指挥拍板）：往共享根开新版本前核本树 HEAD 在 origin/main 上（不是分支）、阶段相关目录（native gfx services ryujinx pack）干净、
+# 共享根只代表 origin/main（10-20 总指挥拍板）：往共享根开新版本前核本树 HEAD 在 origin/main 上（不是分支）、阶段相关目录（runtime ios graphics translator services compat pack）干净、
 #   且不比现行的来源提交（.root_src）旧，否则拒绝——分支树按各自代码算阶段键，会和别的树轮流刷共享现行（10-20 动森现行被三棵树乒乓，在途出包反复被并发保护作废），分支版本还会冒充现行。
 #   分支树用私有根：S2A_ROOTS=~/.s2arm/run/s2arm/roots_priv/<名>（约定放这里，gc 24 小时没动就清）；某款在私有根里还没有现行时，从共享现行 clonefile 起步，只重做键变了的阶段。
 S2A_ROOTS_SHARED=${S2A_ROOTS_SHARED:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}; S2A_ROOTS_PRIV=${S2A_ROOTS_PRIV:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots_priv}   # 单测可覆盖
@@ -83,7 +83,7 @@ _root_tree_ok() {   # 本树能不能改共享现行（$1 = 款）：HEAD 是 or
   local r why= src cur; r=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
   # 不联网：main 的每个提交都是本机列车合出来再推上去的，origin/main 本机已是最新（11-02 jhz「咱们是唯一的合并者」）
   git -C "$r" merge-base --is-ancestor HEAD origin/main 2> /dev/null || why="不在 origin/main 上（分支提交）"
-  [ -z "$(git -C "$r" status --porcelain -- native gfx services ryujinx pack 2>/dev/null)" ] || why="$why 阶段相关目录有未提交改动"
+  [ -z "$(git -C "$r" status --porcelain -- runtime ios graphics translator services compat pack 2>/dev/null)" ] || why="$why 阶段相关目录有未提交改动"
   cur=$(cd -P "$S2A_ROOTS/${1:-?}@现行" 2>/dev/null && pwd); src=$(cat "$cur/.root_src" 2>/dev/null)
   [ -z "$why" ] && [ -n "$src" ] && ! git -C "$r" merge-base --is-ancestor "$src" HEAD 2> /dev/null && why="比现行的来源提交 ${src:0:9} 旧（会把现行刷回去）"
   [ -z "$why" ] && return 0

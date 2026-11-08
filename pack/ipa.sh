@@ -34,7 +34,7 @@ C=$(git -C "$R" rev-parse --short=9 HEAD) || exit 1
 # 源码树干净才出（包号里的提交号要对得上源码）：防开发者用改了没提交的树出包。发布快照（App 内置引擎，根有 engine.json 清单）
 #   安装时已按清单逐文件核过 sha256、玩家机上没人改它，这条在玩家路径上没有意义，不判（11-02 总指挥；beta.3 走查：快照缺
 #   根 .gitignore 时编译产物被当改动，玩家导出 iPhone 版全红——.gitignore 已补进快照，作第二道）
-src_dirty() { [ -f "$1/engine.json" ] && return 1; [ -n "$(git -C "$1" status --porcelain -- native gfx services ryujinx Makefile)" ]; }
+src_dirty() { [ -f "$1/engine.json" ] && return 1; [ -n "$(git -C "$1" status --porcelain -- runtime ios graphics translator services compat Makefile)" ]; }
 src_dirty "$R" && { echo "【红】本树构建相关目录有未提交改动，包版本对不上提交号，不出"; exit 1; }
 # 同一产物根、同款、同提交只许一份在出（10-20 20:5x 我手出与自动正式局同时出动森 c85d1335a，两份抢 CPU）：后到的等先到的出完，
 #   再走下面的正常流程——先到的已写好包键，后到的命中「现行已是包」直接登记，复用它的结果

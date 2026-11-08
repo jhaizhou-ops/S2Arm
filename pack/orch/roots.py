@@ -343,7 +343,7 @@ class Roots:
             return
         if not git('merge-base', '--is-ancestor', 'HEAD', 'origin/main', repo=self.repo, check=False):
             raise Conflict('共享根只代表 main；分支使用 roots_priv')
-        if git('status', '--porcelain', '--', 'runtime', 'graphics', 'translator', 'services', 'compat', 'pack', repo=self.repo):
+        if git('status', '--porcelain', '--', 'runtime', 'ios', 'graphics', 'translator', 'services', 'compat', 'pack', repo=self.repo):
             raise Conflict('共享根拒绝未提交的阶段源码')
         cur = self.cur(game, pin=False)
         if cur and read(cur / '.root_src') and not git('merge-base', '--is-ancestor', read(cur / '.root_src'), 'HEAD', repo=self.repo, check=False):

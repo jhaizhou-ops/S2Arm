@@ -11,8 +11,8 @@ set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); trap 'rm -rf "$T"' 
 cat > "$T/check.py" << 'EOF'
 import os, re, sys
 root, docs = sys.argv[1], sys.argv[2:]
-TOP = {'native', 'services', 'tools', 'tests', 'ryujinx', 'gfx', 'docs', 'platforms', 'skills', 'pack'}
-SRC = ('native', 'services', 'gfx', 'tools', 'ryujinx', 'platforms', 'pack')
+TOP = {'runtime', 'ios', 'services', 'tools', 'tests', 'compat', 'graphics', 'translator', 'docs', 'android', 'launchers', 'macos', 'platform', 'shell', 'skills', 'pack'}
+SRC = ('runtime', 'ios', 'services', 'graphics', 'translator', 'tools', 'compat', 'android', 'launchers', 'macos', 'platform', 'shell', 'pack')
 text = []
 for d in SRC:
     for base, dirs, files in os.walk(os.path.join(root, d)):

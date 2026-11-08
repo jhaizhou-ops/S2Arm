@@ -1,8 +1,8 @@
 # Translation chain tool fingerprints (written by dmsh_chain.py --update-lock; regenerate after changing tools and commit it)
-dmsh_xlate.dll	bc321e142a063b42
-Ryujinx.Graphics.Shader.dll	d863fe605e38b870
-Ryujinx.Common.dll	e5c0a09211ae0070
-S2Arm.Gfx.Widen.Shader.dll	c9e84fe4267a7409
+dmsh_xlate.dll	670ddeecc8a60982
+Ryujinx.Graphics.Shader.dll	acd67649b751ad80
+Ryujinx.Common.dll	51b359bd0c8a7623
+S2Arm.Gfx.Widen.Shader.dll	8bd524cf317261b5
 xlate_source	44fe4db1ee9956b3
 spirv-cross	1.4.363.0
 metal_macosx	Apple metal version 32023.883 (metalfe-32023.883)

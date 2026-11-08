@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
 class SnapshotIgnoresBuildOutputs(unittest.TestCase):
     """11-02 beta.3 走查：快照没带根 .gitignore，出包在副本里编出的 bin/ obj/ 被 pack/ipa.sh 的
-    「git status --porcelain -- native gfx services ryujinx Makefile」当成改动，玩家导出 iPhone 版死在最后一步。
+    「git status --porcelain -- runtime ios graphics translator services compat Makefile」当成改动，玩家导出 iPhone 版死在最后一步。
     用真仓库的根 .gitignore 和 bundle_engine 的输入清单搭快照、造产物，期望那条检查看到的是空的；去掉 .gitignore 的反证要非空。"""
     ROOT = Path(__file__).resolve().parents[3]
 
@@ -71,7 +71,7 @@ class SnapshotIgnoresBuildOutputs(unittest.TestCase):
             git(d, *a)
         for out in ("graphics/widen/bin/Release/x.dll", "graphics/widen/obj/project.assets.json", "services/aot/bin/y", "services/aot/obj/z"):
             (d / out).parent.mkdir(parents=True, exist_ok=True); (d / out).write_text("o\n")
-        return subprocess.run(["git", "-C", str(d), "status", "--porcelain", "--", "native", "gfx", "services", "ryujinx", "Makefile"],
+        return subprocess.run(["git", "-C", str(d), "status", "--porcelain", "--", "runtime", "ios", "graphics", "translator", "services", "compat", "Makefile"],
                               env=ENV, capture_output=True, text=True, check=True).stdout
 
     def test_root_gitignore_is_an_engine_input(self):

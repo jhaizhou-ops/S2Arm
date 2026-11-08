@@ -506,7 +506,7 @@ def prepare(c):
         from library import direct_on
         dual = direct_on()
         # 先定这次的产物根（键 = 引擎源码、工具版本、所选包、字体、引擎号），再发计划：哪几步会复用缓存要在计划里先标出来（11-07）
-        fingerprint = tree_hash(c.engine, ["native", "gfx", "services", "ryujinx", "pack", "Makefile",
+        fingerprint = tree_hash(c.engine, ["runtime", "ios", "graphics", "translator", "services", "compat", "pack", "Makefile",
                                           "platform/build.mk", "macos", "launchers/macos/build.mk",
                                           "tools/toolchain.env", "tools/toolchain.sh", "tools/addr_need.py"])
         fonts = c.fonts_dir()
@@ -592,7 +592,7 @@ def prepare(c):
             for name in ("seed.txt", ".root_src", ".root_base"):
                 (temporary / name).unlink(missing_ok=True)
             clone_tree(c, host, temporary / "S2ArmGame.app")
-            if fingerprint != tree_hash(c.engine, ["native", "gfx", "services", "ryujinx", "pack", "Makefile",
+            if fingerprint != tree_hash(c.engine, ["runtime", "ios", "graphics", "translator", "services", "compat", "pack", "Makefile",
                                                    "platform/build.mk", "macos", "launchers/macos/build.mk",
                                                    "tools/toolchain.env", "tools/toolchain.sh", "tools/addr_need.py"]):
                 raise Failure("构建期间 S2Arm 源码发生变化，请重试；旧运行版本已保留。")
