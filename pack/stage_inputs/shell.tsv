@@ -165,7 +165,7 @@
 入	launchers/macos/build.mk
 入	platform/plat.h
 入	platform/plat_asm.h
-入	ryujinx
+入	compat
 入	services/S2A.Services
 入	services/aot
 入	services/build.mk
