@@ -1,0 +1,38 @@
+# 真机交互运行器（XCUITest）：按包名附着别的 App、按无障碍标识点控件、按坐标单指点按。用法见 tools/xcui/README.md；工程由 xcodegen 生成，不入库
+name: S2AXCUI
+options:
+  bundleIdPrefix: com.s2arm.xcui
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${S2A_XCUI_TEAM}
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  S2AXCUIHost:
+    type: application
+    platform: iOS
+    sources: [Host]
+    settings:
+      base:
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: S2A 点按器
+  S2AXCUIRunner:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Runner
+      - path: ../../build/xcui/gen   # run.sh 每次写 PlanData.swift（本次计划）：TEST_RUNNER_ 环境变量到不了真机上的 UI 测试进程（11-01 测试机1 实测）
+        optional: true
+    dependencies:
+      - target: S2AXCUIHost
+schemes:
+  S2AXCUIRunner:
+    build:
+      targets:
+        S2AXCUIHost: all
+        S2AXCUIRunner: [test]
+    test:
+      targets: [S2AXCUIRunner]

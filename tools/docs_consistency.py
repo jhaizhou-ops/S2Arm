@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 S2Arm contributors
+"""Read-only checks for knowledge headings and generated collaboration policy.
+
+Policy values come from train.sh / contrib_check.sh, never from a second table.
+Use --render to print the block used in CONTRIBUTING and docs/协作循环.md.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from pathlib import Path
+import re
+import sys
+import unicodedata
+
+BEGIN = '<!-- S2ARM_POLICY:BEGIN -->'
+END = '<!-- S2ARM_POLICY:END -->'
+DOCUMENTS = ('CONTRIBUTING.md', 'docs/协作循环.md')
+
+
+class PolicyError(ValueError):
+    pass
+
+
+def headings(text):
+    """Yield level-two entry titles and one-based lines, outside code fences."""
+    fence = None
+    for number, line in enumerate(text.splitlines(), 1):
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', line)
+        if marker:
+            token = marker[1]
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence) and not line[marker.end():].strip():
+                fence = None
+            continue
+        match = re.match(r'^ {0,3}##[ \t]+(.+?)\s*$', line)
+        if fence is None and match:
+            title = re.sub(r'\s+#+\s*$', '', match[1])
+            yield ' '.join(unicodedata.normalize('NFC', title).split()), number
+
+
+def duplicate_headings(text):
+    locations = defaultdict(list)
+    for title, number in headings(text):
+        locations[title].append(number)
+    return {title: rows for title, rows in locations.items() if len(rows) > 1}
+
+
+def policy_block(train, contrib):
+    # Parse static positive defaults only; changed source shapes require review.
+    code = '\n'.join(line for line in train.splitlines() if not line.lstrip().startswith('#'))
+    values = {}
+    for name in ('TRAIN_BATCH_MAX', 'TRAIN_FULL_MAX', 'TRAIN_BISECT_MIN', 'TRAIN_PAR_DEPTH'):
+        found = set(re.findall(r'\$\{' + name + r':-([^}]*)\}', code))
+        if len(found) != 1 or any(not re.fullmatch(r'[1-9][0-9]*', value) for value in found):
+            raise PolicyError(f'{name} 缺少唯一静态正整数缺省值')
+        values[name] = next(iter(found))
+    match = re.search(r'^seqchk\(\).*?(?=^halfland\(\))', code, re.M | re.S)
+    seq = match[0] if match else ''
+    if (not re.search(r'\[ \$# -gt "\$\{TRAIN_BISECT_MIN:-\d+\}" \]', seq)
+            or not re.search(r'\[ "\$d" -lt "\$\{TRAIN_PAR_DEPTH:-\d+\}" \]', seq)
+            or '( export S2A_TRAIN_PD=' not in seq or 'wait $pa $pb' not in seq
+            or 'for e in "$@"' not in seq or 'halfland ' not in seq):
+        raise PolicyError('seqchk 归责/分批形状已变，需重新核对文档语义')
+    statuses = {int(a or b) for a, b in re.findall(r'\bexit[ \t]+(\d+)\b|\bEXIT=(\d+)\b', contrib)}
+    meanings = {0: '第一层本机已证通过（待宿主/第二层仍单列）', 1: '有红',
+                2: '不完整或参数/基线错误', 75: '环境未就绪', 130: '被中断'}
+    if statuses != meanings.keys():
+        raise PolicyError(f'自检退出码集合已变：{sorted(statuses)}')
+    return '\n'.join((
+        BEGIN,
+        '以下内容由 `python3 tools/docs_consistency.py --render` 从实际脚本生成；修改后用同一工具核对。',
+        f'- 批上限：快档 `TRAIN_BATCH_MAX` 缺省 {values["TRAIN_BATCH_MAX"]} 支；'
+        f'full 档 `TRAIN_FULL_MAX` 缺省 {values["TRAIN_FULL_MAX"]} 支。',
+        '- 红批归责：先按红行/红步定位并隔离相关支；无关支只继承输入未变的检查结论。'
+        f'相关支多于 `TRAIN_BISECT_MIN`（缺省 {values["TRAIN_BISECT_MIN"]}）时，'
+        '实际 `seqchk` 会对半分批，只核红步及两半共路由的步骤；'
+        f'并行深度低于 `TRAIN_PAR_DEPTH`（缺省 {values["TRAIN_PAR_DEPTH"]}）时两半同时跑，'
+        '到上限后先后跑；不满足分批条件时逐支核。路由不明则跑整份门禁。',
+        '- 自检退出码：' + '；'.join(f'`{code}` {meanings[code]}' for code in sorted(statuses)) + '。',
+        END,
+    ))
+
+
+def check(repo):
+    problems = []
+    pit = repo / 'docs/坑记录.md'
+    for title, rows in duplicate_headings(pit.read_text(encoding='utf-8')).items():
+        problems.append(f'docs/坑记录.md:{rows[0]}: 重复标题 {title}（行 {", ".join(map(str, rows))}）')
+    try:
+        expected = policy_block((repo / 'tools/train.sh').read_text(encoding='utf-8'),
+                                (repo / 'tools/contrib_check.sh').read_text(encoding='utf-8'))
+    except PolicyError as exc:
+        problems.append(f'规则来源：{exc}')
+        return problems
+    for name in DOCUMENTS:
+        text = (repo / name).read_text(encoding='utf-8')
+        if text.count(BEGIN) != 1 or text.count(END) != 1:
+            problems.append(f'{name}: 缺少唯一生成规则块')
+        elif text.index(END) < text.index(BEGIN):
+            problems.append(f'{name}: 规则块边界倒置')
+        elif text[text.index(BEGIN):text.index(END) + len(END)] != expected:
+            problems.append(f'{name}: 文档规则与脚本不一致（运行 --render）')
+    return problems
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--render', action='store_true')
+    args = parser.parse_args()
+    try:
+        if args.render:
+            print(policy_block((args.repo / 'tools/train.sh').read_text(encoding='utf-8'),
+                               (args.repo / 'tools/contrib_check.sh').read_text(encoding='utf-8')))
+            return 0
+        problems = check(args.repo)
+    except (OSError, UnicodeError, PolicyError) as exc:
+        print(f'文档检查未完成：{exc}', file=sys.stderr)
+        return 2
+    for problem in problems:
+        print(problem)
+    print(f'文档一致性：重复标题/规则问题 {len(problems)} 处（1份坑记录、2份规则文档）')
+    return 1 if problems else 0
+
+
+if __name__ == '__main__':
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
+    raise SystemExit(main())

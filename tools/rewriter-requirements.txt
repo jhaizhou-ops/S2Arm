@@ -1,0 +1,5 @@
+# 宽屏扫描器（graphics/widen/scan/wide_scan.py）等出包 Python 工具的第三方依赖（C 改写器自带固定版 capstone / lz4，见 runtime/rewriter/prepare_deps.py）：版本钉死（10-22 总指挥：改写产物随 capstone 版本变 = 出包依赖构建机）。
+# 出包、门禁、Mac 局一律用同一个解释器 S2A_PY（环境 → tools/machine.local → PATH 上的 python3；开发机在 machine.local 声明钉版 venv，remote.sh 给远端假家目录导出它）；
+# 装 / 补：python3 launchers/macos/prepare_build.py（一并装进构建 venv），或 <你的 Python> -m pip install -r tools/rewriter-requirements.txt。wide_scan.py 启动时核版本，不符报红。
+capstone==5.0.7
+lz4==4.4.5

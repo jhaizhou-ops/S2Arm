@@ -1,0 +1,130 @@
+# 分层边豁免表（架构分层方案 4.3.5；tools/layer_edge.py 对账）。四列，制表符分隔：规则	路径	对方	理由与清零条件
+# 只减不增：只登记 main 上实际存在的越界边；边清掉了必须同笔删行（留着即「豁免过时」报红）。新增越界不许靠加行放行，要加须写可检查的清零条件并经总指挥批
+R-01	graphics/track/track.c	android/native/runtime/tracking/mirror.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/boot.c	android/native/runtime/platform/boot_android.inc	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/crash.c	android/native/runtime/fault/fault.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/gate.c	android/native/runtime/vm/writers.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/guest_main.c	android/native/runtime/fault/fault.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/guest_main.c	android/native/runtime/runtime.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/lifecycle.c	android/native/runtime/platform/lifecycle_android.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/loader.c	android/native/module.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/selfcheck.c	android/native/runtime/platform/selfcheck_android.inc	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/svc_mem.c	android/native/runtime/tracking/mirror.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/svc_mem.c	android/native/runtime/tracking/runtime.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/svc_mem.c	android/native/runtime/vm/backing.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/svc_mem.c	android/native/runtime/vm/writers.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/thread.c	android/native/runtime/fault/fault.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/thread.c	android/native/runtime/fault/thread_android.inc	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/vawin.c	android/native/runtime/platform/vawin_android.inc	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-01	runtime/src/widen.c	android/native/screen_metrics.h	存量：核心反向包含平台实现（方案 H4 / H11 / M1）；清零条件：经平台契约注入或归位后同笔删本行
+R-02	graphics/nvn/gfx/gl/gl_core.m	<mach-o/getsect.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/gl/gl_core.m	<mach-o/ldsyms.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/gl/gl_int.h	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/gl/gl_prog.m	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<CoreFoundation/CoreFoundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<mach-o/getsect.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<mach-o/ldsyms.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/hle_nvn.c	<mach/thread_policy.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn2_codec.c	<CoreVideo/CoreVideo.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn2_codec.c	<VideoToolbox/VideoToolbox.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_dirty.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_frame_rec.inc	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mem_account.inc	<Foundation/Foundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mem_account.inc	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<QuartzCore/CAMetalDisplayLink.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<QuartzCore/CAMetalLayer.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<mach-o/dyld.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<os/lock.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_mtl.m	<os/proc.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_pfkind.h	<Metal/MTLPixelFormat.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_present_fx.inc	<MetalFX/MetalFX.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_refl.h	<Foundation/Foundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/nvn_refl.m	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/nvn/pso_archive.h	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/nvn/gfx/tex/nvn_deswizzle_gpu.h	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/tools/direct/pso_layout_gen.m	<Foundation/Foundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/tools/shbake/gpu_arch.m	<Metal/Metal.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/track/track.c	<mach-o/dyld.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/track/track.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	graphics/track/track.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/include/s2a_text_input_rules.h	<Foundation/Foundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/alias.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/cpuprof.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/cpuprof.c	<mach/thread_act.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/crash.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/crash.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/crash_android_fatal.inc	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/det.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/det.c	<os/lock.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/diag_brk.c	<libkern/OSCacheControl.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/diag_brk.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/diag_brk.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/diag_brk.c	<mach/mach_vm.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/energy.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/energy.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/far.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/hud.c	<CoreFoundation/CoreFoundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/hud.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/hud.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/hud.c	<os/proc.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/imgpack.c	<mach-o/loader.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/imgpack.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/imgpack.h	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/launchctx.c	<mach-o/dyld.h>	存量（11-07 随取包路径从 loader.c 搬来）：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/loader.c	<mach-o/getsect.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/loader.c	<mach-o/ldsyms.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/loader.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/msample.c	<os/lock.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/pack_apply.c	<CoreFoundation/CoreFoundation.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/selfcheck.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/selfcheck.c	<os/proc.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/svc_mem.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/svc_mem.c	<mach/vm_map.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/tdump.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/tdump.c	<mach/thread_act.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/thread.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/thread.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/thread.c	<os/workgroup.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/touch.c	<mach/mach_time.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<mach-o/dyld.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<mach-o/loader.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<mach/mach.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<mach/mach_vm.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<mach/vm_map.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/vawin.c	<os/proc.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-02	runtime/src/xstack.c	<mach-o/getsect.h>	存量：共用文件直接包含苹果系统头（方案 H3 / H14 / M6）；清零条件：收进平台实现或契约后同笔删本行
+R-04	graphics/nvn/gfx/nvn/hle_nvn.c	android/native/runtime/vm/backing.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/compile_export.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/gs_path.c	android/native/capprobe/capprobe.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/gs_path.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/kind_check.h	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/provider_vk.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/provider_vk.c	android/native/wsi_lease.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/direct/vk_device.c	android/native/capprobe/capprobe.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/backend_vulkan.c	android/native/capprobe/capprobe.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/mtl_vk_shim.c	android/native/redlog.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/nvn_vk_compile_events.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/nvn_vk_compute_bridge.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/nvn_vk_frame_log.c	android/native/debug_gate.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/nvn_vk_poolahb.c	android/native/runtime/tracking/runtime.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-04	android/native/nvn/s2a_vp_alias.c	android/native/runtime/vm/backing.h	存量：图形反向依赖平台私有实现（方案 H15 / M1 / L1）；清零条件：改走公开平台接缝后同笔删本行
+R-05	runtime/src/host_main.c	graphics/nvn/gfx/nvn/dmsh_chain.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/bridge.cpp	android/native/direct/diag.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/bridge.cpp	android/native/direct/s2a_direct.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/bridge.cpp	android/native/direct/selection.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/bridge.cpp	android/native/nvn/nvn_vk_first_draw.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/direct_session.c	android/native/direct/selection.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/runtime/runtime.c	android/native/direct/graphics.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/runtime/runtime.c	android/native/direct/json.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/runtime/runtime.c	android/native/direct/provider_vk.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/runtime/runtime.c	android/native/direct/selection.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/native/runtime/services_abi.h	android/native/direct/s2a_direct.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/tools/direct_identity_host.c	android/native/direct/input_identity.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/tools/direct_identity_host.c	android/native/direct/json.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	android/tools/direct_identity_host.c	android/native/direct/sha256.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行
+R-05	macos/front_mac.m	graphics/nvn/gfx/nvn/nvn_present_fit.h	存量：平台壳包含图形内部头（方案 M3 / H1）；清零条件：改用公开图形接口后同笔删本行

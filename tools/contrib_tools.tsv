@@ -1,0 +1,30 @@
+# 贡献者自检（tools/contrib_check.sh）：步骤 → 依赖的工具。工具名与 tools/doctor.sh 打的「缺：<名称>」一致；本机缺这个工具 → 该步记「缺工具没跑」、结论「不完整」
+# 列：步骤名（shell 通配，同门禁步骤名）	工具（多个用逗号分隔，缺任何一个就跳过）。bash 5 / Python 3.12+ 缺了整份不跑（几乎每步都要），不在这里逐条列
+#   按第一列自上而下取第一条命中的行：具体步骤要写在通配行（如 单测 rewrite_*）之上
+钩子 services/gate.sh	.NET 10 SDK
+单测 csproj_closure_test	.NET 10 SDK
+单测 multirange_test	.NET 10 SDK
+单测 save_transfer_interop_test	.NET 10 SDK
+iOS 全量编译	Xcode
+钩子 runtime/gate.sh	Xcode
+钩子 graphics/gate.sh	Xcode
+钩子 tests/visual/gate.sh	Xcode
+钩子 launchers/macos/gate.sh	Xcode
+单测 deploy_target_test	Xcode
+# 只在 macOS 上成立的单测（缺条件退 75）：Linux 自检按 Xcode 记「交 Mac 门禁」不选它们，否则整份自检只因它们退 75
+单测 linux_ctest_colima_test	Xcode
+单测 dmsh_sc_identity_test	Xcode
+# 改写器固定依赖（tools/doctor.sh「改写器固定依赖」，runtime/rewriter/prepare_deps.py 生成）：10-27 逐支实测——有依赖全绿、只藏依赖（假运行根缺 s2arm/deps，
+#   S2A_REWRITER_DEPS / S2A_REWRITER_CACHE 指空）即红、红因是缺依赖（fps_rewrite 为 C 后端编不出）。userenv_test 只有第 ⑤ 项依赖，但映射按整支跳过
+单测 rewrite_c_gate_test	Python 包,改写器固定依赖
+单测 rewrite_signed_jt_test	Python 包,改写器固定依赖
+单测 rewrite_apple_golden_test	Python 包,改写器固定依赖
+单测 pack_rewrite_test	改写器固定依赖
+单测 fps_rewrite_test	Python 包,改写器固定依赖
+单测 userenv_test	改写器固定依赖
+单测 rewrite_*	Python 包
+单测 widen_sites_test	Python 包
+单测 widen_sead_test	Python 包
+单测 cpatch_test	Python 包
+单测 cpatch_twopath_test	Python 包
+单测 widen_aspcap_test	Python 包

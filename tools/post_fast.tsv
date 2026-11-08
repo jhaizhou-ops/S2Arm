@@ -1,0 +1,7 @@
+# 快钩子（tools/train_post.sh 每次合入当场各起一份，不排在 post_merge.tsv 的慢钩子后面、不占单实例锁）：几秒内跑完、只读仓库对象、重复跑无害。
+# 10-23：慢钩子一轮（自动正式局）能跑 49 分钟，排在它后面的「main 推到 mini」「放列车新副本」跟着等，换副本又得靠人。
+# 跑法：在主检出目录（S2A_REPO）里、脚本取自该合入提交，环境带 S2A_POST_REV=<提交> S2A_POST_REPO=<主检出>；日志 post/<提交>_<钩子>.log
+# 列：钩子脚本（仓库相对路径）	归属线	说明
+tools/mini_main.sh	测试出包	把 main 推到 mini 常驻裸库，门禁推分支只传增量（jhz 10-23）
+tools/train_selfcopy.sh	测试出包	列车脚本变了就放新冻结副本，常驻列车批间自换
+tools/mac_slot_selfcopy.sh	测试出包	Mac 局槽仲裁变了就换运行区冻结副本 bin/mac_slot-now.sh，各拿槽入口每次现读（11-04 总指挥：仲裁只能有一份）

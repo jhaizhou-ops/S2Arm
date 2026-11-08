@@ -1,0 +1,21 @@
+#!/bin/bash
+# 编译缓存入口（10-30 列车线，调研报告「按内容编译缓存」③）：tools/cc_cache.sh 把本目录放到 PATH 最前，clang / clang++ / cc / c++ / xcrun 都落到这里。
+#   只有「只编不链」（带 -c）的那一次交给 ccache，别的（链接、-E、-fsyntax-only、读标准输入、@响应文件）原样交给系统 xcrun，行为与不装缓存时一致。
+#   真编译器用 /usr/bin/xcrun -f 解出（跟 DEVELOPER_DIR / --sdk 走，ccache 按真编译器文件判版本）；
+#   没写 -isysroot 时补上 xcrun 本来会用的 SDK（xcrun 靠 SDKROOT 环境变量选 SDK，ccache 不把它算进键，补进命令行才算）
+me=${0##*/}; x=()
+if [ "$me" = xcrun ]; then
+  a=("$@")
+  while [ $# -gt 0 ]; do case $1 in --sdk|-sdk|--toolchain|-toolchain) [ $# -ge 2 ] || exec /usr/bin/xcrun "${a[@]}"; x+=("$1" "$2"); shift 2 ;; *) break ;; esac; done
+  case ${1:-} in clang|clang++|cc|c++) me=$1; shift ;; *) exec /usr/bin/xcrun "${a[@]}" ;; esac
+fi
+c=0; for v in "$@"; do case $v in -c) c=1 ;; -E|-fsyntax-only|-|-M|-MM|-S|--analyze|-emit-llvm|@*) c=0; break ;; esac; done
+[ "$c" = 1 ] && [ -x "${S2A_CCACHE_BIN:-}" ] || exec /usr/bin/xcrun ${x[@]+"${x[@]}"} "$me" "$@"
+real=$(/usr/bin/xcrun ${x[@]+"${x[@]}"} -f "$me" 2> /dev/null) && [ -x "$real" ] || exec /usr/bin/xcrun ${x[@]+"${x[@]}"} "$me" "$@"
+sr=; for v in "$@"; do case $v in -isysroot|-isysroot*|--sysroot|--sysroot=*) sr=1; break ;; esac; done
+[ -n "$sr" ] || { s=$(/usr/bin/xcrun ${x[@]+"${x[@]}"} --show-sdk-path 2> /dev/null) && [ -d "$s" ] && set -- -isysroot "$s" "$@"; }
+# 带调试信息（-g…）时把仓库根映射成「.」：调试信息里的编译目录 / 源路径不带树的绝对路径，同一份输入在哪棵树编出的 .o 都逐字节相同，
+#   缓存才能跨树共用而不把「先编的那棵树」的路径带给别的树（ccache 见到 -fdebug-prefix-map 也不再把当前目录算进键）
+g=; for v in "$@"; do case $v in -g|-g[0-9]|-ggdb*|-gline-tables-only|-gfull|-gdwarf*) g=1; break ;; esac; done
+[ -n "$g" ] && [ -n "${CCACHE_BASEDIR:-}" ] && set -- "$@" "-fdebug-prefix-map=$CCACHE_BASEDIR=."
+exec "$S2A_CCACHE_BIN" "$real" "$@"

@@ -1,0 +1,4 @@
+# 合入后钩子登记（tools/train_post.sh 读，main 每前进一次在 ~/.s2arm/s2arm-wt/.post 后台跑一轮；不挡列车）
+# 列：钩子脚本（仓库相对路径，在仓库根以 bash 跑，退出 0 = 绿）	归属线	说明。钩子要自己判「键没变就几秒跳过」，并对读方原子切换（新目录写完再换）
+tools/post_android_prepare.sh	合入线	安卓 APK 门禁准备标记跟上 main：宿主路只核标记（macOS 不跑 docker 步），缺 / 不匹配即重跑宿主 prepare.sh，跑完删守望 last_checked 补跑本提交（11-01 总指挥）
+tools/devrun_selfcopy.sh	合入线	真机执行器冻结副本跟上 main：tools/ 或 tests/autoplay/ 变了就放 run/s2arm/bin/devrun_<提交>、原子换 bin/devrun-now；各工作树的 dev_run 经 machine.local 里的 tools/devrun_fence.sh 转到它（11-07 总指挥）

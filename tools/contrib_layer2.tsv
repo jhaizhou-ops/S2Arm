@@ -1,0 +1,14 @@
+# 贡献者自检（tools/contrib_check.sh）不跑、留给维护者在列车里跑的第二层步骤：要我们的机器 / 测试 iPhone / 游戏文件 / 存档 / 金样录像 / mini。
+# 依据：10-23 空家目录普查（工具齐全、不给 ~/.s2arm/run 与 ~/.s2arm/data 下任何数据）逐个跑单测与钩子，下面这些仍红且原因是缺数据。
+# 列：步骤名（shell 通配，同门禁步骤名）	原因（写进 PR 摘要）	要的数据（空格分隔路径；本机全都在就照跑，跟列车同一份步骤，10-27 起；不写 = 一律不跑）
+# 钩子 android/gate.sh 的 Q19 真实链接前置（不是第二层跳过项）：有 NDK 时需固定 libavc 源码或 S2A_Q19_AVC_ARCHIVE 指向真实归档；缺失报红。
+# 先在同一缓存执行 S2A_BUILD_CACHE=<缓存> bash android/codecs/build.sh --prepare-sources [本地源码目录]；Q19 / codecs 默认缓存 $HOME/.cache/s2arm-build，源码在 <缓存>/codecs/sources/<固定内容 SHA>.tar.gz。
+# 安卓 game core 真链接前置（不是第二层跳过项）：NDK 29.0.14206865；SDK 已安装时运行 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" 'ndk;29.0.14206865'，或设 ANDROID_NDK_HOME / ANDROID_NDK_ROOT 到该版本目录；缺失报红。
+# Homebrew 安装也检查 /opt/homebrew/share/android-ndk 和 /usr/local/share/android-ndk 的 source.properties；Q19 的 libavc 离线构建使用已选中的实际 NDK，需 CMake >=3.31.6 和离线源码或真实归档；正式 codec 构建仍钉 3.31.6。
+单测 rewrite_apple_golden_test	要九款游戏主程序（~/.s2arm/data/<款>/exefs/main）	~/.s2arm/data/botw/exefs/main
+单测 openfonts_test	要本机生成的开源字体产物（~/.s2arm/run/s2arm/openfonts）	~/.s2arm/run/s2arm/openfonts
+单测 save_transfer_test	要自有真实存档、对应游戏身份及 G05 备份（S2A_SAVE_TRANSFER_SOURCE/GAME/MAC_ARCHIVE）
+钩子 graphics/gate.sh	要 GAL 金样录像与渲染器对拍数据（~/.s2arm/run/s2arm/replay）	~/.s2arm/run/s2arm/replay
+钩子 tests/visual/gate.sh	要宽屏金样 / 真值截图（~/.s2arm/run/s2arm/visual）	~/.s2arm/run/s2arm/visual
+设备单测 GameSessionLifecycleInstrumentation	Android API30+、真实游戏 APK 与私有 revision；入口 python3 android/tests/t_game_session_lifecycle.py --serial S --package P --title-id T --content-root R --artifact-sha256 H --test-apk APK --out NEW_DIR；缺前置 exit2，不代表通过
+iOS 全量编译	要一款游戏的改写产物（main.npdm + 改写映像；维护方在列车里跑，合成夹具接上前的短期登记）	~/.s2arm/run/s2arm/roots/acnh@现行

@@ -1,0 +1,33 @@
+#!/usr/bin/perl
+# coreutils timeout 的最小替身（总指挥 10-23：出包不依赖 Homebrew coreutils；macOS 自带 perl）：timeout <秒>[s] <命令…>
+# 命令在自己的进程组里跑；到点先 TERM 整组、2 秒后 KILL，退出 124（同 GNU timeout）；本进程留在调用方的组里（不像 GNU timeout 自立一组），
+#   外层按组杀到它时转给子进程组——嵌套多层也收得干净（10-28：GNU timeout 嵌套时外层杀不到内层，出包撞 2 小时上限后 direct_lib 成孤儿续写盘 2 小时）；命令自己结束就原样返回它的退出码（被信号杀 = 128 + 信号号）。
+# 本进程收到 TERM / INT 也转给子进程组。tools/toolchain.sh 把 tools/bin 放到 PATH 最前：出包 / 刷新 / 门禁整条链都用它，不用 GNU timeout。
+use strict; use warnings; use POSIX ();
+# 也认 GNU 写法的 -k <秒> / --kill-after=<秒>（到点 TERM 后多久 KILL，缺省 2）、-s <信号> / --signal=<信号>（到点先发的信号，缺省 TERM）、--foreground（忽略：本实现不改终端）
+my ($ka, $sig) = (2, 'TERM');
+while (@ARGV && $ARGV[0] =~ /^-/) { my $o = shift @ARGV;
+  if ($o eq '-k' || $o eq '--kill-after') { $ka = shift @ARGV } elsif ($o =~ /^--kill-after=(.*)$/) { $ka = $1 }
+  elsif ($o eq '-s' || $o eq '--signal') { $sig = shift @ARGV } elsif ($o =~ /^--signal=(.*)$/) { $sig = $1 }
+  elsif ($o eq '--foreground') {} elsif ($o eq '--') { last } else { print STDERR "timeout：不认的选项 $o\n"; exit 125; } }
+$ka //= ''; $ka =~ s/s$//; $sig = uc($sig // ''); $sig =~ s/^SIG//;
+my $t = shift @ARGV // ''; $t =~ s/s$//;
+unless ($t =~ /^\d+(\.\d+)?$/ && $ka =~ /^\d+(\.\d+)?$/ && $sig =~ /^[A-Z0-9]+$/ && @ARGV) { print STDERR "用法：timeout [-k <秒>] [-s <信号>] <秒> <命令…>\n"; exit 125; }
+my $pid = fork; die "timeout: fork 失败：$!\n" unless defined $pid;
+if ($pid == 0) { setpgrp(0, 0); { no warnings; exec { $ARGV[0] } @ARGV; } print STDERR "timeout: $ARGV[0]：$!\n"; POSIX::_exit(127); }
+my $timed = 0;
+# 给子进程组发信号走与 tools/safe_killpg.sh 同样的守卫（10-24 killpg_lint：原先直接 kill -$pid）：组号是数字、> 1、不是本进程自己的组、且确实自成一组（子进程已 setpgrp），否则只发给子进程本身
+sub safe_killpg { my ($sig, $g) = @_; return 0 unless defined $g && $g =~ /^\d+$/ && $g > 1 && $g != getpgrp(0) && getpgrp($g) == $g; return kill $sig, -$g; }
+for my $s (qw(TERM INT HUP)) { $SIG{$s} = sub { safe_killpg($s, $pid); kill $s, $pid; }; }
+# 命令的整棵子孙（不论进程组：嵌套的 timeout 把它的命令放进了另一个组）。#814 F-timeout-nest-kill：原先只 KILL 自己的子组，内层 timeout 被 KILL 时
+#   来不及转发，忽略 TERM 的孙进程留成孤儿。到点先记下整棵树（TERM 之后中间层一退，孙进程就过继给 1 号、按父子关系找不到了），再发信号，
+#   宽限期后对「记下的 + 此刻还挂在命令下面的」整棵 KILL
+sub tree { my %c; for (`ps -A -o pid=,ppid=`) { my ($p, $q) = split; push @{$c{$q}}, $p if defined $q; }
+  my @q = ($_[0]); my @all; while (@q) { my $x = shift @q; for (@{$c{$x} // []}) { push @all, $_; push @q, $_; } } return @all; }
+$SIG{ALRM} = sub { $timed = 1; my @t0 = tree($pid); safe_killpg($sig, $pid); kill $sig, $pid; sleep $ka;
+  my %all = map { $_ => 1 } (@t0, tree($pid)); safe_killpg('KILL', $pid); kill 'KILL', $pid, grep { $_ > 1 && $_ != $$ } keys %all; };
+alarm(int($t + 0.999) || 1);
+my $r; do { $r = waitpid($pid, 0); } while ($r == -1 && $!{EINTR});
+alarm 0;
+exit 124 if $timed;
+exit(POSIX::WIFEXITED($?) ? POSIX::WEXITSTATUS($?) : 128 + POSIX::WTERMSIG($?));

@@ -1,0 +1,65 @@
+# K01 / #194 停住现场归类规则表（数据驱动：加一类新停住 = 加几行，不改 stall_classify.py）
+#
+# 格式：以 # 开头的行是注释，空行忽略。制表符分隔，列固定为 8 列：
+#   kind          归类名（同一 kind 的多行是同一条规则的多个特征）
+#   owner         建议归属（着色器 / 原生层 / 帧率能耗 … 报告里原样输出）
+#   slot          特征在哪匹配：
+#                  thread_stack  某线程的调用栈（pc / lr / #N 任一帧）里的符号
+#                  dump_why      [现场] 块开头的触发原因（「===== 全线程现场：<原因>（N 条线程…）」）
+#                  log_line      该站点前后的日志行（低区账 / 托管 OOM / 声音没开播这类没有栈证据的停住）
+#   thread        slot=thread_stack 时限定哪条线程（线程名正则）：`*` 任何线程、`.` 非渲染线程、
+#                  `@crasher` 发起现场的那条（行尾「（本线程，发起现场）」）。别的 slot 写 `*`。
+#   state         线程状态约束：`*` 不限；`在跑` / `等待` / `!等待` 等（多个用 | 分隔）。
+#                 用处：空闲的后台 GC 线程（.NET BGC，状态「等待」）栈里也有 gc_heap，
+#                 不限定状态的话，任何崩溃现场都会投到「内存回收」——这是真实全量日志暴露的问题。
+#   weight        该特征命中后给这个 kind 的票数（整数；分层见下）
+#   pattern       正则（Python re 语法）
+#   note          人看的说明（可以含空格）
+#
+# 判据分层（按顺序，前一层的结论直接胜出）：
+#   0. 崩溃发起点只看一条线程：发起现场的那条线程（`@crasher`）栈命中某类规则 → 归那类；
+#      栈顶落在 abort / __pthread_kill 且**帧的模块列**是 IOGPU / AGXMetal* / Metal（或符号里有这几种）
+#      → GPU 驱动中止；其余 → 未知（备注写发起现场线程名 + 栈顶前 3 帧）。崩溃站点**不再按别的线程投票**：
+#      真实日志里我方 abort（pso_desc.cold.1）被空闲音频线程投成「声音」、SIGSEGV 在 nxgal_prog_load_binary
+#      被别的线程的实化栈投成「着色器实化互等」。
+#   1. 低区账优先：站点前有「低区账 [托管 OOM]」「低区账 [崩溃时]」+ OutOfMemoryException →
+#      低区地址耗尽。这三行同时出现就是低区耗尽的直接证据，优先于任何线程栈投票。
+#   2. 渲染线程 S2A.GPU 的栈（主判据）。
+#   3. 其它线程的栈（状态要满足 state 约束，见上）。
+#   4. dump_why / log_line。
+#   每一层内部按票数取最高，票数相同按本文件里 kind 首次出现的先后。
+#
+# 不给票的「路过帧」：prepare_draw / RenderLoop / InvokeCommand 这类每帧都会路过的帧不进规则表——
+#   它们在任何停住现场里都可能出现，给了票就会抢走真正的判据（真实日志里发生过）。
+#
+# 服务线程只在「在跑」时算票：真实全量日志里每份现场都常驻空闲的 AudioRendererManager.Worker /
+#   {AudioMain}（状态「等待」）与 .NET BGC（状态「等待」）。状态写 `在跑|等待` 的话任何崩溃都能被投成
+#   声音或内存回收。④声音本来靠「回调 0 次」这条日志判据，不靠栈。
+#
+# 内存回收不看 `[gc] … gen1/gen2 压缩 … 停顿 X ms` 这类日志行：那是周期统计行，整局都会出现，
+#   不是停住证据（窗口放开到「上一个站点之后」后会把无关站点判成内存回收）。只靠两条栈证据。
+#
+# 模块列：真实栈里驱动帧常是 `<redacted>+0xd0（AGXMetalG18P）`，符号被抹掉、只剩括号里的模块名，
+#   所以解析器把模块单独存成 Frame.module，GPU 驱动判据同时比符号和模块。
+kind	owner	slot	thread	state	weight	pattern	note
+着色器实化互等	着色器	thread_stack	S2A\.GPU	*	10	ProgramQueue__WaitForProgram	渲染线程在程序队列里等程序编好（ProgramQueue.WaitForProgram）
+着色器实化互等	着色器	thread_stack	S2A\.GPU	*	10	WaitForProgram	渲染线程等程序（WaitForProgram 的其它调用形态）
+着色器实化互等	着色器	thread_stack	.	等待	4	CheckProgramLink	GPU 模拟线程在 CheckProgramLink 等渲染线程（佐证，须在等待态）
+着色器实化互等	着色器	thread_stack	.	等待	4	S2AMaterializeCore	按需实化着色器核心（佐证，须在等待态）
+着色器实化互等	着色器	thread_stack	.	等待	3	ShaderSpecializationList__Materialize	着色器特化列表实化（佐证）
+管线作业等待	着色器	thread_stack	S2A\.GPU	等待	10	gal_pso_job_wait	渲染线程等管线编译作业（gal_pso_job_wait，须在等待态）
+管线作业等待	着色器	thread_stack	S2A\.GPU	等待	10	gal_pso_get	渲染线程取管线（内部等作业，须在等待态）
+内存回收	原生层	thread_stack	.	在跑	10	\bGC_\w|S_P_CoreLib_System_GC__|PInvoke_GC_	GC 线程真在跑（.NET BGC 空闲态不算，见 state 列）
+内存回收	原生层	thread_stack	.	在跑|等待	6	WaitForGCCompletion|GCHeap__GarbageCollect	游戏线程在等这一次回收
+声音	原生层	thread_stack	.	在跑	10	AudioRenderer|AudioRendererManager	音频渲染线程
+声音	原生层	thread_stack	.	在跑	8	AAudio|AudioUnit|AUHAL|CoreAudio	音频输出设备调用
+声音	原生层	log_line	*	*	10	【红】声音|声音输出没有开播|\[声\] 输出 #\d+[^\n]*回调 0 次	音频输出没开播（④的另一条判据在代码里查能耗行）
+满核空转	帧率能耗	dump_why	*	*	10	满核空转	现场触发原因就是满核空转看门
+满核空转	帧率能耗	log_line	*	*	10	游戏线程满核空转：	满核空转看门打的现场
+低区地址耗尽	原生层	log_line	*	*	10	低区账 \[托管 OOM\]	低区账当场记托管 OOM（第 1 层，优先于线程栈）
+低区地址耗尽	原生层	log_line	*	*	10	低区账 \[崩溃时\]	崩溃时低区账（第 1 层）
+低区地址耗尽	原生层	log_line	*	*	10	OutOfMemoryException	托管 OOM 异常（第 1 层）
+低区地址耗尽	原生层	thread_stack	.	*	4	GeneratorPool__AddChunkIfNeeded|GeneratorPool__Allocate	SPIR-V 生成器池分配失败（佐证：托管分配失败点）
+GPU 栅栏卡死	原生层	dump_why	*	*	10	GPU 卡死	现场触发原因就是 GPU 栅栏卡死
+GPU 栅栏卡死	原生层	log_line	*	*	10	【红】GPU 卡死	GPU 栅栏等待超时主动退出
+GPU 栅栏卡死	原生层	log_line	*	*	8	等栅栏 \d+ 超过	栅栏等待超时读数

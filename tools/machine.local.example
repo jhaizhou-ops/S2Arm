@@ -1,0 +1,28 @@
+# 备份文件（machine.local.bak_* 等）已被 .gitignore 排除，勿手动 git add
+# 复制为 tools/machine.local（已在 .gitignore）。不要提交。
+# 各工作树 / 冻结副本找不到同目录的这份时，读主检出 tools/machine.local（tools/machine.sh），所以主检出里至少放一份。
+# 下面全是占位。换成这台机器的真值；没填的项沿用仓库里的代号 / 空。
+
+# 测试机名单，列：编号|代号|硬件标识|CoreDevice 标识|锁目录|电量目录
+# S2A_DAILY_PHONE_LOCAL='日常手机的硬件标识'
+# S2A_DEVICES_LOCAL="1|测试机1|<硬件标识>|<CoreDevice 标识>|$HOME/sw-work/run/ios/device.lock|$HOME/sw-work/run/ios
+# 2|测试机2|<硬件标识>|<CoreDevice 标识>|$HOME/.s2arm/run/devq2/device2.lock|$HOME/.s2arm/run/devq2/battery"
+
+# 签名团队（pack/ipa.sh、探针直签）。没设则出包在签名前停下。
+# S2A_TEAM_DEFAULT='Apple Team ID'
+
+# mini 的 ssh 目标。不要写进仓库。
+# S2A_MINI_DEFAULT='user@mini'
+# S2A_REMOTE_HOSTS='user@mini-direct user@mini-lan'
+# S2A_REMOTE_DEFAULT='user@mini-direct'
+# 我方共享机器（开发机 / mini / Air）才设：直连库带我方管线种子（graphics/tools/direct/direct_lib.sh）。用户自己的机器不要设
+# S2A_CPU_LEDGER=1
+
+# 开发机的 Python 与数据目录（11-07 启动器零配置：出包链代码不再写死 ~/.s2arm/venv、~/.s2arm/data，一律读这里或同名环境变量；没设就按「没有」处理）
+# 出包 / 门禁 / Mac 局用的钉版解释器（tools/rewriter-requirements.txt、pack/fonts/requirements.txt、launchers/macos/requirements-runtime.txt 装齐的 venv；
+#   python3 launchers/macos/prepare_build.py 会建好并打印这一行）。没设：S2A_PYTHON → PATH 上的 python3
+# S2A_PY=$HOME/<venv>/bin/python3
+# 社区补丁库根（*/full/*/INDEX.tsv、*/<类>/INDEX.tsv）、社区着色器参考库根、宽屏自动出表用的社区超宽补丁目录。没设 = 不用
+# S2A_COMMUNITY_DIR=$HOME/<数据目录>/community_patches
+# S2A_REFLIB_ROOT=$HOME/<数据目录>/community_shcache
+# S2A_UW_PATCHES=$HOME/<数据目录>/community_patches/<包>/ultrawide

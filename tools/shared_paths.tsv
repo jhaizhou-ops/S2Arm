@@ -1,0 +1,111 @@
+# 共享位置登记表（tools/shared_path_lint.py 读，门禁红线：脚本 / 钩子 / run_mac.sh / 宿主源码里新出现的共享缺省路径没登记就红）
+# 列：路径前缀	归属线	用途	并发规则。缺省一律局目录私有；只有确实要跨局共享的才登记，并写清谁能写、怎么防撞。
+# 运行时缺省（iOS 是 App 容器私有；Mac 上是整台机器共用，Mac 局一律由 runtime/run_mac.sh / tools/mac_health.sh 显式给局目录，不许落到这里）
+~/Documents	原生层 / 服务接入线 / 帧率能耗线	iOS 容器 Documents（资源包、host.log、threads.txt、S2A/ryujinx）；Mac 只作没给环境变量时的兜底	Mac 局禁止落到这里：run_mac.sh 缺省给 S2A_DOCS / S2A_AUTOPLAY_OUT / S2A_RYU_DATA / NXGAL_SHADER_CACHE_DIR = 局目录
+# 版本化 / 内容寻址：读方任何时刻看到完整版本，写方有护栏
+~/.s2arm/run/s2arm/roots	测试出包	共享产物根（只代表 origin/main）	pack/roots.sh：clonefile 新版本 + rename 切现行；只许 main 上干净树写；提交时核开工基线
+~/.s2arm/run/s2arm/roots_priv	测试出包	分支私有产物根（每树一个名字）	一树一目录；从共享现行克隆起步；gc 24 小时没动清
+~/.s2arm/run/s2arm/bin	测试出包	编好的小工具（nx_unpack）	内容寻址文件名，编到 .tmp 再 mv；只读使用
+~/.s2arm/run/s2arm/bin/mac_slot-now.sh	测试出包	Mac 局槽仲裁的唯一一份（tools/mac_slot_frozen.sh 每次现读；合入后快钩子 tools/mac_slot_selfcopy.sh 按 main 换，旁边 .rev 记出自哪个提交）；S2A_MAC_SLOT_BIN 可改	只读脚本；只由钩子换（.tmp + mv），不手改、不删（删了所有 Mac 局与门禁显卡步骤报红）
+~/.s2arm/run/s2arm/saves	服务接入线（资产）/ 测试出包（读）	测试资产存档（按 main 构建号分目录）	只读；起局一律 clonefile 到局目录或推到机上每局独立子目录（SW_SAVE_SUB 教训）
+~/.s2arm/run/s2arm/widen	画幅线	界面布局覆盖 ui_w<W>（出包输入；宽屏启用表 10-20 起在仓库 graphics/widen/tables/）	只读输入；画幅线更新走新文件再 mv
+~/.s2arm/run/s2arm/apreg	测试出包	旧自动玩家判据回归集（判据与回归单测已删，数据只留存不再读）	只读
+~/.s2arm/run/s2arm/visual	画幅线	参考录像 / 真值图 / 金样（GAL 回放）	只从 main 刷新；门禁只读
+~/.cache/s2arm-qc	能力与泛化线	移植质量快检 AI 看图结论缓存（tools/quality_check.py，S2A_QC_CACHE 可改；键 = 截图内容 sha256 + 题面；贡献者机器也用）	内容寻址、临时文件原子替换；同键并发写同一份结论，读方只读完整文件
+~/.cache/s2a/vision_or_403	体验线	视觉驾驶员升级后端在这条网络上回过 HTTP 403 的「档:模型」（tests/autoplay/vision_or.py：Air 直连 Anthropic 回 403，跳过免得每问先白跑一趟；_px 后缀 = 走代理时那份）	只记 403；写临时文件再 os.replace；读到坏值 / 不认识的就照缺省顺序，删了下次重学
+~/.cache/s2a/openrouter_402	体验线	OpenRouter 回过 HTTP 402（额度用完）的标记，空文件、看修改时间（tests/autoplay/vision_jev.py / vision_or.py / vision.sh、tools/quality_check.py 共用：1 小时内 Jev 与 OpenRouter 各档全跳过，中转站做主力）	只在 402 时整文件重写（空文件，并发写无内容可撞）；读不到 = 没 402，照常先试 OpenRouter；删了下次 402 再记
+~/.s2arm/wt/ledger_batch	能力与泛化线	验证账专用工作树（tools/ledger_post.sh，分支 lists/ledger-batch：局后入账攒批、--flush 送列车）	多局并发收局 → mkdir 锁（<路径>.lock）串行；上一批合入后切回最新 main
+~/.s2arm/run/s2arm/quality/reports	能力与泛化线	局后快检报告与证据（tools/ledger_post.sh，<款>_<时刻>/，维护方抽查 / 复算）	每局独立子目录，只增不改
+~/.s2arm/run/s2arm/replay/gal	测试出包 / 画幅线	GAL 金样录像（九款，list.tsv；tests/回放契约.md）	只从 main 刷新；门禁只读
+~/.s2arm/gate_data/diffrec	画面着色器	双后端逐绘制对拍录像（tests/visual/gate.sh 读，清单 tests/visual/diff_list.tsv 随代码走）	内容寻址文件名 <款>_<sha256 前 16>.rec，tests/visual/diff_store.sh 写 .tmp 再 mv、只增不改；门禁只读
+~/.s2arm/run/s2arm/ryu_ipcrec	服务接入线	真值 Ryujinx 私有构建（IPC 录制）	构建者独占写；跑局只读
+~/.s2arm/run/s2arm/ryu_fps	帧率能耗线	帧率真值 Ryujinx 私有构建（TRUTH_FPS=1 build_truth.sh，compat/truth/run_fps.sh 读）	构建者独占写；跑局只读
+~/.s2arm/run/s2arm/ryu_seam	服务接入线	真值 Ryujinx 私有构建（接缝全量对拍：IPC + SVC + 起局状态）	构建者独占写（build_truth.sh）；跑局只读
+~/.s2arm/toolchain	用户体验	开发机预装的工具链（jdk-17 等）：Android 门禁找 JDK 的最后一档（S2A_JAVAC / Homebrew / java_home 都没有时）；tools/remote.sh 的假 HOME 软链过去	只读；装 / 换版本由人手动做，脚本不写
+~/.s2arm/data	服务接入线 / 测试出包	游戏原件解包（exefs / romfs，按款一目录；真值卡带软链到这里）	只读
+~/.s2arm/run/ryu	服务接入线	真值 Ryujinx 的卡带 / 系统根	真值局串行（一台 Windows / 一份根）；只读挂载
+~/.s2arm/rw/.wip/ryu_rec	服务接入线	真值录制器私有副本与签名	构建者独占
+~/.s2arm/sw/tools/guirun.sh	服务接入线	旧库 GUI 启动器（真值局用）	只读
+~/.s2arm/data/sysfont	测试出包	系统字体原件（系统数据阶段输入）	只读
+~/.switch/prod.keys	jhz	主机密钥（抽 control.nacp）	只读，不复制、不进仓库
+~/.dotnet	全线	dotnet SDK	只读
+~/.nuget/packages	全线	NuGet 全局包缓存（tests/aot_heap_test.sh 离线读 NativeAOT 10.0.12 包）	只读；门禁不还原、不联网
+# 调度 / 列车 / 锁：单实例或带存活检查的锁
+~/.s2arm/run/s2arm/sched	测试出包	双 iPhone 调度（队列、作业、包快照、收件箱）	队列文件 tmp+mv 入队；包快照按引用保护（sched.sh refs）；派发按设备锁
+~/.s2arm/run/s2arm/device_ledger	能耗线（11-04）	真机统一账本 ledger.tsv：tools/dev_run.sh 每局收局经 tools/device_ledger.py 记帧率 / GPU / 整机功率 / 热状态 / 内存一行	只追加单行，flock 互斥（两台测试机同时收局）；不删不改旧行
+~/.s2arm/run/s2arm/pso_seed	画面着色器	管线种子表来源（出包唯一来源，审计 #1534 P1-54）：测试机局收局拉回的 pso_user.tsv（tools/dev_run.sh 写 <程序号>/<作业名>.tsv）、Mac 局收局并进的本机表（runtime/run_mac.sh → tools/pso_seed_keep.sh 写 <程序号>/mac_<本机名>.tsv）；graphics/tools/direct/run_knowledge.py 读成快照	测试机一局一文件（作业名唯一）、Mac 一机一文件（只并新行、不改旧行序），都 tmp + mv 写；读方按行去重、按本次库键过滤，不怕旧行
+~/.s2arm/run/s2arm/shcollect	画面·着色器	首局根治 C①：各局收回的运行时着色器缓存（按款 / 程序号 / 内容指纹分目录），出包 stage_shaders 作 --ref-guest 读	只有 graphics/tools/shbake/shcollect.sh 写：先写 .tmp_<指纹> 再 mv 成 <指纹>（读方只认含 shared.toc 的目录）；删只删被新份完全包含的旧份；内容是游戏着色器代码，只在本机、不分发
+~/.s2arm/run/s2arm/cache/reflib	画面·着色器	参考库 .s2rl.zst 解压缓存（stage_shaders 按 zst 内容指纹取名）	先写 .tmp.<pid> 再 mv；内容寻址、不改写；可整目录删（下次出包重解）
+~/.s2arm/data/community_shcache	测试出包	社区着色器缓存原料（RyuSAK 导出、Grokbot 交回）与参考库产物（reflib_v3/<程序号>.s2rl、grokbot_s2rl_all_*/<程序号>.s2rl.zst，出包 stage_shaders 作 --reflib 读）	参考库由 testline 脚本整目录重出后再换（读方按文件内容指纹进键）；原料只读；只存组合关系、不含游戏代码
+~/.s2arm/run/s2arm/train	测试出包	合入列车（队列、门禁日志、收件箱）	train.sh 单实例锁（pid 存活检查）
+~/.s2arm/s2arm-wt	各线	工作树根（.train 是列车临时树）	一线一树；列车临时树按 pid 取名，退出 prune
+~/.s2arm/wt	各线	工作树根（运维脚本 / 自检私有树）	一线一树；tools/gc.sh 盘低时只删干净、HEAD 已推、24 小时没动、没人在用的
+~/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/Library/Caches/AppInstallationBinaryDeltas	出包运维线	devicectl 装包增量缓存（Apple 维护）	只由 tools/gc.sh 盘低时删 1 天前的包目录；删了只让下次装同一身份走全量
+~/.s2arm/S2Arm	测试出包（列车）	主仓库（列车在这里取分支、推 main）	只有列车推 main；各线在自己的工作树里改
+run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原子）；里程碑只在变化时追加
+~/.s2arm/run/s2arm/locks	测试出包	Mac 局槽 mac_slot/（tools/mac_slot.sh）、刷新锁 refresh_<款>（pack/refresh.sh）	mkdir 锁 + 持有者 pid 存活检查
+~/.s2arm/run/devq2	测试出包	测试机2 设备锁与电量标记	devlock.sh：内核文件锁（<锁目录>.flock，常驻不删）+ 锁目录作持有者提示与旧版兼容 + 看门狗
+~/sw-work	测试出包（沿用旧库）	测试机1 设备锁、锁历史、电量标记（与旧库共用同一台手机）	devlock.sh：同上；与旧库共用是有意的（同一台设备只能一个持有者）
+~/sw-work/run/ios	测试出包（沿用旧库）	同上	同上
+~/.s2arm/work	各线（安卓 oneclick 验收等的出包输出目录）	一键出包 --out 的落点；tools/disk_guard.sh 只读 du -s 列体积（10-29 #693 验收在此留 11 GB）	只读量体积，不写不删
+~/.s2arm/devices	基础设施线（10-29）	贡献者自己的 iPhone（tools/devices.sh S2A_DEVICE_OWN=1）的设备锁与电量标记，按硬件 UDID 分目录：<UDID>/device.lock、<UDID>/battery	devlock.sh：同上；一台设备一个目录，同一时刻一个持有者
+~/.s2arm/run_int	合入运维线（11-06）	内置盘溢出工作根（tools/disk_admit.py 按卷记账，内置盘保底 60 GB）：S2A_2T 放不下时各线批目录 / 冷出包放这里；tools/dev_prune.sh 只读其中作业目录找装机记录	写方各管各的子目录（census/<批>、ns2_zelda/<版>），准入走内置盘那本账；读方只读
+~/.s2arm/devpick	合入运维线（11-06）	三台测试机选机互斥（tools/devices.sh s2a_device_pick：any / iphone / duo 挑最闲的那台并在 <锁>.claim/ 记占位）	mkdir 原子互斥，目录里记持有 pid；持有者已死下一家直接收回；整段只有几十毫秒
+~/.s2arm/run/s2arm/mini	测试出包	mini 同步镜像（工具 / 资源包缓存）	mini_sync.sh 按款单写；作业目录每局独立
+~/.s2arm/run/s2arm/remote	测试出包	mini 远程执行（tools/remote.sh）：本机侧锁（<名>.lock 同名远端工作树、slot.<主机>.<序号> 远端满核槽）与每次的日志 <名>/<时刻>.log	mkdir 锁 + pid 存活检查；日志一次一个新文件，每个名字留最近 20 份
+~/.s2arm/remote	出包运维	远端机（mini / Air）上 tools/remote.sh 的远端根：工作树 wt/、假家目录 home/、gc 冻结副本 gc/<提交>/、gc_last.log；tools/disk_guard.sh 只查盘、低于回收水位时用最新冻结副本起 gc	remote.sh 单写者；gc 自带锁，同时只跑一份
+~/.config/mole/whitelist	jhz / 出包运维	Mole（mo clean）受保护路径清单；tools/disk_guard.sh 只读：含 ~/.Trash 才跑 mo clean	只读（人手维护）
+~/.Trash	jhz	废纸篓；tools/disk_guard.sh 只读判它在不在 Mole 白名单里，任何脚本都不清空	只读，禁止删除
+~/.s2arm/run/s2arm/ops_bg/reserve	出包运维	机器独占预留（ops_bg/packgate.sh --excl 写：到期秒 / 持有者 pid / 名 / 硬件 UUID）；tools/remote.sh --reserved 只读	单写者（持有独占的 packgate 进程）写整文件；读方过期或持有者已死即视为无效
+~/.gitconfig	jhz	git 全局配置（提交身份）；tools/remote.sh 每次同步一份到 mini 假家目录（远端单测里有 git commit）	只读
+~/.s2arm/venv	测试出包 / 帧率能耗	Python 虚拟环境（lz4：着色器抽取）；tools/remote.sh 在 mini 假家目录里软链到 mini 的这份	只读使用
+# 门禁 / 统计
+~/.s2arm/run/s2arm/cache/nxaot	服务接入线（脚本）/ 测试出包（gc）	C# NativeAOT 静态库整机缓存（键 = 源码内容哈希 + dotnet 版本 + 平台）	services/nxaot.sh：mkdir 锁 + pid 存活检查，编到 <键>.tmp 再 mv；只读使用；gc 每平台留 3 份
+~/.s2arm/run/s2arm/cache/vpx	服务接入线（脚本）/ 测试出包（gc）	libvpx 静态库整机缓存（键 = build.sh 内容 + 平台）	services/vpx/build.sh：mkdir 锁 + pid 存活检查，.tmp 再 mv；gc 每平台留 2 份
+~/.s2arm/run/s2arm/cache/shell	Windows出包线（脚本）/ 测试出包（gc）	iOS 预编壳整机缓存（键 = 壳编号：源码提交 + 直连链号 + iOS 最低版本；11-04 全外置，pack/shell_build.sh 出）	pack/ipa.sh：出到 .tmp.<编号>.<pid> 再 mv（两单同出，先到者发布、后到者丢自己那份），每次用时 touch；gc 24 小时没用删、最多留 6 份
+~/.s2arm/run/s2arm/cache/widen_gate	画幅线	宽屏门禁缓存（tests/visual/widen_gate.sh）：rec/ 金样录像解压、spv/ 回放见过的 SPIR-V、sh/ MSL 缓存、lib/<键>/ 离线着色器库（键 = graphics/metal + graphics/third_party 内容哈希）	解压与建库写 .tmp.<pid> 再 mv，SPIR-V / MSL 由 libnxgal 先写临时名再改名；只影响速度不影响判据；库留最新 3 份
+~/.s2arm/run/s2arm/cache/opus	服务接入线（脚本）/ 测试出包（gc）	libopus 静态库整机缓存（键 = build.sh 内容 + 平台）	services/opus/build.sh：mkdir 锁 + pid 存活检查，.tmp 再 mv；gc 每平台留 2 份
+~/.s2arm/run/s2arm/cache/dav1d	服务接入线（脚本）/ 测试出包（gc）	dav1d 静态库整机缓存（键 = build.sh 内容 + 平台）	services/dav1d/build.sh：mkdir 锁 + pid 存活检查，.tmp 再 mv；gc 每平台留 2 份
+~/.s2arm/run/s2arm/cache/aoc	测试出包	追加内容（DLC）解包缓存 <款>-<键>/（aoc/ + aoc.tsv + aoc.log），各产物根从这里克隆，全机只解一次	pack/stage_aoc.sh：解到 .tmp.<pid> 再 mv，并发后到的丢弃；只读使用；gc 每款留 2 份
+~/.s2arm/run/s2arm/cache/unpack	测试出包	本体解包缓存 <程序号>-<键>/（+ 旁边 .size），pack/stages/unpack.sh 命中就克隆、没命中解完存一份；普查 / 出包队列 / 一键出包全机只解一次（11-02 jhz）	pack/stages/unpack.sh：解到 .tmp.<pid> 再改名，并发后到的丢弃；只读使用；gc 每程序号留 1 份、总量 ≤ S2A_UNPACK_CACHE_GB（缺省 150）
+~/.s2arm/run/s2arm/cache/srcver	测试出包	原件版本核对结果 <款>-<键>（键 = 候选原件 + nx_unpack 哈希 + 现行 main 构建号；内容一行 0 / 1 + 不符原话），refresh 开头读，原件 / 工具 / 现行没变不再解	pack/srcver.sh：写 .tmp.<pid> 再 mv；每份几十字节，不清
+~/.s2arm/run/s2arm/pack_lock	测试出包	出包去重锁 <款>@<提交>@<产物根目录 cksum>/pid：同根同款同提交只许一份在出	pack/ipa.sh：mkdir 锁 + pid 存活检查，后到的等先到的出完再走正常流程（命中「现行已是包」复用）；退出即删
+~/.s2arm/run/s2arm/gate_ios	测试出包	门禁 iOS 全量编译的按树镜像 + 增量构建目录（gate_ios/<树号>/src、build）	gate_ios.sh 持本树镜像锁 src.lock（pid 存活检查）；不同树互不排队；gc 清 24 小时没用的
+~/.s2arm/run/s2arm/gate_ios_build	测试出包	门禁 iOS 全量编译的增量构建目录	gate_ios.sh 持镜像锁（pid 存活检查）期间独占
+~/.s2arm/run/s2arm/gate_ios_src	测试出包	门禁 iOS 编译的源码镜像	同上（gate_ios_src.lock）
+~/.s2arm/run/s2arm/cost.tsv	测试出包	测试成本账本	只追加单行（< 4 KB 原子写）
+~/.s2arm/run/s2arm/health	测试出包	Mac 健康表批次目录 + 噪声基线 aa.tsv	每批一个新目录；aa.tsv 只由 A/A 校准写
+~/.s2arm/run/s2arm/milestones	各线（总指挥定）	里程碑验收证据（M3_*/<款>/ ap_summary.json + ap_mark.png + 读数.txt；10-25 起直连口径：M5_*/<款>/host.log 零配置直连到 MARK、M5_画面退回*/、M6_退回*/、M7_*/<款>/host.log），board.py 只读	每批一个新目录、带 .keep 不被 gc 清；只追加不改
+~/Library/MobileDevice/Provisioning	Xcode（系统）	签名描述文件（出包签名读）	只读
+~/Library/Developer/Xcode/UserData/Provisioning	Xcode（系统）	签名描述文件（新版 Xcode 位置）	只读
+~/.s2arm/run/s2arm/vision_cache	服务接入线	视觉测试员回答缓存（tests/autoplay/vision.sh：按截图 sha256 一张一个 <哈希>.json）	内容寻址：同一截图同一答案；写入是先写局目录再 cp 成整文件，读到的要么没有要么完整；并发写同哈希等价
+~/.s2arm/.secrets/openrouter.key	服务接入线（jhz 提供）	OpenRouter 密钥（视觉测试员 Jev 后端，tests/autoplay/vision_jev.py）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
+~/.s2arm/.secrets/relay.key	运维线（jhz 提供，同 ~/.codex-relay/relay.key）	中转站密钥（视觉测试员优先后端，tests/autoplay/vision_or.py；本机与 Air 各一份）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
+~/.s2arm/run/s2arm/icons	测试出包	各款 App 图标（tools/game_icons.sh 从游戏原始包重抽，中文优先；pack/ipa.sh 读）	单写者 game_icons.sh，写临时文件再改名；读方只读
+~/Downloads	测试出包	游戏原始包（xci / nsp）所在目录，tools/game_icons.sh 只读（S2A_GAME_SRC 可改）	只读，不写
+~/.s2arm/run/s2arm/cache/csclosure	测试出包	着色器阶段键：C# 编译闭包文件清单缓存 <粗键>.files（tools/csproj_closure.py）	同粗键并发只求值一份（<粗键>.files.lock，pid 存活检查）；写临时名再原子改名
+~/.s2arm/run/s2arm/cache/xckey	测试出包	着色器阶段键：GAL 翻译代码二进制哈希 <树号组>、SPIRV-Cross 目标文件 spvc-<键>/（graphics/tools/shbake/xc_key.sh）	同组并发只编一份（<组>.lock，pid 存活检查）；写临时名再原子改名
+~/.s2arm/run/s2arm/cache/shx	测试出包	着色器包抽取缓存 <程序号>-<键>/（graphics/tools/shader_pack.sh ①：抽出集 + 程序配对 + 透明测试）	写 <键>.<pid> 再原子改名；每程序号留 2 份
+~/.s2arm/run/s2arm/wip/gate_scene	测试出包线	单测不通时的文本现场（tests/keep_scene.sh：<单测>_<时刻>_<pid>，只拷 *.log *.tsv *.txt *.json）	每次新建带 pid 的子目录、不覆盖；wip/ 下 6 小时由 tools/gc.sh 清
+~/.s2arm/run/gal_pso_cache	画面·着色器线 / 测试出包	管线归档分片缓存（graphics/tools/shbake/pso_chunk.sh 按内容寻址：键 = 分片输入 + 编译器版本）	按键写临时文件再改名（同键并发只是重复编）；10-23 起 tools/gc.sh 不再按盘余量删（条目全和产物根共享、独占 0，删了腾不出空间）
+~/.s2arm/run/gal_air_cache	画面·着色器线 / 测试出包	.air 内容寻址缓存（graphics/metal/tools/gal_offline.py：键 = MSL 源码 + 平台 + metal 编译器版本；链接 metallib 的中间产物，产物根里不留）	按键写临时文件再改名；tools/gc.sh 超过 72 小时删、ios/ 下非 u?? 合编目录的逐支条目超过 6 小时删、盘紧按修改时间从旧到新补缺口（1 小时内动过的不动）；烘焙道有活持有者时 gc 跳过
+~/.s2arm/run/gal_dl_cache	画面·着色器线 / 测试出包	链接版函数体 GPU 动态库内容寻址缓存（graphics/tools/shbake/dl_gen.py）	同 gal_air_cache（72 小时 / 盘紧补缺口 / 烘焙道忙跳过）；删除量按 APFS 独占大小记（tools/privsize.py）
+~/.s2arm/run/s2arm/gate_snap	画面着色器	门禁渲染器单测超时前现场（graphics/tools/timeout_snap.sh：sample 栈 + ps + vm_stat + 负载，每次一个 metal_<时刻>_<pid>.txt 与 .digest；另 gfx_timing.tsv：graphics/gate.sh 逐子项秒数，只追加）	文件名带时刻与 pid 不撞；只增，读后可删；gc 不管
+~/.s2arm/run/s2arm/jhz_play	测试出包	jhz 实机局日志存档（两局测试之间有人自己玩过时，执行器起局前从机上拉回的 host.log / host.prev.log / frames.tsv / firstuse.txt），按款_时刻_机号分目录	只由 tools/dev_run.sh jhzplay 写；各线只读；不进 gc
+~/.s2arm/run/s2arm/openfonts	用户体验	开源替代共享字体产物（pack/fonts/make_open_fonts.py 生成；tests/openfonts_test.sh 缺省读它）	只有手动跑生成器时写（直接覆盖写，跑前确认没人在读）；单测只读。出 App 用 build/macos/OpenFonts 私有副本，不读这里
+~/.s2arm/run/s2arm/cache/openfonts	用户体验	开源字体下载缓存（来源钉版本 + sha256）	先写 .part 再 replace；内容按 sha256 校验；可整目录删（下次重下）
+~/.s2arm/run/s2arm/beta_inbox	测试出包	内测诊断包收件目录（玩家 App「导出诊断包」交回的 s2a_diag_*.zip 放顶层；tools/beta_intake.py 解到 x/<包名>/、处理过的记 done/、按会话汇总进 summary.tsv）	诊断包与汇总长期留（内测证据），x/ 解包目录可按需清
+~/.s2arm/run/s2arm/apponly	测试出包	只换 App 程序快道的包目录（tools/app_only.sh：<款>-<提交>/pkg = 新 ipa + 登记包快照克隆）	每款只留最近两份；登记时 sched.sh pkg 另存快照，删这里不影响已登记的
+~/.s2arm/run/s2arm/gate_data/dsh	测试出包	S2A.Dsh 门禁考卷的冻结输入（动森包目录 + 表，graphics/tools/direct/tests/t_dsh.sh freeze 写，inputs.sha 核内容）；生产出库不读不写	只读；只有人工 freeze 时写（已在就拒绝）
+~/.s2arm/run/s2arm/cache/gate_dsh	测试出包	S2A.Dsh 门禁考卷：被测树的离线链对冻结输入只出抽样键（<输入指纹>-<链版本>-<键表>/，cas/ 内容寻址）；生产出库不读不写	临时目录出完 mv 成品（先到的留下）；只留最近 3 份
+~/.colima	基础设施线（本机 colima 虚拟机，安卓 Linux CTest 门禁子项）	colima 实例与配置；s2a-start.lock 是起实例的单实例锁（android/linux_ctest.sh、tools/colima_setup.sh 共用）	起实例先 mkdir 锁、pid 写进锁目录，持锁进程已死才清；只有 colima 自己写实例数据
+~/Library/Caches/colima/caches	基础设施线（colima 镜像缓存）	colima 系统镜像缓存（文件名 = 镜像地址的 sha256）；tools/colima_setup.sh 经代理下好、核过 SHA512 后放进来	先下到缓存外临时文件，核对通过才 mv 进来（colima start 失败会清空整个缓存目录，10-29）
+~/Library/Caches/s2a_vulkan	一次成功线（Vulkan 容器单测）	tests/vulkan/run.sh 挂进容器 /cache；shader_cases/<编译输入摘要>/translator 存编好的 ShaderCases.dll（tests/shader_cases/run.py build_key）	内容寻址：未命中编完拷进同目录临时名再整目录 rename，同键并发只落一份；只留最近 8 份；删了只让下次冷编
+~/.s2arm/run/s2arm/cache/testres	列车线	门禁单测结果缓存（tools/test_cache.py，tools/gate.sh 用；键 = 单测名 + 输入文件内容哈希 + 工具链指纹，一键一个空文件，只记绿；mini 上在远端假家目录下）	内容寻址；写 .<键>.<pid>.tmp 再 os.replace，同键并发写结果相同；读方只看文件在不在
+~/.s2a/lanes	出包线（11-01）	同机正在出包的道数登记（tools/cores.sh s2a_lanes：每道按入口进程号建空文件，算并行度时数活着的）	每道只写自己进程号的空文件；数道数时删进程已退的登记；内容为空，撞了也只是多 / 少数一道
+~/.s2arm/run/s2arm/census_dcache	出包线（11-01）	普查直连库缓存（远端常驻，按程序号分目录；tools/census/dcache_gc.py 管总量上限，Air 缺省 40 GB）	dmsh_store 自带片锁与 .inuse 共享锁；超上限按 .used 最久没用的款淘汰，在用（.inuse 拿不到独占锁）与本次要用的款不动；删除走 safe_rm
+~/.cache/s2arm-build/post-prepare.lock	合入线	合入后钩子 tools/post_android_prepare.sh 的串行锁（两棵钩子树同时跑时 prepare 排队）；S2A_ANDROID_PREPARE_LOCK 可改	mkdir 原子拿锁、写 pid；持锁进程死了下一个收回；退出时 trap 删
+~/.cache/s2arm-build/sources	合入线	固定版本第三方源码包按 sha256 内容寻址的共享缓存 sources/<sha256>/<文件名>（android/tools/fetch_source.sh；安卓 APK 两条准备路线、codecs/openssl 构建、services/opus|vpx|dav1d 共用；docker 准备把它挂成容器 /cache/sources；跟 S2A_BUILD_CACHE 走）	命中先核 sha256、对才用；下载写同目录 mktemp 临时文件、核过 sha256 才 mv -f 落位（同 sha 并发各写各的临时文件，后到的覆盖同字节成品），读方只见完整文件；不删别人的文件，SHA 不对的旧文件只靠 mv 覆盖；可整目录删，下次缺什么下什么
+~/.config/s2arm/gh_token	合入线	user 域常驻作业（tools/keepalive.sh）的 gh 令牌：user 域取不到登录钥匙串，读成 GH_TOKEN；S2A_GH_TOKEN_FILE 可改	gh auth token 写入、chmod 600；换令牌重写；不进仓库
+~/.s2arm/run/s2arm/packq/bin/slot.sh	出包运维	机器槽脚本（我方运行区专用，不进发布物；Air 上在同一路径手工放一份）；tools/slot_res.sh 缺省取它，S2A_SLOT_BIN 可改	只读脚本；更新用 .new + mv，不原地改在用的脚本
+~/../reserve	出包运维	远端 <远端根>/reserve/（远端命令里 HOME=<远端根>/home 的上一级）：tools/remote.sh 在这台被独占预留时从本机预留目录同步一份，只读给 tools/slot_res.sh 复查	单写者 tools/remote.sh（put 先清后写、clear 删）；读方只读，S2A_RES_DIR 可改

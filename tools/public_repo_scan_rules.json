@@ -1,0 +1,492 @@
+{
+  "version": 1,
+  "content_rules": [
+    {
+      "id": "home",
+      "category": "home_path",
+      "regex": "(?<![\\w$})])(?:/Users/|/home/|/Volumes/|[A-Za-z]:[\\\\/]Users[\\\\/])([\\w.-]+)",
+      "group": 1
+    },
+    {
+      "id": "udid",
+      "category": "device_id",
+      "regex": "\\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}\\b"
+    },
+    {
+      "id": "legacy_udid",
+      "category": "device_id",
+      "regex": "\\b(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})\\b",
+      "context": "(?i)udid|coredevice|device[_ -]?(?:id|identifier)|硬件标识"
+    },
+    {
+      "id": "usb_serial",
+      "category": "device_id",
+      "regex": "\\b[0-9A-Fa-f]{24}\\b",
+      "context": "(?i)udid|coredevice|device[_ -]?(?:id|identifier)|serialnumber|硬件标识"
+    },
+    {
+      "id": "udid_prefix_literal",
+      "category": "device_id",
+      "regex": "[\"']([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4})[\"']",
+      "group": 1
+    },
+    {
+      "id": "team_assignment",
+      "category": "team_id",
+      "regex": "(?i)(?:S2A_TEAM_DEFAULT|DEVELOPMENT_TEAM|DevelopmentTeam|team_?id|TEAM|团队号)[\"\\x27]?\\s*[=:：]\\s*[\"\\x27]?([a-z0-9]{10})(?![a-z0-9])",
+      "group": 1
+    },
+    {
+      "id": "team_literal",
+      "category": "team_id",
+      "regex": "[\"']((?=[A-Z0-9]{10}[\"'])(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{10})[\"']",
+      "group": 1
+    },
+    {
+      "id": "team_bundle",
+      "category": "team_id",
+      "regex": "(?i)\\bs2arm\\.((?=[a-z0-9]{0,9}[0-9])[a-z0-9]{10})\\.[a-z0-9_-]+",
+      "group": 1
+    },
+    {
+      "id": "email",
+      "category": "email",
+      "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"
+    }
+  ],
+  "metadata_rules": [
+    {
+      "category": "game_macro",
+      "globs": [
+        "*.mme",
+        "graphics/tools/macrogen/corpus/*",
+        "*/s2amacrotable.g.cs",
+        "s2amacrotable.g.cs"
+      ]
+    },
+    {
+      "category": "game_screenshot",
+      "globs": [
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.webp",
+        "*.gif",
+        "*.bmp",
+        "*.tiff",
+        "*.heic"
+      ]
+    }
+  ],
+  "allowlist": [
+    {
+      "id": "example_users",
+      "categories": [
+        "home_path"
+      ],
+      "paths": [
+        "*"
+      ],
+      "regex": "(?i)user|username|yourname|your_name|example|player|s2arm|synthetic",
+      "reason": "公开文档占位与维护方指定合成用户名；尖括号占位本身不匹配。"
+    },
+    {
+      "id": "zero_udid",
+      "categories": [
+        "device_id"
+      ],
+      "paths": [
+        "*"
+      ],
+      "regex": "00000000(?:-.*|[0-9A-Fa-f]{16})|0+",
+      "reason": "维护方指定零芯片号的合成设备标识；包括去横杠的 24 位 USB 序列形式。"
+    },
+    {
+      "id": "example_team",
+      "categories": [
+        "team_id"
+      ],
+      "paths": [
+        "*"
+      ],
+      "regex": "(?i)ABCDE12345|FGHIJ67890",
+      "reason": "维护方指定的合成团队号占位（与零芯片号同一口径）。"
+    },
+    {
+      "id": "diagredact_synthetic",
+      "categories": [
+        "device_id"
+      ],
+      "paths": [
+        "tests/fixtures/redact_cases.tsv",
+        "tests/diagredact_test.sh",
+        "pack/jobs/tests/test_jobs.py"
+      ],
+      "regex": "(?i)0000abcd-(?:0123456789abcdef)|(?:0123456789abcdef){2}(?:01234567)?",
+      "reason": "诊断脱敏三端共用夹具的顺序十六进制合成设备标识；只认这两个值形、只限列出的三个测试文件。"
+    },
+    {
+      "id": "example_mail",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "*"
+      ],
+      "regex": "(?i)[^@]+@(?:example\\.(?:com|org|net)|[^@]+\\.invalid)(?:\\.(?:log|txt|json))?",
+      "reason": "保留标准示例地址。"
+    },
+    {
+      "id": "root_tmp_dir",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "tests/*"
+      ],
+      "regex": "[A-Za-z0-9_-]+@[A-Za-z0-9-]+\\.tmp",
+      "reason": "产物根写到一半的版本目录名 <款>@<版本>.tmp（pack/roots.sh 命名约定），单测夹具造它测清理 / 回收，不是邮箱。"
+    },
+    {
+      "id": "license_mail",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "graphics/metal/shaders/AA-LICENSE.txt",
+        "runtime/rewriter/LICENSES/*",
+        "compat/tree/*/Smaa*.glsl",
+        "compat/tree/*/SMAA*.glsl"
+      ],
+      "reason": "维护方点名的第三方许可署名，不删除或改写。"
+    },
+    {
+      "id": "redactor_patterns",
+      "categories": [
+        "home_path",
+        "device_id",
+        "team_id",
+        "email"
+      ],
+      "paths": [
+        "tools/redact.py"
+      ],
+      "line_regex": "(?i)re\\.(?:compile|sub)|r[\"\\x27]|regex",
+      "reason": "仅脱敏器正则表达式行，不豁免整个文件。"
+    },
+    {
+      "id": "scanner_synthetic",
+      "categories": [
+        "home_path",
+        "device_id",
+        "team_id",
+        "email"
+      ],
+      "paths": [
+        "tests/public_repo_scan_test.py"
+      ],
+      "reason": "本扫描器原创正反夹具；不含真实值，不泛化到其他测试。"
+    },
+    {
+      "id": "synthetic_icon_filename",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "pack/app_bundle.py",
+        "tests/test_app_bundle.py",
+        "pack/APP_BUNDLE.md"
+      ],
+      "regex": "[^@]+@[123]x\\.png",
+      "reason": "@2x / @3x 是合成图标文件名倍率，不是邮箱。"
+    },
+    {
+      "id": "synthetic_temp_filename",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "tests/crosshost_stage_test.py",
+        "tests/disk_gate_test.sh",
+        "tests/gc_test.sh",
+        "tests/pack_test.sh",
+        "tests/roots_romfs_store_test.sh"
+      ],
+      "regex": "[^@]+@[^@]+\\.tmp",
+      "reason": "这些原创回归里以 @ 分隔构建名、以 .tmp 结尾的临时目录，不是邮件。"
+    },
+    {
+      "id": "synthetic_reply_fixture",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "tests/train_reply_test.py"
+      ],
+      "regex": "fixture@[^@]*fixture[^@]*",
+      "reason": "列车回复回归中 local 与 domain 都标为 fixture 的合成输入，不是实际邮箱。"
+    },
+    {
+      "id": "mac_ui_evidence_01",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "docs/研究/Mac卡片悬停可读性_20261028/after-hover.png",
+        "docs/研究/Mac卡片悬停可读性_20261028/before-hover.png",
+        "docs/研究/Mac卡片悬停可读性_20261028/before-idle.png"
+      ],
+      "reason": "原创悬停复现夹具的原生窗口截图，仅含界面、占位进度与说明，无游戏画面、封面、密钥或存档。 逐张人工核对；仅放行列出的文件，不匹配目录或通配符，来源见对应 README。"
+    },
+    {
+      "id": "mac_ui_evidence_02",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "docs/研究/Mac_LumaNX界面同步_20261028/library-light.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/management-graphics.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/platforms.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/save-management.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/settings-dark.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/settings-en-dark.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/settings-light.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/反馈修正/after-details.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/反馈修正/before-details.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/反馈修正/community-buttons.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/反馈修正/graphics-buttons.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/反馈修正/mac-default-enabled.png"
+      ],
+      "reason": "独立 Bundle ID 的原生 UI 验证截图，游戏记录为合成文字和系统控制器占位图；无游戏、封面、密钥、设备标识或存档。 逐张人工核对；仅放行列出的文件，不匹配目录或通配符，来源见对应 README。"
+    },
+    {
+      "id": "mac_ui_evidence_03",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "docs/研究/Mac_LumaNX界面同步_20261028/搜索行与编译日志/library-row.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/搜索行与编译日志/logs-deleted.png"
+      ],
+      "reason": "独立 Bundle ID 的合成游戏库与自建日志清理截图，无游戏画面、封面、密钥、设备标识或存档。 逐张人工核对；仅放行列出的文件，不匹配目录或通配符，来源见对应 README。"
+    },
+    {
+      "id": "mac_ui_evidence_04",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "docs/研究/Mac_LumaNX界面同步_20261028/输入映射设计统一/dark-options.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/输入映射设计统一/dark-visual.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/输入映射设计统一/light-test.png",
+        "docs/研究/Mac_LumaNX界面同步_20261028/输入映射设计统一/light-visual.png"
+      ],
+      "reason": "独立 Bundle ID 的输入映射窗口截图，使用合成目录记录；Joy-Con 为原创交互矢量，未使用游戏画面、封面、密钥或存档。 逐张人工核对；仅放行列出的文件，不匹配目录或通配符，来源见对应 README。"
+    },
+    {
+      "id": "openssh_algorithm_name",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "*"
+      ],
+      "regex": "[a-z0-9-]+@openssh\\.com",
+      "reason": "OpenSSH 算法 / 扩展名的命名约定（如 ssh -c aes128-gcm@openssh.com），不是邮箱。"
+    }
+  ],
+  "boundaries": {
+    "credential_globs": [
+      "*.keys",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.mobileprovision",
+      "*.keystore",
+      "*/.env",
+      "*/.env.*",
+      ".env",
+      ".env.*",
+      "*credentials*",
+      "*auth.json",
+      "*token.json",
+      "*session.json",
+      "*cookies*",
+      "*id_rsa",
+      "*id_ed25519",
+      "*id_ecdsa",
+      "*id_dsa",
+      "*machine.local"
+    ],
+    "credential_directories": [
+      ".ssh",
+      ".aws",
+      ".switch",
+      ".gnupg",
+      ".credentials",
+      "secrets",
+      "credentials",
+      "sessions"
+    ],
+    "binary_ascii_globs": [
+      "translator/dmsh_xlate_bin/*.dll",
+      "translator/dmsh_xlate_bin/*.pdb",
+      "translator/dmsh_xlate_bin/dmsh_xlate",
+      "runtime/tests/t_fps_default"
+    ],
+    "reviewed_text_globs": [
+      "graphics/widen/tables/*/来源.txt",
+      "graphics/widen/tables/*/source.txt"
+    ],
+    "payload_globs": [
+      "*.nsp",
+      "*.xci",
+      "*.nca",
+      "*.nsz",
+      "*.xcz",
+      "*.ncz",
+      "*.nso",
+      "*.sav",
+      "*.save",
+      "*.bin",
+      "*.rom",
+      "*.zip",
+      "*.7z",
+      "*.ipa",
+      "*.apk",
+      "*.orig",
+      "graphics/widen/tables/*",
+      "runtime/fps/*.tsv",
+      "runtime/tests/cpatch/*.tsv",
+      "graphics/tools/shbake/tests/refpso/*",
+      "graphics/tools/shbake/tests/trlog_baseline.tsv"
+    ],
+    "payload_directories": [
+      "games",
+      "firmware",
+      "romfs",
+      "exefs",
+      "corpus",
+      "assets",
+      "fixtures",
+      "vectors",
+      "resources"
+    ],
+    "code_suffixes": [
+      ".py",
+      ".sh",
+      ".bash",
+      ".c",
+      ".h",
+      ".cpp",
+      ".cc",
+      ".hpp",
+      ".cs",
+      ".m",
+      ".mm",
+      ".swift",
+      ".java",
+      ".kt",
+      ".kts",
+      ".s",
+      ".metal",
+      ".inc",
+      ".glsl",
+      ".frag",
+      ".vert",
+      ".comp",
+      ".js",
+      ".ts"
+    ],
+    "text_suffixes": [
+      ".bash",
+      ".c",
+      ".cc",
+      ".cfg",
+      ".cmake",
+      ".comp",
+      ".config",
+      ".cpp",
+      ".cs",
+      ".csproj",
+      ".css",
+      ".csv",
+      ".editorconfig",
+      ".entitlements",
+      ".frag",
+      ".glsl",
+      ".gradle",
+      ".h",
+      ".hpp",
+      ".html",
+      ".in",
+      ".inc",
+      ".ini",
+      ".java",
+      ".js",
+      ".json",
+      ".kt",
+      ".kts",
+      ".ld",
+      ".m",
+      ".md",
+      ".metal",
+      ".mk",
+      ".mm",
+      ".pbxproj",
+      ".plist",
+      ".properties",
+      ".props",
+      ".py",
+      ".resx",
+      ".rst",
+      ".s",
+      ".sh",
+      ".strings",
+      ".swift",
+      ".targets",
+      ".toml",
+      ".ts",
+      ".tsv",
+      ".txt",
+      ".vert",
+      ".xcconfig",
+      ".xml",
+      ".yaml",
+      ".yml",
+      ".patch",
+      ".diff"
+    ],
+    "text_names": [
+      "Makefile",
+      "CMakeLists.txt",
+      "Dockerfile",
+      "LICENSE",
+      "AUTHORS",
+      "NOTICE",
+      ".gitignore",
+      ".gitattributes",
+      ".editorconfig",
+      ".clang-format",
+      "series"
+    ],
+    "protected_directories": [
+      "games",
+      "firmware",
+      "romfs",
+      "exefs",
+      "corpus"
+    ],
+    "source_text_directories": [
+      "tests/fixtures"
+    ]
+  },
+  "path_redaction_rules": [
+    {
+      "category": "device_id",
+      "regex": "(?<![0-9A-Fa-f])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}(?![0-9A-Fa-f])",
+      "reason": "文件名不带代码引号；短前缀也只输出掩码，不改变内容候选规则。"
+    }
+  ]
+}
