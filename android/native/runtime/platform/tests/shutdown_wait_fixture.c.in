@@ -1,0 +1,59 @@
+#include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+static pthread_mutex_t serial = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int owner_ready, owner_released, attempts;
+static int held;
+static const char *mode;
+static void check(int yes, const char *why) {
+    if (!yes) { fprintf(stderr,"FAIL shutdown wait: %s\n",why); _exit(86); }
+}
+static void delay(long ns) { struct timespec t={0,ns}; nanosleep(&t,NULL); }
+// Endpoint only: the production caller must really acquire this other pthread's
+// mutex. Actual guest roster/fault proof is checked by run_shutdown_consumer.py.
+int s2a_android_guest_shutdown_writers_begin(void) {
+    atomic_fetch_add(&attempts,1);
+    if (!strcmp(mode,"fatal")) return EDEADLK;
+    if (!strcmp(mode,"unready")) return ENOTSUP;
+    int error=pthread_mutex_trylock(&serial);
+    if (!error) held=1;
+    return error;
+}
+PRODUCTION_HELPER
+static void *owner(void *unused) {
+    (void)unused;
+    check(!pthread_mutex_lock(&serial),"owner locks real serial");
+    atomic_store(&owner_ready,1);
+    if (!strcmp(mode,"hung")) for (;;) delay(1000000);
+    delay(60000000);
+    atomic_store(&owner_released,1);
+    pthread_mutex_unlock(&serial);
+    return NULL;
+}
+static void *watchdog(void *unused) {
+    (void)unused; delay(150000000); _exit(124);
+}
+int main(int argc,char **argv) {
+    check(argc==2,"mode"); mode=argv[1];
+    if (!strcmp(mode,"busy") || !strcmp(mode,"hung")) {
+        pthread_t thread;
+        check(!pthread_create(&thread,NULL,owner,NULL),"owner thread");
+        while (!atomic_load(&owner_ready)) delay(100000);
+        if (!strcmp(mode,"hung")) check(!pthread_create(&thread,NULL,watchdog,NULL),"watchdog thread");
+    }
+    int error=android_shutdown_writers_begin();
+    if (!strcmp(mode,"fatal") || !strcmp(mode,"unready")) {
+        check(error==(!strcmp(mode,"fatal")?EDEADLK:ENOTSUP) && atomic_load(&attempts)==1 && !held,"terminal errors stay fatal without retry");
+        return 125;
+    }
+    if (error) return 125;
+    check(held,"success requires actual serial ownership");
+    check(pthread_mutex_trylock(&serial)==EBUSY,"terminal owner retains serial until process exit");
+    if (!strcmp(mode,"busy")) check(atomic_load(&owner_released) && atomic_load(&attempts)>1,"waited for real owner handoff");
+    puts("PASS shutdown wait"); return 0;
+}
