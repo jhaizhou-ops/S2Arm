@@ -116,7 +116,7 @@ def main():
     assert original.count(marker) == 1
     mutant = out / "missing-quiesce.c"
     mutant.write_text(original.replace(marker, "int error = 0;").replace(
-        '"runtime/runtime/platform/lifecycle_android.h"',
+        '"../../android/native/runtime/platform/lifecycle_android.h"',
         '"' + str(PLATFORM / "lifecycle_android.h") + '"'))
     broken = build(mutant, "missing-quiesce")
     log, _ = run([broken, "normal"], "reject-actual-touch-race", 86)
@@ -124,7 +124,7 @@ def main():
     assert "managed-dispose" not in log and "优雅退出完成" not in log
     lifecycle_text = lifecycle.read_text()
     vk_text = vk_source.read_text()
-    header = ('"runtime/runtime/platform/lifecycle_android.h"',
+    header = ('"../../android/native/runtime/platform/lifecycle_android.h"',
               '"' + str(PLATFORM / "lifecycle_android.h") + '"')
     drain_begin = "    // 失败时不调 host_wait_end"
     drain_end = 'S2A_SHUTDOWN_STAGE("排空已受理Vulkan调用", t0); }\n'

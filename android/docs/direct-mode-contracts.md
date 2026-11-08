@@ -102,7 +102,7 @@ owner 只有一条，不能同步回调 guest；需要申请 command memory 的�
 | Create*Binding、CreateExtraSet | §4.2 的确定 allocator，CreateExtraSet 固定 -1；数组仍在标准四个 set 中，descriptor 能力不足明确失败 |
 | RegisterTexture、S2AReportStateUse、Log | 收集实际读取依赖/绑定反射与诊断，供重用验证；不是忽略错误的查询接口 |
 
-**长度单位的独立期望**：64 字节 cbuf 的 FromBuffer 查询应为 8，128 字节应为 16，不能返回 64/128；texture pool maximumId=7 时 FromPool 应为 8。依据是 [GpuAccessor 的实际返回](../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs)、[8 字节句柄定义](../../compat/tree/src/Ryujinx.Graphics.Gpu/Constants.cs)及 [BindlessToArray 的数组长度消费](../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs)。`IGpuAccessor` 的旧注释写“字节数”，与这些实现不一致；不能只按该注释实现。`textureBufferLengths` 输入采用相同个数单位，数据来源仍须先按 bank→NVN uniform 映射解析。
+**长度单位的独立期望**：64 字节 cbuf 的 FromBuffer 查询应为 8，128 字节应为 16，不能返回 64/128；texture pool maximumId=7 时 FromPool 应为 8。依据是 [GpuAccessor 的实际返回](../../compat/tree/src/Ryujinx.Graphics.Gpu/Shader/GpuAccessor.cs)、[8 字节句柄定义](../../../compat/tree/src/Ryujinx.Graphics.Gpu/Constants.cs)及 [BindlessToArray 的数组长度消费](../../compat/tree/src/Ryujinx.Graphics.Shader/Translation/Optimizations/BindlessToArray.cs)。`IGpuAccessor` 的旧注释写“字节数”，与这些实现不一致；不能只按该注释实现。`textureBufferLengths` 输入采用相同个数单位，数据来源仍须先按 bank→NVN uniform 映射解析。
 
 控制段在 SetShaders 调用内用受校验的 guest 范围复制，先验证自描述长度、stage、code size/offset；支持 parser 版本才解释字段。复用共用抽取器/解析器，新增版本用合成结构和合法本地样本证明，不能按标题号判格式。不能无条件 memcpy 0x880，不能把 iOS/D2R 单款配对表当解析器。代码若已映射就复制；尚未映射时记录地址/长度、pool 身份及未就绪状态，首次实际消费前从仍有效 backing 解析并复制；这不是向 guest NVN ABI 任意新增 Pending 返回码。来源失效明确失败，不回读旧 control 指针；代码/池代际改变失效旧源身份。
 

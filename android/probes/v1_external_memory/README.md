@@ -1,6 +1,6 @@
 # WP17 V1 探针：原地换底、APK 进程、CPU 吞吐、稀疏拼接（#401）
 
-在 V0 探针（[../v0_external_memory/](../v0_external_memory/)）之上补 V1 的 a / b / c / e 四项。
+在 V0 探针（[../v0_external_memory/](../v0_external_memory)）之上补 V1 的 a / b / c / e 四项。
 `v1probe.c` 直接 `#include` V0 的 `v0probe.c`（JSON 行、Vulkan 上下文、导入与一致性函数共用），
 V0 的默认行为不变。结论与读数见 [docs/研究/安卓直连V1_n06ody.md](../../../../docs/研究/安卓直连V1_n06ody.md)。
 

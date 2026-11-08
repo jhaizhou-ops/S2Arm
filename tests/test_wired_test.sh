@@ -264,7 +264,7 @@ for t in t_gated t_notgated t_pre t_inner t_pat t_dry; do echo 'print(1)' > $M/g
 for t in t_wrap t_say; do echo 'print(1)' > $M/plat/tests/$t.py; done
 printf -- '-include $(sort $(wildcard */build.mk))\n' > $M/Makefile
 printf 'gated:\n\tpython3 graphics/tests/t_gated.py\nnotgated:\n\tpython3 graphics/tests/t_notgated.py\nagg: sub-a\nsub-a:\n\tpython3 graphics/tests/t_pre.py\nsub-b:\n\t$(MAKE) -C graphics/m inner\nnative-test-x:\n\tpython3 graphics/tests/t_pat.py\ndry:\n\tpython3 graphics/tests/t_dry.py\nTEST_TARGETS += notgated\n' > $M/graphics/build.mk
-printf 'inner:\n\tpython3 t_inner.py/n' > $M/graphics/m/Makefile
+printf 'inner:\n\tpython3 ../tests/t_inner.py\n' > $M/graphics/m/Makefile
 printf 'make -s gated\ntimeout "$GT" make -s agg sub-b\nfor k in x; do make -s "native-test-$k"; done\nmake -n dry\n' > $M/graphics/gate.sh
 echo '<Project><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup></Project>' > $M/plat/Py.Tests/Py.Tests.csproj; cp $M/plat/Py.Tests/Py.Tests.csproj $M/plat/Lone.Tests/Lone.Tests.csproj
 printf 'from pathlib import Path\nhere = Path(__file__).resolve().parent\ncmd = ["dotnet", "build", str(here / "Py.Tests/Py.Tests.csproj")]\n' > $M/plat/run_py.py

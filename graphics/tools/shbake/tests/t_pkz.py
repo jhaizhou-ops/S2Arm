@@ -129,7 +129,7 @@ class PkzTests(unittest.TestCase):
         self.assertEqual([m.name for m in members], ['../same.dat', '../same.dat'])
         self.assertEqual([m.compression for m in members], ['OodleKraken', 'FutureCodec'])
         self.assertEqual([m.size for m in members], [3, 5])
-        first = 32 + 2 * 32 + len(b'../same.dat/0OodleKraken/0../same.dat/0FutureCodec/0')
+        first = 32 + 2 * 32 + len(b'../same.dat\0OodleKraken\0../same.dat\0FutureCodec\0')
         self.assertEqual([m.offset for m in members], [first, first + 3])
         self.assertEqual([m.stored for m in members], [3, 5])
         with self.assertRaises(pkz.FormatError):

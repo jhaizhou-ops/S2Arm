@@ -83,7 +83,7 @@ APK 只装模块（107 MB），资源包 3.9 GB 单独导入——与计划的"�
 | JNI | `bridge.cpp` 的 16 个 `Java_..._NativeBridge_*` | 无 boot / run / start |
 | APK 内容 | `unzip -l app-debug.apk` | 只有 `libs2arm_android.so`（601 KB，宿主层）、`libs2a_cs_probe.so`（1.2 MB，运行时探针）、`libcrypto/libssl`、`assets/game/modules`（90.5 MB）——**没有 `libs2a_cs.so`** |
 | 构建默认 | `android/docker/build.sh:18` | `S2ARM_ANDROID_CS_SERVICES=${S2ARM_ANDROID_CS_SERVICES:-0}`，默认只出 probe；服务层（`S2A.Services` + Ryujinx HLE）要用 `1` 或 `static` 才编 |
-| 原生核心 | `android/CMakeLists.txt:37` | `S2A_CS_SERVICES=static` 时链 `native/s2a_native_stub.c`，注释写明 "until the native core runs here"；`../runtime/src` 只加 include 路径，**一个 `.c` 都没编** |
+| 原生核心 | `android/CMakeLists.txt:37` | `S2A_CS_SERVICES=static` 时链 `native/s2a_native_stub.c`，注释写明 "until the native core runs here"；`../../runtime/src` 只加 include 路径，**一个 `.c` 都没编** |
 | stub | `s2a_native_stub.c`（59 行） | 除 `s2a_screen_w` / `s2a_boot_mark` 外全部 `unbacked()`，首次调用打 `link stub, the native core does not run on Android yet` |
 | 启动入口 | `services/S2A.Services/Exports.cs:26` | `[UnmanagedCallersOnly(EntryPoint = "S2A_Init")]` → `Host.Boot(renderer, audio, baseDir)`；**Android 侧没有任何代码调用它** |
 
@@ -100,7 +100,7 @@ files/games/01004AB00A260000/revisions/sha256-9d96dbf3.../
 ### 4.2 接上要做的四件事（按依赖顺序）
 
 1. **把真实核心编进 Android 库**：`android/CMakeLists.txt` 目前只
-   `target_include_directories(... ../../runtime/include)`；需要把 `../runtime/src/*.c`
+   `target_include_directories(... ../../runtime/include)`；需要把 `../../runtime/src/*.c`
    （`boot.c` / `host_main.c` / `thread.c` / `mem.c` …）纳入 `s2arm_android`，并去掉 `s2a_native_stub.c`。
    `host_main.c` 是独立 `main()`，要把它抽成可调用的 `s2a_host_run(const char *root)`（§4.3 已实测验证顺序）。
 2. **把服务层打进 APK**：`S2ARM_ANDROID_CS_SERVICES=static`（与宿主同库）或 `1`（独立 `libs2a_cs.so`）；

@@ -36,7 +36,7 @@ static const struct { const char *ctl; const char *fn; } k_nvn_builtin_map[] = {
 };
 
 // S2Arm tessellation: 固定曲面细分核（count / scan / emit），从 graphics/metal/gal_tess_d3d.h（D3D11参照细分器）嵌入。
-// Makefile 用 tools/embed_msl.py 把 ../../../gfx/metal/gal_tess_d3d.h 编成 $(OUT)/gen/gal_tess_msl.h（C字符串常量 k_nvn_tess_core），
+// Makefile 用 tools/embed_msl.py 把 ../../../graphics/metal/gal_tess_d3d.h 编成 $(OUT)/gen/gal_tess_msl.h（C字符串常量 k_nvn_tess_core），
 // 本文件 include 它，再包一层三个核函数（count/scan/emit）成 k_nvn_tess_msl。直连侧不引入 graphics/metal 头文件（避免依赖NXGAL），CHWTessellator MSL内嵌
 #include "gal_tess_msl.h"
 // k_nvn_tess_core 由上面 include 提供，是 gal_tess_d3d.h 的完整 CHWTessellator 实现（2342行）；下面包一层三个核函数

@@ -19,7 +19,7 @@ function(s2a_android_direct_core target)
     # Paths are relative to android, as are target_sources above.
     set(includes ../..)
     list(APPEND includes ../graphics/nvn/gfx/nvn ../graphics/nvn/gfx/nvn/include ../graphics/nvn
-        ../graphics/nvn/host ../graphics/nvn/gfx/tex native/nvn native/nvn/compat native/direct ../../runtime/src)
+        ../graphics/nvn/host ../graphics/nvn/gfx/tex native/nvn native/nvn/compat native/direct ../runtime/src)
     target_include_directories(${target} PRIVATE ${includes})
     target_compile_definitions(${target} PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
     target_link_options(${target} PRIVATE -Wl,--wrap=_exit -Wl,--wrap=exit)

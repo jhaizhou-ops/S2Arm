@@ -114,7 +114,7 @@ flowchart LR
 | 管线配方 | 程序内容 ID/profile、layout、render-pass 定义、固定/动态状态分类、specialization、配方 schema | 驱动更新后可重新预热；语义或 profile 不符拒绝 |
 | driver cache | vendorID、deviceID、driverID（不可取得时标明）、原始 driverVersion、pipelineCacheUUID、实际 API/feature/profile、backend/schema | 不符仅丢弃可重建缓存，保留程序包和配方 |
 
-已有 `HostCacheCapabilities.GetIdentity` 是 host 文件准入摘要，不是完整 TranslationProfile，更不是 driverKey；继续保留其逐字段分类及共享代际检查。profile 必须补齐目标 SPIR-V 环境、实际改变翻译的选择、代码生成版本和变换版本；不把温度、线程数、Surface generation/revision 放进去。[当前托管生成器](../../compat/tree/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs)固定产生 SPIR-V 1.3，不能把 Vulkan GLSL 路径的目标版本设置当成托管生成器已经改版。
+已有 `HostCacheCapabilities.GetIdentity` 是 host 文件准入摘要，不是完整 TranslationProfile，更不是 driverKey；继续保留其逐字段分类及共享代际检查。profile 必须补齐目标 SPIR-V 环境、实际改变翻译的选择、代码生成版本和变换版本；不把温度、线程数、Surface generation/revision 放进去。[当前托管生成器](../../../compat/tree/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/CodeGenContext.cs)固定产生 SPIR-V 1.3，不能把 Vulkan GLSL 路径的目标版本设置当成托管生成器已经改版。
 
 第一版只接受目标设备实际导出的 profile，构建与运行时严格匹配，不先造一个未经验证的“全安卓最低 profile”。后续满足 requiredCaps 的保守变体仍按主方案 §8.3 锁定翻译语义；不能因设备额外支持某 feature，悄悄改用另一条路径。
 

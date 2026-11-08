@@ -1,6 +1,6 @@
 # Android host bring-up
 
-This directory follows [the multi-platform plan](../docs/架构_多终端.md).
+This directory follows [the multi-platform plan](../../docs/架构_多终端.md).
 It builds an ARM64 diagnostic APK with Activity / SurfaceView lifecycle, JNI,
 memory and rewrite probes, a Vulkan test presenter, and a gamepad snapshot using
 the existing `s2a_vpad_read(int32_t[4])` ABI. Optional NativeAOT service builds
