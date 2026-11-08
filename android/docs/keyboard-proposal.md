@@ -83,7 +83,7 @@ SHA256 `cf43e23309a80b45cbbc6d25189ad6fce7988ad1825a4eaac7677f72acf3b116`，附�
 [#199最新owner回复](https://github.com/jhaizhou-ops/S2Arm/issues/199#issuecomment-6386448340)
 继续要求NgWord明确报缺输入、禁止空数据假成功；没有另一个键盘实现可拉取。
 
-已复核原始游戏输入catalog不包含0100000000000823；有界检查下载目录和nx2ios/data未找到
+已复核原始游戏输入catalog不包含0100000000000823；有界检查下载目录和游戏数据目录未找到
 该系统档案或Switch固件NCA，常用Ryujinx系统内容目录亦不存在。当前缺项仍须由玩家提供
 自己的固件NCA或解出的 `systemdata/0100000000000823/`，之后沿现有解包、manifest与资源绑定链路复验。
 这是未完成的输入依赖，不能把读取PDF、fetch成功或前置检查通过写成游戏问题已解决。
@@ -103,7 +103,7 @@ Ngc启动MountSystemData失败可继续的上游兼容行为也由两端共享�
 | 测试存档 | ipa.sh:126–129按main构建号附测试存档；dev_run.sh推到Documents并设S2A_SAVE_DIR | 独立持久存档目录，不执行Apple seed覆盖路径；当前实际走新建角色 |
 
 由这些代码可以确定存在资源准备与测试路线差异，不能在没有对应证据时断言用户所述的
-iOS正常包一定带0823或一定使用存档。本机当前已知nx2ios产物目录没有可对照的iOS游戏包/资源包/局日志。
+iOS正常包一定带0823或一定使用存档。本机当前已知产物目录没有可对照的iOS游戏包/资源包/局日志。
 应优先核对那份正常iOS局的游戏版本/main构建号、配套资源包index中
 `systemdata/0100000000000823/`及host.log里的`在/缺 OpenDataStorageByDataId`、带存档记录。
 若已有同用户的真实系统数据，可经当前Android输入manifest和资源生产者重新绑定复用，
