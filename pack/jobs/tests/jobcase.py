@@ -133,6 +133,13 @@ class JobCase(unittest.TestCase):
 source = pathlib.Path(sys.argv[4])
 if source.read_bytes() == b"truncated fixture":
     print("【内容截断】")
+if source.read_bytes() == b"multi truncated fixture":
+    # 合并包：本体和 DLC 的清单都读得出，末尾一个内容超出文件末尾。
+    print("【内容截断】")
+    print(json.dumps({"schema":1,"packages":[
+        {"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"Synthetic","display":"1.0","guestIsa":"aarch64","builds":{}},
+        {"titleId":"0100000000000001","baseId":"0100000000000000","type":"dlc","version":0,"name":"","display":"","guestIsa":"unknown","builds":{}}]}))
+    raise SystemExit(0)
 if source.read_bytes() in (b"outdated fixture", b"ticket fixture"):
     code = "keys_missing" if source.read_bytes() == b"outdated fixture" else "ticket_missing"
     print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")

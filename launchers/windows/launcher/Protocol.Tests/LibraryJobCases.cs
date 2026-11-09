@@ -6,6 +6,13 @@ internal static class LibraryJobCases
 {
     public static void Run(Action<bool, string> check)
     {
+        // 导入失败的去向：只有读取器确认通用密钥版本不足（keys_outdated）才引导换密钥；
+        // 无法读取、缺票据、内容截断都不是换 prod.keys 能解决的。
+        check(ImportFailureRoute.For("keys_missing", false) == ImportFailureRoute.ImportKeys, "missing prod.keys asks to import keys");
+        check(ImportFailureRoute.For("keys_outdated", true) == ImportFailureRoute.ReplaceKeys, "outdated keys asks to replace keys");
+        check(ImportFailureRoute.For("keys_outdated", false) == ImportFailureRoute.ShowMessage, "outdated keys without ready keys shows the message");
+        foreach (var code in new[] { "content_unreadable", "ticket_missing", "content_truncated", "disk_full", null })
+            check(ImportFailureRoute.For(code, true) == ImportFailureRoute.ShowMessage, "no key prompt for " + (code ?? "no code"));
         const string sample = """
         {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":1,"type":"stage","operation":"catalog","state":"running","message":"读取游戏库"}
         {"schema":1,"jobId":"catalog-test","taskId":"catalog-test","seq":2,"type":"result","operation":"catalog","state":"succeeded","message":"操作完成","result":{"games":[{"id":"0100000000000001","name":"Synthetic game","display":"1.2","cover":"","hidden":false,"missing":["Need base"],"ready":false}],"keys":{"ready":false,"verified":false,"message":"尚未导入"}}}

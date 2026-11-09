@@ -255,16 +255,17 @@ public sealed partial class EnvironmentWindow
             {
                 // 检查错误码
                 var code = GetDiagCode(result);
-                if (code == "keys_missing")
+                var route = ImportFailureRoute.For(code, catalog?.KeysReady == true);
+                if (route == ImportFailureRoute.ImportKeys)
                 {
                     // 记下待导入文件，打开放密钥弹窗
                     pendingImportPaths = filePaths;
                     importDialog = new ImportDialogState(ImportKind.Keys);
                     importError = "";
                 }
-                else if (code == "content_unreadable" && catalog?.KeysReady == true)
+                else if (route == ImportFailureRoute.ReplaceKeys)
                 {
-                    // 密钥在但读不了：留选择，提示换一份
+                    // 密钥在但版本不足：留选择，提示换一份
                     pendingImportPaths = filePaths; keysRejected = true;
                     importDialog = new ImportDialogState(ImportKind.Keys);
                     importError = "";

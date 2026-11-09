@@ -31,6 +31,17 @@ class ImportTests(JobCase):
         self.assert_failure(terminal, "content_truncated")
         self.assertEqual(self.c.catalog()["games"], [])
 
+    def test_multi_content_file_with_truncated_content_is_rejected_whole(self):
+        # 有意：导入把一个文件当一个整体，被截断的内容之后出包会缺东西，所以整个文件拒绝，
+        # 不留下半个包。解包流程仍只跳过被截断的内容（行为不变，见 tests/nx_unpack_fail_test.sh）。
+        self.import_keys()
+        self.install_reader_fixture()
+        source = self.root / "combined.nsp"
+        source.write_bytes(b"multi truncated fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assert_failure(terminal, "content_truncated")
+        self.assertEqual(self.c.catalog()["games"], [])
+
     def test_truncated_key_candidate_is_not_evidence_against_keys(self):
         self.import_keys()
         self.install_reader_fixture()
