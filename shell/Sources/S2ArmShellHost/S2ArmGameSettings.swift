@@ -23,7 +23,8 @@ public enum S2ArmGameSettings {
     }
 
     /// 本款布局的当前状态（宿主接口给的 JSON）；读不到（Mac 单测、宿主没链）按「默认、没有我的布局、没有出厂预设、按住锁定开」
-    public struct LayoutState: Equatable { public var selected: String; public var hasMine: Bool; public var holdLock = true; public var presetName: String?; public var customIdentity = false }
+    public struct LayoutState: Equatable { public var selected: String; public var hasMine: Bool; public var holdLock = true; public var presetName: String?; public var customIdentity = false
+        public init(selected: String, hasMine: Bool, holdLock: Bool = true, presetName: String? = nil, customIdentity: Bool = false) { self.selected = selected; self.hasMine = hasMine; self.holdLock = holdLock; self.presetName = presetName; self.customIdentity = customIdentity } }
     public static func layoutState(_ id: String) -> LayoutState {
         guard let p = id.withCString({ s2a_shell_vpad_layout_json($0, 832, 419) }) else { return LayoutState(selected: "default", hasMine: false, presetName: nil) }
         defer { free(p) }
@@ -35,6 +36,8 @@ public enum S2ArmGameSettings {
 
     /// 本款可用的按键皮肤包与当前选择（宿主接口给的 JSON）；没有包就没有皮肤行
     public struct SkinState: Equatable { public var selected: String; public var skins: [(id: String, name: String)]
+        // 公开 init：sections 的默认参数在调用方模块里求值，成员 init 是 internal 时跨模块用不了（CI 实测红）
+        public init(selected: String, skins: [(id: String, name: String)]) { self.selected = selected; self.skins = skins }
         public static func == (a: SkinState, b: SkinState) -> Bool { a.selected == b.selected && a.skins.map(\.id) == b.skins.map(\.id) } }
     public static func skinState(_ id: String) -> SkinState {
         guard let p = id.withCString({ s2a_shell_vpad_skins_json($0) }) else { return SkinState(selected: "", skins: []) }
