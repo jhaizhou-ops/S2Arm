@@ -377,55 +377,150 @@ static void sample_home_quit(GCExtendedGamepad *pad) {
     s2a_hq_action act = s2a_hq_step(&g_hq, now_ns(), home || (pad.buttonMenu.isPressed && pad.buttonOptions.isPressed), home, a, b);
     if (act != S2A_HQ_NONE) home_quit_ui(act);
 }
+// —— 本地多手柄（Mac 双人 / 四人）：每个扩展手柄按「连接顺序」占一个固定槽位（0..S2A_MAX_PADS-1），各自独立采样。
+//    槽 0 与键盘 / 鼠标 / 触屏共用，只连一个手柄时行为与原来完全一致；active_pad 只留给六轴和 Home 用。
+//    原实现只有 active_pad（取最近有输入的那个手柄），两只手柄会合并成一位玩家，本地双人分不开。
+#define S2A_MAX_PADS 4
+static _Atomic uint32_t pad_buttons[S2A_MAX_PADS];
+static _Atomic int32_t pad_sticks[S2A_MAX_PADS][4];
+static _Atomic int pad_live = 1;   // 本次采样占到的最高槽位 + 1（键盘 / 鼠标 / 触屏也算一位）
+// 槽位持有强引用：手柄蓝牙休眠 / 断开时系统会释放 GCController，若这里只存裸指针就会变悬空指针，
+//   下一次 [controllers containsObject:] 往里发消息直接段错误。强引用后对象不会提前释放，
+//   断开时靠整表重建清槽，置 nil 才真正释放。只在主线程读写。
+static GCController *pad_owner[S2A_MAX_PADS];
+// 单个扩展手柄 → 按键位 + 摇杆（不含键盘 / 鼠标；调用方负责叠加）
+static void sample_pad_state(GCExtendedGamepad *pad, uint32_t *out_buttons, int32_t sticks[4]) {
+    uint32_t buttons = 0;
+    for (int i = 0; i < 4; i++) sticks[i] = 0;
+    // 位序与 active_pad 那条路径共用 s2a_pad_abxy_order（审计 P2-213：两端各写一套，以后只改一处就会一端错）
+    GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
+    int order[4];
+    s2a_pad_abxy_order(s2a_pad_labels_abxy(pad.controller.productCategory.UTF8String, pad.controller.vendorName.UTF8String), order);
+    NSDictionary *bindings = @{@"east": face[order[0]], @"south": face[order[1]], @"north": face[order[2]], @"west": face[order[3]],
+        @"leftShoulder": pad.leftShoulder, @"rightShoulder": pad.rightShoulder,
+        @"leftTrigger": pad.leftTrigger, @"rightTrigger": pad.rightTrigger, @"menu": pad.buttonMenu,
+        @"dpadLeft": pad.dpad.left, @"dpadRight": pad.dpad.right, @"dpadUp": pad.dpad.up, @"dpadDown": pad.dpad.down};
+    NSMutableDictionary *all = [bindings mutableCopy];
+    if (pad.buttonOptions) all[@"options"] = pad.buttonOptions;
+    if (pad.leftThumbstickButton) all[@"leftStick"] = pad.leftThumbstickButton;
+    if (pad.rightThumbstickButton) all[@"rightStick"] = pad.rightThumbstickButton;
+    for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] isPressed]) action(name, &buttons, sticks);
+    NSDictionary *axes = @{@"leftX": @(pad.leftThumbstick.xAxis.value), @"leftY": @(pad.leftThumbstick.yAxis.value),
+                           @"rightX": @(pad.rightThumbstick.xAxis.value), @"rightY": @(pad.rightThumbstick.yAxis.value)};
+    NSArray *names = @[@"LX", @"LY", @"RX", @"RY"];
+    float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15;
+    for (int i = 0; i < 4; i++) {
+        NSDictionary *binding = config[@"axes"][names[i]];
+        float v = [axes[binding[@"source"] ?: @""] floatValue];
+        if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+    }
+    *out_buttons = buttons;
+}
+// 槽位计划（纯逻辑，不持有对象：单测直接喂身份指针，不碰 GameController）。
+//   prev 是上一轮的槽位身份（max 项，NULL = 空槽），live 是本次系统报上来的手柄（顺序 = 连接顺序）。
+//   slot_of[j] 写第 j 只该占的槽（-1 = 超过 max 只，不参与）；返回占用到的最高槽位 + 1（至少 1：槽 0 总留给键盘 / 鼠标）。
+//   断开的手柄下一轮不在 live 里 → 槽空出来；重连时按「最小空槽」占回去（中间没插别的就回到原槽）。
+static int s2a_slot_plan(const void *const *prev, const void *const *live, int count, int max, int *slot_of) {
+    for (int j = 0; j < count; j++) {
+        slot_of[j] = -1;
+        for (int i = 0; i < max; i++) if (prev[i] && prev[i] == live[j]) { slot_of[j] = i; break; }   // 还在原槽
+    }
+    for (int j = 0; j < count; j++) {
+        if (slot_of[j] >= 0) continue;
+        for (int i = 0; i < max; i++) {
+            int taken = 0;
+            for (int k = 0; k < count; k++) if (slot_of[k] == i) { taken = 1; break; }   // 本轮已被别人占
+            if (taken) continue;
+            if (prev[i]) {
+                int still_alive = 0;
+                for (int k = 0; k < count; k++) if (live[k] == prev[i]) { still_alive = 1; break; }
+                if (still_alive) continue;   // 原占用者还在，别抢它的槽
+            }
+            slot_of[j] = i; break;
+        }
+    }
+    int top = 1;
+    for (int j = 0; j < count; j++) if (slot_of[j] + 1 > top) top = slot_of[j] + 1;
+    return top;
+}
 static void sample_input(void) {
-    int32_t sticks[4] = {0}; uint32_t buttons = 0;
+    int32_t kbd_sticks[4] = {0}; uint32_t kbd_buttons = 0;
+    uint32_t slot_buttons[S2A_MAX_PADS] = {0};
+    int32_t slot_sticks[S2A_MAX_PADS][4] = {{0}};
+    int live = 1;
+
     sample_motion(focused ? active_pad(GCController.controllers) : nil);
-    if (!focused) { publish(0, sticks); return; }
-    sample_home_quit(active_pad(GCController.controllers));
-    if (g_hq.open) { publish(0, sticks); return; }
-    NSDictionary *keyboard = config[@"keyboard"];
-    NSUInteger consumed = 0;
-    for (NSString *name in keyboard) {
-        NSDictionary *binding = keyboard[name]; NSUInteger mods = [binding[@"modifiers"] unsignedIntegerValue];
-        if (mods && (modifiers & mods) == mods && [keys containsObject:binding[@"code"]]) {
-            action(name, &buttons, sticks); consumed |= mods;
+    if (focused) sample_home_quit(active_pad(GCController.controllers));
+    // 失焦 / 退出确认条打开：照旧不喂输入（上游这两条都是 publish(0) 后直接返回）。手柄槽位仍然要扫，
+    //   否则窗口一失焦服务层就以为只剩 1 只手柄，会把玩家 2 的格子拆掉。
+    BOOL muted = !focused || g_hq.open;
+    if (!muted) {
+        NSDictionary *keyboard = config[@"keyboard"];
+        NSUInteger consumed = 0;
+        for (NSString *name in keyboard) {
+            NSDictionary *binding = keyboard[name]; NSUInteger mods = [binding[@"modifiers"] unsignedIntegerValue];
+            if (mods && (modifiers & mods) == mods && [keys containsObject:binding[@"code"]]) {
+                action(name, &kbd_buttons, kbd_sticks); consumed |= mods;
+            }
+        }
+        for (NSString *name in keyboard) {
+            NSDictionary *binding = keyboard[name]; NSNumber *code = binding[@"code"];
+            if ([binding[@"modifiers"] unsignedIntegerValue]) continue;
+            unsigned k = code.unsignedIntValue;
+            NSUInteger own_mod = (k == 56 || k == 60) ? 1 : (k == 59 || k == 62) ? 2 : (k == 58 || k == 61) ? 4 : 0;
+            if (!(consumed & own_mod) && [keys containsObject:code]) action(name, &kbd_buttons, kbd_sticks);
+        }
+        for (NSString *name in config[@"mouse"]) if ([mouse containsObject:config[@"mouse"][name]]) action(name, &kbd_buttons, kbd_sticks);
+    }
+    {
+        NSArray *controllers = GCController.controllers;
+        // 系统报上来的扩展手柄（顺序 = 连接顺序）；数组留得比槽位多，超出的交给 s2a_slot_plan 判 -1 丢弃
+        const void *live_ids[8]; GCExtendedGamepad *live_pads[8]; int n = 0;
+        for (GCController *c in controllers) {
+            GCExtendedGamepad *p = c.extendedGamepad;
+            if (!p) continue;
+            if (n >= 8) break;
+            live_ids[n] = (__bridge const void *)c; live_pads[n] = p; n++;
+        }
+        const void *prev[S2A_MAX_PADS];
+        for (int i = 0; i < S2A_MAX_PADS; i++) prev[i] = (__bridge const void *)pad_owner[i];
+        int slot_of[8];
+        live = s2a_slot_plan(prev, live_ids, n, S2A_MAX_PADS, slot_of);
+        // 断开清槽：整表重建，只有本轮还在的才写回（强引用随之释放，不会留悬空指针）
+        for (int i = 0; i < S2A_MAX_PADS; i++) pad_owner[i] = nil;
+        for (int j = 0; j < n; j++) {
+            if (slot_of[j] < 0) continue;   // 超过 S2A_MAX_PADS 只：多出来的不参与
+            pad_owner[slot_of[j]] = (__bridge GCController *)live_ids[j];
+            sample_pad_state(live_pads[j], &slot_buttons[slot_of[j]], slot_sticks[slot_of[j]]);
         }
     }
-    for (NSString *name in keyboard) {
-        NSDictionary *binding = keyboard[name]; NSNumber *code = binding[@"code"];
-        if ([binding[@"modifiers"] unsignedIntegerValue]) continue;
-        unsigned k = code.unsignedIntValue;
-        NSUInteger own_mod = (k == 56 || k == 60) ? 1 : (k == 59 || k == 62) ? 2 : (k == 58 || k == 61) ? 4 : 0;
-        if (!(consumed & own_mod) && [keys containsObject:code]) action(name, &buttons, sticks);
-    }
-    for (NSString *name in config[@"mouse"]) if ([mouse containsObject:config[@"mouse"][name]]) action(name, &buttons, sticks);
-    GCExtendedGamepad *pad = active_pad(GCController.controllers);
-    if (pad) {
-        // GameController 通常按物理方位上报（buttonA 在南侧）；Switch Pro 手柄在 macOS 上按键面字母上报（A 在东侧、X 在北侧）
-        //   位序调共用的 s2a_pad_abxy_order（同 iOS controller.m publishSystem；审计 P2-213：两端各写一套，以后只改一处就会一端错）。order 按任天堂 A / B / X / Y = 东 / 南 / 北 / 西
-        GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
-        int order[4]; s2a_pad_abxy_order(s2a_pad_labels_abxy(pad.controller.productCategory.UTF8String, pad.controller.vendorName.UTF8String), order);
-        NSDictionary *pad_buttons = @{@"east": face[order[0]], @"south": face[order[1]], @"north": face[order[2]], @"west": face[order[3]],
-            @"leftShoulder": pad.leftShoulder, @"rightShoulder": pad.rightShoulder,
-            @"leftTrigger": pad.leftTrigger, @"rightTrigger": pad.rightTrigger, @"menu": pad.buttonMenu,
-            @"dpadLeft": pad.dpad.left, @"dpadRight": pad.dpad.right, @"dpadUp": pad.dpad.up, @"dpadDown": pad.dpad.down};
-        NSMutableDictionary *all = [pad_buttons mutableCopy];
-        if (pad.buttonOptions) all[@"options"] = pad.buttonOptions;
-        if (pad.leftThumbstickButton) all[@"leftStick"] = pad.leftThumbstickButton;
-        if (pad.rightThumbstickButton) all[@"rightStick"] = pad.rightThumbstickButton;
-        for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] isPressed]) action(name, &buttons, sticks);
-        NSDictionary *axes = @{@"leftX": @(pad.leftThumbstick.xAxis.value), @"leftY": @(pad.leftThumbstick.yAxis.value),
-                               @"rightX": @(pad.rightThumbstick.xAxis.value), @"rightY": @(pad.rightThumbstick.yAxis.value)};
-        NSArray *names = @[@"LX", @"LY", @"RX", @"RY"];
-        float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15;
-        for (int i = 0; i < 4; i++) {
-            NSDictionary *binding = config[@"axes"][names[i]];
-            float v = [axes[binding[@"source"] ?: @""] floatValue];
-            if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+    if (muted) {
+        for (int s = 0; s < S2A_MAX_PADS; s++) {
+            slot_buttons[s] = 0;
+            for (int i = 0; i < 4; i++) slot_sticks[s][i] = 0;
         }
+    } else {
+        slot_buttons[0] |= kbd_buttons;   // 槽 0 = 键盘 / 鼠标 / 触屏 + 第一只手柄
+        for (int i = 0; i < 4; i++) slot_sticks[0][i] += kbd_sticks[i];
     }
-    for (int i = 0; i < 4; i++) sticks[i] = MAX(-32767, MIN(32767, sticks[i]));
-    publish(buttons, sticks);
+    for (int s = 0; s < S2A_MAX_PADS; s++)
+        for (int i = 0; i < 4; i++) slot_sticks[s][i] = MAX(-32767, MIN(32767, slot_sticks[s][i]));
+    atomic_store(&pad_live, live);
+    static int logged_live;   // 诊断：接上手柄 / 拔掉时打一行
+    if (live != logged_live) { logged_live = live; fprintf(stderr, "[s2a] 手柄槽位：%d 个（含键盘 / 鼠标）\n", live); }
+    for (int s = 0; s < S2A_MAX_PADS; s++) {
+        atomic_store(&pad_buttons[s], slot_buttons[s]);
+        for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[s][i], slot_sticks[s][i]);
+    }
+    publish(slot_buttons[0], slot_sticks[0]);   // 旧 ABI：玩家 1（含鼠标视角）
+}
+// 多手柄槽位（服务层 InputPump 按符号查；没导出时退回旧的单手柄 ABI）
+__attribute__((visibility("default"), used)) int s2a_vpad_pad_count(void) { return atomic_load(&pad_live); }
+__attribute__((visibility("default"), used)) uint32_t s2a_vpad_read_pad(int index, int32_t *sticks) {
+    if (index < 0 || index >= S2A_MAX_PADS) { for (int i = 0; i < 4; i++) sticks[i] = 0; return 0; }
+    uint32_t buttons = atomic_load_explicit(&pad_buttons[index], memory_order_seq_cst);
+    for (int i = 0; i < 4; i++) sticks[i] = atomic_load_explicit(&pad_sticks[index][i], memory_order_seq_cst);
+    return buttons;
 }
 
 // keyUp 可能在菜单或其他响应者处被消费。定时采样只核对本窗口已经接收的键，
