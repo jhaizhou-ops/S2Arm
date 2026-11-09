@@ -23,14 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # PR 分流核对合并提交的两个父提交，无需拉完整历史。
-          fetch-depth: 2
+          # 仅 PR 需要两个父提交；push / 手动保持 checkout 原默认深度。
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
       - name: 判定改动范围
         id: plan
+        if: ${{ github.event_name == 'pull_request' }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             # 使用目标分支已审阅的版本；首次引入脚本 / 无法取到时运行完整检查。
