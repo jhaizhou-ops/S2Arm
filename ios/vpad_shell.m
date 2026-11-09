@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #import "vpad_layout.h"
+#import "vpad_skin.h"
 
 // 游戏号进路径：同 launchctx.c id_ok —— 只收 [A-Za-z0-9._-]、不以 . 开头、≤127 字
 static BOOL gid_ok(const char *g) {
@@ -19,14 +20,23 @@ static S2AVPadLayoutStore *store_for(const char *gid) {
     const char *t = getenv("S2A_SHELL_DOCS");   // 只给单测：Mac 上 Documents 是用户真目录，单测指到临时目录
     NSURL *docs = t && *t ? [NSURL fileURLWithPath:@(t) isDirectory:YES] : [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *game = [[docs URLByAppendingPathComponent:@"games" isDirectory:YES] URLByAppendingPathComponent:@(gid) isDirectory:YES];
-    return [[S2AVPadLayoutStore alloc] initWithDirectory:[game URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]
-                                       settingsDirectory:[docs URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]];
+    S2AVPadLayoutStore *store = [[S2AVPadLayoutStore alloc] initWithDirectory:[game URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]
+                                                            settingsDirectory:[docs URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]];
+    store.presetLayout = [S2AVPadLayout presetForTitleID:@(gid)];   // 包内出厂预设（本款有才给）
+    [store adoptPresetIfNoSelection];   // 从没选过方案的款：初始选择就是出厂预设
+    return store;
 }
-// 要编辑的底稿：本款「我的布局」能读就用它，否则按这块安全区现算默认布局
+// 要编辑的底稿：本款「我的布局」能读就用它，其次出厂预设，否则按这块安全区现算默认布局
 static S2AVPadLayout *base_for(S2AVPadLayoutStore *s, CGRect safe, BOOL *hasMine) {
     *hasMine = NO;
     for (S2AVPadLayout *l in s.layouts) if ([l.identifier isEqualToString:S2AVPadLayoutMineIdentifier]) { *hasMine = YES; return l; }
+    if (s.presetLayout) return s.presetLayout;
     return [S2AVPadLayout defaultForSafeRect:safe];
+}
+static char *json_out(NSDictionary *doc) {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil]; if (!d) return NULL;
+    char *out = malloc(d.length + 1); if (!out) return NULL;
+    memcpy(out, d.bytes, d.length); out[d.length] = 0; return out;
 }
 
 char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h) {
@@ -35,24 +45,45 @@ char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe
         BOOL hasMine; S2AVPadLayout *b = base_for(s, CGRectMake(0, 0, safe_w, safe_h), &hasMine);
         NSString *sel = s.selectedIdentifier;
         NSString *kind = [sel isEqualToString:S2AVPadLayoutMineIdentifier] ? @"mine" : [sel isEqualToString:S2AVPadLayoutDefaultIdentifier] ? @"default"
-                       : [sel isEqualToString:S2AVPadLayoutTouchIdentifier] ? @"touch" : @"other";
-        NSDictionary *doc = @{@"selected": kind, @"hasMine": @(hasMine), @"holdLock": @(s.holdLockEnabled), @"buttons": b.buttons};
-        NSData *d = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil]; if (!d) return NULL;
-        char *out = malloc(d.length + 1); if (!out) return NULL;
-        memcpy(out, d.bytes, d.length); out[d.length] = 0; return out;
+                       : [sel isEqualToString:S2AVPadLayoutTouchIdentifier] ? @"touch"
+                       : (s.presetLayout && [sel isEqualToString:s.presetLayout.identifier]) ? @"preset" : @"other";
+        NSDictionary *preset = s.presetLayout ? @{@"id": s.presetLayout.identifier, @"name": s.presetLayout.name} : (id)NSNull.null;
+        return json_out(@{@"selected": kind, @"hasMine": @(hasMine), @"preset": preset, @"holdLock": @(s.holdLockEnabled), @"buttons": b.buttons});
     }
+}
+
+static int save_geometry_impl(const char *game_id, NSDictionary *geometry, double safe_w, double safe_h) {
+    S2AVPadLayoutStore *s = store_for(game_id); if (!s) return 0;
+    NSMutableDictionary *centers = [NSMutableDictionary dictionary], *scales = [NSMutableDictionary dictionary];
+    for (NSString *bid in geometry) {
+        NSDictionary *entry = [geometry[bid] isKindOfClass:NSDictionary.class] ? geometry[bid] : nil;
+        if ([entry[@"center"] isKindOfClass:NSArray.class]) centers[bid] = entry[@"center"];
+        if ([entry[@"scale"] isKindOfClass:NSNumber.class]) scales[bid] = entry[@"scale"];
+    }
+    CGRect safe = CGRectMake(0, 0, safe_w, safe_h); BOOL hasMine; NSError *e;
+    S2AVPadLayout *m = [base_for(s, safe, &hasMine) layoutWithButtonCenters:centers scales:scales safeRect:safe identifier:S2AVPadLayoutMineIdentifier name:@"我的布局" error:&e];
+    BOOL ok = m && [s replaceLayout:m error:&e] && [s selectIdentifier:S2AVPadLayoutMineIdentifier error:&e] && [s markManual:&e];
+    if (!ok) NSLog(@"S2Arm 游戏库：保存 %s 的按键位置失败：%@", game_id, e.localizedDescription);
+    return ok ? 1 : 0;
 }
 
 int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double safe_w, double safe_h) {
     @autoreleasepool {
-        S2AVPadLayoutStore *s = store_for(game_id); if (!s || !centers_json || !(safe_w > 0) || !(safe_h > 0)) return 0;
+        if (!game_id || !centers_json || !(safe_w > 0) || !(safe_h > 0)) return 0;
         NSData *d = [NSData dataWithBytes:centers_json length:strlen(centers_json)];
         id c = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil]; if (![c isKindOfClass:NSDictionary.class]) return 0;
-        CGRect safe = CGRectMake(0, 0, safe_w, safe_h); BOOL hasMine; NSError *e;
-        S2AVPadLayout *m = [base_for(s, safe, &hasMine) layoutWithButtonCenters:c safeRect:safe identifier:S2AVPadLayoutMineIdentifier name:@"我的布局" error:&e];
-        BOOL ok = m && [s replaceLayout:m error:&e] && [s selectIdentifier:S2AVPadLayoutMineIdentifier error:&e] && [s markManual:&e];
-        if (!ok) NSLog(@"S2Arm 游戏库：保存 %s 的按键位置失败：%@", game_id, e.localizedDescription);
-        return ok ? 1 : 0;
+        NSMutableDictionary *geometry = [NSMutableDictionary dictionary];
+        for (NSString *bid in c) if ([c[bid] isKindOfClass:NSArray.class]) geometry[bid] = @{@"center": c[bid]};
+        return save_geometry_impl(game_id, geometry, safe_w, safe_h);
+    }
+}
+
+int s2a_shell_vpad_save_geometry(const char *game_id, const char *geometry_json, double safe_w, double safe_h) {
+    @autoreleasepool {
+        if (!game_id || !geometry_json || !(safe_w > 0) || !(safe_h > 0)) return 0;
+        NSData *d = [NSData dataWithBytes:geometry_json length:strlen(geometry_json)];
+        id c = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil]; if (![c isKindOfClass:NSDictionary.class]) return 0;
+        return save_geometry_impl(game_id, c, safe_w, safe_h);
     }
 }
 
@@ -68,10 +99,40 @@ int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled) {
 int s2a_shell_vpad_select(const char *game_id, const char *layout_id) {
     @autoreleasepool {
         S2AVPadLayoutStore *s = store_for(game_id); if (!s || !layout_id) return 0;
-        NSString *i = !strcmp(layout_id, "mine") ? S2AVPadLayoutMineIdentifier : !strcmp(layout_id, "default") ? S2AVPadLayoutDefaultIdentifier : nil;
+        NSString *i = !strcmp(layout_id, "mine") ? S2AVPadLayoutMineIdentifier : !strcmp(layout_id, "default") ? S2AVPadLayoutDefaultIdentifier
+                    : !strcmp(layout_id, "preset") ? s.presetLayout.identifier : nil;
         if (!i) return 0;
         NSError *e; BOOL ok = [s selectIdentifier:i error:&e] && [s markManual:&e];
         if (!ok) NSLog(@"S2Arm 游戏库：%s 切到 %s 失败：%@", game_id, layout_id, e.localizedDescription);
         return ok ? 1 : 0;
+    }
+}
+
+char *s2a_shell_vpad_skins_json(const char *game_id) {
+    @autoreleasepool {
+        if (!gid_ok(game_id)) return NULL;
+        NSString *gid = @(game_id);
+        NSMutableArray *skins = [NSMutableArray array];
+        for (S2AVPadSkin *skin in [S2AVPadSkin skinsForGame:gid]) {
+            NSMutableDictionary *entry = [@{@"id": skin.identifier, @"name": skin.name, @"dir": skin.directory.path} mutableCopy];
+            if (skin.manifest[@"buttons"]) entry[@"buttons"] = skin.manifest[@"buttons"];
+            if (skin.manifest[@"stick"]) entry[@"stick"] = skin.manifest[@"stick"];
+            [skins addObject:entry];
+        }
+        return json_out(@{@"selected": [S2AVPadSkin selectedSkinIDForGame:gid] ?: @"", @"skins": skins});
+    }
+}
+
+int s2a_shell_vpad_select_skin(const char *game_id, const char *skin_id) {
+    @autoreleasepool {
+        if (!gid_ok(game_id) || !skin_id) return 0;
+        NSString *gid = @(game_id), *sid = @(skin_id);
+        if (sid.length) {   // 必须是本款真有的包（防悬空选择）
+            BOOL found = NO;
+            for (S2AVPadSkin *skin in [S2AVPadSkin skinsForGame:gid]) if ([skin.identifier isEqualToString:sid]) { found = YES; break; }
+            if (!found) return 0;
+        }
+        [S2AVPadSkin selectSkinID:sid.length ? sid : nil forGame:gid];
+        return 1;
     }
 }

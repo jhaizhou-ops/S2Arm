@@ -43,7 +43,7 @@ public final class S2ArmShellHostModel {
         listedBanners = catalogue.bannerURLs
         games = catalogue.tiles.map { tile in
             var state = layoutState(tile.id); state.customIdentity = identityStore.load(tile.id) != nil
-            return GameDetail(game: tile, sections: S2ArmGameSettings.sections(for: tile.id, stores: stores, state: state))
+            return GameDetail(game: tile, sections: S2ArmGameSettings.sections(for: tile.id, stores: stores, state: state, skins: S2ArmGameSettings.skinState(tile.id)))
         }
         listedStates = Dictionary(catalogue.tiles.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
         self.play = play ?? { id in _ = id.withCString { s2a_shell_play($0) } }
@@ -84,6 +84,7 @@ public final class S2ArmShellHostModel {
                      onButtonTest: { [weak self] open in self?.buttonTest(open) })
     }
 
+/几何保存/皮肤接口，设置页加皮肤行，编辑器加每键缩放与皮肤预览)
     /// 只放行可运行的那款（界面本身也只在 playable 时调 onPlay，这里再守一道）；放行前当场重判资源包（库开着时资源被删 / 换机拷走）
     public func requestPlay(_ id: String) {
         refreshGameData()
@@ -113,7 +114,7 @@ public final class S2ArmShellHostModel {
     func refresh(_ id: String) {
         guard let i = games.firstIndex(where: { $0.id == id }) else { return }
         var state = layoutState(id); state.customIdentity = identityStore.load(id) != nil
-        games[i].sections = S2ArmGameSettings.sections(for: id, stores: stores, state: state)
+        games[i].sections = S2ArmGameSettings.sections(for: id, stores: stores, state: state, skins: S2ArmGameSettings.skinState(id))
     }
 
     /// 改名字和封面的编辑页要用：当前显示的名字，以及有没有自定义

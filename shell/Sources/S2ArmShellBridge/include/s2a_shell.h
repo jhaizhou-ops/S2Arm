@@ -40,15 +40,23 @@ void s2a_shell_refresh(void);
 //   实现在宿主 ios/vpad_shell.m；本包 s2a_shell.c 里是弱定义缺省（读返回 NULL、写返回 0），Swift 单测不链宿主也能编。
 //   坐标：safe_w × safe_h 是编辑页里按键可放的区域（点），原点左上；按键字段同布局 JSON（x / y 为该区域宽高比例、width / height /
 //   cornerRadius 为区域短边比例，见 ios/layouts/layout.schema.json）。
-// 要编辑的布局：{"selected":"default|mine|touch|other","hasMine":bool,"holdLock":bool,"buttons":[{id,x,y,width,height,cornerRadius}…]}，
-//   有本款「我的布局」就是它，否则按这块区域现算的默认布局；malloc 出的 UTF-8，调用方 free。游戏号不合规返回 NULL
+// 要编辑的布局：{"selected":"default|mine|touch|preset|other","hasMine":bool,"holdLock":bool,"preset":{"id","name"}|null,"buttons":[{id,x,y,width,height,cornerRadius}…]}，
+//   编辑底稿 = 本款「我的布局」，否则出厂预设（包内 vpad-data/layouts/<程序号>.json，本款有才给），否则按这块区域现算的默认布局；
+//   malloc 出的 UTF-8，调用方 free。游戏号不合规返回 NULL
 char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h);
 // 存本款「我的布局」并选中：centers_json = {"A":[x,y],…}（区域坐标的点，只含挪过的键也行），返回 1 成功 / 0 失败
 int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double safe_w, double safe_h);
-// 选方案：layout_id = "default" / "mine"，返回 1 成功 / 0 失败（「恢复默认」= 选 default，「我的布局」文件保留）
+// 存本款「我的布局」并选中（带每键缩放）：geometry_json = {"A":{"center":[x,y],"scale":1.2},…}，scale 缺省 1、钳 0.6–1.6；返回 1 / 0
+int s2a_shell_vpad_save_geometry(const char *game_id, const char *geometry_json, double safe_w, double safe_h);
+// 选方案：layout_id = "default" / "mine" / "preset"，返回 1 成功 / 0 失败（「恢复默认」= 选 default，「我的布局」文件保留）
 int s2a_shell_vpad_select(const char *game_id, const char *layout_id);
 // ZL / ZR 按住锁定开关（按游戏，与游戏内设置同一份数据），返回 1 成功 / 0 失败
 int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
+// 本款可用的按键皮肤包：{"selected":"<皮肤 id 或空>","skins":[{"id","name","dir","buttons":{…},"stick":{…}}…]}，
+//   dir 是包内皮肤目录的绝对路径（编辑器预览按 dir + 清单文件名拼图）；没有可用包时 skins 为空数组。malloc，调用方 free
+char *s2a_shell_vpad_skins_json(const char *game_id);
+// 选本款皮肤：skin_id = 皮肤 id，传 "" = 回内置描线；写按游戏偏好 S2AGame.<游戏号> 的 S2AVPadSkin（与游戏内 vpad 同一处）。返回 1 / 0
+int s2a_shell_vpad_select_skin(const char *game_id, const char *skin_id);
 
 #ifdef __cplusplus
 }
