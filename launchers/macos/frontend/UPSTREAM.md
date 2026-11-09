@@ -23,7 +23,7 @@
 
 | 本目录 | 上游 `frontend/` | 改动 |
 |---|---|---|
-| `Sources/NX2Apple/LauncherView.swift` | 同名 | 只保留库页；状态换成 `S2ArmLauncherModel`（不用 `LauncherStores`）；作业进行中（一局 / 准备 / 装机 / 导入）换成 `JobSessionView`，出包换成 `ExportSessionView`；点某款的「出包」库页换成出包页 `ExportView`；顶栏加「添加游戏」（选文件 / 拖进窗口 → import 作业）与「环境检查」；加装机页、释放空间两个 sheet；去掉 Builds / Settings 页、启动选项 sheet、引擎同步横幅、封面编辑、管理菜单、主机模式与手柄驱动；顶栏显示品牌名（一行大号，与窗口三个按钮同一中线：空的 unified 工具栏把标题栏撑到顶栏高、系统把按钮居中） |
+| `Sources/NX2Apple/LauncherView.swift` | 同名 | 只保留库页；状态换成 `S2ArmLauncherModel`（不用 `LauncherStores`）；作业进行中（一局 / 准备 / 装机 / 导入）换成 `JobSessionView`，出包换成 `ExportSessionView`；点某款的「出包」库页换成出包页 `ExportView`；顶栏加「添加游戏」（选文件 / 拖进窗口 → import 作业）与「环境检查」；加装机页、释放空间两个 sheet；去掉 Builds / Settings 页、启动选项 sheet、引擎同步横幅、封面编辑、管理菜单、主机模式与手柄驱动；顶栏显示品牌名（一行大号，与窗口三个按钮同一中线：空的 unified 工具栏把标题栏撑到顶栏高、系统把按钮居中）；顶栏加 Switch 2 Pro 手柄按钮与弹窗（`Switch2ProConnectionPopover`） |
 | `Sources/NX2Apple/LauncherView+Library.swift` | 同名 | 游戏换成适配层 `GameSummary`（catalog 作业），封面用游戏库 `cover.jpg`（`CoverFill` / `CoverCache`，不取上游 Artwork 体系）；主按钮是「出包」（打开出包页），Mac 版已做好的款旁边加次按钮「开始游戏」（launch 作业），再是「释放空间」圆钮；没有启动选项圆钮（11-07 维护者 删游戏选项）；卡片与主按钮带自己的辅助功能标签（原先被读成图片）；空库页加「添加游戏」；去掉重建、iPhone 重签、管理菜单、Switch 2 徽标、筛选 |
 | `l10n/en.json`、`l10n/zh.json` | 同名 | 按键序插入我方键 `s2arm.*`；上游已有的键一个没改 |
 | `Package.swift` | 同名 | 我方重写：只含取用的文件；上游 app target `NX2Apple` 改成库 target `NX2AppleUI`（路径仍是 `Sources/NX2Apple`），依赖 `S2ArmAppleAdapter`；下限同上游 macOS 13、Swift 5 语言模式 |

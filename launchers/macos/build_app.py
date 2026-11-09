@@ -138,6 +138,9 @@ def main():
     macos.mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(Path(bindir) / front["executable"], macos / front["executable"])
+    # Switch 2 Pro 蓝牙连接由启动器旁的独立进程持有，游戏经本机通道读输入（docs/mac-switch2-pro.md）
+    subprocess.run(["make", "-C", str(ROOT), "S2A_MAC_FRONTEND=1", "build/S2ArmNS2Connection"], env=env, check=True)
+    shutil.copy2(ROOT / "build/S2ArmNS2Connection", macos / "S2ArmNS2Connection")
     copy_launcher_resources(Path(bindir), resources)
     if front["nx2apple_resources"]:
         print("前端资源：" + " ".join(frontend_layout.stage_apple_resources(ROOT, resources)))
@@ -202,12 +205,14 @@ def main():
     info = dict(**frontend_layout.info_identity(front), CFBundlePackageType="APPL",
                 CFBundleIconFile="S2Arm", LSMinimumSystemVersion=runtime_sources.deployment_target(),
                 NSHighResolutionCapable=True, CFBundleDevelopmentRegion="en", CFBundleLocalizations=["en", "zh-Hans"],
+                NSBluetoothAlwaysUsageDescription="连接 Switch 2 Pro 手柄，接收按键与体感并发送游戏震动。",
                 **release_identity(resources / "Engine/engine.json"))
     info["UTExportedTypeDeclarations"] = [dict(UTTypeIdentifier="org.s2arm.save-backup", UTTypeDescription="S2Arm Save Backup",
         UTTypeConformsTo=["public.zip-archive"], UTTypeTagSpecification={"public.filename-extension": ["s2asave"]})]
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     # 启动器本体同样去掉调试映射（见 bundle_engine.strip_debug_maps），再签整个 App
     subprocess.run(["xcrun", "strip", "-S", str(app / "Contents/MacOS" / front["executable"])], env=env, check=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(macos / "S2ArmNS2Connection")], env=env, check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(app)], env=env, check=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], env=env, check=True)
     print("最低系统检查：", verify_minimum_macos(app, runtime_sources.deployment_target()), "个 Mach-O")

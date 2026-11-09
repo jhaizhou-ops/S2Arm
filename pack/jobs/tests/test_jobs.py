@@ -1002,6 +1002,24 @@ class JobsTests(unittest.TestCase):
         with self.assertRaises(Failure):
             build.runtime_env(self.c, self.game(), self.root)
 
+    def test_launcher_decides_whether_the_game_may_auto_connect(self):
+        self.c.r["switch2ProAutoConnect"] = True
+        self.assertEqual(build.runtime_env(self.c, self.game(), self.root / "runtime")["S2A_NS2_AUTOCONNECT"], "1")
+        self.c.r["switch2ProAutoConnect"] = False
+        self.assertEqual(build.runtime_env(self.c, self.game(), self.root / "runtime")["S2A_NS2_AUTOCONNECT"], "0")
+        self.c.r["switch2ProAutoConnect"] = "yes"
+        with self.assertRaises(Failure):
+            build.runtime_env(self.c, self.game(), self.root)
+        self.c.r["switch2ProAutoConnect"] = True
+        self.c.r["switch2ProRelaySocket"] = "/tmp/s2a-ns2-relay.sock"
+        self.assertEqual(build.runtime_env(self.c, self.game(), self.root / "runtime")["S2A_NS2_SOCKET"],
+                         "/tmp/s2a-ns2-relay.sock")
+        self.c.r.pop("switch2ProRelaySocket")
+        self.assertNotIn("S2A_NS2_SOCKET", build.runtime_env(self.c, self.game(), self.root / "runtime"))
+        self.c.r["switch2ProRelaySocket"] = 1
+        with self.assertRaises(Failure):
+            build.runtime_env(self.c, self.game(), self.root)
+
     def test_metal_hud_switch_and_explicit_environment_reach_real_child(self):
         names = ("MTL_HUD_ENABLED", "MTL_HUD_LOG_ENABLED", "MTL_HUD_LOG_SHADER_ENABLED")
         previous = {name: os.environ.get(name) for name in names}

@@ -49,6 +49,20 @@ struct InputSettingsSheet: View {
                             }
                         }
                     }
+                    CardGroup(loc.lang == .zh ? "Switch 2 Pro 背键" : "Switch 2 Pro back buttons",
+                              footnote: loc.lang == .zh ? "按游戏保存，下次开始游戏时生效。原有按键仍可正常使用。" : "Saved per game; applies on the next launch. Original buttons remain available.") {
+                        ForEach(["GL", "GR"], id: \.self) { side in
+                            CardRow(side) {
+                                LauncherDropdown(options: [("", t("unbound"))] + Array(zip(InputConfig.padCodes, InputConfig.targets.prefix(16))).map { ($0.0, names.target($0.1)) },
+                                                 selection: config.backButtons?[side] ?? "", label: side, style: .button) { value in
+                                    var back = config.backButtons ?? [:]
+                                    back[side] = value.isEmpty ? nil : value
+                                    config.backButtons = back.isEmpty ? nil : back
+                                    failure = nil
+                                }
+                            }
+                        }
+                    }
                     options
                 }
                 .padding(.horizontal, 30).padding(.bottom, 24)

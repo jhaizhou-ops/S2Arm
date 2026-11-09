@@ -1672,6 +1672,9 @@ def validate_input(config):
             if token in seen:
                 raise Failure("输入映射存在重复绑定。")
             seen.add(token)
+    back = config.get("backButtons", {})
+    if not isinstance(back, dict) or any(side not in {"GL", "GR"} or not isinstance(source, str) or source not in pad for side, source in back.items()):
+        raise Failure("无效手柄映射。")
     if not isinstance(config.get("deadzone"), (int, float)) or not 0 <= config["deadzone"] < 1:
         raise Failure("摇杆死区必须在 0 到 1 之间。")
     options = config.get("mouseOptions")
