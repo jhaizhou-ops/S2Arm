@@ -581,14 +581,11 @@ static const char *frame_emit(const s2a_pic *p, const int ref_idx[3], int target
             put(&b, 0, 1);
             put(&b, p->allow_hp != 0, 1);
             put(&b, p->interp == 4, 1);
-            // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR} — the bitstream literal is a table
-            // index, not the enum value (decoder maps it back through read_interp_filter). Only the
-            // compressed-header path remaps; libvpx's stand-in path keeps the raw enum byte it always sent.
+            // p->interp is the bitstream literal already (NVDEC pic[121]; managed Decoder.cs runs
+            // LiteralToFilter itself) — write it verbatim on both paths. An earlier revision remapped
+            // enum→literal here, which double-swapped lit∈{0,1} streams into a wrong declaration.
             if (p->interp != 4)
-            {
-                static const uint8_t interp_literal[4] = { 1, 0, 2, 3 };
-                put(&b, mc ? interp_literal[p->interp] : (uint8_t)p->interp, 2);
-            }
+                put(&b, (uint8_t)p->interp, 2);
         }
     }
     put(&b, 0, 1);                 // refresh_frame_context

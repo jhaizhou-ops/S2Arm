@@ -545,3 +545,4 @@
 20261110-0532-vp9-native-compressed-hdr.patch
 20261110-0631-vp9-fallback-ledger-mcbytes.patch
 20261110-0653-vp9-midfallback-metadata-gate.patch
+20261110-0733-vp9-interp-literal-verbatim.patch

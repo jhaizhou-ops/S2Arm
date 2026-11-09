@@ -440,7 +440,10 @@ int main(int argc, char **argv)
             p.lossless = cm->base_qindex == 0 && !cm->y_dc_delta_q && !cm->uv_dc_delta_q && !cm->uv_ac_delta_q;
             p.tx_mode = (uint8_t)cm->tx_mode;
             p.allow_hp = (uint8_t)cm->allow_high_precision_mv;
-            p.interp = (uint8_t)cm->interp_filter;
+            // NVDEC pic[121]/s2a_pic.interp carries the bitstream literal (managed Decoder.cs does
+            // LiteralToFilter itself), not libvpx's enum — feed the literal like production does.
+            static const uint8_t lit_of_enum[5] = { 1, 0, 2, 3, 4 };
+            p.interp = lit_of_enum[cm->interp_filter];
             p.ref_mode = (uint8_t)cm->reference_mode;
             p.log2_tile_cols = (uint8_t)cm->log2_tile_cols;
             p.log2_tile_rows = (uint8_t)cm->log2_tile_rows;
