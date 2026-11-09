@@ -60,12 +60,12 @@ class PlanTests(unittest.TestCase):
         self.write('README.md', 'Edited English\n')
         self.assertTrue(self.classify(self.commit()))
 
-    def test_both_readmes_are_lightweight_on_pr_and_push(self):
+    def test_both_readmes_are_lightweight_only_on_pr(self):
         self.write('README.md', 'Edited English\n')
         self.write('README.zh-CN.md', 'Edited Chinese\n')
         head = self.commit()
         self.assertTrue(self.classify(head))
-        self.assertTrue(self.classify(head, name='push'))
+        self.assertFalse(self.classify(head, name='push'))
 
     def test_readme_plus_other_path_is_full(self):
         for path in ('runtime/example.c', '.github/workflows/ci.yml', 'tools/example.py',
@@ -137,7 +137,7 @@ class PlanTests(unittest.TestCase):
         advanced_base = self.commit()
         self.assertTrue(self.classify(topic, base=advanced_base))
 
-    def test_push_uses_before_after_without_merge_base(self):
+    def test_divergent_push_is_full(self):
         self.git('checkout', '-qb', 'topic')
         self.write('README.md', 'Topic edit\n')
         topic = self.commit()
@@ -145,6 +145,14 @@ class PlanTests(unittest.TestCase):
         self.write('runtime/example.c', 'int changed_on_base;\n')
         advanced_base = self.commit()
         self.assertFalse(self.classify(topic, base=advanced_base, name='push'))
+
+    def test_readme_push_cannot_replace_incomplete_code_run(self):
+        self.write('runtime/example.c', 'int code_needing_checks;\n')
+        code_commit = self.commit()
+        self.write('README.md', 'Readme after code\n')
+        readme_commit = self.commit()
+        # cancel-in-progress may have cancelled code_commit's main workflow.
+        self.assertFalse(self.classify(readme_commit, base=code_commit, name='push'))
 
     def merge_fixture(self, code=False):
         self.git('checkout', '-qb', 'topic')
@@ -203,11 +211,15 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(plan.readme_only(self.shallow_clone(), 'push',
                                          self.event(after, before, 'push')))
 
-    def test_push_immediate_parent_works_with_depth_two(self):
+    def test_push_immediate_parent_still_runs_full_checks(self):
         self.write('README.md', 'Edited English\n')
         after = self.commit()
-        self.assertTrue(plan.readme_only(self.shallow_clone(), 'push',
+        self.assertFalse(plan.readme_only(self.shallow_clone(), 'push',
                                         self.event(after, self.base, 'push')))
+
+    def test_push_does_not_read_or_fetch_history(self):
+        with mock.patch.object(plan, 'git', side_effect=AssertionError('push must stay full')):
+            self.assertFalse(plan.readme_only(self.repo, 'push', self.event(self.base, name='push')))
 
     def test_empty_diff_is_full(self):
         self.assertFalse(self.classify(self.base))

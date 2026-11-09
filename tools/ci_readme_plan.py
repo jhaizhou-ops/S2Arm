@@ -5,7 +5,7 @@
 
 Actions PRs compare the verified merge's base parent to its merged tree, using
 only checkout depth 2. Local PR histories compare merge-base to head. Pushes
-compare before to after; unavailable shallow history never triggers a fetch.
+always run full CI: an earlier main run may have failed or been cancelled.
 Added, deleted,
 renamed or non-regular files, unknown events and unavailable history use full CI.
 Reads GITHUB_EVENT_NAME / GITHUB_EVENT_PATH and appends to GITHUB_OUTPUT.
@@ -33,25 +33,21 @@ def valid_sha(value):
 def readme_only(repo, event_name, event, merge_sha=None):
     """Fail closed: False selects the existing full Linux and macOS checks."""
     try:
-        if event_name == 'pull_request':
-            base = event['pull_request']['base']['sha']
-            head = event['pull_request']['head']['sha']
-        elif event_name == 'push':
-            base, head = event['before'], event['after']
-        else:
+        if event_name != 'pull_request':
             return False
+        base = event['pull_request']['base']['sha']
+        head = event['pull_request']['head']['sha']
         if not valid_sha(base) or not valid_sha(head):
             return False
-        if event_name == 'pull_request':
-            if merge_sha:
-                if not valid_sha(merge_sha):
-                    return False
-                parents = git(repo, 'rev-list', '--parents', '-n', '1', merge_sha).decode('ascii').split()
-                if parents != [merge_sha, base, head]:
-                    return False
-                head = merge_sha
-            else:
-                base = git(repo, 'merge-base', base, head).decode('ascii').strip()
+        if merge_sha:
+            if not valid_sha(merge_sha):
+                return False
+            parents = git(repo, 'rev-list', '--parents', '-n', '1', merge_sha).decode('ascii').split()
+            if parents != [merge_sha, base, head]:
+                return False
+            head = merge_sha
+        else:
+            base = git(repo, 'merge-base', base, head).decode('ascii').strip()
         raw = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-renames',
                   '--name-status', '-z', base, head, '--')
         records = raw.decode('utf-8').split('\0')

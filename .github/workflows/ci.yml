@@ -2,7 +2,7 @@
 # Copyright 2026 S2Arm contributors
 # 公开仓 CI：只用 GitHub 托管 runner，不依赖维护者机器、私有 secret 和 S2A_PRIVATE_TOOLS。
 #   linux：平台无关的快速门禁；macos：贡献者自检 tools/contrib_check.sh（第一层；第二层由维护者在合入列车里跑）。
-#   在原 linux 任务内判定 README 分流，不新增任务；macos 等待判定，原检查命令及名称保留。
+#   仅 PR 在原 linux 任务内判定 README 分流；main push / 手动触发保留完整检查，不新增任务。
 name: ci
 on:
   pull_request:
@@ -32,8 +32,14 @@ jobs:
       - name: 判定改动范围
         id: plan
         run: |
-          if ! python3 tools/ci_readme_plan.py; then
-            echo "::warning::README 判定失败，执行原有完整检查"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            # 使用目标分支已审阅的版本；首次引入脚本 / 无法取到时运行完整检查。
+            if ! { git show HEAD^1:tools/ci_readme_plan.py > "$RUNNER_TEMP/ci-readme-plan.py" &&
+                   python3 "$RUNNER_TEMP/ci-readme-plan.py"; }; then
+              echo "::warning::README 判定不可用，执行原有完整检查"
+              echo "readme_only=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
             echo "readme_only=false" >> "$GITHUB_OUTPUT"
           fi
       - name: 分层登记
