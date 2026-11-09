@@ -6534,5 +6534,37 @@
  {
   "source": "路径太长：把游戏库搬到盘符根目录附近的短路径（比如 D:\\S2Arm），再打一次包；反馈时请带上错误摘要。",
   "en": "Path too long: move your game library to a short path near the drive root (for example D:\\S2Arm), then build again. Include the error summary when reporting."
+ },
+ {
+  "source": "检查文件和票据是否完整；若另行确认 Switch 密钥版本不足，可重新导出并到「设置 → 玩家密钥」重新导入。",
+  "en": "Check that the file and its tickets are complete. If you independently confirm your Switch keys are outdated, export them again and add them in Settings → Player keys."
+ },
+ {
+  "source": "从原始位置重新复制完整的游戏文件，再重新导入。",
+  "en": "Copy the complete game file from its original location and import it again."
+ },
+ {
+  "source": "用系统版本更新的 Switch 重新导出 prod.keys，再到「设置 → 玩家密钥」重新导入。",
+  "en": "Export prod.keys from a Switch with newer system software, then add the file again in Settings → Player keys."
+ },
+ {
+  "source": "游戏文件不完整，部分内容超出文件末尾。",
+  "en": "The game file is incomplete. Some content extends past the end of the file."
+ },
+ {
+  "source": "缺少内容对应的票据或标题密钥，请检查源文件是否完整。",
+  "en": "The content's ticket or title key is missing. Check that the source file is complete."
+ },
+ {
+  "source": "核对源文件是否含有所需票据。",
+  "en": "Check whether the source file includes the required ticket."
+ },
+ {
+  "source": "现有 prod.keys 缺少读取此文件所需的密钥。",
+  "en": "Your prod.keys file is missing keys needed to read this file."
+ },
+ {
+  "source": "无法读取游戏内容：可能是文件不完整、缺票据或密钥不匹配。请核对原始文件；若已确认 Switch 密钥版本不足，再重新导出，到「设置 → 玩家密钥」重新导入。",
+  "en": "Could not read the game content. The file might be incomplete, a ticket may be missing, or the keys may not match. Check the original file. If you have confirmed the Switch keys are outdated, export them again and add them in Settings → Player keys."
  }
 ]

@@ -94,7 +94,10 @@ s2armctl state | errors [游戏号] | logs <任务号|游戏号> [--lines N]
 | 现象 / 错误码 | 谁 | 怎么办 |
 |---|---|---|
 | `keys_missing` / `keys_invalid` | ask | 问玩家自己从 Switch 导出的 prod.keys 在哪，`keys <路径>`；文件不完整就请他重新导出一份 |
-| `content_unreadable` 解不开 | human | 密钥比游戏旧：请玩家把 Switch 更新到最新系统、重新导出 prod.keys，再 `keys <路径>` |
+| `content_unreadable` 无法读取 | human | 核对源文件和票据是否完整 |
+| `ticket_missing` 缺少票据 | human | 核对源文件是否含有所需票据 |
+| `content_truncated` 文件不完整 | human | 从原始位置重新复制完整的游戏文件 |
+| `keys_outdated` 密钥版本不足 | human | 请玩家用系统版本更新的 Switch 重新导出 prod.keys，再 `keys <路径>` |
 | `input_base_missing` | ask | 只放了更新或 DLC：问玩家游戏本体在哪，`games <本体所在文件夹>` |
 | `input_empty` / `input_type_unsupported` | ask | 文件夹里没有 NSP / XCI / NSZ / XCZ：问玩家游戏文件到底在哪 |
 | `input_missing` / `content_invalid` | ask | 文件找不到（外接盘没接）或损坏：请玩家接上磁盘或换一份完整的原版文件 |

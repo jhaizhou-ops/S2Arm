@@ -63,7 +63,7 @@ static partial class P {
             string titleKeys = null;
             for (int i = 2; i < args.Length; i++) if (args[i].StartsWith("--title-keys=", StringComparison.Ordinal)) titleKeys = args[i].Substring(13);
             LoadTitleKeys(args[0], titleKeys);
-            Index(args[2]); Resolve();
+            Index(args[2], inspect: true); Resolve();
             var packages = new List<object>();
             foreach (var open in Where.Values.ToArray()) {
                 var meta = new Nca(Ks, open());

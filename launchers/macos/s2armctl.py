@@ -158,7 +158,10 @@ def brief(s):
 AI_NEXT = {
     'keys_missing': ('ask', '问玩家自己导出的 prod.keys 放在哪，然后 s2armctl keys <路径>'),
     'keys_invalid': ('ask', 'prod.keys 文件不完整：请玩家重新导出一份，然后 s2armctl keys <路径>'),
-    'content_unreadable': ('human', '密钥版本太旧解不开这款游戏：请玩家把 Switch 更新到最新系统、重新导出 prod.keys，再 s2armctl keys <路径>'),
+    'content_unreadable': ('human', '请玩家核对源文件和票据是否完整'),
+    'ticket_missing': ('human', '请玩家核对源文件是否含有所需票据'),
+    'content_truncated': ('human', '请玩家从原始位置重新复制完整的游戏文件'),
+    'keys_outdated': ('human', '请玩家用系统版本更新的 Switch 重新导出 prod.keys，再 s2armctl keys <路径>'),
     'input_base_missing': ('ask', '只放了更新或 DLC：问玩家这款游戏本体（NSP / XCI）在哪，s2armctl games <本体所在文件夹>'),
     'input_empty': ('ask', '这个文件夹里没有 NSP / XCI：问玩家游戏文件在哪，s2armctl games <文件夹>'),
     'input_type_unsupported': ('ask', '不是 NSP / XCI：问玩家游戏文件在哪，s2armctl games <文件夹>'),

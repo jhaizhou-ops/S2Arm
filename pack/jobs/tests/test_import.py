@@ -22,6 +22,42 @@ class DigestTests(unittest.TestCase):   # 11-06：导入的包身份 = 原件整
 
 
 class ImportTests(JobCase):
+    def test_complete_metadata_does_not_hide_truncation(self):
+        self.import_keys()
+        self.install_reader_fixture()
+        source = self.root / "source.nsp"
+        source.write_bytes(b"truncated fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assert_failure(terminal, "content_truncated")
+        self.assertEqual(self.c.catalog()["games"], [])
+
+    def test_truncated_key_candidate_is_not_evidence_against_keys(self):
+        self.import_keys()
+        self.install_reader_fixture()
+        source = self.root / "source.nsp"
+        source.write_bytes(b"complete fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assertEqual(terminal["state"], "succeeded")
+        source.write_bytes(b"truncated fixture")
+        _, terminal = self.worker("keys", path=str(self.c.keys))
+        self.assertEqual(terminal["state"], "succeeded")
+        self.assertFalse(terminal["result"]["verified"])
+
+    def test_missing_keys_outdated_keys_and_missing_ticket_are_distinct(self):
+        self.install_reader_fixture()
+        source = self.root / "source.nsp"
+        source.write_bytes(b"outdated fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assert_failure(terminal, "keys_missing")
+        self.import_keys()
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assert_failure(terminal, "keys_outdated")
+        source.write_bytes(b"ticket fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        diagnostic = self.assert_failure(terminal, "ticket_missing")
+        self.assertNotIn("prod.keys", diagnostic["summary"])
+        self.assertNotIn("重新导出", diagnostic["suggestion"])
+
     def test_import_folder_follows_symlinked_files_and_folders(self):
         # 原件挪走、原位置留软链（10-26 维护者把 Downloads 原件挪外置盘）：文件夹里指向文件的软链、软链目录都认；软链成环不转圈
         self.import_keys(); self.install_reader_fixture()

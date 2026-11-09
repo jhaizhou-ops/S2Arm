@@ -318,7 +318,7 @@ public final class S2ArmLauncherModel: ObservableObject {
             let infos: [GameInfo]
             do {
                 infos = try await self.provider.importGames(GameInputs(paths: urls), events: sink)
-            } catch let failure as JobFailure where failure.code == "content_unreadable" && self.provider.library.keysReady == true {
+            } catch let failure as JobFailure where failure.code == "keys_outdated" && self.provider.library.keysReady == true {
                 // 密钥在，但读不了这款：选好的游戏留着，提示换一份，换好自动接着导入
                 self.pendingImport = urls; self.keysRejected = true; self.showKeys = true
                 return nil
