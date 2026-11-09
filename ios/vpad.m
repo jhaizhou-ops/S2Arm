@@ -174,6 +174,7 @@ void s2a_dprompt_ask(NSString *title, NSString *body, NSString *accept, NSString
     CGFloat _stickTravel[2];
     S2AVPadLayoutStore *_layoutStore;
     S2AVPadLayout *_layout;
+    UILabel *_editSelected;         // 拖动编辑中点选的键（每键缩放作用于它）
     CGRect _safeRect, _lastBounds;
     CGFloat _radius[2]; CGRect _activation[2];
     NSString *_layoutProblem;
@@ -246,6 +247,11 @@ static NSString *button_label(NSString *identifier) {
     const char *gd = getenv("S2A_DOCS"); NSURL *gameDocs = gd && *gd ? [NSURL fileURLWithPath:@(gd) isDirectory:YES] : docs;
     _layoutStore = [[S2AVPadLayoutStore alloc] initWithDirectory:[gameDocs URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]
                                                 settingsDirectory:[docs URLByAppendingPathComponent:@"VPadLayouts" isDirectory:YES]];
+    // 出厂预设按程序号取包内数据（单款壳没程序号就没有预设，行为与从前一致）
+    const char *gid = getenv("S2A_LAUNCH_GAME_ID");
+    NSString *titleID = gid && *gid ? @(gid) : nil;
+    _layoutStore.presetLayout = [S2AVPadLayout presetForTitleID:titleID];
+    [_layoutStore adoptPresetIfNoSelection];
     [self reloadLayout];
     _mode = [[UISegmentedControl alloc] initWithItems:@[@S2A_DPROMPT_VPAD_SEG_KEYS, @S2A_DPROMPT_VPAD_SEG_TOUCH]];
     _mode.accessibilityIdentifier = @"vpad.mode"; _mode.hidden = YES; _mode.alpha = 0.7;
@@ -262,7 +268,6 @@ static NSString *button_label(NSString *identifier) {
         _knob[i].backgroundColor = [UIColor colorWithRed:210 / 255.0 green:214 / 255.0 blue:220 / 255.0 alpha:0.59];
         _ring[i].alpha = _knob[i].alpha = vp_opacity();
         _ring[i].hidden = _knob[i].hidden = YES; _ring[i].userInteractionEnabled = _knob[i].userInteractionEnabled = NO; [self addSubview:_ring[i]]; [self addSubview:_knob[i]];
-    }
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(lostFocus:) name:UIApplicationWillResignActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(lostFocus:) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [self wake];
@@ -363,19 +368,54 @@ static NSString *button_label(NSString *identifier) {
     _editing = YES; [self clearTouches]; [_fade invalidate]; _fade = nil;
     s2a_pad_update(S2A_PAD_TOUCH, 0, 0, NULL);   // 编辑期间触屏源不可用：游戏收不到半截按键
     _drag = [NSMapTable strongToStrongObjectsMapTable]; _dragOffset = [NSMapTable strongToStrongObjectsMapTable];
+    _editSelected = nil;
     for (UILabel *l in _keys) { [l.layer removeAllAnimations]; l.alpha = 1; l.layer.borderColor = vp_face().CGColor; }
     _editBar = [UIView new]; _editBar.accessibilityIdentifier = @"vpad.edit";
-    UILabel *tip = [UILabel new]; tip.text = @"拖动按键调整位置（只对这款游戏生效）"; tip.textColor = UIColor.whiteColor; tip.font = [UIFont systemFontOfSize:13];
+    UILabel *tip = [UILabel new]; tip.text = @"拖动按键调整位置；点选一个键可用 － / ＋ 调大小（只对这款游戏生效）"; tip.textColor = UIColor.whiteColor; tip.font = [UIFont systemFontOfSize:13];
     tip.textAlignment = NSTextAlignmentCenter; tip.tag = 1;
     UIButton *reset = [self editButton:@"恢复默认" action:@selector(editReset)], *cancel = [self editButton:@"取消" action:@selector(editCancel)],
              *done = [self editButton:@"完成" action:@selector(editDone)];
     reset.tag = 2; cancel.tag = 3; done.tag = 4;
-    for (UIView *v in @[tip, reset, cancel, done]) [_editBar addSubview:v];
+    UIButton *minus = [self editButton:@"－" action:@selector(editShrink)], *plus = [self editButton:@"＋" action:@selector(editGrow)];
+    minus.tag = 5; plus.tag = 6;
+    UILabel *scale = [UILabel new]; scale.text = @"未选按键"; scale.textColor = UIColor.whiteColor; scale.font = [UIFont systemFontOfSize:13];
+    scale.textAlignment = NSTextAlignmentCenter; scale.tag = 7;
+    for (UIView *v in @[tip, reset, cancel, done, minus, plus, scale]) [_editBar addSubview:v];
     [self addSubview:_editBar]; [self setNeedsLayout];
     LOG("触屏布局：进入按键位置编辑（%s）", _layout.identifier.UTF8String);
 }
+// 点选（拖动开始时记下）：高亮白边，缩放行显示键名与当前倍率（相对当前方案的帧宽）
+- (void)editSelect:(UILabel *)key {
+    _editSelected = key;
+    for (UILabel *l in _keys) l.layer.borderColor = (l == key) ? vp_line().CGColor : vp_face().CGColor;
+    [self editRefreshScaleLabel];
+}
+- (void)editRefreshScaleLabel {
+    UILabel *scale = (UILabel *)[_editBar viewWithTag:7]; if (!scale) return;
+    if (!_editSelected) { scale.text = @"未选按键"; return; }
+    NSUInteger i = [_keys indexOfObject:_editSelected];
+    CGRect base = i < _layout.buttons.count ? [_layout frameForButton:_layout.buttons[i] safeRect:_safeRect] : _editSelected.frame;
+    double s = base.size.width > 0 ? _editSelected.frame.size.width / base.size.width : 1;
+    scale.text = [NSString stringWithFormat:@"%@：%.2f×", _editSelected.accessibilityLabel, s];
+}
+- (void)editGrow { [self editScaleBy:1.05]; }
+- (void)editShrink { [self editScaleBy:0.95]; }
+- (void)editScaleBy:(CGFloat)factor {
+    UILabel *key = _editSelected; if (!key) return;
+    NSUInteger i = [_keys indexOfObject:key]; if (i >= _layout.buttons.count) return;
+    CGRect base = [_layout frameForButton:_layout.buttons[i] safeRect:_safeRect];
+    CGFloat target = MAX(0.6, MIN(1.6, key.frame.size.width / MAX(base.size.width, 1) * factor));
+    CGFloat w = base.size.width * target, h = base.size.height * target;
+    CGPoint c = key.center;   // 整个键不出安全区（同拖动的钳法）
+    c.x = MAX(CGRectGetMinX(_safeRect) + w / 2, MIN(CGRectGetMaxX(_safeRect) - w / 2, c.x));
+    c.y = MAX(CGRectGetMinY(_safeRect) + h / 2, MIN(CGRectGetMaxY(_safeRect) - h / 2, c.y));
+    key.frame = CGRectMake(c.x - w / 2, c.y - h / 2, w, h);
+    key.layer.cornerRadius = MIN([_layout.buttons[i][@"cornerRadius"] doubleValue] * MIN(_safeRect.size.width, _safeRect.size.height) * target,
+                                 MIN(w, h) / 2);
+    [self editRefreshScaleLabel];
+}
 - (void)endEditing {
-    _editing = NO; [_editBar removeFromSuperview]; _editBar = nil; _drag = nil; _dragOffset = nil;
+    _editing = NO; [_editBar removeFromSuperview]; _editBar = nil; _drag = nil; _dragOffset = nil; _editSelected = nil;
     for (UILabel *l in _keys) l.layer.borderColor = vp_line().CGColor;
 }
 - (void)editCancel { [self endEditing]; [self reloadLayout]; LOG("触屏布局：取消编辑，按键位置不变"); }
@@ -386,11 +426,15 @@ static NSString *button_label(NSString *identifier) {
     [self reloadLayout];
 }
 - (void)editDone {
-    NSMutableDictionary *centers = [NSMutableDictionary dictionary];
-    for (NSUInteger i = 0; i < _keys.count && i < _layout.buttons.count; i++)
+    NSMutableDictionary *centers = [NSMutableDictionary dictionary], *scales = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < _keys.count && i < _layout.buttons.count; i++) {
         centers[_layout.buttons[i][@"id"]] = @[@(_keys[i].center.x), @(_keys[i].center.y)];
+        CGRect base = [_layout frameForButton:_layout.buttons[i] safeRect:_safeRect];
+        double s = base.size.width > 0 ? _keys[i].frame.size.width / base.size.width : 1;
+        if (fabs(s - 1) > 0.001) scales[_layout.buttons[i][@"id"]] = @(s);   // 每键缩放（编辑里 － / ＋ 调过的键）
+    }
     NSError *error;
-    S2AVPadLayout *mine = [_layout layoutWithButtonCenters:centers safeRect:_safeRect identifier:S2AVPadLayoutMineIdentifier name:@"我的布局" error:&error];
+    S2AVPadLayout *mine = [_layout layoutWithButtonCenters:centers scales:scales safeRect:_safeRect identifier:S2AVPadLayoutMineIdentifier name:@"我的布局" error:&error];
     BOOL ok = mine && [_layoutStore replaceLayout:mine error:&error] && [_layoutStore selectIdentifier:S2AVPadLayoutMineIdentifier error:&error];
     [self endEditing];
     if (ok) { [_layoutStore markManual:nil]; LOG("触屏布局：本款游戏的按键位置已保存（我的布局）"); }
@@ -406,11 +450,15 @@ static NSString *button_label(NSString *identifier) {
 }
 - (void)layoutEditBar {
     if (!_editBar) return;
-    CGRect g = self.safeAreaLayoutGuide.layoutFrame; CGFloat w = MIN(520, g.size.width - 32), h = 76;
+    CGRect g = self.safeAreaLayoutGuide.layoutFrame; CGFloat w = MIN(520, g.size.width - 32), h = 118;
     _editBar.frame = CGRectMake(CGRectGetMidX(g) - w / 2, CGRectGetMidY(g) - h / 2, w, h); [self bringSubviewToFront:_editBar];   // 屏幕正中（默认布局正中没有键；放顶上会压住 − / +）
     [_editBar viewWithTag:1].frame = CGRectMake(0, 0, w, 24);
     CGFloat bw = (w - 2 * 12) / 3;
     for (int i = 0; i < 3; i++) [_editBar viewWithTag:2 + i].frame = CGRectMake(i * (bw + 12), 32, bw, 36);
+    // 每键缩放行：－ / ＋ 调点选的那个键（0.6–1.6×），中间显键名与当前倍率
+    [_editBar viewWithTag:5].frame = CGRectMake(0, 76, 64, 36);
+    [_editBar viewWithTag:6].frame = CGRectMake(w - 64, 76, 64, 36);
+    [_editBar viewWithTag:7].frame = CGRectMake(76, 76, w - 152, 36);
 }
 - (void)openLayouts {
     UIViewController *controller = self.window.rootViewController;
@@ -719,7 +767,7 @@ static NSString *button_label(NSString *identifier) {
         for (UITouch *t in ts) {
             CGPoint p = [t locationInView:self]; int k = [self keyAt:p]; if (k < 0) continue;
             for (UILabel *l in _keys) if (l.tag == k) { [_drag setObject:l forKey:t];
-                [_dragOffset setObject:[NSValue valueWithCGPoint:CGPointMake(l.center.x - p.x, l.center.y - p.y)] forKey:t]; vp_fill(l, YES); break; }
+                [_dragOffset setObject:[NSValue valueWithCGPoint:CGPointMake(l.center.x - p.x, l.center.y - p.y)] forKey:t]; vp_fill(l, YES); [self editSelect:l]; break; }
         }
         return;
     }

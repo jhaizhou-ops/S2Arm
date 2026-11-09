@@ -22,13 +22,16 @@ public enum S2ArmGameSettings {
         public static var live: Stores { Stores(game: { UserDefaults(suiteName: "S2AGame." + $0) }, app: .standard) }
     }
 
-    /// 本款布局的当前状态（宿主接口给的 JSON）；读不到（Mac 单测、宿主没链）按「默认、没有我的布局」
-    public struct LayoutState: Equatable { public var selected: String; public var hasMine: Bool; public var holdLock = true; public var customIdentity = false }
+    /// 本款布局的当前状态（宿主接口给的 JSON）；读不到（Mac 单测、宿主没链）按「默认、没有我的布局、没有出厂预设、按住锁定开」
+    public struct LayoutState: Equatable { public var selected: String; public var hasMine: Bool; public var holdLock = true; public var presetName: String?; public var customIdentity = false
+        public init(selected: String, hasMine: Bool, holdLock: Bool = true, presetName: String? = nil, customIdentity: Bool = false) { self.selected = selected; self.hasMine = hasMine; self.holdLock = holdLock; self.presetName = presetName; self.customIdentity = customIdentity } }
     public static func layoutState(_ id: String) -> LayoutState {
-        guard let p = id.withCString({ s2a_shell_vpad_layout_json($0, 832, 419) }) else { return LayoutState(selected: "default", hasMine: false) }
+        guard let p = id.withCString({ s2a_shell_vpad_layout_json($0, 832, 419) }) else { return LayoutState(selected: "default", hasMine: false, presetName: nil) }
         defer { free(p) }
         let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8)) as? [String: Any]
-        return LayoutState(selected: obj?["selected"] as? String ?? "default", hasMine: obj?["hasMine"] as? Bool ?? false, holdLock: obj?["holdLock"] as? Bool ?? true)
+        return LayoutState(selected: obj?["selected"] as? String ?? "default", hasMine: obj?["hasMine"] as? Bool ?? false,
+                           holdLock: obj?["holdLock"] as? Bool ?? true,
+                           presetName: (obj?["preset"] as? [String: Any])?["name"] as? String)
     }
 
     public static func sections(for id: String, stores: Stores = .live, state: LayoutState) -> [SettingSection] {
@@ -37,9 +40,13 @@ public enum S2ArmGameSettings {
         let force = g?.bool(forKey: "S2AWidenForce") ?? false
         let op = (stores.app.object(forKey: "S2AVPadOpacity") as? Double).map { min(1, max(0.1, $0)) } ?? 1
         var options = [SettingOption("default", "默认布局")]
+        if let presetName = state.presetName { options.append(SettingOption("preset", presetName)) }
         if state.hasMine { options.append(SettingOption("mine", "我的布局")) }
         options.append(SettingOption(editLayout, "调整位置…"))
-        let current = state.selected == "mine" && state.hasMine ? "mine" : "default"
+        let current = state.selected == "mine" && state.hasMine ? "mine" : state.selected == "preset" && state.presetName != nil ? "preset" : "default"
+        var vpadRows = [SettingRow(id: layout, label: "按键布局", note: "调整位置只对这款游戏生效", kind: .choice(options), value: current)]
+        vpadRows.append(SettingRow(id: holdLock, label: "按住锁定 ZL / ZR", note: "按住 2 秒锁定，再点一下解锁；只对这款游戏生效", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"))
+        vpadRows.append(SettingRow(id: opacity, label: "按键透明度", note: "全部游戏共用，下次进游戏生效", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))))
         return [
             SettingSection(id: "s2a.identity", title: "显示", rows: [
                 SettingRow(id: identity, label: "名字和封面", note: "只改这台 iPhone 上的显示", kind: .choice([SettingOption("current", state.customIdentity ? "已自定义" : "默认"), SettingOption(editIdentity, "修改…")]), value: "current"),
@@ -48,11 +55,7 @@ public enum S2ArmGameSettings {
                 SettingRow(id: fps60, label: "60 帧", note: "关掉回到游戏自己的帧率（多为 30 帧），更省电", kind: .toggle(on: "on", off: "off"), value: on60 ? "on" : "off"),
                 SettingRow(id: widenForce, label: "宽屏强制启用", note: "没验证过的游戏也铺满全屏；画面若被拉伸会自动退回 16:9", kind: .toggle(on: "on", off: "off"), value: force ? "on" : "off"),
             ]),
-            SettingSection(id: "s2a.vpad", title: "虚拟手柄", rows: [
-                SettingRow(id: layout, label: "按键布局", note: "调整位置只对这款游戏生效", kind: .choice(options), value: current),
-                SettingRow(id: holdLock, label: "按住锁定 ZL / ZR", note: "按住 2 秒锁定，再点一下解锁；只对这款游戏生效", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"),
-                SettingRow(id: opacity, label: "按键透明度", note: "全部游戏共用，下次进游戏生效", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))),
-            ]),
+            SettingSection(id: "s2a.vpad", title: "虚拟手柄", rows: vpadRows),
         ]
     }
 
@@ -66,7 +69,7 @@ public enum S2ArmGameSettings {
         case holdLock: _ = id.withCString { s2a_shell_vpad_set_hold_lock($0, value == "on" ? 1 : 0) }
         case layout:
             if value == editLayout { return true }
-            if value == "default" || value == "mine" { _ = id.withCString { i in value.withCString { s2a_shell_vpad_select(i, $0) } } }
+            if value == "default" || value == "mine" || value == "preset" { _ = id.withCString { i in value.withCString { s2a_shell_vpad_select(i, $0) } } }
         default: break
         }
         return false

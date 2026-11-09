@@ -1,4 +1,5 @@
 #import "vpad_layout.h"
+#import "vpad_data.h"
 #include <math.h>
 
 NSString *const S2AVPadLayoutDefaultIdentifier = @"default";
@@ -129,17 +130,34 @@ static CGRect normalized_rect(NSDictionary *value) {
 }
 - (instancetype)layoutWithButtonCenters:(NSDictionary<NSString *, NSArray<NSNumber *> *> *)centers safeRect:(CGRect)rect
                              identifier:(NSString *)identifier name:(NSString *)name error:(NSError **)error {
+    return [self layoutWithButtonCenters:centers scales:nil safeRect:rect identifier:identifier name:name error:error];
+}
+- (instancetype)layoutWithButtonCenters:(NSDictionary<NSString *, NSArray<NSNumber *> *> *)centers
+                                 scales:(NSDictionary<NSString *, NSNumber *> *)scales safeRect:(CGRect)rect
+                             identifier:(NSString *)identifier name:(NSString *)name error:(NSError **)error {
     CGFloat w = MAX(rect.size.width, 1), h = MAX(rect.size.height, 1);
     NSMutableArray *buttons = [NSMutableArray array];
     for (NSDictionary *button in self.buttons) {
         NSMutableDictionary *b = [button mutableCopy]; NSArray<NSNumber *> *c = centers[button[@"id"]];
         if (c.count == 2) { CGPoint p = CGPointMake(c[0].doubleValue, c[1].doubleValue);
             b[@"x"] = @(MAX(0, MIN(1, (p.x - CGRectGetMinX(rect)) / w))); b[@"y"] = @(MAX(0, MIN(1, (p.y - CGRectGetMinY(rect)) / h))); }
+        NSNumber *scale = scales[button[@"id"]];
+        if (scale) {
+            double s = MAX(0.6, MIN(1.6, scale.doubleValue));
+            double bw = MAX(0.04, MIN(0.4, [b[@"width"] doubleValue] * s)), bh = MAX(0.04, MIN(0.4, [b[@"height"] doubleValue] * s));
+            b[@"width"] = @(bw); b[@"height"] = @(bh);
+            b[@"cornerRadius"] = @(MAX(0, MIN(MIN(0.2, MIN(bw, bh) / 2), [b[@"cornerRadius"] doubleValue] * s)));
+        }
         [buttons addObject:b];
     }
     NSDictionary *doc = @{@"schemaVersion": @1, @"id": identifier, @"name": name, @"buttons": buttons, @"sticks": self.sticks};
     NSData *data = [NSJSONSerialization dataWithJSONObject:doc options:0 error:error];
     return data ? [S2AVPadLayout readData:data error:error] : nil;
+}
++ (instancetype)presetForTitleID:(NSString *)titleID {
+    if (!titleID.length) return nil;
+    NSData *data = [S2AVPadData dataForRelativePath:[NSString stringWithFormat:@"layouts/%@.json", titleID]];
+    return data ? [S2AVPadLayout readData:data error:nil] : nil;
 }
 - (CGRect)frameForButton:(NSDictionary *)button safeRect:(CGRect)rect {
     CGFloat unit = MIN(rect.size.width, rect.size.height);
@@ -227,6 +245,7 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
 
     NSString *_stickProblem;
     NSString *_visibilityProblem;
+    BOOL _hadSelectionFile;   // init 时 .selection.json 在不在（决定出厂预设能不能当初始选择）
 }
 - (instancetype)initWithDirectory:(NSURL *)directory { return [self initWithDirectory:directory settingsDirectory:directory]; }
 - (instancetype)initWithDirectory:(NSURL *)directory settingsDirectory:(NSURL *)settingsDirectory {
@@ -251,7 +270,8 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
         else _visibilityProblem = @"F01.visibility：闲置透明度设置损坏，暂用 25%；重新调整可修复，原记录保留";
     }
     NSURL *url = [_directory URLByAppendingPathComponent:@".selection.json"];
-    if ([NSFileManager.defaultManager fileExistsAtPath:url.path]) {
+    _hadSelectionFile = [NSFileManager.defaultManager fileExistsAtPath:url.path];
+    if (_hadSelectionFile) {
         NSError *error;
         NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:&error];
         NSData *data = nil;
@@ -313,14 +333,22 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
         if (layout) [result addObject:layout]; else [problems addObject:[NSString stringWithFormat:@"%@：%@", url.lastPathComponent, error.localizedDescription]];
     }
     if (![S2AVPadLayout isBuiltinIdentifier:_selectedIdentifier] &&
+        ![_selectedIdentifier isEqualToString:_presetLayout.identifier] &&
         ![[result valueForKey:@"identifier"] containsObject:_selectedIdentifier])
         [problems addObject:@"F01.selection：选定布局缺失或无效，当前暂用默认布局；请选择有效方案或恢复默认"];
-    _diagnostics = [problems copy]; return result;
+    _diagnostics = [problems copy];
+    if (_presetLayout) [result insertObject:_presetLayout atIndex:0];
+    return result;
 }
 - (S2AVPadLayout *)selectedLayout:(NSError **)error {
     if (_selectionProblem) { fail(error, @"F01.selection", _selectionProblem); return nil; }
     if ([S2AVPadLayout isBuiltinIdentifier:_selectedIdentifier]) return nil;
+    if (_presetLayout && [_selectedIdentifier isEqualToString:_presetLayout.identifier]) return _presetLayout;
     return [self readIdentifier:_selectedIdentifier error:error];
+}
+- (BOOL)adoptPresetIfNoSelection {
+    if (!_presetLayout || _hadSelectionFile || _selectionProblem) return NO;
+    return [self selectIdentifier:_presetLayout.identifier error:nil];
 }
 - (BOOL)prepareDirectory:(NSError **)error {
     return [NSFileManager.defaultManager createDirectoryAtURL:_directory withIntermediateDirectories:YES attributes:nil error:error];
@@ -376,7 +404,8 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
 }
 - (BOOL)selectIdentifier:(NSString *)identifier error:(NSError **)error {
     if (!identifier_ok(identifier)) return fail(error, @"F01.identity", @"布局 id 无效");
-    if (![S2AVPadLayout isBuiltinIdentifier:identifier] && ![self readIdentifier:identifier error:error]) return NO;
+    if (![S2AVPadLayout isBuiltinIdentifier:identifier] && ![identifier isEqualToString:_presetLayout.identifier] &&
+        ![self readIdentifier:identifier error:error]) return NO;
     if (![self prepareDirectory:error]) return NO;
     NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"schemaVersion": @1, @"id": identifier} options:0 error:error];
     if (![data writeToURL:[_directory URLByAppendingPathComponent:@".selection.json"] options:NSDataWritingAtomic error:error]) return NO;
@@ -394,7 +423,8 @@ static int read_enabled(NSURL *file, BOOL *enabled) {
     id value = data.length <= 4096 && data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     NSString *identifier = fields(value, @[@"schemaVersion", @"id"]) && number(value[@"schemaVersion"], 1, 1) && identifier_ok(value[@"id"]) ? value[@"id"] : nil;
     if (!identifier || [identifier isEqualToString:S2AVPadLayoutTouchIdentifier]) return S2AVPadLayoutDefaultIdentifier;
-    if (![S2AVPadLayout isBuiltinIdentifier:identifier] && ![self readIdentifier:identifier error:nil]) return S2AVPadLayoutDefaultIdentifier;
+    if (![S2AVPadLayout isBuiltinIdentifier:identifier] && ![identifier isEqualToString:_presetLayout.identifier] &&
+        ![self readIdentifier:identifier error:nil]) return S2AVPadLayoutDefaultIdentifier;
     return identifier;
 }
 - (int)setTouchOnly:(BOOL)on error:(NSError **)error {

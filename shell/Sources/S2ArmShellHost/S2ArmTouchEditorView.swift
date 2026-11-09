@@ -15,10 +15,16 @@ struct S2ArmTouchEditorView: View {
     @State var opacity: Double
     let close: () -> Void
 
-    struct Key: Identifiable { let id: String; var center: CGPoint; let size: CGSize; let radius: CGFloat }
+    /// baseSize / baseRadius 是底稿布局里的原始尺寸；scale 是本页里调的每键倍率（0.6–1.6），保存时与中心一起交给宿主
+    struct Key: Identifiable {
+        let id: String; var center: CGPoint; let baseSize: CGSize; let baseRadius: CGFloat; var scale: Double = 1
+        var size: CGSize { CGSize(width: baseSize.width * scale, height: baseSize.height * scale) }
+        var radius: CGFloat { min(baseRadius * scale, min(size.width, size.height) / 2) }
+    }
     @State private var keys: [Key] = []
     @State private var area: CGRect = .zero
     @State private var problem: String?
+    @State private var selectedID: String?
 
     // 方案三「描线」+ 摇杆区方案二「石墨」（同 vpad.m vp_line / vp_face / 摇杆圈）
     private let line = Color.white.opacity(0.78), face = Color(red: 150 / 255, green: 215 / 255, blue: 230 / 255).opacity(0.9)
@@ -74,11 +80,12 @@ struct S2ArmTouchEditorView: View {
     private func keyView(_ k: Key) -> some View {
         let isFace = ["A", "B", "X", "Y"].contains(k.id)
         let labels = ["PLUS": "＋", "MINUS": "－", "UP": "▲", "DOWN": "▼", "LEFT": "◀︎", "RIGHT": "▶︎", "LS": "L3", "RS": "R3"]
+        let selected = selectedID == k.id
         return Text(labels[k.id] ?? k.id)
             .font(.system(size: isFace ? 17 : 13, weight: .bold))
             .foregroundStyle(isFace ? face : Color.white.opacity(0.86))
             .frame(width: k.size.width, height: k.size.height)
-            .overlay(RoundedRectangle(cornerRadius: k.radius).stroke(line, lineWidth: 1.6))
+            .overlay(RoundedRectangle(cornerRadius: k.radius).stroke(selected ? face : line, lineWidth: selected ? 2.6 : 1.6))
             .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
             .contentShape(Rectangle())
             .opacity(opacity)
@@ -87,6 +94,7 @@ struct S2ArmTouchEditorView: View {
 
     private func drag(_ k: Binding<Key>) -> some Gesture {
         DragGesture(minimumDistance: 0).onChanged { g in
+            selectedID = k.wrappedValue.id   // 抓起哪个键就选中哪个（缩放行作用于它）
             let hw = k.wrappedValue.size.width / 2, hh = k.wrappedValue.size.height / 2   // 整个键不出可放区域
             k.wrappedValue.center = CGPoint(x: min(area.maxX - hw, max(area.minX + hw, g.location.x)),
                                             y: min(area.maxY - hh, max(area.minY + hh, g.location.y)))
@@ -102,6 +110,17 @@ struct S2ArmTouchEditorView: View {
                 button(shellText("Done")) { landscape ? save() : close() }
             }
             .frame(width: landscape ? 340 : 170)
+            if landscape, let sel = keys.first(where: { $0.id == selectedID }) {
+                // 每键缩放：抓起 / 点中哪个键就调哪个（0.6–1.6×，与游戏内编辑同一份数据、同一个钳法）
+                HStack(spacing: 12) {
+                    Text("按键大小 \(sel.id)").font(.footnote.weight(.semibold)).foregroundStyle(.white)
+                    Spacer()
+                    miniButton("－") { adjustScale(sel.id, -0.05) }
+                    Text(String(format: "%.2f×", sel.scale)).font(.footnote.monospacedDigit()).foregroundStyle(.white).frame(width: 52)
+                    miniButton("＋") { adjustScale(sel.id, 0.05) }
+                }
+                .frame(width: 340)
+            }
             if landscape {
                 VStack(spacing: 4) {
                     HStack(spacing: 10) {
@@ -131,6 +150,23 @@ struct S2ArmTouchEditorView: View {
         .buttonStyle(.plain)
     }
 
+    private func miniButton(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 15, weight: .bold)).foregroundStyle(.white).frame(width: 44, height: 32)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func adjustScale(_ id: String, _ delta: Double) {
+        guard let i = keys.firstIndex(where: { $0.id == id }) else { return }
+        keys[i].scale = min(1.6, max(0.6, ((keys[i].scale + delta) * 100).rounded() / 100))
+        let hw = keys[i].size.width / 2, hh = keys[i].size.height / 2   // 变大后整个键仍不出可放区域
+        keys[i].center = CGPoint(x: min(area.maxX - hw, max(area.minX + hw, keys[i].center.x)),
+                                 y: min(area.maxY - hh, max(area.minY + hh, keys[i].center.y)))
+    }
+
     /// 可放区域同 vpad.m layoutSafeRect：安全区，左右至少 16、底至少 8 点
     private func load(_ full: CGSize) {
         let w = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
@@ -149,15 +185,17 @@ struct S2ArmTouchEditorView: View {
                   let bw = b["width"] as? Double, let bh = b["height"] as? Double else { return nil }
             let size = CGSize(width: min(area.width, bw * unit), height: min(area.height, bh * unit))
             let radius = min((b["cornerRadius"] as? Double ?? 0) * unit, min(size.width, size.height) / 2)
-            return Key(id: id, center: CGPoint(x: area.minX + x * area.width, y: area.minY + y * area.height), size: size, radius: radius)
+            return Key(id: id, center: CGPoint(x: area.minX + x * area.width, y: area.minY + y * area.height), baseSize: size, baseRadius: radius)
         }
     }
 
     private func save() {
-        var centers: [String: [Double]] = [:]
-        for k in keys { centers[k.id] = [Double(k.center.x - area.minX), Double(k.center.y - area.minY)] }   // 区域坐标（原点左上）
-        guard let data = try? JSONSerialization.data(withJSONObject: centers), let json = String(data: data, encoding: .utf8) else { problem = "按键位置没保存"; return }
-        let ok = gameID.withCString { g in json.withCString { s2a_shell_vpad_save(g, $0, Double(area.width), Double(area.height)) } }
+        var geometry: [String: [String: Any]] = [:]
+        for k in keys {   // 区域坐标（原点左上）+ 每键倍率，宿主按 F01 校验存「我的布局」
+            geometry[k.id] = ["center": [Double(k.center.x - area.minX), Double(k.center.y - area.minY)], "scale": k.scale]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: geometry), let json = String(data: data, encoding: .utf8) else { problem = "按键位置没保存"; return }
+        let ok = gameID.withCString { g in json.withCString { s2a_shell_vpad_save_geometry(g, $0, Double(area.width), Double(area.height)) } }
         if ok == 1 { close() } else { problem = "按键位置没保存，请再试一次" }
     }
 }
