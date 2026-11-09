@@ -441,6 +441,16 @@
       ],
       "regex": "[a-z0-9-]+@openssh\\.com",
       "reason": "OpenSSH 算法 / 扩展名的命名约定（如 ssh -c aes128-gcm@openssh.com），不是邮箱。"
+    },
+    {
+      "id": "vpad_skin_art",
+      "categories": [
+        "game_screenshot"
+      ],
+      "paths": [
+        "ios/vpad-data/skins/*/*.png"
+      ],
+      "reason": "虚拟手柄皮肤图：nxnative 移植项目（Tiaoge-tou/nxnative）已定版并随其 IPA 分发的按键皮肤素材（含以游戏技能图为题材的按键图），本 PR 经作者线复用到 S2Arm 的皮肤包，长边统一缩到 256 px；不是游戏画面截图，也不是从游戏文件新提取的资源。"
     }
   ],
   "boundaries": {
