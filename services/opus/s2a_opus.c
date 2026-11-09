@@ -1,15 +1,22 @@
 // libopus 解码的极小 C 接口（给 Ryujinx.Horizon 的 HardwareOpusDecoder）：单流 / 多流解码器统一成一个句柄，
 // 打开 / 解一包 / 复位 / 关闭，外加包内样本数。opus_*_ctl 是变参函数（arm64 苹果平台变参走栈，P/Invoke 不能直调），复位只能经这里。
 // 解码全在 C 侧：每包零托管分配（原先 Concentus 托管实现每包分配 18–36 KB，暗黑3 稳态每秒 40 多包，是 iOS 阻塞式 gen0 回收的主因）。
+// S2A_OPUS_SYSTEM=1（仅 macOS）：48 kHz 单/双声道单流改走系统 AudioToolbox 解码，其余（多流 / 其他采样率）仍用 libopus。
 #include <stdint.h>
 #include <stdlib.h>
 #include "opus.h"
 #include "opus_multistream.h"
+#ifdef S2A_OPUS_SYSTEM
+#include "s2a_opus_apple.h"
+#endif
 
 typedef struct
 {
     OpusDecoder *single;
     OpusMSDecoder *multi;
+#ifdef S2A_OPUS_SYSTEM
+    void *apple;
+#endif
 } s2a_opus;
 
 // mapping == NULL：单流解码器（opus_decoder）；否则多流（opus_multistream_decoder）。失败返回 NULL，*err 为 libopus 错误码
@@ -20,6 +27,14 @@ void *s2a_opus_open(int32_t rate, int32_t channels, int32_t streams, int32_t cou
 
     if (h != NULL)
     {
+#ifdef S2A_OPUS_SYSTEM
+        // 系统后端只接 48 kHz 单/双声道单流；多流与其他采样率保持 libopus
+        if (mapping == NULL && rate == 48000 && (channels == 1 || channels == 2))
+        {
+            h->apple = s2a_apple_open(rate, channels, &e);
+        }
+        else
+#endif
         if (mapping == NULL)
         {
             h->single = opus_decoder_create(rate, channels, &e);
@@ -45,6 +60,27 @@ int32_t s2a_opus_decode(void *p, const uint8_t *data, int32_t len, int16_t *pcm,
 {
     s2a_opus *h = p;
 
+#ifdef S2A_OPUS_SYSTEM
+    if (h->apple != NULL)
+    {
+        // 系统解码器对坏包静默返回 0 帧；先按 libopus 语义校验（含填充越界），错误码保持 -4
+        const unsigned char *frames[48];
+        opus_int16 sizes[48];
+
+        if (len <= 0)
+        {
+            return OPUS_BAD_ARG;
+        }
+
+        if (opus_packet_parse(data, len, NULL, frames, sizes, NULL) < 0)
+        {
+            return OPUS_INVALID_PACKET;
+        }
+
+        return s2a_apple_decode(h->apple, data, len, pcm, frame_size);
+    }
+#endif
+
     return h->single != NULL
         ? opus_decode(h->single, data, len, pcm, frame_size, 0)
         : opus_multistream_decode(h->multi, data, len, pcm, frame_size, 0);
@@ -53,6 +89,14 @@ int32_t s2a_opus_decode(void *p, const uint8_t *data, int32_t len, int16_t *pcm,
 void s2a_opus_reset(void *p)
 {
     s2a_opus *h = p;
+
+#ifdef S2A_OPUS_SYSTEM
+    if (h->apple != NULL)
+    {
+        s2a_apple_reset(h->apple);
+        return;
+    }
+#endif
 
     if (h->single != NULL)
     {
@@ -70,6 +114,15 @@ void s2a_opus_close(void *p)
 
     if (h != NULL)
     {
+#ifdef S2A_OPUS_SYSTEM
+        if (h->apple != NULL)
+        {
+            s2a_apple_close(h->apple);
+            free(h);
+            return;
+        }
+#endif
+
         opus_decoder_destroy(h->single);
         opus_multistream_decoder_destroy(h->multi);
         free(h);
