@@ -96,6 +96,16 @@ S2Arm runs 64-bit (AArch64) games. Apple silicon cannot execute 32-bit ARM code,
 
 [Contributing](CONTRIBUTING.md) · [AI collaboration policy](LLM_POLICY.md) · [Diagnosis and root-fix skills for AI](skills/) · [Report a problem](https://github.com/jhaizhou-ops/S2Arm/issues) · [Third-party licenses](THIRD_PARTY_LICENSES.md)
 
+## Star history
+
+<a href="https://star-history.com/#jhaizhou-ops/S2Arm&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date" />
+    <img alt="S2Arm star history chart" src="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date" />
+  </picture>
+</a>
+
 ## Thanks
 
 S2Arm stands on the shoulders of its community.

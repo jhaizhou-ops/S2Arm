@@ -96,6 +96,16 @@ S2Arm 运行 64 位（AArch64）游戏。Apple 芯片不能执行 32 位 ARM 代
 
 [贡献指南](CONTRIBUTING.md) · [AI 协作规范](LLM_POLICY.md) · [给 AI 的诊断与根修 skills](skills/) · [问题回报](https://github.com/jhaizhou-ops/S2Arm/issues) · [第三方许可](THIRD_PARTY_LICENSES.md)
 
+## Star 走势
+
+<a href="https://star-history.com/#jhaizhou-ops/S2Arm&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date" />
+    <img alt="S2Arm Star 走势图" src="https://api.star-history.com/svg?repos=jhaizhou-ops/S2Arm&type=Date" />
+  </picture>
+</a>
+
 ## 致谢
 
 S2Arm 站在社区的肩膀上。
