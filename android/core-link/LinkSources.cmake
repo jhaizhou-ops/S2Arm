@@ -23,6 +23,8 @@ function(s2a_android_host_sources output)
         # 安卓侧共用文档根绑定：runtime.c 起局把 S2A_DOCS 指到本局 state 目录（iOS/Mac 由
         # launchctx 提供，安卓无此环节；dguard 的 wire/direct_guard 等消费者才得以落盘）
         native/docs_android.c
+        # AMediaCodec 视频解码边界（#44 第二刀）：纯 NDK API，无钉版源码，直接进单库。
+        codecs/s2a_mc.c
         native/direct_vk.c native/direct_session.c native/direct_choice.c native/direct_callback.c native/direct_callback.S)
     if(S2A_ANDROID_EXPERIMENTAL_TOUCH)
         list(APPEND sources native/touch_input.c)
