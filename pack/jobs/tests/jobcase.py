@@ -132,6 +132,9 @@ class JobCase(unittest.TestCase):
         binary.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
 source = pathlib.Path(sys.argv[4])
 if source.read_bytes() == b"truncated fixture":
+    print("Beginning of synthetic reader diagnostic")
+    print("long synthetic diagnostic " * 300)
+    print("Authorization: Bearer synthetic-bearer")
     print("【内容截断】")
 if source.read_bytes() in (b"outdated fixture", b"ticket fixture"):
     code = "keys_missing" if source.read_bytes() == b"outdated fixture" else "ticket_missing"
@@ -141,6 +144,10 @@ if source.read_bytes() in (b"outdated fixture", b"ticket fixture"):
 if source.read_bytes() == b"unreadable fixture":
     print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
     print("Authorization: Bearer synthetic-bearer")
+    raise SystemExit(3)
+if source.read_bytes() == b"disk full fixture":
+    print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
+    print("【原因 disk_full】")
     raise SystemExit(3)
 if source.read_bytes() == b"unknown exit fixture":
     print("Unrecognized fixture error")

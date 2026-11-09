@@ -79,6 +79,8 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
     try:
         if c.operation not in operations:
             raise Failure("不支持的任务类型。")
+        if c.operation == "import":
+            c.import_result = library.initial_import_result(c)
         if c.operation not in saves.OPERATIONS:
             embedded.install(c)
         result = operations[c.operation](c)
@@ -97,7 +99,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
         waiting = c.operation in ("downloadIosPlatform", "downloadMetal")
         c.finish("cancelled", "游戏已停止。" if c.operation == "launch" else
                  "已停止等待：Xcode 的下载可能仍在继续（可在 Xcode → 设置 → Components 里查看）。" if waiting else
-                 "任务已取消；上次成功的运行版本和存档已保留。")
+                 "任务已取消；上次成功的运行版本和存档已保留。", getattr(c, "import_result", None))
         return 130
     except Exception as error:
         ended.set()
@@ -109,7 +111,7 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
             c.last_log = log
         diagnostic = c.report_failure(error)
         message = diagnostic["summary"]
-        c.finish("failed", message)
+        c.finish("failed", message, getattr(c, "import_result", None))
         return 1
     finally:
         ended.set()

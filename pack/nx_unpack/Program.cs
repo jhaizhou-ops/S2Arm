@@ -83,12 +83,17 @@ static partial class P {
     // 任何没被专门接住的异常翻译成「能照做的红字 + 分类码」。分类码是给普查 / 日志聚合看的，不参与成功判定。
     //   异常链里每一个（含并行读包 AggregateException 的全部 inner）各分一次类，按 Prio 取最具体的那个（#772 F-nxunpack-leaf-first：
     //   原先只顺着第一条 inner 走到底，缺密钥 / 容器坏排在第二条时记成 internal，普查和「内部错误」混在一起）
-    static readonly string[] Prio = { "ticket_missing", "keys_missing", "hash_mismatch", "container_invalid", "out_of_range", "io", "oom", "hresult", "source", "usage", "internal" };
+    static readonly string[] Prio = { "disk_full", "ticket_missing", "keys_missing", "hash_mismatch", "container_invalid", "out_of_range", "io", "oom", "hresult", "source", "usage", "internal" };
     static (string Code, string Message) Explain(Exception e) {
         (string Code, string Message) best = ExplainOne(e); int bi = Array.IndexOf(Prio, best.Code);
         foreach (Exception x in Chain(e)) { var r = ExplainOne(x); int i = Array.IndexOf(Prio, r.Code); if (i < bi) { best = r; bi = i; } }
         return best;
     }
+    // .NET preserves Unix errno and wraps Windows filesystem errors in HRESULTs.
+    static bool DiskFull(IOException error) => OperatingSystem.IsWindows()
+        ? error.HResult is unchecked((int)0x80070070) or unchecked((int)0x80070027)
+        : error.HResult == 28 || error.HResult == (OperatingSystem.IsMacOS() ? 69 : 122);
+
     static (string Code, string Message) ExplainOne(Exception x) {
         string first = (x.Message ?? "").Split('\n')[0];
         switch (x) {
@@ -106,6 +111,8 @@ static partial class P {
                 return ("container_invalid", $"容器格式不对（{first}）：不是 xci / nsp，或包里的 .ncz 头损坏，换一份原始包");
             case ArgumentOutOfRangeException or IndexOutOfRangeException:
                 return ("out_of_range", $"读越界（{first}）：源文件被截断（NCZ 声明的长度比实际数据长），或内容号对不上；文件不完整就换一份完整的");
+            case IOException io when DiskFull(io):
+                return ("disk_full", "写入内容所需的磁盘空间不足");
             case IOException io:   // 含 EndOfStreamException（NCZ 临时文件 / zstd 流提前结束）
                 return ("io", $"读源文件失败（{first}）：文件被截断或读不动（外置盘掉线？），换一份完整的");
             case OutOfMemoryException:
@@ -445,7 +452,7 @@ static partial class P {
                         var nca = new Nca(Ks, content());
                         ok = nca.VerifyHeaderSignature() == Validity.Valid;
                         if (!ok) { ok = true; for (int sct = 0; sct < 4; sct++) if (nca.SectionExists(sct) && nca.VerifySection(sct) != Validity.Valid) { ok = false; break; } }
-                    } catch (Exception) { ok = false; }
+                    } catch (Exception error) when (!inspect || error is not IOException io || !DiskFull(io)) { ok = false; }
                     if (!ok) { badsig.Add(e.Name); continue; }
                     signed.Add(e.Name);
                 }
