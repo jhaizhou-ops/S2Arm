@@ -4,10 +4,10 @@ NATIVE_TEST_OWN += vpad_custom
 .PHONY: native-test-vpad_custom
 native-test-vpad_custom:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -framework Foundation -framework CoreGraphics -o $(BUILD)/tests/t_vpad_custom runtime/tests/t_vpad_custom.m ios/vpad_layout.m
+	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -framework Foundation -framework CoreGraphics -o $(BUILD)/tests/t_vpad_custom runtime/tests/t_vpad_custom.m ios/vpad_layout.m ios/vpad_data.m
 	$(BUILD)/tests/t_vpad_custom
 ifeq ($(shell uname -s),Darwin)
-	@$(IOS_CC) -fsyntax-only -fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include ios/vpad.m ios/vpad_settings.m ios/vpad_shell.m ios/settings.m
+	@$(IOS_CC) -fsyntax-only -fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include ios/vpad.m ios/vpad_settings.m ios/vpad_shell.m ios/vpad_data.m ios/vpad_skin.m ios/vpad_probe.m ios/settings.m
 endif
 TEST_TARGETS += native-test-vpad_custom
 
@@ -16,6 +16,6 @@ NATIVE_TEST_OWN += vpad_shell
 .PHONY: native-test-vpad_shell
 native-test-vpad_shell:
 	@mkdir -p $(BUILD)/tests
-	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -framework Foundation -framework CoreGraphics -o $(BUILD)/tests/t_vpad_shell runtime/tests/t_vpad_shell.m ios/vpad_shell.m ios/vpad_layout.m
+	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -framework Foundation -framework CoreGraphics -o $(BUILD)/tests/t_vpad_shell runtime/tests/t_vpad_shell.m ios/vpad_shell.m ios/vpad_layout.m ios/vpad_data.m ios/vpad_skin.m
 	$(BUILD)/tests/t_vpad_shell
 TEST_TARGETS += native-test-vpad_shell

@@ -39,6 +39,27 @@ int main(void) {
         S2AVPadLayoutStore *ra = [[S2AVPadLayoutStore alloc] initWithDirectory:A settingsDirectory:S];
         S2AVPadLayout *sel = [ra selectedLayout:&e];
         CK(sel && [sel.identifier isEqualToString:S2AVPadLayoutMineIdentifier] && near([btn(sel, @"A")[@"x"] doubleValue], 0.25), "⑤ 重开 A：选中 mine、A 键 x 0.25（第二次的位置）（实得 %s）", sel ? [[btn(sel, @"A")[@"x"] description] UTF8String] : "无");
+        // ⑥ 每键缩放：A 放大 1.5×、B 缩小 0.5（钳到 0.6），宽高与圆角同比、中心不变；没给倍率的键照旧
+        S2AVPadLayout *sc = [d layoutWithButtonCenters:@{} scales:@{@"A": @1.5, @"B": @0.5} safeRect:safe identifier:S2AVPadLayoutMineIdentifier name:@"缩放" error:&e];
+        double aw = [btn(d, @"A")[@"width"] doubleValue], bw2 = [btn(d, @"B")[@"width"] doubleValue];
+        CK(sc && near([btn(sc, @"A")[@"width"] doubleValue], MIN(0.4, aw * 1.5)) && near([btn(sc, @"A")[@"x"] doubleValue], [btn(d, @"A")[@"x"] doubleValue]),
+           "⑥ A 键 1.5×：宽 %.4f → %.4f、中心不变", aw, [btn(sc, @"A")[@"width"] doubleValue]);
+        CK(sc && near([btn(sc, @"B")[@"width"] doubleValue], MAX(0.04, bw2 * 0.6)), "⑥ B 键倍率 0.5 钳到 0.6：宽 %.4f → %.4f", bw2, [btn(sc, @"B")[@"width"] doubleValue]);
+        CK(sc && near([btn(sc, @"A")[@"cornerRadius"] doubleValue], MIN(MIN(0.2, [btn(sc, @"A")[@"width"] doubleValue] / 2), [btn(d, @"A")[@"cornerRadius"] doubleValue] * 1.5)),
+           "⑥ A 键圆角同比放大且不越短边一半");
+        // ⑦ 出厂预设：无选择记录时 adopt 成初始选择、出现在列表里、能选中读回；有选择记录（mine 已选）时不覆盖
+        NSURL *C = [root URLByAppendingPathComponent:@"games/gC/VPadLayouts"];
+        S2AVPadLayoutStore *sc7 = [[S2AVPadLayoutStore alloc] initWithDirectory:C settingsDirectory:S];
+        sc7.presetLayout = [d layoutWithButtonCenters:@{} safeRect:safe identifier:@"preset.0100000000000000" name:@"出厂布局" error:&e];
+        CK([sc7 adoptPresetIfNoSelection] && [sc7.selectedIdentifier isEqualToString:@"preset.0100000000000000"], "⑦ 新款 adopt 出厂预设为初始选择");
+        CK(sc7.layouts.count == 1 && [sc7.layouts.firstObject.identifier isEqualToString:@"preset.0100000000000000"], "⑦ 预设出现在 layouts 列表");
+        CK([[sc7 selectedLayout:&e].identifier isEqualToString:@"preset.0100000000000000"], "⑦ 选中预设能读回（不落盘）");
+        S2AVPadLayoutStore *ra7 = [[S2AVPadLayoutStore alloc] initWithDirectory:A settingsDirectory:S];
+        ra7.presetLayout = sc7.presetLayout;
+        CK(![ra7 adoptPresetIfNoSelection] && [ra7.selectedIdentifier isEqualToString:S2AVPadLayoutMineIdentifier], "⑦ 已有选择记录的款不 adopt、保持 mine");
+        // ⑧ 页值派生布局：只换键集、座位覆盖生效、stick 照旧、不落盘
+        S2AVPadLayout *dv = [d derivedLayoutWithButtons:@[btn(d, @"A"), btn(d, @"B")]];
+        CK(dv.buttons.count == 2 && dv.sticks.count == 2 && [dv.identifier isEqualToString:d.identifier], "⑧ 派生布局只剩给定键、摇杆与 id 照旧");
         [fm removeItemAtURL:root error:nil];
     }
     if (bad) printf("✗ t_vpad_custom：%d 项不通\n", bad); else printf("✓ t_vpad_custom：全部通过\n");

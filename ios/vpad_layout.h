@@ -30,6 +30,16 @@ CGFloat S2AVPadKeyOpacity(CGFloat idle, BOOL active);
 //   新 id / 名称，越出安全区的中心钳到 [0,1]。生成后按生产校验重读，不合法返回 nil
 - (nullable instancetype)layoutWithButtonCenters:(NSDictionary<NSString *, NSArray<NSNumber *> *> *)centers safeRect:(CGRect)rect
                                        identifier:(NSString *)identifier name:(NSString *)name error:(NSError **)error;
+// 同上，再按 scales（键 id → 倍率，0.6–1.6，编辑器每键缩放）放大 / 缩小每键的 width / height / cornerRadius；
+//   缩放后仍按生产校验重读（尺寸钳进 F01 的 [0.04, 0.4]、圆角钳到短边一半），不合法返回 nil
+- (nullable instancetype)layoutWithButtonCenters:(NSDictionary<NSString *, NSArray<NSNumber *> *> *)centers
+                                          scales:(nullable NSDictionary<NSString *, NSNumber *> *)scales safeRect:(CGRect)rect
+                                      identifier:(NSString *)identifier name:(NSString *)name error:(NSError **)error;
+// 页值显隐的派生布局（vpad_probe / vpad.m 用）：同方案只换按键集（顺序照 buttons），不走 F01 校验
+//   （同 defaultForSafeRect 的可信内存构造：输入来自已校验的源布局 + 包内数据文件的座位覆盖）
+- (instancetype)derivedLayoutWithButtons:(NSArray<NSDictionary *> *)buttons;
+// 包内出厂预设（vpad-data/layouts/<程序号>.json，F01 格式）；没有返回 nil
++ (nullable instancetype)presetForTitleID:(NSString *)titleID;
 @end
 // 拖动编辑存下的方案 id（每款游戏一份，覆盖保存）
 extern NSString *const S2AVPadLayoutMineIdentifier;
@@ -60,6 +70,10 @@ double S2AVPadHoldLockDeadline(const S2AVPadHoldLockState *state);
 CGPoint S2AVPadStickResponse(CGPoint input, CGFloat deadzone, CGFloat saturation, CGFloat exponent);
 
 @interface S2AVPadLayoutStore : NSObject
+// 本款的出厂预设（包内数据，不落盘）：出现在 layouts 列表里、可被选中；
+//   本款从没写过选择记录时 adoptPresetIfNoSelection 把它设为初始选择
+@property(nonatomic, strong, nullable) S2AVPadLayout *presetLayout;
+- (BOOL)adoptPresetIfNoSelection;
 @property(nonatomic, readonly, copy) NSURL *directory;
 @property(nonatomic, readonly, copy) NSString *selectedIdentifier;
 // Invalid files remain on disk and are returned as visible diagnostics.
