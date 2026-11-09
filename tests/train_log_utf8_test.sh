@@ -8,11 +8,13 @@
 set -u
 H=$(cd "$(dirname "$0")/.." && pwd); bad=0
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
-eval "$(/usr/bin/grep -a '^u8() ' "$H/tools/train.sh")"
+TR=${S2A_PRIVATE_TOOLS:+$S2A_PRIVATE_TOOLS/train.sh}; TR=${TR:-$H/tools/train.sh}
+if [ ! -f "$TR" ]; then echo "train_log_utf8 单测跳过：公开检出没有列车脚本"; exit 75; fi
+eval "$(/usr/bin/grep -a '^u8() ' "$TR")"
 in=$(printf '门禁 绿 全量清\xe5\x8d；ok')
 o=$(u8 "$in")
 v=$(printf '%s' "$o" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8"); print("合法")' 2>/dev/null)
 ck "① 截半的汉字被滤掉，前后文都在（${o}）" '[ "$v" = 合法 ] && [ "$o" = "门禁 绿 全量清；ok" ]'
 ck "② 合法输入原样" '[ "$(u8 "已合入 x → main 中文🟢")" = "已合入 x → main 中文🟢" ]'
-ck "③ t() 与 inbox() 写入口经 u8" '/usr/bin/grep -aq "^t() .*u8 " "$H/tools/train.sh" && /usr/bin/grep -aq "^inbox() { set -- \"\$1\" \"\$(u8 " "$H/tools/train.sh"'
+ck "③ t() 与 inbox() 写入口经 u8" '/usr/bin/grep -aq "^t() .*u8 " "$TR" && /usr/bin/grep -aq "^inbox() { set -- \"\$1\" \"\$(u8 " "$TR"'
 [ $bad = 0 ] && echo "train_log_utf8 单测全过"; exit $bad

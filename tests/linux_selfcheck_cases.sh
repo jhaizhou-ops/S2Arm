@@ -11,7 +11,7 @@ class LinuxSelfcheck(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.r = pathlib.Path(self.tmp.name)
-        for d in ('tools/bin', 'tests', 'native', 'android'):
+        for d in ('tools/bin', 'tests', 'runtime', 'android'):
             (self.r / d).mkdir(parents=True, exist_ok=True)
         for f in ('gate.sh', 'contrib_check.sh', 'gate_plan.sh', 'idle_timeout.sh'):
             shutil.copyfile(H / 'tools' / f, self.r / 'tools' / f)
@@ -153,7 +153,7 @@ class LinuxSelfcheck(unittest.TestCase):
         self.assertEqual(b.returncode, 0, b.stderr)
         # 改前 main 的固定夹具字节，不依赖本地保留历史提交。
         self.assertEqual(b.stdout.encode(), ('语法\n单测 portable_test\niOS 全量编译\n'
-            '钩子 runtime/gate.sh\n钩子 android/gate.sh\n').encode())
+            '钩子 android/gate.sh\n钩子 runtime/gate.sh\n').encode())
     def test_remote_selection_keeps_toolchain_preflight(self):
         p=self.run_script('tools/gate.sh', GATE_RERUN='单测 portable_test', GATE_HOST='gate-host')
         self.assertEqual(p.returncode, 2)
@@ -201,8 +201,12 @@ class LinuxSelfcheck(unittest.TestCase):
         self.assertFalse((self.r/'apple-ran').exists())
     def pre_fixture(self, portable_rc='0', bad_script=False):
         # 列车入队预检（tools/train.sh pre）在没有苹果工具链的宿主上：合并树 = origin/main + 本支
-        for f in ('train.sh',):
-            shutil.copyfile(H / 'tools' / f, self.r / 'tools' / f)
+        # 列车脚本是维护方工具，公开检出没有（同 tools/docs_consistency.py train_source）
+        private = os.environ.get('S2A_PRIVATE_TOOLS')
+        train = pathlib.Path(private) / 'train.sh' if private else H / 'tools/train.sh'
+        if not train.exists():
+            self.skipTest('公开检出没有列车脚本')
+        shutil.copyfile(train, self.r / 'tools/train.sh')
         self.write('tools/gate_route.py', 'import glob, subprocess, sys\nc = sys.argv[1]\n'
                    'if c == "why": print("fixture")\nelif c == "tests": print("\\n".join(sorted(glob.glob("tests/*_test.sh"))))\n'
                    'elif c == "ios": print("yes")\nelif c == "hooks": print("runtime/gate.sh\\nandroid/gate.sh")\n')

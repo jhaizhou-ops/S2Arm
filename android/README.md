@@ -8,31 +8,7 @@ and the AAudio backend are described below. The integration branch also supplies
 a per-game runtime; device compatibility and complete game behavior require
 validation for each final build and device.
 
-## Android implementation documents
-
-- Android 快速通用模式：目标与实现方案: the single Android
-  product and implementation plan; start here for goals, architecture, shaders, delivery order and acceptance.
-- 直连历史证据归档: old candidate identities,
-  measurements and counterexamples; evidence only, not active implementation instructions.
-- Android 端实施方案: integration contracts, dependencies and
-  acceptance criteria.
-- 里程碑 ChangeLog: verified milestones, rollbacks and changes to milestone acceptance conclusions; not a development diary.
-- Android 开发总览: current A0–A8 / AN status, evidence and open work.
-- GPU 兼容性与优化说明: shared Vulkan code, capability
-  checks, driver differences and extension points for device-specific optimization.
-- 着色器与管线缓存实施方案: iOS / D2R reference, general/direct
-  graphics separation, offline preparation, Vulkan caches, warm-up and staged acceptance.
-- 直连实施契约 v1: concrete ABI, shader inputs/bindings,
-  HLE/video, WSI/IME, packaging, failure recovery and delivery gates; design baseline, not implemented runtime.
-- D2R 直连经验清单: 29 source-backed adoption decisions,
-  executable NVN ABI comparison and the scope of the checks actually run.
-- Android 系统输入法方案: shared generic/direct keyboard,
-  Chinese IME composition, Unicode, session cancellation and device acceptance.
-- E04 Xiaomi 13 首轮诊断: sanitized
-  device observations, limitations, and an opt-in manual rerun tool; not an automated gate.
-
-This README records the implemented bring-up and its verification scope. The
-implementation plan describes the remaining work under the multi-platform plan.
+This README records the implemented bring-up and its verification scope.
 
 Android community patches default to off; an explicitly configured `S2A_CPATCH_ON`
 may enable them. This source-level policy has not been verified on a device.
@@ -718,7 +694,7 @@ Checked on the Redmi K50 Ultra (2026-10-23, synthetic package, versionCode 3):
   artifact is for versionCode 99, this app is 3";
 - the app was uninstalled afterwards.
 
-### Distribution constraints (2026-10-28 research, `docs/研究/情报/20261028_安卓16KB页与鸿蒙可执行内存.md`, `20261028_方向三四增量跟踪.md`)
+### Distribution constraints (2026-10-28 research)
 
 Per-game APKs are built by the player and sideloaded; they are never published
 through Google Play. Google's developer verification changes what sideloading
