@@ -84,7 +84,6 @@ public final class S2ArmShellHostModel {
                      onButtonTest: { [weak self] open in self?.buttonTest(open) })
     }
 
-/几何保存/皮肤接口，设置页加皮肤行，编辑器加每键缩放与皮肤预览)
     /// 只放行可运行的那款（界面本身也只在 playable 时调 onPlay，这里再守一道）；放行前当场重判资源包（库开着时资源被删 / 换机拷走）
     public func requestPlay(_ id: String) {
         refreshGameData()
