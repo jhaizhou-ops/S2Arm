@@ -369,8 +369,15 @@ def keys(c):
                               if p["type"] == "base" and p.get("format") not in ("nup", "dump", "extract", "loose") and source_path(c, p).is_file()), None)   # NUP 与解包目录不加密，验不了密钥
             if candidate:
                 with tempfile.TemporaryDirectory(dir=c.private) as icons:
-                    inspect(c, candidate, icons, keyfile=temporary)
-                verified = True
+                    diagnostics_before = len(c.job["diagnostics"])
+                    try:
+                        inspect(c, candidate, icons, keyfile=temporary)
+                    except Failure as error:
+                        if error.code != "content_truncated":
+                            raise
+                        del c.job["diagnostics"][diagnostics_before:]
+                    else:
+                        verified = True
             c.check()
             os.replace(temporary, c.keys)
     finally:
@@ -379,9 +386,8 @@ def keys(c):
     return dict(entries=count, verified=verified, message="已验证解密能力" if verified else "格式通过，首次读取游戏时验证解密能力")
 
 
-KEYS_CANNOT_DECRYPT = ("读不出这个游戏：你的 prod.keys 解不开它。多半是密钥太旧（导出密钥的 Switch 系统版本比游戏要求的低），"
-                       "请把 Switch 更新到最新系统后重新导出 prod.keys，到「设置 → 玩家密钥」重新导入，再放一次游戏。"
-                       "如果密钥是新的，可能是游戏文件不完整，请重新复制或下载后再试。")
+KEYS_CANNOT_DECRYPT = ("无法读取游戏内容：可能是文件不完整、缺票据或密钥不匹配。请核对原始文件；"
+                       "若已确认 Switch 密钥版本不足，再重新导出，到「设置 → 玩家密钥」重新导入。")
 
 
 def inspect(c, source, icon_dir, keyfile=None):
@@ -391,11 +397,20 @@ def inspect(c, source, icon_dir, keyfile=None):
     try:
         c.run(["dotnet", toolchain.reader(c), keyfile, "--inspect", source, icon_dir],
               c.private / "logs" / (c.task + "-inspect.log"), on_line=lines.append)
-    except Failure:
-        # 读取器解不开（退出码 3，「could not be decrypted or verified. Check keys…」）：说成玩家能照做的话（10-23 内测前失败提示走查）
+    except Failure as error:
+        if error.code not in ("tool_exit", "job_failed"):
+            raise
+        if "【内容截断】" in lines:
+            raise Failure("游戏文件不完整，部分内容超出文件末尾。", code="content_truncated") from None
+        if any(line.startswith("【原因 ticket_missing】") for line in lines):
+            raise Failure("缺少内容对应的票据或标题密钥，请检查源文件是否完整。", code="ticket_missing") from None
+        if any(line.startswith("【原因 keys_missing】") for line in lines):
+            raise Failure("现有 prod.keys 缺少读取此文件所需的密钥。", code="keys_outdated") from None
         if any("could not be decrypted" in line or "Check keys" in line for line in lines):
             raise Failure(KEYS_CANNOT_DECRYPT, code="content_unreadable") from None
         raise
+    if "【内容截断】" in lines:
+        raise Failure("游戏文件不完整，部分内容超出文件末尾。", code="content_truncated")
     try:
         output = json.loads(next(line for line in reversed(lines) if line.startswith("{")))
         if output.get("schema") != 1 or not output["packages"]:

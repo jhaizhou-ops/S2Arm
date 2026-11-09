@@ -65,7 +65,7 @@ static partial class P {
         catch (Exception e) when (HashFail(e) is HorizonResultException h) {   // 数据块哈希不对（10-26 生死格斗沙滩排球3 整合版：资源被改过、哈希没更新）
             Console.Error.WriteLine($"🔴 源文件数据哈希校验不过（{h.Message.Split('\n')[0]}）：文件被改过（如合进改版资源的整合版）或损坏，换一份原版完整的文件"); return 1; }
         catch (LibHac.Common.Keys.MissingKeyException e) {
-            Console.Error.WriteLine($"🔴 prod.keys 里没有 {e.Name}：这款游戏用了更新的密钥版本，要用系统版本更新的 Switch 重新导出 prod.keys（{e.Message.Split('\n')[0]}）"); return 1; }
+            Console.Error.WriteLine("🔴 " + ExplainOne(e).Message); return 1; }
         catch (Exception e) {   // 兜底（10-28 #633）：上面三类之外的任何异常都不许再让 CLR 打印调用栈 + abort（rc=134）
             var (code, message) = Explain(e);
             Report(code, message, e); return 1;
@@ -83,7 +83,7 @@ static partial class P {
     // 任何没被专门接住的异常翻译成「能照做的红字 + 分类码」。分类码是给普查 / 日志聚合看的，不参与成功判定。
     //   异常链里每一个（含并行读包 AggregateException 的全部 inner）各分一次类，按 Prio 取最具体的那个（#772 F-nxunpack-leaf-first：
     //   原先只顺着第一条 inner 走到底，缺密钥 / 容器坏排在第二条时记成 internal，普查和「内部错误」混在一起）
-    static readonly string[] Prio = { "keys_missing", "hash_mismatch", "container_invalid", "out_of_range", "io", "oom", "hresult", "source", "usage", "internal" };
+    static readonly string[] Prio = { "ticket_missing", "keys_missing", "hash_mismatch", "container_invalid", "out_of_range", "io", "oom", "hresult", "source", "usage", "internal" };
     static (string Code, string Message) Explain(Exception e) {
         (string Code, string Message) best = ExplainOne(e); int bi = Array.IndexOf(Prio, best.Code);
         foreach (Exception x in Chain(e)) { var r = ExplainOne(x); int i = Array.IndexOf(Prio, r.Code); if (i < bi) { best = r; bi = i; } }
@@ -94,6 +94,8 @@ static partial class P {
         switch (x) {
             case SourceError s: return ("source", s.Message);
             case UsageError u: return ("usage", u.Message);
+            case MissingKeyException m when m.Type == LibHac.Common.Keys.KeyType.Title:
+                return ("ticket_missing", "缺少内容对应的票据或标题密钥，请检查源文件是否完整");
             case LibHac.Common.Keys.MissingKeyException m:
                 return ("keys_missing", $"prod.keys 里没有 {m.Name}：这款游戏用了更新的密钥版本，要用系统版本更新的 Switch 重新导出 prod.keys（{first}）");
             case HorizonResultException h when h.Message.Contains("VerificationFailed"):
@@ -383,7 +385,7 @@ static partial class P {
         if (!Copies.TryGetValue(id, out var list)) Copies[id] = list = new();
         list.Add((src, open));
     }
-    static void Index(string src) {
+    static void Index(string src, bool inspect = false) {
         // 长度取打开后的流（跟随符号链接）：FileInfo(src).Length 在 Unix 上是链接自身的长度（10-26 Downloads 里指向移动硬盘的链接全当成非卡带镜像）
         string fn = Path.GetFileName(src); bool xci = false; long len;
         using (var fh = File.OpenRead(src)) {
@@ -407,6 +409,7 @@ static partial class P {
         catch (Exception e) when (e is InvalidDataException || e is HorizonResultException || e is EndOfStreamException) {
             throw new SourceError(xci ? $"{fn} 是卡带镜像（0x100 处有 HEAD），但分区表打不开（文件坏了或密钥不对）：{e.Message.Split('\n')[0]}"
                                       : $"{fn} 既不是卡带镜像（0x100 处没有 HEAD）也不是安装包（PFS0），或分区表坏了：{e.Message.Split('\n')[0]}"); }
+        bool confirmedTruncation = false;
         var truncated = new List<string>(); var strange = new List<string>(); var signed = new List<string>(); var badsig = new List<string>();
         foreach (var e in ents) {
             if (e.Name.EndsWith(".tik", StringComparison.OrdinalIgnoreCase)) {
@@ -421,7 +424,14 @@ static partial class P {
                 string id = e.Name[..32].ToLowerInvariant(); Func<IStorage> raw = e.Open;
                 // 截断核对：内容的最后一个字节要读得到（10-26 宝可梦朱 1.47 GB 的卡带镜像声明 6.27 GB，原先在解清单时抛 OutOfRange 调用栈）
                 byte[] last = new byte[1];
-                if (e.Size > 0 && raw().Read(e.Size - 1, last).IsFailure()) { truncated.Add(e.Name); continue; }
+                if (e.Size > 0) {
+                    var read = raw().Read(e.Size - 1, last);
+                    if (read.IsFailure()) {
+                        confirmedTruncation |= ResultFs.OutOfRange.Includes(read);
+                        truncated.Add(e.Name);
+                        continue;
+                    }
+                }
                 Func<IStorage> content = raw;
                 if (e.Name.EndsWith(".ncz", StringComparison.OrdinalIgnoreCase)) {
                     string key = src + "\0" + e.Name;
@@ -452,6 +462,7 @@ static partial class P {
             Console.WriteLine($"🟡 {fn} 里 {strange.Count} 个内容文件名字不是「32 位内容号 + .nca/.ncz」（如 {strange[0]}），跳过（认不出内容号就对不上清单）");
         if (truncated.Count > 0) {   // 只跳过被截断的那几个内容（同文件里完整的内容照用，如 DLC 的清单）；被跳过的若是本体 / 更新要的，下面照样报红
             string m = $"{fn} 被截断：{truncated.Count} 个内容超出文件末尾（文件 {len / (double)(1L << 30):F2} GB；如 {string.Join(", ", truncated.Take(3))}），源文件不完整，换一份完整的";
+            if (inspect && confirmedTruncation) Console.WriteLine("【内容截断】");
             Broken.Add(m); Console.WriteLine($"🟡 源文件损坏，已跳过被截断的内容：{m}");
         }
     }

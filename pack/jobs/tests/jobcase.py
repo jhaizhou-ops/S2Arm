@@ -131,6 +131,13 @@ class JobCase(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
 source = pathlib.Path(sys.argv[4])
+if source.read_bytes() == b"truncated fixture":
+    print("【内容截断】")
+if source.read_bytes() in (b"outdated fixture", b"ticket fixture"):
+    code = "keys_missing" if source.read_bytes() == b"outdated fixture" else "ticket_missing"
+    print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
+    print(f"【原因 {code}】")
+    raise SystemExit(3)
 if source.read_bytes() == b"unreadable fixture":
     print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
     print("Authorization: Bearer synthetic-bearer")
