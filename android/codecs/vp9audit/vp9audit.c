@@ -303,7 +303,8 @@ static int apply_compressed(uint8_t *blob, const s2a_pic *p, const uint8_t *data
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) { fprintf(stderr, "usage: vp9audit <file.ivf>\n"); return 2; }
+    if (argc != 2 && argc != 3) { fprintf(stderr, "usage: vp9audit <file.ivf> [-guest]\n"); return 2; }
+    const int guest = argc == 3 && !strcmp(argv[2], "-guest");
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror("open"); return 1; }
     uint8_t hdr[32];
@@ -324,6 +325,12 @@ int main(int argc, char **argv)
     int *ord_w = malloc(sizeof(int) * 65536), *ord_h = malloc(sizeof(int) * 65536);
     s2a_slots repack;
     s2a_slots_reset(&repack);
+    // -guest: model the game's supplied-probs shadow under zero counts. A job the native backend
+    // decodes writes no backward-update counts, so the game's next supplied blob stays frozen at
+    // the last value real counts produced; a job that went managed resyncs the shadow to its real
+    // table (optimistic bound — a managed decode on a desynced base may recover less).
+    uint8_t shadow[3087]; memcpy(shadow, defaults, 3087);
+    int mc_era = 0;
     int n_match = 0, n_mismatch = 0, n_hidden = 0, n_check = 0, n_hdr = 0, n_slot = 0;
     int n_inactive = 0, n_exist = 0, n_derr = 0, n_profile = 0;
 
@@ -376,6 +383,7 @@ int main(int argc, char **argv)
         if (uh.err || uh.show_existing)
         {
             // unparseable (non-profile-0) or show_existing: can't repack; orig still tracked for ref bookkeeping
+            mc_era = 0;
             if (uh.show_existing) { n_exist++; continue; }
             if (key) { active = 1; s2a_slots_reset(&repack); }
             if (active) { printf("f%04d -> hdr(parse/profile)\n", ord); n_profile++; active = 0; s2a_slots_reset(&repack); }
@@ -403,7 +411,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < 4; i++) fc_to_blob(&cm->frame_contexts[i], ctx_blobs[i]);
 
         if (key) { active = 1; s2a_slots_reset(&repack); }
-        if (!active) { n_inactive++; continue; }
+        if (!active) { n_inactive++; mc_era = 0; continue; }
 
         const char *bucket = NULL;
         if (!show) { bucket = "hidden"; n_hidden++; }
@@ -451,7 +459,19 @@ int main(int argc, char **argv)
             memcpy(blob, pre_blob, 3087);
             const uint8_t *ch = mbuf + uh.uncompressed_bytes;
             int ap = apply_compressed(blob, &p, ch, uh.first_partition_size);
-            const char *chk = ap < 0 ? "ch-apply" : s2a_compressed_check(&p, blob, defaults);
+            const uint8_t *supplied = blob;
+            if (guest && ap >= 0)
+            {
+                // 客体零计数模型：客体自己的熵模型照样吃压缩头增量，缺的只是解码计数
+                // 的反向适配——MC 作业回来的是全零计数，影子链只靠增量漂移；托管作业
+                // 按乐观上界把影子重同步回真值表。
+                if (!mc_era) memcpy(shadow, pre_blob, 3087);
+                else if (key || cm->error_resilient_mode || cm->reset_frame_context == 3 || cm->reset_frame_context == 2)
+                    memcpy(shadow, defaults, 3087);
+                apply_compressed(shadow, &p, ch, uh.first_partition_size);
+                supplied = shadow;
+            }
+            const char *chk = ap < 0 ? "ch-apply" : s2a_compressed_check(&p, supplied, defaults);
             if (chk) { bucket = chk; n_check++; }
             else
             {
@@ -459,7 +479,7 @@ int main(int argc, char **argv)
                 size_t tiles_len = msz - uh.uncompressed_bytes - uh.first_partition_size;
                 size_t len = 0;
                 int target = -1;
-                const char *be = s2a_build_frame2(&p, &sf, &repack, blob, defaults, tiles, tiles_len,
+                const char *be = s2a_build_frame2(&p, &sf, &repack, supplied, defaults, tiles, tiles_len,
                                                   au, 1 << 20, &len, &target);
                 if (getenv("AUDIT_DUMP") && ord == (uint32_t)atoi(getenv("AUDIT_DUMP")))
                 {
@@ -486,6 +506,7 @@ int main(int argc, char **argv)
                         if (planes_equal(ia, ib))
                         {
                             n_match++;
+                            mc_era = 1;
                             s2a_slots_commit(&repack, &p, &sf, target);
                             printf("f%04d %s tx=%d ref=%d prevmv=%d -> Decoded\n", ord, key ? "K" : "I",
                                    cm->tx_mode, cm->reference_mode, cm->use_prev_frame_mvs);
@@ -501,13 +522,15 @@ int main(int argc, char **argv)
         printf("f%04d %s tx=%d ref=%d prevmv=%d -> %s\n", ord, key ? "K" : "I",
                cm->tx_mode, cm->reference_mode, cm->use_prev_frame_mvs, bucket);
         active = 0;
+        mc_era = 0;
         s2a_slots_reset(&repack);
         }
         free(buf);
     }
 
     int n = n_frames - n_exist;
-    printf("outcome: frames=%d (show_existing=%d superframes=%d) decoded=%d mismatch=%d hidden=%d check=%d hdr=%d slot=%d inactive=%d profile=%d decerr=%d\n",
+    printf("outcome%s: frames=%d (show_existing=%d superframes=%d) decoded=%d mismatch=%d hidden=%d check=%d hdr=%d slot=%d inactive=%d profile=%d decerr=%d\n",
+           guest ? " [guest/zero-counts]" : "",
            n_frames, n_exist, n_super, n_match, n_mismatch, n_hidden, n_check, n_hdr, n_slot, n_inactive, n_profile, n_derr);
     if (n) printf("decoded share: %d/%d = %.1f%%\n", n_match, n, 100.0 * n_match / n);
     return 0;

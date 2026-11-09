@@ -2,6 +2,7 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.Video;
 using System;
+using System.Collections.Generic;
 
 namespace Ryujinx.Graphics.Nvdec.Android
 {
@@ -45,9 +46,26 @@ namespace Ryujinx.Graphics.Nvdec.Android
         private bool _failed;
 
         // 结局记账（真机覆盖率验证）：每 300 作业与 Dispose 各打一行分布。
-        // hidden/shape/starved/error 是这里还能产生的回退；帧形语义（压缩头写不出的
-        // 段落）在上游 Vp9CompressedHeader.Check 拦下，不进本账本。
+        // hidden/shape/starved/error 是本 backend 判出的回退；Vp9NativePath 层面拦下的作业
+        // （上游 Check 的帧形段、libvpx 结果、尺寸/关键帧等）经 NoteFallback 记进 fb: 账本。
         private int _jobs, _decoded, _nrHidden, _nrShape, _nrSize, _starved, _errors;
+
+        // Vp9NativePath 交回托管的作业按原因计数，随 outcome 行同排输出，分母是总作业数。
+        private readonly SortedDictionary<string, int> _fallbacks = new();
+
+        public void NoteFallback(string reason)
+        {
+            _fallbacks.TryGetValue(reason, out int n);
+            _fallbacks[reason] = n + 1;
+        }
+
+        private string FallbackLedger()
+        {
+            if (_fallbacks.Count == 0) return "";
+            var b = new System.Text.StringBuilder(" fb:");
+            foreach (var kv in _fallbacks) b.Append($" {kv.Key}={kv.Value}/{_jobs}");
+            return b.ToString();
+        }
 
         private Vp9NativeResult Done(Vp9NativeResult r, ref int bucket)
         {
@@ -57,7 +75,7 @@ namespace Ryujinx.Graphics.Nvdec.Android
         }
 
         private void Report() => Logger.Info?.Print(LogClass.Nvdec,
-            $"mc-vp9 outcome: jobs={_jobs} decoded={_decoded} hidden={_nrHidden} shape={_nrShape} size/key={_nrSize} starved={_starved} error={_errors}");
+            $"mc-vp9 outcome: jobs={_jobs} decoded={_decoded} hidden={_nrHidden} shape={_nrShape} size/key={_nrSize} starved={_starved} error={_errors}{FallbackLedger()}");
 
         // AMediaCodec 交不出 MV 字段 / 反向更新计数：Decoded 不写 mvsOut/countsOut，
         // 客体 MV 缓冲保持上游内容；调用方据此拦下会读陈旧 MV 的托管作业。

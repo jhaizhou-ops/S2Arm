@@ -63,6 +63,11 @@ namespace Ryujinx.Graphics.Video
         // update slots (uv_mode for shown frames; y_mode/partition for intra-only) must sit at ctx defaults.
         bool NeedsCompressedHeader { get; }
 
+        // Called once per job the caller gives back to the managed decoder mid-stream, with the reason.
+        // Backends that keep an outcome ledger print the per-reason counts on the same line as the rest of
+        // the outcome bookkeeping (denominator = total jobs seen) so real runs show why coverage was lost.
+        void NoteFallback(string reason);
+
         // frame: uncompressed header + 1 byte + tile data. probs: Vp9EntropyProbs bytes (3087). prevMvs: the guest's MV
         // read buffer (empty when UsePrevFrameMvs is 0). mvsOut: the guest's MV write buffer (16 bytes per 8x8), written
         // on Decoded when ProducesGuestMetadata — otherwise left untouched (guest content is kept; nothing fabricated).

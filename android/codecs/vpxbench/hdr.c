@@ -1,4 +1,7 @@
 // See hdr.h. Field order and checks follow docs/设计_原生VP9/design_phase2_B.md §2 (header) and §3 (slot map).
+// Compressed-header 段的写出顺序与概率布局出处：libvpx 1.17.0 (pinned, BSD-3-Clause)
+// vp9/decoder/vp9_decodeframe.c `read_compressed_header`、vp9/common/vp9_entropymode.h——与
+// compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9CompressedHeader.cs 同款镜像，hdrcmp 金样测字节级一致。
 #include "hdr.h"
 
 #include <assert.h>
@@ -364,6 +367,10 @@ const char *s2a_compressed_check(const s2a_pic *p, const uint8_t *probs, const u
 {
     const int key = (p->flags & S2A_KEY) != 0;
     const int intra_only = !key && (p->flags & S2A_INTRA_ONLY);
+    // error_resilient only gates the compressed-header path: the repack emits error_resilient_mode=0
+    // and a resilient job derives use_prev_frame_mvs differently than the stream intended. libvpx's
+    // out-of-band path carries no such header, so the flag must not gate it (Vp9CompressedHeader.Check).
+    if (p->flags & S2A_ERROR_RES) return "error_resilient";
     if (!key && !region_equal(probs, defaults, S2A_OFF_UV, 90)) return "uv_mode probs";
     if (intra_only && (!region_equal(probs, defaults, S2A_OFF_YMODE, 36) ||
                        !region_equal(probs, defaults, S2A_OFF_PARTITION, 48)))
@@ -465,7 +472,6 @@ static const char *frame_prepare(const s2a_pic *p, const s2a_surfaces *sf, s2a_s
 
     // §2 checks
     if (p->seg_enabled) return "segmentation";
-    if (p->flags & S2A_ERROR_RES) return "error_resilient";
     if (bit_depth != 0 && bit_depth != 8) return "bit depth";
     if (w < 1 || h < 1 || w > 8192 || h > 8192) return "frame size";
     if (p->tx_mode > 4) return "tx_mode";
@@ -525,8 +531,11 @@ static const char *frame_prepare(const s2a_pic *p, const s2a_surfaces *sf, s2a_s
 }
 
 // Uncompressed header bits + compressed bytes + tiles. *len receives the total; returns NULL or the reason.
+// mc: emit the byte-level fixups a real decoder requires (interp literal remap, tail-bit mask, marker
+// pad byte). The libvpx backend consumed the pre-fixup byte shape since this file existed — its emit
+// must keep producing those exact bytes (mc=0, Vp9NativeHeader.WriteUncompressed).
 static const char *frame_emit(const s2a_pic *p, const int ref_idx[3], int target, int min_log2, int max_log2,
-                              const uint8_t *compressed, size_t n_compressed,
+                              int mc, const uint8_t *compressed, size_t n_compressed,
                               const uint8_t *tiles, size_t tiles_size, uint8_t *dst, size_t cap, size_t *len)
 {
     const int key = (p->flags & S2A_KEY) != 0;
@@ -573,11 +582,12 @@ static const char *frame_emit(const s2a_pic *p, const int ref_idx[3], int target
             put(&b, p->allow_hp != 0, 1);
             put(&b, p->interp == 4, 1);
             // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR} — the bitstream literal is a table
-            // index, not the enum value (decoder maps it back through read_interp_filter)
+            // index, not the enum value (decoder maps it back through read_interp_filter). Only the
+            // compressed-header path remaps; libvpx's stand-in path keeps the raw enum byte it always sent.
             if (p->interp != 4)
             {
                 static const uint8_t interp_literal[4] = { 1, 0, 2, 3 };
-                put(&b, interp_literal[p->interp], 2);
+                put(&b, mc ? interp_literal[p->interp] : (uint8_t)p->interp, 2);
             }
         }
     }
@@ -611,14 +621,15 @@ static const char *frame_emit(const s2a_pic *p, const int ref_idx[3], int target
     put(&b, (uint32_t)n_compressed, 16);   // header_size_in_bytes
     size_t n = (b.bit + 7) >> 3;
     if (n + n_compressed + tiles_size > cap) return "frame buffer too small";
-    if (b.bit & 7) dst[n - 1] &= (uint8_t)(0xff << (8 - (b.bit & 7)));
+    if (mc && (b.bit & 7)) dst[n - 1] &= (uint8_t)(0xff << (8 - (b.bit & 7)));
     memcpy(dst + n, compressed, n_compressed);
     memcpy(dst + n + n_compressed, tiles, tiles_size);
     size_t len0 = n + n_compressed + tiles_size;
     // A packet whose last byte matches the superframe-index marker (110xxxxx) is reparsed by
     // decoders as a multi-frame index — libvpx splits it into a phantom trailing frame. The spec
-    // guard: append a zero byte so the tail can never look like the index marker.
-    if ((dst[len0 - 1] & 0xe0) == 0xc0)
+    // guard: append a zero byte so the tail can never look like the index marker. MC-path only —
+    // the libvpx packet goes to the hook as a byte blob and must not grow a tail byte.
+    if (mc && (dst[len0 - 1] & 0xe0) == 0xc0)
     {
         if (len0 + 1 > cap) return "frame buffer too small";
         dst[len0++] = 0;
@@ -634,7 +645,7 @@ const char *s2a_build_frame(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots 
     const char *err = frame_prepare(p, sf, slots, ref_idx, target, &min_log2, &max_log2);
     if (err) return err;
     static const uint8_t standin[1] = { 0 };
-    return frame_emit(p, ref_idx, *target, min_log2, max_log2, standin, 1, tiles, tiles_size, dst, cap, len);
+    return frame_emit(p, ref_idx, *target, min_log2, max_log2, 0, standin, 1, tiles, tiles_size, dst, cap, len);
 }
 
 const char *s2a_build_frame2(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots *slots,
@@ -647,7 +658,7 @@ const char *s2a_build_frame2(const s2a_pic *p, const s2a_surfaces *sf, s2a_slots
     uint8_t scratch[3456];
     int nc = s2a_compressed_write(p, probs, defaults, scratch, sizeof scratch);
     if (nc < 0) return "compressed header overflow";
-    return frame_emit(p, ref_idx, *target, min_log2, max_log2, scratch, (size_t)nc, tiles, tiles_size,
+    return frame_emit(p, ref_idx, *target, min_log2, max_log2, 1, scratch, (size_t)nc, tiles, tiles_size,
                       dst, cap, len);
 }
 

@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Nvdec
     sealed class Vp9NativePath : IDisposable
     {
         private const int MaxErrors = 3;
+        private const int MaxMidFallbacks = 3;   // mid-stream fallbacks tolerated per decode context; then native is disabled outright
 
         // Guest MV freshness: a backend that cannot produce the NVDEC MV field (ProducesGuestMetadata=false)
         // leaves the guest MV write buffer untouched on Decoded, so the read buffer a later managed job would
@@ -43,6 +44,7 @@ namespace Ryujinx.Graphics.Nvdec
         private Vp9GuestMvState _mvState;
         private bool _active;
         private int _errors;
+        private int _midFallbacks;
         private bool _loggedFirst;
 
         public bool Disabled { get; private set; }
@@ -78,7 +80,26 @@ namespace Ryujinx.Graphics.Nvdec
 
         private void Fallback(string reason)
         {
+            // A fallback while a native segment was running strands the guest MV/count state the managed
+            // decoder would consume, freezing output until the next key frame. A stream that keeps hitting
+            // this gets its native backend disabled for the rest of the context — every later GOP then runs
+            // managed from the start instead of freezing its first frames over and over.
+            bool midStream = _active;
+
             Deactivate();
+            _backend.NoteFallback(reason);
+
+            if (midStream)
+            {
+                _midFallbacks++;
+                Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码中途回退 {_midFallbacks}/{MaxMidFallbacks}：{reason}");
+
+                if (_midFallbacks >= MaxMidFallbacks)
+                {
+                    Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码同一上下文累计 {MaxMidFallbacks} 次中途回退，本解码上下文停用原生后端，之后各 GOP 从头走托管解码器");
+                    Disabled = true;
+                }
+            }
 
             if (_loggedReasons.Add(reason))
             {

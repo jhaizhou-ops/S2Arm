@@ -46,6 +46,9 @@ namespace Ryujinx.Graphics.Nvdec.Vpx
         // The hook injects tx_mode/reference_mode/probs out of band; the repack's stand-in byte is enough.
         public bool NeedsCompressedHeader => false;
 
+        // No outcome ledger on this backend — fallbacks are the caller's bookkeeping.
+        public void NoteFallback(string reason) { }
+
         public Vp9NativeResult Decode(
             ReadOnlySpan<byte> frame,
             ReadOnlySpan<byte> probs,

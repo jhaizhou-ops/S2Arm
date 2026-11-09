@@ -8,7 +8,9 @@ namespace Ryujinx.Graphics.Nvdec
     // spec defaults (key frame resets all contexts; refresh_frame_context=0 means *fc is only ever a copy and
     // frame_contexts[0] never drifts), so every diff update here is spec-default -> the job's supplied table.
     //
-    // Emission order is exactly the decoder's read order (libvpx read_compressed_header, BSD reference):
+    // Emission order is exactly the decoder's read order — 出处：libvpx 1.17.0 (pinned, BSD-3-Clause)
+    // vp9/decoder/vp9_decodeframe.c `read_compressed_header`、vp9/common/vp9_entropymode.h 默认表；
+    // C 镜像 android/codecs/vpxbench/hdr.c 同款，hdrcmp 金样测字节级一致：
     //   tx_mode | tx probs (TX_MODE_SELECT) | coef probs | skip |
     //   [inter only] inter_mode | interp probs (SWITCHABLE) | intra_inter | reference_mode | ref probs |
     //   y_mode | partition | mv probs
@@ -211,6 +213,10 @@ namespace Ryujinx.Graphics.Nvdec
         // express odd targets; a reference mode above SINGLE is only writable when compound is allowed.
         public static string Check(in Vp9NativeInput p, ReadOnlySpan<byte> probs, ReadOnlySpan<byte> defaults)
         {
+            // The repack always emits error_resilient_mode=0; an error-resilient job would derive
+            // use_prev_frame_mvs differently on the hardware side than in the original stream. Scoped here:
+            // the libvpx backend has no compressed header to corrupt, so the flag must not gate it.
+            if (p.ErrorResilient) return "error_resilient";
             if (probs.Length < ProbsSize || defaults.Length < ProbsSize) return "probs blob";
 
             bool intraOnly = !p.KeyFrame && p.IntraOnly;
