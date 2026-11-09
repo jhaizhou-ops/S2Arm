@@ -48,30 +48,18 @@ def readme_only(repo, event_name, event, merge_sha=None):
             head = merge_sha
         else:
             base = git(repo, 'merge-base', base, head).decode('ascii').strip()
+        # Raw diff carries both modes; no per-tree lookup or extra Git process.
         raw = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-renames',
-                  '--name-status', '-z', base, head, '--')
+                  '--raw', '--no-abbrev', '-z', base, head, '--')
         records = raw.decode('utf-8').split('\0')
         if len(records) < 3 or records[-1] != '' or len(records) % 2 != 1:
             return False
-        paths = set()
-        for status, path in zip(records[0:-1:2], records[1:-1:2]):
-            if status != 'M' or path not in READMES:
+        for metadata, path in zip(records[0:-1:2], records[1:-1:2]):
+            fields = metadata.split()
+            if (len(fields) != 5 or fields[0] != ':100644' or fields[1] != '100644' or
+                    fields[4] != 'M' or path not in READMES):
                 return False
-            paths.add(path)
-        for revision in (base, head):
-            entries = git(repo, 'ls-tree', '-z', revision, '--', *sorted(paths))
-            regular = set()
-            for entry in entries.decode('utf-8').split('\0'):
-                if not entry:
-                    continue
-                metadata, path = entry.split('\t', 1)
-                mode, kind, _ = metadata.split()
-                if mode != '100644' or kind != 'blob':
-                    return False
-                regular.add(path)
-            if regular != paths:
-                return False
-        return bool(paths)
+        return True
     except (KeyError, TypeError, ValueError, UnicodeError, OSError,
             subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
