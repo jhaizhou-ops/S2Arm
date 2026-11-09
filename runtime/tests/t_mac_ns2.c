@@ -16,6 +16,9 @@ static ns2_status_callback status_callback;
 static ns2_motion sample;
 static ns2_vibration sent[2];
 static int starts, scans, stops, shutdowns, sends, imu;
+// NS2 input report 0x30: GL is bit 19 and GR is bit 20
+// (switch2_controller_research bluetooth_interface.md).
+enum { NS2_TEST_BUTTON_GL = 19, NS2_TEST_BUTTON_GR = 20 };
 int ns2_start_with_motion(ns2_state_callback input, ns2_status_callback status, ns2_motion_callback motion, void *context) {
     assert(motion && !context);
     starts++; input_callback = input; status_callback = status; return 1;
@@ -70,13 +73,13 @@ int main(void) {
     input_callback(&physical, NULL);
     assert(s2a_mac_ns2_read(&input) && !memcmp(&input, &physical, sizeof input));
     s2a_mac_ns2_set_back_buttons(1u << 6, 1u << 7); // GL -> L; GR -> R.
-    physical.buttons = (1ull << 19) | (1ull << 20) | 1;
+    physical.buttons = (1ull << NS2_TEST_BUTTON_GL) | (1ull << NS2_TEST_BUTTON_GR) | 1;
     input_callback(&physical, NULL);
     assert(s2a_mac_ns2_read(&input));
     assert((input.buttons & 0xffff) == ((1u << 6) | (1u << 7) | 1));
     physical.buttons = 1; input_callback(&physical, NULL);
     assert(s2a_mac_ns2_read(&input) && (input.buttons & 0xffff) == 1);
-    physical.buttons = 1ull << 19; input_callback(&physical, NULL);
+    physical.buttons = 1ull << NS2_TEST_BUTTON_GL; input_callback(&physical, NULL);
     s2a_mac_ns2_set_back_buttons(1, 0); // Remapping a held paddle takes effect immediately.
     assert(s2a_mac_ns2_read(&input) && (input.buttons & 0xffff) == 1);
     s2a_mac_ns2_set_back_buttons(0, 0);
@@ -94,10 +97,11 @@ int main(void) {
     s2a_pad_set_rumble_pair(session, pair);
     assert(sends == 1 && sent[0].low_amp == .2f && sent[1].high_freq == 640);
     s2a_mac_ns2_focus(0);
-    assert(stops && !s2a_pad_rumble_session() && !s2a_mac_ns2_read(&input));
+    assert(stops && !imu && !s2a_pad_rumble_session() && !s2a_mac_ns2_read(&input));
     assert(!s2a_pad_read_motion(&motion));
     s2a_pad_set_rumble_pair(session, pair); assert(sends == 1);
     s2a_mac_ns2_focus(1);
+    assert(imu);
     assert(s2a_pad_rumble_session() != session);
     s2a_pad_set_rumble_pair(session, pair); assert(sends == 1);
     status_callback(NS2_STATUS_DISCONNECTED, "test disconnect", NULL);
