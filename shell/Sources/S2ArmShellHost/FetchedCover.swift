@@ -71,15 +71,17 @@ final class CoverFetchService: @unchecked Sendable {
     /// 去重抓取入口：负缓存新鲜 / 已在飞时直接返回；成功落盘后在后台线程回调一次（调用方自行回主线程）。
     func ensureFetched(titleID: String, onFetched: @escaping (Data) -> Void) {
         if negativeCacheIsFresh(for: titleID) { return }
-        lock.lock()
-        let alreadyFlying = inFlight.contains(titleID)
-        if !alreadyFlying { inFlight.insert(titleID) }
-        lock.unlock()
+        // Swift 6：NSLock.lock()/unlock() 在 async 上下文不可用，统一用 withLock
+        let alreadyFlying = lock.withLock {
+            if inFlight.contains(titleID) { return true }
+            inFlight.insert(titleID)
+            return false
+        }
         guard !alreadyFlying else { return }
 
         Task.detached(priority: .utility) { [self] in
             let data = await fetchStoreCoverData(titleID: titleID)
-            lock.lock(); inFlight.remove(titleID); lock.unlock()
+            lock.withLock { inFlight.remove(titleID) }
             guard let data else { recordNegativeAttempt(for: titleID); return }
             FetchedCoverStore.save(data, for: titleID)
             onFetched(data)
