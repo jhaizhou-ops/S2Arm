@@ -81,10 +81,11 @@ namespace Ryujinx.Graphics.Nvdec
         private void Fallback(string reason)
         {
             // A fallback while a native segment was running strands the guest MV/count state the managed
-            // decoder would consume, freezing output until the next key frame. A stream that keeps hitting
-            // this gets its native backend disabled for the rest of the context — every later GOP then runs
-            // managed from the start instead of freezing its first frames over and over.
-            bool midStream = _active;
+            // decoder would consume — but only on a backend that produces no guest metadata (MC). libvpx
+            // fills real MVs/counts, so its managed handoff stays exact and must keep the old
+            // "off until the next key frame" behavior — the disable bound below would otherwise
+            // permanently kill native decode on iOS/Mac after a few representable-gap events.
+            bool midStream = _active && !_backend.ProducesGuestMetadata;
 
             Deactivate();
             _backend.NoteFallback(reason);

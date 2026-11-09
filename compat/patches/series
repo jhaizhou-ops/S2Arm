@@ -544,3 +544,4 @@
 20261110-0412-vp9-native-guest-mv-freshness.patch
 20261110-0532-vp9-native-compressed-hdr.patch
 20261110-0631-vp9-fallback-ledger-mcbytes.patch
+20261110-0653-vp9-midfallback-metadata-gate.patch

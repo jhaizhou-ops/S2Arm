@@ -309,7 +309,48 @@ static class Program
             Check(R(key,out _,out err)==Vp9NativeResult.Error,"mid-stream failure is Error");
             Check(R(key,out _,out _)==Vp9NativeResult.Error,"failure is sticky");
         }
+        // 中途回退上界（Vp9NativePath.Fallback）：同一解码上下文累计 MaxMidFallbacks 次
+        // 原生段进行中回退 → 整体 Disabled。只针对 ProducesGuestMetadata=false 的后端——
+        // 产不出客体 MV/计数才有「托管吃陈旧状态」的冻结；vpx 语义下托管接手精确，
+        // 同一事件序列不得停用（iOS/Mac 老行为是「到下一关键帧再激活」）。
+        // seg 关键帧必过激活再被 Check 拒——不触 ResourceManager，rm 用默认值即可。
+        {
+            NvdecRegisters state = new();
+            ResourceManager rm = default;
+            var pic = new Ryujinx.Graphics.Nvdec.Types.Vp9.PictureInfo { Flags = Ryujinx.Graphics.Nvdec.Types.Vp9.FrameFlags.IsKeyFrame };
+            pic.Seg.Enabled = 1;
+            Vp9PictureInfo info = new();
+            byte[] tiles = { 0 };
+            using var mc = new Vp9NativePath(new FakeBackend(false));
+            for (int i = 0; i < 3; i++)
+                Check(!mc.TryDecode(rm, ref state, ref pic, ref info, tiles), $"mc mid-fallback {i} goes managed");
+            Check(mc.Disabled, "no-metadata backend: 3 mid-fallbacks disable native for this context");
+            var vpxBackend = new FakeBackend(true);
+            using var vpx = new Vp9NativePath(vpxBackend);
+            for (int i = 0; i < 3; i++)
+                Check(!vpx.TryDecode(rm, ref state, ref pic, ref info, tiles), $"vpx mid-fallback {i} goes managed");
+            Check(!vpx.Disabled, "metadata backend: same sequence keeps next-keyframe reactivation");
+            Check(vpxBackend.Fallbacks == 3, "fallbacks still counted for the ledger");
+        }
         Console.WriteLine("PASS vp9 selection boundary mode="+mode);
+    }
+    // IVp9NativeBackend fixture: Decode is unreachable from these tests (jobs fall back at Check).
+    sealed class FakeBackend : IVp9NativeBackend
+    {
+        public FakeBackend(bool guestMetadata) => ProducesGuestMetadata = guestMetadata;
+        public bool ProducesGuestMetadata { get; }
+        public bool NeedsCompressedHeader => false;
+        public int Fallbacks;
+        public Vp9NativeResult Decode(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> probs, in Vp9NativeParams p,
+            ReadOnlySpan<byte> prevMvs, Span<byte> mvsOut, Span<byte> countsOut,
+            out Vp9NativePicture picture, out string error)
+        {
+            picture = default;
+            error = "fixture: Decode unreachable";
+            return Vp9NativeResult.Error;
+        }
+        public void NoteFallback(string reason) => Fallbacks++;
+        public void Dispose() { }
     }
     static void Reconfiguration(string directory)
     {
