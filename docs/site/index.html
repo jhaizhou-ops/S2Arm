@@ -1,0 +1,317 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: Apache-2.0
+Copyright 2026 S2Arm contributors
+
+S2Arm 下载页（GitHub Pages）。由 .github/workflows/pages.yml 发布，说明见同目录 README.md。
+下载按钮直接指向 releases/latest/download/<产物名>，不依赖脚本；脚本只补版本号、大小和校验值。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>下载 S2Arm</title>
+<meta name="description" content="下载 S2Arm 启动器（Mac / Windows），把你自己的 Switch 游戏原生带到 iPhone、iPad 和 Mac。">
+<link rel="icon" href="images/icon.png">
+<style>
+:root {
+  --bg: #0b0b0c;
+  --panel: #151516;
+  --panel-2: #1c1c1e;
+  --line: #2a2a2d;
+  --text: #f2f0eb;
+  --muted: #a3a09a;
+  --accent: #f6ead2;
+  --accent-ink: #1a1712;
+  --cyan: #2cc8f0;
+  --red: #e5484d;
+  --radius: 16px;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: radial-gradient(1200px 600px at 15% -10%, #1d1a16 0%, var(--bg) 60%) fixed, var(--bg);
+  color: var(--text);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Segoe UI", Roboto, "Noto Sans CJK SC", sans-serif;
+}
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+header.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 18px 0;
+}
+header.top img { height: 36px; width: auto; display: block; }
+.top-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  border-radius: 999px; padding: 6px 14px; font-size: 14px; cursor: pointer;
+}
+.chip:hover { border-color: #444; text-decoration: none; }
+
+.hero { padding: 48px 0 24px; }
+.hero h1 { font-size: clamp(30px, 5.4vw, 52px); line-height: 1.15; margin: 0 0 16px; letter-spacing: -0.01em; }
+.hero p.lead { color: var(--muted); font-size: 18px; max-width: 640px; margin: 0; }
+.release-line { margin-top: 18px; color: var(--muted); font-size: 14px; min-height: 22px; }
+.release-line strong { color: var(--text); font-weight: 600; }
+
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 28px 0 8px; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 24px; display: flex; flex-direction: column; gap: 14px; position: relative;
+}
+.card.recommended { border-color: #5a5346; box-shadow: 0 0 0 1px #5a5346 inset; }
+.badge {
+  position: absolute; top: 18px; right: 18px; font-size: 12px; padding: 2px 10px; border-radius: 999px;
+  background: #2b271f; color: var(--accent); display: none;
+}
+.card.recommended .badge { display: inline-block; }
+.card h2 { margin: 0; font-size: 22px; display: flex; align-items: center; gap: 10px; }
+.card h2 svg { width: 26px; height: 26px; flex: none; }
+.req { color: var(--muted); font-size: 14px; margin: 0; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--accent); color: var(--accent-ink); font-weight: 600; font-size: 16px;
+  border-radius: 999px; padding: 12px 22px; align-self: flex-start;
+}
+.btn:hover { text-decoration: none; filter: brightness(1.04); }
+.btn svg { width: 18px; height: 18px; }
+.meta { font-size: 13px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; min-height: 20px; }
+.card ol { margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+.card ol li + li { margin-top: 4px; }
+.note { font-size: 13px; color: var(--muted); background: var(--panel-2); border-radius: 10px; padding: 10px 12px; margin: 0; }
+
+.mobile-hint {
+  display: none; margin-top: 20px; padding: 14px 16px; border-radius: 12px;
+  background: #13202a; border: 1px solid #1f3a4a; color: #cfe9f5; font-size: 15px;
+}
+.mobile-hint.show { display: block; }
+
+section.block { padding: 36px 0 8px; }
+section.block h3 { font-size: 20px; margin: 0 0 14px; }
+.shots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.shots figure { margin: 0; }
+.shots img { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--line); }
+.shots figcaption { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.fact { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.fact b { display: block; margin-bottom: 4px; }
+.fact span { color: var(--muted); font-size: 14px; }
+.links { display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 15px; }
+
+footer { padding: 40px 0 48px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); margin-top: 48px; }
+footer p { margin: 6px 0; }
+
+[data-lang="en"] .zh, [data-lang="zh"] .en { display: none !important; }
+
+@media (max-width: 760px) {
+  .cards, .shots, .facts { grid-template-columns: minmax(0, 1fr); }
+  .hero { padding-top: 24px; }
+  header.top img { height: 28px; }
+}
+</style>
+</head>
+<body data-lang="zh">
+<div class="wrap">
+
+<header class="top">
+  <a href="https://github.com/jhaizhou-ops/S2Arm" aria-label="S2Arm"><img src="images/s2arm-wordmark.png" alt="S2Arm" width="122" height="36"></a>
+  <nav class="top-links">
+    <a class="chip" href="https://github.com/jhaizhou-ops/S2Arm"><span class="zh">GitHub 仓库</span><span class="en">GitHub</span></a>
+    <button class="chip" id="lang-toggle" type="button"><span class="zh">English</span><span class="en">中文</span></button>
+  </nav>
+</header>
+
+<main>
+<section class="hero">
+  <h1>
+    <span class="zh">下载 S2Arm 启动器</span>
+    <span class="en">Download the S2Arm launcher</span>
+  </h1>
+  <p class="lead">
+    <span class="zh">把你自己的 Switch 游戏，原生带到 iPhone、iPad 和 Mac。在电脑上装好启动器，按欢迎页的三步就能出包、装机、开玩。不需要 GitHub 账号。</span>
+    <span class="en">Bring your own Switch games natively to iPhone, iPad and Mac. Install the launcher on your computer and follow the three steps on its welcome screen to build, install and play. No GitHub account needed.</span>
+  </p>
+  <div class="release-line" id="release-line" aria-live="polite">
+    <span class="zh">始终提供最新正式版。</span><span class="en">Always the latest release.</span>
+  </div>
+  <div class="mobile-hint" id="mobile-hint">
+    <span class="zh">你正在用手机或平板浏览。启动器需要装在 Mac 或 Windows 电脑上，再由它把游戏装到 iPhone / iPad。请在电脑上打开本页下载。</span>
+    <span class="en">You are on a phone or tablet. The launcher runs on a Mac or Windows PC, which then installs games onto your iPhone / iPad. Open this page on your computer to download.</span>
+  </div>
+</section>
+
+<div class="cards">
+  <article class="card" id="card-mac" data-os="mac">
+    <span class="badge"><span class="zh">适合这台电脑</span><span class="en">For this computer</span></span>
+    <h2>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c-.02-2.2 1.8-3.26 1.88-3.31-1.03-1.5-2.62-1.7-3.18-1.72-1.35-.14-2.64.8-3.33.8-.69 0-1.74-.78-2.87-.76-1.47.02-2.83.86-3.59 2.18-1.53 2.66-.39 6.6 1.1 8.76.73 1.05 1.6 2.24 2.73 2.2 1.1-.05 1.51-.71 2.84-.71 1.32 0 1.7.71 2.86.69 1.18-.02 1.93-1.07 2.65-2.13.84-1.22 1.18-2.4 1.2-2.46-.03-.01-2.3-.88-2.32-3.5zM14.2 6.13c.6-.73 1.01-1.75.9-2.76-.87.04-1.92.58-2.54 1.31-.56.65-1.05 1.68-.92 2.67.97.08 1.96-.49 2.56-1.22z"/></svg>
+      Mac
+    </h2>
+    <p class="req">
+      <span class="zh">Apple 芯片（M1 及更新），macOS 15 或更新。经过苹果公证。</span>
+      <span class="en">Apple silicon (M1 or later), macOS 15 or later. Notarized by Apple.</span>
+    </p>
+    <a class="btn" id="dl-mac" href="https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/S2Arm-mac-arm64.dmg">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      <span class="zh">下载 Mac 版</span><span class="en">Download for Mac</span>
+    </a>
+    <div class="meta" id="meta-mac">S2Arm-mac-arm64.dmg</div>
+    <ol>
+      <li><span class="zh">打开下载的 dmg，把 S2Arm 拖进「应用程序」。</span><span class="en">Open the dmg and drag S2Arm into Applications.</span></li>
+      <li><span class="zh">已装旧版直接替换，游戏库、密钥、存档不受影响。</span><span class="en">Replacing an older version keeps your library, keys and saves.</span></li>
+      <li><span class="zh">v0.1.3 起启动器会在应用内提示更新。</span><span class="en">From v0.1.3 the launcher offers updates in-app.</span></li>
+    </ol>
+  </article>
+
+  <article class="card" id="card-win" data-os="win">
+    <span class="badge"><span class="zh">适合这台电脑</span><span class="en">For this computer</span></span>
+    <h2>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5l7.4-1v7.1H3V5.5zm0 13l7.4 1v-7H3v6zm8.3 1.1L21 21v-8.4h-9.7v7zm0-15.2v7.2H21V3l-9.7 1.4z"/></svg>
+      Windows
+    </h2>
+    <p class="req">
+      <span class="zh">Windows 10 / 11，64 位。用来为 iPhone / iPad 出包并装机。</span>
+      <span class="en">Windows 10 / 11, 64-bit. Builds and installs packages for iPhone / iPad.</span>
+    </p>
+    <a class="btn" id="dl-win" href="https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/S2Arm-windows-x64.zip">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+      <span class="zh">下载 Windows 版</span><span class="en">Download for Windows</span>
+    </a>
+    <div class="meta" id="meta-win">S2Arm-windows-x64.zip</div>
+    <ol>
+      <li><span class="zh">解压到任意文件夹（路径别太深），整个文件夹都要留着。</span><span class="en">Unzip to any folder (keep the path short) and keep the whole folder.</span></li>
+      <li><span class="zh">双击 <code>S2Arm.exe</code> 启动。</span><span class="en">Double-click <code>S2Arm.exe</code>.</span></li>
+    </ol>
+    <p class="note">
+      <span class="zh">程序暂未代码签名，首次打开若弹出「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。</span>
+      <span class="en">The exe is not code-signed yet. If "Windows protected your PC" appears, click "More info → Run anyway".</span>
+    </p>
+  </article>
+</div>
+
+<p class="req" style="margin-top:12px">
+  <span class="zh">下载文件来自 GitHub 的服务器；国内网络若下载缓慢，可稍后重试或换个网络。下载后可用 <a id="sha-link" href="https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a> 核对文件完整性。</span>
+  <span class="en">Files are served from GitHub. If downloads are slow, retry later or switch networks. Verify the files with <a href="https://github.com/jhaizhou-ops/S2Arm/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.</span>
+</p>
+
+<section class="block">
+  <h3><span class="zh">装好之后</span><span class="en">After installing</span></h3>
+  <div class="shots">
+    <figure>
+      <img src="images/launcher-welcome.png" alt="S2Arm 启动器欢迎页" loading="lazy" width="1600" height="1125">
+      <figcaption><span class="zh">Mac 启动器：准备电脑、添加游戏、放入密钥，三步开始出包。</span><span class="en">Mac launcher: prepare the Mac, add a game, add keys.</span></figcaption>
+    </figure>
+    <figure>
+      <img src="images/launcher-windows.png" alt="S2Arm Windows 启动器" loading="lazy" width="1600" height="1125">
+      <figcaption><span class="zh">Windows 启动器：同样的流程，为 iPhone / iPad 出包。</span><span class="en">Windows launcher: the same flow, building for iPhone / iPad.</span></figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="block">
+  <h3><span class="zh">使用前请了解</span><span class="en">Before you start</span></h3>
+  <div class="facts">
+    <div class="fact">
+      <b><span class="zh">游戏原件自备</span><span class="en">Bring your own games</span></b>
+      <span><span class="zh">S2Arm 不提供游戏、密钥、固件，也不提供打好的 IPA / APK。</span><span class="en">S2Arm ships no games, keys, firmware or prebuilt IPA / APK.</span></span>
+    </div>
+    <div class="fact">
+      <b><span class="zh">iPhone / iPad</span><span class="en">iPhone / iPad</span></b>
+      <span><span class="zh">iOS / iPadOS 18 起，由电脑上的启动器出包后装机。</span><span class="en">iOS / iPadOS 18 or later, installed from the launcher on your computer.</span></span>
+    </div>
+    <div class="fact">
+      <b><span class="zh">仍在测试</span><span class="en">Still in testing</span></b>
+      <span><span class="zh">兼容性和不同设备的表现仍在验证，遇到问题欢迎反馈。</span><span class="en">Compatibility is still being verified; please report problems.</span></span>
+    </div>
+  </div>
+</section>
+
+<section class="block">
+  <h3><span class="zh">更多</span><span class="en">More</span></h3>
+  <div class="links">
+    <a id="notes-link" href="https://github.com/jhaizhou-ops/S2Arm/releases/latest"><span class="zh">本版更新说明</span><span class="en">Release notes</span></a>
+    <a href="https://github.com/jhaizhou-ops/S2Arm/releases"><span class="zh">全部历史版本</span><span class="en">All releases</span></a>
+    <a class="zh" href="https://github.com/jhaizhou-ops/S2Arm/blob/main/README.zh-CN.md#开始使用">使用说明</a>
+    <a class="en" href="https://github.com/jhaizhou-ops/S2Arm/blob/main/README.md#getting-started">Getting started</a>
+    <a href="https://github.com/jhaizhou-ops/S2Arm/issues/new/choose"><span class="zh">反馈问题</span><span class="en">Report a problem</span></a>
+  </div>
+</section>
+</main>
+
+<footer>
+  <p><span class="zh">S2Arm 以 Apache-2.0 许可开源。本页只链接 GitHub 发布页上的官方文件。</span><span class="en">S2Arm is open source under Apache-2.0. This page links only to official files on the GitHub releases page.</span></p>
+  <p><span class="zh">Switch 是任天堂的商标，S2Arm 与任天堂无关。</span><span class="en">Switch is a trademark of Nintendo. S2Arm is not affiliated with Nintendo.</span></p>
+</footer>
+
+</div>
+<script>
+(function () {
+  'use strict';
+  var REPO = 'jhaizhou-ops/S2Arm';
+  var ASSETS = { mac: 'S2Arm-mac-arm64.dmg', win: 'S2Arm-windows-x64.zip' };
+  var body = document.body;
+
+  // 语言：?lang= 优先，其次记住的选择，再看浏览器语言。
+  function pickLang() {
+    var q = (location.search.match(/[?&]lang=(zh|en)\b/) || [])[1];
+    if (q) return q;
+    try { var s = localStorage.getItem('s2arm-lang'); if (s === 'zh' || s === 'en') return s; } catch (e) {}
+    return /^zh/i.test(navigator.language || '') ? 'zh' : 'en';
+  }
+  function setLang(l) {
+    body.setAttribute('data-lang', l);
+    document.documentElement.lang = l === 'zh' ? 'zh-CN' : 'en';
+    document.title = l === 'zh' ? '下载 S2Arm' : 'Download S2Arm';
+  }
+  setLang(pickLang());
+  document.getElementById('lang-toggle').addEventListener('click', function () {
+    var l = body.getAttribute('data-lang') === 'zh' ? 'en' : 'zh';
+    setLang(l);
+    try { localStorage.setItem('s2arm-lang', l); } catch (e) {}
+  });
+
+  // 系统：推荐对应平台的卡片；手机和平板给提示。
+  var ua = navigator.userAgent || '';
+  var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+  var mobile = /iPhone|iPad|iPod|Android|HarmonyOS/i.test(ua) ||
+    (/Mac/i.test(plat) && navigator.maxTouchPoints > 1);
+  var os = mobile ? '' : /Win/i.test(plat + ua) ? 'win' : /Mac/i.test(plat + ua) ? 'mac' : '';
+  if (mobile) document.getElementById('mobile-hint').className += ' show';
+  if (os) {
+    var card = document.getElementById(os === 'mac' ? 'card-mac' : 'card-win');
+    card.className += ' recommended';
+    if (os === 'win') card.parentNode.insertBefore(card, card.parentNode.firstChild);
+  }
+
+  // 版本信息：只做展示。接口不可用（限流、断网）时按钮照常可用。
+  function mb(n) { return (n / 1048576).toFixed(0) + ' MB'; }
+  function day(s) { return (s || '').slice(0, 10); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  if (!window.fetch) return;
+  fetch('https://api.github.com/repos/' + REPO + '/releases/latest', { headers: { Accept: 'application/vnd.github+json' } })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (rel) {
+      var tag = esc(rel.tag_name || '');
+      var line = document.getElementById('release-line');
+      line.innerHTML =
+        '<span class="zh">最新版 <strong>' + tag + '</strong> · ' + day(rel.published_at) + ' 发布</span>' +
+        '<span class="en">Latest <strong>' + tag + '</strong> · released ' + day(rel.published_at) + '</span>';
+      if (rel.html_url) document.getElementById('notes-link').href = rel.html_url;
+      var byName = {};
+      (rel.assets || []).forEach(function (a) { byName[a.name] = a; });
+      ['mac', 'win'].forEach(function (k) {
+        var a = byName[ASSETS[k]];
+        if (!a) return;
+        var sha = (a.digest || '').replace(/^sha256:/, '');
+        document.getElementById('meta-' + k).innerHTML =
+          esc(a.name) + ' · ' + mb(a.size) + (sha ? '<br>SHA-256 ' + esc(sha) : '');
+      });
+    })
+    .catch(function () { /* 保留静态文字，下载链接不受影响 */ });
+})();
+</script>
+</body>
+</html>

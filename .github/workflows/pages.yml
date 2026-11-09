@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 S2Arm contributors
+#
+# 把 docs/site/ 下载页发布到 GitHub Pages（https://jhaizhou-ops.github.io/S2Arm/）。
+# 只拷静态文件，不构建、不下载依赖。启用方法见 docs/site/README.md。
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/site/**
+      - docs/images/s2arm-wordmark.png
+      - docs/images/launcher-welcome.png
+      - docs/images/launcher-windows.png
+      - launchers/macos/Branding/AppIcon-1024.png
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            docs/site
+            docs/images
+            launchers/macos/Branding
+          sparse-checkout-cone-mode: true
+      - name: Assemble site
+        run: |
+          set -eu
+          mkdir -p _site/images
+          cp docs/site/index.html _site/
+          cp docs/images/s2arm-wordmark.png docs/images/launcher-welcome.png \
+             docs/images/launcher-windows.png _site/images/
+          cp launchers/macos/Branding/AppIcon-1024.png _site/images/icon.png
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
