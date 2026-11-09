@@ -450,6 +450,10 @@ def apply(staged, install, pid, private, args=(), launch=default_launch, health_
             return fail("update_app_busy", "S2Arm 没有退出，这次没有更新。", restart=False)
         time.sleep(0.5)
     try:
+        # A previous apply may have stopped between swap()'s two renames.
+        # Restore the only old copy before treating any backup as disposable.
+        if backup.exists() and not install.exists():
+            retry_rename(backup, install)
         if backup.exists():
             remove_tree(backup)
         swap(staged, install, backup, new)

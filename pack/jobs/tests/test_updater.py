@@ -94,6 +94,45 @@ class ApplyTests(Base):
         self.assertEqual(result, 1)
         self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
 
+    def test_retry_after_interrupted_first_rename_installs_new_version(self):
+        before = self.data()
+        backup = self.install.with_name("S2Arm.s2arm-old")
+        # swap() interrupted after install -> backup, before new -> install.
+        os.rename(self.install, backup)
+        self.assertEqual(self.run_apply(self.healthy), 0)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "new")
+        self.assertFalse(backup.exists())
+        self.assertEqual(self.data(), before)
+
+    def test_retry_with_missing_staged_files_restores_the_old_install(self):
+        before = self.data()
+        backup = self.install.with_name("S2Arm.s2arm-old")
+        os.rename(self.install, backup)
+        launches = []
+        self.staged = self.root / "missing-staged"
+        self.assertEqual(self.run_apply(lambda i, a: launches.append((i / "S2Arm.exe").read_text())), 1)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+        self.assertEqual(launches, ["old"])
+        self.assertEqual(self.data(), before)
+
+    def test_failed_interrupted_install_recovery_preserves_the_backup(self):
+        backup = self.install.with_name("S2Arm.s2arm-old")
+        os.rename(self.install, backup)
+        with patch.object(updater, "retry_rename", side_effect=PermissionError(13, "locked")):
+            self.assertEqual(self.run_apply(lambda *_: None), 1)
+        self.assertEqual((backup / "S2Arm.exe").read_text(), "old")
+
+    def test_retry_after_partial_new_copy_cleans_it_and_installs_normally(self):
+        backup = self.install.with_name("S2Arm.s2arm-old")
+        os.rename(self.install, backup)
+        partial = self.install.with_name("S2Arm.s2arm-new")
+        partial.mkdir()
+        (partial / "incomplete").write_text("synthetic interrupted copy")
+        self.assertEqual(self.run_apply(self.healthy), 0)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "new")
+        self.assertFalse((self.install / "incomplete").exists())
+        self.assertFalse(partial.exists())
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     routes = {}
