@@ -16,13 +16,22 @@ enum ShellLayout: Equatable {
         return regular && !accessibilityText ? .grid : .column
     }
 
-    /// The width of the overlay Settings and Controllers share: a panel from the trailing edge over the dimmed library.
+    /// The widest the overlay Settings and Controllers get: a panel from the trailing edge over the dimmed library.
     static let overlayWidth: CGFloat = 520
+    /// Fork difference (kept across upstream syncs): a landscape panel on a phone is capped well under the 520,
+    /// following the NX2/GameCase rule — at the full width it took three fifths of the screen and its rows
+    /// stretched. `width` here is the safe-area width, so this is min(520, screen width × 0.44 less the safe
+    /// area); tablets and regular windows keep the 520.
+    func overlayWidth(_ width: CGFloat) -> CGFloat {
+        if case .coverFlow(let regular) = self, !regular { return min(Self.overlayWidth, width * 0.44) }
+        return Self.overlayWidth
+    }
     /// Settings drop in as that overlay wherever the library stays in view beside it (at least 120 points of it), and
     /// take the whole screen where it would not: a phone held upright, a folded foldable, a narrow window.
+    /// The float threshold stays on the 520 cap, as before.
     func settingsFloat(_ width: CGFloat) -> Bool { self != .column && width >= Self.overlayWidth + 120 }
     /// The settings' width: the overlay, or the whole width.
-    func paneWidth(_ width: CGFloat) -> CGFloat { settingsFloat(width) ? min(width, Self.overlayWidth) : width }
+    func paneWidth(_ width: CGFloat) -> CGFloat { settingsFloat(width) ? min(width, overlayWidth(width)) : width }
     var isCoverFlow: Bool { if case .coverFlow = self { true } else { false } }
 }
 
@@ -111,6 +120,8 @@ public struct LibraryView: View {
             let layout = ShellLayout.resolve(whole, accessibilityText: typeSize.isAccessibilitySize)
             let width = geometry.size.width
             let pane = layout.paneWidth(width)
+            // The Controllers and shell-settings overlays share the settings pane's width rule.
+            let overlay = min(width, layout.overlayWidth(width))
             // Settings only when asked for. A panel floats over the dimmed library where there is room, otherwise the
             // settings take the whole screen and the library steps out of the way.
             let floating = layout.settingsFloat(width)
@@ -220,11 +231,11 @@ public struct LibraryView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }.zIndex(2) }
                 if controllersOpen { Group {
-                    Color.black.opacity(0.55 * (1 - min(1, edgeDrag / min(width, 520)))).ignoresSafeArea().accessibilityHidden(true)
+                    Color.black.opacity(0.55 * (1 - min(1, edgeDrag / overlay))).ignoresSafeArea().accessibilityHidden(true)
                         .onTapGesture { back() }
                     ControllersView(controllers: controllers, onBack: back, padMap: globalPadMap)
                         .accessibilityHidden(choice != nil || padMapping != nil || buttonTestOpen)
-                        .frame(width: min(width, 520))
+                        .frame(width: overlay)
                         .frame(maxHeight: .infinity)
                         .background { ShellPalette.background.ignoresSafeArea() }
                         .overlay(alignment: .leading) { Rectangle().fill(ShellPalette.hairline).frame(width: 1).ignoresSafeArea() }
@@ -234,10 +245,10 @@ public struct LibraryView: View {
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }.zIndex(3) }
                 if shellSettingsOpen { Group {
-                    Color.black.opacity(0.55 * (1 - min(1, edgeDrag / min(width, 520)))).ignoresSafeArea().accessibilityHidden(true)
+                    Color.black.opacity(0.55 * (1 - min(1, edgeDrag / overlay))).ignoresSafeArea().accessibilityHidden(true)
                         .onTapGesture { back() }
                     ShellSettingsView(actions: guardedActions, onClose: closeShellSettings)
-                        .frame(width: min(width, 520))
+                        .frame(width: overlay)
                         .frame(maxHeight: .infinity)
                         .background { ShellPalette.background.ignoresSafeArea() }
                         .overlay(alignment: .leading) { Rectangle().fill(ShellPalette.hairline).frame(width: 1).ignoresSafeArea() }
@@ -291,7 +302,7 @@ public struct LibraryView: View {
                 EdgeSwipeBack(enabled: (settingsOpen || controllersOpen || shellSettingsOpen) && choice == nil && helpGameID == nil && deleteGameID == nil
                                   && padMapping == nil && !buttonTestOpen && touchLayout == nil,
                               changed: { edgeDrag = $0 },
-                              ended: { finishEdgeSwipe(travel: $0, velocity: $1, span: controllersOpen || shellSettingsOpen ? min(width, 520) : pane) },
+                              ended: { finishEdgeSwipe(travel: $0, velocity: $1, span: controllersOpen || shellSettingsOpen ? overlay : pane) },
                               cancelled: cancelEdgeSwipe)
             }
             // Every target on screen. Which of them the D-pad reaches is decided when it is used (`isLive`), from the
