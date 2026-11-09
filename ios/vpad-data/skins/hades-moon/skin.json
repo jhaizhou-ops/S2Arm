@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "hades-moon",
+  "name": "哈迪斯 II · 月亮",
+  "games": [
+    "0100A00019DE0000"
+  ],
+  "buttons": {
+    "A": {
+      "normal": "a.png"
+    },
+    "B": {
+      "normal": "b.png"
+    },
+    "X": {
+      "normal": "x.png"
+    },
+    "Y": {
+      "normal": "y.png"
+    },
+    "L": {
+      "normal": "l.png"
+    },
+    "R": {
+      "normal": "r.png"
+    },
+    "ZL": {
+      "normal": "zl.png"
+    },
+    "ZR": {
+      "normal": "zr.png"
+    },
+    "MINUS": {
+      "normal": "minus.png"
+    },
+    "PLUS": {
+      "normal": "plus.png"
+    },
+    "LEFT": {
+      "normal": "left.png"
+    },
+    "UP": {
+      "normal": "up.png"
+    },
+    "DOWN": {
+      "normal": "down.png"
+    },
+    "RIGHT": {
+      "normal": "right.png"
+    }
+  },
+  "stick": {
+    "base": "stick.png",
+    "knob": "knob.png"
+  }
+}

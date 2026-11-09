@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "id": "preset.010021c000b6a000",
+  "name": "以撒 · 出厂布局",
+  "buttons": [
+    {
+      "id": "A",
+      "x": 0.91269,
+      "y": 0.736,
+      "width": 0.15775,
+      "height": 0.15775,
+      "cornerRadius": 0.07887
+    },
+    {
+      "id": "B",
+      "x": 0.85969,
+      "y": 0.85108,
+      "width": 0.15775,
+      "height": 0.15775,
+      "cornerRadius": 0.07887
+    },
+    {
+      "id": "X",
+      "x": 0.85969,
+      "y": 0.62092,
+      "width": 0.15775,
+      "height": 0.15775,
+      "cornerRadius": 0.07887
+    },
+    {
+      "id": "Y",
+      "x": 0.80669,
+      "y": 0.736,
+      "width": 0.15775,
+      "height": 0.15775,
+      "cornerRadius": 0.07887
+    },
+    {
+      "id": "ZL",
+      "x": 0.63239,
+      "y": 0.85108,
+      "width": 0.14951,
+      "height": 0.14951,
+      "cornerRadius": 0.07475
+    },
+    {
+      "id": "L",
+      "x": 0.71639,
+      "y": 0.85108,
+      "width": 0.14951,
+      "height": 0.14951,
+      "cornerRadius": 0.07475
+    },
+    {
+      "id": "R",
+      "x": 0.94,
+      "y": 0.501,
+      "width": 0.14951,
+      "height": 0.14951,
+      "cornerRadius": 0.07475
+    },
+    {
+      "id": "ZR",
+      "x": 0.94,
+      "y": 0.319,
+      "width": 0.14951,
+      "height": 0.14951,
+      "cornerRadius": 0.07475
+    },
+    {
+      "id": "MINUS",
+      "x": 0.5349,
+      "y": 0.9181,
+      "width": 0.11528,
+      "height": 0.11528,
+      "cornerRadius": 0.05764
+    },
+    {
+      "id": "PLUS",
+      "x": 0.4619,
+      "y": 0.919,
+      "width": 0.10878,
+      "height": 0.10878,
+      "cornerRadius": 0.05439
+    },
+    {
+      "id": "UP",
+      "x": 0.14031,
+      "y": 0.62204,
+      "width": 0.12096,
+      "height": 0.12096,
+      "cornerRadius": 0.06048
+    },
+    {
+      "id": "DOWN",
+      "x": 0.14031,
+      "y": 0.86396,
+      "width": 0.12096,
+      "height": 0.12096,
+      "cornerRadius": 0.06048
+    },
+    {
+      "id": "LEFT",
+      "x": 0.08449,
+      "y": 0.743,
+      "width": 0.12096,
+      "height": 0.12096,
+      "cornerRadius": 0.06048
+    },
+    {
+      "id": "RIGHT",
+      "x": 0.19614,
+      "y": 0.743,
+      "width": 0.12096,
+      "height": 0.12096,
+      "cornerRadius": 0.06048
+    }
+  ],
+  "sticks": [
+    {
+      "id": "left",
+      "activation": {
+        "x": 0,
+        "y": 0,
+        "width": 0.5,
+        "height": 1
+      },
+      "radius": 0.1812
+    },
+    {
+      "id": "right",
+      "activation": {
+        "x": 0.5,
+        "y": 0,
+        "width": 0.5,
+        "height": 1
+      },
+      "radius": 0.1626
+    }
+  ]
+}

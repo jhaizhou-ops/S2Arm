@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "silksong-metal",
+  "name": "丝之歌 · 黑铁",
+  "games": [
+    "010013C00E930000"
+  ],
+  "buttons": {
+    "Y": {
+      "normal": "attack.png",
+      "pressed": "attack_p.png"
+    },
+    "B": {
+      "normal": "jump.png",
+      "pressed": "jump_p.png"
+    },
+    "ZR": {
+      "normal": "dash.png",
+      "pressed": "dash_p.png"
+    },
+    "R": {
+      "normal": "tool.png",
+      "pressed": "tool_p.png"
+    },
+    "X": {
+      "normal": "needolin.png",
+      "pressed": "needolin_p.png"
+    },
+    "A": {
+      "normal": "bind.png",
+      "pressed": "bind_p.png"
+    },
+    "ZL": {
+      "normal": "clawline.png",
+      "pressed": "clawline_p.png"
+    },
+    "L": {
+      "normal": "map.png",
+      "pressed": "map_p.png"
+    },
+    "MINUS": {
+      "normal": "bag.png",
+      "pressed": "bag_p.png"
+    },
+    "PLUS": {
+      "normal": "pause.png",
+      "pressed": "pause_p.png"
+    },
+    "UP": {
+      "normal": "bagdup.png",
+      "pressed": "bagdup_p.png"
+    },
+    "LEFT": {
+      "normal": "bagdleft.png",
+      "pressed": "bagdleft_p.png"
+    },
+    "DOWN": {
+      "normal": "bagddown.png",
+      "pressed": "bagddown_p.png"
+    },
+    "RIGHT": {
+      "normal": "bagdright.png",
+      "pressed": "bagdright_p.png"
+    }
+  },
+  "stick": {
+    "base": "stick.png",
+    "knob": "knob.png"
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "id": "preset.0100a00019de0000",
+  "name": "哈迪斯 II · 出厂布局",
+  "buttons": [
+    {
+      "id": "A",
+      "x": 0.8305,
+      "y": 0.44263,
+      "width": 0.13434,
+      "height": 0.13434,
+      "cornerRadius": 0.06716
+    },
+    {
+      "id": "B",
+      "x": 0.758,
+      "y": 0.715,
+      "width": 0.13434,
+      "height": 0.13434,
+      "cornerRadius": 0.06716
+    },
+    {
+      "id": "X",
+      "x": 0.7773,
+      "y": 0.55769,
+      "width": 0.13434,
+      "height": 0.13434,
+      "cornerRadius": 0.06716
+    },
+    {
+      "id": "Y",
+      "x": 0.903,
+      "y": 0.715,
+      "width": 0.16468,
+      "height": 0.16468,
+      "cornerRadius": 0.08234
+    },
+    {
+      "id": "ZL",
+      "x": 0.88,
+      "y": 0.086,
+      "width": 0.08667,
+      "height": 0.08667,
+      "cornerRadius": 0.04333
+    },
+    {
+      "id": "L",
+      "x": 0.817,
+      "y": 0.086,
+      "width": 0.08667,
+      "height": 0.08667,
+      "cornerRadius": 0.04333
+    },
+    {
+      "id": "R",
+      "x": 0.903,
+      "y": 0.40059,
+      "width": 0.13434,
+      "height": 0.13434,
+      "cornerRadius": 0.06716
+    },
+    {
+      "id": "ZR",
+      "x": 0.943,
+      "y": 0.086,
+      "width": 0.08667,
+      "height": 0.08667,
+      "cornerRadius": 0.04333
+    },
+    {
+      "id": "MINUS",
+      "x": 0.691,
+      "y": 0.086,
+      "width": 0.08667,
+      "height": 0.08667,
+      "cornerRadius": 0.04333
+    },
+    {
+      "id": "PLUS",
+      "x": 0.754,
+      "y": 0.086,
+      "width": 0.08667,
+      "height": 0.08667,
+      "cornerRadius": 0.04333
+    },
+    {
+      "id": "UP",
+      "x": 0.701,
+      "y": 0.896,
+      "width": 0.08234,
+      "height": 0.08234,
+      "cornerRadius": 0.04117
+    },
+    {
+      "id": "DOWN",
+      "x": 0.753,
+      "y": 0.896,
+      "width": 0.08234,
+      "height": 0.08234,
+      "cornerRadius": 0.04117
+    },
+    {
+      "id": "LEFT",
+      "x": 0.645,
+      "y": 0.896,
+      "width": 0.08234,
+      "height": 0.08234,
+      "cornerRadius": 0.04117
+    },
+    {
+      "id": "RIGHT",
+      "x": 0.807,
+      "y": 0.896,
+      "width": 0.08234,
+      "height": 0.08234,
+      "cornerRadius": 0.04117
+    }
+  ],
+  "sticks": [
+    {
+      "id": "left",
+      "activation": {
+        "x": 0,
+        "y": 0,
+        "width": 0.5,
+        "height": 1
+      },
+      "radius": 0.1626
+    },
+    {
+      "id": "right",
+      "activation": {
+        "x": 0.5,
+        "y": 0,
+        "width": 0.5,
+        "height": 1
+      },
+      "radius": 0.1626
+    }
+  ]
+}
