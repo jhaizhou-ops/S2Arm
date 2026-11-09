@@ -150,6 +150,15 @@ static int relay_command(uint16_t type) {
     return relay_send(&packet);
 }
 
+static void set_relay_motion(int enabled) {
+    ns2_relay_packet packet = {0};
+    packet.magic = NS2_RELAY_MAGIC;
+    packet.version = NS2_RELAY_VERSION;
+    packet.type = NS2_RELAY_MOTION;
+    packet.enabled = enabled;
+    relay_send(&packet);
+}
+
 int s2a_mac_ns2_connect(void) {
     pthread_mutex_lock(&lock);
     if (relayFD >= 0) {
@@ -229,10 +238,15 @@ void s2a_mac_ns2_focus(int focused) {
         memset(&input, 0, sizeof input);
     }
     int relay = relayFD >= 0;
+    int motion = motion_requested && foreground;
     pthread_mutex_unlock(&lock);
-    if (changed && !foreground) {
-        if (relay) relay_command(NS2_RELAY_STOP_RUMBLE);
-        else ns2_stop_rumble();
+    if (changed) {
+        if (relay) set_relay_motion(motion);
+        else ns2_set_motion_enabled(motion);
+        if (!foreground) {
+            if (relay) relay_command(NS2_RELAY_STOP_RUMBLE);
+            else ns2_stop_rumble();
+        }
     }
 }
 
@@ -305,16 +319,12 @@ EXPORT void s2a_pad_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&lock);
     motion_requested = !!enabled;
     int relay = relayFD >= 0;
+    int active = motion_requested && foreground;
     pthread_mutex_unlock(&lock);
     if (relay) {
-        ns2_relay_packet packet = {0};
-        packet.magic = NS2_RELAY_MAGIC;
-        packet.version = NS2_RELAY_VERSION;
-        packet.type = NS2_RELAY_MOTION;
-        packet.enabled = motion_requested;
-        relay_send(&packet);
+        set_relay_motion(active);
     } else {
-        ns2_set_motion_enabled(motion_requested);
+        ns2_set_motion_enabled(active);
     }
 }
 

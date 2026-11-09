@@ -2,6 +2,7 @@
 // Copyright 2026 S2Arm contributors
 #import <Foundation/Foundation.h>
 #include "ns2_relay.h"
+#include "ns2_parent_watch.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -23,6 +24,15 @@ static int clientFD = -1;
 static const char *socketPath;
 static pthread_mutex_t relayLock = PTHREAD_MUTEX_INITIALIZER;
 static ns2_relay_packet snapshot;
+
+static void *parent_watch_main(void *context) {
+    if (s2a_ns2_wait_for_parent_exit((pid_t)(intptr_t)context)) {
+        if (socketPath) unlink(socketPath);
+        ns2_shutdown("S2Arm launcher closed", 200);
+        _exit(0);
+    }
+    return NULL;
+}
 
 static void emit_status(ns2_status status, const char *message, void *context) {
     (void)context;
@@ -153,17 +163,27 @@ static void send_snapshot(void) {
 static int create_listener(const char *path) {
     struct sockaddr_un address = {0};
     size_t length = strlen(path);
-    if (length == 0 || length >= sizeof address.sun_path) return 0;
+    if (length == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (length >= sizeof address.sun_path) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
     unlink(path);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    if (fd < 0) return -1;
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, path, length + 1);
-    if (bind(fd, (struct sockaddr *)&address, sizeof address) ||
-        listen(fd, 2) || chmod(path, 0600)) {
+    mode_t previous = umask(077);
+    int failed = bind(fd, (struct sockaddr *)&address, sizeof address) ||
+        listen(fd, 2) || chmod(path, 0600);
+    umask(previous);
+    if (failed) {
         close(fd);
         unlink(path);
-        return 0;
+        return -1;
     }
     return fd;
 }
@@ -172,6 +192,7 @@ static void start_relay(const char *path) {
     listenFD = create_listener(path);
     if (listenFD < 0) {
         fprintf(stderr, "[NS2 Relay] Could not listen on %s: %s\n", path, strerror(errno));
+        emit_status(NS2_STATUS_ERROR, strerror(errno), NULL);
         exit(1);
     }
 
@@ -232,6 +253,9 @@ int main(void) {
 
         terminateSource = install_shutdown_signal(SIGTERM);
         interruptSource = install_shutdown_signal(SIGINT);
+        pthread_t parentWatch;
+        if (!pthread_create(&parentWatch, NULL, parent_watch_main, (void *)(intptr_t)getppid()))
+            pthread_detach(parentWatch);
         start_relay(socketPath);
         if (!ns2_start_with_motion(receive_input, emit_status, receive_motion, NULL)) {
             emit_status(NS2_STATUS_ERROR, "Could not start the controller connection", NULL);

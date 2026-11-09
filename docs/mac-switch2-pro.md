@@ -28,6 +28,8 @@ off, so opening S2Arm does not start Bluetooth scanning or show a pairing prompt
 Manual **连接手柄** and **断开连接** controls are always available in the
 popover. Play remains available without a controller. With no relay socket, the
 launch request tells the game not to run its own background controller check.
+The helper watches the launcher with kqueue and exits if the launcher crashes or
+is force quit, so a stale process cannot keep the Bluetooth link.
 
 All 16 standard Nintendo buttons and both analog sticks use the game's existing
 controller mappings and deadzone. Home, Capture and C are not game inputs.
