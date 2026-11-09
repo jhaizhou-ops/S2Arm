@@ -46,6 +46,16 @@ with tempfile.TemporaryDirectory(prefix='s2a-avc-managed-') as temporary:
         run=subprocess.run(['dotnet',str(binary),'vp9'],env=mc_env,capture_output=True,text=True)
         (out/f'vp9-{mode}.log').write_text(run.stdout+run.stderr)
         assert run.returncode==0 and 'PASS vp9 selection boundary mode='+mode in run.stdout, run.stdout+run.stderr
+    # Compressed-header byte parity: C# writer vs the libvpx-verified C mirror in vpxbench.
+    hdr=subprocess.run(['dotnet',str(binary),'vp9-hdr'],env=env,capture_output=True,text=True)
+    (out/'vp9-hdr.log').write_text(hdr.stdout+hdr.stderr)
+    assert hdr.returncode==0, hdr.stdout+hdr.stderr
+    hdrcmp=out/'hdrcmp'
+    subprocess.run(['cc','-O2','-I'+str(root/'android/codecs/vpxbench'),'-o',str(hdrcmp),
+                    str(root/'android/codecs/vpxbench/hdrcmp.c'),str(root/'android/codecs/vpxbench/hdr.c')],check=True)
+    parity=subprocess.run([str(hdrcmp)],input=hdr.stdout,capture_output=True,text=True)
+    (out/'vp9-hdr-parity.log').write_text(parity.stdout+parity.stderr)
+    assert parity.returncode==0 and 'PASS' in parity.stdout, parity.stdout+parity.stderr
     missing_env=dict(env,S2A_AVC_LIBRARY=str(missing))
     entry=subprocess.run(['dotnet',str(binary)],env=missing_env,capture_output=True,text=True)
     (out/'missing-entry.log').write_text(entry.stdout+entry.stderr)

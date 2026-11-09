@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # vp9audit：宿主侧 VP9 可表示性审计（测量工具，不进产品）。解一段 IVF（编码器默认参数生成、
-# 无游戏资源），按 McVp9Backend 同款判门把每帧归桶（decoded/hidden/header/prevMv/probs/size），
-# 报覆盖率分布——「占位压缩头」形态下 AMediaCodec 路能原生解多少。
+# 无游戏资源），按 McVp9Backend+真压缩头 的同款判门把每帧重打包、送进第二个 libvpx 解码器，
+# 逐像素比对原解码输出；不可表示的帧归桶并按 Vp9NativePath.Fallback 语义终结本段到下一关键帧。
 # 用法：build.sh [out]   → 产出 <out>/vp9audit（缺省 build/vp9audit）；需要 sources 缓存里有
 # 钉住版 libvpx 源码包（android/codecs/build.sh --prepare-sources 或正常构建会自动取）。
 set -euo pipefail
@@ -24,5 +24,6 @@ host_target=${host_target:-generic-gnu}
   --disable-libyuv --enable-static --disable-shared > configure.log 2>&1 && make -j"$(sysctl -n hw.ncpu)" > make.log 2>&1) \
   || { echo "libvpx host build failed — 看 $work/obj/*.log"; exit 1; }
 cc -std=c11 -O2 -I"$work/src/libvpx" -I"$work/obj" -o "$out/vp9audit" \
-  "$repo_dir/android/codecs/vp9audit/vp9audit.c" "$work/obj/libvpx.a" -lm
+  "$repo_dir/android/codecs/vp9audit/vp9audit.c" "$repo_dir/android/codecs/vpxbench/hdr.c" \
+  "$work/obj/libvpx.a" -lm
 echo "$out/vp9audit"

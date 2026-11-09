@@ -542,3 +542,4 @@
 20261111-0102-shader-sr84-vrs-size.patch
 20261110-0329-vp9-native-mc-params.patch
 20261110-0412-vp9-native-guest-mv-freshness.patch
+20261110-0532-vp9-native-compressed-hdr.patch

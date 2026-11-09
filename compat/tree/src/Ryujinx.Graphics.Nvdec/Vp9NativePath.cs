@@ -38,6 +38,7 @@ namespace Ryujinx.Graphics.Nvdec
         private readonly VpxSurface _surface = new(0, 0);
         private readonly HashSet<string> _loggedReasons = [];
         private byte[] _frame = new byte[1 << 20];
+        private byte[] _defaults;
         private readonly byte[] _counts = new byte[VpxVp9Backend.CountsSize];
         private Vp9GuestMvState _mvState;
         private bool _active;
@@ -55,6 +56,18 @@ namespace Ryujinx.Graphics.Nvdec
                 Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码：概率表 / 计数布局与 libvpx 补丁不符（{Unsafe.SizeOf<Vp9EntropyProbs>()} / {Unsafe.SizeOf<Vp9BackwardUpdates>()}），只走托管解码器");
                 Disabled = true;
             }
+        }
+
+        // Spec-default probs (key-frame init) as the 3087-byte blob — the base every compressed-header
+        // delta is emitted against. Lazily built once; only read when the backend NeedsCompressedHeader.
+        private ReadOnlySpan<byte> Defaults()
+        {
+            if (_defaults == null)
+            {
+                Vp9EntropyProbs fc = Vp9.Decoder.DefaultProbs();
+                _defaults = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref fc, 1)).ToArray();
+            }
+            return _defaults;
         }
 
         public void Deactivate()
@@ -83,6 +96,7 @@ namespace Ryujinx.Graphics.Nvdec
                 Width = p.CurrentFrameSize.Width, Height = p.CurrentFrameSize.Height,
                 KeyFrame = p.Flags.HasFlag(FrameFlags.IsKeyFrame),
                 IntraOnly = p.Flags.HasFlag(FrameFlags.IntraOnly),
+                ErrorResilient = p.Flags.HasFlag(FrameFlags.ErrorResilientMode),
                 SignBias1 = p.RefFrameSignBias[1], SignBias2 = p.RefFrameSignBias[2], SignBias3 = p.RefFrameSignBias[3],
                 FilterLevel = p.FirstLevel, Sharpness = p.SharpnessLevel, BaseQIndex = p.BaseQIndex,
                 YDcDeltaQ = p.YDcDeltaQ, UvDcDeltaQ = p.UvDcDeltaQ, UvAcDeltaQ = p.UvAcDeltaQ,
@@ -133,6 +147,16 @@ namespace Ryujinx.Graphics.Nvdec
             int target = -1;
             reason ??= _slots.Resolve(input, refIdx, out target);
 
+            ReadOnlySpan<byte> probs = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info.Entropy, 1));
+
+            // A backend without an out-of-band probs channel (NeedsCompressedHeader) gets the real compressed
+            // header — defaults -> supplied deltas — but only sections with update slots are writable; the rest
+            // must already sit at the ctx defaults or the job falls to the managed decoder.
+            if (reason == null && _backend.NeedsCompressedHeader)
+            {
+                reason = Vp9CompressedHeader.Check(input, probs, Defaults());
+            }
+
             if (reason != null)
             {
                 Fallback(reason);
@@ -144,7 +168,9 @@ namespace Ryujinx.Graphics.Nvdec
                 _frame = new byte[(tiles.Length + Vp9NativeHeader.MaxHeaderBytes) * 2];
             }
 
-            int frameLength = Vp9NativeHeader.Write(input, refIdx, target, tiles, _frame);
+            int frameLength = _backend.NeedsCompressedHeader
+                ? Vp9NativeHeader.Write(input, refIdx, target, probs, Defaults(), tiles, _frame)
+                : Vp9NativeHeader.Write(input, refIdx, target, tiles, _frame);
 
             int miCols = (input.Width + 7) >> 3;
             int miRows = (input.Height + 7) >> 3;
@@ -167,7 +193,6 @@ namespace Ryujinx.Graphics.Nvdec
             ReadOnlySpan<byte> prevMvs = info.UsePrevInFindMvRefs
                 ? rm.MemoryManager.DeviceGetSpan(state.Vp9SetColMvReadBufOffset, mvBytes)
                 : ReadOnlySpan<byte>.Empty;
-            ReadOnlySpan<byte> probs = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info.Entropy, 1));
 
             Vp9NativeResult result;
             Vp9NativePicture picture;

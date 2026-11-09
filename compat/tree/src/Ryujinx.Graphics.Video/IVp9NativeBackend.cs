@@ -56,6 +56,13 @@ namespace Ryujinx.Graphics.Video
         // a key frame re-establishes it.
         bool ProducesGuestMetadata { get; }
 
+        // Whether the repacked frame must carry a real VP9 compressed header (defaults -> supplied prob
+        // deltas, spec §6.3) instead of the 1-byte stand-in. libvpx gets the probs out of band through the
+        // hook; a hardware path has no such channel — the bits are the only way to program its entropy state.
+        // When true the caller also gates the job through Vp9CompressedHeader.Check first: sections with no
+        // update slots (uv_mode for shown frames; y_mode/partition for intra-only) must sit at ctx defaults.
+        bool NeedsCompressedHeader { get; }
+
         // frame: uncompressed header + 1 byte + tile data. probs: Vp9EntropyProbs bytes (3087). prevMvs: the guest's MV
         // read buffer (empty when UsePrevFrameMvs is 0). mvsOut: the guest's MV write buffer (16 bytes per 8x8), written
         // on Decoded when ProducesGuestMetadata — otherwise left untouched (guest content is kept; nothing fabricated).

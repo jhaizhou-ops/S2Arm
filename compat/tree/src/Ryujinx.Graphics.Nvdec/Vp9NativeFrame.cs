@@ -10,7 +10,7 @@ namespace Ryujinx.Graphics.Nvdec
     struct Vp9NativeInput
     {
         public int LastWidth, LastHeight, GoldenWidth, GoldenHeight, AltWidth, AltHeight, Width, Height;
-        public bool KeyFrame, IntraOnly;
+        public bool KeyFrame, IntraOnly, ErrorResilient;
         public int SignBias1, SignBias2, SignBias3;
         public int FilterLevel, Sharpness, BaseQIndex, YDcDeltaQ, UvDcDeltaQ, UvAcDeltaQ;
         public bool Lossless;
@@ -169,6 +169,9 @@ namespace Ryujinx.Graphics.Nvdec
         public static string Check(in Vp9NativeInput p)
         {
             if (p.SegmentationEnabled) return "segmentation";
+            // The repack always emits error_resilient_mode=0; an error-resilient job would derive
+            // use_prev_frame_mvs differently on the hardware side than in the original stream.
+            if (p.ErrorResilient) return "error_resilient";
             if (p.BitDepth != 0 && p.BitDepth != 8) return "bit depth";
             if (p.Width < 1 || p.Height < 1 || p.Width > 8192 || p.Height > 8192) return "frame size";
             if (p.TxMode is < 0 or > 4) return "tx_mode";
@@ -185,6 +188,8 @@ namespace Ryujinx.Graphics.Nvdec
             if (p.Log2TileRows is < 0 or > 2) return "tile rows";
             return null;
         }
+
+        private static readonly byte[] InterpLiteral = { 1, 0, 2, 3 };
 
         public static void TileRange(int width, out int minLog2, out int maxLog2)
         {
@@ -225,10 +230,40 @@ namespace Ryujinx.Graphics.Nvdec
             }
         }
 
-        public const int MaxHeaderBytes = 64;
+        // Uncompressed header + up to a full compressed header (Vp9CompressedHeader.MaxBytes) before tiles.
+        public const int MaxHeaderBytes = 64 + Vp9CompressedHeader.MaxBytes;
 
         // Writes header + 1 stand-in byte + tiles into dst; returns the length. target: -1 on key frames.
         public static int Write(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, ReadOnlySpan<byte> tiles, Span<byte> dst)
+        {
+            int n = WriteUncompressed(in p, refIdx, target, 1, dst);
+            dst[n++] = 0;                      // stand-in compressed header
+            tiles.CopyTo(dst[n..]);
+            n += tiles.Length;
+            if ((dst[n - 1] & 0xe0) == 0xc0)
+                dst[n++] = 0;                  // a packet ending in a marker byte would be split as a superframe
+            return n;
+        }
+
+        // Writes header + the real compressed header (defaults -> supplied prob deltas) + tiles; the caller
+        // must have cleared the job through Vp9CompressedHeader.Check. Returns the length.
+        public static int Write(
+            in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target,
+            ReadOnlySpan<byte> probs, ReadOnlySpan<byte> defaults, ReadOnlySpan<byte> tiles, Span<byte> dst)
+        {
+            Span<byte> compressed = stackalloc byte[Vp9CompressedHeader.MaxBytes];
+            int nCompressed = Vp9CompressedHeader.Write(in p, probs, defaults, compressed);
+
+            int n = WriteUncompressed(in p, refIdx, target, nCompressed, dst);
+            compressed[..nCompressed].CopyTo(dst[n..]);
+            tiles.CopyTo(dst[(n + nCompressed)..]);
+            n += nCompressed + tiles.Length;
+            if ((dst[n - 1] & 0xe0) == 0xc0)
+                dst[n++] = 0;                  // a packet ending in a marker byte would be split as a superframe
+            return n;
+        }
+
+        private static int WriteUncompressed(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, int headerSize, Span<byte> dst)
         {
             bool key = p.KeyFrame;
             bool intraOnly = !key && p.IntraOnly;
@@ -272,7 +307,9 @@ namespace Ryujinx.Graphics.Nvdec
                     b.Put(0, 1);
                     b.Put(p.AllowHighPrecisionMv ? 1u : 0u, 1);
                     b.Put(p.InterpFilter == 4 ? 1u : 0u, 1);
-                    if (p.InterpFilter != 4) b.Put((uint)p.InterpFilter, 2);
+                    // literal_to_filter[] = {SMOOTH, EIGHTTAP, SHARP, BILINEAR} — the literal is a table
+                    // index, not the enum value (read_interp_filter maps it back)
+                    if (p.InterpFilter != 4) b.Put((uint)InterpLiteral[p.InterpFilter], 2);
                 }
             }
 
@@ -312,12 +349,11 @@ namespace Ryujinx.Graphics.Nvdec
 
             b.Put(p.Log2TileRows != 0 ? 1u : 0u, 1);
             if (p.Log2TileRows != 0) b.Put(p.Log2TileRows == 2 ? 1u : 0u, 1);
-            b.Put(1, 16);                      // header_size_in_bytes
+            b.Put((uint)headerSize, 16);       // header_size_in_bytes
 
             int n = (b.Bit + 7) >> 3;
-            dst[n++] = 0;                      // stand-in compressed header
-            tiles.CopyTo(dst[n..]);
-            return n + tiles.Length;
+            if ((b.Bit & 7) != 0) dst[n - 1] &= (byte)(0xff << (8 - (b.Bit & 7)));
+            return n;
         }
     }
 }

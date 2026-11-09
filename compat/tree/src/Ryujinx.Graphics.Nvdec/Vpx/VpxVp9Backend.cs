@@ -43,6 +43,9 @@ namespace Ryujinx.Graphics.Nvdec.Vpx
         // The libvpx hook fills the guest MV write buffer and the backward-update counts with real values.
         public bool ProducesGuestMetadata => true;
 
+        // The hook injects tx_mode/reference_mode/probs out of band; the repack's stand-in byte is enough.
+        public bool NeedsCompressedHeader => false;
+
         public Vp9NativeResult Decode(
             ReadOnlySpan<byte> frame,
             ReadOnlySpan<byte> probs,

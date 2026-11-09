@@ -207,38 +207,48 @@ surface as `S2A_MC_RECONFIG` before input queueing — `McVp9Decoder` destroys
 and recreates the codec at the new dimensions, so RECONFIG is only observable
 through the raw C ABI.
 
-The repacked frame's compressed header is a single `0x00` stand-in byte
-(`Vp9NativeHeader.Write` ends with it): `tx_mode`, `reference_mode`,
-per-job probability deltas and the `use_prev_frame_mvs` bit were all
-injected out-of-band into libvpx by the hook — AMediaCodec has no such
-channel and decodes the placeholder literally (tx_mode=ONLY_4X4,
-reference_mode=SINGLE, no updates). Under the `IVp9NativeBackend`
-contract the backend therefore reports honestly what the placeholder
-cannot represent, and `Vp9NativePath` hands that job to the managed
-decoder until the next key frame: `show_frame=0` jobs (intra-only hidden
-frames — the hook surfaces the previous picture, hardware cannot),
-inter jobs whose `TxMode`/`ReferenceMode` exceed the placeholder
-semantics (intra frames are spec-forced to ONLY_4X4+SINGLE and need no
-check), `use_prev_frame_mvs` jobs (the placeholder's first bit is the
-flag and it is always 0 — the guest MV buffer also cannot hold this
-frame's real MV field, so a managed takeover would only find a stale
-value; `NeedsKeyFrame` marks the key frame as the point the dependency
-edge safely closes), supplied entropy-probability tables that differ
-from the spec defaults the codec's context always carries, and
-non-key-frame size changes (a recreated codec has no reference state).
-`mvsOut` and `countsOut` are metadata hardware cannot produce, so the
-backend writes nothing (the guest buffers keep their upstream content;
-the path's counts stay all-zero, which is the faithful value for a
-`refresh_frame_context=0` frame) — nothing fabricated. The unwritten
-MV field has a caller-side consequence: `ProducesGuestMetadata=false`
-makes `Vp9NativePath` mark the guest MV buffer stale after each native
-`Decoded`, and `Vp9Decoder.Decode` refuses to run a managed job with
+The repacked frame carries a real compressed header
+(`Vp9CompressedHeader.Write`: a VP9 bool encoder plus the spec's
+`diff_update_prob`/`mv_update` forms), emitting the deltas that take
+the codec's per-segment context defaults to the job's supplied
+probability table — `tx_mode`, `reference_mode`, tx/coef/skip/
+inter-mode/interp/intra-inter/ref/ymode/partition/mv sections, in
+`read_compressed_header` order. `use_prev_frame_mvs` is not in the
+compressed header at all: the decoder derives it from uncompressed
+state (`!error_resilient && same_size && last shown && last not
+intra && last not key`), identical to the driver's
+`UsePrevInFindMvRefs` conditions, so it stays consistent inside an
+unbroken native segment. `Vp9NativePath` builds the supplied table
+from the job's pre-frame context plus the original compressed
+header's diffs (post-decode `fc` is already forward-adapted — never
+snapshot it). What the spec gives no update slot cannot be written,
+so `Vp9CompressedHeader.Check` keeps the job on the managed decoder:
+`uv_mode` probabilities that differ from defaults on any shown frame,
+`y_mode`/`partition` diffs on intra-only frames, MV targets that are
+even (updates only encode odd values), and `reference_mode` above
+SINGLE when no pair of reference sign biases differs. The backend
+itself now only reports runtime facts: `show_frame=0` jobs
+(intra-only hidden frames — the hook surfaces the previous picture,
+MediaCodec cannot), non-key-frame size changes (a recreated codec has
+no reference state), and starvation. `mvsOut` and `countsOut` are
+metadata hardware cannot produce, so the backend writes nothing (the
+guest buffers keep their upstream content; the path's counts stay
+all-zero, which is the faithful value for a `refresh_frame_context=0`
+frame) — nothing fabricated. The unwritten MV field has a caller-side
+consequence: `ProducesGuestMetadata=false` makes `Vp9NativePath` mark
+the guest MV buffer stale after each native `Decoded`, and
+`Vp9Decoder.Decode` refuses to run a managed job with
 `use_prev_frame_mvs` while stale — the segment drops to the next key
 frame rather than let managed decode from values the backend never
 wrote (a managed decode or a key frame re-establishes real MVs and
-clears it). Every 300 jobs and at Dispose the backend logs a one-line
-outcome distribution
-(`mc-vp9 outcome:` decoded/hidden/header/prevMv/probs/size/starved/error)
+clears it). One bitstream hazard the assembler guards: a packet whose
+last byte matches the superframe index marker `(b&0xe0)==0xc0` is
+split by `vp9_parse_superframe_index` (it only cross-checks the
+marker bytes, never the size sum) into a phantom `show_existing`
+frame that resets decoder state — both writers append a `0` byte in
+that case, the guard libvpx's own comment prescribes. Every 300 jobs
+and at Dispose the backend logs a one-line outcome distribution
+(`mc-vp9 outcome:` decoded/hidden/shape/size/starved/error)
 for real-device coverage measurement. After any decode-stage failure
 the shim marks the context failed; the backend maps that to `Error`
 once, and sustained starvation escalates to the same result so the

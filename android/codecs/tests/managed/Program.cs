@@ -140,6 +140,48 @@ static class Program
             }
         }
     }
+    // Emits the canonical compressed-header cases hdrcmp.c replays through s2a_compressed_write —
+    // inputs printed once (pic line + muts line), both writers must produce identical bytes.
+    static void Vp9Hdr()
+    {
+        Vp9EntropyProbs def0 = Ryujinx.Graphics.Nvdec.Vp9.Decoder.DefaultProbs();
+        byte[] defs = MemoryMarshal.AsBytes(new[] { def0 }.AsSpan()).ToArray();
+        Console.WriteLine($"defaults {Convert.ToHexString(defs)}");
+        int[,] cases =
+        {
+            { 0, 0, 0, 0, 4, 2, 4, 1, 0, 1, 0 },   // inter tx=select ref=select compound sw-interp hp
+            { 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0 },   // inter tx=8x8-only single fixed-interp
+            { 0, 1, 0, 0, 2, 0, 4, 0, 0, 0, 0 },   // intra-only
+            { 1, 0, 0, 0, 4, 2, 4, 1, 1, 1, 0 },   // key frame (tx/ref/interp fields inert)
+            { 0, 0, 0, 1, 4, 0, 4, 0, 0, 0, 0 },   // inter lossless (tx literal omitted)
+        };
+        int[] muts = { 1230, 2960, 3016, 3021, 3030, 3050, 3080, 2984, 2990, 3000, 1005, 1180 };
+        for (int c = 0; c < cases.GetLength(0); c++)
+        {
+            var p = new Vp9NativeInput
+            {
+                Width = 64, Height = 32,
+                KeyFrame = cases[c, 0] != 0, IntraOnly = cases[c, 1] != 0, ErrorResilient = cases[c, 2] != 0,
+                Lossless = cases[c, 3] != 0, TxMode = cases[c, 4], ReferenceMode = cases[c, 5],
+                InterpFilter = cases[c, 6], AllowHighPrecisionMv = cases[c, 7] != 0,
+                SignBias1 = cases[c, 8], SignBias2 = cases[c, 9], SignBias3 = cases[c, 10],
+            };
+            byte[] probs = (byte[])defs.Clone();
+            for (int i = 0; i < muts.Length; i++)
+            {
+                int off = muts[i];
+                probs[off] = (byte)((probs[off] | 1) + 2);  // odd non-default targets where mv gates apply
+            }
+            Console.WriteLine($"case {c}");
+            Console.WriteLine("pic " + string.Join(',', Enumerable.Range(0, 11).Select(i => cases[c, i].ToString())));
+            Console.WriteLine("muts " + string.Join(' ', muts.Select(o => o.ToString())));
+            Span<byte> dst = stackalloc byte[Vp9CompressedHeader.MaxBytes];
+            int n = Vp9CompressedHeader.Write(in p, probs, defs, dst);
+            Console.WriteLine($"compressed {Convert.ToHexString(dst[..n].ToArray())}");
+            Console.WriteLine("end");
+        }
+    }
+
     static unsafe void Vp9Mc()
     {
         // S2A_MC_FAKE_MODE 驱动 fixture dylib 的演出路径；验的是 IVp9NativeBackend 契约下
@@ -177,31 +219,45 @@ static class Program
             Check(counts.All(x=>x==0xAA),"countsOut untouched — hardware produces none, nothing fabricated");
             var inter=key; inter.IntraFrame=0;
             Check(R(inter,out _,out _)==Vp9NativeResult.Decoded,"inter frame decodes");
-            // 隐藏帧 / 供给表≠默认表 / 越界尺寸：如实回退，不产出图。
+            // 隐藏帧 / 越界尺寸：后端运行时事实判门，如实回退，不产出图。
             var hidden=key; hidden.ShowFrame=0;
             Check(R(hidden,out _,out _)==Vp9NativeResult.NotRepresentable,"hidden job not representable");
+            // 帧形语义（tx/ref/概率增量/use_prev）现在由真压缩头自带——后端不再判，
+            // 供给表任意都照样过（fixture 不读 probs，位流已携带）。
             byte[] bad=(byte[])probs.Clone(); bad[2000]^=0xFF;
-            Check(RP(bad,key,out _,out _)==Vp9NativeResult.NotRepresentable,"non-default probs rejected");
-            // seg 字段不进解码：供给表仅 seg 段不同仍应通过（负对照）。
-            int segTree=(int)Marshal.OffsetOf<Vp9EntropyProbs>(nameof(Vp9EntropyProbs.SegTreeProb));
-            bad=(byte[])probs.Clone(); bad[segTree]^=0xFF; bad[segTree+8]^=0xFF;
-            Check(RP(bad,key,out _,out _)==Vp9NativeResult.Decoded,"seg fields excluded from compare");
-            // 占位压缩头（1 字节 0x00）强解出 tx_mode=ONLY_4X4、reference_mode=SINGLE、
-            // use_prev_frame_mvs=0：真实字段超出占位语义就回退，不然位流失步花屏。
+            Check(RP(bad,key,out _,out _)==Vp9NativeResult.Decoded,"coef-region prob diff now encodable");
             var txsel=inter; txsel.TxMode=4;
-            Check(R(txsel,out _,out _)==Vp9NativeResult.NotRepresentable,"tx_mode_select not representable");
+            Check(R(txsel,out _,out _)==Vp9NativeResult.Decoded,"tx_mode_select carried by compressed header");
             var txsel2=inter; txsel2.TxMode=1;
-            Check(R(txsel2,out _,out _)==Vp9NativeResult.NotRepresentable,"allow_8x8 not representable");
+            Check(R(txsel2,out _,out _)==Vp9NativeResult.Decoded,"allow_8x8 carried by compressed header");
             var refsel=inter; refsel.ReferenceMode=2;
-            Check(R(refsel,out _,out _)==Vp9NativeResult.NotRepresentable,"reference_mode_select not representable");
-            var refcmp=inter; refcmp.ReferenceMode=1;
-            Check(R(refcmp,out _,out _)==Vp9NativeResult.NotRepresentable,"compound ref not representable");
-            var keytx=key; keytx.TxMode=4; keytx.ReferenceMode=2; // intra 规范强制两值，不算违例
-            Check(R(keytx,out _,out _)==Vp9NativeResult.Decoded,"intra tx/ref fields spec-forced, still decodes");
+            Check(R(refsel,out _,out _)==Vp9NativeResult.Decoded,"reference_mode_select carried by compressed header");
             var prevmv=inter; prevmv.UsePrevFrameMvs=1;
-            Check(R(prevmv,out _,out _)==Vp9NativeResult.NeedsKeyFrame,"prev-mv job after decoded needs keyframe");
+            Check(R(prevmv,out _,out _)==Vp9NativeResult.Decoded,"use_prev derived identically in-segment");
             byte[] prevMvBuf=new byte[16];
-            Check(backend.Decode(au,probs,in prevmv,prevMvBuf,mvs,counts,out _,out _)==Vp9NativeResult.NeedsKeyFrame,"non-empty prevMvs same rule");
+            Check(backend.Decode(au,probs,in prevmv,prevMvBuf,mvs,counts,out _,out _)==Vp9NativeResult.Decoded,"non-empty prevMvs same rule");
+            // 上游判门（Vp9CompressedHeader.Check）：规范压缩头里没有更新槽的段落，
+            // 或写不出的目标值，如实拦回托管——这才是「供给表≠默认表」的新裁决点。
+            var input=new Vp9NativeInput{Width=32,Height=16};
+            Check(Vp9CompressedHeader.Check(input,probs,probs)==null,"defaults pass check");
+            byte[] uv=(byte[])probs.Clone(); uv[1040]^=0xFF;      // uv_mode 段（无更新槽）
+            Check(Vp9CompressedHeader.Check(input,uv,probs)!=null,"uv_mode prob diff rejected");
+            byte[] coef=(byte[])probs.Clone(); coef[2000]^=0xFF; // coef 段（有更新槽）
+            Check(Vp9CompressedHeader.Check(input,coef,probs)==null,"coef prob diff expressible");
+            var inonly=input; inonly.IntraOnly=true;
+            byte[] ym=(byte[])probs.Clone(); ym[1010]^=0xFF;     // y_mode 段（intra-only 无更新槽）
+            Check(Vp9CompressedHeader.Check(inonly,ym,probs)!=null,"intra-only y_mode diff rejected");
+            var nocomp=input; nocomp.SignBias1=0; nocomp.SignBias2=0; nocomp.SignBias3=0;
+            nocomp.ReferenceMode=1;
+            Check(Vp9CompressedHeader.Check(nocomp,probs,probs)!=null,"compound ref without sign biases rejected");
+            nocomp.SignBias2=1;                                   // 有反向偏置 → compound 可写
+            Check(Vp9CompressedHeader.Check(nocomp,probs,probs)==null,"compound ref with sign biases expressible");
+            byte[] mv=(byte[])probs.Clone();                      // mv 概率只能写奇数目标
+            Check((probs[3021]&1)==0,"fixture default sign prob is even (128)");
+            mv[3021]=(byte)(probs[3021]^0x02);                    // 偶数非默认 → 写不出
+            Check(Vp9CompressedHeader.Check(input,mv,probs)!=null,"even mv prob target rejected");
+            mv[3021]=(byte)(probs[3021]|0x01);                    // 奇数目标 → 写得进
+            Check(Vp9CompressedHeader.Check(input,mv,probs)==null,"odd mv prob target expressible");
             // 尺寸变化的非关键帧 → NeedsKeyFrame；关键帧则重建后照常解。
             var resize=key; resize.IntraFrame=0; resize.Width=64; resize.Height=32;
             Check(R(resize,out _,out _)==Vp9NativeResult.NeedsKeyFrame,"non-key resize needs keyframe");
@@ -286,7 +342,8 @@ static class Program
                 using var baseline=new Ryujinx.Graphics.Nvdec.FFmpeg.H264.Decoder();
                 throw new Exception("baseline unexpectedly found FFmpeg");
             }
-            if(args.Length>0 && args[0]=="vp9") Vp9Mc();
+            if(args.Length>0 && args[0]=="vp9-hdr") Vp9Hdr();
+            else if(args.Length>0 && args[0]=="vp9") Vp9Mc();
             else if(args.Length==0) Contracts(); else { Vectors(args[0],args.Length>1?args[1]:""); if(args.Length==1) Reconfiguration(args[0]); }
             return 0;
         }
