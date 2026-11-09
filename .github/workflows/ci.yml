@@ -2,7 +2,6 @@
 # Copyright 2026 S2Arm contributors
 # 公开仓 CI：只用 GitHub 托管 runner，不依赖维护者机器、私有 secret 和 S2A_PRIVATE_TOOLS。
 #   linux：平台无关的快速门禁；macos：贡献者自检 tools/contrib_check.sh（第一层；第二层由维护者在合入列车里跑）。
-#   仅 PR 在原 linux 任务内判定 README 分流；main push / 手动触发保留完整检查，不新增任务。
 name: ci
 on:
   pull_request:
@@ -18,48 +17,22 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    outputs:
-      readme_only: ${{ steps.plan.outputs.readme_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # 仅 PR 需要两个父提交；push / 手动保持 checkout 原默认深度。
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
-      - name: 判定改动范围
-        id: plan
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            # 使用目标分支已审阅的版本；首次引入脚本 / 无法取到时运行完整检查。
-            if ! { git show HEAD^1:tools/ci_readme_plan.py > "$RUNNER_TEMP/ci-readme-plan.py" &&
-                   python3 "$RUNNER_TEMP/ci-readme-plan.py"; }; then
-              echo "::warning::README 判定不可用，执行原有完整检查"
-              echo "readme_only=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "readme_only=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: 分层登记
-        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/layer_map.py check
       - name: 单测接线
-        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/test_wired_lint.py
       - name: 公开仓扫描（全量）
-        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/public_repo_scan.py --repo . --ref HEAD --path . --format gate
-      - name: README 公开仓扫描（仅两份文档）
-        if: ${{ steps.plan.outputs.readme_only == 'true' }}
-        run: python3 tools/public_repo_scan.py --repo . --ref HEAD --path README.md --path README.zh-CN.md --format gate
   macos:
-    needs: linux
     # 私有仓 macOS 分钟按 10 倍计：私有时只在手动触发时跑，转公开后自动跑
-    # status 条件覆盖默认 success()，linux 检查失败时非 README 的 macos 仍执行。
-    if: ${{ !cancelled() && needs.linux.outputs.readme_only != 'true' && (github.event.repository.private == false || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.event.repository.private == false || github.event_name == 'workflow_dispatch' }}
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -70,7 +43,28 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
+      - name: README PR 仅省略无关依赖准备，检查仍由原自检执行
+        id: readme
+        if: github.event_name == 'pull_request' && github.event.pull_request.changed_files > 0 && github.event.pull_request.changed_files <= 2
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          only=false
+          if [ "$(git show -s --format=%P HEAD)" = "$BASE_SHA $HEAD_SHA" ] &&
+             git diff --raw --no-abbrev --no-renames --no-ext-diff --no-textconv -z "$BASE_SHA" HEAD > "$RUNNER_TEMP/s2arm-readme.raw"; then
+            only=true
+            seen=false
+            while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+              case "$meta" in ':100644 100644 '*' M') ;; *) only=false ;; esac
+              case "$path" in README.md|README.zh-CN.md) ;; *) only=false ;; esac
+              seen=true
+            done < "$RUNNER_TEMP/s2arm-readme.raw"
+            [ "$seen" = true ] || only=false
+          fi
+          echo "only=$only" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73  # v6.1.0
+        if: steps.readme.outputs.only != 'true'
         with:
           global-json-file: compat/tree/global.json
       - name: bash 5 与钉版 Python 包
@@ -81,14 +75,17 @@ jobs:
           echo "$pythonLocation/bin" >> "$GITHUB_PATH"
           python3 -m pip install -r tools/rewriter-requirements.txt -r pack/fonts/requirements.txt
       - name: 改写器固定依赖（钉版 Capstone / LZ4 源码；构建本身不下载）
+        if: steps.readme.outputs.only != 'true'
         run: python3 runtime/rewriter/prepare_deps.py build/rewriter-deps
       - name: Windows 启动器离线门禁要的 NuGet 包
+        if: steps.readme.outputs.only != 'true'
         run: python3 tools/nuget_prefetch.py launchers/windows/launcher
       - name: 钉版时区源码（服务层单测生成 tzdata 用）
         run: bash services/systemdata/make_tzdata.sh --prepare-sources
       - name: 共享字体（开源替代 7 个 .bfttf；字体版本与 sha256 在 make_open_fonts.py 里核）
         run: python3 pack/fonts/make_open_fonts.py "$RUNNER_TEMP/openfonts"
       - name: 安卓链接核对前置（钉版 NDK / CMake；版本单一来源 android/docker/Dockerfile 的 ARG SDK_PACKAGES）
+        if: steps.readme.outputs.only != 'true'
         run: |
           SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
           [ -n "$SDK" ] || { echo '【红】托管镜像没有 Android SDK（ANDROID_HOME 未设）'; exit 1; }
