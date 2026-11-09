@@ -112,7 +112,7 @@ static partial class P {
                                 var ucode = nca.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
                                 byte[] unpdm = InspectRead(ucode, "/main.npdm", 1 << 20);
                                 guestIsa = NpdmIsa(unpdm);
-                            } catch (Exception) { guestIsa = "unknown"; }
+                            } catch (Exception error) when (error is not IOException io || !DiskFull(io)) { guestIsa = "unknown"; }
                         }
                         if (content.Type == ContentType.Program && kind == "base") {
                             var code = nca.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);

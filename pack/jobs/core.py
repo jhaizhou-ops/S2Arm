@@ -803,6 +803,8 @@ class Context:
     def finish(self, state, message, result=None):
         self.cancelled = False  # Allow the terminal event after cancellation.
         self.job.update(state=state, ended=time.time(), message=message)
+        if self.operation == "import" and "sources" in (result or {}):
+            self.job["sources"] = result["sources"]
         if (result or {}).get("outputPath"):
             self.job["outputPath"] = result["outputPath"]
         # 启动器重开后从任务记录恢复完成卡：IPA 路径 / 装到的设备 / 推了几个文件原先只在结果事件里，任务记录不存，
