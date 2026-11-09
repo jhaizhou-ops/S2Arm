@@ -19,6 +19,10 @@ struct S2ArmTouchEditorView: View {
     @State private var keys: [Key] = []
     @State private var area: CGRect = .zero
     @State private var problem: String?
+    /// 本款选中的皮肤包的图（编辑器预览与游戏内同渲染）：键 id → 常态图；摇杆圈 / 头各一张
+    @State private var skinArt: [String: UIImage] = [:]
+    @State private var stickBase: UIImage?
+    @State private var stickKnob: UIImage?
 
     // 方案三「描线」+ 摇杆区方案二「石墨」（同 vpad.m vp_line / vp_face / 摇杆圈）
     private let line = Color.white.opacity(0.78), face = Color(red: 150 / 255, green: 215 / 255, blue: 230 / 255).opacity(0.9)
@@ -54,14 +58,16 @@ struct S2ArmTouchEditorView: View {
         .frame(width: size.width, height: size.height)
     }
 
-    /// 摇杆是浮动的（左 / 右半屏任意处按下），这里只画石墨圈示意大致的拇指位，不能拖
+    /// 摇杆是浮动的（左 / 右半屏任意处按下），这里只画圈示意大致的拇指位，不能拖；皮肤包给了摇杆图就用图（同游戏内）
     private var sticks: some View {
         let r = min(area.width, area.height) * 60 / 419   // 游戏内半径 60 点（短边 419 时）
         return ForEach([(0.075, 0.69, "左摇杆：左半屏任意处按下"), (0.70, 0.81, "右摇杆：右半屏任意处按下")], id: \.2) { x, y, text in
             VStack(spacing: 6) {
                 ZStack {
-                    Circle().fill(Color(red: 20 / 255, green: 22 / 255, blue: 26 / 255).opacity(0.32)).frame(width: 2 * r, height: 2 * r)
-                    Circle().fill(Color(red: 210 / 255, green: 214 / 255, blue: 220 / 255).opacity(0.59)).frame(width: r * 52 / 60, height: r * 52 / 60)
+                    if let stickBase { Image(uiImage: stickBase).resizable().aspectRatio(contentMode: .fit).frame(width: 2 * r, height: 2 * r) }
+                    else { Circle().fill(Color(red: 20 / 255, green: 22 / 255, blue: 26 / 255).opacity(0.32)).frame(width: 2 * r, height: 2 * r) }
+                    if let stickKnob { Image(uiImage: stickKnob).resizable().aspectRatio(contentMode: .fit).frame(width: r * 52 / 60, height: r * 52 / 60) }
+                    else { Circle().fill(Color(red: 210 / 255, green: 214 / 255, blue: 220 / 255).opacity(0.59)).frame(width: r * 52 / 60, height: r * 52 / 60) }
                 }
                 Text(text).font(.caption2).foregroundStyle(.white.opacity(0.85))
             }
@@ -74,15 +80,22 @@ struct S2ArmTouchEditorView: View {
     private func keyView(_ k: Key) -> some View {
         let isFace = ["A", "B", "X", "Y"].contains(k.id)
         let labels = ["PLUS": "＋", "MINUS": "－", "UP": "▲", "DOWN": "▼", "LEFT": "◀︎", "RIGHT": "▶︎", "LS": "L3", "RS": "R3"]
-        return Text(labels[k.id] ?? k.id)
-            .font(.system(size: isFace ? 17 : 13, weight: .bold))
-            .foregroundStyle(isFace ? face : Color.white.opacity(0.86))
-            .frame(width: k.size.width, height: k.size.height)
-            .overlay(RoundedRectangle(cornerRadius: k.radius).stroke(line, lineWidth: 1.6))
-            .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
-            .contentShape(Rectangle())
-            .opacity(opacity)
-            .accessibilityLabel(k.id)
+        return Group {
+            if let art = skinArt[k.id] {   // 皮肤包有这键的图：与游戏内同渲染（图自带边框与字）
+                Image(uiImage: art).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                Text(labels[k.id] ?? k.id)
+                    .font(.system(size: isFace ? 17 : 13, weight: .bold))
+                    .foregroundStyle(isFace ? face : Color.white.opacity(0.86))
+            }
+        }
+        .frame(width: k.size.width, height: k.size.height)
+        // 边框：描线样式画描线圈；皮肤图自带边框不画；选中时一律换高亮圈（缩放对象）
+        .overlay(RoundedRectangle(cornerRadius: k.radius).stroke(skinArt[k.id] == nil ? line : Color.clear, lineWidth: 1.6))
+        .shadow(color: .black.opacity(0.45), radius: 1, y: 1)
+        .contentShape(Rectangle())
+        .opacity(opacity)
+        .accessibilityLabel(k.id)
     }
 
     private func drag(_ k: Binding<Key>) -> some Gesture {
@@ -151,6 +164,24 @@ struct S2ArmTouchEditorView: View {
             let radius = min((b["cornerRadius"] as? Double ?? 0) * unit, min(size.width, size.height) / 2)
             return Key(id: id, center: CGPoint(x: area.minX + x * area.width, y: area.minY + y * area.height), size: size, radius: radius)
         }
+        loadSkinArt()
+    }
+
+    /// 本款选中的皮肤包图（与游戏内 vpad 同一份选择）：预览按图画，没选 / 没图就回描线
+    private func loadSkinArt() {
+        skinArt = [:]; stickBase = nil; stickKnob = nil
+        guard let p = gameID.withCString({ s2a_shell_vpad_skins_json($0) }) else { return }
+        defer { free(p) }
+        let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8)) as? [String: Any]
+        guard let selected = obj?["selected"] as? String, !selected.isEmpty,
+              let skin = (obj?["skins"] as? [[String: Any]] ?? []).first(where: { $0["id"] as? String == selected }),
+              let dir = skin["dir"] as? String else { return }
+        for (id, entry) in (skin["buttons"] as? [String: [String: String]] ?? [:]) {
+            if let file = entry["normal"] { skinArt[id] = UIImage(contentsOfFile: (dir as NSString).appendingPathComponent(file)) }
+        }
+        let stick = skin["stick"] as? [String: String] ?? [:]
+        if let file = stick["base"] { stickBase = UIImage(contentsOfFile: (dir as NSString).appendingPathComponent(file)) }
+        if let file = stick["knob"] { stickKnob = UIImage(contentsOfFile: (dir as NSString).appendingPathComponent(file)) }
     }
 
     private func save() {

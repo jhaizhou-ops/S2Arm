@@ -141,6 +141,13 @@ static CGRect normalized_rect(NSDictionary *value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:doc options:0 error:error];
     return data ? [S2AVPadLayout readData:data error:error] : nil;
 }
+- (instancetype)derivedLayoutWithButtons:(NSArray<NSDictionary *> *)buttons {
+    S2AVPadLayout *layout = [S2AVPadLayout new];
+    NSMutableDictionary *doc = [_document mutableCopy]; doc[@"buttons"] = buttons;
+    layout->_document = [doc copy]; layout->_identifier = _identifier; layout->_name = _name;
+    layout->_buttons = [buttons copy]; layout->_sticks = _sticks;
+    return layout;
+}
 - (CGRect)frameForButton:(NSDictionary *)button safeRect:(CGRect)rect {
     CGFloat unit = MIN(rect.size.width, rect.size.height);
     CGFloat w = MIN(rect.size.width, [button[@"width"] doubleValue] * unit);

@@ -30,6 +30,9 @@ CGFloat S2AVPadKeyOpacity(CGFloat idle, BOOL active);
 //   新 id / 名称，越出安全区的中心钳到 [0,1]。生成后按生产校验重读，不合法返回 nil
 - (nullable instancetype)layoutWithButtonCenters:(NSDictionary<NSString *, NSArray<NSNumber *> *> *)centers safeRect:(CGRect)rect
                                        identifier:(NSString *)identifier name:(NSString *)name error:(NSError **)error;
+// 页值显隐的派生布局（vpad_probe / vpad.m 用）：同方案只换按键集（顺序照 buttons），不走 F01 校验
+//   （同 defaultForSafeRect 的可信内存构造：输入来自已校验的源布局 + 包内数据文件的座位覆盖）
+- (instancetype)derivedLayoutWithButtons:(NSArray<NSDictionary *> *)buttons;
 @end
 // 拖动编辑存下的方案 id（每款游戏一份，覆盖保存）
 extern NSString *const S2AVPadLayoutMineIdentifier;

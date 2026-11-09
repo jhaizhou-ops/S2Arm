@@ -10,7 +10,7 @@ import ShellUI
 /// - 按键透明度：App 级 `S2AVPadOpacity`（0.1–1，缺省 1），全部游戏共用；宿主 ios/vpad.m 进游戏时读
 /// - 虚拟手柄布局：按游戏，走 C 接口 s2a_shell_vpad_*（宿主 ios/vpad_shell.m），与游戏内拖动编辑同一份文件
 public enum S2ArmGameSettings {
-    public static let fps60 = "fps60", widenForce = "widenForce", opacity = "vpadOpacity", layout = "vpadLayout", holdLock = "vpadHoldLock", identity = "gameIdentity", editIdentity = "edit"
+    public static let fps60 = "fps60", widenForce = "widenForce", opacity = "vpadOpacity", layout = "vpadLayout", holdLock = "vpadHoldLock", identity = "gameIdentity", editIdentity = "edit", skin = "vpadSkin"
     /// 布局多选里打开二级编辑页的那一项（不是一个方案）
     public static let editLayout = "edit"
 
@@ -31,7 +31,23 @@ public enum S2ArmGameSettings {
         return LayoutState(selected: obj?["selected"] as? String ?? "default", hasMine: obj?["hasMine"] as? Bool ?? false, holdLock: obj?["holdLock"] as? Bool ?? true)
     }
 
-    public static func sections(for id: String, stores: Stores = .live, state: LayoutState) -> [SettingSection] {
+    /// 本款可用的按键皮肤包与当前选择（宿主接口给的 JSON）；没有包就没有皮肤行
+    public struct SkinState: Equatable { public var selected: String; public var skins: [(id: String, name: String)]
+        // 公开 init：sections 的默认参数在调用方模块里求值，成员 init 是 internal 时跨模块用不了（CI 实测红）
+        public init(selected: String, skins: [(id: String, name: String)]) { self.selected = selected; self.skins = skins }
+        public static func == (a: SkinState, b: SkinState) -> Bool { a.selected == b.selected && a.skins.map(\.id) == b.skins.map(\.id) } }
+    public static func skinState(_ id: String) -> SkinState {
+        guard let p = id.withCString({ s2a_shell_vpad_skins_json($0) }) else { return SkinState(selected: "", skins: []) }
+        defer { free(p) }
+        let obj = try? JSONSerialization.jsonObject(with: Data(String(cString: p).utf8)) as? [String: Any]
+        let skins = (obj?["skins"] as? [[String: Any]] ?? []).compactMap { s -> (id: String, name: String)? in
+            guard let sid = s["id"] as? String, let name = s["name"] as? String else { return nil }
+            return (sid, name)
+        }
+        return SkinState(selected: obj?["selected"] as? String ?? "", skins: skins)
+    }
+
+    public static func sections(for id: String, stores: Stores = .live, state: LayoutState, skins: SkinState = SkinState(selected: "", skins: [])) -> [SettingSection] {
         let g = stores.game(id)
         let on60 = (g?.object(forKey: "S2AFps60") as? Bool) ?? true
         let force = g?.bool(forKey: "S2AWidenForce") ?? false
@@ -40,6 +56,13 @@ public enum S2ArmGameSettings {
         if state.hasMine { options.append(SettingOption("mine", "我的布局")) }
         options.append(SettingOption(editLayout, "调整位置…"))
         let current = state.selected == "mine" && state.hasMine ? "mine" : "default"
+        var vpadRows = [SettingRow(id: layout, label: "按键布局", note: "调整位置只对这款游戏生效", kind: .choice(options), value: current)]
+        vpadRows.append(SettingRow(id: holdLock, label: "按住锁定 ZL / ZR", note: "按住 2 秒锁定，再点一下解锁；只对这款游戏生效", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"))
+        if !skins.skins.isEmpty {   // 皮肤包按游戏给：本款有包才出这一行；空 id = 内置描线
+            let skinOptions = [SettingOption("", "内置描线")] + skins.skins.map { SettingOption($0.id, $0.name) }
+            vpadRows.append(SettingRow(id: skin, label: "按键皮肤", note: "只对这款游戏生效，下次进游戏生效", kind: .choice(skinOptions), value: skins.selected))
+        }
+        vpadRows.append(SettingRow(id: opacity, label: "按键透明度", note: "全部游戏共用，下次进游戏生效", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))))
         return [
             SettingSection(id: "s2a.identity", title: "显示", rows: [
                 SettingRow(id: identity, label: "名字和封面", note: "只改这台 iPhone 上的显示", kind: .choice([SettingOption("current", state.customIdentity ? "已自定义" : "默认"), SettingOption(editIdentity, "修改…")]), value: "current"),
@@ -48,11 +71,7 @@ public enum S2ArmGameSettings {
                 SettingRow(id: fps60, label: "60 帧", note: "关掉回到游戏自己的帧率（多为 30 帧），更省电", kind: .toggle(on: "on", off: "off"), value: on60 ? "on" : "off"),
                 SettingRow(id: widenForce, label: "宽屏强制启用", note: "没验证过的游戏也铺满全屏；画面若被拉伸会自动退回 16:9", kind: .toggle(on: "on", off: "off"), value: force ? "on" : "off"),
             ]),
-            SettingSection(id: "s2a.vpad", title: "虚拟手柄", rows: [
-                SettingRow(id: layout, label: "按键布局", note: "调整位置只对这款游戏生效", kind: .choice(options), value: current),
-                SettingRow(id: holdLock, label: "按住锁定 ZL / ZR", note: "按住 2 秒锁定，再点一下解锁；只对这款游戏生效", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"),
-                SettingRow(id: opacity, label: "按键透明度", note: "全部游戏共用，下次进游戏生效", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))),
-            ]),
+            SettingSection(id: "s2a.vpad", title: "虚拟手柄", rows: vpadRows),
         ]
     }
 
@@ -67,6 +86,8 @@ public enum S2ArmGameSettings {
         case layout:
             if value == editLayout { return true }
             if value == "default" || value == "mine" { _ = id.withCString { i in value.withCString { s2a_shell_vpad_select(i, $0) } } }
+        case skin:
+            _ = id.withCString { i in value.withCString { s2a_shell_vpad_select_skin(i, $0) } }
         default: break
         }
         return false

@@ -49,6 +49,11 @@ int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double sa
 int s2a_shell_vpad_select(const char *game_id, const char *layout_id);
 // ZL / ZR 按住锁定开关（按游戏，与游戏内设置同一份数据），返回 1 成功 / 0 失败
 int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
+// 本款可用的按键皮肤包：{"selected":"<皮肤 id 或空>","skins":[{"id","name","dir","buttons":{…},"stick":{…}}…]}，
+//   dir 是包内皮肤目录的绝对路径（编辑器预览按 dir + 清单文件名拼图）；没有可用包时 skins 为空数组。malloc，调用方 free
+char *s2a_shell_vpad_skins_json(const char *game_id);
+// 选本款皮肤：skin_id = 皮肤 id，传 "" = 回内置描线；写按游戏偏好 S2AGame.<游戏号> 的 S2AVPadSkin（与游戏内 vpad 同一处）。返回 1 / 0
+int s2a_shell_vpad_select_skin(const char *game_id, const char *skin_id);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #import "vpad_layout.h"
+#import "vpad_skin.h"
 
 // 游戏号进路径：同 launchctx.c id_ok —— 只收 [A-Za-z0-9._-]、不以 . 开头、≤127 字
 static BOOL gid_ok(const char *g) {
@@ -27,6 +28,11 @@ static S2AVPadLayout *base_for(S2AVPadLayoutStore *s, CGRect safe, BOOL *hasMine
     *hasMine = NO;
     for (S2AVPadLayout *l in s.layouts) if ([l.identifier isEqualToString:S2AVPadLayoutMineIdentifier]) { *hasMine = YES; return l; }
     return [S2AVPadLayout defaultForSafeRect:safe];
+}
+static char *json_out(NSDictionary *doc) {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil]; if (!d) return NULL;
+    char *out = malloc(d.length + 1); if (!out) return NULL;
+    memcpy(out, d.bytes, d.length); out[d.length] = 0; return out;
 }
 
 char *s2a_shell_vpad_layout_json(const char *game_id, double safe_w, double safe_h) {
@@ -73,5 +79,34 @@ int s2a_shell_vpad_select(const char *game_id, const char *layout_id) {
         NSError *e; BOOL ok = [s selectIdentifier:i error:&e] && [s markManual:&e];
         if (!ok) NSLog(@"S2Arm 游戏库：%s 切到 %s 失败：%@", game_id, layout_id, e.localizedDescription);
         return ok ? 1 : 0;
+    }
+}
+
+char *s2a_shell_vpad_skins_json(const char *game_id) {
+    @autoreleasepool {
+        if (!gid_ok(game_id)) return NULL;
+        NSString *gid = @(game_id);
+        NSMutableArray *skins = [NSMutableArray array];
+        for (S2AVPadSkin *skin in [S2AVPadSkin skinsForGame:gid]) {
+            NSMutableDictionary *entry = [@{@"id": skin.identifier, @"name": skin.name, @"dir": skin.directory.path} mutableCopy];
+            if (skin.manifest[@"buttons"]) entry[@"buttons"] = skin.manifest[@"buttons"];
+            if (skin.manifest[@"stick"]) entry[@"stick"] = skin.manifest[@"stick"];
+            [skins addObject:entry];
+        }
+        return json_out(@{@"selected": [S2AVPadSkin selectedSkinIDForGame:gid] ?: @"", @"skins": skins});
+    }
+}
+
+int s2a_shell_vpad_select_skin(const char *game_id, const char *skin_id) {
+    @autoreleasepool {
+        if (!gid_ok(game_id) || !skin_id) return 0;
+        NSString *gid = @(game_id), *sid = @(skin_id);
+        if (sid.length) {   // 必须是本款真有的包（防悬空选择）
+            BOOL found = NO;
+            for (S2AVPadSkin *skin in [S2AVPadSkin skinsForGame:gid]) if ([skin.identifier isEqualToString:sid]) { found = YES; break; }
+            if (!found) return 0;
+        }
+        [S2AVPadSkin selectSkinID:sid.length ? sid : nil forGame:gid];
+        return 1;
     }
 }
