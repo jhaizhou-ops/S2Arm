@@ -1,0 +1,120 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index 55d4fafb690fb61cf235a9299adaecbbe927f555..6d9f3d4cd1babfc95f138e9654ce2ad540db1bf5 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -7,8 +7,10 @@ namespace Ryujinx.Graphics.Nvdec
+     {
+         private IH264Decoder _h264Decoder;
+         private IVp8Decoder _vp8Decoder;
++        private IVp9Decoder _vp9Decoder;
+ 
+         // 解码器一律由平台装配登记进 S2AVideoDecoders（苹果 AppleVideo、安卓 AndroidVideo）；没登记落到 Unavailable
++        // （VP9 例外：工厂没登记回树内托管 Vp9.Decoder——登记槽接上之前 VP9 一直走的也是它）。
+         public IH264Decoder GetH264Decoder()
+         {
+             return _h264Decoder ??= S2AVideoDecoders.CreateH264() ?? new UnavailableH264Decoder();
+@@ -19,6 +21,11 @@ namespace Ryujinx.Graphics.Nvdec
+             return _vp8Decoder ??= S2AVideoDecoders.CreateVp8() ?? new UnavailableVp8Decoder();
+         }
+ 
++        public IVp9Decoder GetVp9Decoder()
++        {
++            return _vp9Decoder ??= S2AVideoDecoders.CreateVp9() ?? new Vp9.Decoder();
++        }
++
+         public void Dispose()
+         {
+             _h264Decoder?.Dispose();
+@@ -26,6 +33,9 @@ namespace Ryujinx.Graphics.Nvdec
+ 
+             _vp8Decoder?.Dispose();
+             _vp8Decoder = null;
++
++            _vp9Decoder?.Dispose();
++            _vp9Decoder = null;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+index 06d251a671032fef3842f47ab1088c94482c034f..74cbb193556cecc447989225342d793f65c7c1c5 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+@@ -74,7 +74,7 @@ namespace Ryujinx.Graphics.Nvdec
+                     Vp8Decoder.Decode(_currentContext, _rm, ref _state.State);
+                     break;
+                 case ApplicationId.Vp9:
+-                    Vp9Decoder.Decode(_rm, ref _state.State);
++                    Vp9Decoder.Decode(_currentContext, _rm, ref _state.State);
+                     break;
+                 default:
+                     Logger.Error?.Print(LogClass.Nvdec, $"Unsupported codec \"{applicationId}\".");
+diff --git a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+index 4eae2bf1b4c138b288e36c39588231f4a4f1b091..1813953c52867da4a9f9bf25bf26c1252d7558a9 100644
+--- a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
++++ b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+@@ -8,15 +8,18 @@ namespace Ryujinx.Graphics.Nvdec
+     //   平台装配在 Host.Boot 之前设一次，之后只读；工厂在 Nvdec 设备线程上、每个解码上下文第一次要解码器时调一次，返回新实例，
+     //   解码器归 NvdecDecoderContext（它 Dispose 时释放）。工厂不许抛异常：抛了报红一次、当没登记处理。
+     //   苹果已登记（platform/apple/cs/video，S2A.Apple.Video.AppleVideo.Register）；安卓已登记（android/cs/video，S2A.Android.Video.AndroidVideo.Register）；没登记一律 Unavailable
++    //   （VP9 例外：树内自带托管 Ryujinx.Graphics.Nvdec.Vp9.Decoder，工厂没登记时由 NvdecDecoderContext 回它）。
+     public static class S2AVideoDecoders
+     {
+         public static Func<IH264Decoder> H264 { get; set; }
+         public static Func<IVp8Decoder> Vp8 { get; set; }
++        public static Func<IVp9Decoder> Vp9 { get; set; }
+ 
+-        private static int _h264Failed, _vp8Failed;
++        private static int _h264Failed, _vp8Failed, _vp9Failed;
+ 
+         internal static IH264Decoder CreateH264() => Create(H264, ref _h264Failed, "H.264");
+         internal static IVp8Decoder CreateVp8() => Create(Vp8, ref _vp8Failed, "VP8");
++        internal static IVp9Decoder CreateVp9() => Create(Vp9, ref _vp9Failed, "VP9");
+ 
+         private static T Create<T>(Func<T> factory, ref int failed, string codec) where T : class
+         {
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+index 9474a86043da8ca6758ea3772afe6d3e02bd6683..464e72709ee66c4a81a6c12cbe71bd7c02071a85 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+@@ -14,17 +14,20 @@ namespace Ryujinx.Graphics.Nvdec
+ {
+     static class Vp9Decoder
+     {
+-        private static readonly Decoder _decoder = new();
+-        private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take this (managed) VP9 path
++        private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take the VP9 path (and which backend)
+ 
+-        public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
++        public unsafe static void Decode(NvdecDecoderContext context, ResourceManager rm, ref NvdecRegisters state)
+         {
+             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
+             EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
+ 
++            // S2Arm：与 H264/VP8 同一合同——解码器由平台装配工厂提供（context 管生命周期）；
++            // 工厂没登记时 context 回树内托管 Vp9.Decoder，与接槽之前同一条路径。
++            IVp9Decoder decoder = context.GetVp9Decoder();
++
+             ISurface Rent(uint lumaOffset, uint chromaOffset, FrameSize size)
+             {
+-                return rm.Cache.Get(_decoder, lumaOffset, chromaOffset, size.Width, size.Height);
++                return rm.Cache.Get(decoder, lumaOffset, chromaOffset, size.Width, size.Height);
+             }
+ 
+             ISurface lastSurface = Rent(state.SetPictureLumaOffset[0], state.SetPictureChromaOffset[0], pictureInfo.LastFrameSize);
+@@ -59,14 +62,14 @@ namespace Ryujinx.Graphics.Nvdec
+             uint lumaOffset = state.SetPictureLumaOffset[3];
+             uint chromaOffset = state.SetPictureChromaOffset[3];
+ 
+-            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
++            if (decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+             {
+                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
+ 
+                 if (!_s2aLogged)
+                 {
+                     _s2aLogged = true;
+-                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"VP9（Ryujinx 托管解码器）首帧解出：{pictureInfo.CurrentFrameSize.Width}x{pictureInfo.CurrentFrameSize.Height}");
++                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"VP9（{decoder.GetType().Name} hw={decoder.IsHardwareAccelerated}）首帧解出：{pictureInfo.CurrentFrameSize.Width}x{pictureInfo.CurrentFrameSize.Height}");
+                 }
+             }
+ 

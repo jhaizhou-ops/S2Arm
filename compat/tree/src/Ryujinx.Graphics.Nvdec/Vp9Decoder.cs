@@ -14,17 +14,20 @@ namespace Ryujinx.Graphics.Nvdec
 {
     static class Vp9Decoder
     {
-        private static readonly Decoder _decoder = new();
-        private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take this (managed) VP9 path
+        private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take the VP9 path (and which backend)
 
-        public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
+        public unsafe static void Decode(NvdecDecoderContext context, ResourceManager rm, ref NvdecRegisters state)
         {
             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
             EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
 
+            // S2Arm：与 H264/VP8 同一合同——解码器由平台装配工厂提供（context 管生命周期）；
+            // 工厂没登记时 context 回树内托管 Vp9.Decoder，与接槽之前同一条路径。
+            IVp9Decoder decoder = context.GetVp9Decoder();
+
             ISurface Rent(uint lumaOffset, uint chromaOffset, FrameSize size)
             {
-                return rm.Cache.Get(_decoder, lumaOffset, chromaOffset, size.Width, size.Height);
+                return rm.Cache.Get(decoder, lumaOffset, chromaOffset, size.Width, size.Height);
             }
 
             ISurface lastSurface = Rent(state.SetPictureLumaOffset[0], state.SetPictureChromaOffset[0], pictureInfo.LastFrameSize);
@@ -59,14 +62,14 @@ namespace Ryujinx.Graphics.Nvdec
             uint lumaOffset = state.SetPictureLumaOffset[3];
             uint chromaOffset = state.SetPictureChromaOffset[3];
 
-            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+            if (decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
             {
                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
 
                 if (!_s2aLogged)
                 {
                     _s2aLogged = true;
-                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"VP9（Ryujinx 托管解码器）首帧解出：{pictureInfo.CurrentFrameSize.Width}x{pictureInfo.CurrentFrameSize.Height}");
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"VP9（{decoder.GetType().Name} hw={decoder.IsHardwareAccelerated}）首帧解出：{pictureInfo.CurrentFrameSize.Width}x{pictureInfo.CurrentFrameSize.Height}");
                 }
             }
 

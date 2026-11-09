@@ -28,16 +28,18 @@ internal static class VideoDecoderFactoryContractTests
         private readonly object _value = Activator.CreateInstance(Type, nonPublic: true)!;
         public IH264Decoder H264() => (IH264Decoder)Type.GetMethod("GetH264Decoder")!.Invoke(_value, null)!;
         public IVp8Decoder Vp8() => (IVp8Decoder)Type.GetMethod("GetVp8Decoder")!.Invoke(_value, null)!;
+        public IVp9Decoder Vp9() => (IVp9Decoder)Type.GetMethod("GetVp9Decoder")!.Invoke(_value, null)!;
         public void Dispose() => ((IDisposable)_value).Dispose();
     }
 
-    private sealed class Spy : IH264Decoder, IVp8Decoder
+    private sealed class Spy : IH264Decoder, IVp8Decoder, IVp9Decoder
     {
         public int Disposals { get; private set; }
         public bool IsHardwareAccelerated => false;
         public ISurface CreateSurface(int width, int height) => throw new NotSupportedException("no video surface in factory test");
         public bool Decode(ref H264PictureInfo info, ISurface output, ReadOnlySpan<byte> data) => throw new NotSupportedException("no H264 decoding in factory test");
         public bool Decode(ref Vp8PictureInfo info, ISurface output, ReadOnlySpan<byte> data) => throw new NotSupportedException("no VP8 decoding in factory test");
+        public bool Decode(ref Vp9PictureInfo info, ISurface output, ReadOnlySpan<byte> data, ReadOnlySpan<Vp9MvRef> mvsIn, Span<Vp9MvRef> mvsOut) => throw new NotSupportedException("no VP9 decoding in factory test");
         public void Dispose() => Disposals++;
     }
 
@@ -45,33 +47,40 @@ internal static class VideoDecoderFactoryContractTests
     {
         var h = new List<Spy>();
         var v = new List<Spy>();
+        var n = new List<Spy>();
         S2AVideoDecoders.H264 = () => { var value = new Spy(); h.Add(value); return value; };
         S2AVideoDecoders.Vp8 = () => { var value = new Spy(); v.Add(value); return value; };
+        S2AVideoDecoders.Vp9 = () => { var value = new Spy(); n.Add(value); return value; };
         using var first = new Context();
         using var second = new Context();
-        Check(h.Count == 0 && v.Count == 0, "factories must be lazy");
+        Check(h.Count == 0 && v.Count == 0 && n.Count == 0, "factories must be lazy");
         var h1 = first.H264();
         Check(h.Count == 1 && ReferenceEquals(h1, h[0]), "H264 registered factory result");
         Check(ReferenceEquals(h1, first.H264()) && h.Count == 1, "H264 cached per context");
-        Check(v.Count == 0, "H264 getter must not create VP8");
+        Check(v.Count == 0 && n.Count == 0, "H264 getter must not create VP8/VP9");
         var v1 = first.Vp8();
         Check(v.Count == 1 && ReferenceEquals(v1, v[0]), "VP8 registered factory result");
         Check(ReferenceEquals(v1, first.Vp8()) && v.Count == 1, "VP8 cached per context");
+        var n1 = first.Vp9();
+        Check(n.Count == 1 && ReferenceEquals(n1, n[0]), "VP9 registered factory result");
+        Check(ReferenceEquals(n1, first.Vp9()) && n.Count == 1, "VP9 cached per context");
         var h2 = second.H264();
         var v2 = second.Vp8();
+        var n2 = second.Vp9();
         Check(h.Count == 2 && !ReferenceEquals(h1, h2) && ReferenceEquals(h2, h[1]), "H264 separate context ownership");
         Check(v.Count == 2 && !ReferenceEquals(v1, v2) && ReferenceEquals(v2, v[1]), "VP8 separate context ownership");
+        Check(n.Count == 2 && !ReferenceEquals(n1, n2) && ReferenceEquals(n2, n[1]), "VP9 separate context ownership");
         first.Dispose();
-        Check(h[0].Disposals == 1 && v[0].Disposals == 1, "created decoders disposed by first context");
-        Check(h[1].Disposals == 0 && v[1].Disposals == 0, "second context survives first disposal");
+        Check(h[0].Disposals == 1 && v[0].Disposals == 1 && n[0].Disposals == 1, "created decoders disposed by first context");
+        Check(h[1].Disposals == 0 && v[1].Disposals == 0 && n[1].Disposals == 0, "second context survives first disposal");
         first.Dispose();
-        Check(h[0].Disposals == 1 && v[0].Disposals == 1, "repeated context disposal must not repeat decoder disposal");
+        Check(h[0].Disposals == 1 && v[0].Disposals == 1 && n[0].Disposals == 1, "repeated context disposal must not repeat decoder disposal");
         second.Dispose();
-        Check(h[1].Disposals == 1 && v[1].Disposals == 1, "second context owns its decoders");
+        Check(h[1].Disposals == 1 && v[1].Disposals == 1 && n[1].Disposals == 1, "second context owns its decoders");
         using var lazy = new Context();
         var h3 = (Spy)lazy.H264();
         lazy.Dispose();
-        Check(h.Count == 3 && v.Count == 2 && h3.Disposals == 1, "dispose must not instantiate unused VP8");
+        Check(h.Count == 3 && v.Count == 2 && n.Count == 2 && h3.Disposals == 1, "dispose must not instantiate unused VP8/VP9");
         Check(Errors.Count == 0, "registered path has no red log");
     }
 
@@ -101,14 +110,28 @@ internal static class VideoDecoderFactoryContractTests
         Check(Count("Nvdec VP8 backend=unavailable") == instances, "VP8 unavailable log once per decoder instance");
     }
 
+    private static void Vp9Managed(Context context)
+    {
+        // VP9 的兜底不是 Unavailable：工厂没登记/工厂抛异常时 context 回树内托管解码器
+        // （Ryujinx.Graphics.Nvdec.Vp9.Decoder），与接槽之前同一条路径，不产红日志。
+        var n = context.Vp9();
+        Check(n != null && n.GetType().FullName == "Ryujinx.Graphics.Nvdec.Vp9.Decoder",
+            "VP9 unset factory falls back to the in-tree managed decoder");
+        Check(ReferenceEquals(n, context.Vp9()), "VP9 managed fallback cached per context");
+        Check(!n!.IsHardwareAccelerated, "managed VP9 fallback reports no hardware acceleration");
+    }
+
     private static void Unregistered()
     {
         S2AVideoDecoders.H264 = null;
         S2AVideoDecoders.Vp8 = null;
+        S2AVideoDecoders.Vp9 = null;
         using var first = new Context();
         Fallback(first, 1);
+        Vp9Managed(first);
         using var second = new Context();
         Fallback(second, 2);
+        Vp9Managed(second);
         Check(Errors.Count == 4, "unregistered two contexts have four unavailable diagnostics");
     }
 
@@ -125,23 +148,28 @@ internal static class VideoDecoderFactoryContractTests
         Check(h.GetType().Assembly == platform && v.GetType().Assembly == platform, "both decoders live in platform assembly");
         Check(h.GetType().Assembly != typeof(S2AVideoDecoders).Assembly, "decoders are outside shared Nvdec assembly");
         Check(ReferenceEquals(h, context.H264()) && ReferenceEquals(v, context.Vp8()), "registered decoders cached per context");
+        Vp9Managed(context);   // 安卓尚未登记 VP9 工厂：同一兜底，行为与接槽前一致
         Check(Errors.Count == 0, "android-registered path has no red log");
     }
 
     private static void Throwing()
     {
-        int h = 0, v = 0;
+        int h = 0, v = 0, n = 0;
         S2AVideoDecoders.H264 = () => { h++; throw new InvalidOperationException("synthetic H264 factory failure"); };
         S2AVideoDecoders.Vp8 = () => { v++; throw new InvalidOperationException("synthetic VP8 factory failure"); };
+        S2AVideoDecoders.Vp9 = () => { n++; throw new InvalidOperationException("synthetic VP9 factory failure"); };
         using var first = new Context();
         Fallback(first, 1);
-        Check(h == 1 && v == 1, "throwing factories invoked once in first context");
+        Vp9Managed(first);
+        Check(h == 1 && v == 1 && n == 1, "throwing factories invoked once in first context");
         using var second = new Context();
         Fallback(second, 2);
-        Check(h == 2 && v == 2, "new context retries each factory once");
+        Vp9Managed(second);
+        Check(h == 2 && v == 2 && n == 2, "new context retries each factory once");
         Check(Count("H.264 解码器工厂抛异常") == 1, "H264 factory diagnostic once per process");
         Check(Count("VP8 解码器工厂抛异常") == 1, "VP8 factory diagnostic once per process");
-        Check(Errors.Count == 6, "two factory errors plus four fallback diagnostics");
+        Check(Count("VP9 解码器工厂抛异常") == 1, "VP9 factory diagnostic once per process");
+        Check(Errors.Count == 7, "three factory errors plus four fallback diagnostics");
     }
 
     private static int Main(string[] args)
@@ -155,6 +183,7 @@ internal static class VideoDecoderFactoryContractTests
         }
         var oldH264 = S2AVideoDecoders.H264;
         var oldVp8 = S2AVideoDecoders.Vp8;
+        var oldVp9 = S2AVideoDecoders.Vp9;
         EventHandler<LogEventArgs> capture = (_, e) => { if (e.Level == LogLevel.Error) Errors.Add(e.Message); };
         Logger.SetEnable(LogLevel.Error, true);
         Logger.SetEnable(LogClass.Nvdec, true);
@@ -183,6 +212,7 @@ internal static class VideoDecoderFactoryContractTests
         {
             S2AVideoDecoders.H264 = oldH264;
             S2AVideoDecoders.Vp8 = oldVp8;
+            S2AVideoDecoders.Vp9 = oldVp9;
             Logger.Updated -= capture;
         }
     }

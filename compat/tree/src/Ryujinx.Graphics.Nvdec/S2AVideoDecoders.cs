@@ -8,15 +8,18 @@ namespace Ryujinx.Graphics.Nvdec
     //   平台装配在 Host.Boot 之前设一次，之后只读；工厂在 Nvdec 设备线程上、每个解码上下文第一次要解码器时调一次，返回新实例，
     //   解码器归 NvdecDecoderContext（它 Dispose 时释放）。工厂不许抛异常：抛了报红一次、当没登记处理。
     //   苹果已登记（platform/apple/cs/video，S2A.Apple.Video.AppleVideo.Register）；安卓已登记（android/cs/video，S2A.Android.Video.AndroidVideo.Register）；没登记一律 Unavailable
+    //   （VP9 例外：树内自带托管 Ryujinx.Graphics.Nvdec.Vp9.Decoder，工厂没登记时由 NvdecDecoderContext 回它）。
     public static class S2AVideoDecoders
     {
         public static Func<IH264Decoder> H264 { get; set; }
         public static Func<IVp8Decoder> Vp8 { get; set; }
+        public static Func<IVp9Decoder> Vp9 { get; set; }
 
-        private static int _h264Failed, _vp8Failed;
+        private static int _h264Failed, _vp8Failed, _vp9Failed;
 
         internal static IH264Decoder CreateH264() => Create(H264, ref _h264Failed, "H.264");
         internal static IVp8Decoder CreateVp8() => Create(Vp8, ref _vp8Failed, "VP8");
+        internal static IVp9Decoder CreateVp9() => Create(Vp9, ref _vp9Failed, "VP9");
 
         private static T Create<T>(Func<T> factory, ref int failed, string codec) where T : class
         {
