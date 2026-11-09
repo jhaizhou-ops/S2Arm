@@ -153,7 +153,7 @@ class LinuxSelfcheck(unittest.TestCase):
         self.assertEqual(b.returncode, 0, b.stderr)
         # 改前 main 的固定夹具字节，不依赖本地保留历史提交。
         self.assertEqual(b.stdout.encode(), ('语法\n单测 portable_test\niOS 全量编译\n'
-            '钩子 runtime/gate.sh\n钩子 android/gate.sh\n').encode())
+            '钩子 android/gate.sh\n钩子 runtime/gate.sh\n').encode())
     def test_remote_selection_keeps_toolchain_preflight(self):
         p=self.run_script('tools/gate.sh', GATE_RERUN='单测 portable_test', GATE_HOST='gate-host')
         self.assertEqual(p.returncode, 2)
