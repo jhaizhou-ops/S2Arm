@@ -19,6 +19,7 @@ typedef struct {
     s2a_input_axis axes[S2A_INPUT_AXIS_COUNT];       // source -1 = unbound
     double deadzone, sensitivity_x, sensitivity_y;
     int mouse_camera, invert_x, invert_y, recenter;
+    int back_buttons[2]; // GL / GR -> physical pad source; -1 = unbound
 } s2a_input_config;
 enum s2a_input_config_error {
     S2A_INPUT_CONFIG_OK = 0,

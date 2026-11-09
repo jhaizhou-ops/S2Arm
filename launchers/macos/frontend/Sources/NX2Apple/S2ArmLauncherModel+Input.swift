@@ -37,6 +37,7 @@ extension MouseOptions {
 struct InputConfig: Codable, Equatable {
     var schema = 1; var keyboard: [String: KeyBinding]; var mouse: [String: Int]; var gamepad: [String: String]; var axes: [String: AxisBinding]
     var mouseOptions: MouseOptions = .init(); var deadzone = 0.15
+    var backButtons: [String: String]?
     static let targets = ["A","B","X","Y","LS","RS","L","R","ZL","ZR","PLUS","MINUS","LEFT","UP","RIGHT","DOWN","LS_UP","LS_DOWN","LS_LEFT","LS_RIGHT","RS_UP","RS_DOWN","RS_LEFT","RS_RIGHT"]
     static let padCodes = ["east","south","north","west","leftStick","rightStick","leftShoulder","rightShoulder","leftTrigger","rightTrigger","menu","options","dpadLeft","dpadUp","dpadRight","dpadDown"]
     static let axisTargets = ["LX","LY","RX","RY"]

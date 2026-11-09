@@ -28,6 +28,13 @@ int main(void) {
     CHECK(c.gamepad[0] == 0 && c.axes[0].source == 0 && !c.axes[0].invert, "east and leftX are canonical sources");
     CHECK(c.mouse_camera && c.recenter && !c.invert_x && !c.invert_y, "schema1 option defaults are camera/recenter/no inversion");
     CHECK(c.deadzone == .15 && c.sensitivity_x == 1 && c.sensitivity_y == 1, "numeric values retained");
+    CHECK(c.back_buttons[0] == -1 && c.back_buttons[1] == -1, "older mappings leave both back buttons unbound");
+    char with_back[sizeof valid + 80];
+    snprintf(with_back, sizeof with_back, "%.*s,\"backButtons\":{\"GL\":\"east\",\"GR\":\"south\"}}", (int)strlen(valid) - 1, valid);
+    CHECK(!s2a_input_config_parse(with_back, strlen(with_back), &c), "launcher back-button mappings accepted");
+    CHECK(c.back_buttons[0] == 0 && c.back_buttons[1] == 1 && c.gamepad[0] == 0, "back mappings supplement original gamepad mappings");
+    replace_bad("\"schema\":1", "\"schema\":1,\"backButtons\":{\"GL\":\"unknown\"}", S2A_INPUT_CONFIG_BINDING, "invalid back-button source rejected");
+    replace_bad("\"schema\":1", "\"schema\":1,\"backButtons\":{\"XX\":\"east\"}", S2A_INPUT_CONFIG_BINDING, "invalid paddle rejected");
     const char custom[] = "{\"schema\":1,\"keyboard\":{\"A\":{\"code\":49,\"modifiers\":3},\"B\":{\"code\":49}},\"mouse\":{\"ZL\":4},\"gamepad\":{\"PLUS\":\"options\"},\"axes\":{\"RY\":{\"source\":\"leftY\",\"invert\":true}},\"deadzone\":0,\"mouseOptions\":{\"mode\":\"off\",\"sensitivityX\":0.1,\"sensitivityY\":10,\"invertX\":true,\"invertY\":true,\"recenter\":false}}";
     CHECK(!s2a_input_config_parse(custom, sizeof custom - 1, &c), "custom keyboard chord and edge values");
     CHECK(c.keyboard[0].code == 49 && c.keyboard[0].modifiers == 3 && c.keyboard[1].code == 49 && !c.keyboard[1].modifiers, "same key with different modifiers remains distinct");

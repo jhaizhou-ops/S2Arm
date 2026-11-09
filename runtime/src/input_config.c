@@ -456,6 +456,7 @@ static void input_empty(s2a_input_config *c) {
     memset(c, 0, sizeof *c);
     for (int i = 0; i < S2A_INPUT_TARGET_COUNT; i++) c->keyboard[i].code = c->mouse[i] = c->gamepad[i] = -1;
     for (int i = 0; i < 4; i++) c->axes[i].source = -1;
+    c->back_buttons[0] = c->back_buttons[1] = -1;
     c->recenter = c->mouse_camera = 1; c->deadzone = .15; c->sensitivity_x = c->sensitivity_y = 1;
 }
 void s2a_input_config_default(s2a_input_config *out) {
@@ -540,6 +541,18 @@ int s2a_input_config_parse(const char *json, size_t bytes, s2a_input_config *out
                 for (int k = 0; k < 4; k++) if (result.axes[k].source == code) return S2A_INPUT_CONFIG_DUPLICATE;
                 result.axes[target] = (s2a_input_axis){code, invert};
             }
+        }
+    }
+    f = ic_json_get(&root, "backButtons");
+    if (f) {
+        ic_json_object back;
+        if (!input_object(f, &back)) return S2A_INPUT_CONFIG_BINDING;
+        const char *const sides[] = {"GL", "GR"};
+        for (uint32_t i = 0; i < back.count; i++) {
+            int side = input_index(back.fields[i].key, sides, 2);
+            int source = input_string_index(&back.fields[i], input_pads, 16);
+            if (side < 0 || source < 0) return S2A_INPUT_CONFIG_BINDING;
+            result.back_buttons[side] = source;
         }
     }
     f = ic_json_get(&root, "deadzone");

@@ -6,6 +6,8 @@
 // https://github.com/caqlayan/procon2-mac (BLEController, MIT)
 // 仅采用协议布局与校准关系，生命周期和线程模型为本桥独立实现。
 // Protocol layouts and calibration relations inform this independently implemented lifecycle and threading model.
+// S2Arm contributors 修改（2026）：扫描时长可由 NS2_SCAN_SECONDS 编译期设定；记住的手柄标识可经 S2A_NS2_DEFAULTS_SUITE 存到指定偏好域。
+// Modified by S2Arm contributors (2026): build-time NS2_SCAN_SECONDS scan length; remembered-controller identifier may use the S2A_NS2_DEFAULTS_SUITE defaults domain.
 /*
 MIT License
 Copyright (c) 2026 jhaizhou
@@ -42,6 +44,9 @@ THE SOFTWARE.
 
 #define LOG(...) do { fprintf(stderr, "[NS2Transport] "); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
 #define NS2Localized(key) NSLocalizedStringFromTable((key), @"Transport", nil)
+#ifndef NS2_SCAN_SECONDS
+#define NS2_SCAN_SECONDS 10
+#endif
 static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
 static NSString *const serviceUUID = @"AB7DE9BE-89FE-49AD-828F-118F09DF7FD0";
@@ -51,6 +56,15 @@ static NSString *const vibrationUUID = @"CC483F51-9258-427D-A939-630C31F72B05";
 static NSString *const commandUUID = @"649D4AC9-8EB7-4E6C-AF44-1EA54FE5F005";
 static NSString *const responseUUID = @"C765A961-D9D8-4D36-A20A-5315B111836A";
 static NSString *const lastReadyPeripheralKey = @"S2ArmNS2ProLastReadyPeripheralIdentifier";
+static NSUserDefaults *controllerDefaults(void) {
+    static NSUserDefaults *defaults;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *suite = getenv("S2A_NS2_DEFAULTS_SUITE");
+        defaults = suite && *suite ? [[NSUserDefaults alloc] initWithSuiteName:[NSString stringWithUTF8String:suite]] : NSUserDefaults.standardUserDefaults;
+    });
+    return defaults;
+}
 
 // 调用线程只更新固定 mailbox；CB 对象始终局限于串行队列，不逐请求创建 block。
 // Caller threads only update the fixed mailbox; CB objects stay on one serial queue, without a block per request.
@@ -183,7 +197,7 @@ static NS2Bridge *bridge;
     initialConnectionRequested = NO;
     // 只复用曾完成握手的真实系统标识；retrieve 不扫描，失效标识或空结果才进入首次扫描。
     // Reuse only a real system identifier that completed initialization; retrieval does not scan, and invalid or absent results start discovery.
-    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:lastReadyPeripheralKey];
+    NSString *saved = [controllerDefaults() stringForKey:lastReadyPeripheralKey];
     NSUUID *identifier = saved ? [[NSUUID alloc] initWithUUIDString:saved] : nil;
     // 其他同团队游戏可能刚释放前台；先接管系统仍持有的同一外设，不凭共同服务 UUID 选其他设备。
     // Match the remembered identifier before attaching to a peripheral already connected to the system.
@@ -208,7 +222,7 @@ static NS2Bridge *bridge;
     if (!stopped && scanRequested && !device && !central.isScanning && central.state == CBManagerStatePoweredOn) {
         // 配对广播不保证包含服务 UUID，因此前台保留无过滤扫描，但禁止重复广播且只扫描十秒。
         // Pairing advertisements may omit service UUIDs; keep an unfiltered foreground scan without duplicates for ten seconds.
-        scanDeadline = now_ns() + 10ull * NSEC_PER_SEC;
+        scanDeadline = now_ns() + (uint64_t)NS2_SCAN_SECONDS * NSEC_PER_SEC;
         [central scanForPeripheralsWithServices:nil options:nil];
         emit_status(NS2_STATUS_SCANNING, NS2Localized(@"Searching for a Switch 2 Pro in pairing mode"));
         [self scheduleTimer];
@@ -540,7 +554,7 @@ static NS2Bridge *bridge;
         pthread_mutex_lock(&stateMu); ready = YES; deviceInfo.ready = 1; pthread_mutex_unlock(&stateMu);
         // 仅在校准、命令 ACK 和输入订阅均成功后记住设备，发现或连接事件不写入。
         // Remember the device only after calibration, command ACKs and input subscription succeed, never on discovery or connection alone.
-        [NSUserDefaults.standardUserDefaults setObject:peripheral.identifier.UUIDString forKey:lastReadyPeripheralKey];
+        [controllerDefaults() setObject:peripheral.identifier.UUIDString forKey:lastReadyPeripheralKey];
         LOG("NS2 Pro BLE ready：工厂摇杆校准；report05%s；玩家1灯与固件反馈命令ACK；双侧双频42-byte震动，仅活动时调度；gain=%.3g（命令ACK不代表电机动作）", motionCallback ? " IMU" : "", rumbleGain);
         emit_status(NS2_STATUS_READY, NS2Localized(@"Connected: factory calibration and player 1 light initialization complete"));
         if (self != bridge) return;
