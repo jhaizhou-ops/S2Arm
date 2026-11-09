@@ -2,7 +2,7 @@
 # Copyright 2026 S2Arm contributors
 # 公开仓 CI：只用 GitHub 托管 runner，不依赖维护者机器、私有 secret 和 S2A_PRIVATE_TOOLS。
 #   linux：平台无关的快速门禁；macos：贡献者自检 tools/contrib_check.sh（第一层；第二层由维护者在合入列车里跑）。
-#   plan 先判定；只有根 README 的普通文本修改走轻量扫描。原任务名称保留，避免改变必需检查名称。
+#   在原 linux 任务内判定 README 分流，不新增任务；macos 等待判定，原检查命令及名称保留。
 name: ci
 on:
   pull_request:
@@ -15,57 +15,44 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  plan:
+  linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     outputs:
       readme_only: ${{ steps.plan.outputs.readme_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          fetch-depth: 0
+          # PR 合并提交的两个父提交 / 常规 push 的 before，无需拉完整历史。
+          fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
-      - name: CI 分流回归
-        run: python3 tests/ci_readme_plan_test.py
       - name: 判定改动范围
         id: plan
-        run: python3 tools/ci_readme_plan.py
-  linux:
-    needs: plan
-    # plan 本身异常时也要报告失败，不能让原必需检查因 needs 被一起跳过。
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: 确认分流成功
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-        run: test "$PLAN_RESULT" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: '3.12'
+        run: |
+          if ! python3 tools/ci_readme_plan.py; then
+            echo "::warning::README 判定失败，执行原有完整检查"
+            echo "readme_only=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: 分层登记
-        if: ${{ needs.plan.outputs.readme_only != 'true' }}
+        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/layer_map.py check
       - name: 单测接线
-        if: ${{ needs.plan.outputs.readme_only != 'true' }}
+        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/test_wired_lint.py
       - name: 公开仓扫描（全量）
-        if: ${{ needs.plan.outputs.readme_only != 'true' }}
+        if: ${{ steps.plan.outputs.readme_only != 'true' }}
         run: python3 tools/public_repo_scan.py --repo . --ref HEAD --path . --format gate
       - name: README 公开仓扫描（仅两份文档）
-        if: ${{ needs.plan.outputs.readme_only == 'true' }}
+        if: ${{ steps.plan.outputs.readme_only == 'true' }}
         run: python3 tools/public_repo_scan.py --repo . --ref HEAD --path README.md --path README.zh-CN.md --format gate
   macos:
-    needs: plan
+    needs: linux
     # 私有仓 macOS 分钟按 10 倍计：私有时只在手动触发时跑，转公开后自动跑
-    if: ${{ needs.plan.outputs.readme_only != 'true' && (github.event.repository.private == false || github.event_name == 'workflow_dispatch') }}
+    # status 条件覆盖默认 success()，linux 检查失败时非 README 的 macos 仍执行。
+    if: ${{ !cancelled() && needs.linux.outputs.readme_only != 'true' && (github.event.repository.private == false || github.event_name == 'workflow_dispatch') }}
     runs-on: macos-26
     timeout-minutes: 60
     steps:

@@ -146,6 +146,69 @@ class PlanTests(unittest.TestCase):
         advanced_base = self.commit()
         self.assertFalse(self.classify(topic, base=advanced_base, name='push'))
 
+    def merge_fixture(self, code=False):
+        self.git('checkout', '-qb', 'topic')
+        self.write('README.md', 'Topic edit\n')
+        if code:
+            self.write('runtime/example.c', 'int topic_change;\n')
+        topic = self.commit()
+        self.git('checkout', '-qb', 'merge-fixture', self.base)
+        self.write('README.zh-CN.md', 'Base advanced\n')
+        base = self.commit()
+        self.git('merge', '--no-ff', '-qm', 'synthetic PR merge', 'topic')
+        return base, topic, self.git('rev-parse', 'HEAD')
+
+    def shallow_clone(self):
+        target = self.repo / 'shallow'
+        self.git('clone', '-q', '--depth=2', '--no-checkout', self.repo.as_uri(), str(target))
+        return target
+
+    def test_verified_pr_merge_is_lightweight_with_depth_two(self):
+        base, topic, merged = self.merge_fixture()
+        shallow = self.shallow_clone()
+        self.assertEqual(self.git('-C', str(shallow), 'rev-parse', '--is-shallow-repository'), 'true')
+        self.assertTrue(plan.readme_only(shallow, 'pull_request', self.event(topic, base), merged))
+
+    def test_code_in_shallow_pr_merge_is_full(self):
+        base, topic, merged = self.merge_fixture(code=True)
+        self.assertFalse(plan.readme_only(self.shallow_clone(), 'pull_request',
+                                         self.event(topic, base), merged))
+
+    def test_cli_uses_verified_shallow_merge(self):
+        base, topic, merged = self.merge_fixture()
+        shallow = self.shallow_clone()
+        event_path = self.repo / 'event.json'
+        event_path.write_text(json.dumps(self.event(topic, base)), encoding='utf-8')
+        output_path = self.repo / 'output'
+        env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_SHA': merged,
+               'GITHUB_EVENT_PATH': str(event_path), 'GITHUB_OUTPUT': str(output_path)}
+        subprocess.run([sys.executable, str(ROOT / 'tools/ci_readme_plan.py')],
+                       cwd=shallow, env=env, capture_output=True, check=True)
+        self.assertEqual(output_path.read_text(encoding='utf-8'), 'readme_only=true\n')
+
+    def test_unverified_merge_is_full(self):
+        base, topic, merged = self.merge_fixture()
+        for sha, event_base in ((topic, base), (merged, self.base), ('f' * 40, base)):
+            with self.subTest(merge=sha, base=event_base):
+                self.assertFalse(plan.readme_only(self.repo, 'pull_request',
+                                                 self.event(topic, event_base), sha))
+
+    def test_push_missing_shallow_before_is_full_without_fetch(self):
+        self.write('README.md', 'First edit\n')
+        before = self.commit()
+        self.write('README.md', 'Second edit\n')
+        self.commit()
+        self.write('README.md', 'Third edit\n')
+        after = self.commit()
+        self.assertFalse(plan.readme_only(self.shallow_clone(), 'push',
+                                         self.event(after, before, 'push')))
+
+    def test_push_immediate_parent_works_with_depth_two(self):
+        self.write('README.md', 'Edited English\n')
+        after = self.commit()
+        self.assertTrue(plan.readme_only(self.shallow_clone(), 'push',
+                                        self.event(after, self.base, 'push')))
+
     def test_empty_diff_is_full(self):
         self.assertFalse(self.classify(self.base))
 
@@ -181,6 +244,7 @@ class PlanTests(unittest.TestCase):
         event_path.write_text(json.dumps(self.event(self.commit())), encoding='utf-8')
         output_path = self.repo / 'output'
         env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request',
+               'GITHUB_SHA': '',
                'GITHUB_EVENT_PATH': str(event_path), 'GITHUB_OUTPUT': str(output_path)}
         result = subprocess.run([sys.executable, str(ROOT / 'tools/ci_readme_plan.py')],
                                 cwd=self.repo, env=env, capture_output=True, check=True)
@@ -190,6 +254,7 @@ class PlanTests(unittest.TestCase):
     def test_cli_missing_event_file_falls_back_to_full(self):
         output_path = self.repo / 'output'
         env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request',
+               'GITHUB_SHA': '',
                'GITHUB_EVENT_PATH': str(self.repo / 'missing.json'),
                'GITHUB_OUTPUT': str(output_path)}
         subprocess.run([sys.executable, str(ROOT / 'tools/ci_readme_plan.py')],
