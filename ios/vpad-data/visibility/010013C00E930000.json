@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "titleID": "010013C00E930000",
+  "status": "unverified",
+  "statusNote": "Page table and mode derivation copied verbatim from nxnative hle_hid.c (build fc9ea4ccc955d5799f37752b2d730b31 = Silksong 1.0.30000, the build this container packs). The IL2CPP class slots and field offsets have NOT been re-verified against the S2Arm rewritten binary; flip to verified only after a device run shows the expected [pad] state/page log.",
+  "reader": "il2cpp-singletons",
+  "buildID": "fc9ea4ccc955d5799f37752b2d730b31",
+  "classes": [
+    {
+      "name": "GameManager",
+      "slot": "0x7e14880",
+      "instanceOffset": "0x8",
+      "fields": {
+        "gs": "0x20",
+        "inputHandler": "0xa8"
+      }
+    },
+    {
+      "name": "UIManager",
+      "slot": "0x7e195b8",
+      "instanceOffset": "0x10",
+      "fields": {
+        "us": "0x64",
+        "page": "0x68"
+      }
+    },
+    {
+      "name": "Hero",
+      "slot": "0x7e176b0",
+      "instanceOffset": "0x8",
+      "fields": {
+        "inv": "0x8ac",
+        "tab": "0x278"
+      }
+    }
+  ],
+  "skipOffset": "0x84",
+  "menuPages": [
+    1,
+    2,
+    3,
+    6,
+    7,
+    12,
+    19
+  ],
+  "achievementsPage": 13,
+  "bindingPage": 20,
+  "bagEnabled": false,
+  "modes": {
+    "0": {
+      "keys": "all"
+    },
+    "1": {
+      "keys": []
+    },
+    "2": {
+      "keys": []
+    },
+    "3": {
+      "keys": [
+        "A"
+      ],
+      "seats": {
+        "A": {
+          "x": 0.898,
+          "y": 0.5271,
+          "width": 0.16208,
+          "height": 0.16208,
+          "cornerRadius": 0.08104
+        }
+      },
+      "sticks": false
+    },
+    "5": {
+      "keys": [
+        "LEFT",
+        "UP",
+        "DOWN",
+        "RIGHT",
+        "A",
+        "B"
+      ],
+      "seats": {
+        "LEFT": {
+          "x": 0.0608,
+          "y": 0.7222,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "UP": {
+          "x": 0.1077,
+          "y": 0.6204,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "DOWN": {
+          "x": 0.1077,
+          "y": 0.824,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "RIGHT": {
+          "x": 0.1546,
+          "y": 0.7222,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "A": {
+          "x": 0.9316,
+          "y": 0.639,
+          "width": 0.16901,
+          "height": 0.16901,
+          "cornerRadius": 0.0845
+        },
+        "B": {
+          "x": 0.9316,
+          "y": 0.8172,
+          "width": 0.16901,
+          "height": 0.16901,
+          "cornerRadius": 0.0845
+        }
+      },
+      "sticks": false
+    },
+    "6": {
+      "keys": "all"
+    },
+    "7": {
+      "keys": [
+        "LEFT",
+        "UP",
+        "DOWN",
+        "RIGHT",
+        "B"
+      ],
+      "seats": {
+        "LEFT": {
+          "x": 0.0608,
+          "y": 0.7222,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "UP": {
+          "x": 0.1077,
+          "y": 0.6204,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "DOWN": {
+          "x": 0.1077,
+          "y": 0.824,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "RIGHT": {
+          "x": 0.1546,
+          "y": 0.7222,
+          "width": 0.11554,
+          "height": 0.11554,
+          "cornerRadius": 0.05777
+        },
+        "B": {
+          "x": 0.9316,
+          "y": 0.8172,
+          "width": 0.16901,
+          "height": 0.16901,
+          "cornerRadius": 0.0845
+        }
+      },
+      "sticks": false
+    }
+  }
+}

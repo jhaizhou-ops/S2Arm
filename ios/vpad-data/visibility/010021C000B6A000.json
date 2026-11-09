@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "titleID": "010021C000B6A000",
+  "status": "unverified",
+  "statusNote": "Diary/pause derivation from the AB+ (175) probe notes: the diary word is Game+0x27630 (u32, 2 while shown) and the pause word is Game+0x1AE128, reached through the g_Game pointer at Repentance NRO data +0x87448. The pointer chain and field offsets have NOT been re-verified against the S2Arm rewritten NRO; flip to verified only after a device run shows the expected diary/pause transitions. Menu A/B derivation (title / save vs main menu / character) is intentionally not included: its fields were only measured on the older build.",
+  "reader": "module-data-fields",
+  "module": {
+    "nameContains": "epentance"
+  },
+  "fields": {
+    "gamePtr": {
+      "chain": [
+        "0x87448"
+      ],
+      "type": "ptr"
+    },
+    "diary": {
+      "chain": [
+        "gamePtr",
+        "0x27630"
+      ],
+      "type": "u32"
+    },
+    "pause": {
+      "chain": [
+        "gamePtr",
+        "0x1AE128"
+      ],
+      "type": "u32"
+    }
+  },
+  "modes": {
+    "2": {
+      "keys": "all"
+    },
+    "3": {
+      "keys": [
+        "LEFT",
+        "UP",
+        "DOWN",
+        "RIGHT",
+        "A",
+        "B"
+      ],
+      "seats": {
+        "UP": {
+          "id": "UP",
+          "x": 0.14031,
+          "y": 0.62204,
+          "width": 0.12096,
+          "height": 0.12096,
+          "cornerRadius": 0.06048
+        },
+        "LEFT": {
+          "id": "LEFT",
+          "x": 0.08449,
+          "y": 0.743,
+          "width": 0.12096,
+          "height": 0.12096,
+          "cornerRadius": 0.06048
+        },
+        "DOWN": {
+          "id": "DOWN",
+          "x": 0.14031,
+          "y": 0.86396,
+          "width": 0.12096,
+          "height": 0.12096,
+          "cornerRadius": 0.06048
+        },
+        "RIGHT": {
+          "id": "RIGHT",
+          "x": 0.19614,
+          "y": 0.743,
+          "width": 0.12096,
+          "height": 0.12096,
+          "cornerRadius": 0.06048
+        },
+        "A": {
+          "id": "A",
+          "x": 0.91269,
+          "y": 0.736,
+          "width": 0.15775,
+          "height": 0.15775,
+          "cornerRadius": 0.07887
+        },
+        "B": {
+          "id": "B",
+          "x": 0.85969,
+          "y": 0.85108,
+          "width": 0.15775,
+          "height": 0.15775,
+          "cornerRadius": 0.07887
+        }
+      },
+      "sticks": false
+    }
+  }
+}
