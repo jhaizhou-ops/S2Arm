@@ -25,3 +25,11 @@ cp docs/images/s2arm-wordmark.png docs/images/launcher-welcome.png docs/images/l
 cp launchers/macos/Branding/AppIcon-1024.png build/site/images/icon.png
 python3 -m http.server -d build/site 8000
 ```
+
+## 预览
+
+[preview/](preview/) 里是本地用 Chromium 截的整页图，只供审阅和文档引用，不会发布到 Pages：
+
+| Mac（中文） | Windows（英文） | iPhone |
+|---|---|---|
+| ![Mac 中文](preview/desktop-mac-zh.jpg) | ![Windows 英文](preview/desktop-windows-en.jpg) | ![iPhone](preview/mobile-iphone.jpg) |
