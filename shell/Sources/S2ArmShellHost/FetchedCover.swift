@@ -36,6 +36,13 @@ enum FetchedCoverStore {
 
 // MARK: - 抓取服务（去重 + 负缓存 + 静默）
 
+/// 回调的 Sendable 盒：抓取完成回调只在后台线程被调用恰好一次（见 ensureFetched 契约），
+/// 调用方负责自行回主线程；装盒只为过 Swift 6 的 sending 捕获检查，不改线程语义。
+private struct SendableCoverCallback: @unchecked Sendable {
+    let body: (Data) -> Void
+    init(_ body: @escaping (Data) -> Void) { self.body = body }
+}
+
 /// 内部可变状态（inFlight）由 NSLock 守护，故 @unchecked Sendable。
 final class CoverFetchService: @unchecked Sendable {
     static let shared = CoverFetchService()
@@ -79,12 +86,16 @@ final class CoverFetchService: @unchecked Sendable {
         }
         guard !alreadyFlying else { return }
 
+        // Swift 6 并发检查：Task.detached 的闭包是 sending 语义，不能直接捕获非 @Sendable 的
+        // onFetched 参数（42582041076 实测报错）。回调契约本就是「后台线程恰好回一次、调用方
+        // 自行回主线程」，故先装进 @unchecked Sendable 盒再捕获，语义不变。
+        let callback = SendableCoverCallback(onFetched)
         Task.detached(priority: .utility) { [self] in
             let data = await fetchStoreCoverData(titleID: titleID)
             lock.withLock { inFlight.remove(titleID) }
             guard let data else { recordNegativeAttempt(for: titleID); return }
             FetchedCoverStore.save(data, for: titleID)
-            onFetched(data)
+            callback.body(data)
         }
     }
 
