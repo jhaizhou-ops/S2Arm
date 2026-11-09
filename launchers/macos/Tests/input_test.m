@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <locale.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include "../../../macos/ns2_relay.h"
 #include "../../../ios/input_config.h"
 #import "../../../macos/front_mac.m"
 #import "../../../macos/input_guide.m"
@@ -605,6 +609,34 @@ static void test_shared_input_config(void) {
 #undef CONFIG_EXPECT
 }
 int main(int argc, const char **argv) {
+    char relayPath[96];
+    snprintf(relayPath, sizeof relayPath, "/tmp/s2arm-motion-%d.sock", getpid());
+    struct sockaddr_un relayAddress = {.sun_family = AF_UNIX};
+    strcpy(relayAddress.sun_path, relayPath);
+    int relayListener = socket(AF_UNIX, SOCK_STREAM, 0);
+    expect(bind(relayListener, (struct sockaddr *)&relayAddress, sizeof relayAddress) == 0, "motion relay bind");
+    expect(listen(relayListener, 1) == 0, "motion relay listen");
+    setenv("S2A_NS2_SOCKET", relayPath, 1);
+    s2a_mac_ns2_focus(1);
+    expect(s2a_mac_ns2_connect(), "Switch 2 Pro motion relay connects");
+    int relayClient = accept(relayListener, NULL, NULL);
+    s2a_pad_set_motion_enabled(1);
+    ns2_relay_packet motionPacket = {
+        .magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT,
+        .ready = 1, .status = NS2_STATUS_READY, .motion_known = 1,
+        .motion = {.known = 1, .host_timestamp_us = 1234, .gyro_x = 90, .acceleration_z = 1},
+    };
+    expect(send(relayClient, &motionPacket, sizeof motionPacket, 0) == sizeof motionPacket, "motion relay publishes");
+    s2a_pad_motion ns2Motion = {0};
+    for (int attempt = 0; attempt < 100 && !s2a_pad_read_motion(&ns2Motion); attempt++) usleep(1000);
+    expect(ns2Motion.host_timestamp_us == 1234 && ns2Motion.gyro_x == 90 && ns2Motion.acceleration_z == 1,
+           "Switch 2 Pro motion reaches shared Mac six-axis entry");
+    s2a_pad_set_motion_enabled(0);
+    s2a_mac_ns2_detach();
+    close(relayClient);
+    close(relayListener);
+    unlink(relayPath);
+    unsetenv("S2A_NS2_SOCKET");
     @autoreleasepool {
         if (argc == 2 && !strcmp(argv[1], "--input-config-only")) { test_shared_input_config(); return 0; }
         if (argc >= 3 && !strcmp(argv[1], "--guide-render")) {

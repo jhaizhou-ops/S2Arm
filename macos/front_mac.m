@@ -324,7 +324,8 @@ static void set_motion_source(GCMotion *source) {
     if (source.sensorsRequireManualActivation) source.sensorsActive = YES;
 }
 static void sample_motion(GCExtendedGamepad *pad) {
-    GCMotion *m = atomic_load(&g_motion_wanted) ? pad.controller.motion : nil;
+    BOOL ns2 = s2a_mac_ns2_status() == NS2_STATUS_READY;
+    GCMotion *m = atomic_load(&g_motion_wanted) && !ns2 ? pad.controller.motion : nil;
     set_motion_source(m.hasRotationRate && m.hasGravityAndUserAcceleration ? m : nil);
     s2a_pad_motion sample = {0};
     int known = g_motion_source != nil;
@@ -339,8 +340,12 @@ static void sample_motion(GCExtendedGamepad *pad) {
     g_motion = sample; g_motion_known = known;
     pthread_mutex_unlock(&g_motion_mu);
 }
-__attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) { atomic_store(&g_motion_wanted, enabled != 0); }
+__attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) {
+    atomic_store(&g_motion_wanted, enabled != 0);
+    s2a_mac_ns2_set_motion_enabled(enabled);
+}
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_motion *out) {
+    if (s2a_mac_ns2_status() == NS2_STATUS_READY) return s2a_mac_ns2_read_motion(out);
     pthread_mutex_lock(&g_motion_mu);
     int known = g_motion_known;
     *out = g_motion;

@@ -62,7 +62,7 @@ int main(void) {
     s2a_pad_motion motion;
     unsetenv("S2A_NS2_SOCKET");
     assert(!s2a_mac_ns2_read(&input) && !starts);
-    s2a_pad_set_motion_enabled(1); // A game can request sensors before connection.
+    s2a_mac_ns2_set_motion_enabled(1); // A game can request sensors before connection.
     assert(s2a_mac_ns2_connect() && starts == 1 && imu);
     s2a_mac_ns2_focus(1);
     status_callback(NS2_STATUS_READY, "test connected", NULL);
@@ -90,7 +90,7 @@ int main(void) {
     sample = (ns2_motion){.known=1, .host_timestamp_us=123456,
         .acceleration_x=.1f, .acceleration_y=.2f, .acceleration_z=1,
         .gyro_x=90, .gyro_y=-45, .gyro_z=180};
-    assert(s2a_pad_read_motion(&motion));
+    assert(s2a_mac_ns2_read_motion(&motion));
     assert(motion.host_timestamp_us == 123456 && motion.gyro_x == 90 && motion.gyro_y == -45);
     assert(motion.gyro_z == 180 && motion.acceleration_z == 1);
     const s2a_pad_vibration pair[2] = {{.2f, 160, .3f, 320}, {.4f, 80, .5f, 640}};
@@ -98,7 +98,7 @@ int main(void) {
     assert(sends == 1 && sent[0].low_amp == .2f && sent[1].high_freq == 640);
     s2a_mac_ns2_focus(0);
     assert(stops && !imu && !s2a_pad_rumble_session() && !s2a_mac_ns2_read(&input));
-    assert(!s2a_pad_read_motion(&motion));
+    assert(!s2a_mac_ns2_read_motion(&motion));
     s2a_pad_set_rumble_pair(session, pair); assert(sends == 1);
     s2a_mac_ns2_focus(1);
     assert(imu);
@@ -109,7 +109,7 @@ int main(void) {
     assert(s2a_mac_ns2_connect() && scans == 1 && starts == 1);
     status_callback(NS2_STATUS_READY, "test reconnect", NULL);
     assert(s2a_pad_rumble_session() != session);
-    s2a_pad_set_motion_enabled(0); assert(!imu && !s2a_pad_read_motion(&motion));
+    s2a_mac_ns2_set_motion_enabled(0); assert(!imu && !s2a_mac_ns2_read_motion(&motion));
     s2a_mac_ns2_disconnect(); assert(shutdowns == 1 && !s2a_pad_rumble_session());
     assert(s2a_mac_ns2_connect() && starts == 2);
     s2a_mac_ns2_disconnect(); assert(shutdowns == 2);
@@ -134,7 +134,7 @@ int main(void) {
     assert(input.buttons == 1 && input.lx == -123 && input.ly == 456);
     assert(s2a_mac_ns2_status() == NS2_STATUS_READY);
 
-    s2a_pad_set_motion_enabled(1);
+    s2a_mac_ns2_set_motion_enabled(1);
     memset(&packet, 0, sizeof packet);
     assert(receive_all(relay, &packet, sizeof packet));
     assert(packet.magic == NS2_RELAY_MAGIC && packet.type == NS2_RELAY_MOTION && packet.enabled);
@@ -146,7 +146,7 @@ int main(void) {
     };
     assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
     for (int i = 0; i < 100; i++) {
-        if (s2a_pad_read_motion(&motion) && motion.host_timestamp_us == 888) break;
+        if (s2a_mac_ns2_read_motion(&motion) && motion.host_timestamp_us == 888) break;
         usleep(1000);
     }
     assert(motion.host_timestamp_us == 888 && motion.gyro_y == 56);

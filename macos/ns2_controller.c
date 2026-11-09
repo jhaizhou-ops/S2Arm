@@ -315,7 +315,7 @@ EXPORT void s2a_pad_stop_rumble(uint64_t session) {
     else ns2_stop_rumble();
 }
 
-EXPORT void s2a_pad_set_motion_enabled(int enabled) {
+EXPORT void s2a_mac_ns2_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&lock);
     motion_requested = !!enabled;
     int relay = relayFD >= 0;
@@ -328,7 +328,7 @@ EXPORT void s2a_pad_set_motion_enabled(int enabled) {
     }
 }
 
-EXPORT int s2a_pad_read_motion(s2a_pad_motion *out) {
+EXPORT int s2a_mac_ns2_read_motion(s2a_pad_motion *out) {
     ns2_motion sample = {0};
     pthread_mutex_lock(&lock);
     if (ready && foreground && motion_requested) {
