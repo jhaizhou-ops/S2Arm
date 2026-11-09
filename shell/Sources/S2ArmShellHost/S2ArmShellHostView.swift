@@ -39,6 +39,8 @@ import UIKit
 public func s2a_shell_library_vc(_ cataloguePath: UnsafePointer<CChar>?) -> UnsafeMutableRawPointer {
     let path = cataloguePath.map { String(cString: $0) } ?? ""
     let model = S2ArmShellHostModel(catalogue: Catalogue.load(path: path))
+    // 没横版封面的款在后台联网补抓（清单加载的接缝）：不等它，库界面先按图标占位出
+    model.fetchMissingCovers()
     // 宿主「重新检查」→ 重判资源包；模型随 vc 活着，登记的是不持有的指针（vc 由 app.m 持有到进程结束）
     s2a_shell_set_refresh_handler({ ctx in
         guard let ctx else { return }

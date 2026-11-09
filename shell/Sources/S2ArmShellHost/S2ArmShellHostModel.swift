@@ -65,6 +65,28 @@ public final class S2ArmShellHostModel {
         }
     }
 
+    /// 清单里没有横版封面的款：先用本机抓取缓存（FetchedCover）补，缺的后台联网抓，抓到当场换上。
+    /// 由宿主入口在建库时调一次（s2a_shell_library_vc）；全程静默、失败退图标，不阻塞库加载。
+    public func fetchMissingCovers() {
+        for i in games.indices {
+            let tile = games[i].game
+            guard tile.banner == nil, isTitleID(tile.id) else { continue }
+            if let data = FetchedCoverStore.cachedData(for: tile.id) {
+                games[i].game.banner = Artwork(id: tile.id + ".banner", data: data)
+                bannerURLs[tile.id] = FetchedCoverStore.fileURL(for: tile.id)
+                continue
+            }
+            CoverFetchService.shared.ensureFetched(titleID: tile.id) { [weak self] data in
+                Task { @MainActor [weak self] in
+                    guard let self, let j = games.firstIndex(where: { $0.id == tile.id }),
+                          games[j].game.banner == nil else { return }
+                    games[j].game.banner = Artwork(id: tile.id + ".banner", data: data)
+                    bannerURLs[tile.id] = FetchedCoverStore.fileURL(for: tile.id)
+                }
+            }
+        }
+    }
+
     /// 重判各款资源包（建好、回前台、宿主说明里「重新检查」后）：清单 playable 且资源包不在 → needsGameData；放好了 → 回到清单状态
     public func refreshGameData() {
         for i in games.indices {
