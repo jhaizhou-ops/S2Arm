@@ -20,6 +20,7 @@ S2Arm 本身以 Apache License 2.0 授权（仓库根目录 [LICENSE](LICENSE) �
 | D3D11 细分参照 | Mesa main，2026-10-21 取 | MIT | Microsoft，经 Mesa `src/gallium/auxiliary/tessellator`；`graphics/metal/gal_tess_d3d.h` | 是 | 是 |
 | SMAA | 经 Ryujinx 着色器转出（不带 FXAA：NVIDIA FXAA 3.11 没有授权条款） | MIT | `graphics/metal/shaders/AA-LICENSE.txt` | 是 | 是 |
 | LumaDock 移植 | `238c1dd` | MIT | https://github.com/Xc1Ym/LumaDock ，全文 `launchers/macos/LICENSE.LumaDock.txt` | 是（启动器） | 否 |
+| MelonX（nxnative-fe3h-bl2h）参考 | — | MIT（© 2026 jhaizhou） | 同作者提供的 iOS 虚拟手柄参考工程 `nxnative-fe3h-bl2h`。只参考外观与交互参数（SF Symbol 图标、光晕、配色、尺寸档位、摇杆固定/浮动模式），实现在本仓库自行编写（`ios/dmpad.m`），未逐行复制 | 否 | 是（外观参数编进 iOS 宿主） |
 | LibHac | 0.21.0-alpha.133 | MIT（© 2018 Alex Barney）+ ISC（hactool，© 2018 SciresM）+ XTSSharp 声明，以包内 `LICENSE` 为准 | nupkg：`compat/packages/ryujinx.libhac.0.21.0-alpha.133.nupkg` | 是（编进 NSP/XCI 读取器） | 否 |
 | Ryujinx 引用的 NuGet 包 | MsgPack.Cli 1.0.1、Humanizer 3.0.10、Gommon 2.8.1.2、Microsoft.IO.RecyclableMemoryStream 3.0.1、Microsoft.IdentityModel.JsonWebTokens 8.19.1、SkiaSharp 3.119.4、NetCoreServer 8.0.7、Open.Nat.V2 3.2.1、System.IO.Hashing 10.0.9（版本见 `compat/tree/Directory.Packages.props`） | MsgPack.Cli 为 Apache-2.0，其余 MIT（按各包 nuspec 与包内 LICENSE 核过） | NuGet，经 Ryujinx.Common / HLE / Horizon / Input 进入产品引用闭包 | 是（随 Ryujinx 工具链） | 在引用闭包里；NativeAOT 裁剪后各自是否保留未逐一核 |
 | ZstdSharp.Port | 0.8.8 | MIT | nupkg：`compat/packages/zstdsharp.port.0.8.8.nupkg` | 是（随 Ryujinx 工具链） | 视宿主构建是否引用 |

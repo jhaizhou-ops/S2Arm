@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #import <UIKit/UIKit.h>
 #import "controller.h"
+#import "dmpad.h"   // dm_pad_attach：MelonX 风格虚拟手柄（ios/dmpad.m）
 #include "input_config.h"
 #include "root_ready.h"
 #import "vpad.h"
@@ -443,11 +444,12 @@ static double screen_ratio(void) {
 int s2a_ios_screen_known(void) { return g_view_ratio > 0; }   // 窗口场景已连上、比例取自实际所在的屏（runtime/src/widen.c 到这时才缓存屏幕高）
 int s2a_ios_screen_w(void) { double r = screen_ratio(); return ((int)(1080.0 * r)) & ~1; }
 int s2a_ios_screen_h(void) { double r = screen_ratio(); return r * 9 < 16 ? ((int)(1920.0 / r)) & ~1 : 1080; }   // 比 16:9 窄的屏（Duo 内屏 951×669 点 → 1350）
-// 游戏画面根控制器：只许横屏（Info.plist 同声明）；画面铺满全屏，四边系统边缘手势延后一拍（贴边控件一拖不退出游戏）、底部横条自动隐藏、状态栏隐藏（照旧库 SwGameVC）
+// 游戏画面根控制器：朝向跟随手柄菜单的竖屏 / 横屏选择（dm_pad_supported_orientations，缺省锁横屏，Info.plist 同时声明横竖屏）；画面铺满全屏，
+// 四边系统边缘手势延后一拍（贴边控件一拖不退出游戏）、底部横条自动隐藏、状态栏隐藏（照旧库 SwGameVC）
 @interface S2AGameVC : UIViewController
 @end
 @implementation S2AGameVC
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return dm_pad_supported_orientations(); }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (BOOL)prefersStatusBarHidden { return YES; }
@@ -456,21 +458,15 @@ int s2a_ios_screen_h(void) { double r = screen_ratio(); return r * 9 < 16 ? ((in
     CGSize z = self.view.bounds.size; double a = fmax(z.width, z.height), b = fmin(z.width, z.height); if (b > 0) g_view_ratio = a / b;
     void s2a_direct_relayout(void) __attribute__((weak_import));
     if (s2a_direct_relayout) s2a_direct_relayout();
+    void nxgal_window_ios_relayout(void) __attribute__((weak_import));   // 通用出图层（graphics/metal/gal_ios_layer.m）按新 bounds 重摆
+    if (nxgal_window_ios_relayout) nxgal_window_ios_relayout();
 }
-- (void)viewSafeAreaInsetsDidChange {   // 方向与视图尺寸记进日志（真机验横屏用）
+- (void)viewSafeAreaInsetsDidChange {   // 方向与视图尺寸记进日志（真机验横竖屏用）
     [super viewSafeAreaInsetsDidChange]; UIEdgeInsets i = self.view.safeAreaInsets; CGSize z = self.view.bounds.size; CGSize n = UIScreen.mainScreen.nativeBounds.size;
     UIInterfaceOrientation o = self.view.window.windowScene.interfaceOrientation;
     LOG("iOS 壳：朝向 %s（%ld），视图 %.0fx%.0f 点，屏幕 %.0fx%.0f 像素，屏幕宽（1080 高对应）%d；安全区 上 %.1f 左 %.1f 下 %.1f 右 %.1f",
         UIInterfaceOrientationIsLandscape(o) ? "横屏" : UIInterfaceOrientationIsPortrait(o) ? "竖屏" : "未知", (long)o, z.width, z.height, fmax(n.width, n.height), fmin(n.width, n.height),
         s2a_ios_screen_w(), i.top, i.left, i.bottom, i.right);
-    // 横屏判据看落定后的朝向：每次变化后等 1 秒，那时仍不是横屏才报红。LiveContainer 里 UIKit 读的是 LC 本体的 Info.plist（竖屏排第一、没声明全屏），
-    //   场景先以竖屏起、本类只许横屏随即转过来（10-30 测试设备1：视图 440x956 → 956x440，画面最终横屏满屏），转的那一下不是缺陷；原生安装起手就是横屏
-    static unsigned gen; unsigned g = ++gen; __weak UIViewController *wself = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        UIViewController *s = wself; if (!s || g != gen) return;   // 1 秒内又变过：以最后一次为准
-        UIInterfaceOrientation now = s.view.window.windowScene.interfaceOrientation;
-        if (!UIInterfaceOrientationIsLandscape(now) && now != UIInterfaceOrientationUnknown) LOG("【红】iOS 壳：画面不是横屏（落定 1 秒后朝向 %ld）", (long)now);
-    });
 }
 @end
 @interface S2AAppDelegate : UIResponder <UIApplicationDelegate>
@@ -718,7 +714,11 @@ void s2a_shell_pick_game_data(const char *gid) {   // 主线程（s2a_shell.h �
 - (void)prepareGameView {
     UIViewController *vc = self.window.rootViewController;
     settings_attach_runtime();
-    if (!g_msg) { s2a_vpad_attach(vc.view); void s2a_dprompt_attach(UIView *root); s2a_dprompt_attach(vc.view); }   // 触屏虚拟手柄（vpad.m）；游戏内提示条（dprompt.m）
+    // 触屏虚拟手柄换成 MelonX 风格（ios/dmpad.m，移植自 nxnative 的 DmGamepad）；旧的 ios/vpad.m 不再 attach，避免两套手柄同时向游戏发按键，
+    //   它的 s2a_vpad_read* / s2a_vpad_touch_wanted 导出仍保留（C# InputPump 按符号轮询）。
+    // 实体手柄 / 手机震动仍由 controller.m 管；s2a_controller_attach 的回调只表示「触屏输入是否该生效」，dmpad 自己按 s2a_pad_has_controller() 收起虚拟键。
+    if (!g_msg) { dm_pad_attach(vc.view); s2a_controller_attach(vc.view, ^(BOOL enabled) { (void)enabled; });
+                  void s2a_dprompt_attach(UIView *root); s2a_dprompt_attach(vc.view); }   // 游戏内提示条（dprompt.m）
     // 四指长按 1.5 秒打开设置；提示页（缺资源 / 导入失败）保留诊断按钮。
     { void s2a_diag_attach(UIViewController *vc); s2a_diag_attach(vc); }
     if (!g_msg) { void s2a_hud_attach(UIView *root); s2a_hud_attach(vc.view); }   // 开发浮层（hud.m，S2A_HUD=1 才开）

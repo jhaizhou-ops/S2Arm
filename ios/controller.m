@@ -68,6 +68,23 @@ static void system_reset_on_queue(void) {
 static float finite_clamp(float x, float lo, float hi) {
     return isfinite(x) ? fminf(hi, fmaxf(lo, x)) : lo;
 }
+// 玩家菜单里的震动强度：总开关 + 0~4 档（1 = 标准）。提交时按倍率缩放振幅，
+// 这样实体手柄 / 手机马达 / NS2 Pro 三条链路共用一份口径。
+static _Atomic int g_rumble_on = 1;
+static _Atomic int g_rumble_lv = 1;
+static const float k_rumble_gain[5] = {0.35f, 0.70f, 1.00f, 1.40f, 1.80f};
+static float rumble_gain(void) {
+    if (!atomic_load(&g_rumble_on)) return 0;
+    int lv = atomic_load(&g_rumble_lv);
+    return k_rumble_gain[(lv >= 0 && lv <= 4) ? lv : 1];
+}
+static void rumble_scale(s2a_pad_vibration v[2]) {
+    float g = rumble_gain();
+    for (int i = 0; i < 2; i++) {
+        v[i].low_amp = finite_clamp(v[i].low_amp * g, 0, 1);
+        v[i].high_amp = finite_clamp(v[i].high_amp * g, 0, 1);
+    }
+}
 // 震动失败只从这里归档：一行诊断 + 退避 / 判死（决策在 ios/haptic_retry.h，可在 Mac 宿主单测）。
 //   带上 domain / code 而不是只有 localizedDescription——「Couldn't communicate with a helper application.」是
 //   NSCocoaErrorDomain 4097（NSXPCConnectionInvalid），只看描述分不出是环境连不上还是 pattern 非法。
@@ -727,24 +744,30 @@ __attribute__((visibility("default"), used)) uint64_t s2a_pad_rumble_session(voi
 }
 __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64_t session, const s2a_pad_vibration values[2]) {
     if (!values) return;
+    // 玩家选了强度 / 关了震动：三条链路共用一份缩放后的副本（调用方的数组是 const）
+    s2a_pad_vibration scaled[2] = {values[0], values[1]};
+    rumble_scale(scaled);
     if ((session & 0xffff000000000000ull) == PHONE_SESSION_BASE) {
         pthread_mutex_lock(&g_feedback_mu);
-        if (session == (PHONE_SESSION_BASE | g_phone_epoch)) phone_submit_locked(values, NO);
+        if (session == (PHONE_SESSION_BASE | g_phone_epoch)) phone_submit_locked(scaled, NO);
         pthread_mutex_unlock(&g_feedback_mu); return;
     }
     pthread_mutex_lock(&g_feedback_mu);
     if ((session & 0xffff000000000000ull) == SYSTEM_SESSION_BASE) {
-        system_submit_locked(session, values);
+        system_submit_locked(session, scaled);
     } else if (!g_system_present && s2a_pad_has_controller() && atomic_load(&g_adapter_enabled) && session && session == atomic_load(&g_feedback_session) && atomic_load(&g_ble_ready)) {
         ns2_vibration pair[2] = {
-            { values[0].low_amp, values[0].low_hz, values[0].high_amp, values[0].high_hz },
-            { values[1].low_amp, values[1].low_hz, values[1].high_amp, values[1].high_hz }
+            { scaled[0].low_amp, scaled[0].low_hz, scaled[0].high_amp, scaled[0].high_hz },
+            { scaled[1].low_amp, scaled[1].low_hz, scaled[1].high_amp, scaled[1].high_hz }
         };
         atomic_load(&g_ns2)->send_pair_lease(pair, 1000);
     }
     pthread_mutex_unlock(&g_feedback_mu);
 }
 __attribute__((visibility("default"), used)) void s2a_pad_set_rumble(uint64_t session, unsigned side, float low_amp, float low_hz, float high_amp, float high_hz) {
+    float g = rumble_gain();   // 只缩放本次提交的那一侧，另一侧沿用上次提交的快照，避免反复叠加
+    low_amp = finite_clamp(low_amp * g, 0, 1);
+    high_amp = finite_clamp(high_amp * g, 0, 1);
     if ((session & 0xffff000000000000ull) == PHONE_SESSION_BASE) {   // 手机马达只有一个，合成两侧
         pthread_mutex_lock(&g_feedback_mu);
         if (side < 2 && session == (PHONE_SESSION_BASE | g_phone_epoch)) {
@@ -776,6 +799,30 @@ __attribute__((visibility("default"), used)) void s2a_pad_stop_rumble(uint64_t s
         s2a_pad_vibration zero[2] = {0}; system_submit_locked(session, zero);
     } else if (atomic_load(&g_adapter_enabled) && session && session == atomic_load(&g_feedback_session) && atomic_load(&g_ble_ready)) atomic_load(&g_ns2)->stop_rumble();
     pthread_mutex_unlock(&g_feedback_mu);
+}
+// 齿轮菜单：震动总开关。关掉立即把三条链路都停掉，不必等游戏下一帧提交零振幅。
+void s2a_rumble_set_enabled(int on) {
+    int was = atomic_exchange(&g_rumble_on, on ? 1 : 0);
+    if (!on && was) {
+        dispatch_async(g_system_haptics_queue, ^{
+            system_stop_on_queue();
+            s2a_phone_rumble_stop();
+        });
+        if (atomic_load(&g_adapter_enabled) && atomic_load(&g_ble_ready)) {
+            const ns2_api *api = atomic_load(&g_ns2);
+            if (api) api->stop_rumble();
+        }
+        LOG("震动：玩家关闭");
+    } else if (on && !was) {
+        LOG("震动：玩家打开（档位 %d）", atomic_load(&g_rumble_lv));
+    }
+}
+// 齿轮菜单：0 弱 / 1 标准 / 2 强 / 3 更强 / 4 最强（倍率见 k_rumble_gain）。
+void s2a_rumble_set_level(int lv) {
+    if (lv < 0) lv = 0;
+    if (lv > 4) lv = 4;
+    int was = atomic_exchange(&g_rumble_lv, lv);
+    if (was != lv) LOG("震动：强度档位 %d（%.2f 倍）", lv, k_rumble_gain[lv]);
 }
 __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&g_motion_mu);

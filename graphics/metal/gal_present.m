@@ -52,6 +52,10 @@ static int g_filter;             // ScalingFilter：0 Bilinear 1 Nearest 2 Fsr 3
 static int g_antialiasing;       // AntiAliasing：None 0 / SMAA Low..Ultra 2..5（1 = 旧 Fxaa 值，按 SMAA Medium）；随帧冻结
 static int g_req_w, g_req_h;     // SetSize（0 = 用图层自己的 drawableSize）
 static float g_min_interval;     // 秒；0 = 不限
+// 画面填充 / 画面自定义（手柄菜单写，g_mu 护）：fill -1 = 跟随这一帧的 stretched，0 保持比例，1 拉伸，2 裁切
+static int g_pic_fill = -1;
+static float g_pic_scale = 1, g_pic_sx = 1, g_pic_sy = 1, g_pic_dx, g_pic_dy;
+static _Atomic int g_last_dst[4], g_last_dt[2], g_last_ok;   // 最近一次上屏的目标矩形（像素）与 drawable 尺寸，画面编辑虚线框用
 
 static _Atomic uint64_t g_n_present, g_n_shown, g_n_dropped, g_n_nodrawable;
 static _Atomic uint64_t g_disp_us, g_n_disp_drop; static double g_disp_prev;   // 最近两次真正上屏的间隔（微秒）、交了却没上屏的次数（上屏回调线程写）
@@ -183,16 +187,33 @@ static id<MTLRenderPipelineState> pr_pso_get(MTLPixelFormat f, int compile) {
 }
 
 // ---------- 宽高比：Ryujinx Window.Present 同一套（float 运算、int 截断、整数除 2 居中）----------
-static irect dst_rect(int W, int H, int stretched, float ax, float ay) {
+typedef struct { int fill; float scale, sx, sy, dx, dy; } piccfg;   // 本帧的画面填充 / 自定义（present_main 从窗口设置里拷出来）
+static const piccfg k_pic_default = {-1, 1, 1, 1, 0, 0};
+// 手柄改过画面后：fill = 0 保持比例、1 拉伸、2 裁切（裁切返回比目标大的矩形，靠 scissor 截到目标，见 pr_encode）；
+// scale / sx / sy / dx / dy 与参考前端 front_ios.m 的画面语义一致（dx / dy 是整屏宽高的比例）。
+static irect dst_rect(int W, int H, int stretched, float ax, float ay, piccfg pc) {
     if (!(ax > 0) || !(ay > 0)) stretched = 1;   // 宽高比缺失（0 / 非数）按拉伸，免得除零
-    float rx = stretched ? 1.0f : fminf(1.0f, H * ax / (W * ay));
-    float ry = stretched ? 1.0f : fminf(1.0f, W * ay / (H * ax));
-    int dw = (int)(W * rx), dh = (int)(H * ry);
-    // 截断后离满屏不足 1 像素（比例只差小数位）就铺满：不到一像素的信箱看不出，留下的那一列 / 行黑却看得出
-    // （10-21 真机 2868×1320 屏出图 1564×720：W·rx = 2867.35 → 2867，右侧 1 列黑，宽屏界面线截屏量出）
-    if (W - W * rx < 1.0f) dw = W;
-    if (H - H * ry < 1.0f) dh = H;
-    return (irect){(W - dw) / 2, (H - dh) / 2, dw, dh};
+    if (pc.fill < 0 && pc.scale == 1 && pc.sx == 1 && pc.sy == 1 && pc.dx == 0 && pc.dy == 0) {
+        float rx = stretched ? 1.0f : fminf(1.0f, H * ax / (W * ay));
+        float ry = stretched ? 1.0f : fminf(1.0f, W * ay / (H * ax));
+        int dw = (int)(W * rx), dh = (int)(H * ry);
+        // 截断后离满屏不足 1 像素（比例只差小数位）就铺满：不到一像素的信箱看不出，留下的那一列 / 行黑却看得出
+        // （10-21 真机 2868×1320 屏出图 1564×720：W·rx = 2867.35 → 2867，右侧 1 列黑，宽屏界面线截屏量出）
+        if (W - W * rx < 1.0f) dw = W;
+        if (H - H * ry < 1.0f) dh = H;
+        return (irect){(W - dw) / 2, (H - dh) / 2, dw, dh};
+    }
+    int mode = pc.fill < 0 ? (stretched ? 1 : 0) : pc.fill;
+    float pw = W * pc.scale * pc.sx, ph = H * pc.scale * pc.sy;
+    float rx = 1, ry = 1;
+    if (mode == 0) { rx = fminf(1.0f, ph * ax / (pw * ay)); ry = fminf(1.0f, pw * ay / (ph * ax)); }
+    else if (mode == 2) { rx = fmaxf(1.0f, ph * ax / (pw * ay)); ry = fmaxf(1.0f, pw * ay / (ph * ax)); }
+    int dw = (int)(pw * rx), dh = (int)(ph * ry);
+    if (mode == 0) {   // 截断后差不足一像素就铺满（同缺省档）
+        if (pw - pw * rx < 1.0f) dw = (int)pw;
+        if (ph - ph * ry < 1.0f) dh = (int)ph;
+    }
+    return (irect){(int)((W - dw) / 2 + pc.dx * W), (int)((H - dh) / 2 + pc.dy * H), dw, dh};
 }
 // 上屏编码（drawable 与 render_to 共用）：目标 W×H，信箱外清黑
 static MTL4RenderPassDescriptor *pr_pass(id<MTLTexture> dst, irect r) {
@@ -204,14 +225,19 @@ static MTL4RenderPassDescriptor *pr_pass(id<MTLTexture> dst, irect r) {
     d.renderTargetWidth = dst.width; d.renderTargetHeight = dst.height;
     return d;
 }
-static void pr_encode(id<MTL4RenderCommandEncoder> e, id<MTL4ArgumentTable> t, id<MTLRenderPipelineState> p, id<MTLTexture> src, irect r, int filter) {
+static void pr_encode(id<MTL4RenderCommandEncoder> e, id<MTL4ArgumentTable> t, id<MTLRenderPipelineState> p, id<MTLTexture> src, irect r, int filter, int dstw, int dsth) {
     if (r.w <= 0 || r.h <= 0) return;
+    // 裁切档的目标矩形会比 drawable 大（或原点为负）：viewport 照原样画，scissor 与 drawable 求交
+    int sx = r.x < 0 ? 0 : r.x, sy = r.y < 0 ? 0 : r.y;
+    int ex = r.x + r.w, ey = r.y + r.h;
+    if (ex > dstw) ex = dstw; if (ey > dsth) ey = dsth;
+    if (ex - sx <= 0 || ey - sy <= 0) return;
     [t setTexture:src.gpuResourceID atIndex:0];
     [t setSamplerState:(filter == 1 ? g_smp_near : g_smp_lin).gpuResourceID atIndex:0];
     [e setArgumentTable:t atStages:MTLRenderStageFragment];
     [e setRenderPipelineState:p];
     [e setViewport:(MTLViewport){r.x, r.y, r.w, r.h, 0, 1}];
-    [e setScissorRect:(MTLScissorRect){(NSUInteger)r.x, (NSUInteger)r.y, (NSUInteger)r.w, (NSUInteger)r.h}];
+    [e setScissorRect:(MTLScissorRect){(NSUInteger)sx, (NSUInteger)sy, (NSUInteger)(ex - sx), (NSUInteger)(ey - sy)}];
     [e setCullMode:MTLCullModeNone];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 }
@@ -250,11 +276,16 @@ static int present_prep(CAMetalLayer *layer, int s, int vsync, int rw, int rh) {
     g_applied = applied; g_applied_vsync = applied_vsync; g_applied_size = applied_size;
     return 1;
 }
-static void present_one(CAMetalLayer *layer, id<CAMetalDrawable> dr, int s, pslot sl, int filter, float mi) {
+static void present_one(CAMetalLayer *layer, id<CAMetalDrawable> dr, int s, pslot sl, int filter, float mi, piccfg pc) {
     id<MTLRenderPipelineState> pso = pr_pso_get(layer.pixelFormat, 0);
     id<MTLTexture> dt = dr.texture;
-    irect r = dst_rect((int)dt.width, (int)dt.height, sl.stretched, sl.ax, sl.ay);
-    fit_geom((int)dt.width, (int)dt.height, sl.w, sl.h, r, sl.stretched);
+    irect r = dst_rect((int)dt.width, (int)dt.height, sl.stretched, sl.ax, sl.ay, pc);
+    fit_geom((int)dt.width, (int)dt.height, sl.w, sl.h, r, pc.fill < 0 ? sl.stretched : pc.fill == 1);
+    // 画面编辑虚线框按真正看得见的部分（裁切档裁到 drawable 内）
+    int vx = r.x < 0 ? 0 : r.x, vy = r.y < 0 ? 0 : r.y;
+    int vw = MIN((int)dt.width, r.x + r.w) - vx, vh = MIN((int)dt.height, r.y + r.h) - vy;
+    atomic_store(&g_last_dst[0], vx); atomic_store(&g_last_dst[1], vy); atomic_store(&g_last_dst[2], vw); atomic_store(&g_last_dst[3], vh);
+    atomic_store(&g_last_dt[0], (int)dt.width); atomic_store(&g_last_dt[1], (int)dt.height); atomic_store(&g_last_ok, 1);
 
     // 定格那次提交做完再出图：在 CPU 上等，不在 GPU 上等（10-22 帧率能耗线，4 秒冻结根因）。
     // 旧做法 [g_pq waitForEvent:g_pev] 让出图命令缓冲带着跨队列等待先进 GPU 渲染通道，主队列这一帧的渲染编码器（要做完才发这个事件）
@@ -275,7 +306,7 @@ static void present_one(CAMetalLayer *layer, id<CAMetalDrawable> dr, int s, pslo
     id<MTL4CommandBuffer> cb = [g_gdev newCommandBuffer];
     [cb beginCommandBufferWithAllocator:g_palloc[a]];
     id<MTL4RenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pr_pass(dt, r)];
-    pr_encode(e, g_pt, pso, sl.aa ? sl.post : sl.tex, r, filter);
+    pr_encode(e, g_pt, pso, sl.aa ? sl.post : sl.tex, r, filter, (int)dt.width, (int)dt.height);
     [e endEncoding];
     [cb endCommandBuffer];
     if (gpuwait) [g_pq waitForEvent:g_pev value:sl.fence];   // 旧做法（A/B）：定格那次提交做完再读，在 GPU 上等
@@ -315,6 +346,7 @@ static void *present_main(void *arg) {
         int s = g_pending; g_pending = -1; g_slot[s].presenting++;
         pslot sl = g_slot[s];
         CAMetalLayer *layer = g_layer; int vsync = g_vsync, filter = g_filter, rw = g_req_w, rh = g_req_h; float mi = g_min_interval;
+        piccfg pc = {g_pic_fill, g_pic_scale, g_pic_sx, g_pic_sy, g_pic_dx, g_pic_dy};
         pthread_mutex_unlock(&g_mu);
 
         if (!present_prep(layer, s, vsync, rw, rh)) continue;
@@ -329,7 +361,7 @@ static void *present_main(void *arg) {
             slot_unpresent(s); continue;
         }
         if (nd_ms >= 100) { static int nslow; if (nslow++ < 8) GLOG("出图线程：nextDrawable 等了 %llu ms（闸内；第 %d 次 ≥ 100 ms，此刻%s关闸请求）", nd_ms, nslow, gal_gate_held() ? "有" : "无"); }
-        present_one(layer, dr, s, sl, filter, mi);
+        present_one(layer, dr, s, sl, filter, mi, pc);
     }
     return NULL;
 }
@@ -367,6 +399,15 @@ NXGAL_API void nxgal_window_set_size(int32_t w, int32_t h) { GAL_API_LOCK(); pth
 NXGAL_API void nxgal_window_set_vsync(int32_t mode) { GAL_API_LOCK(); pthread_mutex_lock(&g_mu); g_vsync = mode; pthread_mutex_unlock(&g_mu); }
 // 不拿导出入口全局锁：只写 g_mu 护的一个值；SurfaceFlinger 合成线程持它自己的锁时调（交换间隔变了，见 RenderLoop.cs）
 NXGAL_API void nxgal_window_set_min_interval(float seconds) { pthread_mutex_lock(&g_mu); g_min_interval = seconds > 0 ? seconds : 0; pthread_mutex_unlock(&g_mu); }
+// 画面填充（-1 跟随每一帧的拉伸标记 / 0 保持比例 / 1 拉伸铺满 / 2 裁切铺满）与画面自定义（手柄菜单用）
+NXGAL_API void nxgal_window_set_present_fill(int32_t mode) { GAL_API_LOCK();
+    pthread_mutex_lock(&g_mu); g_pic_fill = mode < 0 ? -1 : mode > 2 ? 2 : mode; pthread_mutex_unlock(&g_mu);
+}
+NXGAL_API void nxgal_window_set_picture(float scale, float sx, float sy, float dx, float dy) { GAL_API_LOCK();
+    pthread_mutex_lock(&g_mu);
+    g_pic_scale = scale > 0 ? scale : 1; g_pic_sx = sx > 0 ? sx : 1; g_pic_sy = sy > 0 ? sy : 1; g_pic_dx = dx; g_pic_dy = dy;
+    pthread_mutex_unlock(&g_mu);
+}
 NXGAL_API void nxgal_window_set_scaling(int32_t filter, float level) { GAL_API_LOCK();
     (void)level;   // 只有 FSR 用（锐化强度）
     if (filter == 2) GRED_ONCE("缩放过滤 FSR 未实现，按双线性（后续：MetalFX 空间放大 / RCAS）");
@@ -498,6 +539,10 @@ static _Atomic int g_out_w, g_out_h;   // 最近一次出图的源矩形宽高
 NXGAL_API void nxgal_out_size(int *w, int *h) { *w = atomic_load_explicit(&g_out_w, memory_order_relaxed); *h = atomic_load_explicit(&g_out_h, memory_order_relaxed); }
 NXGAL_API void nxgal_present(uint32_t tex, const nxgal_crop *crop) { nxgal_pool_cycle();   // 先于入口锁与任何 @autoreleasepool：上一帧本线程的自动释放对象在这里放掉
     if (atomic_load(&g_session_stop)) return;
+#if TARGET_OS_IPHONE
+    // 金手指：每上屏一帧给引擎一次机会（ios/dmpad_cheats.m，内部按 100 ms 节流；Mac 壳没链这个符号）
+    { void dm_cheats_tick(void) __attribute__((weak_import)); if (dm_cheats_tick) dm_cheats_tick(); }
+#endif
     GAL_API_LOCK(); gal_rtd_frame_end();
     // 实时声明（gal_rt.m，缺省关）：本线程 = Metal 编码线程，帧周期 = 最短显示间隔（SurfaceFlinger 按交换间隔设），没设按 60 帧
     if (gal_rt_on()) { float mi = g_min_interval; gal_rt_tick(mi > 0 ? mi * 1000.0 : 1000.0 / 60); }
@@ -688,6 +733,14 @@ NXGAL_API int nxgal_present_frame(int32_t *w, int32_t *h, float *ax, float *ay, 
     if (w) *w = iw; if (h) *h = ih; if (ax) *ax = a; if (ay) *ay = b; if (stretched) *stretched = st;
     return iw > 0 && ih > 0;
 }
+// 最近一次上屏的目标矩形与 drawable 尺寸（像素）：画面编辑的虚线框 / 四边箭头按它摆；0 = 还没出过图
+NXGAL_API int nxgal_present_target(int32_t *x, int32_t *y, int32_t *w, int32_t *h, int32_t *dw, int32_t *dh) {
+    int ok = atomic_load(&g_last_ok);
+    if (x) *x = atomic_load(&g_last_dst[0]); if (y) *y = atomic_load(&g_last_dst[1]);
+    if (w) *w = atomic_load(&g_last_dst[2]); if (h) *h = atomic_load(&g_last_dst[3]);
+    if (dw) *dw = atomic_load(&g_last_dt[0]); if (dh) *dh = atomic_load(&g_last_dt[1]);
+    return ok;
+}
 
 // 把最近一帧按当前窗口设置（宽高比 / 拉伸、缩放过滤）画进 GAL 贴图 dst（整张当窗口），与上屏同一段编码。Gpu 线程调用；诊断与单测用。
 // 返回 0 = 已编码；-1 = 还没出过图 / 目标无效
@@ -701,10 +754,10 @@ NXGAL_API int32_t nxgal_window_render_to(uint32_t dst) { GAL_API_LOCK();
         pthread_mutex_unlock(&g_mu);
         if (s < 0) return -1;
         id<MTLRenderPipelineState> p = pr_pso_get(t->tex.pixelFormat, 1); if (!p) return -1;
-        irect r = dst_rect((int)t->tex.width, (int)t->tex.height, sl.stretched, sl.ax, sl.ay);
+        irect r = dst_rect((int)t->tex.width, (int)t->tex.height, sl.stretched, sl.ax, sl.ay, k_pic_default);
         gal_pass_clears_touch(t->root); gal_pass_close();
         id<MTL4RenderCommandEncoder> e = gal_render_begin_desc(pr_pass(t->tex, r));
-        pr_encode(e, g_rt_t, p, sl.aa ? sl.post : sl.tex, r, filter);
+        pr_encode(e, g_rt_t, p, sl.aa ? sl.post : sl.tex, r, filter, (int)t->tex.width, (int)t->tex.height);
         gal_enc_end();
         g_genc_serial++;
     }

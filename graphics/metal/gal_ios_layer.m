@@ -12,6 +12,20 @@ UIView *s2a_ios_root_view(void) __attribute__((weak_import));
 // Optional host hook: wait on the render thread, before dispatching UIKit work.
 int s2a_ios_wait_root_view(int timeout_ms) __attribute__((weak_import));
 void s2a_ios_render_init_failed(void) __attribute__((weak_import));
+static __weak CAMetalLayer *g_ios_layer;   // 挂上的层（弱持有）；转屏时按根视图新 bounds 重摆
+// 转屏 / 分屏后根视图尺寸变了：层框、可绘制尺寸、窗口请求尺寸都要跟着换（ios/app.m viewDidLayoutSubviews 调）
+NXGAL_API void nxgal_window_ios_relayout(void) {
+    CAMetalLayer *L = g_ios_layer; UIView *v = s2a_ios_root_view();
+    if (!L || !v || v.bounds.size.width <= 0 || v.bounds.size.height <= 0) return;
+    CGFloat s = v.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale;
+    CGSize px = CGSizeMake(v.bounds.size.width * s, v.bounds.size.height * s);
+    if (CGSizeEqualToSize(L.drawableSize, px) && CGRectEqualToRect(L.frame, v.bounds) && L.contentsScale == s) return;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    L.frame = v.bounds; L.contentsScale = s; L.drawableSize = px;
+    [CATransaction commit];
+    nxgal_window_set_size((int32_t)px.width, (int32_t)px.height);
+    GLOG("出图：转屏后 Metal 层重摆为 %.0fx%.0f 像素", px.width, px.height);
+}
 NXGAL_API void nxgal_window_attach_failed_ios(void) {
     if (s2a_ios_render_init_failed) s2a_ios_render_init_failed();
     else GRED_ONCE("出图：宿主没有渲染初始化失败提示接口");
@@ -27,6 +41,7 @@ NXGAL_API int32_t nxgal_window_attach_ios(void) {
         L = [CAMetalLayer layer]; CGFloat s = v.window.screen.nativeScale ?: UIScreen.mainScreen.nativeScale;
         L.frame = v.bounds; L.contentsScale = s; px = CGSizeMake(v.bounds.size.width * s, v.bounds.size.height * s);
         L.drawableSize = px;
+        g_ios_layer = L;
         // 出图层不透明：整屏游戏画面（黑边也由本层自己画），合成器不必与下面的根视图混合
         L.opaque = YES;
         [v.layer insertSublayer:L atIndex:0];   // Keep virtual controls and diagnostic UI above the game.
@@ -40,5 +55,6 @@ NXGAL_API int32_t nxgal_window_attach_ios(void) {
 #else
 NXGAL_API int32_t nxgal_window_attach_ios(void) { return -1; }
 NXGAL_API void nxgal_window_attach_failed_ios(void) { }
+NXGAL_API void nxgal_window_ios_relayout(void) { }
 #endif
 GAL_MTL4_ZONE_END

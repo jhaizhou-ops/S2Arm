@@ -199,7 +199,13 @@ static void ft_pace(void);
 static int present_fps(void);
 void s2a_nominal_fps_set(int fps);   // runtime/src/ap_host.c：自动玩家折算路线帧数的标称帧率
 void dm_guest_frame_tick(void) { ap_draws_tick(); s2a_frame_presented(); ft_present();
-    ft_pace(); s2a_nominal_fps_set(present_fps()); }
+    ft_pace(); s2a_nominal_fps_set(present_fps());
+#if TARGET_OS_IPHONE
+    // 金手指：每上屏一帧给引擎一次机会（ios/dmpad_cheats.m，内部按 100 ms 节流；Mac 壳没链这个符号）
+    void dm_cheats_tick(void) __attribute__((weak_import));
+    if (dm_cheats_tick) dm_cheats_tick();
+#endif
+}
 
 // ---------- 切栈 ----------
 // 直连层让建对象 / 提交 / 上屏等做 Metal 活的函数跑在大的宿主栈上（nvn_entry.S nvn_big_entry：x16 = nvn_big_real[i]，跳 dm_bigstack_enter），
@@ -252,6 +258,33 @@ static CAMetalLayer *g_layer;
 static double g_out_a;   // 出图宽高比（起局定，游戏内部按它渲染；NVN 直连换屏时跟着换，见 s2a_direct_relayout）
 // 触屏（ios/vpad.m gameRect）按这同一个比例算画面矩形（审计 P1-79：原先触点一律按屏幕宽 : 1080，宽屏没生效 / 窄屏加高时出图是 16:9 / 1920:屏高，手指落点偏）。0 = 还没挂层
 double s2a_direct_out_aspect(void) { return g_out_a; }
+
+// ---------- 画面填充 / 画面自定义（ios/dmpad_compat.m 写入，主线程改；上屏线程只读 fill）----------
+//   填充：0 保持比例（黑边），1 拉伸铺满，2 裁切铺满；scale / sx / sy / dx / dy 与参考前端 front_ios.m 的 picture 语义一致
+//   （dx / dy 是整屏宽高的比例；scale < 1 缩成小窗，> 1 放大）。
+static pthread_mutex_t g_pic_mu = PTHREAD_MUTEX_INITIALIZER;
+static int g_pic_fill; static float g_pic_scale = 1, g_pic_sx = 1, g_pic_sy = 1, g_pic_dx, g_pic_dy;
+static double g_pic_top;                 // 竖屏默认贴顶时 16:9 画面上沿（视图点）；0 = 居中
+static CGRect g_pic_frame; static int g_pic_frame_ok;   // 最近一次 layout_layer 的层框（视图点），画面编辑虚线框用
+int s2a_direct_fill_mode(void) { pthread_mutex_lock(&g_pic_mu); int m = g_pic_fill; pthread_mutex_unlock(&g_pic_mu); return m; }
+int s2a_direct_picture_rect(double *x, double *y, double *w, double *h) {
+    if (!g_pic_frame_ok) return 0;
+    if (x) *x = g_pic_frame.origin.x; if (y) *y = g_pic_frame.origin.y;
+    if (w) *w = g_pic_frame.size.width; if (h) *h = g_pic_frame.size.height;
+    return 1;
+}
+// 画面设置：s2a_direct_relayout 让新几何立即生效（调用方在主线程）
+void s2a_direct_set_picture(int fill, float scale, float sx, float sy, float dx, float dy, double top) {
+    pthread_mutex_lock(&g_pic_mu);
+    g_pic_fill = fill < 0 ? 0 : fill > 2 ? 2 : fill;
+    g_pic_scale = scale > 0 ? scale : 1; g_pic_sx = sx > 0 ? sx : 1; g_pic_sy = sy > 0 ? sy : 1;
+    g_pic_dx = dx; g_pic_dy = dy; g_pic_top = top > 0 ? top : 0;
+    pthread_mutex_unlock(&g_pic_mu);
+    void s2a_direct_relayout(void);
+    if (NSThread.isMainThread) s2a_direct_relayout(); else dispatch_async(dispatch_get_main_queue(), ^{ s2a_direct_relayout(); });
+}
+void nvn_be_fps_set_override(int fps);   // graphics/nvn/gfx/nvn/nvn_mtl.m：运行期帧率档（30 / 60；0 = 跟随游戏 / 配置）
+void s2a_direct_set_fps(int fps) { nvn_be_fps_set_override(fps); }
 // 按根视图当前尺寸摆出图层：出图比例 g_out_a 等比放进视图、居中，可画尺寸跟着变（主线程）。挂层时调一次；之后屏幕尺寸变了
 //   （10-27 Duo 合上切外屏：层仍按内屏尺寸挂，外屏只露出左上一块）由 App 壳视图控制器布局回调经 s2a_direct_relayout 再调——
 //   NVN 直连按新屏重算屏幕宽 / 高（s2a_screen_reaspect），出图比例跟着换，宽屏核心在下一个渲染遍前按新比例出图（widen_glue.inc wd_reaspect；10-27 维护者：坚持原生满屏）；
@@ -263,8 +296,24 @@ static void layout_layer(UIView *v, CAMetalLayer *l) {
     // 等比居中；出图比例与视图比例差 < 1% 时铺满视图（10-29：宽屏开着时出图比例来自取整后的屏幕宽，如 2346 / 1080 = 2.1722 对屏幕 2.1727，
     //   旧写法层比视图窄零点几个点，右侧露一条 ≤ 1 像素的黑缝；同 the reference port present_viewport 的 1% 容差）
     pf_vp f = pf_viewport(b.size.width, b.size.height, a, 1); CGFloat w = f.w, h = f.h;
+    // 画面填充 / 画面自定义：层框按玩家设置缩放、平移；填充打开时层铺满视图，拉伸 / 裁切交给上屏（nvn_mtl.m 读 s2a_direct_fill_mode）
+    pthread_mutex_lock(&g_pic_mu);
+    int fill = g_pic_fill; CGFloat sc = g_pic_scale, psx = g_pic_sx, psy = g_pic_sy, dx = g_pic_dx, dy = g_pic_dy, top = g_pic_top;
+    pthread_mutex_unlock(&g_pic_mu);
+    CGFloat vw = b.size.width, vh = b.size.height, cx, cy;
+    if (fill > 0) {   // 拉伸 / 裁切：层按整屏（或玩家缩放）铺开
+        w = vw * sc * psx; h = vh * sc * psy; cx = vw / 2 + dx * vw;
+        cy = vh / 2 + dy * vh;
+    } else {
+        w = w * sc * psx; h = h * sc * psy; cx = vw / 2 + dx * vw;
+        // 竖屏且玩家没动过位移：16:9 画面上半屏、下半屏留给按键（参考前端 front_ios.m 的缺省摆法）
+        if (vh > vw && fabs(dx) < 0.002 && fabs(dy) < 0.002 && top > 0) cy = top + h / 2;
+        else cy = vh / 2 + dy * vh;
+    }
+    CGFloat x = cx - w / 2, y = cy - h / 2;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    l.frame = CGRectMake(f.x, f.y, w, h);
+    l.frame = CGRectMake(x, y, w, h);
+    g_pic_frame = l.frame; g_pic_frame_ok = 1;
     // 出图层像素倍数（S2A_OUT_SCALE，缺省 1 = 屏幕原生；帧率能耗线 10-26 维护者要量）：最后上屏这一层按原生全分辨率画，每帧多一次整屏读写；
     //   设 0.75 时可画尺寸按 0.75 倍、图层框不变，交系统合成器放大。代价可能反过来（尺寸不符时合成器要自己缩放），真机 A/B 定生死前缺省不动；换屏重摆沿用同一倍数
     static double k = -1; if (k < 0) { const char *e = getenv("S2A_OUT_SCALE"); k = e ? atof(e) : 1.0; if (!(k >= 0.5 && k <= 1.0)) k = 1.0;

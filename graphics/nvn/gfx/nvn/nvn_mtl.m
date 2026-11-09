@@ -13756,7 +13756,14 @@ static const char *cctx_snap(void) {
 }
 // When the game itself asks for 30 fps (pacing by the game's present interval, interval 2, hle_nvn.c) the display link runs at 30 Hz too: games whose logic counts frames, such as Engage, are not pulled up to 60 fps by the display link on iOS
 __attribute__((weak)) int nvn_game_fps(void) { return 60; }   // hle_nvn.c provides the strong definition
-static int fps_override(void) { static int env = -2; if (env == -2) { const char *e = getenv("DM_FPS"); env = e ? atoi(e) : -1; if (env != 30 && env != 60) env = -1; else MLOG("DM_FPS=%d: frame rate pinned by the test switch", env); } return env; }
+// 手柄菜单的帧率档（30 / 60 / 0 跟随游戏；120 按 60）：运行期可改，优先于 DM_FPS 测试开关
+static _Atomic int g_fps_ovr;
+void nvn_be_fps_set_override(int fps) {
+    int v = (fps == 30 || fps == 60) ? fps : fps == 120 ? 60 : 0;
+    if (atomic_exchange(&g_fps_ovr, v) != v) MLOG("frame rate override: %d (0 = follow the game / profile)", v);
+}
+static int fps_override(void) { int ovr = atomic_load(&g_fps_ovr); if (ovr > 0) return ovr;
+    static int env = -2; if (env == -2) { const char *e = getenv("DM_FPS"); env = e ? atoi(e) : -1; if (env != 30 && env != 60) env = -1; else MLOG("DM_FPS=%d: frame rate pinned by the test switch", env); } return env; }
 int nvn_be_fps_target(void) { int env = fps_override(); return env > 0 ? env : nvn_game_fps() == 30 ? 30 : 60; }
 // Hand a submission to the GPU in segments (DM_NVN_CUT=draw count, 0 = off; default 64): when the game holds back the next frame's submit until this frame's GPU work is done (The Legend of Zelda: Breath of the Wild: the main thread's nvnSyncWait on the fence of the frame just submitted),
 // the GPU sits idle for the milliseconds the host spends translating inside the submit (in the shrine each frame is GPU 13 ms + translation 7 ms back to back). Each time this many draws have accumulated, the command buffer encoded so far is committed between two passes: the GPU runs the earlier passes while the CPU translates the later ones.
@@ -14869,6 +14876,7 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     return v;
 }
 #include "nvn_present_fit.h"   // pf_crop_fit (present_now) / pf_viewport (both blits); plain C, tested by graphics/nvn/tests/t_present_fit.c
+int s2a_direct_fill_mode(void);   // graphics/nvn/host_adapt.m：画面填充（0 保持比例 / 1 拉伸铺满 / 2 裁切铺满）
 static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], BOOL flip) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -14887,8 +14895,16 @@ static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTextu
     // Keep the game picture's aspect ratio and center it, leaving black bars in the rest (no stretching when the screen ratio differs from the game's, e.g. iPhone about 19.5:9 versus the game's 16:9);
     // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
     double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
-    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
+    int fill = s2a_direct_fill_mode();
+    if (fill == 2) {   // 裁切铺满：只采样源画面里与目标同比例的中心块（剩下的四边被目标边界裁掉）
+        double ta = dw / dh, sa = (double)cw / ch;
+        if (sa > ta) { NSUInteger nw = (NSUInteger)llround((double)ch * ta); if (nw < 1) nw = 1; if (nw > cw) nw = cw; cx += (cw - nw) / 2; cw = nw; }
+        else if (sa < ta) { NSUInteger nh = (NSUInteger)llround((double)cw / ta); if (nh < 1) nh = 1; if (nh > ch) nh = ch; cy += (ch - nh) / 2; ch = nh; }
+    }
+    MTLViewport vp; int full;
+    if (fill) { vp = (MTLViewport){0, 0, dw, dh, 0, 1}; full = 1; }   // 拉伸 / 裁切：整个目标
+    else { pf_vp pv = pf_viewport(dw, dh, cw, ch); vp = (MTLViewport){pv.x, pv.y, pv.w, pv.h, 0, 1};
+        full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh; }
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
         MLOG("present viewport %.0f,%.0f %.0fx%.0f / canvas %.0fx%.0f (game image %lux%lu)", vp.originX, vp.originY, vp.width, vp.height, dw, dh, (unsigned long)src.width, (unsigned long)src.height); }
@@ -14917,8 +14933,16 @@ static int present_blit_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLT
     }
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
-    pf_vp pv = pf_viewport(dw, dh, cw, ch); MTLViewport vp = {pv.x, pv.y, pv.w, pv.h, 0, 1};
-    int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
+    int fill = s2a_direct_fill_mode();
+    if (fill == 2) {   // 裁切铺满：只采样源画面里与目标同比例的中心块
+        double ta = dw / dh, sa = (double)cw / ch;
+        if (sa > ta) { NSUInteger nw = (NSUInteger)llround((double)ch * ta); if (nw < 1) nw = 1; if (nw > cw) nw = cw; cx += (cw - nw) / 2; cw = nw; }
+        else if (sa < ta) { NSUInteger nh = (NSUInteger)llround((double)cw / ta); if (nh < 1) nh = 1; if (nh > ch) nh = ch; cy += (ch - nh) / 2; ch = nh; }
+    }
+    MTLViewport vp; int full;
+    if (fill) { vp = (MTLViewport){0, 0, dw, dh, 0, 1}; full = 1; }
+    else { pf_vp pv = pf_viewport(dw, dh, cw, ch); vp = (MTLViewport){pv.x, pv.y, pv.w, pv.h, 0, 1};
+        full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh; }
     MTL4RenderPassDescriptor *rp = pass_desc();
     rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = full ? MTLLoadActionDontCare : MTLLoadActionClear;
