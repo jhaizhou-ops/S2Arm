@@ -163,9 +163,12 @@
         "docs/images/内测教程/04-都放好了.jpg",
         "docs/images/内测教程/05-打包进度.jpg",
         "docs/images/内测教程/07-iPhone导入中.jpg",
-        "docs/images/内测教程/08-iPhone导入完成.jpg"
+        "docs/images/内测教程/08-iPhone导入完成.jpg",
+        "docs/site/preview/desktop-mac-zh.jpg",
+        "docs/site/preview/desktop-windows-en.jpg",
+        "docs/site/preview/mobile-iphone.jpg"
       ],
-      "reason": "文档用自家界面截图：内测教程 8 张为启动器 / iPhone 导入界面，metal-hud 为无游戏清屏探针窗口加系统 HUD；均无游戏画面。"
+      "reason": "文档用自家界面截图：内测教程 8 张为启动器 / iPhone 导入界面，metal-hud 为无游戏清屏探针窗口加系统 HUD，docs/site/preview 3 张为下载页整页截图；均无游戏画面。"
     },
     {
       "id": "upstream_gommon_pdb_path",
