@@ -6,6 +6,8 @@ HERE=$(cd "$(dirname "$0")" && pwd); DOTNET=${DOTNET:-$HOME/.dotnet/dotnet}
 # 只在 macOS 上跑（审计 #859）：原生库（libvpx / libopus 垫片按 osx 构建、libSystem 读数）都是苹果的，Linux x86_64 不能冒充 osx-x64；
 #   别的系统打一行说明、退出码 75（列车约定：环境未就绪，不算红）
 if [ "$(uname -s)" != Darwin ]; then echo "服务单测：只在 macOS 上跑，本机 $(uname -s) $(uname -m)，环境未就绪（退出码 75）" >&2; exit 75; fi
+# macOS 默认全量系统 Opus 后端；S2A_OPUS_SYSTEM=0 回退 libopus（构建与单测容差用同一个值）
+export S2A_OPUS_SYSTEM=${S2A_OPUS_SYSTEM:-1}
 # 时区系统数据：由宿主 IANA 时区库生成（只生成一次）
 export S2A_TZDATA=${S2A_TZDATA:-${TMPDIR:-/tmp}/s2a_tzdata}
 [ -f "$S2A_TZDATA/binaryList.txt" ] || bash "$HERE/systemdata/make_tzdata.sh" "$S2A_TZDATA" > /dev/null
@@ -21,8 +23,9 @@ case $(uname -m) in
 esac
 # VP8 解码（libvpx + 垫片）：单测经动态库调（宿主里是静态链）
 VPX_A=$(bash "$HERE/vpx/build.sh" "$HOST_RID" 2>/dev/null | tail -1); [ -f "$VPX_A" ] && export S2A_VPX_DYLIB=${VPX_A%/*}/libs2a_vpx.dylib
-# Opus 解码（libopus + 垫片）：同上
+# Opus 解码：macOS 默认单流/多流、8–48 kHz 全部走系统 AudioToolbox（宿主静态库不含 libopus）；S2A_OPUS_SYSTEM=0 回退 libopus
 OPUS_A=$(bash "$HERE/opus/build.sh" "$HOST_RID" 2>/dev/null | tail -1); [ -f "$OPUS_A" ] && export S2A_OPUS_DYLIB=${OPUS_A%/*}/libs2a_opus.dylib
+if [ "$S2A_OPUS_SYSTEM" = 1 ]; then echo "Opus 解码后端：全量系统 AudioToolbox（单流/多流、8–48 kHz；宿主不链 libopus）"; else echo "Opus 解码后端：libopus（S2A_OPUS_SYSTEM=0）"; fi
 cd "$HERE/S2A.Services.Tests"
 # 构建成败看命令自己的退出码，筛选只决定打印什么（10-26 #414）：原先这条管道在 set -euo pipefail 下，
 #   中文成功汇总（「0 个错误」）与合法空输出会让 grep 返回 1、整步提前退出，后面的单测一次都不跑；

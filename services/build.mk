@@ -34,6 +34,11 @@ $(info $(shell tail -8 build/cs/opus_osx.err | tr '\n' '|'))
 $(error services/opus/build.sh 失败（全文 build/cs/opus_osx.err）)
 endif
 HOST_LIBS += $(S2A_OPUS_LIB)
+# macOS 默认全量系统 Opus（单流/多流、8–48 kHz）：宿主不再链 libopus，补 AudioToolbox / CoreFoundation；
+#   S2A_OPUS_SYSTEM=0 回退 libopus
+ifneq ($(S2A_OPUS_SYSTEM),0)
+HOST_LIBS += -framework AudioToolbox -framework CoreFoundation
+endif
 # 库按源码内容哈希放整机缓存（services/nxaot.sh）：C# 改回旧内容时换回一份更早建好的库，按修改时间判不出要重链，宿主静默带着上一版 C#
 #   （10-31 直连线帧回放实测：改回 WidenSession.cs 后 make 秒过、宿主仍是带实验开关的旧库）。库路径进戳文件（路径变了才改写），宿主依赖它；
 #   不进 .host_cfg：那份戳所有目标文件都依赖，C# 一改会把全部 C 代码重编
