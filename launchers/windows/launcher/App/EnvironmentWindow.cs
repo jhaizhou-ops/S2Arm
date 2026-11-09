@@ -35,7 +35,7 @@ public sealed partial class EnvironmentWindow : Window
         Background = Canvas; Foreground = Ink;
         FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope");
         Closed += (_, _) => { active?.Cancel(); ClearCovers(); CloseControl(); };
-        Opened += (_, _) => StartControl();
+        Opened += (_, _) => { StartControl(); FinishPendingUpdate(); _ = CheckForUpdateAsync(); };
         Closing += CloseLibraryAsync;
         Closing += ClosePackAsync;
         // 欢迎页进来自动触发环境检查（回到窗口也会重查）
@@ -88,6 +88,7 @@ public sealed partial class EnvironmentWindow : Window
             if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
             language = languages.SelectedIndex == 0 ? "zh-Hans" : "en"; Render();
         };
+        AddUpdateControls(rightBar);
         rightBar.Children.Add(languages);
 
         // 添加游戏
@@ -148,6 +149,17 @@ public sealed partial class EnvironmentWindow : Window
         settings.Children.Add(Action("action.save_settings", CapturePaths, !busy));
         body.Children.Add(new Expander { Header = T("settings.title"), Content = settings,
             HorizontalAlignment = HorizontalAlignment.Stretch });
+
+        var libraryRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        var libraryText = new StackPanel { Spacing = 4 };
+        libraryText.Children.Add(Label(T("environment.library.title"), 16));
+        libraryText.Children.Add(Label(connectedFolder ?? libraryFolder));
+        libraryText.Children.Add(Label(T("environment.library.detail")));
+        libraryRow.Children.Add(libraryText);
+        var libraryChange = Action("environment.library.change", () => BeginPicker(ChangeLibraryAsync), !libraryBusy && !PackBusy);
+        libraryChange.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(libraryChange, 1); libraryRow.Children.Add(libraryChange);
+        body.Children.Add(Card(libraryRow));
 
         var aiRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         var aiText = new StackPanel { Spacing = 4 };
