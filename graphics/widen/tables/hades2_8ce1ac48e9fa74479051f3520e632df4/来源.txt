@@ -1,0 +1,6 @@
+哈迪斯 II（0100A00019DE0000）1.0.137848，main 构建号见目录名（8ce1ac48e9fa74479051f3520e632df4，更新后 main；出包产物根 main.fixups.tsv 首行 # BUILD_ID 实测）。
+fork 批次 1 ③（widen + 60 帧）落点：
+- 60 帧：Switch 版原生 720p / 60 帧（掌机/主机双档位同），无内嵌 30 帧上限；S2Arm 现行包 s2a_caps.tsv 已登记 fps60 1（来源「引擎通用：放开出图间隔」）+ fps60_display 1，无需 fps 表 / cpatch 帧率件。
+- 满屏：第三层整套放宽（本表 widen_full.handheld.tsv），掌机档。
+- 为什么不走 cpatch：本构建（8CE1AC48E9FA7447…）全网无任何社区补丁/金手指文件——NX-60FPS-RES-GFX-Cheats 数据库无本款条目、公开 ultrawide 合集无本款、无对版 IPS/pchtxt；且社区补丁字节按维护者 10-30 口径不进发布包。故走仓库自有满屏线的登记路（与丝之歌同路：verified.tsv 登记 + widen_full 表）。
+验证状态：未跑 Mac 闭环、未做真机量化。本表与登记随 fork 容器出包，机主 iPhone 装机验判读：画面铺满、无拉伸变形、无露空/重影；验不过即撤登记行与本表。
