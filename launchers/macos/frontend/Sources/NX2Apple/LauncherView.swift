@@ -63,7 +63,7 @@ struct LauncherView: View {
                     .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
                         Self.fileURLs(providers) { urls in
                             // 拖进来的是 prod.keys 就当密钥放，别当游戏报错
-                            if urls.count == 1, urls[0].pathExtension.lowercased() == "keys" { model.importKeys(urls[0]) } else { model.importGames(urls) }
+                            if urls.count == 1, urls[0].pathExtension.lowercased() == "keys" { model.importKeys(urls[0]) } else { model.importGames(urls, partialResults: true) }
                         }
                         return true
                     }

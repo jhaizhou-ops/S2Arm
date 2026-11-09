@@ -83,7 +83,7 @@ import S2ArmAppleAdapter
         case ("POST", "/games"):
             guard let ps = a["paths"] as? [String], !ps.isEmpty else { return .bad("缺 paths") }
             if let b = busy() { return b }
-            model.importGames(ps.map { URL(fileURLWithPath: $0) }); return .ok()
+            model.importGames(ps.map { URL(fileURLWithPath: $0) }, partialResults: false); return .ok()
         case ("POST", "/prepare"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             return blocked(model.export(g, platforms: [.mac], spaceOverride: spaceOverride))

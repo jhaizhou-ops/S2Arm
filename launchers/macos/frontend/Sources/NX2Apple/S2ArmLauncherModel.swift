@@ -356,33 +356,127 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     // ---- import ----
 
-    func importGames(_ urls: [URL]) {
+    enum ImportPage { case selection, keys, results }
+    @Published private(set) var importPage: ImportPage?
+    @Published private(set) var importSources: [ImportSource] = []
+    @Published private(set) var importBatchFailure: String?
+    private var importUsesResults = false
+
+    var pendingSources: [ImportSource] { importSources.filter { !$0.succeeded } }
+    var importedSourceCount: Int { importSources.filter(\.succeeded).count }
+
+    func importGames(_ urls: [URL], partialResults: Bool) {
         guard !urls.isEmpty, !busy else { return }
+        if partialResults {
+            importSources = []
+            importPage = nil
+            pendingImport = []
+            if !showKeys { showAddGames = true }
+        }
+        submitImport(urls, partialResults: partialResults)
+    }
+
+    private func submitImport(_ urls: [URL], partialResults: Bool) {
+        guard let first = urls.first, !busy else { return }
+        importUsesResults = partialResults
+        importBatchFailure = nil
         failAction(nil, game: nil)
         inlineFailure = nil
-        if !showKeys { showAddGames = true }
-        start(.importGames, game: nil, name: urls[0].lastPathComponent + (urls.count > 1 ? " +\(urls.count - 1)" : "")) { [weak self] sink in
+        start(.importGames, game: nil, name: first.lastPathComponent + (urls.count > 1 ? " +\(urls.count - 1)" : "")) { [weak self] sink in
             guard let self else { return nil }
             let wasEmpty = self.games.isEmpty
-            let infos: [GameInfo]
             do {
-                infos = try await self.provider.importGames(GameInputs(paths: urls), events: sink)
-            } catch let failure as JobFailure where failure.code == "keys_outdated" && self.provider.library.keysReady == true {
-                // 密钥在，但读不了这款：选好的游戏留着，提示换一份，换好自动接着导入
-                self.pendingImport = urls; self.keysRejected = true; self.showKeys = true
-                return nil
-            } catch let failure as JobFailure where failure.code == "keys_missing" {
-                // 有 NSP / XCI 要密钥：记下选好的游戏，放好密钥后接着导入。欢迎页由第 3 步接住，游戏库页直接弹放密钥
-                self.pendingImport = urls
-                if !self.games.isEmpty { self.showKeys = true }
-                return nil
-            }
-            if let first = infos.first {
-                self.selectedID = first.titleId
-                if wasEmpty { self.welcomeGameID = first.titleId }
+                let result = try await self.provider.importGames(GameInputs(paths: urls), partialResults: partialResults, events: sink)
+                try Task.checkCancellation()
+                if partialResults { self.mergeImportSources(result.sources, submitted: urls) }
+                self.selectImportedGame(result.games.first, forWelcome: wasEmpty)
+            } catch let failure as JobFailure where partialResults {
+                try Task.checkCancellation()
+                let rows = ImportSource.rows(in: failure.outcome.result)
+                self.mergeImportSources(rows, submitted: urls)
+                if failure.code == "keys_missing" {
+                    self.pendingImport = self.pendingSources.isEmpty ? urls : self.pendingImportURLs
+                    if wasEmpty && !self.showKeys && self.importedSourceCount == 0 {
+                        // The welcome flow shows the selection and offers its existing keys step.
+                        self.showAddGames = false
+                        self.importPage = nil
+                    } else {
+                        self.importPage = .keys
+                    }
+                    return nil
+                }
+                if let imports = failure.outcome.result["imports"] as? [[String: Any]], !imports.isEmpty {
+                    let games = await self.provider.importedGames(in: failure.outcome.result)
+                    try Task.checkCancellation()
+                    self.selectImportedGame(games.first, forWelcome: wasEmpty)
+                }
+                if !rows.contains(where: { $0.status == .failed && $0.code == failure.code }) {
+                    self.importBatchFailure = failure.errorDescription
+                }
+                throw failure
+            } catch {
+                if partialResults && !Task.isCancelled { self.importBatchFailure = error.localizedDescription }
+                throw error
             }
             return nil
         }
+    }
+
+    private var pendingImportURLs: [URL] { pendingSources.map { URL(fileURLWithPath: $0.path) } }
+
+    private func selectImportedGame(_ game: GameInfo?, forWelcome: Bool) {
+        guard let game else { return }
+        selectedID = game.titleId
+        if forWelcome { welcomeGameID = game.titleId }
+    }
+
+    private func mergeImportSources(_ rows: [ImportSource], submitted: [URL]) {
+        guard !rows.isEmpty else { return }
+        // A failed folder scan may expand to child sources on retry.
+        let submittedPaths = Set(submitted.map(\.path))
+        let returnedIDs = Set(rows.map(\.id))
+        importSources.removeAll { !$0.succeeded && submittedPaths.contains($0.path) && !returnedIDs.contains($0.id) }
+        var positions = Dictionary(uniqueKeysWithValues: importSources.enumerated().map { ($0.element.id, $0.offset) })
+        for row in rows {
+            if let index = positions[row.id] {
+                if !importSources[index].succeeded { importSources[index] = row }
+            } else {
+                positions[row.id] = importSources.count
+                importSources.append(row)
+            }
+        }
+        if !pendingSources.isEmpty { importPage = .results }
+    }
+
+    func retryImport() {
+        submitImport(pendingImportURLs, partialResults: true)
+    }
+
+    func backFromImportResults() {
+        guard !busy else { return }
+        if pendingSources.contains(where: \.needsKeys) {
+            pendingImport = pendingImportURLs
+            keysRejected = pendingSources.contains { $0.code == "keys_outdated" }
+            importPage = .keys
+        } else {
+            importPage = .selection
+        }
+    }
+
+    func cancelImport() {
+        if let session, [.importGames, .keys].contains(session.kind) { stop() }
+        closeImport()
+        clearInlineFailure()
+    }
+
+    private func closeImport() {
+        showAddGames = false
+        showKeys = false
+        importPage = nil
+        importSources = []
+        pendingImport = []
+        importBatchFailure = nil
+        keysRejected = false
     }
 
     // ---- export ----
@@ -658,7 +752,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         failAction(nil, game: nil)
         inlineFailure = nil
         keysRejected = false
-        showKeys = true
+        if !showAddGames { showKeys = true }
         start(.keys, game: nil, name: file.lastPathComponent) { [weak self] sink in
             _ = try await self?.provider.importKeys(file, events: sink)
             return nil
@@ -891,10 +985,18 @@ public final class S2ArmLauncherModel: ObservableObject {
             }
         }
         if state == .completed && session.kind == .keys {
-            if pendingImport.isEmpty { showKeys = false } else { let urls = pendingImport; pendingImport = []; importGames(urls) }
+            if pendingImport.isEmpty {
+                closeImport()
+            } else {
+                let urls = pendingImport
+                pendingImport = []
+                submitImport(urls, partialResults: true)
+            }
         }
-        if state == .completed && session.kind == .importGames && pendingImport.isEmpty { showAddGames = false; showKeys = false }
-        if state == .completed && session.kind == .importGames && !pendingImport.isEmpty { showAddGames = false }
+        if state == .completed && session.kind == .importGames && importUsesResults &&
+            pendingImport.isEmpty && pendingSources.isEmpty {
+            closeImport()
+        }
         if Self.repairKinds.contains(session.kind) {
             if state == .completed, !repairQueue.isEmpty { repair(repairQueue.removeFirst()) } else if state != .completed { repairQueue = [] }
         }
