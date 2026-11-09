@@ -11,7 +11,7 @@ class LinuxSelfcheck(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.r = pathlib.Path(self.tmp.name)
-        for d in ('tools/bin', 'tests', 'native', 'android'):
+        for d in ('tools/bin', 'tests', 'runtime', 'android'):
             (self.r / d).mkdir(parents=True, exist_ok=True)
         for f in ('gate.sh', 'contrib_check.sh', 'gate_plan.sh', 'idle_timeout.sh'):
             shutil.copyfile(H / 'tools' / f, self.r / 'tools' / f)
@@ -201,8 +201,12 @@ class LinuxSelfcheck(unittest.TestCase):
         self.assertFalse((self.r/'apple-ran').exists())
     def pre_fixture(self, portable_rc='0', bad_script=False):
         # 列车入队预检（tools/train.sh pre）在没有苹果工具链的宿主上：合并树 = origin/main + 本支
-        for f in ('train.sh',):
-            shutil.copyfile(H / 'tools' / f, self.r / 'tools' / f)
+        # 列车脚本是维护方工具，公开检出没有（同 tools/docs_consistency.py train_source）
+        private = os.environ.get('S2A_PRIVATE_TOOLS')
+        train = pathlib.Path(private) / 'train.sh' if private else H / 'tools/train.sh'
+        if not train.exists():
+            self.skipTest('公开检出没有列车脚本')
+        shutil.copyfile(train, self.r / 'tools/train.sh')
         self.write('tools/gate_route.py', 'import glob, subprocess, sys\nc = sys.argv[1]\n'
                    'if c == "why": print("fixture")\nelif c == "tests": print("\\n".join(sorted(glob.glob("tests/*_test.sh"))))\n'
                    'elif c == "ios": print("yes")\nelif c == "hooks": print("runtime/gate.sh\\nandroid/gate.sh")\n')

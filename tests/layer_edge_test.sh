@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁只看：tools/layer_edge.py tools/layer_map.py tools/layer_map.tsv tools/layer_exempt.tsv runtime/* services/* graphics/* backends/* platforms/* pack/* Makefile
+# 门禁只看：tools/layer_edge.py tools/layer_map.py tools/layer_map.tsv tools/layer_exempt.tsv runtime/* services/* graphics/* android/* ios/* macos/* platform/* shell/* pack/* Makefile
 # 分层边检查（tools/layer_edge.py，架构分层方案 4.3 阶段一 1-1）单测，约 2 秒：bash tests/layer_edge_test.sh
 # 合成小仓（最小地图：runtime/src 核心、platform/plat.h 契约、android 平台壳、graphics/nvn/gfx/nvn 图形共用层）。期望按方案 4.3.2 / 4.3.5 手写：
 #   ① 核心 .c 新增 #include 安卓私有头（负对照：核心 → 安卓）→ 红，点名 文件:行 与 R-01；包含平台契约 plat.h → 不红
