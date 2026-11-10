@@ -309,6 +309,15 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
             return ResultCode.Success;
         }
 
+        [CommandCmif(130)] // 21.0.0+
+        // EnableStartupLogoDisappearedMessage()：固件 21+ / 新 SDK 起局会调；未实现回 2010-0221 即 Break（Fit Boxing 3）
+        public ResultCode EnableStartupLogoDisappearedMessage(ServiceCtx context)
+        {
+            Logger.Stub?.PrintStub(LogClass.ServiceAm);
+
+            return ResultCode.Success;
+        }
+
         [CommandCmif(300)] // 9.0.0+
         // GetSettingsPlatformRegion() -> u8
         public ResultCode GetSettingsPlatformRegion(ServiceCtx context)
