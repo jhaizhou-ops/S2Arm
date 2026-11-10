@@ -110,7 +110,7 @@ class MacDisplayTests(unittest.TestCase):
     def test_every_mac_item_of_the_table_is_on_the_page(self):
         # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen widenForce docked rumble rumbleLevel motion hud
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "rumble", "rumbleLevel", "motion", "padFace", "hud"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "rumble", "rumbleLevel", "motion", "padFace", "metalBackend", "hud"]))
 
     def test_game_without_a_mac_build_says_why(self):
         m = self.mac()
@@ -163,6 +163,21 @@ class MacDisplayTests(unittest.TestCase):
         self.caps()
         self.save(docked="handheld", hud=True, rumble=False, rumbleLevel="4", motion=False)
         self.assertEqual(community.launch_env(self.c, GID), {"S2A_DOCKED": "0", "S2A_HUD": "1", "S2A_RUMBLE": "0", "S2A_RUMBLE_SCALE": "1.8", "S2A_MOTION": "0"})
+
+    def test_metal_backend_reaches_the_host_only_when_metal3_is_picked(self):
+        # 图形后端：缺省「自动」不设环境变量（宿主自己按系统选）；选 Metal 3 → NXGAL_BE=mtl3；回缺省 / 明选自动 → 不设；只存这款的 launch.json
+        self.caps()
+        m = self.mac()
+        self.assertEqual((m["metalBackend"]["available"], m["metalBackend"]["value"]), (True, "auto"))
+        self.save(metalBackend="metal3")
+        self.assertEqual(self.launch_file()["settings"], {"metalBackend": "metal3"})
+        self.assertEqual(community.launch_env(self.c, GID), {"NXGAL_BE": "mtl3"})
+        self.save(metalBackend="auto")
+        self.assertEqual(community.launch_env(self.c, GID), {})
+        self.save(metalBackend="metal3"); self.save(metalBackend=None)
+        self.assertEqual((community.launch_env(self.c, GID), self.launch_file()["settings"]), ({}, {}))
+        with self.assertRaises(Failure):
+            self.save(metalBackend="metal4")
 
     def test_pad_face_is_shared_by_every_game(self):
         # 全游戏共用：存数据目录 game-settings.json、不进这款 launch.json；另一款（没有 Mac 版）也读到「按位置」；起局转 S2A_PAD_FACE=position

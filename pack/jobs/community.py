@@ -300,6 +300,8 @@ def launch_env(c, gid):
         env["S2A_SCALING_FILTER"] = "MetalFX"   # 画面增强模式 = 直连上屏 MetalFX 空间放大（graphics/nvn/gfx/nvn/nvn_present_fx.inc）
     if "docked" in s:
         env["S2A_DOCKED"] = "1" if s["docked"] == "docked" else "0"
+    if s.get("metalBackend") == "metal3":
+        env["NXGAL_BE"] = "mtl3"          # 图形后端强制 Metal 3（graphics/metal/gal_core.m be_forced_mtl3、直连 nvn_be.h）；自动 = 不设，宿主按系统版本选
     if s.get("hud") is True:
         env["S2A_HUD"] = "1"              # S2Arm 诊断浮层：front_mac.m 绘制，hud.c 格式化
     if s.get("rumble") is False:
