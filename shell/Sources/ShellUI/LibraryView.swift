@@ -414,7 +414,16 @@ public struct LibraryView: View {
                             .padding(.horizontal, 24).padding(.top, 18).padding(.bottom, 32 + insets.bottom)
                             // A phone on its side: a readable column, not rows stretched across the whole width.
                             .frame(maxWidth: 640, alignment: .leading)
-                            .padding(.leading, insets.leading).padding(.trailing, insets.trailing)
+                            // A floating pane sits on the screen's trailing edge, so the window's trailing
+                            // safe inset is positional — the pane's own frame already ends at the safe edge,
+                            // and padding the content by that inset a second time stacks 59pt of dead space
+                            // on the trailing side only (device-measured: card margins 24 leading / 83
+                            // trailing). Inside a floating pane the horizontal margins are the content's
+                            // own 24 on both sides; the banner above still bleeds edge to edge with the
+                            // full insets. Full-screen panes keep the insets. (The same ruling GameCase's
+                            // settings column ships with.)
+                            .padding(.leading, floating ? 0 : insets.leading)
+                            .padding(.trailing, floating ? 0 : insets.trailing)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

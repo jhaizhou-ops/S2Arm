@@ -123,7 +123,10 @@ struct ShellSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollIndicators(.hidden)
-                .ignoresSafeArea(edges: .bottom)
+                // The horizontal safe insets are positional for a trailing-edge overlay and must not be
+                // spent a second time inside the page — see the note in ControllersView. Only the
+                // horizontal pair is added; the top inset and the bottom handling stay as they are.
+                .ignoresSafeArea(edges: [.leading, .trailing, .bottom])
                 .onChange(of: focus.id) { _, id in
                     guard let id, id.hasPrefix("shs.") else { return }
                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
