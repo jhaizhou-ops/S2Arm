@@ -26,10 +26,12 @@ namespace S2A.Services
         private readonly delegate* unmanaged<ulong, void> _stopRumble;
         private readonly delegate* unmanaged<ulong> _rumbleSession;
         private readonly delegate* unmanaged<MotionSample*, int> _readMotion;
+        private readonly delegate* unmanaged<MotionSample*, int> _readMotionPair;   // 可选：左右两路（Mac Joy-Con HID）
         private readonly delegate* unmanaged<int, void> _setMotionEnabled;
-        private readonly List<SixAxisInput> _motionStates = new(1);
+        private readonly List<SixAxisInput> _motionStates = new(2);
         private readonly float[] _orientation = new float[9];
-        private MotionInput _motion;
+        private readonly float[] _orientationRight = new float[9];
+        private MotionInput _motion, _motionRight;
         private PlayerIndex _rumblePlayer, _motionPlayer;
         private ulong _session;
         private ulong _motionSession, _motionTimestamp;
@@ -68,8 +70,10 @@ namespace S2A.Services
             {
                 _readMotion = (delegate* unmanaged<MotionSample*, int>)motion;
                 _setMotionEnabled = (delegate* unmanaged<int, void>)NativeLibrary.GetExport(program, "s2a_pad_set_motion_enabled");
+                if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))
+                    _readMotionPair = (delegate* unmanaged<MotionSample*, int>)pair;
             }
-            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_enable={_setMotionEnabled != null} player={(int)player} session={_session} permit={_rumblePermitted}");
+            Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} player={(int)player} session={_session} permit={_rumblePermitted}");
         }
 
         public void Update(PlayerIndex player)
@@ -171,7 +175,7 @@ namespace S2A.Services
             {
                 _motionPlayer = player;
                 _motionSession = session;
-                _motion = null;
+                _motion = _motionRight = null;
                 _motionTimestamp = 0;
                 _motionLogged = false;
                 if (_motionPublished)
@@ -189,11 +193,22 @@ namespace S2A.Services
                 _motionEnabled = enabled;
             }
             _motionStates.Clear();
-            MotionSample sample = default;
-            int known = enabled ? _readMotion(&sample) : 0;
+            MotionSample sample = default, sampleR = default;
+            int known = 0, nPair = 0;
+            if (enabled)
+            {
+                if (_readMotionPair != null)
+                {
+                    MotionSample* buf = stackalloc MotionSample[2];
+                    nPair = _readMotionPair(buf);
+                    if (nPair >= 1) { sample = buf[0]; known = 1; }
+                    if (nPair >= 2) sampleR = buf[1];
+                }
+                else known = _readMotion(&sample);
+            }
             if (!enabled || known == 0)
             {
-                _motion = null;
+                _motion = _motionRight = null;
                 _motionTimestamp = 0;
                 if (_motionPublished)
                 {
@@ -202,42 +217,43 @@ namespace S2A.Services
                 }
                 return;
             }
-            if (sample.TimestampUs == _motionTimestamp) return;
+            if (sample.TimestampUs == _motionTimestamp && nPair < 2) return;
             _motionTimestamp = sample.TimestampUs;
             if (!_motionLogged)
             {
                 _motionLogged = true;
-                Console.Error.WriteLine($"[输入反馈] first motion known={known} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
+                Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
             }
-            // 量程饱和与 hid 88 报给游戏的 IC 量程同一份常量（Ryujinx.HLE Types/SixAxisSensorIc.cs）：手机读数超量程的部分照真机饱和
+            AddMotionState(player, sample, ref _motion, _orientation, pushImu: true);
+            // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴
+            if (nPair >= 2)
+                AddMotionState(player, sampleR, ref _motionRight, _orientationRight, pushImu: false);
+            _npads.UpdateSixAxis(_motionStates);
+            _motionPublished = true;
+        }
+
+        private void AddMotionState(PlayerIndex player, MotionSample sample, ref MotionInput motion, float[] orientation, bool pushImu)
+        {
             Vector3 accel = new(SixAxisSensorIc.ClampAcceleration(sample.AccelerationX), SixAxisSensorIc.ClampAcceleration(sample.AccelerationY), SixAxisSensorIc.ClampAcceleration(sample.AccelerationZ));
             Vector3 gyro = new(SixAxisSensorIc.ClampAngularRate(sample.GyroX), SixAxisSensorIc.ClampAngularRate(sample.GyroY), SixAxisSensorIc.ClampAngularRate(sample.GyroZ));
-            // Switch 2 Npad IMU（hid 320）：NS2 原始坐标读数原样写进游戏给的样本缓冲（单位换算在 NpadImu），不经 MotionInput 的轴变换与融合
-            _npads.PushImu(player, accel, gyro, sample.TimestampUs);
-            // Native 已把超过 250 ms 的样本判为无效；跨会话或大间隔不积分旧姿态。
-            if (_motion != null && (sample.TimestampUs < _motion.TimeStamp || sample.TimestampUs - _motion.TimeStamp > 250_000))
-                _motion = null;
-            _motion ??= new MotionInput();
-            if (sample.TimestampUs != _motion.TimeStamp)
-            {
-                // NS2 raw -> SDL (x,z,-y) -> Ryujinx (x,-z,y)，合成后保留 raw 轴。
-                // MotionInput 沿用上游的加速度符号、角速度积分与 Mahony 姿态融合。
-                _motion.Update(accel, gyro, sample.TimestampUs, 100, 0);
-            }
-            Matrix4x4 m = _motion.GetOrientation();
-            _orientation[0] = m.M11; _orientation[1] = m.M12; _orientation[2] = m.M13;
-            _orientation[3] = m.M21; _orientation[4] = m.M22; _orientation[5] = m.M23;
-            _orientation[6] = m.M31; _orientation[7] = m.M32; _orientation[8] = m.M33;
+            if (pushImu) _npads.PushImu(player, accel, gyro, sample.TimestampUs);
+            if (motion != null && (sample.TimestampUs < motion.TimeStamp || sample.TimestampUs - motion.TimeStamp > 250_000))
+                motion = null;
+            motion ??= new MotionInput();
+            if (sample.TimestampUs != motion.TimeStamp)
+                motion.Update(accel, gyro, sample.TimestampUs, 100, 0);
+            Matrix4x4 m = motion.GetOrientation();
+            orientation[0] = m.M11; orientation[1] = m.M12; orientation[2] = m.M13;
+            orientation[3] = m.M21; orientation[4] = m.M22; orientation[5] = m.M23;
+            orientation[6] = m.M31; orientation[7] = m.M32; orientation[8] = m.M33;
             _motionStates.Add(new SixAxisInput
             {
                 PlayerId = player,
-                Accelerometer = _motion.Accelerometer,
-                Gyroscope = _motion.Gyroscrope * 0.0027f,
-                Rotation = _motion.Rotation * 0.0027f,
-                Orientation = _orientation,
+                Accelerometer = motion.Accelerometer,
+                Gyroscope = motion.Gyroscrope * 0.0027f,
+                Rotation = motion.Rotation * 0.0027f,
+                Orientation = orientation,
             });
-            _npads.UpdateSixAxis(_motionStates);
-            _motionPublished = true;
         }
 
         public void Stop()
@@ -257,7 +273,7 @@ namespace S2A.Services
                 for (int i = 0; i < NpadDevices.MaxControllers; i++) _npads.ResetRumble((PlayerIndex)i);
             }
             if (_setMotionEnabled != null) _setMotionEnabled(0);
-            _motion = null;
+            _motion = _motionRight = null;
             _motionTimestamp = 0;
             _motionEnabled = false;
             if (_motionPublished)

@@ -62,4 +62,6 @@ void s2a_pad_set_rumble(uint64_t session, unsigned side, float low_amp, float lo
 void s2a_pad_stop_rumble(uint64_t session);
 void s2a_pad_set_motion_enabled(int enabled);
 int s2a_pad_read_motion(s2a_pad_motion *out);
+// 可选：左右两路体感（Mac Joy-Con HID）。返回写入条数 0..2；out[0]=左、out[1]=右。没有此导出时服务层只走 s2a_pad_read_motion。
+int s2a_pad_read_motion_pair(s2a_pad_motion out[2]);
 #endif

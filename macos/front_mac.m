@@ -8,6 +8,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "../runtime/include/s2a_pad.h"
 #include "../runtime/include/phone_axes.h"
+#include "joycon_imu.h"
 #import "input_guide.h"
 #include "ns2_controller.h"
 #include <stdatomic.h>
@@ -375,6 +376,8 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int
     int want = enabled != 0 && !(off && !strcmp(off, "0"));
     atomic_store(&g_motion_wanted, want);
     s2a_mac_ns2_set_motion_enabled(want);
+    // Joy-Con：系统 GCMotion 为 nil，改走 HID 全报告六轴（macos/joycon_imu.m）
+    s2a_joycon_imu_set_enabled(want);
 }
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_motion *out) {
     if (s2a_mac_ns2_status() == NS2_STATUS_READY) return s2a_mac_ns2_read_motion(out);
@@ -382,7 +385,30 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_mot
     int known = g_motion_switched ? 0 : g_motion_known;
     *out = g_motion; g_motion_switched = 0;
     pthread_mutex_unlock(&g_motion_mu);
-    return known;
+    if (known) return 1;
+    // GameController 无六轴时回退 Joy-Con HID（优先右、否则左）
+    s2a_pad_motion l = {0}, r = {0};
+    int mask = s2a_joycon_imu_read(&l, &r);
+    if (mask & 2) { *out = r; return 1; }
+    if (mask & 1) { *out = l; return 1; }
+    return 0;
+}
+// 左右 Joy-Con 各一路；只有 GCMotion 时退回单源写在 out[0]
+__attribute__((visibility("default"), used)) int s2a_pad_read_motion_pair(s2a_pad_motion out[2]) {
+    if (!out) return 0;
+    s2a_pad_motion l = {0}, r = {0};
+    int mask = s2a_joycon_imu_read(&l, &r);
+    if (mask) {
+        int n = 0;
+        if (mask & 1) out[n++] = l;
+        if (mask & 2) out[n++] = r;
+        // 只有一只时仍返回 1：服务层 UpdateSixAxis 会把同一份写到双 Joy-Con 左右
+        return n;
+    }
+    s2a_pad_motion one = {0};
+    if (!s2a_pad_read_motion(&one)) return 0;
+    out[0] = one;
+    return 1;
 }
 // 实体手柄退出游戏（#276）：决策在 runtime/include/s2a_home_quit.h，界面（提示条、失焦、退出）在 S2AMacDelegate 后面的 home_quit_ui
 static s2a_hq_state g_hq;
