@@ -307,7 +307,7 @@ void s2a_record_compute_note(const struct s2a_compute_diagnostic *d,
     if (g_compute.trace && g_compute.trace_lines < 64) { g_compute.trace_lines++; trace=1; }
     pthread_mutex_unlock(&g_compute_mu);
     if (trace) {
-        static const char *source_names[]={"unknown","offline","private","live","miss"};
+        static const char *source_names[]={"unknown","offline","private","live","miss","cached"};
         static const char *outcome_names[]={"build_failed","unsubmitted","completed","completion_unknown","copyback_failed"};
         const char *outcome_name = (unsigned)outcome < sizeof outcome_names/sizeof outcome_names[0] ? outcome_names[outcome] : "build_failed";
         char identity[65] = "unavailable";
@@ -330,10 +330,11 @@ int s2a_record_compute_session_end(void) {
         for(int j=0;j<n;j++) if(entry[j]=='\n' || entry[j]=='\r') entry[j]=' ';
         memcpy(reasons+used,entry,(size_t)n+1); used+=(size_t)n;
     }
-    __android_log_print(ANDROID_LOG_INFO,"S2Arm","compute session: session=%llu generation=%llu dispatches=%llu offline=%llu private=%llu live=%llu miss=%llu unknown_source=%llu submitted=%llu completed=%llu completion_unknown=%llu unsubmitted=%llu build_failed=%llu copyback_failed=%llu reason_overflow=%llu stale=%llu reason_log_omitted=%u%s",
+    __android_log_print(ANDROID_LOG_INFO,"S2Arm","compute session: session=%llu generation=%llu dispatches=%llu offline=%llu private=%llu live=%llu miss=%llu cached=%llu unknown_source=%llu submitted=%llu completed=%llu completion_unknown=%llu unsubmitted=%llu build_failed=%llu copyback_failed=%llu reason_overflow=%llu stale=%llu reason_log_omitted=%u%s",
         (unsigned long long)stats.session,(unsigned long long)stats.generation,(unsigned long long)stats.dispatches,
         (unsigned long long)stats.sources[S2A_COMPUTE_OFFLINE],(unsigned long long)stats.sources[S2A_COMPUTE_PRIVATE],
         (unsigned long long)stats.sources[S2A_COMPUTE_LIVE],(unsigned long long)stats.sources[S2A_COMPUTE_MISS],
+        (unsigned long long)stats.sources[S2A_COMPUTE_CACHED],
         (unsigned long long)stats.sources[S2A_COMPUTE_UNKNOWN],(unsigned long long)stats.submitted,(unsigned long long)stats.completed,
         (unsigned long long)stats.unknown_completion,(unsigned long long)stats.unsubmitted,(unsigned long long)stats.build_failed,
         (unsigned long long)stats.copyback_failed,(unsigned long long)stats.reason_overflow,(unsigned long long)stats.stale_events,omitted,reasons);

@@ -182,7 +182,8 @@ struct s2a_record_dispatch_state {
 // lifetimes must extend through this delayed finish. Unknown completion is not success.
 /* Diagnostic facts never confer execution success. Unknown identity is explicit. */
 enum s2a_compute_source { S2A_COMPUTE_UNKNOWN, S2A_COMPUTE_OFFLINE,
-    S2A_COMPUTE_PRIVATE, S2A_COMPUTE_LIVE, S2A_COMPUTE_MISS, S2A_COMPUTE_SOURCE_COUNT };
+    S2A_COMPUTE_PRIVATE, S2A_COMPUTE_LIVE, S2A_COMPUTE_MISS, S2A_COMPUTE_CACHED,
+    S2A_COMPUTE_SOURCE_COUNT };
 struct s2a_compute_diagnostic {
     uint64_t session, generation;
     uint8_t identity[32], identity_valid;

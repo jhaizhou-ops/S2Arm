@@ -85,12 +85,39 @@ void nvn_vk_compute_pso_cache_release(struct s2a_vk_device *device);
 /* vkCreateComputePipelines 的进程累计：调用次数与总耗时（ns）。与缓存门无关、永不清零——
  * 逐帧 TSV cpso_n/cpso_us 对它差分；宿主替身与设备同口径。 */
 void nvn_vk_compute_cpso_totals(uint64_t *creates, uint64_t *ns);
+/* 程序级缓存（debug.s2a.compute_prog_cache，默认关）：与 PSO 缓存同一张有界表、同一套
+ * refs/LRU/设备冲表；by_identity 区分键域，两种键永不互配。键 = request.identity
+ * （canonical sha256，按构造覆盖翻译器全部输入，与磁盘程序缓存同信任域）。命中则
+ * lookup/parse/对象创建整段短路；每笔数据（c0/c1/guest 字节/绑定快照）不进键、
+ * 命中后仍按本次 dispatch 活状态逐笔填。
+ * prog_lookup 命中返回持 owner 引用的不透明条目：交给 pipeline_build_cached 消费
+ * （成败都由它收尾）；不调 build_cached 时必须 prog_release 归还。 */
+struct cpso;
+struct cpso *nvn_vk_compute_prog_lookup(struct s2a_vk_device *device, const uint8_t identity[32]);
+void nvn_vk_compute_prog_release(struct cpso *entry);
+/* 程序级命中/未中进程累计（门关恒 0）：宿主断言与 A/B 读数用。 */
+void nvn_vk_compute_prog_totals(uint64_t *hits, uint64_t *misses);
 int nvn_vk_compute_pipeline_build(struct s2a_vk_device *device,
     const struct s2a_record_dispatch_state *state,
     const struct s2a_record_memory *memory,
     struct nvk_compute_tex_snapshot *snapshot,
     const struct s2a_source_entry_view *source,
     const struct nvk_compute_lookup_result *program,
+    struct s2a_record_dispatch_output *out, char *why, size_t why_bytes);
+/* miss 路径：与 pipeline_build 同，另带本笔 request.identity 供程序级入表。 */
+int nvn_vk_compute_pipeline_build_prog(struct s2a_vk_device *device,
+    const struct s2a_record_dispatch_state *state,
+    const struct s2a_record_memory *memory,
+    struct nvk_compute_tex_snapshot *snapshot,
+    const struct s2a_source_entry_view *source,
+    const struct nvk_compute_lookup_result *program, const uint8_t identity[32],
+    struct s2a_record_dispatch_output *out, char *why, size_t why_bytes);
+/* 程序级命中路径：entry 来自 prog_lookup；接管其 owner 引用（失败归还、成功归 owner）。 */
+int nvn_vk_compute_pipeline_build_cached(struct s2a_vk_device *device,
+    const struct s2a_record_dispatch_state *state,
+    const struct s2a_record_memory *memory,
+    struct nvk_compute_tex_snapshot *snapshot,
+    const struct s2a_source_entry_view *source, struct cpso *entry,
     struct s2a_record_dispatch_output *out, char *why, size_t why_bytes);
 #ifdef __cplusplus
 }
