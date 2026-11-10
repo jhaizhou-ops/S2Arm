@@ -81,6 +81,14 @@ class PlanRules(Base):
         self.assertEqual(self.go({})[:2], (1, 2)); self.assertEqual(self.dev.lists, [["a", "b"]])
         self.assertEqual(self.dev.files[f"{RP}/.pushed"].decode(), f"a\t{sha(b'A')}\nb\t{sha(b'BB')}\n")   # 推完这批即记账
         self.assertEqual(self.dev.puts[-2:], [f"{RP}/index.tsv", f"{RP}/manifest.json"])                   # 最后推索引与清单
+        # 开推第一件事把机上清单置空（11-09 根修：「清单读得出」= 推送完整，App 据此分清「传完只等解开」和「传断了」）；
+        #   在它之前只有推前探针（#333，几字节，不动清单）
+        self.assertEqual(self.dev.puts[:2], [f"{RP}/{push.PROBE}", f"{RP}/manifest.json"])
+        self.assertEqual(self.dev.files[f"{RP}/manifest.json"], (self.pk / "manifest.json").read_bytes())       # 最后写回的是本包清单
+
+    def test_nothing_to_push_keeps_manifest(self):   # 机上已有全部文件（已应用）、没东西推：不把机上清单置空
+        self.go(self.on_phone("a", "b"))
+        self.assertNotIn(b"", [self.dev.files.get(f"{RP}/manifest.json")])
 
     def test_applied_trusted_after_spot_check(self):   # 机上 a 在且 sha 对（抽查过）→ 只推 b
         self.assertEqual(self.go(self.on_phone("a"))[:2], (1, 1)); self.assertEqual(self.dev.lists, [["b"]])
@@ -218,8 +226,10 @@ class ContainerDocs(Base):
         self.dev.docs, self.dev.ctx = self.D, self.CTX
         nb, nt, _ = push.run(self.dev, self.pk, self.w, False, say=self.log.append)
         self.assertEqual((nb, nt), (1, 2))
-        self.assertTrue(self.dev.puts[0].startswith(f"{self.D}/资源包/.incoming/") and self.dev.puts[0].endswith("_000.tar"), self.dev.puts[0])
-        self.assertEqual(self.dev.puts[1:], [f"{self.D}/资源包/.pushed", f"{self.D}/资源包/index.tsv", f"{self.D}/资源包/manifest.json"])
+        self.assertEqual(self.dev.puts[0], f"{self.D}/资源包/{push.PROBE}")   # 先写探针（#333），也在本款资源包目录
+        self.assertEqual(self.dev.puts[1], f"{self.D}/资源包/manifest.json")   # 开推先置空本款清单（同一份文档根）
+        self.assertTrue(self.dev.puts[2].startswith(f"{self.D}/资源包/.incoming/") and self.dev.puts[2].endswith("_000.tar"), self.dev.puts[2])
+        self.assertEqual(self.dev.puts[3:], [f"{self.D}/资源包/.pushed", f"{self.D}/资源包/index.tsv", f"{self.D}/资源包/manifest.json"])
         def done(d):
             d.files[f"{self.D}/资源包/.applied"] = "x"; d.files[f"{self.D}/unpack.log"] = "11-07 解开 1 个包 2 个文件 0 MB，.applied = x（0.1 秒）\n"
         self.dev.on_launch = done; clock = [0.0]
@@ -255,7 +265,7 @@ class SpaceNeed(Base):
 
     def test_one_byte_short_reports(self):
         with self.assertRaises(push.Fail) as e: self.run_with_free(8197)
-        self.assertIn("空间不足", str(e.exception)); self.assertEqual(self.dev.puts, [])
+        self.assertIn("空间不足", str(e.exception)); self.assertEqual(self.dev.puts, [f"{RP}/{push.PROBE}"])   # 只写了探针（#333），资源一个没推
 
     def test_devpush_free_parses_or_none(self):
         d = push.Devpush("exe", "U", "b", self.w)
@@ -336,6 +346,24 @@ class SendProgress(Base):
     def test_cli_progress_lines(self):   # Mac 装机作业读的机器行
         line = push.PROGRESS_PREFIX + " 60 200 1 3"
         self.assertRegex(line, r"^S2A_PUSH_PROGRESS \d+ \d+ \d+ \d+$")
+
+
+class LockedProbe(Base):
+    """#333：推之前先写几字节探针；写不进（锁屏 / 断开）立刻报 DeviceLocked（code device_locked），不核账、不推一个文件"""
+    def test_locked_phone_stops_before_any_push(self):
+        dev = Fake(self.on_phone("a"))
+        def put(src, rel): raise push.Fail("写不进")
+        dev.put = put
+        dev.put_tar = lambda *a: self.fail("锁屏时不该推资源")
+        with self.assertRaises(push.DeviceLocked) as e:
+            push.run(dev, self.pk, self.w, False, say=self.log.append)
+        self.assertEqual(e.exception.code, "device_locked")
+        self.assertIn("锁屏", str(e.exception))
+
+    def test_probe_goes_into_the_pack_folder_and_push_continues(self):
+        self.go({})
+        self.assertEqual(self.dev.puts[0], f"{RP}/{push.PROBE}")
+        self.assertIn(f"{RP}/index.tsv", self.dev.files)
 
 
 class SendFail(Base):

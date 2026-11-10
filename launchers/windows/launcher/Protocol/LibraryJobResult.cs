@@ -92,7 +92,7 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
     public string LocationState => Location?.State ?? "none";
 
     /// <summary>可以显示的本地封面路径：只认作业层给的、就在这款自己文件夹里（catalog location.folder，按英文名或游戏号命名都行）的
-    /// cover.jpg 或玩家换的 cover.custom.&lt;8 位十六进制&gt;.jpg（作业层 _CUSTOM_COVER）；其它一律 null。
+    /// cover.jpg（游戏包自带图标）、玩家换的 cover.custom.&lt;8 位十六进制&gt;.jpg（作业层 _CUSTOM_COVER），或没有自带图标时的商店横图 banner.jpg；其它一律 null。
     /// 不按游戏号拼 games\&lt;号&gt;\：v0.2.0 起文件夹按英文名命名（#330）。</summary>
     public string? CoverFile()
     {
@@ -104,7 +104,7 @@ public sealed record LibraryGame(string Id, string Name, string Version, string 
             var parent = System.IO.Path.GetDirectoryName(path);
             var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             return parent is not null && string.Equals(parent, folder, comparison) &&
-                System.Text.RegularExpressions.Regex.IsMatch(System.IO.Path.GetFileName(path), @"^cover(\.custom\.[0-9a-f]{8})?\.jpg$") ? path : null;
+                System.Text.RegularExpressions.Regex.IsMatch(System.IO.Path.GetFileName(path), @"^(cover(\.custom\.[0-9a-f]{8})?|banner)\.jpg$") ? path : null;
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or System.IO.PathTooLongException) { return null; }
     }

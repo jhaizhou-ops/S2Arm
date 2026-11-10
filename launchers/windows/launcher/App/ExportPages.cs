@@ -72,6 +72,7 @@ public sealed partial class EnvironmentWindow
     // A checklist that could not be read must not lock the player out: start and let the install job give the real reason.
     private bool InstallAllowed => readiness?.Ready == true || (readiness is null && installCheckFailed);
     private string installState = "", installMessage = "", installDiagnostics = "";
+    private string revealProblem = "";   // 「显示 IPA」「打开游戏文件夹」找不到目标时的提示（不打开空的资源管理器）
     // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
     //   installSeen：跑完后玩家回安装页看过结果没有；没看过时顶栏胶囊一直在。进度计数来自作业事件 done / total / unit（推资源包按字节，机上解包按包）
     private string? installGameId, installGameName;
@@ -905,12 +906,17 @@ public sealed partial class EnvironmentWindow
             var install = Primary(T("export.done.install"), () => { readinessFor = null; Navigate("install"); });
             AutomationId(install, "progress.install");
             install.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(install);
-            if (packIpa is not null)
+            // IPA 是装机时组装、整个游戏库共用一份（默认位置根 S2Arm.ipa）：出包这步没有 IPA，只给「打开游戏文件夹」（按索引找这款实际所在的位置）
+            if (!string.IsNullOrEmpty(packIpa))
             {
                 var reveal = Action("progress.reveal_ipa", () => Reveal(packIpa));
                 reveal.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(reveal);
             }
+            var folder = Action("progress.open_game_folder", () => OpenGameFolder(game));
+            AutomationId(folder, "progress.open_game_folder");
+            folder.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(folder);
             result.Children.Add(buttons);
+            if (revealProblem.Length > 0) result.Children.Add(Muted(revealProblem, 13));
             result.Children.Add(Muted(T("export.win.done.installNote"), 12));
 
             // 详细记录（折叠步骤列表）
@@ -1015,6 +1021,9 @@ public sealed partial class EnvironmentWindow
 
     private void Reveal(string path)
     {
+        // 路径不在就说清楚，不把空参数交给资源管理器（原先 /select, 后面是空串，打开一个什么都没选中的空窗口）
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) { revealProblem = T("reveal.ipa_missing"); Render(); return; }
+        revealProblem = "";
         try
         {
             // Explorer selects the file; the path goes in as one argument, never through a shell.
@@ -1092,14 +1101,19 @@ public sealed partial class EnvironmentWindow
             restore.Click += (_, _) => _ = ConfirmRestoreAsync(game);
             buttons.Children.Add(restore);
         }
-        if (readiness is { IpaPath.Length: > 0 } located)
+        if (readiness is { IpaPath.Length: > 0 } located)   // 装机时组装的那份（默认位置根 S2Arm.ipa），还没装过就没有
         {
             var reveal = Action("progress.reveal_ipa", () => Reveal(located.IpaPath));
             reveal.Margin = new Thickness(12, 0, 0, 0);
             AutomationId(reveal, "install.reveal_ipa");
             buttons.Children.Add(reveal);
         }
+        var openFolder = Action("progress.open_game_folder", () => OpenGameFolder(game));
+        openFolder.Margin = new Thickness(12, 0, 0, 0);
+        AutomationId(openFolder, "install.open_game_folder");
+        buttons.Children.Add(openFolder);
         list.Children.Add(buttons);
+        if (revealProblem.Length > 0) list.Children.Add(Muted(revealProblem, 13));
         body.Children.Add(Card(list));
 
         if (installState != "" && installGameId is not null && installGameId != game.Id)

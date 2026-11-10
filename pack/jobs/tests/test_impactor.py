@@ -2,6 +2,7 @@
 """Windows 签装交给玩家自装的 Impactor（pack/jobs/impactor.py + impactor_guide.json）单测。
 期望按规则写：报错原文取自 11-04 Windows 出包机实测与上游报告的原句；实测版本 2.7.2；引导两种语言齐全、引用的码全在共用表。"""
 import json, os, sys, tempfile, unittest
+from pathlib import Path
 from unittest import mock
 
 H = os.path.dirname(os.path.abspath(__file__)); J = os.path.dirname(H)
@@ -105,3 +106,20 @@ class Guide(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SelectedTeamTests(unittest.TestCase):
+    """账号存档（%APPDATA%\\PlumeImpactor\\accounts.json）里当前选中账号的团队号：给 Windows 装机定包名用（9401）"""
+    def test_selected_account_team(self):
+        import json, tempfile
+        import impactor
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d) / "PlumeImpactor"; store.mkdir()
+            (store / "accounts.json").write_text(json.dumps({"selected_account": "b@x", "accounts": {
+                "a@x": {"team_id": "FGHIJ67890"}, "b@x": {"team_id": "ABCDE12345"}}}))
+            self.assertEqual(impactor.selected_team(d), "ABCDE12345")
+            (store / "accounts.json").write_text(json.dumps({"selected_account": "c@x", "accounts": {"a@x": {"team_id": "FGHIJ67890"}}}))
+            self.assertIsNone(impactor.selected_team(d))
+            (store / "accounts.json").write_text("{broken")
+            self.assertIsNone(impactor.selected_team(d))
+        self.assertIsNone(impactor.selected_team("/nonexistent-dir"))

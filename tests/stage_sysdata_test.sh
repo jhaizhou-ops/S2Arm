@@ -29,6 +29,7 @@ n() { ls "$(c "$1")/systemdata/$2" 2> /dev/null | wc -l | tr -d ' '; }
 mk g 0100AAAA00000000 11223344
 o=$(S g 2>&1); r=$?
 ck "① 表外的款、两处都没有 → 不报红黄（rc=${r}）、合成 0802 $(n g 0100000000000802) 个 / 0823 $(n g 0100000000000823) 个文件、各带 .synth" '[ $r = 0 ] && [[ "$o" != *【红】* ]] && [[ "$o" != *【黄】* ]] && [ "$(n g 0100000000000802)" = 6 ] && [ "$(n g 0100000000000823)" = 98 ] && [ -f "$(c g)/systemdata/0100000000000802.synth" ] && [ -f "$(c g)/systemdata/0100000000000823.synth" ]'
+ck "① 合成 Switch 2 Mii 资源 0849 $(n g 0400000000000849) 个文件、带 .synth" '[ "$(n g 0400000000000849)" = 12 ] && [ -f "$(c g)/systemdata/0400000000000849.synth" ]'
 ck "① 合成的 0802 解析器读一遍通过；字体、时区照在" 'python3 $T/repo/pack/sysdata_mii.py check "$(c g)/systemdata/0100000000000802" > /dev/null && [ -f "$(c g)/systemdata/fonts/a.bfttf" ] && [ -f "$(c g)/systemdata/010000000000080E/binaryList.txt" ]'
 o=$(S2A_SYSDATA=$T/sd S g 2>&1); r=$?
 ck "② 玩家给了真的 0802 → 换成真的、去掉 .synth；0823 仍合成（rc=${r}）" '[ $r = 0 ] && [ "$(cat "$(c g)/systemdata/0100000000000802/ShapeHigh.dat")" = real ] && [ ! -e "$(c g)/systemdata/0100000000000802.synth" ] && [ -f "$(c g)/systemdata/0100000000000823.synth" ]'

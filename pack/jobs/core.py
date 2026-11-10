@@ -241,6 +241,29 @@ def _job_dirs(private):
     return list(dict.fromkeys([jobs_dir(private), private / "logs" / "jobs", private / "jobs"]))
 
 
+IMPORT_RECORD_SOURCE_DIAGNOSTIC = 16_000    # 任务记录里每个来源的诊断上限（字符）：完整的在终态事件与按来源写的 inspect 日志里
+IMPORT_RECORD_DIAGNOSTICS_TOTAL = 200_000   # 任务记录里全部来源诊断的总上限：catalog 每次要读回最近 200 条任务记录，不能被一次大批导入撑大
+
+
+def record_sources(sources):
+    """逐来源导入结果写进任务记录的份：诊断每条截到 IMPORT_RECORD_SOURCE_DIAGNOSTIC（保留头尾），总量超 IMPORT_RECORD_DIAGNOSTICS_TOTAL
+    后其余来源只留 code / reason / status（诊断清空）"""
+    out, budget = [], IMPORT_RECORD_DIAGNOSTICS_TOTAL
+    for row in sources:
+        row = dict(row)
+        text = row.get("diagnostic") or ""
+        if len(text) > IMPORT_RECORD_SOURCE_DIAGNOSTIC:
+            marker = "\n…[已省略中间部分]…\n"
+            keep = IMPORT_RECORD_SOURCE_DIAGNOSTIC - len(marker)
+            text = text[:keep // 4] + marker + text[len(text) - (keep - keep // 4):]
+        if len(text) > budget:
+            text = ""
+        budget -= len(text)
+        row["diagnostic"] = text
+        out.append(row)
+    return out
+
+
 class Context:
     def __init__(self, request):
         # 空间预检没过、玩家点「仍然继续」重交的出包任务（library.check_pack_space）：只认布尔值、只给 Mac 打包 / 打 iPhone 包
@@ -803,6 +826,8 @@ class Context:
     def finish(self, state, message, result=None):
         self.cancelled = False  # Allow the terminal event after cancellation.
         self.job.update(state=state, ended=time.time(), message=message)
+        if self.operation == "import" and "sources" in (result or {}) and self.r.get("partialResults") is True:
+            self.job["sources"] = record_sources(result["sources"])
         if (result or {}).get("outputPath"):
             self.job["outputPath"] = result["outputPath"]
         # 启动器重开后从任务记录恢复完成卡：IPA 路径 / 装到的设备 / 推了几个文件原先只在结果事件里，任务记录不存，
@@ -960,7 +985,11 @@ def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=Fals
     if not jobs.is_dir():
         return dict(removed=[], kept=0, skippedRunning=0, bytes=0)
     by_task = {}
-    for path in jobs.iterdir():
+    try:
+        listed = list(jobs.iterdir())
+    except FileNotFoundError:   # 并发的作业刚把这个目录收走（layout.adopt_private_logs）
+        return dict(removed=[], kept=0, skippedRunning=0, bytes=0)
+    for path in listed:
         if path.is_symlink() or not path.is_file():
             continue
         if path.suffix not in (".json", ".jsonl"):
@@ -982,7 +1011,12 @@ def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=Fals
     records = {t: record(t) for t in by_task}
     finished = {t for t, r in records.items() if r.get("state") in TERMINAL_STATES or bool(r.get("ended"))}
     running = [t for t in by_task if t not in finished]   # counted before anything is deleted: a removed record must not look like a live one
-    newest = {t: max(p.stat().st_mtime for p in by_task[t]) for t in finished}
+    def mtime(p):   # 列完目录后被并发的作业搬走的文件：当作不在（不再整个作业失败）
+        try:
+            return p.stat().st_mtime
+        except FileNotFoundError:
+            return 0.0
+    newest = {t: max(mtime(p) for p in by_task[t]) for t in finished}
     finished_tasks = sorted(finished, key=lambda t: newest[t], reverse=True)
     floor, seen = set(), {}
     for task in finished_tasks:
@@ -999,7 +1033,7 @@ def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=Fals
             kept += 1
             continue
         files = by_task[task]
-        size = sum(p.stat().st_size for p in files)
+        size = sum(p.stat().st_size for p in files if p.exists())
         if not dry_run:
             for p in files:
                 p.unlink(missing_ok=True)

@@ -52,4 +52,11 @@ ck "Mii 反证：改坏一个条目的压缩长 → 解析器报红" '! python3 
 RM=${S2A_MII_REAL:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots/mk8d@现行/systemdata/0100000000000802}
 if [ -d "$RM" ] && [ ! -e "$RM.synth" ]; then ck "Mii：解析器读真数据也过（对照，${RM}）" 'python3 $H/pack/sysdata_mii.py check "$RM" > /dev/null'
 else echo "【黄】没有真 Mii 数据目录 ${RM}：跳过对照（S2A_MII_REAL 指定）"; fi
+# 0400000000000849 Switch 2 Mii 资源（期望手写：0802 的 6 个文件 + OunceTexture{High,Mid,Low}{Linear,SRGB} 6 个 = 12 个；Ounce 贴图与 NXTextureLowLinear 逐字节同（同一份空贴图）；
+#   形状 / NX 贴图照 0802 的解析器读过；两次合成逐字节同；--ids 列出 0849）
+$SY 0400000000000849 $T/o1 > /dev/null && $SY 0400000000000849 $T/o2 > /dev/null; rc=$?
+ow="NXTextureLowLinear.dat NXTextureLowSRGB.dat NXTextureMidLinear.dat NXTextureMidSRGB.dat OunceTextureHighLinear.dat OunceTextureHighSRGB.dat OunceTextureLowLinear.dat OunceTextureLowSRGB.dat OunceTextureMidLinear.dat OunceTextureMidSRGB.dat ShapeHigh.dat ShapeMid.dat "
+ck "0849：合成 12 个固定文件、两次逐字节同（${rc}）" '[ $rc = 0 ] && [ "$(ls $T/o1 | LC_ALL=C sort | tr "\n" " ")" = "$ow" ] && diff -r $T/o1 $T/o2 > /dev/null'
+ck "0849：解析器读形状 / NX 贴图通过，Ounce 贴图与 NX 贴图同一份" 'python3 $H/pack/sysdata_mii.py check $T/o1 > /dev/null && for f in $T/o1/OunceTexture*.dat; do cmp -s "$f" $T/o1/NXTextureLowLinear.dat || exit 1; done'
+ck "--ids 列出 0849" '$SY --ids | grep -qx 0400000000000849'
 [ $bad = 0 ] && echo "✓ sysdata_synth 单测全过" || { echo "sysdata_synth 单测有不通"; exit 1; }

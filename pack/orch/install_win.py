@@ -67,9 +67,12 @@ def bundle_id_of(ipa):
         return plistlib.loads(z.read(n))['CFBundleIdentifier']
 
 
-def sign_install(exe, ipa, dev_id, name, log, out_ipa):
+def sign_install(exe, ipa, dev_id, name, log, out_ipa, bundle=None):
     cmd = [exe, 'sign', '--package', str(ipa), '--apple-id', '--register-and-install', '--udid', str(dev_id), '-o', str(out_ipa)]
     if name: cmd += ['--custom-name', name]
+    # 包名由调用方定（install.container_bundle_id，和 Mac 一致的小写团队号）：不给时 plumesign 自己在包里的包名后接「.大写团队号」，
+    #   它查已有 App ID 分大小写，同一团队在 Mac 注册过的小写包名认不出、去新建又撞 Apple 9401（包名不分大小写已被占）。给了它就原样用、不再接团队号
+    if bundle: cmd += ['--custom-identifier', bundle]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', env=dict(os.environ, RUST_LOG=os.environ.get('RUST_LOG', 'info')))
     text = p.stdout + p.stderr
     Path(log).write_text(text, encoding='utf-8')
@@ -103,7 +106,7 @@ def install_app(a, say=lambda m: print(m, flush=True)):
     log = a.log or os.path.join(os.path.dirname(os.path.abspath(a.ipa)), 'plumesign.log')
     with tempfile.TemporaryDirectory() as t:
         out = Path(t, 'signed.ipa'); say(f'签名 + 装机（设备编号 {dev}）…')
-        sign_install(exe, a.ipa, dev, a.name, log, out)
+        sign_install(exe, a.ipa, dev, a.name, log, out, getattr(a, 'bundle', None))
         bid = bundle_id_of(out) if out.is_file() else None
     if not bid: raise Fail('装好了但读不到签好的 ipa 里的包名，推不了资源包', 1, 'device_install_failed')
     return bid
@@ -129,8 +132,8 @@ def push_pack(udid, bid, pack, devpush=None, full=False, say=lambda m: print(m, 
                 try: P.apply(dev, Path(pack), Path(w), nb, say)
                 except P.NeedsPlayer as e:   # 传输是成功的：带上传了多少，装机作业按提醒收尾（#192）
                     need = Fail(str(e), 0, 'manual_unpack_required'); need.transferred = (nt, nbytes); raise need
-        except P.Fail as e:
-            raise Fail(f'推资源包失败：{e}', 1, 'device_install_failed')
+        except P.Fail as e:   # 推之前探针写不进 = 锁屏 / 断开：单独报 device_locked（#333）
+            raise Fail(f'推资源包失败：{e}', 1, getattr(e, 'code', None) or 'device_install_failed')
     return nt, nbytes
 
 

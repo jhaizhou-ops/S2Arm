@@ -46,6 +46,15 @@ def logged_in(appdata=None):
         with open(os.path.join(base, 'PlumeImpactor', 'accounts.json'), encoding='utf-8') as f: return bool(json.load(f).get('accounts'))
     except (OSError, ValueError, AttributeError): return False
 
+def selected_team(appdata=None):
+    """账号存档里当前选中账号的团队号（accounts.json 的 selected_account → accounts[账号].team_id）；读不到 → None"""
+    base = appdata or os.environ.get('APPDATA') or os.path.join(os.path.expanduser('~'), '.config')
+    try:
+        with open(os.path.join(base, 'PlumeImpactor', 'accounts.json'), encoding='utf-8') as f: store = json.load(f)
+        team = (store.get('accounts') or {}).get(store.get('selected_account') or '', {}).get('team_id')
+        return team if isinstance(team, str) and re.fullmatch(r'[A-Za-z0-9]{10}', team) else None
+    except (OSError, ValueError, AttributeError): return None
+
 # Impactor / 侧载工具界面上的报错原文 → 共用错误码（顺序即优先级；处理办法在 pack/jobs/errors.py RECOVERY）
 EXPLAIN = (
     (r'-80046', 'login_identity_rejected'),

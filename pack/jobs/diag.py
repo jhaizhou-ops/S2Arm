@@ -30,12 +30,19 @@ COREDEVICE = Path(os.environ.get("S2A_COREDEVICE", "/Library/Developer/PrivateFr
 NO_COREDEVICE = "这台 Mac 没装 Xcode 的设备组件（CoreDevice），读不到连着的设备：打开一次 Xcode、按提示装附加组件后再试；也可以在出包页直接选机型"
 
 
+DEVICECTL_TIMEOUT = 124   # devicectl 超时的返回码（同 coreutils timeout）
+
+
 def devicectl(c, *args, timeout=120):
     exe = COREDEVICE / "Resources/bin/devicectl"
     if not (exe.is_file() and os.access(exe, os.X_OK)):
         return 127, {}, NO_COREDEVICE
     with tempfile.NamedTemporaryFile(suffix=".json", dir=c.private) as out:
-        p = subprocess.run([str(exe), *args, "--json-output", out.name], env=c.env(), capture_output=True, text=True, timeout=timeout)
+        try:
+            p = subprocess.run([str(exe), *args, "--json-output", out.name], env=c.env(), capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # 手机锁屏 / 隧道断时 devicectl 会一直挂到超时（#333）：转成非零退出，调用方按已有的「解锁手机、插稳数据线」分支报，不再裸 traceback 收场
+            return DEVICECTL_TIMEOUT, {}, f"devicectl {timeout} 秒没有响应：手机可能锁屏了或连接断开"
         try:
             data = json.loads(Path(out.name).read_text() or "{}")
         except ValueError:

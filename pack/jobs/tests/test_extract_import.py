@@ -142,5 +142,46 @@ class ExtractImportTests(JobCase):
         self.assertFalse((self.c.private / "keys/status.json").exists())
 
 
+class DefaultPathUnchangedTests(JobCase):
+    """#124 逐来源结果只给开了 partialResults 的调用方：默认路径（不开）结果形状、任务记录、错误码都同 #124 之前（期望按 #124 之前的行为手写）"""
+    make_extract = ExtractImportTests.make_extract
+    def test_default_result_has_only_imports_and_record_has_no_sources(self):
+        import json
+        extract = self.make_extract(self.root / "e1", 0x01002468ACE00000, "Mario", "马力欧")
+        result, done = self.worker("import", paths=[str(extract)])
+        self.assertEqual(done["state"], "succeeded", result.stderr)
+        self.assertEqual(sorted(done["result"]), ["imports"])
+        record = json.loads((self.c.library / "logs" / "jobs" / (done["taskId"] + ".json")).read_text())
+        self.assertNotIn("sources", record)
+        result, done = self.worker("import", paths=[str(self.root / "nope" / "x.nsp")])   # 失败：结果为空，同以前
+        self.assertEqual((done["state"], done.get("result") or {}), ("failed", {}))
+
+    def test_default_catalog_write_error_keeps_original_code(self):
+        # catalog 写不进（非盘满）：默认路径照旧抛原始 OSError，explain 归 permission_denied（#124 曾统一成 job_failed）
+        import library, errors
+        from unittest.mock import patch
+        extract = self.make_extract(self.root / "e2", 0x01002468ACE00000, "Mario", "马力欧")
+        real = library.atomic
+        def atomic(path, data, *a, **k):
+            if Path(path).name == "catalog.json" and data.get("games"):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, data, *a, **k)
+        self.c.r.update(paths=[str(extract)])
+        self.c.r.pop("partialResults", None)
+        with patch.object(library, "atomic", atomic), self.assertRaises(OSError) as e:
+            library.import_games(self.c)
+        self.assertEqual(errors.explain(e.exception).code, "permission_denied")
+
+    def test_record_sources_caps_each_and_total(self):
+        import core
+        big = "头" + "x" * 50_000 + "尾"
+        rows = core.record_sources([dict(status="failed", code="content_invalid", reason="r", diagnostic=big) for _ in range(30)])
+        self.assertTrue(all(len(r["diagnostic"]) <= core.IMPORT_RECORD_SOURCE_DIAGNOSTIC for r in rows))
+        self.assertTrue(rows[0]["diagnostic"].startswith("头") and rows[0]["diagnostic"].endswith("尾"))
+        self.assertLessEqual(sum(len(r["diagnostic"]) for r in rows), core.IMPORT_RECORD_DIAGNOSTICS_TOTAL)
+        self.assertEqual(rows[-1]["diagnostic"], "")                       # 超出总量的来源只留 code / reason / status
+        self.assertEqual((rows[-1]["code"], rows[-1]["status"]), ("content_invalid", "failed"))
+
+
 if __name__ == "__main__":
     unittest.main()

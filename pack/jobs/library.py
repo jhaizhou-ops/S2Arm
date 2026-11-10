@@ -5,6 +5,7 @@ Storage/interaction helpers adapted from LumaDock under MIT.
 from __future__ import annotations
 import collections
 import contextlib
+from copy import deepcopy
 import errno
 import filelock
 import hashlib
@@ -20,6 +21,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from errors import explain
 from core import Failure, atomic, contained, digest, prune_jobs, read
 import space_rule
 import toolchain
@@ -381,6 +383,9 @@ def nup_inspect(c, source, icon_dir):
                 meta.update(k.meta())
             own = {id(k): n.tree_bytes(k.root) for k in [base, vers.get(ver), *dlc.values()] if k is not None}   # 每项各自的内容字节（界面 / 错误摘要逐项显示）
     except (nup.Error, OSError, ValueError) as e:
+        # 默认路径：读错误一律 content_invalid（与原来一致）。只有逐来源模式下的磁盘空间不足要照原样往上抛，中止整批。
+        if isinstance(e, OSError) and c.r.get("partialResults") is True and explain(e).code == "disk_full":
+            raise
         raise Failure(f"读不出这个 NUP 容器（{Path(source).name}）：{e}", code="content_invalid") from None
     nacp = meta.get(nup.T_NACP) if len(meta.get(nup.T_NACP) or b"") == 0x4000 else None
     name = ((dump.nacp_title(nacp, 0) or dump.nacp_title(nacp, 14) or dump.nacp_title(nacp, 13)) if nacp else None) \
@@ -716,7 +721,7 @@ def setup(c):
         if info.get("schema") != 1 or not info.get("id"):
             raise Failure("游戏库标识不完整。")
         return dict(library=str(c.library), libraryId=info["id"], outcome="opened")
-    if any(p.name != ".DS_Store" for p in c.library.iterdir()):
+    if layout.has_content(c.library):   # 只有系统自动生成的文件（.DS_Store / desktop.ini / Thumbs.db）照样算空文件夹
         if not _looks_like_library(c.library):
             raise Failure("这个文件夹里已有别的文件：请选空文件夹，或者已有的 S2Arm 游戏库。文件都没动。")
         info = dict(schema=1, id=str(uuid.uuid4()))
@@ -783,9 +788,9 @@ def keys(c):
                         verified = True
             c.check()
             os.replace(temporary, c.keys)
+            atomic(c.private / "keys/status.json", dict(ready=True, verified=verified, imported=time.time()))
     finally:
         temporary.unlink(missing_ok=True)
-    atomic(c.private / "keys/status.json", dict(ready=True, verified=verified, imported=time.time()))
     return dict(entries=count, verified=verified, message="已验证解密能力" if verified else "格式通过，首次读取游戏时验证解密能力")
 
 
@@ -795,16 +800,19 @@ KEYS_CANNOT_DECRYPT = ("无法读取游戏内容：可能是文件不完整、�
                        "若已确认 Switch 密钥版本不足，再重新导出，到「设置 → 玩家密钥」重新导入。")
 
 
-def inspect(c, source, icon_dir, keyfile=None):
+def inspect(c, source, icon_dir, keyfile=None, *, source_id=None):
     keyfile = keyfile or c.keys
     validate_keys(keyfile)
     lines = []
+    log_name = f"{c.task}-{source_id}-inspect.log" if source_id else c.task + "-inspect.log"
     try:
         c.run(["dotnet", toolchain.reader(c), keyfile, "--inspect", source, icon_dir],
-              c.logs / (c.task + "-inspect.log"), on_line=lines.append)
+              c.logs / log_name, on_line=lines.append)
     except Failure as error:
         if error.code not in ("tool_exit", "job_failed"):
             raise
+        if any(line.startswith("【原因 disk_full】") for line in lines):
+            raise Failure("读取游戏内容时磁盘空间不足。", code="disk_full") from None
         if "【内容截断】" in lines:
             raise Failure("游戏文件不完整，部分内容超出文件末尾。", code="content_truncated") from None
         if any(line.startswith("【原因 ticket_missing】") for line in lines):
@@ -1213,131 +1221,231 @@ def _same_package(p, metadata, sha, size):
     return p["sha256"] == sha or (p.get("type") == metadata["type"] and p.get("version") == metadata["version"] and p.get("size") == size)
 
 
+# Errors attributable to one source. Other failures stop the whole batch.
+IMPORT_SOURCE_ERRORS = {
+    "content_truncated", "content_unreadable", "content_invalid", "keys_outdated", "ticket_missing",
+    "input_missing", "input_type_unsupported", "input_empty", "input_permission",
+    "input_unreadable", "permission_denied",
+}
+
+
+def import_source(path, *, needs_keys=False):
+    return dict(id=hashlib.sha256(os.fsencode(path)).hexdigest(), path=str(path), name=path.name,
+                fileName=path.name, needsKeys=needs_keys, status="unprocessed", code=None, reason="", diagnostic="")
+
+
+# 单个来源写进作业记录的诊断上限（字符）。超出时保留开头与结尾，中间标注已省略。
+IMPORT_DIAGNOSTIC_LIMIT = 100_000
+
+
+def cap_diagnostic(text, limit=IMPORT_DIAGNOSTIC_LIMIT):
+    if len(text) <= limit:
+        return text
+    marker = "\n…[已省略中间部分]…\n"
+    keep = limit - len(marker)
+    head = keep // 4
+    return text[:head] + marker + text[len(text) - (keep - head):]
+
+
+def import_source_failed(c, row, error):
+    failure = explain(error)
+    if c.r.get("partialResults") is True and isinstance(error, OSError) and error.errno in (errno.EIO, errno.ENODEV):
+        failure = Failure("读不了游戏文件。", code="input_unreadable", internal=str(error))
+    detail = [str(failure), failure.internal]
+    if c.last_log:
+        try:
+            detail.append(c.last_log.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    row.update(status="failed", code=failure.code, reason=c.redact(failure),
+               diagnostic=cap_diagnostic(c.redact("\n".join(filter(None, detail)).replace(row["path"], row["fileName"]), limit=None)))
+
+
+def scan_import(c, picked, *, partial):
+    if picked.is_dir():
+        files, extracts, errors, seen = [], [], {}, set()
+
+        def walk_error(error):
+            if partial:
+                if explain(error).code == "disk_full":
+                    raise error
+                errors[Path(error.filename or picked)] = error
+
+        # Keep paths inside the picked folder, while guarding against symlink loops.
+        for directory, dirs, names in os.walk(picked, followlinks=True, onerror=walk_error):
+            real = os.path.realpath(directory)
+            if real in seen:
+                dirs[:] = []
+                continue
+            seen.add(real)
+            path = Path(directory)
+            if is_extracted_game(path):
+                extracts.append(path)
+                dirs[:] = []
+            else:
+                files.extend(path / name for name in names if name.lower().endswith(SOURCE_SUFFIXES)
+                             and os.path.isfile(path / name)
+                             and (not name.lower().endswith(NUP_SUFFIX) or is_nup(c, path / name)))
+        if files or extracts or errors:
+            return files, extracts, errors
+        raise Failure("所选位置没有 NSP、XCI 文件或解包好的游戏文件夹。", code="input_empty")
+    if picked.is_file() and picked.suffix.lower() in SOURCE_SUFFIXES and (
+            picked.suffix.lower() != NUP_SUFFIX or is_nup(c, picked)):
+        return [picked], [], {}
+    if not picked.exists():
+        raise Failure("所选游戏文件或文件夹不存在。", code="input_missing")
+    raise Failure("请选择 NSP、XCI 文件、解包好的游戏文件夹或包含它们的文件夹。", code="input_type_unsupported")
+
+
+def record_import_packages(c, cat, source, packages, icons, sha, extracted):
+    """一份来源读出的各包记进 catalog（cat 是草稿，调用方写盘）：判重同 main（原件按 _same_package 认老整份哈希与新 content ID 身份、
+    解包目录按 sha256 + titleId）；新包记英文名、按英文名建这款文件夹放封面（_copy_cover，不按游戏号拼路径）"""
+    results = []
+    size = None if extracted else source.stat().st_size
+    for metadata in packages:
+        package_sha = metadata.get("sha256", "") if extracted else sha
+        tid = metadata["baseId"]
+        game = next((g for g in cat["games"] if g["id"] == tid), None)
+        if not game:
+            game = dict(id=tid, name=metadata["name"] or tid, display="", packages=[], hidden=False)
+            cat["games"].append(game)
+        game["hidden"] = False
+        if extracted:
+            same = [p for p in game["packages"] if p["sha256"] == package_sha and p["titleId"] == metadata["titleId"]]
+        else:
+            same = [p for p in game["packages"] if _same_package(p, metadata, package_sha, size)]
+        for p in same:
+            # 同一份内容换了位置再放一次：改记新位置；复制进库的旧托管副本还在就照旧用
+            old = source_path(c, p)
+            if Path(p["path"]).is_absolute() or not (old.is_dir() if extracted else old.is_file()):
+                p["path"] = str(source)
+        if not same:
+            icon = Path(icons) / (metadata["titleId"] + ".jpg")
+            english_name = metadata.pop("englishName", "") or ""
+            if english_name and "englishName" not in game:
+                game["englishName"] = english_name
+            if icon.is_file():
+                try:
+                    _copy_cover(c, tid, game, metadata, icon)
+                except OSError as error:
+                    # 只在逐来源模式下包成这款的失败；默认路径照旧抛原始 OSError，由 explain 归 permission_denied / input_missing 等（同 #124 之前）
+                    if explain(error).code == "disk_full" or c.r.get("partialResults") is not True:
+                        raise
+                    raise Failure("游戏库封面无法写入。", internal=str(error)) from error
+            metadata.pop("icon", None)
+            package_size = metadata.get("contentBytes", 0) if extracted else size
+            game["packages"].append(metadata | dict(path=str(source), sha256=package_sha, size=package_size))
+            if metadata["name"]:
+                game["name"] = metadata["name"]
+        results.append(dict(id=tid, name=source.name, duplicate=bool(same)))
+    return results
+
+
+def initial_import_result(c):
+    paths = dict.fromkeys(Path(os.path.abspath(Path(raw).expanduser())) for raw in c.r["paths"])
+    return dict(imports=[], sources=[import_source(path, needs_keys=path.suffix.lower() in SOURCE_SUFFIXES[:-1])
+                                    for path in paths])
+
+
 def import_games(c):
+    partial = c.r.get("partialResults") is True
+    c.import_result = initial_import_result(c)
+    sources = {Path(row["path"]): row for row in c.import_result["sources"]}
+    picked = list(sources)
+    results = c.import_result["imports"]
     c.begin("检查导入文件")
     c.require_library()
-    # 外接盘 / 下载文件夹第一次读会弹系统授权框：先试读，框没点之前界面要说清在等什么，别一直停在「检查导入文件」
-    wait_readable(c, [Path(raw).expanduser() for raw in c.r["paths"] if Path(raw).expanduser().exists()])
-    files = []
-    extract_dirs = []  # 解包目录单独列
-    for raw in c.r["paths"]:
-        p = Path(raw).expanduser().resolve()
-        if p.is_dir():
-            # 软链照目标认（10-26 维护者把 Downloads 的原件挪到外置盘、原位置留软链）：指向文件的算文件、软链目录跟进去，
-            #   记的是软链所在的路径（出包时照样跟到目标）；按真实路径记走过的目录，软链成环也不会转圈
-            seen = set()
-            for d, ds, fs in os.walk(p, followlinks=True):
-                real = os.path.realpath(d)
-                if real in seen:
-                    ds[:] = []
-                    continue
-                seen.add(real)
-                # 三种解包目录判据：认到就不再往里走
-                is_extract_dir = is_extracted_game(Path(d))
-                if is_extract_dir:
-                    extract_dirs.append(Path(d))
-                    ds[:] = []
-                if not is_extract_dir:
-                    files.extend(Path(d) / f for f in fs if f.lower().endswith(SOURCE_SUFFIXES) and os.path.isfile(os.path.join(d, f))
-                                 and (not f.lower().endswith(NUP_SUFFIX) or is_nup(c, Path(d) / f)))   # 文件夹里扩展名是 .nup 却不是 NUP 的照旧不认
-        elif p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and (p.suffix.lower() != NUP_SUFFIX or is_nup(c, p)):
-            files.append(p)
-        elif not p.exists():
-            raise Failure("所选游戏文件或文件夹不存在。", code="input_missing")
-        else:
-            raise Failure("请选择 NSP、XCI 文件、解包好的游戏文件夹或包含它们的文件夹。", code="input_type_unsupported")
-    files = list(dict.fromkeys(sorted(files)))
-    extract_dirs = list(dict.fromkeys(sorted(extract_dirs)))
-    if not files and not extract_dirs:
+    files, extracts = [], []
+    for path in picked:
+        c.check()
+        try:
+            if path.exists():
+                wait_readable(c, [path])
+            found_files, found_extracts, errors = scan_import(c, path if partial else path.resolve(), partial=partial)
+            files.extend(found_files)
+            extracts.extend(found_extracts)
+            for source in found_files:
+                sources[source] = import_source(source, needs_keys=source.suffix.lower() != NUP_SUFFIX)
+            for source in found_extracts:
+                sources[source] = import_source(source)
+            if path not in found_files and path not in found_extracts:
+                sources.pop(path, None)
+            for bad_path, error in errors.items():
+                row = sources[bad_path] = import_source(bad_path)
+                import_source_failed(c, row, error)
+        except (Failure, OSError) as error:
+            # Legacy callers skip empty folders alongside usable sources.
+            if not partial and explain(error).code == "input_empty":
+                sources.pop(path, None)
+                continue
+            import_source_failed(c, sources[path], error)
+            if not partial or sources[path]["code"] not in IMPORT_SOURCE_ERRORS:
+                raise
+        finally:
+            c.import_result["sources"] = list(sources.values())
+    files = sorted(set(files))
+    extracts = sorted(set(extracts))
+    paths = files + extracts
+    c.import_result["sources"] = [sources[p] for p in sorted(sources)]
+    if not sources:
         raise Failure("所选位置没有 NSP、XCI 文件或解包好的游戏文件夹。", code="input_empty")
-    # prod.keys 只有 Switch 1 原件（NSP / XCI / NSZ / XCZ，要读取器解密）才要；只放 Switch 2 NUP 容器或解包目录不要密钥
-    switch1 = [f for f in files if f.suffix.lower() != NUP_SUFFIX]
-    if switch1 and not c.keys.is_file():
+    if any(sources[p]["needsKeys"] for p in files) and not c.keys.is_file():
         raise Failure("请先导入 prod.keys。", code="keys_missing")
-    results = []
     with c.lock():
         cat = c.catalog()
-        with tempfile.TemporaryDirectory(prefix="icons-", dir=c.private) as icons:
-            total = len(files) + len(extract_dirs)
-            idx = 0
-            for i, source in enumerate(files):
-                c.begin("读取游戏信息", idx * 2 + 1, total * 2)
-                packages = nup_inspect(c, source, icons) if source.suffix.lower() == NUP_SUFFIX else inspect(c, source, icons)
-                c.begin("校验游戏文件", idx * 2 + 2, total * 2)   # 读完元数据后文件不见了 / 读不了归在这一步（input_missing），同原先整份算哈希时
-                size = source.stat().st_size
-                sha = source_identity(packages, size)
-                if sha is None:   # 读取器没给 content ID：照旧整份算
-                    sha = digest(source, c.progress)
-                for metadata in packages:
-                    tid = metadata["baseId"]
-                    game = next((g for g in cat["games"] if g["id"] == tid), None)
-                    if not game:
-                        game = dict(id=tid, name=metadata["name"] or tid, display="", packages=[], hidden=False)
-                        cat["games"].append(game)
-                    game["hidden"] = False
-                    same = [p for p in game["packages"] if _same_package(p, metadata, sha, size)]
-                    duplicate = bool(same)
-                    for p in same:
-                        # 同一份内容换了位置再放一次（挪了盘 / 改了文件夹）：改记新位置；复制进库的旧托管副本还在就照旧用（不改记成引用），
-                        #   已被「删除托管 NSP 副本」删掉的改记成这次放进来的原件（beta.3 升级上来想省空间的玩家：删副本 → 重放原件）
-                        if Path(p["path"]).is_absolute() or not source_path(c, p).is_file():
-                            p["path"] = str(source)
-                    if not duplicate:
-                        icon = Path(icons) / (metadata["titleId"] + ".jpg")
-                        english_name = metadata.pop("englishName", "") or ""
-                        if english_name and "englishName" not in game:
-                            game["englishName"] = english_name
-                        if icon.is_file():
-                            _copy_cover(c, tid, game, metadata, icon)
-                        metadata.pop("icon", None)
-                        game["packages"].append(metadata | dict(path=str(source), sha256=sha, size=size))
-                        if metadata["name"]:
-                            game["name"] = metadata["name"]
-                    results.append(dict(id=tid, name=source.name, duplicate=duplicate))
-                idx += 1
-                c.check()
-                atomic(c.library / "catalog.json", cat)
-            # 解包目录
-            for i, source in enumerate(extract_dirs):
-                c.begin("读取游戏信息", idx * 2 + 1, total * 2)
-                packages = extract_inspect(c, source, icons)
-                c.begin("校验游戏文件", idx * 2 + 2, total * 2)
-                # extract_inspect 已算哈希
-                for metadata in packages:
-                    sha = metadata.get("sha256", "")
-                    tid = metadata["baseId"]
-                    game = next((g for g in cat["games"] if g["id"] == tid), None)
-                    if not game:
-                        game = dict(id=tid, name=metadata["name"] or tid, display="", packages=[], hidden=False)
-                        cat["games"].append(game)
-                    game["hidden"] = False
-                    same = [p for p in game["packages"] if p["sha256"] == sha and p["titleId"] == metadata["titleId"]]
-                    duplicate = bool(same)
-                    for p in same:
-                        if Path(p["path"]).is_absolute() or not source_path(c, p).is_dir():
-                            p["path"] = str(source)
-                    if not duplicate:
-                        icon = Path(icons) / (metadata["titleId"] + ".jpg")
-                        english_name = metadata.pop("englishName", "") or ""
-                        if english_name and "englishName" not in game:
-                            game["englishName"] = english_name
-                        if icon.is_file():
-                            _copy_cover(c, tid, game, metadata, icon)
-                        metadata.pop("icon", None)
-                        # 目录：size = 内文件总字节（extract_inspect 已算在 contentBytes）
-                        game["packages"].append(metadata | dict(path=str(source), sha256=sha, size=metadata.get("contentBytes", 0)))
-                        if metadata["name"]:
-                            game["name"] = metadata["name"]
-                    results.append(dict(id=tid, name=source.name, duplicate=duplicate))
-                idx += 1
-                c.check()
-                atomic(c.library / "catalog.json", cat)
+        verified = False
+        extract_paths = set(extracts)
+        total = len(paths) * 2
+        for idx, source in enumerate(paths):
+            c.last_log = None
+            c.last_rc = None
+            c.check()
+            c.require_library()
+            row = sources[source]
+            extracted = source in extract_paths
+            draft = deepcopy(cat)
+            diagnostics_before = len(c.job["diagnostics"])
+            try:
+                c.begin("读取游戏信息", idx * 2 + 1, total)
+                with tempfile.TemporaryDirectory(prefix="icons-", dir=c.private) as icons:
+                    if extracted:
+                        packages = extract_inspect(c, source, icons)
+                    elif row["needsKeys"]:
+                        packages = inspect(c, source, icons, source_id=row["id"])
+                    else:
+                        packages = nup_inspect(c, source, icons)
+                    row["name"] = next((p["name"] for p in packages if p.get("name")), source.name)
+                    c.begin("校验游戏文件", idx * 2 + 2, total)
+                    sha = ""
+                    if not extracted:   # 原件身份按读取器给的 content ID + 大小算，不读全文件；读取器没给才整份算（source_identity）
+                        sha = source_identity(packages, source.stat().st_size) or digest(source, c.progress)
+                    entries = record_import_packages(c, draft, source, packages, icons, sha, extracted)
+                    c.check()
+                    c.require_library()
+                    try:
+                        atomic(c.library / "catalog.json", draft)
+                    except OSError as error:
+                        failure = explain(error)
+                        if failure.code == "disk_full" or not partial:   # 默认路径同 #124 之前：原始 OSError 交 explain 归码
+                            raise
+                        raise Failure("游戏库目录无法写入。", internal=str(error)) from error
+            except (Failure, OSError) as error:
+                import_source_failed(c, row, error)
+                if not partial or row["code"] not in IMPORT_SOURCE_ERRORS:
+                    raise
+                del c.job["diagnostics"][diagnostics_before:]
+            else:
+                cat = draft
+                results.extend(entries)
+                row["status"] = "duplicate" if all(entry["duplicate"] for entry in entries) else "imported"
+                if row["needsKeys"] and not verified:
+                    atomic(c.private / "keys/status.json", dict(ready=True, verified=True))
+                    verified = True
     added = {r["id"].upper() for r in results if not r["duplicate"]}
     if added:
         store_meta_background(c, added)   # 横图、英文标题：后台查（导入不等联网），查到英文名接着改文件夹名
-    if switch1:   # 读取器用这份密钥读通了 Switch 1 原件才算验证过；只导 NUP 或解包目录没用到密钥，不改密钥状态
-        atomic(c.private / "keys/status.json", dict(ready=True, verified=True))
-    return {"imports": results}
+    # 不开 partialResults 时结果形状同 #124 之前：只有 imports（逐来源的 sources 只给要它的调用方）
+    return c.import_result if partial else {"imports": results}
 
 
 JOB_LIST_LIMIT = 200
@@ -1455,10 +1563,12 @@ def catalog(c):
         game["location"] = dict(state=where, path=str(root) if root else "", folder=str(place) if where == "ok" else "",
                                 volume=_volume(root) if root else "", default=root == c.library if root else True)
         cover = layout.path(c, game["id"], "cover.jpg", create=False)
+        banner = layout.path(c, game["id"], "banner.jpg", create=False)
         custom = game_custom(c, game["id"])
         game["customName"], game["customCover"] = bool(custom["name"]), custom["cover"] is not None
         game["name"] = custom["name"] or game["name"]
-        game["cover"] = str(custom["cover"] or cover) if custom["cover"] or cover.is_file() else ""
+        # 封面三级：玩家换的 → 游戏包自带图标（导入时从控制分区 icon_*.dat 取，cover.jpg）→ 商店横图（store_meta，banner.jpg）→ 空（界面用 S2Arm 标志）
+        game["cover"] = str(custom["cover"] or (cover if cover.is_file() else banner if banner.is_file() else "")) if custom["cover"] or cover.is_file() or banner.is_file() else ""
         choices = [p for p in selected_packages(game) if p["type"] in ("base", "update")]
         if choices:
             game["display"] = max(choices, key=lambda p: p["version"])["display"]
@@ -1838,7 +1948,7 @@ def delete(c):
                     # 存档有内容就保留
                     saves = gdir / "saves"
                     backups = gdir / "save-backups"
-                    has_saves = (saves.exists() and any(saves.iterdir())) or (backups.exists() and any(backups.iterdir()))
+                    has_saves = layout.has_content(saves) or layout.has_content(backups)   # 只有 .DS_Store 之类不算有存档
                     if has_saves:
                         for item in gdir.iterdir():
                             if item.name not in ("saves", "save-backups"):

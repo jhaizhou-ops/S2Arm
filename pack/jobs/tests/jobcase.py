@@ -156,6 +156,15 @@ class JobCase(unittest.TestCase):
         binary.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
 source = pathlib.Path(sys.argv[4])
 if source.read_bytes() == b"truncated fixture":
+    print("Beginning of synthetic reader diagnostic")
+    print("long synthetic diagnostic " * 300)
+    print("Authorization: Bearer synthetic-bearer")
+    print("【内容截断】")
+if source.read_bytes() == b"huge truncated fixture":
+    print("HEAD-MARK")
+    for _ in range(3000):
+        print("x" * 100)
+    print("TAIL-MARK")
     print("【内容截断】")
 if source.read_bytes() == b"multi truncated fixture":
     # 合并包：本体和 DLC 的清单都读得出，末尾一个内容超出文件末尾。
@@ -172,6 +181,10 @@ if source.read_bytes() in (b"outdated fixture", b"ticket fixture"):
 if source.read_bytes() == b"unreadable fixture":
     print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
     print("Authorization: Bearer synthetic-bearer")
+    raise SystemExit(3)
+if source.read_bytes() == b"disk full fixture":
+    print("Container metadata could not be decrypted or verified. Check keys, tickets and file integrity.")
+    print("【原因 disk_full】")
     raise SystemExit(3)
 if source.read_bytes() == b"unknown exit fixture":
     print("Unrecognized fixture error")

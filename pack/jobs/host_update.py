@@ -136,7 +136,7 @@ def settle(c, gid, sha, ok):
 
 def prune(c):
     """hosts/mac 里没有任何一款在用、也不是本版内置的宿主删掉（.partial 残留一并清）。
-    要扫所有存放位置的 game.json；有位置没连上（移动硬盘没插）就读不全，这次不清，宁可多留不误删"""
+    要扫所有存放位置的游戏目录；有位置没连上（移动硬盘没插）就读不全，这次不清，宁可多留不误删"""
     root = layout.hosts_mac(c)
     if not root.is_dir():
         return
@@ -146,7 +146,8 @@ def prune(c):
             return
         games = layout.games_root(c, place)
         for d in games.iterdir() if games.is_dir() else []:
-            keep.add(read(d / layout.GAME_JSON, {}).get("hostMac"))
+            if d.is_dir():
+                keep.add(read(d / layout.GAME_JSON, {}).get("hostMac"))
     for d in root.iterdir():
         if d.is_dir() and not d.is_symlink() and d.name not in keep:
             shutil.rmtree(d, ignore_errors=True)

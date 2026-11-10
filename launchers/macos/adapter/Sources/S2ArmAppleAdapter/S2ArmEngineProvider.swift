@@ -12,6 +12,32 @@ import Foundation
 ///
 /// 现有服务（LibraryProvider / SettingsProvider / PlayService / EnvironmentService / InstallService / SpaceService）是它的内部实现，也照旧对外可用：
 /// 设计稿的协议没有的事（环境检查、装到 iPhone、释放空间、换游戏库）走这些服务或本类型的扩展方法。
+public struct ImportSource: Decodable, Identifiable {
+    public enum Status: String, Decodable { case imported, duplicate, failed, unprocessed }
+    public let id: String
+    public let path: String
+    public let name: String
+    public let fileName: String
+    public let needsKeys: Bool
+    public let status: Status
+    public let code: String?
+    public let reason: String
+    public let diagnostic: String
+
+    public var succeeded: Bool { status == .imported || status == .duplicate }
+
+    public static func rows(in result: [String: Any]) -> [Self] {
+        guard let rows = result["sources"] as? [[String: Any]],
+              let data = try? JSONSerialization.data(withJSONObject: rows) else { return [] }
+        return (try? JSONDecoder().decode([Self].self, from: data)) ?? []
+    }
+}
+
+public struct ImportBatchResult {
+    public let games: [GameInfo]
+    public let sources: [ImportSource]
+}
+
 public final class S2ArmEngineProvider: EngineProvider {
     public let id = EngineID("s2arm")
     /// 两个目标都出；Switch 2 款同一条出包 / 起局路径（NVN2，11-06 金刚 Switch 2 纯 Windows 出包进局）；宽屏 / 60 帧是宿主开关（按款有表才可用）；
@@ -48,9 +74,25 @@ public final class S2ArmEngineProvider: EngineProvider {
 
     /// import 作业登记进游戏库（原件留在原处、只读不复制），再 catalog 读回这几款（已在库里的也算，按导入顺序）。
     public func importGames(_ inputs: GameInputs, events: EventSink = .discard) async throws -> [GameInfo] {
+        try await importGames(inputs, partialResults: false, events: events).games
+    }
+
+    public func importGames(_ inputs: GameInputs, partialResults: Bool, events: EventSink = .discard) async throws -> ImportBatchResult {
         guard !inputs.paths.isEmpty else { throw JobClientError(Self.nothingImported) }
         try await library.ensureLibrary(events: events)
-        let result = try await client.perform("import", extra: ["paths": inputs.paths.map(\.path)], events: events).result
+        try Task.checkCancellation()
+        var extra: [String: Any] = ["paths": inputs.paths.map(\.path)]
+        if partialResults { extra["partialResults"] = true }
+        let result = try await client.perform("import", extra: extra, events: events).result
+        let games = partialResults ? await importedGames(in: result) : try await resolveImportedGames(in: result)
+        return ImportBatchResult(games: games, sources: ImportSource.rows(in: result))
+    }
+
+    public func importedGames(in result: [String: Any]) async -> [GameInfo] {
+        (try? await resolveImportedGames(in: result)) ?? []
+    }
+
+    private func resolveImportedGames(in result: [String: Any]) async throws -> [GameInfo] {
         var ids: [String] = []
         for item in result["imports"] as? [[String: Any]] ?? [] {
             if let id = item["id"] as? String, !id.isEmpty, !ids.contains(id) { ids.append(id) }

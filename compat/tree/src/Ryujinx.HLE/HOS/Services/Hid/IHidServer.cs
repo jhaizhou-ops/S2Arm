@@ -1,6 +1,7 @@
 using Ryujinx.Common;
 using Ryujinx.Common.Logging;
 using Ryujinx.HLE.HOS.Ipc;
+using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.HLE.HOS.Services.Hid.HidServer;
 using Ryujinx.HLE.HOS.Services.Hid.Types;
@@ -1611,6 +1612,49 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             long appletResourceUserId = context.RequestData.ReadInt64();
 
             Logger.Stub?.PrintStub(LogClass.ServiceHid, new { appletResourceUserId });
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(320)] // 21.0.0+
+        // EnableNpadImu(pid, nn::applet::AppletResourceUserId, u64 TransferMemorySize, TransferMemoryHandle)：S2Arm——形状读自 Switch 2 SDK 的
+        //   nn::hid::EnableNpadImu(void*, size_t)（建传输内存、交出句柄与大小）；缓冲格式与写入见 HidDevices/NpadImu.cs
+        public ResultCode EnableNpadImu(ServiceCtx context)
+        {
+            long appletResourceUserId = context.RequestData.ReadInt64();
+            ulong size = context.RequestData.ReadUInt64();
+            int handle = context.Request.HandleDesc.ToCopy[0];
+
+            KTransferMemory transferMemory = context.Process.HandleTable.GetObject<KTransferMemory>(handle);
+
+            if (transferMemory == null)
+            {
+                S2AHooks.Red?.Invoke($"hid EnableNpadImu：句柄 0x{handle:X} 不是传输内存");
+
+                return ResultCode.InvalidBufferSize;
+            }
+
+            if (size != transferMemory.Size || size < NpadImu.MinimumSize)
+            {
+                S2AHooks.Red?.Invoke($"hid EnableNpadImu：缓冲大小 0x{size:X}（传输内存 0x{transferMemory.Size:X}）与 SDK 布局要的 0x{NpadImu.MinimumSize:X} 不符");
+
+                return ResultCode.InvalidBufferSize;
+            }
+
+            context.Device.Hid.Npads.Imu.Enable(context.Memory, transferMemory.Address, appletResourceUserId);
+
+            Logger.Info?.Print(LogClass.ServiceHid, $"EnableNpadImu: aruid {appletResourceUserId}, buffer 0x{transferMemory.Address:X}+0x{size:X}");
+
+            return ResultCode.Success;
+        }
+
+        [CommandCmif(321)] // 21.0.0+
+        // DisableNpadImu(pid, nn::applet::AppletResourceUserId)
+        public ResultCode DisableNpadImu(ServiceCtx context)
+        {
+            long appletResourceUserId = context.RequestData.ReadInt64();
+
+            context.Device.Hid.Npads.Imu.Disable(appletResourceUserId);
 
             return ResultCode.Success;
         }

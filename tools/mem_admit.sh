@@ -113,12 +113,16 @@ _ma_try() {
   used=$(_ma_used10); now=$(date +%s)
   if [ -z "$MA_PRIO" ]; then local pq; pq=$(ls "$MA_DIR"/q.0* 2> /dev/null | head -1)
     [ -n "$pq" ] && { MA_WHY="优先类别 $(awk -F'\t' '{printf "%s/%s(pid %s)", $3, $4, $1}' "$pq" 2> /dev/null) 在等，普通作业不插空（S2A_MEM_PRIO_CLASSES）"; return 2; }; fi
-  for f in $(ls "$MA_DIR"/q.* 2> /dev/null | sort); do
+  # 通配直接遍历（按名排序，同 ls | sort）：原先 for f in $(ls …) 按空格切词，玩家机账本在「Application Support」下，每张票的路径被切成三段，
+  #   别人的票一张也读不到、自己的票也认不出（#235 玩家 Mac 出包在这里报 unbound variable 停下）。
+  #   票的发车时刻 / 预留量不是纯数字（别的版本写的、写了一半的）就跳过这张：set -u 下进算术会让整个出包停下
+  for f in "$MA_DIR"/q.*; do [ -e "$f" ] || continue
     [ "$f" = "$MA_TK" ] && break
-    t0=$(cut -f5 "$f" 2> /dev/null); [ -n "$t0" ] && [ $((now - t0)) -ge "${S2A_MEM_STARVE_S:-900}" ] || continue
+    t0=$(cut -f5 "$f" 2> /dev/null); case $t0 in ''|*[!0-9]*) continue;; esac
+    [ $((now - t0)) -ge "${S2A_MEM_STARVE_S:-900}" ] || continue
     # 只给本机当前「空闲 + 可回收」放得进的票预留；放不进的降回普通排队（不占防饿死位），看下一张（11-04 晚：生键 50 GB 一直放不进、挡住后面 12 张票）
-    n0=$(cut -f2 "$f" 2> /dev/null); [ -n "$av" ] || av=$(_ma_avail10)
-    [ "${n0:-0}" -le "$av" ] 2> /dev/null && { old=$f; break; }
+    n0=$(cut -f2 "$f" 2> /dev/null); case $n0 in ''|*[!0-9]*) continue;; esac; [ -n "$av" ] || av=$(_ma_avail10)
+    [ "$n0" -le "$av" ] 2> /dev/null && { old=$f; break; }
   done
   if [ -n "$old" ]; then
     MA_WHY="前面 $(awk -F'\t' '{printf "%s/%s(pid %s)", $3, $4, $1}' "$old" 2> /dev/null) 已排满 ${S2A_MEM_STARVE_S:-900} 秒、本机空闲 + 可回收放得进，给它预留、不插空（账内已占 $(_ma_gb "$used") GB / 上限 $(_ma_gb "$MA_TOTAL10") GB）"

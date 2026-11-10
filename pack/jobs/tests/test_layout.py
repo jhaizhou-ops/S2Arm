@@ -279,6 +279,26 @@ class LocationTests(JobCase):
 
 class HostPruneTests(JobCase):
     """公共宿主清理（host_update.prune）：别的存放位置里的游戏在用的宿主不能删；有位置没连上就不清"""
+    def test_prune_skips_files_in_games_root(self):
+        import host_update
+
+        game = layout.game_dir(self.c, A, english="Alpha")
+        used, unused = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+        layout.update_info(self.c, A, hostMac=used)
+        hosts = layout.hosts_mac(self.c)
+        for sha in (used, unused):
+            (hosts / sha / host_update.APP).mkdir(parents=True)
+
+        files = [game.parent / name for name in (".DS_Store", "notes.txt")]
+        for path in files:
+            path.write_bytes(b"metadata")
+
+        host_update.prune(self.c)
+
+        self.assertEqual({p.name for p in hosts.iterdir()}, {used})
+        for path in files:
+            self.assertEqual(path.read_bytes(), b"metadata")
+
     def test_hosts_used_in_other_locations_survive_and_offline_skips(self):
         import host_update
         atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=A, name="Alpha"), dict(id=B, name="Beta")]))
@@ -464,3 +484,18 @@ class StoreMetaTests(JobCase):
             with patch.dict(os.environ, {"S2A_BANNER_FETCH": "0"}):
                 self.assertFalse(library.store_meta_background(self.fresh(), {B}))
         self.assertEqual(len(popen), 1)
+
+
+class CoverFallbackTests(JobCase):
+    """catalog 的封面三级（期望按规则手写）：游戏包自带图标 cover.jpg → 商店横图 banner.jpg → 空（界面用 S2Arm 标志）"""
+    def test_cover_then_banner_then_empty(self):
+        L = self.c.library
+        atomic(L / "catalog.json", dict(schema=1, games=[dict(id=A, name="甲", packages=[]), dict(id=B, name="乙", packages=[]), dict(id=C, name="丙", packages=[])]))
+        for gid, files in ((A, ("cover.jpg", "banner.jpg")), (B, ("banner.jpg",)), (C, ())):
+            d = L / "games" / gid; d.mkdir(parents=True); atomic(d / "game.json", dict(schema=1, id=gid))
+            for f in files: (d / f).write_bytes(f.encode())
+        result, done = self.worker("catalog")
+        self.assertEqual(done["state"], "succeeded", result.stderr)
+        covers = {g["id"]: g["cover"] for g in done["result"]["games"]}
+        self.assertEqual(covers, {A: str(L / "games" / A / "cover.jpg"), B: str(L / "games" / B / "banner.jpg"), C: ""})
+

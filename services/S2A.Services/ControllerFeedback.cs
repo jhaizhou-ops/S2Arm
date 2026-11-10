@@ -181,7 +181,8 @@ namespace S2A.Services
                     _motionPublished = false;
                 }
             }
-            bool enabled = _npads.SixAxisActive;
+            // 六轴（StartSixAxisSensor）或 Switch 2 Npad IMU（hid 320）任一在用就读体感
+            bool enabled = _npads.SixAxisActive || _npads.Imu.Active;
             if (enabled != _motionEnabled)
             {
                 _setMotionEnabled(enabled ? 1 : 0);
@@ -208,6 +209,11 @@ namespace S2A.Services
                 _motionLogged = true;
                 Console.Error.WriteLine($"[输入反馈] first motion known={known} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
             }
+            // 量程饱和与 hid 88 报给游戏的 IC 量程同一份常量（Ryujinx.HLE Types/SixAxisSensorIc.cs）：手机读数超量程的部分照真机饱和
+            Vector3 accel = new(SixAxisSensorIc.ClampAcceleration(sample.AccelerationX), SixAxisSensorIc.ClampAcceleration(sample.AccelerationY), SixAxisSensorIc.ClampAcceleration(sample.AccelerationZ));
+            Vector3 gyro = new(SixAxisSensorIc.ClampAngularRate(sample.GyroX), SixAxisSensorIc.ClampAngularRate(sample.GyroY), SixAxisSensorIc.ClampAngularRate(sample.GyroZ));
+            // Switch 2 Npad IMU（hid 320）：NS2 原始坐标读数原样写进游戏给的样本缓冲（单位换算在 NpadImu），不经 MotionInput 的轴变换与融合
+            _npads.PushImu(player, accel, gyro, sample.TimestampUs);
             // Native 已把超过 250 ms 的样本判为无效；跨会话或大间隔不积分旧姿态。
             if (_motion != null && (sample.TimestampUs < _motion.TimeStamp || sample.TimestampUs - _motion.TimeStamp > 250_000))
                 _motion = null;
@@ -216,9 +222,7 @@ namespace S2A.Services
             {
                 // NS2 raw -> SDL (x,z,-y) -> Ryujinx (x,-z,y)，合成后保留 raw 轴。
                 // MotionInput 沿用上游的加速度符号、角速度积分与 Mahony 姿态融合。
-                // 量程饱和与 hid 88 报给游戏的 IC 量程同一份常量（Ryujinx.HLE Types/SixAxisSensorIc.cs）：手机读数超量程的部分照真机饱和
-                _motion.Update(new Vector3(SixAxisSensorIc.ClampAcceleration(sample.AccelerationX), SixAxisSensorIc.ClampAcceleration(sample.AccelerationY), SixAxisSensorIc.ClampAcceleration(sample.AccelerationZ)),
-                    new Vector3(SixAxisSensorIc.ClampAngularRate(sample.GyroX), SixAxisSensorIc.ClampAngularRate(sample.GyroY), SixAxisSensorIc.ClampAngularRate(sample.GyroZ)), sample.TimestampUs, 100, 0);
+                _motion.Update(accel, gyro, sample.TimestampUs, 100, 0);
             }
             Matrix4x4 m = _motion.GetOrientation();
             _orientation[0] = m.M11; _orientation[1] = m.M12; _orientation[2] = m.M13;

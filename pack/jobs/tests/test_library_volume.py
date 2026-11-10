@@ -36,6 +36,28 @@ class SetupAndPreflight(unittest.TestCase):
             library.setup(self.c)
         self.assertEqual(e.exception.code, "library_not_apfs"); self.assertFalse(lib.exists())   # 拦在建目录之前
 
+    def test_setup_treats_os_junk_as_empty(self):
+        # 11-09 #343 同类：Windows 资源管理器给新文件夹留 desktop.ini / Thumbs.db、访达留 .DS_Store，选这样的文件夹建库不能报「已有别的文件」
+        lib = Path(tempfile.mkdtemp()) / "库"; lib.mkdir(); self.c.library = lib
+        for junk in (".DS_Store", "desktop.ini", "Thumbs.db"):
+            (lib / junk).write_bytes(b"x")
+        result = library.setup(self.c)
+        self.assertTrue((lib / ".s2arm-library.json").is_file()); self.assertTrue(result["libraryId"])
+
+    def test_setup_still_refuses_real_files(self):
+        lib = Path(tempfile.mkdtemp()) / "库"; lib.mkdir(); self.c.library = lib
+        (lib / "desktop.ini").write_bytes(b"x"); (lib / "notes.txt").write_bytes(b"x")
+        with self.assertRaises(Failure):
+            library.setup(self.c)
+        self.assertFalse((lib / ".s2arm-library.json").exists())
+
+    def test_has_content(self):
+        import layout
+        d = Path(tempfile.mkdtemp())
+        self.assertFalse(layout.has_content(d)); self.assertFalse(layout.has_content(d / "没有"))
+        (d / "Thumbs.db").write_bytes(b"x"); self.assertFalse(layout.has_content(d))
+        (d / "save.dat").write_bytes(b"x"); self.assertTrue(layout.has_content(d))
+
     def test_preflight_reports_library_drive(self):
         import toolchain
         self.c.r["library"] = "/外接盘/游戏库"

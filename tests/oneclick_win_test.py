@@ -488,6 +488,20 @@ class InstallWin(unittest.TestCase):
         self.assertEqual(bid, 'a.b.TEAM')
         self.assertEqual(got['push'][:2], ['U1', 'a.b.TEAM'])
         self.assertIn("'--udid', '42'", log); self.assertIn("'--custom-name', 'N'", log)
+        self.assertNotIn("--custom-identifier", log)   # 没给包名：照旧由 plumesign 定
+
+    def test_given_bundle_is_passed_as_custom_identifier(self):
+        # 9401：调用方定的包名（和 Mac 一致的小写团队号）原样交给 plumesign，它就不再自己接大写团队号
+        body = ("print('args', a)\nprint('Installation complete!')\nz = zipfile.ZipFile(a[a.index('-o') + 1], 'w')\n"
+                "z.writestr('Payload/S2Arm.app/Info.plist', b'<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>io.s2arm.games.abcde12345</string></dict></plist>')\nz.close()\n")
+        old_ns = self.ns
+        self.ns = lambda d, exe: __import__("argparse").Namespace(**dict(vars(old_ns(d, exe)), bundle="io.s2arm.games.abcde12345"))
+        try:
+            bid, got, log = self.run_fake(body)
+        finally:
+            self.ns = old_ns
+        self.assertEqual(bid, 'io.s2arm.games.abcde12345')
+        self.assertIn("'--custom-identifier', 'io.s2arm.games.abcde12345'", log)
 
     def test_login_rejected(self):
         e, got, _ = self.run_fake("print('Error: Apple rejected -80046')\nsys.exit(1)\n")

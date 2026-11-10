@@ -119,6 +119,28 @@ InjectMockProgress(pack, fraction: 0.35, stepIndex: 1, running: true);
 SetW(pack, "sessionHidden", true);
 SaveP("win_07_library_capsule", () => Navigate(pack, "library"));
 
+// 「打开游戏文件夹」找不到文件夹：按钮下方说明原因，不打开空的资源管理器
+InjectMockProgress(pack, fraction: 1.0, stepIndex: -1, running: false, state: "succeeded",
+    ipaBytes: 1_200_000_000L, packBytes: 3_400_000_000L, elapsed: 247);
+SetW(pack, "revealProblem", "找不到这款游戏的文件夹：所在的磁盘可能没接上，或文件夹被移走了。");
+SaveP("win_08_export_success_folder_missing", () => Navigate(pack, "progress"));
+SetW(pack, "revealProblem", "");
+
+// 封面兜底：游戏包没带图标时用商店横图（banner.jpg），在方形卡片里铺满裁切；没有横图才是 S2Arm 标志
+var bannerSrc = Environment.GetEnvironmentVariable("S2A_SNAPSHOT_BANNER") ?? "";
+if (File.Exists(bannerSrc))
+{
+    var folder = Path.Combine(Path.GetTempPath(), "s2a-snap-" + Guid.NewGuid().ToString("N"), "games", "Home Sheep Home");
+    Directory.CreateDirectory(folder);
+    File.Copy(bannerSrc, Path.Combine(folder, "banner.jpg"));
+    var withBanner = MockGame(true) with { Id = "010076000F6B8000", Name = "送小羊回家: 农场末日", Cover = Path.Combine(folder, "banner.jpg"),
+        Location = new GameLocation("ok", Path.GetDirectoryName(Path.GetDirectoryName(folder))!, folder, "", true) };
+    var noCover = MockGame(true) with { Id = "010024B00F9D0000", Name = "泰拉瑞亚", Cover = "" };
+    SetW(pack, "catalog", new LibraryCatalog([withBanner, noCover, MockGame(true)], true, "密钥已就绪"));
+    SetW(pack, "connectedFolder", Path.GetDirectoryName(Path.GetDirectoryName(folder))!);
+    SaveP("win_09_library_banner_fallback", () => Navigate(pack, "library"));
+}
+
 pack.Close();
 Dispatcher.UIThread.RunJobs();
 Console.WriteLine("done.");

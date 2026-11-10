@@ -1,5 +1,5 @@
 """装到 iPhone（pack/jobs/install.py，10-26）：选团队、包名、报错分类、整条流程（签名 / 装机 / 拷资源包打桩，IPA 夹具用 ditto 真解）。期望按规则手写"""
-import json, os, plistlib, shutil, subprocess, sys, tempfile, unittest, zipfile
+import json, os, plistlib, shutil, subprocess, sys, tempfile, types, unittest, zipfile
 import unittest.mock as um
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -176,7 +176,7 @@ class FlowTests(unittest.TestCase):
             z.writestr("Payload/S2Arm.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "io.s2arm.games", "CFBundleExecutable": "S2Arm"}))
             z.writestr("Payload/S2Arm.app/S2Arm", b"bin")
 
-    def _install(self, gid, pushed, applied_before, mbps=0, unpack_ok=True, existing=(), cant_open=False):
+    def _install(self, gid, pushed, applied_before, mbps=0, unpack_ok=True, existing=(), cant_open=False, locked=False):
         """跑 install.install（容器流程）：替身 assemble 出容器（含已有各款 + 本款）、签名装机、只推 fresh 的款。
         existing = 这台手机上已有的款（同壳、资源包号与设备记录一致），现组时带上、不再推。替身按 push_pack.apply 口径记起 App 解包"""
         if existing:
@@ -201,6 +201,9 @@ class FlowTests(unittest.TestCase):
                 if "--apply" in args and not (pushed == 0 and state["applied"] == "cafe01"):
                     launches.append({"S2A_PACK_APPLY_ONLY": "1"})
                     on_line("[12:00:05] 机上解包 13/17")
+                    if locked:   # #333：推之前写探针就写不进
+                        Path(log).write_text("【红】iPhone 写不进资源包：多半是手机锁屏了或数据线松了。解锁手机、保持亮屏，插稳数据线后再点一次。\n", encoding="utf-8")
+                        raise install.Failure("tool", code="tool_exit")
                     if cant_open:
                         Path(log).parent.mkdir(parents=True, exist_ok=True)
                         Path(log).write_text("【红】资源包已传完，还差最后一步：在 iPhone 上打开 S2Arm（电脑这边打不开手机上的 App：起 App 失败：RSD 里没有 app_service）\n", encoding="utf-8")
@@ -251,6 +254,13 @@ class FlowTests(unittest.TestCase):
         unpack = next(i for i, e in enumerate(ev) if e.get("message") == "机上解包 13/17")
         self.assertLess(last_push, unpack)                     # 传完之后才进解包
         self.assertEqual((ev[unpack]["done"], ev[unpack]["total"], ev[unpack]["unit"]), (13, 17, "包"))   # 解包计数另起，不沿用传输 100%
+
+    def test_locked_phone_push_reports_device_locked(self):   # #333：推包探针写不进 → device_locked，原因原话上屏（不是笼统的 resource_transfer_failed）
+        gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
+        with self.assertRaises(install.Failure) as e:
+            self._install(gid, pushed=2, applied_before="", locked=True)
+        self.assertEqual(e.exception.code, "device_locked")
+        self.assertIn("锁屏", str(e.exception))
 
     def test_cant_open_app_is_warning_not_failure(self):   # #192：资源传完、电脑拉不起 App → 装机完成 + 黄字；推了多少照实报（替身：2 个文件 3 MB）
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
@@ -366,7 +376,9 @@ class FlowTests(unittest.TestCase):
         r, it = self._ready([self._dev()])
         self.assertTrue(r["ready"]); self.assertEqual(r["device"], "测试设备2")
         self.assertEqual([i["id"] for i in r["items"]], ["package", "appleId", "connected", "trusted", "developerMode", "deviceReady"])
-        self.assertEqual(r["ipaPath"], str(layout.image_ios(self.c, gid)))   # 指这款的 image/ios（不再有单款 ipa）
+        self.assertEqual(r["ipaPath"], "")   # 「显示 IPA」只指真有的那份：还没装过、默认位置根没有 S2Arm.ipa → 空（原先指这款 image/ios，打开的是游戏目录）
+        layout.phone_ipa(self.c).write_bytes(b"ipa")                                  # 装过一次：默认位置根有整库共用的那份
+        self.assertEqual(self._ready([self._dev()])[0]["ipaPath"], str(layout.phone_ipa(self.c)))
         self.assertEqual((r["account"], it["appleId"]["title"]), ("我", "已登录 Apple ID"))
         self.assertTrue(all(i["detail"] == "" for i in r["items"]))   # 好了的项不带说明
 
@@ -596,10 +608,12 @@ class PullSeenTests(unittest.TestCase):
 class SaveBackupTests(unittest.TestCase):
     setUp = tj.JobsTests.setUp; tearDown = tj.JobsTests.tearDown
 
-    def _run(self, files, fail=None, list_rc=0, installed=False):
+    def _run(self, files, fail=None, list_rc=0, installed=False, apps_rc=0):
         got = []
         def devicectl(c, *a, timeout=0):
             if a[:3] == ("device", "info", "apps"):
+                if apps_rc:
+                    return apps_rc, {}, "devicectl 60 秒没有响应：手机可能锁屏了或连接断开"
                 return 0, {"result": {"apps": [{"bundleIdentifier": "s2arm.z.0100c2500fc20000"}] if installed else []}}, ""
             if a[:3] == ("device", "info", "files") and list_rc:
                 return list_rc, {}, "The operation couldn’t be completed"
@@ -624,8 +638,16 @@ class SaveBackupTests(unittest.TestCase):
 
     def test_list_failure(self):
         self.assertEqual(self._run([], list_rc=1, installed=False)[0], None)   # App 不在机上：第一次装，照装
-        with self.assertRaises(Failure):
+        with self.assertRaises(Failure) as e:
             self._run([], list_rc=1, installed=True)                           # App 在却列不出：停装
+        self.assertEqual(e.exception.code, "device_locked")
+
+    def test_unknown_install_state_stops_instead_of_skipping_backup(self):
+        # #333：列存档超时（124）后连「装没装过」都问不出：不能当成第一次装（会跳过备份直接覆盖丢档），停装并报 device_locked
+        with self.assertRaises(Failure) as e:
+            self._run([], list_rc=124, apps_rc=124)
+        self.assertEqual(e.exception.code, "device_locked")
+        self.assertIn("解锁", str(e.exception))
 
     def _tree(self, tree, docs, locked=()):
         # 假设备文件系统（11-07 满屏线 Duo 实测）：列不存在的目录 devicectl 也报「failed to get a list of files」——和锁屏同一个错，只能靠父目录分辨
@@ -979,3 +1001,17 @@ class ShipExtContainerDropTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DevicectlTimeoutTests(unittest.TestCase):
+    """#333：devicectl 超时（锁屏 / 隧道断时一直挂）转成非零返回码 124 + 人话原因，不再抛 TimeoutExpired 让装机任务裸 traceback 收场"""
+    def test_timeout_becomes_rc_124(self):
+        import subprocess, diag
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "Resources/bin/devicectl"; exe.parent.mkdir(parents=True); exe.write_text("#!/bin/sh\n"); exe.chmod(0o755)
+            c = types.SimpleNamespace(private=Path(d), env=lambda: dict(os.environ))
+            with um.patch.object(diag, "COREDEVICE", Path(d)), \
+                 um.patch.object(diag.subprocess, "run", side_effect=subprocess.TimeoutExpired("devicectl", 120)):
+                rc, data, err = diag.devicectl(c, "device", "info", "files", timeout=120)
+        self.assertEqual((rc, data), (124, {}))
+        self.assertIn("锁屏", err)

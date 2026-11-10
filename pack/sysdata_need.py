@@ -15,6 +15,7 @@ H = os.path.dirname(os.path.abspath(__file__))
 NAMES = {
     '0100000000000802': 'Mii 资源（MiiModel / MiiTexture，游戏画 Mii 头像与角色用）',
     '0100000000000823': '屏蔽词表 NgWord（检查玩家输入的名字 / 文字）',
+    '0400000000000849': 'Switch 2 Mii 资源（MiiResource，Switch 2 游戏画 Mii 用）',
     '0100000000000801': '错误信息文本 ErrorMessage',
     '0100000000000809': '系统版本 SystemVersion',
 }

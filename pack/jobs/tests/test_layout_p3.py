@@ -60,6 +60,23 @@ class DirectoryRuleTests(JobCase):
         self.assertEqual(core.journal(self.c.private, "legacy")["id"], "legacy")
 
 
+class ConcurrentAdoptTests(JobCase):
+    """每个作业起跑都收一次私有目录里的日志（layout.ensure → adopt_private_logs）：启动器同时起两个作业时，另一个可能刚把目录收空删掉。
+    手写时序：判完 is_dir、列目录前目录没了 → 当作已收完，不让作业失败（原先抛 FileNotFoundError，catalog 报「任务所需的文件或目录不存在」）"""
+
+    def test_dir_removed_by_concurrent_job_is_treated_as_adopted(self):
+        touch(self.c.private / "logs" / "jobs" / "old.json", json.dumps(dict(id="old", state="completed", ended=1)))
+        c = Context(dict(self.request, taskId="t-race", operation="catalog"))
+        real = Path.iterdir
+        def vanished(self_):   # 对方作业在本作业判完 is_dir 之后把私有目录收空删掉
+            if self_ == c.private / "logs" / "jobs" or self_ == c.private / "logs":
+                raise FileNotFoundError(2, "No such file or directory", str(self_))
+            return real(self_)
+        with patch.object(Path, "iterdir", vanished):
+            layout.adopt_private_logs(c)   # 不抛
+            self.assertEqual(core.prune_jobs(c.private, jobs=c.private / "logs" / "jobs")["removed"], [])
+
+
 class Upgrade4Tests(JobCase):
     def v3_library(self):
         atomic(self.c.library / ".s2arm-layout.json", dict(version=3, games=[]))   # P1 + P2 都做完（协调约定：从 3 起步）

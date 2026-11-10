@@ -308,10 +308,17 @@ int main(void) {
           snprintf(qc, sizeof qc, "printf x > '%s/exefs/main.npdm'", qr); sh(qc);
           CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, ".applied 等于清单、main.npdm 在：游戏库显示");
           snprintf(qc, sizeof qc, "rm '%s/exefs/main.npdm'", qr); sh(qc);
-          snprintf(qc, sizeof qc, "mkdir -p '%s/.incoming' && printf x > '%s/.incoming/1_000.tar' && printf '' > '%s/.applied'", qr, qr, qr); sh(qc);
-          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, ".applied 被清空（传镜像被打断）：不显示");
+          // 推送包齐了只等解开（11-09 根修 Windows 装完游戏库空：推完起 App 解包没成，.applied 仍是推送开头清空的空文件）：包写完 + 清单读得出 → 显示
+          snprintf(qc, sizeof qc, "mkdir -p '%s/.incoming' && head -c 1024 /dev/zero > '%s/.incoming/1_000.tar' && touch '%s/index.tsv' && printf '' > '%s/.applied'", qr, qr, qr, qr); CHECK(sh(qc) == 0, "造待解开夹具失败");
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, "包齐、清单到了、.applied 为空（Windows 起 App 解包没成）：显示，点 Play 由导入闸门解开");
           snprintf(qc, sizeof qc, "rm '%s/.applied'", qr); sh(qc);
-          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, "推送包齐了只等解开：显示"); }
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, "包齐、没有 .applied：显示");
+          snprintf(qc, sizeof qc, "printf '' > '%s/manifest.json'", qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, "清单被推送开头置空（还在传 / 传断了）：不显示");
+          snprintf(qc, sizeof qc, "printf '{\"version\":2,\"index_sha256\":\"abc123\"}' > '%s/manifest.json' && printf x > '%s/.incoming/1_000.tar'", qr, qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, "有包没写完（没有归档尾）：不显示");
+          snprintf(qc, sizeof qc, "head -c 1024 /dev/zero > '%s/.incoming/1_000.tar' && printf 'abc123' > '%s/.applied'", qr, qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, "机上清单还是上次已导入的那份（新清单没到）：不显示"); }
     }
     printf("%s t_pack_apply：%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

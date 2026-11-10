@@ -389,13 +389,15 @@ struct ExportSessionView: View {
                 if platform == .ios {
                     Button { install(session.gameID ?? "") } label: { LauncherHeroActionLabel(title: x("done.install"), symbol: "iphone") }
                         .buttonStyle(.plain).keyboardShortcut(.defaultAction).accessibilityIdentifier("result.ios.install")
-                    if let path = o.ipa ?? o.output { finderButton(path) }
+                    // 出包这步没有 IPA（装机时才组装、整库共用一份）：给「打开游戏文件夹」；真有 IPA 才给「显示 .ipa」
+                    if let ipa = o.ipa, !ipa.isEmpty { finderButton(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) } }
+                    if let game { finderButton(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
                 } else {
                     Button { if let game { model.backToLibrary(); model.play(game, uiLanguage: uiLanguage) } } label: {
                         LauncherHeroActionLabel(title: loc.t("library.play"), symbol: "play.fill")
                     }
                     .buttonStyle(.plain).accessibilityIdentifier("result.mac.play")
-                    if let path = o.output { finderButton(path) }
+                    if let game { finderButton(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
                 }
             }
             if platform == .ios {
@@ -404,9 +406,9 @@ struct ExportSessionView: View {
         }
     }
 
-    private func finderButton(_ path: String) -> some View {
-        Button { revealInFinder(path) } label: {
-            Label(loc.t("s2arm.job.reveal"), systemImage: "folder").font(.manrope(15, .bold)).foregroundStyle(LauncherPalette.cream)
+    private func finderButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: "folder").font(.manrope(15, .bold)).foregroundStyle(LauncherPalette.cream)
                 .padding(.horizontal, 24).frame(height: LauncherHeroAction.height)
                 .background(Color.white.opacity(0.08), in: Capsule())
                 .overlay(Capsule().strokeBorder(LauncherPalette.cream.opacity(0.3)))
@@ -438,11 +440,12 @@ struct ExportSessionView: View {
                     if platform == .mac {
                         Button(loc.t("library.play")) { if let game { model.backToLibrary(); model.play(game, uiLanguage: uiLanguage) } }
                             .accessibilityIdentifier("result.mac.play")
-                        if let path = outcome?.output { Button(loc.t("s2arm.job.reveal")) { revealInFinder(path) } }
+                        if let game { Button(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
                     } else {
                         Button(loc.t("s2arm.action.install")) { install(session.gameID ?? "") }
                             .accessibilityIdentifier("result.ios.install")
-                        if let path = outcome?.ipa ?? outcome?.output { Button(loc.t("s2arm.export.revealIpa")) { revealInFinder(path) } }
+                        if let ipa = outcome?.ipa, !ipa.isEmpty { Button(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) } }
+                        if let game { Button(loc.t("s2arm.export.openGameFolder")) { model.reveal(game) } }
                     }
                 }
                 .launcherRowControls()

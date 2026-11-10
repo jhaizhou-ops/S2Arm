@@ -133,7 +133,7 @@ struct InstallView: View {
                 Text(loc.t("s2arm.install.note")).font(.manrope(12)).foregroundStyle(.secondary).lineLimit(3)
                 Spacer(minLength: 8)
                 if let ipa = model.installReadiness?.ipaPath, !ipa.isEmpty {
-                    Button(loc.t("s2arm.export.revealIpa")) { revealInFinder(ipa) }
+                    Button(loc.t("s2arm.export.revealIpa")) { model.revealIpa(ipa) }
                         .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.revealIpa")
                 }
                 Button(loc.t("launch.done")) { dismiss() }.buttonStyle(LauncherSecondaryButtonStyle())

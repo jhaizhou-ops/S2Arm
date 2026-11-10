@@ -53,6 +53,21 @@ public enum BackendText {
         launcherItems[id]?[language] ?? "[\(id)]"
     }
 
+    private static let errorTitles: [String: [String: String]] = {
+        guard let data = try? Data(contentsOf: experienceURL()),
+              let spec = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = spec["errors"] as? [String: Any],
+              let items = errors["items"] as? [[String: Any]] else { return [:] }
+        return Dictionary(items.compactMap { item in
+            guard let code = item["code"] as? String, let title = item["title"] as? [String: String] else { return nil }
+            return (code, title)
+        }, uniquingKeysWith: { first, _ in first })
+    }()
+
+    public static func errorTitle(_ code: String, language: String) -> String? {
+        errorTitles[code]?[language]
+    }
+
     /// 共享规格里要进翻译表的那些中英文（同旧启动器 SharedExperience.translations 的取法）：
     /// running / failed 两个状态名、作业结局（成功 / 取消）、出包画面模式标签、阶段名。
     public static func sharedEntries(_ data: Data) throws -> [Entry] {

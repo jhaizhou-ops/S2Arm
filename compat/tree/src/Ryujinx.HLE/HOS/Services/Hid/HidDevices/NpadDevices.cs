@@ -33,6 +33,16 @@ namespace Ryujinx.HLE.HOS.Services.Hid
         private readonly HashSet<(long UserId, int Handle)> _sixAxisSensors = new();
         public bool SixAxisActive { get { lock (_sixAxisSensors) return _sixAxisSensors.Count != 0; } }
 
+        // S2Arm：Switch 2 Npad IMU 缓冲（hid 320 / 321，见 NpadImu.cs）；读数与六轴同源，由宿主的体感读取一并写入
+        public readonly NpadImu Imu = new();
+
+        public void PushImu(PlayerIndex player, System.Numerics.Vector3 accelerationG, System.Numerics.Vector3 angularVelocityDegrees, ulong timestampUs)
+        {
+            bool joyDual = player <= PlayerIndex.Handheld && _device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet == NpadStyleTag.JoyDual;
+
+            Imu.Push(player, joyDual, accelerationG, angularVelocityDegrees, timestampUs);
+        }
+
         public void SetSixAxisActive(long userId, int handle, bool active)
         {
             lock (_sixAxisSensors)
