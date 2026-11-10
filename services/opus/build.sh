@@ -1,8 +1,8 @@
 #!/bin/bash
 # libopus（Xiph 参考实现，BSD）静态库：给 Horizon 硬件 Opus 解码服务（hwopus）用，替掉 Concentus 托管实现（每包分配 18–36 KB，iOS 上 gen0 回收是阻塞式的）。
 # 用法：bash services/opus/build.sh [osx-arm64|osx-x64|ios-arm64] → 最后一行输出 libs2a_opus.a 路径（libopus + C 垫片 s2a_opus.c）。按版本 / 垫片哈希缓存在 ~/.s2arm/run/s2arm/cache/opus，命中秒过。
-# macOS 默认全量系统解码（单流/多流、8–48 kHz，s2a_opus_apple.c），宿主静态库不再包含 libopus；
-#   S2A_OPUS_SYSTEM=0 回退 libopus。单测动态库仍载入 libopus（只作参考解码器 + 测试编码器），不进宿主 / App。
+# S2A_OPUS_SYSTEM=1（可选，仅 osx-*）：单流/多流、8–48 kHz 全部走系统 AudioToolbox（s2a_opus_apple.c），宿主静态库不再包含 libopus；
+#   默认构建仍用 libopus，行为不变。单测动态库仍载入 libopus（只作参考解码器 + 测试编码器），不进宿主 / App。
 # 源码按固定版本 + sha256（与 downloads.xiph.org/releases/opus/SHA256SUMS.txt 一致）取，不进仓库；源码包按 sha256 缓存在 ${S2A_BUILD_CACHE:-~/.cache/s2arm-build}/sources/（android/tools/fetch_source.sh）。做法同 services/vpx/build.sh。
 # 版本取当前稳定版 1.6.1（2026-01）：Concentus 2.2.2 移植自 libopus 1.1.2 定点版（2015），旧版没有 1.2 之后的 NEON 优化与解码修正；
 #   真 Switch 用的 libopus 版本不知道（没有公开来源），解码器输出跨版本本来就不逐位相同（RFC 6716 / 8251 只规定误差上限），不为逐位对齐旧移植退回老版本
@@ -26,7 +26,7 @@ case $RID in
   ios-arm64) MIN=-miphoneos-version-min=$MIOS; SDK=iphoneos ;;
   *) echo "🔴 opus：不认识的平台 $RID" >&2; exit 1 ;;
 esac
-SYS=${S2A_OPUS_SYSTEM:-1}     # macOS 默认全量系统解码；S2A_OPUS_SYSTEM=0 回退 libopus
+SYS=${S2A_OPUS_SYSTEM:-0}     # 系统后端为可选开关；默认 libopus，行为不变
 [[ $RID = osx-* ]] || SYS=0   # 系统后端只接 macOS；iOS 一律 libopus
 CC="xcrun --sdk $SDK clang -arch $ARCH $MIN"
 # 本机缓存跟编译器走（审计 #1534 P1-107）：构建键不含编译器（发版机与玩家机的预编库按它认，不能带本机版本），本机缓存目录名另带 clang 版本行的哈希，toolchain.txt 记原文备查

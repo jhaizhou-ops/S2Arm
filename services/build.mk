@@ -34,9 +34,8 @@ $(info $(shell tail -8 build/cs/opus_osx.err | tr '\n' '|'))
 $(error services/opus/build.sh 失败（全文 build/cs/opus_osx.err）)
 endif
 HOST_LIBS += $(S2A_OPUS_LIB)
-# macOS 默认全量系统 Opus（单流/多流、8–48 kHz）：宿主不再链 libopus，补 AudioToolbox / CoreFoundation；
-#   S2A_OPUS_SYSTEM=0 回退 libopus
-ifneq ($(S2A_OPUS_SYSTEM),0)
+# S2A_OPUS_SYSTEM=1（可选，仅 macOS）：单流/多流、8–48 kHz 全部走系统 AudioToolbox，宿主不再链 libopus；宿主补框架
+ifeq ($(S2A_OPUS_SYSTEM),1)
 HOST_LIBS += -framework AudioToolbox -framework CoreFoundation
 endif
 # 库按源码内容哈希放整机缓存（services/nxaot.sh）：C# 改回旧内容时换回一份更早建好的库，按修改时间判不出要重链，宿主静默带着上一版 C#

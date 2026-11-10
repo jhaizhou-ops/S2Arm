@@ -319,6 +319,51 @@ namespace S2A.Services.Tests
                 FakeNative.HandleClose(dec);
             }
 
+            // 坏包分类单测：期望值按 libopus 的 opus_packet_parse / opus_packet_get_nb_samples /
+            //   opus_multistream_packet_validate 语义手写，运行时不依赖 libopus（宿主不链它也照样跑）。
+            //   服务层映射（HardwareOpusDecoder.DecodeInterleaved）：包内样本数阶段失败时上游不解码、落到末尾回成功
+            //   （0x0，consumed 0 / samples 0）；样本数成功、解码失败：坏包 -4 → 0x10A6F，零帧数（样本数 0 → 解码帧容量 0）→ -1 → 0x1046F。
+            {
+                OpusCase sCase = new("坏包探测 单流 48 kHz 双声道", 48000, 2, 0, 0, null, 0, null, 0, 0, 0, 8, false, 8);
+                OpusCase mCase = new("坏包探测 多流 48 kHz 5.1（3 流 2 立体声）", 48000, 6, 3, 2, new byte[] { 0, 1, 2, 3, 4, 255 }, 0, null, 0, 0, 0, 8, false, 9);
+                uint decS = OpusOpen(hwo, sCase), decM = OpusOpen(hwo, mCase);
+                Check("hwopus 坏包探测解码器（单流 / 多流）", "开成功 / 开成功", $"{(decS != 0 ? "开成功" : "开失败")} / {(decM != 0 ? "开成功" : "开失败")}");
+
+                if (decS != 0 && decM != 0)
+                {
+                    byte[] longFrame = new byte[1277];
+                    longFrame[0] = 0xF8; // 配置 31（CELT FB 20 ms）单帧；载荷 1276 字节超 1275 上限
+                    (string Name, uint Dec, uint Cmd, byte[] Packet, string Want)[] bad =
+                    {
+                        ("code 3 缺帧数字节（样本数阶段报 -4）", decS, 8, new byte[] { 0xFB }, "0x0/0/0"),
+                        ("code 3 零帧数（样本数 0，解码 -1）", decS, 8, new byte[] { 0xFB, 0x00 }, "0x1046F"),
+                        ("时长 180 ms 超 120 ms（样本数阶段报 -4）", decS, 8, new byte[] { 0x5B, 0x03 }, "0x0/0/0"),
+                        ("code 1 奇数载荷", decS, 8, new byte[] { 0xF9, 0x01, 0x02, 0x03 }, "0x10A6F"),
+                        ("code 2 截断尺寸字段", decS, 8, new byte[] { 0xFA }, "0x10A6F"),
+                        ("code 2 尺寸越界", decS, 8, new byte[] { 0xFA, 0x05, 0x01 }, "0x10A6F"),
+                        ("code 3 填充越界", decS, 8, new byte[] { 0xFB, 0x41, 0xFF }, "0x10A6F"),
+                        ("code 3 VBR 尺寸越界", decS, 8, new byte[] { 0xFB, 0x82, 0x05, 0x01 }, "0x10A6F"),
+                        ("code 3 CBR 不整除", decS, 8, new byte[] { 0xFB, 0x03, 0x01, 0x02 }, "0x10A6F"),
+                        ("单帧超 1275 字节", decS, 8, longFrame, "0x10A6F"),
+                        ("空包（样本数阶段报 -1）", decS, 8, Array.Empty<byte>(), "0x0/0/0"),
+                        ("多流 子流数不足（3 流只给 2 子流）", decM, 9, new byte[] { 0xFC, 0x00, 0xFC, 0x00 }, "0x10A6F"),
+                        ("多流 子流时长不一（20 ms + 10 ms）", decM, 9, new byte[] { 0xFC, 0x00, 0xEC, 0x00, 0xFC }, "0x10A6F"),
+                        ("多流 子流坏包（code 1 载荷越界）", decM, 9, new byte[] { 0xF9, 0x05, 0x01, 0xFC, 0x00, 0xFC }, "0x10A6F"),
+                    };
+
+                    foreach ((string name, uint dec, uint cmd, byte[] packet, string want) in bad)
+                    {
+                        Reply r = Call(dec, OpusDecodeMsg(cmd, inBuf, packet, packet.Length, outBuf, 0x10000, false));
+                        // 错误返回时服务不写 consumed / samples（与上游一致），只比结果码；落到末尾回成功的才比 0/0
+                        string got = r.Result == 0 ? $"0x0/{*(int*)r.Data}/{*(int*)(r.Data + 4)}" : $"0x{r.Result:X}";
+                        Check($"hwopus 坏包 {name}", want, got);
+                    }
+
+                    FakeNative.HandleClose(decS);
+                    FakeNative.HandleClose(decM);
+                }
+            }
+
             Check("hwopus 用例覆盖三种编码模式（按 TOC 计包）", "SILK、Hybrid、CELT 都有", modes[0] > 0 && modes[1] > 0 && modes[2] > 0 ? "SILK、Hybrid、CELT 都有" : $"SILK {modes[0]} / Hybrid {modes[1]} / CELT {modes[2]} 包");
             Console.Error.WriteLine($"hwopus 逐样本比对合计：{cases.Length} 例 {allSamples} 样本、超出 ±{opusTolerance} LSB 的不一致 {allBad}（容差内 {allSoft} 样本）；模式 SILK {modes[0]} / Hybrid {modes[1]} / CELT {modes[2]} 包");
         }
