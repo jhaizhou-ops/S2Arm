@@ -4557,6 +4557,22 @@
         }
       }
     },
+    "Glass on the floating buttons and the main action, on systems that offer it.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Glass on the floating buttons and the main action, on systems that offer it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在支持的系统上，浮动按钮与主操作使用玻璃质感。"
+          }
+        }
+      }
+    },
     "Handheld": {
       "localizations": {
         "de": {
@@ -5703,6 +5719,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "左扳机键"
+          }
+        }
+      }
+    },
+    "Liquid Glass": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liquid Glass"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "液态玻璃"
           }
         }
       }

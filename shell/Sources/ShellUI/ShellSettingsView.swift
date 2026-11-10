@@ -5,9 +5,16 @@ import SwiftUI
 enum ShellSettingsRows {
     static let gameID = "shell"
     static let hud = "shell.hud"
+    static let glass = "shell.glass"
     static let touchSize = "shell.touchSize"
     static let touchStick = "shell.touchStick"
     static let targetPrefix = "shs.row."
+
+    /// Liquid Glass on the floating chips and the primary action, where the system offers it.
+    static func glassRow(_ store: ShellSettingsStore) -> SettingRow {
+        SettingRow(id: glass, label: ShellStrings.text("Liquid Glass"), note: ShellStrings.text("Glass on the floating buttons and the main action, on systems that offer it."),
+                   kind: .toggle(on: "1", off: "0"), value: store.liquidGlass ? "1" : "0")
+    }
 
     static func hudRow(_ store: ShellSettingsStore) -> SettingRow {
         SettingRow(id: hud, label: ShellStrings.text("Performance overlay"), note: ShellStrings.text("Used by games that have no choice of their own."),
@@ -38,6 +45,7 @@ enum ShellSettingsRows {
     static func apply(_ id: String, value: String, to store: ShellSettingsStore) {
         switch id {
         case hud: store.storePerformanceHUD(value == "1")
+        case glass: store.storeLiquidGlass(value == "1")
         case touchSize: store.storeTouchSize(value)
         case touchStick: store.storeTouchStick(value)
         default: break
@@ -107,10 +115,11 @@ struct ShellSettingsView: View {
                         // S2Arm: the upstream Touch controls group (size, stick, arrangement) is left out. The game reads its own
                         // per-game layout (each game's settings → button positions), never these shell settings (#372).
                         SettingsGroup(title: ShellStrings.text("Interface")) {
-                            let hud = ShellSettingsRows.hudRow(store)
-                            SettingControl(gameID: ShellSettingsRows.gameID, row: hud, targetPrefix: ShellSettingsRows.targetPrefix) {
-                                ShellSettingsRows.apply(hud.id, value: $0, to: store)
-                            }.equatable()
+                            ForEach([ShellSettingsRows.glassRow(store), ShellSettingsRows.hudRow(store)]) { row in
+                                SettingControl(gameID: ShellSettingsRows.gameID, row: row, targetPrefix: ShellSettingsRows.targetPrefix) {
+                                    ShellSettingsRows.apply(row.id, value: $0, to: store)
+                                }.equatable()
+                            }
                         }
                         // S2Arm: the version, the same number the computer's S2Arm shows (written when the computer installs the app).
                         if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, !version.isEmpty {
