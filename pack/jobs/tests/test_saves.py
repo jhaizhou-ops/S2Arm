@@ -236,6 +236,57 @@ class SaveTests(unittest.TestCase):
         self.assertTrue(saves.restore(c)["committed"])
         self.assertEqual((self.root / PROGRESS).read_bytes(), b"checkpoint-one")
 
+    def move_game_to_second_location(self):
+        """把这款搬到第二个存放位置（默认游戏库之外），返回那个位置的根"""
+        disk = self.directory / "disk2"
+        (disk / "games").mkdir(parents=True)
+        shutil.move(str(self.root.parent), str(disk / "games/TestGame"))
+        layout.register_location(self.context(), disk)
+        self.root = disk / "games/TestGame/saves"
+        self.assertEqual(layout.find_game(self.context(), GID), disk / "games/TestGame")
+        return disk
+
+    def test_restore_of_game_in_second_location_syncs_only_inside_that_location(self):
+        # 11-10 安装版 c341ca87 / M1 Max：时之笛在第二存放位置，恢复存档停在「验证恢复条件」、进程占满一个核不结束（采样全在 open → fsync → close）。
+        # 根因：restore 把事务与备份目录的逐级同步终点写成默认游戏库 c.library，备份目录在游戏所在位置下，往上走不到 c.library，
+        #   到文件系统根后 parent 还是自己，sync_parents 不结束。
+        # 期望不跑被测实现就能定：恢复只在游戏所在位置里建目录，逐级同步的每个目录都是该位置的根或在它下面；走出去的第一步就判红（免得挂住整轮测试）
+        disk = self.move_game_to_second_location()
+        c = self.prepare_restore()
+        real, outside = saves.fsync_dir, []
+
+        def checked(path):
+            path = Path(path)
+            if path != disk and disk not in path.parents:
+                outside.append(path)
+                raise AssertionError("逐级同步走出了游戏所在的存放位置：%s" % path)
+            real(path)
+
+        with patch.object(saves, "fsync_dir", checked):
+            result = saves.restore(c)
+        self.assertEqual(outside, [])
+        self.assertTrue(result["committed"])
+        self.assertEqual((self.root / PROGRESS).read_bytes(), b"checkpoint-one")
+        self.assertTrue(Path(result["previousBackup"]).is_relative_to(disk))
+        self.assertFalse((self.directory / "library/save-transactions").exists())
+
+    def test_sync_parents_refuses_a_root_that_is_not_an_ancestor(self):
+        # 终点不是起点的祖先：期望报错，不是在文件系统根上一直同步下去。同步次数上限手算 = 起点自己 + 它的全部祖先
+        start, calls = self.directory / "a/b", []
+        start.mkdir(parents=True)
+
+        def counted(path):
+            calls.append(Path(path))
+            if len(calls) > len(start.parents) + 1:
+                raise AssertionError("到文件系统根后仍在同步（第 %d 次：%s）" % (len(calls), path))
+
+        with patch.object(saves, "fsync_dir", counted):
+            with self.assertRaises(ValueError):
+                saves.sync_parents(start, self.directory / "elsewhere")
+            calls.clear()
+            saves.sync_parents(start, self.directory)
+        self.assertEqual(calls, [start, start.parent, self.directory])
+
     def test_empty_status_is_normal_and_backup_does_not_create_save_data(self):
         import shutil
 
