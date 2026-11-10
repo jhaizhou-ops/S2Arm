@@ -98,7 +98,7 @@ static VkDescriptorType binding_type(int kind) {
         default: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     }
 }
-/* ======== compute PSO 进程内缓存（debug.s2a.compute_pso_cache=1 才启用，默认关） ========
+/* ======== compute PSO 进程内缓存（默认开；debug.s2a.compute_pso_cache=0 退回逐笔创建） ========
  * 直连每笔 dispatch 都重建 shader module / set layouts / pipeline layout / pipeline，
  * 驱动对每次 vkCreateComputePipelines 重跑后端编译（8E 实测 nx-* 单核 58% 在 libllvm-qgl
  * + scudo 里）。键 = SPIR-V 字节 + 描述符布局签名（set/binding/kind 三元组序列）+ 特化
@@ -147,10 +147,11 @@ static int cpso_on(void) {
     if (v < 0) {
 #ifdef __ANDROID__
         char b[PROP_VALUE_MAX] = {0};
-        v = __system_property_get("debug.s2a.compute_pso_cache", b) > 0 && b[0] == '1';
+        __system_property_get("debug.s2a.compute_pso_cache", b);
+        v = (b[0] == '0') ? 0 : 1;   // 默认开（8E A/B 3.854→13.567 fps 中位，#473）；设 0 关
 #else
         const char *e = getenv("S2A_COMPUTE_PSO_CACHE");
-        v = e && e[0] == '1';
+        v = (e && e[0] == '0') ? 0 : 1;
 #endif
         atomic_store(&g_cpso_gate, v);
     }

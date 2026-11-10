@@ -78,7 +78,7 @@ void nvk_compute_texture_facts(const struct nvk_compute_tex_snapshot *snapshot,
  * The memory callbacks/opaque must remain valid until finish(0/-1). */
 /* c1 常量段（cbuf 1）与 c0 一样是每笔命令都可能变的内容：它只能来自本次 dispatch 在消费点
  * pin 住的源快照（source->c1/c1_bytes），不允许按槽号事后回查、也不允许绑零缓冲顶替。 */
-/* compute PSO 进程内缓存（debug.s2a.compute_pso_cache=1 才有内容）的整表释放：
+/* compute PSO 进程内缓存（默认开；debug.s2a.compute_pso_cache=0 关）的整表释放：
  * session 在 s2a_vk_device_destroy 前调（幂等；表空/别的设备 = 无操作）。
  * 在途 owner 引用的对象由其 finish/destroy 收尾，不在此强制销毁。 */
 void nvn_vk_compute_pso_cache_release(struct s2a_vk_device *device);
