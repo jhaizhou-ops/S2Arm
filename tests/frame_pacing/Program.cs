@@ -42,11 +42,20 @@ static class Program
         Equal(30, FramePacingPolicy.ParseLimit("30"), "30 FPS setting");
         Equal(60, FramePacingPolicy.ParseLimit("60"), "60 FPS setting");
         Equal(120, FramePacingPolicy.ParseLimit("120"), "120 FPS setting");
+        Equal(24, FramePacingPolicy.ParseLimit("24"), "lowest accepted cap");
+        Equal(144, FramePacingPolicy.ParseLimit("144"), "144 FPS setting");
+        Equal(165, FramePacingPolicy.ParseLimit("165"), "165 FPS setting");
+        Equal(240, FramePacingPolicy.ParseLimit("240"), "240 FPS setting");
+        Equal(1000, FramePacingPolicy.ParseLimit("1000"), "highest accepted cap");
         Rejects("");
-        Rejects("29");
-        Rejects("240");
+        Rejects("23");
+        Rejects("1001");
         Rejects("-1");
+        Rejects("+60");
         Rejects("60 ");
+        Rejects("30abc");
+        Rejects("display");
+        Rejects("00000060");
 
         int min30 = FramePacingPolicy.SwapIntervalFloor(30, 60);
         int min60 = FramePacingPolicy.SwapIntervalFloor(60, 60);
@@ -56,6 +65,10 @@ static class Program
         Equal(1, min60, "60 FPS production swap interval floor");
         Equal(1, min120, "120 FPS leaves 60 Hz guest timing unchanged");
         Equal(0, minUnlimited, "unlimited removes the extra production floor");
+        Equal(1, FramePacingPolicy.SwapIntervalFloor(144, 60), "144 FPS leaves 60 Hz guest timing unchanged");
+        Equal(1, FramePacingPolicy.SwapIntervalFloor(40, 60), "40 FPS floor is 1 (rounding 1.5 up to 2 would cap the producer at 30)");
+        Equal(2, FramePacingPolicy.SwapIntervalFloor(24, 60), "24 FPS floor is 2 (30 FPS producer, presentation capped at 24)");
+        Near(1f / 144, FramePacingPolicy.MinimumPresentationInterval(0f, 144), "144 FPS presentation floor for swapInterval=0");
 
         Equal(0, EffectiveSwapInterval(min30, 0), "30 FPS keeps guest swapInterval=0");
         Equal(2, EffectiveSwapInterval(min30, 1), "30 FPS throttles guest swapInterval=1 at production");

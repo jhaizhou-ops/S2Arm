@@ -8,23 +8,58 @@ using Ryujinx.Memory;
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
 
 namespace Ryujinx.Graphics.Nvdec
 {
     static class Vp9Decoder
     {
-        private static readonly Decoder _decoder = new();
         private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take this (managed) VP9 path
+        private static int _s2aNativeBroken;  // S2Arm: the native backend's library is missing or broken in this process
 
-        public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
+        public unsafe static void Decode(NvdecDecoderContext context, ResourceManager rm, ref NvdecRegisters state)
         {
             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
             EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
+            Decoder decoder = context.GetManagedVp9();
+
+            // S2Arm: native libvpx first (Vp9NativePath; docs/设计_原生VP9/design_phase2_B.md §4). It decodes from a key
+            // frame on and hands any job it cannot represent exactly to the managed decoder below.
+            Vp9NativePath native = Volatile.Read(ref _s2aNativeBroken) == 0 ? context.GetVp9Native() : null;
+
+            if (native != null)
+            {
+                Vp9PictureInfo nativeInfo = pictureInfo.Convert();
+                entropy.Convert(ref nativeInfo.Entropy);
+                ReadOnlySpan<byte> tiles = rm.MemoryManager.DeviceGetSpan(state.SetInBufBaseOffset, (int)pictureInfo.BitstreamSize);
+                bool done = false;
+
+                try
+                {
+                    done = native.TryDecode(rm, ref state, ref pictureInfo, ref nativeInfo, tiles);
+                }
+                catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+                {
+                    if (Interlocked.Exchange(ref _s2aNativeBroken, 1) == 0)
+                    {
+                        Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"【红】VP9 原生解码库不可用（{e.GetType().Name}：{e.Message}），本进程只走托管解码器");
+                    }
+
+                    native.Deactivate();
+                }
+
+                if (done)
+                {
+                    WriteBackwardUpdates(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, ref nativeInfo.BackwardUpdateCounts);
+                    decoder.TrackSegmentMap(nativeInfo.IsKeyFrame || nativeInfo.IntraOnly, pictureInfo.CurrentFrameSize.Width, pictureInfo.CurrentFrameSize.Height);
+                    return;
+                }
+            }
 
             ISurface Rent(uint lumaOffset, uint chromaOffset, FrameSize size)
             {
-                return rm.Cache.Get(_decoder, lumaOffset, chromaOffset, size.Width, size.Height);
+                return rm.Cache.Get(decoder, lumaOffset, chromaOffset, size.Width, size.Height);
             }
 
             ISurface lastSurface = Rent(state.SetPictureLumaOffset[0], state.SetPictureChromaOffset[0], pictureInfo.LastFrameSize);
@@ -59,7 +94,7 @@ namespace Ryujinx.Graphics.Nvdec
             uint lumaOffset = state.SetPictureLumaOffset[3];
             uint chromaOffset = state.SetPictureChromaOffset[3];
 
-            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+            if (decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
             {
                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
 

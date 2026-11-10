@@ -2,7 +2,7 @@
 """移植质量快检（维护者 10-29 06:2x：五个问题——画面 / 帧率 / 满屏 / 直连默认启动 / 能耗，用已有真机局产物、最简单的办法自动判；AI 看图也算自动化）：
   quality_check.py <局目录> --report <报告目录> [--game <款>] [--root <产物根>] [--device <机型>] [--contributor <署名>]
       贡献者一条命令（10-29 维护者：开发者自查 / 自纠 / 自修）：局目录 = 自己的一场局（iPhone 真机局 tools/dev_run.sh 的 out_*，或 Mac 局
-      runtime/run_mac.sh / tools/entry_check.sh 的局目录）；证据（截图 / frames.tsv / gfx_mode.txt / 功耗 plist / host.log）拷进 <报告目录>/evidence/
+      runtime/run_mac.sh / 维护方 entry_check.sh 的局目录）；证据（截图 / frames.tsv / gfx_mode.txt / 功耗 plist / host.log）拷进 <报告目录>/evidence/
       并脱敏（家目录 / 用户名 / App 容器路径 / UUID / 邮箱 / IP / 钥匙样字符串），再对证据副本判五项 → report.md（可直接贴 issue）+ report.json
       （s2a.quality-report.v1：工具指纹、每份证据 sha256、程序号 / 构建号、--root 给了时带能力内容哈希）。维护方拿证据目录重跑得同一份指纹
       入账：tools/caps_ledger.py ingest <报告目录>（docs/名单_验证账.tsv）

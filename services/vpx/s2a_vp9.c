@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
+#include "vpx/s2a_vp9_nvdec.h"
 
 // threads：libvpx 解码线程数（≤ 1 = 单线程）；多线程时同时开 VP9 行级并行
 void *s2a_vp9_open(int threads)
@@ -71,4 +72,20 @@ void s2a_vp9_close(void *h)
         vpx_codec_destroy(h);
         free(h);
     }
+}
+
+// Nvdec 的 VP9 作业走 libvpx（S2Arm 补丁 services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch，接口见 vpx/s2a_vp9_nvdec.h；
+// 设计 docs/设计_原生VP9/design_phase2_B.md）。h 来自 s2a_vp9_open。返回 S2A_VP9_*；出错时 *error 是 libvpx 的说明（可能为 NULL）。
+int s2a_vp9_nvdec(void *h, const uint8_t *frame, uint32_t size, const s2a_vp9_nvdec_io *io, s2a_vp9_nvdec_picture *pic,
+                  const char **error)
+{
+    vpx_codec_ctx_t *c = h;
+    int r = s2a_vp9_nvdec_decode(c, frame, size, io, pic);
+
+    if (error != NULL)
+    {
+        *error = r == S2A_VP9_OK || r == S2A_VP9_UNREPR ? NULL : vpx_codec_error_detail(c);
+    }
+
+    return r;
 }

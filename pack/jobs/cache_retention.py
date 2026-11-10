@@ -229,3 +229,65 @@ def trim(private, *, keep_titles=KEEP_TITLES, min_free_bytes=MIN_FREE_BYTES,
                 unscannedRoots=unscanned, protectedLinks=links,
                 accountingComplete=not (unscanned or links or skipped or eviction_errors or disk_errors),
                 scanErrors=scan_errors, evictionErrors=eviction_errors, errors=errors)
+
+
+# ---- 工具缓存的旧键（游戏库结构 P3）----
+# tool-cache 下 NativeAOT（services/nxaot.sh）、libvpx / libopus / dav1d（services/<库>/build.sh）的整机缓存：每份一个目录
+# <平台>-<键…>（如 osx-arm64-1.14.1-ab12cd34ef56-0f1e2d3c），键由引擎源码 / 构建脚本内容算出，引擎一升级旧键就再也命中不了，原来从不清。
+# 这些脚本取用即 touch 目录（命中也续时刻），所以「当前引擎用到的键」= 当前引擎装好之后被动过的目录：
+#   - 同一缓存同一平台，有当前引擎用过的 → 其余全删（旧引擎的键）；
+#   - 当前引擎还没用过这个平台 → 只留最新的一份（引擎升级没改到这个库时键不变，下次照样命中），其余删；
+#   - 30 分钟内动过的一律不删（别的作业可能正拿着路径链接，同 tools 里整机 gc 的规矩）；锁目录、.tmp 半成品、链接都不碰。
+TOOL_CACHES = ('cache/nxaot', 'cache/vpx', 'cache/opus', 'cache/dav1d',
+               'run/s2arm/cache/nxaot', 'run/s2arm/cache/vpx', 'run/s2arm/cache/opus', 'run/s2arm/cache/dav1d')
+TOOL_HOT_SECONDS = 1800
+_TOOL_ENTRY = re.compile(r'((?:osx|ios|linux|win|android)-[A-Za-z0-9_]+)-[A-Za-z0-9_.-]+')
+
+
+def prune_tool_keys(work_root, engine_since, *, now=None):
+    """按上面的规则删 work_root（core.Context.work_root）下各工具缓存的旧键；engine_since = 当前引擎装好的时刻（None = 源码树开发构建，不清）。
+    返回 {removedEntries, removed: [相对路径]}"""
+    removed = []
+    if engine_since is None:
+        return dict(removedEntries=0, removed=removed)
+    now = time.time() if now is None else now
+    work_root = Path(work_root)
+    for rel in TOOL_CACHES:
+        root = work_root / rel
+        if _safe_root(work_root, root) != 'safe':
+            continue
+        groups = {}
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for d in children:
+            m = _TOOL_ENTRY.fullmatch(d.name)
+            if not m or d.name.endswith('.tmp'):
+                continue
+            try:
+                st = d.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISDIR(st.st_mode):
+                continue
+            groups.setdefault(m.group(1), []).append((st.st_mtime, d.name, d))
+        for entries in groups.values():
+            entries.sort(reverse=True)
+            used = [e for e in entries if e[0] >= engine_since]
+            keep = {e[1] for e in used} if used else {entries[0][1]}
+            for mtime, name, d in entries:
+                if name in keep or now - mtime < TOOL_HOT_SECONDS:
+                    continue
+                shutil.rmtree(d, ignore_errors=True)
+                if not os.path.lexists(d):
+                    removed.append(str(d.relative_to(work_root)))
+    return dict(removedEntries=len(removed), removed=removed)
+
+
+def engine_installed_at(engine):
+    """当前引擎副本装好的时刻（embedded.install 写的 .installed.json）；不是装出来的引擎（源码树）→ None"""
+    try:
+        return (Path(engine) / '.installed.json').stat().st_mtime
+    except OSError:
+        return None

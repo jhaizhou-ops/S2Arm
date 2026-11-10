@@ -33,8 +33,10 @@ expected = 'c7a4970bffe5\t0100ABCD00000000\tsynthetic-inputs'
 note = "note: built with this Mac's compilers\ncompiler versions differ"
 fatal = '[RED] translation chain tools do not match the lock file: synthetic translator'
 with tempfile.TemporaryDirectory(prefix='s2a-chain-env-') as tmp:
-    base = Path(tmp); nx = base / 'engine with spaces'; tools = nx / 'graphics/tools'
-    tools.mkdir(parents=True)
+    # 假仓库布局与生产一致（direct_lib.sh：NX=<仓库>/graphics/nvn，核工具 cd "$NX/../../translator"）；迁仓前假脚本放 NX/graphics/tools，
+    #   迁仓改了生产路径没改这里，生产接线 8 项从首次公开快照起一直红（11-09 主线线定因）
+    base = Path(tmp); repo = base / 'repo with spaces'; nx = repo / 'graphics/nvn'; tools = repo / 'translator'
+    nx.mkdir(parents=True); tools.mkdir(parents=True)
     (tools / 'dmsh_chain.py').write_text(
         "import os, sys\n"
         "mode = os.environ['CHAIN_TEST_MODE']\n"

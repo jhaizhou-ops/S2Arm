@@ -41,10 +41,13 @@ static void submit(void) {
     NVNcommandHandle h = API(nvnCommandBufferEndRecording)(&commands); REQUIRE(h != 0);
     API(nvnQueueSubmitCommands)(&queue, 1, &h); API(nvnQueueFinish)(&queue); REQUIRE(mtl_last_commit_error() == 0);
 }
-static void make_tex(NVNtexture *t, NVNformat fmt, int flags) {
+static void make_tex_pkg(NVNtexture *t, NVNformat fmt, int flags, const void *pkg);
+static void make_tex(NVNtexture *t, NVNformat fmt, int flags) { make_tex_pkg(t, fmt, flags, NULL); }
+static void make_tex_pkg(NVNtexture *t, NVNformat fmt, int flags, const void *pkg) {
     NVNtextureBuilder b; API(nvnTextureBuilderSetDefaults)(&b); API(nvnTextureBuilderSetDevice)(&b, &device);
     API(nvnTextureBuilderSetTarget)(&b, NVN_TEXTURE_TARGET_2D); API(nvnTextureBuilderSetSize2D)(&b, W, H); API(nvnTextureBuilderSetLevels)(&b, 1);
     API(nvnTextureBuilderSetFormat)(&b, fmt); API(nvnTextureBuilderSetFlags)(&b, flags);
+    if (pkg) API(nvnTextureBuilderSetPackagedTextureData)(&b, pkg);
     size_t al = API(nvnTextureBuilderGetStorageAlignment)(&b), sz = API(nvnTextureBuilderGetStorageSize)(&b);
     texture_offset = (texture_offset + al - 1) / al * al; REQUIRE(texture_offset + sz <= POOL_SIZE);
     API(nvnTextureBuilderSetStorage)(&b, &pool, (ptrdiff_t)texture_offset); texture_offset += sz;
@@ -175,6 +178,23 @@ int main(int argc, char **argv) {
         API(nvnCommandBufferSetScissor)(&commands, 0, 0, W, H); API(nvnCommandBufferClearColor)(&commands, 0, f, 15); API(nvnCommandBufferClearDepthStencil)(&commands, 1.0f, 1, 0, 0xff); } submit();
     storage_is(&E, scaled ? RS_BLACK : RS_NONE, W, H);
     paint(want, W, H, GREEN, NULL, 0, 1); read_game(&E, got); compare(got, want, W, H, NULL, 0, 0, "E 内容");
+    done();
+
+    // 7. 同一遍里有附件缩放失败 → 已缩的附件退回、同遍尺寸一致（11-09 #312 暗黑地牢2：颜色目标是打包贴图，存储建时不带渲染目标用途，缩放拷贝画不了；
+    //    原先它记成不缩、同遍的深度照样缩到一半，同遍附件尺寸不一，iPhone 上闪粉色块）。修后：新存储补渲染目标用途 → 颜色也缩成；任何附件缩不成时同遍全部原尺寸
+    phase = "7 打包数据的颜色目标 + 可缩深度：同遍尺寸一致";
+    { static uint8_t pkgdata[1 << 20]; for (int i = 0; i < W * H; i++) memcpy(pkgdata + 4 * i, GREY, 4);   // 宿主按存储大小（块线性，大于 W×H×4）拷
+      NVNtexture P, PZ; texture_offset = (texture_offset + 65535) / 65536 * 65536;   // 新起一页：前面贴图所在页已被写保护（单测桩不接缺页钩子），建时拷打包数据会 SIGBUS
+      make_tex_pkg(&P, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_COMPRESSIBLE, pkgdata); make_tex(&PZ, NVN_FORMAT_DEPTH32F, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
+      begin(); { const NVNtexture *ts[1] = {&P}; API(nvnCommandBufferSetRenderTargets)(&commands, 1, ts, NULL, &PZ, NULL); float f[4] = {0, 0, 1, 1};
+          API(nvnCommandBufferSetScissor)(&commands, 0, 0, W, H); API(nvnCommandBufferClearColor)(&commands, 0, f, 15); API(nvnCommandBufferClearDepthStencil)(&commands, 1.0f, 1, 0, 0xff); } submit();
+      int cw = 0, ch = 0, zw = 0, zh = 0, cs = nvn_be_tex_storage_size(&P, &cw, &ch), zs = nvn_be_tex_storage_size(&PZ, &zw, &zh);
+      printf("  颜色存储 %dx%d 记录 %d，深度存储 %dx%d 记录 %d（期望两者相同）\n", cw, ch, cs, zw, zh, zs);
+      REQUIRE(cw == zw && ch == zh);
+      if (scaled) REQUIRE(cs == RS_SCALED && cw == W / 2);   // 补了渲染目标用途，颜色缩成
+      paint(want, W, H, BLUE, NULL, 0, 1);   // 打包贴图的 ReadTexels 以池内存为准（读到打包原数据），GPU 内容走 CopyTextureToBuffer
+      begin(); { NVNcopyRegion r = {0, 0, 0, W, H, 1}; API(nvnCommandBufferCopyTextureToBuffer)(&commands, &P, NULL, &r, pa + BUF_OFFSET, 0); } submit();
+      compare((uint8_t *)storage + BUF_OFFSET, want, W, H, NULL, 0, 0, "P 内容 = 清屏蓝"); }
     done();
 
     printf("t_nvn_rscale %s：%u 组、%u 项全过\n", argv[1], cases, checks);

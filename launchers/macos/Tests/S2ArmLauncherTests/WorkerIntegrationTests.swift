@@ -20,7 +20,8 @@ import XCTest
         XCTAssertEqual(marker?["id"] as? String,store.preferences.libraryId)
         XCTAssertFalse(store.preferences.libraryId.isEmpty)
         XCTAssertEqual(store.tasks.first(where:{$0.id==id})?.state,"completed")
-        let firstRequest=try JSONSerialization.jsonObject(with:Data(contentsOf:store.privateRoot.appendingPathComponent("jobs/\(id).request.json"))) as? [String:Any]
+        // 游戏库结构 P3：setup 起跑时库还没建好，任务记录退回 <私有目录>/logs/jobs；库建好后的作业写 <库>/logs/jobs
+        let firstRequest=try JSONSerialization.jsonObject(with:Data(contentsOf:store.privateRoot.appendingPathComponent("logs/jobs/\(id).request.json"))) as? [String:Any]
         XCTAssertEqual(firstRequest?["metalHud"] as? Bool,false)
         store.preferences.metalHud=true
         store.savePreferences()
@@ -34,7 +35,7 @@ import XCTest
             let done=expectation(description:"fast catalogue EOF")
             let requestID=store.worker("catalog",visible:false) {_ in done.fulfill()}
             await fulfillment(of:[done],timeout:10)
-            let request=try JSONSerialization.jsonObject(with:Data(contentsOf:store.privateRoot.appendingPathComponent("jobs/\(requestID).request.json"))) as? [String:Any]
+            let request=try JSONSerialization.jsonObject(with:Data(contentsOf:library.appendingPathComponent("logs/jobs/\(requestID).request.json"))) as? [String:Any]
             XCTAssertEqual(request?["metalHud"] as? Bool,true)
         }
         store.terminate()

@@ -96,14 +96,15 @@ def sources(root):
 def engine_l1(root):
     """引擎通用第一层（10-29 60 帧泛化）：graphics/nvn/games/profile_guess.engine 对 Unity / UE4 主程序推导 present_interval_derived=display
     （引擎自己的 targetFrameRate / t.MaxFPS 管限帧，交换间隔放开后逻辑按真实时间推进）。直连宿主按 game_tsv.h s2a_present_decide 放开出图间隔，
-    逻辑速度红（L3 need_l3 / 名单_60帧 红 / 强信号表）才关。产物根没有 exefs + romfs、或推导失败 → False（不算来源，不报错）"""
+    逻辑速度红（L3 need_l3 / 名单_60帧 红 / 强信号表）才关。产物根没有 exefs + romfs → False；推导失败 → False 并在错误输出打【红】行（不算来源、不中断）"""
     ex, rf = os.path.join(root, 'exefs'), os.path.join(root, 'romfs')
     if not (os.path.isdir(ex) and os.path.exists(rf)): return False
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'graphics', 'nvn', 'games')); import profile_guess
         F = profile_guess.facts_of(ex, rf); profile_guess.guess(F)
         return (profile_guess.engine(F).get('present_interval_derived') or ('',))[0] == 'display'
-    except Exception:
+    except Exception as e:   # 审计 P1-138：推导出错照旧不算来源、不中断出包（60 帧还有名单 / 补丁等来源），但必须响亮报出来，不能静默当「不是 Unity / UE」
+        print(f'【红】caps_policy 引擎推导出错（{root}），本次不把引擎通用算作 60 帧来源：{type(e).__name__}: {e}', file=sys.stderr)
         return False
 
 

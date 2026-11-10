@@ -20,6 +20,6 @@ build_opus() (
         cp "$work/src/COPYING" "$work/result/"
         codec_publish "$work/result" "$target"
     fi
-    codec_shim s2a_opus "$target/libopus.a" "$repo_dir/services/opus/s2a_opus.c" "$target/include" "$target"
+    codec_shim s2a_opus "$target/libopus.a" "$target/include" "$target" "$repo_dir/services/opus/s2a_opus.c"
     cp "$target/COPYING" "$licenses/opus-COPYING.txt"
 )

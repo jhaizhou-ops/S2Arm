@@ -12,6 +12,9 @@ enum UpdateState: Equatable {
 }
 
 extension S2ArmLauncherModel {
+    /// 自动更新失败时「打开下载页」：官方下载页（用系统浏览器打开），手动下载新版
+    static let downloadPage = URL(string: "https://jhaizhou-ops.github.io/S2Arm/")!
+
     /// 控制口用：{state, detail, percent}。
     var updateStatus: [String: Any] {
         switch updateState {

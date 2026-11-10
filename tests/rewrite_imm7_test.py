@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 S2Arm contributors
-"""P2-20: real C CLI must not round/wrap plain()'s scratch restore address.
+"""Real C CLI must not round/wrap plain()'s scratch restore address.
 
 Inputs are original synthetic NSOs. AArch64 signed imm7 * 8 is decoded
-independently; the saved address must equal SP_delta + restore displacement.
-Android's existing indexed spframe route remains allowed where encodable.
+independently; the restore must read the saved pair and leave SP at its
+original writeback value. Apple's pair must also lie outside the red zone.
 """
 import importlib.util
 import os
@@ -44,7 +44,7 @@ def source_word(kind, delta):
     return op | (((delta // scale) & 127) << 15) | (2 << 10) | (31 << 5) | 18
 
 
-def check_output(directory, delta, framed):
+def check_output(directory, delta, apple):
     data = (directory / 'main.patched.bin').read_bytes()
     word, = struct.unpack_from('<I', data, 0x100)
     assert word >> 26 == 5, 'original instruction was not rewritten to B'
@@ -56,17 +56,21 @@ def check_output(directory, delta, framed):
         if w >> 26 == 5:
             break
     # The production trampoline saves/restores two scratch registers through SP.
-    stores = [w for w in words if (w & 0xffc003e0) ==
-              (0xa98003e0 if framed else 0xa90003e0)]
-    loads = [w for w in words if (w & 0xffc003e0) ==
-             (0xa8c003e0 if framed else 0xa94003e0)]
-    assert len(stores) == len(loads) == 1, 'missing scratch save/restore'
-    save, restore = pair_offset(stores[0]), pair_offset(loads[0])
-    if framed:
-        assert save <= -16 and restore == delta - save, (save, restore, delta)
-    else:
-        assert save == delta + restore, f'store {save}, restore effective {delta + restore} (d={delta}, encoded={restore})'
-    return save, restore
+    stores = [w for w in words if (w & 0xffc003e0) == 0xa98003e0]
+    assert len(stores) == 1, 'missing scratch save'
+    load_modes = (0xa8c003e0, 0xa94003e0) if apple else (0xa8c003e0,)
+    loads = [(i, w) for i, w in enumerate(words) if (w & 0xffc003e0) in load_modes]
+    assert len(loads) == 1, 'missing scratch restore'
+    i, load = loads[0]
+    save, restore = pair_offset(stores[0]), pair_offset(load)
+    assert save <= (-144 if apple else -16) and save % 16 == 0, save
+    assert (stores[0] & 0x7c1f) == (load & 0x7c1f), 'restored wrong registers'
+    if (load & 0xffc003e0) == 0xa94003e0:
+        assert restore == 0, restore
+        add = words[i + 1]
+        assert (add & 0xffc003ff) == 0x910003ff, 'missing add sp, sp, #imm'
+        restore = (add >> 10) & 4095
+    assert restore == delta - save, (save, restore, delta)
 
 
 def main():
@@ -119,16 +123,10 @@ def main():
                     try:
                         if want_ok:
                             assert result.returncode == 0, result.stdout + result.stderr
-                            save, restore = check_output(directory, delta, framed)
+                            check_output(directory, delta, target == 'apple')
                             accepted += 1
                         else:
-                            detail = ''
-                            if result.returncode == 0:
-                                try:
-                                    check_output(directory, delta, False)
-                                except AssertionError as error:
-                                    detail = str(error)
-                            assert result.returncode != 0, 'unsafe sequence accepted: ' + detail
+                            assert result.returncode != 0, 'unsafe sequence accepted'
                             assert 'PFRW' in result.stdout and ('GAP' in result.stdout or 'fatal=1' in result.stdout), result.stdout + result.stderr
                             rejected += 1
                         print('通 ' + label)

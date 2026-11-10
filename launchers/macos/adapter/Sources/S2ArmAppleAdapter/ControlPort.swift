@@ -69,6 +69,13 @@ final class ControlStateCache: @unchecked Sendable {
     public nonisolated let token: String
     public private(set) var port: UInt16 = 0
     public var controlFile: URL { privateRoot.appendingPathComponent("control.json") }
+
+    /// 控制口起不来时也就没有 /state：把原因写进数据目录，s2armctl start 读它报给用户。写不上不影响启动器本身。
+    public nonisolated static func reportStartFailure(privateRoot: URL, why: String) {
+        try? FileManager.default.createDirectory(at: privateRoot, withIntermediateDirectories: true)
+        try? Data(why.utf8).write(to: errorFile(privateRoot))
+    }
+    private nonisolated static func errorFile(_ root: URL) -> URL { root.appendingPathComponent("control.error") }
     private let privateRoot: URL
     private let listener: NWListener
     private let state: @MainActor () -> [String: Any]
@@ -132,6 +139,7 @@ final class ControlStateCache: @unchecked Sendable {
             fail("写不了 " + controlFile.path)
             return
         }
+        try? FileManager.default.removeItem(at: Self.errorFile(privateRoot))
         NSLog("S2Arm 控制口：127.0.0.1:\(port)（\(controlFile.path)）")
         readied(port)
     }
@@ -168,26 +176,73 @@ final class ControlStateCache: @unchecked Sendable {
     }
 }
 
-/// 作业层自己写的作业记录（pack/jobs/core.py：<私有目录>/jobs/<任务>.json，字段 id / operation / gameId / state / stage / milestone / milestones /
+/// 作业层自己写的作业记录（pack/jobs/core.py：<游戏库>/logs/jobs/<任务>.json，库没建好时 <私有目录>/logs/jobs，见 S2ArmPaths.jobsDir，字段 id / operation / gameId / state / stage / milestone / milestones /
 ///   done / total / unit / message / started / ended / diagnostics / ipaPath / outputPath / pid / pidStart）当 GET /state 的 tasks：
 ///   作业是独立进程，界面没有任务表也照样有据（s2armctl wait / errors / logs 读的就是这些字段；控制口不应答时 s2armctl 本来就读同一份文件）。
 public enum ControlJournal {
     /// 玩家看得见的作业（同旧启动器 Store.visibleOperations）；查环境、读游戏库这类后台小作业不进。
-    public static let visibleOperations: Set<String> = ["install", "installRemove", "build", "import", "keys", "downloadMetal", "downloadIosPlatform", "launch", "clean",
+    public static let visibleOperations: Set<String> = ["install", "installRemove", "installRestore", "build", "moveGame", "import", "keys", "downloadMetal", "downloadIosPlatform", "launch", "clean",
                                                         "remove", "delete", "diagnostics", "prepareEngine", "pullDiagnostics", "ipa", "installDotnet", "setup", "spaceFree"]
 
     /// 最近的 limit 条，按开始时间从旧到新。
-    public static func tasks(privateRoot: URL, limit: Int = 60) -> [[String: Any]] {
-        let dir = privateRoot.appendingPathComponent("jobs")
+    /// 控制口每秒刷一次状态快照（ControlPort.refreshCache）都会调这里。原先每次把任务目录里所有记录重读、重解析一遍：
+    ///   任务多了（11-09 维护者机器 45207 条、290 MB）闲置也占 30–90% CPU、风扇狂转。记录都是先写临时文件再改名（pack/jobs/core.py atomic），
+    ///   每次更新都会改目录的修改时间：目录没变就直接用上次结果；变了只重新解析大小或修改时间变过的文件。没结束的任务每次单独再核一遍
+    public static func tasks(privateRoot: URL, library: String? = nil, limit: Int = 60) -> [[String: Any]] {
+        lock.lock(); defer { lock.unlock() }
+        let dir = S2ArmPaths.jobsDir(privateRoot: privateRoot, library: library)
+        let stamp = stat(dir.path)
+        if let stamp, cache.dir == dir.path, cache.stamp == stamp, cache.limit == limit, !cache.hasLiveTaskChanged(dir: dir) {
+            return cache.result
+        }
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        if cache.dir != dir.path { cache.files = [:] }
+        var files: [String: JournalCache.Entry] = [:]
         var out: [[String: Any]] = []
         for n in names where n.hasSuffix(".json") && !n.hasSuffix(".request.json") {
-            guard let d = try? Data(contentsOf: dir.appendingPathComponent(n)),
-                  let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-                  j["id"] is String, let op = j["operation"] as? String, visibleOperations.contains(op) else { continue }
-            out.append(j)
+            guard let st = stat(dir.appendingPathComponent(n).path) else { continue }
+            let entry: JournalCache.Entry
+            if let old = cache.files[n], old.stat == st {
+                entry = old
+            } else {
+                var record: [String: Any]?
+                if let d = try? Data(contentsOf: dir.appendingPathComponent(n)),
+                   let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                   j["id"] is String, let op = j["operation"] as? String, visibleOperations.contains(op) { record = j }
+                entry = JournalCache.Entry(stat: st, record: record)
+            }
+            files[n] = entry
+            if let j = entry.record { out.append(j) }
         }
         out.sort { ($0["started"] as? Double ?? 0) < ($1["started"] as? Double ?? 0) }
-        return Array(out.suffix(limit))
+        let result = Array(out.suffix(limit))
+        cache.dir = dir.path; cache.stamp = stamp; cache.limit = limit; cache.files = files; cache.result = result
+        cache.live = files.filter { _, e in e.record.map { !terminalStates.contains($0["state"] as? String ?? "") } ?? false }.mapValues(\.stat)
+        return result
+    }
+
+    private static let terminalStates: Set<String> = ["completed", "failed", "cancelled"]
+    private static let lock = NSLock()
+    private static let cache = JournalCache()
+
+    /// 修改时间（纳秒）+ 大小：判断一个文件 / 目录变没变
+    fileprivate struct FileStamp: Equatable { let mtime: Int64; let size: Int64 }
+    fileprivate static func stat(_ path: String) -> FileStamp? {
+        var st = Darwin.stat()
+        guard lstat(path, &st) == 0 else { return nil }
+        return FileStamp(mtime: Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec), size: Int64(st.st_size))
+    }
+
+    private final class JournalCache {
+        struct Entry { let stat: FileStamp; let record: [String: Any]? }
+        var dir = ""
+        var stamp: FileStamp?
+        var limit = 0
+        var files: [String: Entry] = [:]
+        var result: [[String: Any]] = []
+        var live: [String: FileStamp] = [:]   // 还没结束的任务：原地改写不会动目录的修改时间，每次单独核
+        func hasLiveTaskChanged(dir: URL) -> Bool {
+            live.contains { n, st in ControlJournal.stat(dir.appendingPathComponent(n).path) != st }
+        }
     }
 }

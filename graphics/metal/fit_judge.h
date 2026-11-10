@@ -79,6 +79,30 @@ static int fj_dark_band(const fj_src *t, int *right, int *pct) {
     #undef RSUM
     return -1;
 }
+// 中间整列纯黑（11-09 质量线，哈迪斯 II 强制整套放宽：画面中段 291 / 1280 列整列 RGB 全 0、两侧都是场景，旧判据只扫贴边的带和 16:9 边界，宿主报满屏 0 红）：
+//   第一 / 最后一列有内容的列之间，最长一段整列纯黑 ≥ max(宽 / 50, 8) 列，且 ① 这段两侧紧挨各 8 列的平均亮度（RGB 和）≥ 12——真露空是断崖，游戏自己的暗角是渐暗
+//   （丝之歌右侧暗角里零星萤火虫：紧挨列 0–0.2）；② 这段以外的画面里纯黑像素 < 50%——黑底页上左右各摆一块内容（动森对话页 89%）不算。
+//   标定（11-09，S2A_2T 盘上 815 张自动玩家截图 + 哈迪斯三张）：命中哈迪斯 ap_mid / ap_mark（紧挨列 101–127）与超级马力欧奥德赛放宽实验坏图（15.5–17.8），丝之歌 / 动森 / 其余 0 张。
+//   返回黑段起点列（*len = 列数），没有返回 -1
+static int fj_mid_black(const fj_src *t, uint8_t *buf, int *len) {
+    int w = t->w, h = t->h, lo = -1, hi = -1;
+    for (int x = 0; x < w; x++) if (!fj_col_black(t, x, buf)) { if (lo < 0) lo = x; hi = x; }
+    if (lo < 0 || hi - lo < 2) return -1;
+    int best = 0, bs = -1, cur = 0;
+    for (int x = lo + 1; x < hi; x++) { if (fj_col_black(t, x, buf)) { if (++cur > best) { best = cur; bs = x - cur + 1; } } else cur = 0; }
+    int need = w / 50 > 8 ? w / 50 : 8;
+    if (best < need) return -1;
+    double side[2] = {0, 0}; int nside[2] = {0, 0};
+    for (int k = 1; k <= 8; k++) {
+        int xs[2] = {bs - k, bs + best - 1 + k};
+        for (int j = 0; j < 2; j++) { if (xs[j] < 0 || xs[j] >= w) continue; t->col(t->ctx, xs[j], buf); for (int y = 0; y < h; y++) side[j] += buf[4 * y] + buf[4 * y + 1] + buf[4 * y + 2]; nside[j] += h; }
+    }
+    if (!nside[0] || !nside[1] || side[0] / nside[0] < 12 || side[1] / nside[1] < 12) return -1;
+    uint64_t blk = 0, tot = 0;
+    for (int x = lo; x <= hi; x++) { if (x >= bs && x < bs + best) continue; t->col(t->ctx, x, buf); for (int y = 0; y < h; y++) blk += !(buf[4 * y] | buf[4 * y + 1] | buf[4 * y + 2]); tot += (uint64_t)h; }
+    if (!tot || blk * 2 >= tot) return -1;
+    *len = best; return bs;
+}
 // 两侧带与中间不连续（10-29 马车8 选轮胎页：两侧留旧帧 / 铺满画布的底纹只画了中间，整列不黑、暗带判据也不认）：16:9 边界 b0 左右各 ±3 列里找接缝最强的一列 b，
 //   逐行比跨边台阶 |I[b] − I[b−1]|（RGB 和）与它两侧各 7 列相邻台阶的中位数：台阶 > max(3 × 中位, 24) 的行 = 接缝行；返回接缝行占比最大的那列的占比（百分数），*col = 那列。
 //   这一侧带除接缝搜索窗（边界 ±R+1 列）外整列纯黑（RGB 全 0，同本文件黑带口径；原比例页 / 黑边，归黑带判据管）返回 -1：上屏双线性放大时边界那一列混进内容、不再纯黑
@@ -185,6 +209,9 @@ static void fj_judge(fj_state *S, const fj_src *qt, int geo, const char *geo_why
         // 贴边暗带：黑带没判出、也不是原比例页 / 两侧是游戏画的（g 非 0：纯 2D 页、菜单衬底贴边本来就暗，10-22 塞尔达标题页右侧极暗）
         int rs, pc, dx = !c && (g == 0 || g == 2) ? fj_dark_band(qt, &rs, &pc) : -1;   // 原比例回退（5）两侧本就是黑带，不判暗带 / 接缝
         if (dx >= 0) { c = 1; kind = 3; snprintf(why, sizeof why, "画面 %dx%d %s第 %d 列起明显变暗、断口贯穿 %d%% 行（某一遍没铺满放宽宽度）", w, h, rs ? "右侧" : "左侧到", rs ? dx : dx - 1, pc); }
+        // 中间整列纯黑（fj_mid_black）：只在常规帧判（g 0）；原比例页 / 两侧是游戏画的 / 纯 2D 合成 / 回退的排版归游戏
+        if (!c && g == 0) { int ml = 0, mx = fj_mid_black(qt, buf, &ml);
+            if (mx >= 0) { c = 1; kind = 1; snprintf(why, sizeof why, "画面 %dx%d 中间第 %d–%d 列整列纯黑（%d 列，两侧紧挨都是画面：放宽后中间一块没画到）", w, h, mx, mx + ml - 1, ml); } }
         // 两侧带与中间不连续（fj_seam）：黑带 / 暗带都没判出时再看；游戏自己出宽图的纯 2D 合成帧（4）排版归游戏，不判
         //   两侧是放宽内容画的（2：铺满画布的层按放宽画过两侧，见 WidenFrame.MarkBands）也不判：接缝判据的两个前提「两侧留旧帧」「铺满画布的层没铺满」都被这个结论否掉，
         //   剩下的跨边台阶是游戏自己的排版（11-02 植物大战僵尸协议页：压暗层已推满整幅、两侧同乘 0.32，游戏在压暗之后又在画布外画侧饰，第 213 列接缝 99% 行）

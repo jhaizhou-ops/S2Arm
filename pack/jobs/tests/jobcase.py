@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
+import os
+os.environ.setdefault("S2A_BANNER_FETCH", "0")   # 作业层测试一律不连商店（library.store_meta）；要测的用例自己打桩
 
 JOBS = Path(__file__).resolve().parents[1]
 ROOT = JOBS.parents[1]
@@ -73,6 +76,27 @@ def _windows_private_request(path, value):
         temporary.unlink(missing_ok=True)
 
 
+
+class OsView:
+    """只给被测模块看的 os：name 缺省 "nt"，其余转给真 os（构造时可再覆盖几个属性，如 replace）。
+    不能改全进程的 os.name：Python 3.12 起 Path() 构造时看 os.name，mock 期间新建的路径变成 WindowsPath，
+    「/var/folders/…/job.json」被当成反斜杠相对名写进当前目录（各线工作树根反复冒出「\\var\\folders…」杂文件、两次被 git add -A 带进提交）"""
+    def __init__(self, name="nt", **override):
+        self.name = name
+        self.__dict__.update(override)
+
+    def __getattr__(self, key):
+        return getattr(os, key)
+
+
+def as_windows(*modules, **override):
+    """被测模块按 Windows 分支走：只替换这些模块的 os 属性"""
+    from contextlib import ExitStack
+    stack = ExitStack()
+    for m in modules:
+        stack.enter_context(unittest.mock.patch.object(m, "os", OsView(**override)))
+    return stack
+
 class JobCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="s2arm-g01 ")
@@ -113,7 +137,7 @@ class JobCase(unittest.TestCase):
         self.assertTrue(diagnostic["suggestion"])
         self.assertEqual(terminal["message"], diagnostic["summary"])
         self.assertTrue(Path(diagnostic["logPath"]).is_file())
-        saved = json.loads((self.c.private / "jobs" / (terminal["taskId"] + ".json")).read_text())
+        saved = json.loads((self.c.library / "logs" / "jobs" / (terminal["taskId"] + ".json")).read_text())   # 库已建好：任务记录在 <库>/logs/jobs
         self.assertEqual(saved["diagnostics"], terminal["diagnostics"])
         return diagnostic
 
@@ -152,6 +176,16 @@ if source.read_bytes() == b"unreadable fixture":
 if source.read_bytes() == b"unknown exit fixture":
     print("Unrecognized fixture error")
     raise SystemExit(17)
+if source.read_bytes().startswith(b"content id fixture"):   # 新读取器：带各 NCA 的 content ID（导入按它定原件身份，不读全文件）
+    print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"Synthetic","display":"1.0","guestIsa":"aarch64","builds":{},
+        "contentIds":["000000000000000000000000000000bb","000000000000000000000000000000aa"]}]}))
+    raise SystemExit(0)
+if source.read_bytes() == b"chinese title fixture":   # 标题简体中文优先、另给英文名（文件夹取名用），封面写进 argv[5]
+    pathlib.Path(sys.argv[5]).mkdir(parents=True, exist_ok=True)
+    (pathlib.Path(sys.argv[5]) / "0100000000000000.jpg").write_bytes(b"ICON")
+    print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"空洞骑士：丝之歌",
+        "englishName":"Hollow Knight: Silksong","display":"1.0","guestIsa":"aarch64","builds":{}}]}))
+    raise SystemExit(0)
 if source.read_bytes() == b"disappear fixture":
     source.unlink()
 print(json.dumps({"schema":1,"packages":[{"titleId":"0100000000000000","baseId":"0100000000000000","type":"base","version":0,"name":"Synthetic","display":"1.0","guestIsa":"aarch64","builds":{}}]}))
@@ -261,3 +295,20 @@ def synthetic_nacp(title, display):   # 0x4000 字节：ApplicationTitle[0] 名�
     b[:len(title.encode())] = title.encode()
     b[0x3060:0x3060 + len(display)] = display.encode()
     return bytes(b)
+
+
+def ios_fixture(c, gid, *, shell="SID1", pack="cafe01", compat=None, fixups=True):
+    """游戏库结构 v3 里一款出好的 iPhone 版：这款文件夹 image/ios/kit（容器件：main.npdm + 改写产物表）+ image/ios/pack（资源包，清单带 index_sha256），
+    game.json 的 ios 记出它的壳号、资源包号（compat 给了再记 hostAbi / dmshChain）→ (kit, pack)"""
+    import layout
+    image = layout.image_ios(c, gid)
+    kit, pk = image / "kit", image / "pack"
+    kit.mkdir(parents=True, exist_ok=True)
+    (kit / "main.npdm").write_bytes(b"META")
+    if fixups:
+        (kit / "main.fixups.tsv").write_text("")
+    (pk / "romfs").mkdir(parents=True, exist_ok=True)
+    (pk / "romfs/a").write_bytes(b"12345"); (pk / "index.tsv").write_text("romfs/a\t5\th\n")
+    (pk / "manifest.json").write_text(json.dumps({"version": 2, "index_sha256": pack}))
+    layout.update_info(c, gid, ios=dict(shellId=shell, pack=pack, **(compat or {})))
+    return kit, pk

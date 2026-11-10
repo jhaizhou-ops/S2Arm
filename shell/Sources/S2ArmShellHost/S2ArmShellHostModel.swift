@@ -6,10 +6,16 @@ import ShellUI
 
 /// 我方宿主层的最小实现：清单 → 库界面条目；手柄 / 键盘语义输入（上游 ShellControllers 原样）；Play → C 出口 s2a_shell_play。
 /// 只借上游 ShellHostModel 的设计（@Observable 模型 + actions + startControllers），不带它的 EngineLaunchPlan / DM_* / framework 扫描。
-/// 设置行：每款游戏的「画面」「虚拟手柄」两组（S2ArmGameSettings，11-07 维护者）；数据目录、云存档、删除等动作本刀不接（ShellActions 缺省空操作）。
+/// 设置行：每款游戏的「画面」「虚拟手柄」两组（S2ArmGameSettings，11-07 维护者）；数据目录、云存档等动作本刀不接（ShellActions 缺省空操作）。
+/// 删除游戏（#227）：删本机这款的游戏数据（Documents/games/<游戏号>），勾了连存档才删存档；删完重判，库里随即不再显示（App 里的程序随下次从电脑装机摘掉）。
 @MainActor @Observable
 public final class S2ArmShellHostModel {
-    public private(set) var games: [GameDetail]
+    /// 清单里的全部款（容器里的）
+    private var allGames: [GameDetail]
+    /// 这台设备上资源没到位的款：不在库里显示
+    private var notOnDevice: Set<String> = []
+    /// 库里显示的款：只有这台设备上真能玩的（清单列着、资源已到位）
+    public var games: [GameDetail] { allGames.filter { !notOnDevice.contains($0.id) } }
     public private(set) var controllers: [ControllerInfo] = []
     public private(set) var input = ShellInputLog()
     public private(set) var padSnapshot: PadSnapshot?
@@ -18,6 +24,8 @@ public final class S2ArmShellHostModel {
     /// 本款资源包在不在机上（宿主按 Documents/games/<游戏号> 判，见 s2a_shell.h）；清单写 playable 的款不在就改显示「需要游戏数据」、不给 Play
     @ObservationIgnored private let gameDataReady: (String) -> Bool
     @ObservationIgnored private let pickGameData: (String) -> Void
+    /// 这台设备上每款数据的根（宿主同一取法：launch.ctx 的 docs = @home/Documents/games/<游戏号>）；单测可换
+    @ObservationIgnored private let gamesRoot: URL
     /// 清单里写的状态（重判资源包时以它为底，不叠加）
     @ObservationIgnored private let listedStates: [String: GameState]
     @ObservationIgnored private let stores: S2ArmGameSettings.Stores
@@ -26,6 +34,8 @@ public final class S2ArmShellHostModel {
     public var editingLayout: String?
     /// 正在改名字和封面的那款（非空时宿主视图盖上编辑页）
     public var editingIdentity: String?
+    /// 编辑页上次点保存没存成的原因（存成 / 关页清掉）
+    public private(set) var identityError: String?
     @ObservationIgnored private let identityStore: GameIdentityStore
     /// 清单里写的条目：恢复默认时回到它
     @ObservationIgnored private var listedTiles: [String: GameTile] = [:]
@@ -36,12 +46,14 @@ public final class S2ArmShellHostModel {
     /// play 缺省走 C 出口；单测可换
     public init(catalogue: Catalogue, play: ((String) -> Void)? = nil, stores: S2ArmGameSettings.Stores = .live,
                 layoutState: @escaping (String) -> S2ArmGameSettings.LayoutState = S2ArmGameSettings.layoutState,
-                gameDataReady: ((String) -> Bool)? = nil, pickGameData: ((String) -> Void)? = nil, identityStore: GameIdentityStore = .live) {
+                gameDataReady: ((String) -> Bool)? = nil, pickGameData: ((String) -> Void)? = nil, identityStore: GameIdentityStore = .live,
+                gamesRoot: URL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/games")) {
+        self.gamesRoot = gamesRoot
         self.stores = stores; self.layoutState = layoutState; bannerURLs = catalogue.bannerURLs
         self.identityStore = identityStore
         listedTiles = Dictionary(catalogue.tiles.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         listedBanners = catalogue.bannerURLs
-        games = catalogue.tiles.map { tile in
+        allGames = catalogue.tiles.map { tile in
             var state = layoutState(tile.id); state.customIdentity = identityStore.load(tile.id) != nil
             return GameDetail(game: tile, sections: S2ArmGameSettings.sections(for: tile.id, stores: stores, state: state))
         }
@@ -56,10 +68,10 @@ public final class S2ArmShellHostModel {
         //   S2A_SHELL_OPEN_LAYOUT_EDITOR=<游戏号> 起来直接盖上这款的「调整位置」编辑页
         //   S2A_SHELL_PLAY=<游戏号> 起来 2 秒后替人点这款的 Play（走同一条 requestPlay → C 出口；截图局别带 S2A_AUTOPLAY=1：没有视觉驾驶员时自动玩家判卡住、优雅退出）
         let env = ProcessInfo.processInfo.environment
-        if let id = env["S2A_SHELL_OPEN_LAYOUT_EDITOR"], games.contains(where: { $0.id == id }) {
+        if let id = env["S2A_SHELL_OPEN_LAYOUT_EDITOR"], allGames.contains(where: { $0.id == id }) {
             editingLayout = id; NSLog("S2Arm 游戏库：S2A_SHELL_OPEN_LAYOUT_EDITOR 直接开 %@ 的调整位置页", id)
         }
-        if let id = env["S2A_SHELL_PLAY"], games.contains(where: { $0.id == id }) {
+        if let id = env["S2A_SHELL_PLAY"], allGames.contains(where: { $0.id == id }) {
             NSLog("S2Arm 游戏库：S2A_SHELL_PLAY 2 秒后开始 %@", id)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.requestPlay(id) }
         }
@@ -67,12 +79,15 @@ public final class S2ArmShellHostModel {
 
     /// 重判各款资源包（建好、回前台、宿主说明里「重新检查」后）：清单 playable 且资源包不在 → needsGameData；放好了 → 回到清单状态
     public func refreshGameData() {
-        for i in games.indices {
-            let id = games[i].id, listed = listedStates[id] ?? games[i].game.state
-            let want: GameState = listed == .playable && !gameDataReady(id) ? .needsGameData : listed
-            if games[i].game.state != want {
+        var missing = Set<String>()
+        defer { if missing != notOnDevice { notOnDevice = missing }; NSLog("S2Arm 游戏库：这台设备上 %d / %d 款可玩", allGames.count - missing.count, allGames.count) }
+        for i in allGames.indices {
+            let id = allGames[i].id, listed = listedStates[id] ?? allGames[i].game.state, ready = gameDataReady(id)
+            if !ready { missing.insert(id) }
+            let want: GameState = listed == .playable && !ready ? .needsGameData : listed
+            if allGames[i].game.state != want {
                 NSLog("S2Arm 游戏库：%@ 资源包%@", id, want == .needsGameData ? "不在机上，显示需要游戏数据" : "已就绪")
-                games[i].game.state = want
+                allGames[i].game.state = want
             }
         }
     }
@@ -81,18 +96,51 @@ public final class S2ArmShellHostModel {
         ShellActions(onPlay: { [weak self] id in self?.requestPlay(id) },
                      onChange: { [weak self] id, setting, value in self?.change(id, setting, value) },
                      onPickGameData: { [weak self] id in self?.requestGameData(id) },
-                     onButtonTest: { [weak self] open in self?.buttonTest(open) })
+                     onPickShellCloud: Self.pickCloudFolder, onClearShellCloud: Self.pickCloudFolder == nil ? nil : { CloudSaves.forget() },
+                     onButtonTest: { [weak self] open in self?.buttonTest(open) },
+                     onDeleteGame: { [weak self] id, saves in self?.deleteGame(id, saves: saves) })
+    }
+
+    /// 库设置「云存档 → 选择文件夹…」（iCloud 存档同步，见 CloudSaves.swift）：iOS 弹系统文件夹选择器；Mac 上跑单测时没有界面
+    static var pickCloudFolder: (() -> Void)? {
+        #if canImport(UIKit)
+        return { CloudFolderPicker.present() }
+        #else
+        return nil
+        #endif
     }
 
     /// 只放行可运行的那款（界面本身也只在 playable 时调 onPlay，这里再守一道）；放行前当场重判资源包（库开着时资源被删 / 换机拷走）
     public func requestPlay(_ id: String) {
         refreshGameData()
-        if games.first(where: { $0.id == id })?.game.state == .needsGameData { requestGameData(id); return }
-        guard let g = games.first(where: { $0.id == id }), g.game.state == .playable else {
+        if allGames.first(where: { $0.id == id })?.game.state == .needsGameData { requestGameData(id); return }
+        guard let g = allGames.first(where: { $0.id == id }), g.game.state == .playable else {
             NSLog("S2Arm 游戏库：Play %@ 被拒（不在列表或不可运行）", id)
             return
         }
         play(id)
+    }
+
+    /// 存档在这款数据根下的 S2A/（Ryujinx 数据根 <文档根>/S2A/ryujinx，存档 bis/user/save，同 pack/jobs/install.py SAVE_REL）
+    static let saveRoot = "S2A"
+
+    /// 删除这款的本机数据：saves = 连存档一起删（整个数据根），否则留下 S2A/（存档与用户资料）、其余（资源包、名字封面等）删掉。删完重判资源包，库里随即不显示
+    public func deleteGame(_ id: String, saves: Bool) {
+        guard allGames.contains(where: { $0.id == id }), id.allSatisfy({ $0.isHexDigit }) else { return }
+        let fm = FileManager.default, dir = gamesRoot.appendingPathComponent(id)
+        do {
+            if saves {
+                if fm.fileExists(atPath: dir.path) { try fm.removeItem(at: dir) }
+            } else {
+                for item in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where item.lastPathComponent != Self.saveRoot {
+                    try fm.removeItem(at: item)
+                }
+            }
+            NSLog("S2Arm 游戏库：已删除 %@ 的本机数据%@", id, saves ? "（含存档）" : "（存档保留）")
+        } catch {
+            NSLog("S2Arm 游戏库：删除 %@ 失败：%@", id, error.localizedDescription)
+        }
+        refreshGameData()
     }
 
     /// 「需要游戏数据」那款：交宿主给导入说明（宿主「重新检查」后经 s2a_shell_refresh 回到 refreshGameData）
@@ -101,7 +149,7 @@ public final class S2ArmShellHostModel {
     /// 设置行改了：存下、刷新这一款的设置行；选「调整位置…」打开编辑页
     public func change(_ id: String, _ setting: String, _ value: String) {
         if setting == S2ArmGameSettings.identity {
-            if value == S2ArmGameSettings.editIdentity { editingIdentity = id }
+            if value == S2ArmGameSettings.editIdentity { editingIdentity = id; identityError = nil }
             refresh(id)
             return
         }
@@ -111,29 +159,34 @@ public final class S2ArmShellHostModel {
     /// 编辑页关了（存了 / 取消 / 恢复默认）：布局行跟着刷新
     public func closeLayoutEditor() { if let id = editingLayout { editingLayout = nil; refresh(id) } }
     func refresh(_ id: String) {
-        guard let i = games.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = allGames.firstIndex(where: { $0.id == id }) else { return }
         var state = layoutState(id); state.customIdentity = identityStore.load(id) != nil
-        games[i].sections = S2ArmGameSettings.sections(for: id, stores: stores, state: state)
+        allGames[i].sections = S2ArmGameSettings.sections(for: id, stores: stores, state: state)
     }
 
     /// 改名字和封面的编辑页要用：当前显示的名字，以及有没有自定义
-    public func identityName(_ id: String) -> String { games.first(where: { $0.id == id })?.game.title ?? "" }
+    public func identityName(_ id: String) -> String { allGames.first(where: { $0.id == id })?.game.title ?? "" }
     public func hasCustomIdentity(_ id: String) -> Bool { identityStore.load(id) != nil }
 
+    /// 名字和封面一次提交（GameIdentityStore.save）。存成了关编辑页；没存成不关页、留着玩家填的，identityError 给编辑页显示原因
     public func saveIdentity(_ id: String, name: String, cover: Data?) {
         // 名字没动时不存成自定义，否则电脑端以后改名就传不到这台手机
         let keep = name == listedTiles[id]?.title ? "" : name
         do { try identityStore.save(id, name: keep, cover: cover) }
-        catch { NSLog("S2Arm 游戏库：保存 %@ 的名字和封面失败：%@", id, error.localizedDescription) }
+        catch {
+            NSLog("S2Arm 游戏库：保存 %@ 的名字和封面失败：%@", id, error.localizedDescription)
+            identityError = error.localizedDescription
+            return
+        }
         closeIdentityEditor(id)
     }
     public func resetIdentity(_ id: String) { identityStore.clear(id); closeIdentityEditor(id) }
-    public func closeIdentityEditor(_ id: String) { editingIdentity = nil; applyIdentity(id); refresh(id) }
+    public func closeIdentityEditor(_ id: String) { editingIdentity = nil; identityError = nil; applyIdentity(id); refresh(id) }
 
     /// 把这台手机上的名字和封面叠到清单条目上；没有就回到清单原样，状态保持不变。
     private func applyIdentity(_ id: String) {
-        guard let i = games.firstIndex(where: { $0.id == id }), var tile = listedTiles[id] else { return }
-        tile.state = games[i].game.state
+        guard let i = allGames.firstIndex(where: { $0.id == id }), var tile = listedTiles[id] else { return }
+        tile.state = allGames[i].game.state
         bannerURLs[id] = listedBanners[id]
         if let custom = identityStore.load(id) {
             if !custom.name.isEmpty { tile.title = custom.name }
@@ -141,7 +194,7 @@ public final class S2ArmShellHostModel {
                 tile.banner = art; tile.icon = art; bannerURLs[id] = url
             }
         }
-        games[i].game = tile
+        allGames[i].game = tile
     }
 
     public func startControllers() {

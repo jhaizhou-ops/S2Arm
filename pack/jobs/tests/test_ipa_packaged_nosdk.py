@@ -50,7 +50,7 @@ class PackagedNoSdk(unittest.TestCase):
         self.assertEqual(nxu.read_text(), '#!/bin/sh\nexec dotnet /App/Engine/Binaries/Reader/nx_unpack.dll "$@"\n')
         self.assertTrue(os.access(nxu, os.X_OK))
         self.assertEqual(env.get("DOTNET_ROOT"), before, "不换成外部 SDK")
-        self.assertTrue(r["ipa"].endswith("x.ipa"))
+        self.assertTrue((Path(r["outputPath"]) / "kit" / "main.npdm").is_file())   # 交付件进了这款的 image/ios（不再留单款 ipa）
 
     @shared_extract
     def test_packaged_missing_shell_is_reinstall(self):

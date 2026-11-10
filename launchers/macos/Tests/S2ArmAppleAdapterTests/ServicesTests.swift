@@ -6,7 +6,7 @@ final class LibraryProviderTests: XCTestCase {
     func testCatalogResultBecomesGameSummaries() throws {
         let box = try Sandbox(); defer { box.remove() }
         let runner = FakeRunner()
-        runner.script = { _ in ([eventLine("result", state: "succeeded", message: "操作完成", extra: #","result":{"games":[{"id":"0100A","name":"Alpha","display":"1.2.0","cover":"/L/games/0100A/cover.jpg","ready":true,"needsPreparation":false,"compatibility":"experimental","missing":[]},{"id":"0100B","name":"Beta","cover":"","ready":true,"needsPreparation":true},{"id":"0100C","name":"Hidden","hidden":true},{"name":"no id"}]}"#)], 0, false) }
+        runner.script = { _ in ([eventLine("result", state: "succeeded", message: "操作完成", extra: #","result":{"games":[{"id":"0100A","name":"Alpha","display":"1.2.0","cover":"/L/games/0100A/cover.jpg","ready":true,"needsPreparation":false,"compatibility":"experimental","missing":[],"sizes":{"imageMac":1,"imageIos":2,"saves":3,"cache":4,"sources":5000000000,"measured":true}},{"id":"0100B","name":"Beta","cover":"","ready":true,"needsPreparation":true},{"id":"0100C","name":"Hidden","hidden":true},{"name":"no id"}]}"#)], 0, false) }
         let done = expectation(description: "load")
         var games: [GameSummary] = []
         LibraryProvider(client: client(box, runner)).load { if case .success(let g) = $0 { games = g }; done.fulfill() }
@@ -18,6 +18,26 @@ final class LibraryProviderTests: XCTestCase {
         XCTAssertNil(games[1].cover)
         XCTAssertTrue(games[0].playable)
         XCTAssertFalse(games[1].playable)   // 运行文件要重新准备
+        XCTAssertEqual(games[0].sizes, GameSizes(imageMac: 1, imageIos: 2, saves: 3, cache: 4, sources: 5_000_000_000, measured: true))
+        XCTAssertEqual(games[1].sizes, GameSizes(), "catalog 没给 sizes：四项 0、没量过")
+    }
+
+    func testLastKnownGamesShowBeforeTheJobAndFollowTheLibrary() throws {
+        let box = try Sandbox(); defer { box.remove() }
+        let runner = FakeRunner()
+        runner.script = { _ in ([eventLine("result", state: "succeeded", message: "操作完成", extra: #","result":{"games":[{"id":"0100A","name":"Alpha","display":"1.2.0","ready":true,"missing":[]}],"keys":{"ready":true},"jobs":[]}"#)], 0, false) }
+        let provider = LibraryProvider(client: client(box, runner))
+        XCTAssertNil(provider.lastKnownGames(), "没读过：没有列表可显示")
+        let done = expectation(description: "load")
+        provider.load { _ in done.fulfill() }
+        wait(for: [done], timeout: 5)
+        let starts = runner.starts.count
+        let fresh = LibraryProvider(client: client(box, runner))
+        XCTAssertEqual(fresh.lastKnownGames()?.map(\.id), ["0100A"])
+        XCTAssertEqual(fresh.keysReady, true)
+        XCTAssertEqual(runner.starts.count, starts, "读列表不起作业")
+        var other = box.environment(); other.libraryId = "another-library"
+        XCTAssertNil(LibraryProvider(client: client(box, runner, env: other)).lastKnownGames(), "换了游戏库不显示旧列表")
     }
 
     func testNoLibraryFailsWithoutStartingAJob() throws {

@@ -112,20 +112,48 @@ public static class PackCases
               (string?)ipa["shellDir"] == Path.GetFullPath(paths.Shell) && (int?)ipa["parentPid"] == Environment.ProcessId &&
               (string?)ipa["resources"] == Path.GetFullPath(AppContext.BaseDirectory),
             "request: ipa carries game, library id, bundled shell, bundled resources (fonts) and launcher pid");
-        foreach (var op in new[] { "installCheck", "install", "installRemove" })
+        foreach (var op in new[] { "installCheck", "install", "installRemove", "installRestore" })
         {
             var r = PackJobClient.Payload(new(paths, Path.GetTempPath(), Path.GetTempPath(), "lib-id", op, "0100FD70134FA000"), "win-2");
             check((string?)r["resources"] == Path.GetFullPath(AppContext.BaseDirectory) && (op == "install") == r.ContainsKey("shellDir"),
                 $"request: {op} carries the launcher folder (bundled Impactor); only install carries the shell");
         }
+        check(PackJobClient.Operations.Contains("delete"), "request: delete (remove the whole game, saves kept) is a launcher operation since library layout v3");
         foreach (var (operation, extra, label) in new (string, Dictionary<string, object?>?, string)[]
         {
-            ("delete", null, "request: operations outside export / install / remove refused"),
+            ("launch", null, "request: operations outside export / install / remove / library layout refused (Windows does not run games)"),
             ("communitySave", null, "request: game options are not a launcher operation (维护者 11-07)"),
             ("install", new() { ["gameId"] = "other" }, "request: extra fields cannot replace the envelope")
         })
         {
             try { PackJobClient.Payload(new(paths, Path.GetTempPath(), Path.GetTempPath(), "lib-id", operation, "G", extra), "win-3"); }
+            catch (ArgumentException) { check(true, label); continue; }
+            throw new Exception("accepted " + label);
+        }
+
+        // ---- library layout v3 (pack/jobs/library.py move_game / relink_game / forget_game / clean kind=cache, ipa location) ----
+        var where = Path.Combine(Path.GetTempPath(), "Games");
+        Dictionary<string, object?> V3(string op, Dictionary<string, object?>? extra) =>
+            PackJobClient.Payload(new(paths, Path.GetTempPath(), Path.GetTempPath(), "lib-id", op, "0100FD70134FA000", extra), "win-4");
+        var move = V3("moveGame", new() { ["location"] = where });
+        check((string?)move["operation"] == "moveGame" && (string?)move["gameId"] == "0100FD70134FA000" && (string?)move["location"] == where &&
+              !move.ContainsKey("shellDir") && !move.ContainsKey("resources"), "request: moveGame carries game and target location, no shell / resources");
+        check((string?)V3("relinkGame", new() { ["folder"] = where })["folder"] == where, "request: relinkGame carries the chosen folder");
+        check(V3("forgetGame", null).Count == move.Count - 1, "request: forgetGame is the bare envelope");
+        check((string?)V3("clean", new() { ["kind"] = "cache" })["kind"] == "cache", "request: clean kind=cache accepted");
+        check((string?)V3("ipa", new() { ["location"] = where })["location"] == where && !V3("ipa", null).ContainsKey("location"),
+            "request: ipa location optional, passed through when chosen");
+        foreach (var (operation, extra, label) in new (string, Dictionary<string, object?>?, string)[]
+        {
+            ("moveGame", null, "request: moveGame without a location refused"),
+            ("moveGame", new() { ["location"] = "Games" }, "request: relative move target refused"),
+            ("relinkGame", null, "request: relinkGame without a folder refused"),
+            ("ipa", new() { ["location"] = "" }, "request: empty export location refused"),
+            ("clean", null, "request: clean without kind refused"),
+            ("clean", new() { ["kind"] = "all" }, "request: clean other than the cache refused")
+        })
+        {
+            try { V3(operation, extra); }
             catch (ArgumentException) { check(true, label); continue; }
             throw new Exception("accepted " + label);
         }

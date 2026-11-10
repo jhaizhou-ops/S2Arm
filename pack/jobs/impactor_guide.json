@@ -44,7 +44,7 @@
             "en": ["In Impactor Settings tick Launch on startup so it stays running; it re-signs 3 days before expiry and keeps game data.",
                    "With the cable connected, open iTunes → phone icon → Summary → tick Sync with this iPhone over Wi-Fi → Apply.",
                    "On the iPhone: Settings → Wi-Fi → ⓘ next to the current network → set Private Wi-Fi Address to Off. Otherwise the computer cannot see the phone over Wi-Fi."]},
-     "note": {"zh-Hans": "免费 Apple ID：同时最多 3 个自签 App，每 7 天最多 10 个包名；删 App 不退名额。", "en": "Free Apple ID: at most 3 self-signed apps at a time and 10 bundle IDs per 7 days; deleting an app does not refund them."}}
+     "note": {"zh-Hans": "免费 Apple ID：每台设备同时最多 3 个自签 App，每 7 天最多注册 10 个包名；删 App 只腾出前者，不退包名额度。", "en": "Free Apple ID: at most 3 self-signed apps on a device at a time, and at most 10 App IDs registered per 7 days; removing an app frees a device slot but does not give App IDs back."}}
   ],
   "errors_title": {"zh-Hans": "常见报错", "en": "Common errors"},
   "errors": [
@@ -52,7 +52,8 @@
     {"match": "-20970 / -20101", "code": "apple_id_wrong", "means": {"zh-Hans": "Apple ID 或密码不对（含全角字符）", "en": "Wrong Apple ID or password (including full-width characters)"}},
     {"match": "verification code", "code": "two_factor_wrong", "means": {"zh-Hans": "两步验证码不对或过期", "en": "Two-factor code wrong or expired"}},
     {"match": "An unknown error occured while reading the file / The name for this app is invalid", "code": "ipa_needs_repack", "means": {"zh-Hans": "旧版 S2Arm 出的包（zip64 或中文显示名），侧载工具读不了", "en": "Package from an older S2Arm (zip64 or non-ASCII display name) that sideload tools cannot read"}},
-    {"match": "maximum number of apps / App ID", "code": "free_app_limit", "means": {"zh-Hans": "免费账号名额用完", "en": "Free account limit reached"}},
+    {"match": "maximum number of installed apps", "code": "free_app_limit", "means": {"zh-Hans": "这台 iPhone 的自签 App 已满 3 个，删一个不玩的再装", "en": "This iPhone already has 3 self-signed apps; remove one you no longer play and install again"}},
+    {"match": "App ID limit / 9120", "code": "free_appid_limit", "means": {"zh-Hans": "免费 Apple ID 7 天内 10 个包名用满，删 App 不退额度；等几天或换 Apple ID", "en": "The free Apple ID used all 10 App IDs for 7 days; removing apps does not help. Wait a few days or use another Apple ID"}},
     {"match": "Developer Mode", "code": "developer_mode_required", "means": {"zh-Hans": "手机没开开发者模式", "en": "Developer Mode is off"}},
     {"match": "locked / passcode", "code": "device_locked", "means": {"zh-Hans": "手机锁屏了", "en": "iPhone is locked"}},
     {"match": "pairing / trust", "code": "device_pairing_required", "means": {"zh-Hans": "手机没信任这台电脑", "en": "iPhone does not trust this computer"}},

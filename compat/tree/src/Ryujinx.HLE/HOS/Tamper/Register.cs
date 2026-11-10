@@ -15,14 +15,14 @@ namespace Ryujinx.HLE.HOS.Tamper
 
         public T Get<T>() where T : unmanaged
         {
-            return (T)(dynamic)_register;
+            return TamperNum.FromU64<T>(_register);
         }
 
         public void Set<T>(T value) where T : unmanaged
         {
             Logger.Debug?.Print(LogClass.TamperMachine, $"{_alias}: {value}");
 
-            _register = (ulong)(dynamic)value;
+            _register = TamperNum.ToU64(value);
         }
     }
 }

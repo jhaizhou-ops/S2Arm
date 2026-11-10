@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -180,17 +181,31 @@ PAD_EXPORT void s2a_pad_get_latency(s2a_pad_latency *out, int reset) {
     if (reset) memset(&latency, 0, sizeof latency);
     pthread_mutex_unlock(&pad_mu);
 }
-int s2a_pad_labels_abxy(const char *category, const char *vendor) {
-    static const char *const names[] = {"switch pro", "pro controller", "joy-con", "joycon"};
-    const char *both[2] = {category, vendor};
-    for (int i = 0; i < 2; i++)
-        for (size_t n = 0; both[i] && n < sizeof names / sizeof *names; n++)
-            if (strcasestr(both[i], names[n])) return 1;
-    return 0;
+// 手柄分类只认系统给的类别（productCategory 由苹果驱动按设备类型填，不是设备自报的名字）与手柄类型（宿主判 GCXboxGamepad / GCDualShockGamepad /
+//   GCDualSenseGamepad）；不看 vendorName（审计 P2-213：第三方手柄名字里带「Pro Controller」被认成任天堂）
+int s2a_pad_kind(const char *category, int is_xbox, int is_playstation) {
+    if (is_xbox) return S2A_PAD_KIND_XBOX;
+    if (is_playstation) return S2A_PAD_KIND_PLAYSTATION;
+    static const char *const nintendo[] = {"Switch Pro Controller", "Nintendo Switch", "Joy-Con"};   // 苹果给任天堂 Pro / Joy-Con 的类别前缀
+    for (size_t n = 0; category && n < sizeof nintendo / sizeof *nintendo; n++)
+        if (!strncmp(category, nintendo[n], strlen(nintendo[n]))) return S2A_PAD_KIND_NINTENDO;
+    return S2A_PAD_KIND_OTHER;
 }
-void s2a_pad_abxy_order(int labelled, int out[4]) {
-    static const int order[2][4] = {{1, 0, 3, 2}, {0, 1, 2, 3}};   // 物理方位：Nintendo A/B/X/Y 在东/南/北/西 = 系统 B/A/Y/X
-    memcpy(out, order[!!labelled], sizeof order[0]);
+// 按字母 / 按位置（维护者 11-09：缺省按字母——Xbox 的 A 就是 Switch 的 A）。宿主起局按 S2A_PAD_FACE（position = 按位置），游戏内菜单改了经 s2a_pad_face_set 即时生效
+static _Atomic int g_face = -1;
+int s2a_pad_face_by_letter(void) {
+    int v = atomic_load(&g_face);
+    if (v < 0) { const char *e = getenv("S2A_PAD_FACE"); v = !(e && !strcmp(e, "position")); atomic_store(&g_face, v); }
+    return v;
+}
+void s2a_pad_face_set(int by_letter) { atomic_store(&g_face, by_letter ? 1 : 0); }
+void s2a_pad_abxy_order(int kind, int by_letter, int out[4]) {
+    // 系统 buttonA/B/X/Y 一律按物理方位上报（A 南、B 东、X 西、Y 北），只有任天堂手柄按键帽字母上报（印 A 的右键 = buttonA）。
+    //   任天堂：字母就在任天堂的位置，两种口径一样；Xbox：按字母 = 系统 A/B/X/Y 直接对 Switch A/B/X/Y，按位置 = 东/南/北/西；
+    //   PlayStation（×○□△ 没有字母）与其他手柄：只有位置口径（Switch A 在东 = 系统 B，即 PS 的 ○）
+    static const int position[4] = {1, 0, 3, 2}, letter[4] = {0, 1, 2, 3};
+    int same = kind == S2A_PAD_KIND_NINTENDO || (kind == S2A_PAD_KIND_XBOX && by_letter);
+    memcpy(out, same ? letter : position, sizeof letter);
 }
 void s2a_pad_stick(float x, float y, int32_t axes[2]) {
     float radius = hypotf(x, y);

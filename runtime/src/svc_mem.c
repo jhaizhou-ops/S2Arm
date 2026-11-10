@@ -123,6 +123,28 @@ static pthread_mutex_t g_vm_writer = PTHREAD_MUTEX_INITIALIZER;
 #endif
 static void host_write(uint64_t a, uint64_t n) { if (g_hooks.host_write) g_hooks.host_write(a, n); }
 void s2a_host_write_hook(uint64_t a, uint64_t n) { host_write(a, n); }   // thread.c 等别处写游戏内存前调
+#ifndef __ANDROID__   // 与本文件其余苹果段同口径（端点核对在 Mac 上加 -D__ANDROID__ 编，__APPLE__ 照样为真）
+// 装载器（宿主扮演 rtld）写游戏内存里的一个 8 字节槽：nn::ro 装 NRO 后把起局没解析的导入补绑过去（loader.c s2a_nro_map）。
+//   11-09 玩家 iPhone 17 Pro Max（01001BA027DD8000，Nmpl 引擎）：游戏 DT_INIT 后用 SetMemoryPermission 把 main 的 RELRO（导入表所在）改只读，
+//   随后装 romfs/nro/NmplDLL.nro，补绑直接写只读页 → SIGBUS（同地址连崩 3 局）。真机 rtld 不受游戏设的页权限约束（这类导入走延迟绑定），宿主也不该受：
+//   槽所在页可写就直接写；只读的数据页经跟踪器同一钩子（guest_protect，与缺页自愈串行）临时加写、写入、恢复原保护；代码页（可执行）一律不写。返回 0 成功、-1 没写
+int s2a_loader_store64(uint64_t *where, uint64_t v) {
+    uint64_t a = (uint64_t)(uintptr_t)where, page = memory_protection_page(); if (!page || (a & 7)) return -1;
+    uint64_t lo = a & ~(page - 1);
+    vm_address_t ra = (vm_address_t)lo; vm_size_t rs = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS || ra > lo) return -1;
+    if (info.protection & VM_PROT_EXECUTE) return -1;
+    host_write(a, 8);
+    if (info.protection & VM_PROT_WRITE) { __atomic_store_n(where, v, __ATOMIC_RELEASE); return 0; }
+    int cur = (info.protection & VM_PROT_READ) ? PROT_READ : PROT_NONE;
+    int (*prot)(uint64_t, uint64_t, int) = g_hooks.guest_protect;
+    if (prot ? prot(lo, page, cur | PROT_READ | PROT_WRITE) : mprotect((void *)(uintptr_t)lo, page, cur | PROT_READ | PROT_WRITE)) return -1;
+    __atomic_store_n(where, v, __ATOMIC_RELEASE);
+    int e = prot ? prot(lo, page, cur) : mprotect((void *)(uintptr_t)lo, page, cur);
+    prot_changed(lo, page);
+    return e ? -1 : 0;
+}
+#endif
 #ifdef __ANDROID__
 // 启动期间、尚未放行guest时登记同一个shared VM写入/权限通道，不建立第二张映射表。
 int s2a_android_tracking_vm_prepare(void) {
@@ -368,6 +390,12 @@ uint64_t s2a_npdm_window_need(const char *npdm) {
     if (npdm_read(npdm, &t, &sr, &ms, &pid, 0)) return 0;
     uint64_t mod = s2a_module_span(npdm_dir(npdm));
     return mod ? s2a_layout_need(t, sr, mod) : 0;   // 读不到模块 = 不知道要多大
+}
+// 本款程序号（vawin.c 构造函数占窗口时按名字取）：同 s2a_npdm_window_need 的不写本局状态读法（apply = 0）；读不到 / 没有 ACI0 为 0。
+//   审计 P1-139：构造期客体内存文件后备要按程序号找本款实测峰值 / 「上一局前台死掉」标记，那时图形模式还没落定，不能经 s2a_npdm_program_id → s2a_gfx_mode
+uint64_t s2a_npdm_pid(const char *npdm) {
+    uint32_t t, ms; uint64_t sr, pid;
+    return npdm_read(npdm, &t, &sr, &ms, &pid, 0) ? 0 : pid;
 }
 void s2a_thread_set_caps(uint64_t core_mask, uint64_t prio_mask);   // thread.c：CreateThread 按 NPDM 核 / 优先级掩码校验
 void s2a_thread_set_npdm(int def_core, int main_prio);              // thread.c：NPDM 缺省核 / 主线程优先级（S2A_SCHED_HZ 用）
@@ -750,13 +778,20 @@ uint64_t s2a_mem_test_probes(void) { return g_amask_probes; }
 // 锁序断言的负控：持 g_mu 再取 g_vp_mu，Debug 构建必须 abort。
 void s2a_mem_test_lockorder_abort(void) { GMU_LOCK(); s2a_mem_lockorder_vp_enter(); GMU_UNLOCK(); }
 #endif
+#ifndef __ANDROID__
+static void punch_reset_locked(void);   // #258 懒清零状态复位（定义在 pages_release 前）
+#endif
 // 单测：不经 NPDM / 窗口，直接摆出别名区、堆、映射表与子页位
 void s2a_mem_test_setup(uint64_t alias_base, uint64_t alias_size, uint64_t win_base, uint64_t win_size, void *heap, uint64_t heap_cur) {
     memset(&L, 0, sizeof L); L.alias_base = alias_base; L.alias_size = alias_size; L.win_base = win_base; L.win_size = win_size;
 #ifdef __ANDROID__
     s2a_android_mirror_init((uintptr_t)win_base, (size_t)win_size);
 #endif
-    g_heap = heap; g_heap_cur = heap_cur; free(g_amask); g_amask = NULL; g_nmap = 0; g_nspan = 0; g_nmod = 0; g_phys = 0; g_tlr_next = 0; free(g_perm); g_perm = NULL; g_nperm = 0; free(g_attr); g_attr = NULL; g_nattr = 0;
+    g_heap = heap; g_heap_cur = heap_cur; free(g_amask); g_amask = NULL;
+#ifndef __ANDROID__
+    punch_reset_locked();
+#endif
+    g_nmap = 0; g_nspan = 0; g_nmod = 0; g_phys = 0; g_tlr_next = 0; free(g_perm); g_perm = NULL; g_nperm = 0; free(g_attr); g_attr = NULL; g_nattr = 0;
     g_cur_st = g_cur_sh = g_pk_st = g_pk_sh = g_pk_st_end = g_pk_sh_end = g_pk_alias_end = 0;
     g_pk_heap_request = g_pk_heap = heap_cur;
 #ifdef __ANDROID__
@@ -959,7 +994,55 @@ static uint64_t alias_map(uint64_t dst, uint64_t src, uint64_t n, int prot) {
 //   Switch / Ryujinx 新给的堆和物理映射都是填 0 的页（KPageTableBase SetHeapSize / MapPhysicalMemory 带 shouldFillPages、填充值 0）。
 //   原先用 madvise(MADV_FREE) + mprotect(PROT_NONE)：那是懒回收，内核还没收走的页在 mprotect 放出时带着旧内容回到游戏手里。
 //   调用方解锁后要报 backing_changed（渲染器包着游戏内存的零拷贝缓冲要重建）
+// #258 文件后备下的还页不再在锁内打洞（懒清零）：时之笛 S2（Mac 16 GB，文件后备自动开）每约 30 秒 UnmapPhysicalMemory 约 250 MB，逐 16 KB 打洞 + 重映射
+//   每页 60–70 µs、全程持 g_mu 约 1 s，音频渲染（s2a_mem_mapped）等锁、整帧停住。改法：锁内只把这段 mprotect 成不可访问（微秒级）并记成「待清零」，
+//   不打洞、不重映射；页被游戏重新放出来时就地处理——0x2C / SetHeapSize 增长 / MapMemory 拷贝路径先 mprotect 读写再 memset 清零（punch_zero_locked），
+//   MapMemory 对齐路径 vm_remap 盖掉原映射、只撤销标记（punch_forget_locked）。零页语义不变；释放的页留在文件里当脏页，内存紧时由内核按文件后备原设计换出
+//   （真机 6 分钟释放 1.19 GB，物理脚印不涨）。两版「尽快打洞」（攒段一次 F_PUNCHHOLE；后台线程逐块打洞）都在真机上让 Metal 报 GPU 挂死：
+//   游戏渲染期间对后备文件打洞，Metal 命令提交就在内核里和 F_PUNCHHOLE 互卡；原版不挂只因为那 1 s 卡顿让 GPU 空闲。细节见 docs/坑记录.md。
+//   S2A_PUNCH_DEFER=0 回原路径（逐页同步打洞 + 重映射，负对照用）。
+static uint8_t *g_punch_pend;   // 窗口内每宿主页一字节：1 待清零（释放后还没放出来）；g_mu 保护
+static uint64_t g_punch_pending_n;   // 待清零宿主页数
+static uint64_t g_punch_inline_n, g_punch_forget_n;   // 读数：放出来时就地清零的页数、对齐 MapMemory 盖掉而撤销标记的页数
+static uint64_t g_unmap_n, g_unmap_ns, g_unmap_max_ns;   // 读数：≥1 MB 的 UnmapPhysicalMemory 持锁次数 / 总时长 / 最长一次（S2A_PUNCH_DEFER=0 与缺省同一份代码量，PR 修前→修后用）
+static int punch_defer_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("S2A_PUNCH_DEFER"); v = !(e && *e == '0'); } return v; }
+static uint8_t *punch_at(uint64_t hp) { return g_punch_pend + (hp - L.win_base) / HPG; }
+// 还页走懒清零（持 g_mu）：[a, a + n) 全在文件后备窗口里才接，改成不可访问并记待清零；接了返回 1
+static int punch_defer_locked(uint64_t a, uint64_t n) {
+    if (!punch_defer_on() || !L.win_size || !s2a_guest_in_file(a, n) || a < L.win_base || a + n > L.win_base + L.win_size || (a | n) & (HPG - 1)) return 0;
+    if (mprotect((void *)a, n, PROT_NONE)) die("懒清零 mprotect errno=%d", errno);
+    if (!g_punch_pend) g_punch_pend = calloc(L.win_size / HPG, 1);
+    for (uint64_t p = a; p < a + n; p += HPG) { uint8_t *b = punch_at(p); if (!*b) { *b = 1; g_punch_pending_n++; } }
+    return 1;
+}
+// 游戏把 [lo, hi) 放出来（持 g_mu，调用方已把这段 mprotect 成读写）：其中待清零的宿主页内容是旧的，就地清零并撤销标记
+static void punch_zero_locked(uint64_t lo, uint64_t hi) {
+    if (!g_punch_pend || !L.win_size) return;
+    uint64_t we = L.win_base + L.win_size; if (lo < L.win_base) lo = L.win_base; if (hi > we) hi = we;
+    for (uint64_t p = lo; p < hi; p += HPG) { uint8_t *b = punch_at(p); if (!*b) continue; *b = 0; g_punch_pending_n--; memset((void *)p, 0, HPG); g_punch_inline_n++; }
+}
+// [lo, hi) 的原映射被整体盖掉（MapMemory 对齐路径 vm_remap 共享源页）：旧内容不可见了，只撤销标记、不碰内存（那是源的页）
+static void punch_forget_locked(uint64_t lo, uint64_t hi) {
+    if (!g_punch_pend || !L.win_size) return;
+    uint64_t we = L.win_base + L.win_size; if (lo < L.win_base) lo = L.win_base; if (hi > we) hi = we;
+    for (uint64_t p = lo; p < hi; p += HPG) { uint8_t *b = punch_at(p); if (!*b) continue; *b = 0; g_punch_pending_n--; g_punch_forget_n++; }
+}
+// 收局时（lifecycle.c，_exit 前）打一行读数：取消 / SIGTERM 路径不走会话重置，否则读数永远看不到
+void s2a_punch_summary(void) {
+    if (g_unmap_n) LOG("#258 解除物理映射读数：≥1 MB 的解除 %llu 次、持锁共 %llu ms、最长一次 %llu ms", (unsigned long long)g_unmap_n, (unsigned long long)(g_unmap_ns / 1000000), (unsigned long long)(g_unmap_max_ns / 1000000));
+    if (g_punch_pend) LOG("#258 懒清零读数（%s）：放出来时就地清零 %llu 页、对齐 MapMemory 盖掉 %llu 页、待清零 %llu 页", punch_defer_on() ? "开" : "关", (unsigned long long)g_punch_inline_n, (unsigned long long)g_punch_forget_n, (unsigned long long)g_punch_pending_n);
+}
+static void punch_reset_locked(void) {
+    if (g_punch_pend) s2a_punch_summary();
+    free(g_punch_pend); g_punch_pend = NULL; g_punch_pending_n = 0;
+    g_punch_inline_n = g_punch_forget_n = 0; g_unmap_n = g_unmap_ns = g_unmap_max_ns = 0;
+}
+#ifdef S2A_UNIT_TEST
+uint64_t s2a_mem_test_punch_pending(void) { return g_punch_pending_n; }
+void s2a_mem_test_punch_stats(uint64_t *inline_zero, uint64_t *forget) { *inline_zero = g_punch_inline_n; *forget = g_punch_forget_n; }
+#endif
 static void pages_release(uint64_t a, uint64_t n) {
+    if (punch_defer_locked(a, n)) return;   // #258：文件后备窗口里的页懒清零（上面）
     if (s2a_guest_zero(a, n)) return;   // 客体内存文件后备（vawin.c）：打洞 + 原偏移重映射，再给出去同样是零
     if (mmap((void *)a, n, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0) == MAP_FAILED) die("还页 mmap errno=%d", errno);
 }
@@ -1294,6 +1377,7 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
         int shrink = size < g_heap_cur;
         if (backing_begin_locked(lo, n, 0)) { GMU_UNLOCK(); regs[0] = 0xD401; return 1; }
         if (size > g_heap_cur && mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE)) die("SetHeapSize mprotect errno=%d", errno);
+        if (size > g_heap_cur) punch_zero_locked((uint64_t)g_heap + g_heap_cur, (uint64_t)g_heap + size);   // #258：增长段里待清零的旧页就地清零
         if (shrink) pages_release((uint64_t)g_heap + size, g_heap_cur - size);
 #endif
         vm_mutation_check("堆大小改动"); g_heap_cur = size; if (size > g_pk_heap) g_pk_heap = size;
@@ -1418,6 +1502,7 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
             uint64_t ae = alias_map(dst, src, size, VM_PROT_READ | VM_PROT_WRITE);
             if (!ae && mprotect((void *)dst, size, PROT_READ | PROT_WRITE)) die("MapMemory 共享映射 mprotect errno=%d", errno);   // 源被设过只读时 vm_remap 随源保护，栈要读写
             if (ae) { backing_end_locked(dst, size, 0, 0); GMU_UNLOCK(); regs[0] = ae; return 1; }
+            punch_forget_locked(dst, dst + size);   // #258：目标原映射被盖掉，这段若是上次 UnmapMemory 释放的待清零页，只撤销标记
             map_add(dst, size, src, ST_STACK, MAP_ALIAS);
             backing_end_locked(dst, size, 1, 1);
             GMU_UNLOCK();
@@ -1441,6 +1526,9 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
             }
             die("MapMemory mprotect errno=%d", saved_errno);
         }
+#ifndef __ANDROID__
+        punch_zero_locked(lo, hi);   // #258：目标里上次 UnmapMemory 释放的待清零页内容是旧的，先清零再拷（memcpy 只盖 [dst, dst+size)）
+#endif
 #ifdef __ANDROID__
         // 实际writers安全点保护映射表；同步GPU回写/复制时不持g_mu，回调可查询VM。
         // g_mu 解锁期间外层仍持独占 writer epoch，其他替页或栈搬移事务不得进入。
@@ -1614,6 +1702,8 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
         uint64_t rel_lo = UINT64_MAX, rel_hi = 0;
         uint64_t we = L.win_base + L.win_size, wl = hi < we ? hi : lo > we ? lo : we;
         if (num == 0x2C && hi > wl && !s2a_far_has(wl, hi - wl)) { regs[0] = va_short(num, a, size, "别名区"); return 1; }
+        struct timespec t_unmap_ts; uint64_t t_unmap0 = 0;
+        if (num == 0x2D && hi - lo >= (1u << 20) && wl > lo && !clock_gettime(CLOCK_MONOTONIC, &t_unmap_ts)) t_unmap0 = (uint64_t)t_unmap_ts.tv_sec * 1000000000ull + (uint64_t)t_unmap_ts.tv_nsec;
 #endif
         GMU_LOCK();
         if (num == 0x2C) {
@@ -1664,6 +1754,7 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
                 if (f1 > f0 && s2a_far_map(f0, f1 - f0)) { if (wl > lo) backing_end_locked(lo, wl - lo, 0, 0); GMU_UNLOCK(); regs[0] = va_short(num, a, size, "别名区（影子区与堆撞上）"); return 1; }
             }
             if (wl > lo && mprotect((void *)lo, wl - lo, PROT_READ | PROT_WRITE)) die("MapPhysicalMemory mprotect errno=%d", errno);
+            if (wl > lo) punch_zero_locked(lo, wl);   // #258：整宿主页原先全空、释放后待清零的，内容是旧的，先清零（下面按「原先全空 = 零」不再清）
             uint64_t run = 0;   // 新映射的连续子页起点：权限账按段清（已映射的子页保留游戏改过的权限）
             uint8_t was = 0;   // 本次调用之前这个宿主页的子页掩码：循环里会给 *m 置位，判「原先全空」必须看进来时的值
             for (uint64_t p = a; p < a + size; p += 0x1000) {   // 新映射的子页清零（真机新页是零页）；整宿主页原先全空的是解除时换上的新占位（pages_release），mprotect 放出来本来就是零
@@ -1742,6 +1833,9 @@ static int svc_mem_impl(int num, uint64_t *regs, uint64_t orig) {
         }
         (void)lo; (void)hi;
         if (mapping && a + size - L.alias_base > g_pk_alias_end) g_pk_alias_end = a + size - L.alias_base;
+#endif
+#ifndef __ANDROID__
+        if (t_unmap0 && !clock_gettime(CLOCK_MONOTONIC, &t_unmap_ts)) { uint64_t dt = (uint64_t)t_unmap_ts.tv_sec * 1000000000ull + (uint64_t)t_unmap_ts.tv_nsec - t_unmap0; g_unmap_n++; g_unmap_ns += dt; if (dt > g_unmap_max_ns) g_unmap_max_ns = dt; static int said; if (dt >= 200000000 && said < 20) { said++; LOG("#258 解除物理映射 %#llx +%llu MB 持锁 %llu ms", (unsigned long long)a, (unsigned long long)(size >> 20), (unsigned long long)(dt / 1000000)); } }
 #endif
         GMU_UNLOCK();
 #ifndef __ANDROID__
@@ -2088,6 +2182,9 @@ void s2a_mem_session_reset(void) {
     { int be = plat_backing_reset(); if (be) die("会话复位时背板引用未清空 errno=%d（NVN vpool 拆除顺序违约 / 0x4C-0x51 ref 未清）", be); }
 #endif
     GMU_LOCK();
+#ifndef __ANDROID__
+    punch_reset_locked();
+#endif
     free(g_amask); g_amask = NULL;
     L = (s2a_layout){0}; g_npdm_core = g_npdm_prio = 0;
     g_program_id = g_core_mask = g_prio_mask = 0;

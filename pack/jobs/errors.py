@@ -42,6 +42,7 @@ RECOVERY = {
     "library_not_apfs": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 APFS 格式的磁盘上：在「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置（内置盘），或选一块 APFS 格式的外接盘（可在「磁盘工具」里另分出一个 APFS 分区，盘上要有空闲空间、原有数据不动），再重试；游戏原件不用挪。",
     "library_in_cloud": "游戏库在云盘同步目录里（iCloud 云盘、OneDrive、Dropbox 等）：出包时会写几十 GB 中间文件，云盘会上传它们、换成占位文件，出包中途会读不到。在「设置 → 游戏库与玩家数据」把游戏库改到本机磁盘上不同步的位置（例如默认位置），再重试；游戏原件放在哪都行。",
     "library_bad_format": "游戏原件放哪块盘都行，导出时的工作数据（游戏库）要放在 NTFS 格式的磁盘上（FAT32 单个文件不能超过 4 GB，exFAT 没有可靠的原子替换）：在「设置 → 游戏库与玩家数据」改用这台电脑上的默认位置，或选一块 NTFS 格式的盘，再重试。",
+    "library_move_failed": "游戏库还在原来的位置，什么都没有丢：按上面的原因处理后再搬一次。",
     "disk_full": "释放任务所在磁盘的空间，检查游戏库和应用数据所在磁盘后重试；不要删除存档或上次成功的运行版本。",
     "permission_denied": "检查文件和目录权限；若位于桌面、文稿、下载或外接磁盘，请在「系统设置 → 隐私与安全性 → 文件与文件夹」允许 S2Arm 访问，再重试。",
     "architecture_unsupported": "当前路径需要 Apple Silicon Mac，请换用支持的设备；重试不会改变硬件兼容性。",
@@ -55,7 +56,8 @@ RECOVERY = {
     "dotnet_sdk_missing": "在「设置」的环境检查中安装 .NET 10 SDK，完成后重新检查，再打 iPhone 包。",
     "reader_unavailable": "重新安装完整的 S2Arm，然后重新导入游戏。",
     "engine_incomplete": "重新安装完整的 S2Arm，然后点「重新检查」。",
-    "engine_toolchain_newer": "把 S2Arm 更新到最新版（新版认得你的 Xcode），然后再点一次。",   # 11-07 联合开发者：beta.4 遇 Xcode 27.2（metal 比锁新）直连库「链号前后不一」
+    "engine_toolchain_newer": "把 S2Arm 更新到最新版（新版认得你的 Xcode），然后再点一次。",
+    "graphics_api_unsupported": "这款暂时打不了包，换一款官方游戏试试；如果确定是正版游戏，点「复制错误摘要」发给我们。",   # #222：同人移植把图形库静态链进程序，判不出图形接口   # 11-07 联合开发者：beta.4 遇 Xcode 27.2（metal 比锁新）直连库「链号前后不一」
     "tool_missing": "重新安装完整的 S2Arm，点「重新检查」后重试。",
     "target_unsupported": "这台设备的 GPU 或系统不在当前支持范围内，重试无法解决；需要 A14 / M1 或更新芯片及 iOS / iPadOS 18 或更新系统。",
     "xcode_sdk_too_old": "把 Xcode 更新到最新版，装好打开一次，回来点「重新检查」，再打 iPhone 包。",
@@ -63,13 +65,16 @@ RECOVERY = {
     "xcode_team_pending": "在装机页点「解决办法」打开引导项目，在 Xcode 里选 Personal Team，连上手机点运行一次，再点一次「装到 iPhone」。也可以先到 Xcode › Settings › Apple Accounts 看团队列表有没有显示。",
     "signing_certificate_missing": "打开 Xcode，点菜单 Xcode › Settings › Apple Accounts，选中账号后点 Manage Certificates，点 + 选 Apple Development，再点一次「装到 iPhone」。",
     "xcode_account_missing": "打开 Xcode →「设置」→「账户」，点「+」登录你的 Apple ID（免费的就可以），再点一次「装到 iPhone」；不想登录 Xcode 也可以改用 AltStore 安装。",
+    "device_not_ready": "按上面的提示做完，再点一次安装。",
     "device_not_connected": "用数据线连上要装的那台 iPhone 并解锁，在手机上点「信任」；第一次还要在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式，然后再试。",
     "signing_failed": "查看本任务日志里签名那一步的报错；确认 Xcode 能用你的账号给这台 iPhone 签名，或改用 AltStore 安装。",
     "device_locked": "解锁这台 iPhone（保持亮屏、停在主屏幕），再点一次「装到 iPhone」；装机过程中别锁屏。",
-    "free_app_limit": "免费 Apple ID 每台设备最多同时装 3 个自签 App、每 7 天最多注册 10 个包名：在 iPhone 上长按删掉一个不再玩的自签 App 后重试；包名额度用完则等 7 天恢复；或改用付费 Apple 开发者账号（没有这两个上限）。",
+    "free_app_limit": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App，这台 iPhone 已经装满：在 iPhone 上长按删掉一个不再玩的自签 App 后重试；或改用付费 Apple 开发者账号（没有这个上限）。",
+    "free_appid_limit": "这是 Apple 对免费 Apple ID 的限制：7 天内最多注册 10 个包名，这个账号已经用满；在手机上删 App 不会退还额度。办法：等几天，最早那批包名注册满 7 天就会恢复；或在 Xcode / Impactor 里换一个 Apple ID 登录后再装；或改用付费 Apple 开发者账号（没有这个限制）。",   # Apple 错误 9120；与 free_app_limit（设备上同时 3 个）是两件事，删 App 无效
     "aoc_missing": "本体已出好，照常安装即可；没解出的追加内容不在包里，游戏里用不到那部分内容。请导出诊断反馈，解码支持后重新打包即可带上。",
     "sibling_clone_failed": "已改从解包目录准备，本次照常完成，只是多花一些时间；游戏库放在 APFS 格式的磁盘上（Mac 内置盘或格式化为 APFS 的外接盘）时，各平台导出可以共用已准备好的游戏数据。",
     "iml_missing": "用 Xcode（免费 Apple ID 即可）或 AltStore Classic v2.3 重新签名安装这款游戏；SideStore 0.7.0 免费账号重签会丢这项权限。已装的也可以用 GetMoreRam 给 App ID 补上权限后重装。",
+    "manual_unpack_required": "资源包已经在手机上，不用重推：在 iPhone 上打开 S2Arm，选这款游戏，保持在前台别锁屏，等它导入完就能玩。",
     "usb_slow": "换一根支持 USB 3 的 USB-C 数据线，直接插 Mac 上的 USB-C / 雷雳口（不经扩展坞、集线器、显示器上的口），再装下一款；iPhone 15 Pro 及更新的 Pro 机型才支持 USB 3，其它机型只能 USB 2.0。",
     "shell_sdk_old": "装好的包能用；要在 iPhone Duo 等新机型上铺满全屏，把 Xcode 更新到不低于这台 iPhone 系统大版本的版本（如 iOS 27 用 Xcode 27），在启动器里选它后重新打 iPhone 包再装。",
     'configuration_failed': '检查当前阶段的配置推导错误，保留原始游戏输入；更新完整引擎后重新准备，仍失败时反馈错误摘要。',
@@ -103,7 +108,6 @@ RECOVERY = {
     'save_recovery': '存档回退没完成：事务记录与副本都保留着。可以先在存档页备份当前存档；确认可能丢掉没做完的导入 / 恢复后，可选「仍要启动」。不要删除事务目录。',
     'container_stale': '先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；手机上现有的游戏不受影响。',
     'container_incompatible': '这款没法和手机上已有的游戏放进同一个 App：先从 iPhone 删掉不兼容的那款。',
-    'container_last_game': '在 iPhone 桌面长按 S2Arm 删除 App 即可。',
     'container_purge_failed': '手机解锁、数据线插稳后再删一次；不影响其他游戏。',
     'keychain_prompt': '在这台 Mac 屏幕上的钥匙串弹窗里点「始终允许」（需要的话输入 Mac 登录密码），再点一次「装到 iPhone」。',
     'windows_path_too_long': '路径太长：把游戏库搬到盘符根目录附近的短路径（比如 D:\\S2Arm），再打一次包；反馈时请带上错误摘要。',
@@ -176,6 +180,7 @@ PLAYER_REASON = {
     "metal_unavailable": "缺少 Metal 组件：编着色器要用的 Metal 组件没装上。",
     "ios_platform_missing": "缺少 iOS 平台组件：Xcode 的 iOS 平台还没装，打不了 iPhone 包。",
     "engine_toolchain_newer": "这版 S2Arm 不认识你的 Xcode：你的 Xcode 比这版 S2Arm 新。",
+    "graphics_api_unsupported": "这款游戏暂不支持：没找到任天堂官方图形接口（NVN / Vulkan / OpenGL），多见于自制或移植的程序。",
     "tool_missing": "缺少工具：这条链上有个工具没装。",
     "content_invalid": "文件内容不对：文件结构校验没通过，可能没下完整。",
     "signing_failed": "签名没成：用你的 Apple ID 给这台 iPhone 签名没成功。",
@@ -200,14 +205,20 @@ LOG_CAUSES = (
     (r"No space left on device|\bENOSPC\b|\[Errno 28\]|\berrno\s*[=:]?\s*28\b"          # POSIX / Python OSError / .NET IOException（Mac）
      r"|There is not enough space on the disk|\bDisk full\b|WinError 112|ERROR_DISK_FULL|0x80070070"   # Windows / .NET
      r"|STATUS_DISK_FULL|磁盘空间不足", "disk_full"),                                       # Windows 退出码注（direct_lib.sh 127）/ 我方字样
+    # cp 被系统拒绝（拷字体等，pack/stages/sysdata.sh 红行带 cp 原文）：macOS 隐私授权没给（桌面 / 文稿 / 下载 / 外接盘）或目录没写权限 → 提示去系统设置授权
+    (r"\bcp: .*: (?:Operation not permitted|Permission denied)", "permission_denied"),
     # 直连库出库前核链号对不上：旧引擎（≤ beta.4，direct_lib.sh 把 dmsh_chain.py --build-env 的 stderr 一起收进链号）遇到 metal 比锁新的 Xcode，
     #   编译器提示「note: …」被当成链号读（eb4b5c964 已修）。玩家能做的就是更新 S2Arm
     (r"链号前后不一", "engine_toolchain_newer"),
+    # 直连配置推导判不出图形接口（graphics/nvn/tools/direct_profile.py；gfx_api.py 只认动态导入的 NVN / Vulkan / EGL）：
+    #   同人移植多把 deko3d / Mesa 静态链进程序（#222 程序号 05F4…，不是官方 0100 段），通用 GPU 模拟路径已拆（11-07 只有直连），这类按现行设计不支持
+    (r"unsupported graphics API: unknown", "graphics_api_unsupported"),
     # PFRW 改写失败：gaps>0 表示有改写缺口（游戏程序里有一处暂不支持的模式）
     (r"PFRW\s+mod=\S+\s+need=\d+\s+gaps=[1-9]\d*", "rewrite_gap"),
     # Windows 出包期 GLSLC 工具模式缺失（exitCode 75）
     (r"Windows 还没有 GLSLC 工具模式|要出包期离线编 GLSLC.*Windows", "glslc_windows_unavailable"),
-    (r"unable to find utility \"metal(?:lib)?\"|cannot execute tool '?metal(?:lib)?'?|missing Metal Toolchain", "metal_unavailable"),
+    (r"unable to find utility \"metal(?:lib)?\"|cannot execute tool '?metal(?:lib)?'?|missing Metal Toolchain"
+     r"|【红】环境缺件 metal：", "metal_unavailable"),   # 后者：Windows 出包预检（pack/orch/oneclick_win.py env_items）找不到 Metal Developer Tools
     (r"is not installed\. (?:To use with Xcode, first download and install the platform|Please download and install the platform)", "ios_platform_missing"),   # xcodebuild 原文（11-07 gate-host Xcode 26.6）
     (r"unable to find utility \"|: command not found|is not recognized as an internal or external command", "tool_missing"),
 )

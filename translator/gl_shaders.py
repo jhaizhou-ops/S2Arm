@@ -53,7 +53,7 @@ import mbundle
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "graphics/tools"))
 from glsl.normalize import resources as normalize_resources
-from spirv_msl import SLOT_CLASS, metal_cmd
+from spirv_msl import SLOT_CLASS, metal_cmd, metal_run
 from spirv_msl import translate as spirv_to_msl
 
 GL_LIB_ABI = 3   # = graphics/nvn/gfx/gl/gl_lib.h S2A_GL_LIB_ABI（3：MSL 3.1，审计 #1534 P1-66）：表格式 / 槽位 / 翻译选项改了两边一起加 1（2：采样器数组 t:<名>=<槽>:<类型>:<个数>，11-03 火影羁绊 Scaleform）
@@ -310,11 +310,19 @@ def one(task, temp, components):
     return rows, [] if rows else errors
 
 
+def metal(command, temp):
+    """Metal 编译器：Windows 上按相对 temp 的路径交给编译器（spirv_msl.metal_run：空格会被再拆开、非 ASCII 打不开）"""
+    result = metal_run([str(arg) for arg in command], temp, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        raise ValueError((result.stdout + result.stderr).strip())
+    return result.stdout
+
+
 def compile_msl(task, temp):
     identity, row, sdk, extra = task
     air = Path(temp) / f"{row['function']}.{sdk}.air"
     try:
-        run(metal_cmd(sdk, "metal", "-c", "-fpreserve-invariance", *extra, row["msl"], "-o", air))
+        metal(metal_cmd(sdk, "metal", "-c", "-fpreserve-invariance", *extra, row["msl"], "-o", air), temp)
         return identity, sdk, str(air), None
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         return identity, sdk, None, f"{row['source']} [{sdk}]: {exc}"
@@ -322,7 +330,7 @@ def compile_msl(task, temp):
 
 def library(airs, destination, sdk):
     path = Path(destination) / f"gl_shaders.{sdk}.metallib"
-    run(metal_cmd(sdk, "metallib", *airs, "-o", path))
+    metal(metal_cmd(sdk, "metallib", *airs, "-o", path), destination)
     return path
 
 

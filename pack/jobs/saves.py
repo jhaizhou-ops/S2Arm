@@ -24,6 +24,8 @@ from pathlib import Path, PurePosixPath
 from core import Failure, atomic, contained
 from library import input_identity, selected_packages
 import save_formats
+import layout
+import layout as _lay   # external_archive 里有同名局部变量 layout（存档结构），那里用这个别名
 
 OPERATIONS = {"saveStatus", "saveBackup", "saveInspect", "saveRestore"}
 TREES = ("bis/user/save", "bis/system/save")
@@ -108,9 +110,9 @@ def locations(c, game):
     if not re.fullmatch(r"[0-9a-fA-F]{16}", gid):
         fail(c, "游戏标识无效，无法管理存档。", "game_id")
     try:
-        root = safe_path(c.library, c.library / "saves" / gid)
-        transactions = safe_path(c.library, c.library / "save-transactions")
-        backups = safe_path(c.library, c.library / "save-backups" / gid)
+        root = safe_path(layout.root_of(c, gid), layout.path(c, gid, "saves", create=False))
+        transactions = safe_path(layout.root_of(c, gid), layout.root_of(c, gid) / "save-transactions")   # 事务只涉及本位置的游戏（游戏库结构 v3）
+        backups = safe_path(layout.root_of(c, gid), layout.path(c, gid, "save-backups", create=False))
     except ValueError:
         fail(c, "存档目录包含链接，已停止操作。", "unsafe_path")
     return root, transactions, backups
@@ -579,9 +581,9 @@ def journal_paths(c, game, record):
         or record.get("phase") not in ("prepared", "committed")
     ):
         raise ValueError("invalid recovery record")
-    transaction = safe_path(c.library, transactions / token)
-    previous = safe_path(c.library, backups / token)
-    owner = safe_path(c.library, transaction / "owner.json")
+    transaction = safe_path(layout.root_of(c, game["id"]), transactions / token)
+    previous = safe_path(layout.root_of(c, game["id"]), backups / token)
+    owner = safe_path(layout.root_of(c, game["id"]), transaction / "owner.json")
     if json_object(owner.read_bytes()) != dict(schema=1, gameId=game["id"], transaction=token):
         raise ValueError("transaction owner mismatch")
     return root, transaction, previous
@@ -609,7 +611,7 @@ def recover_once(c, game):
     """Caller MUST hold the library execution lock, including build.launch.
     返回 True = 回退了一次没做完的事务；False = 没有事务或已提交；失败抛 RecoveryFailed（不删记录）。"""
     root, transactions, _ = locations(c, game)
-    journal = safe_path(c.library, transactions / (game["id"] + ".json"))
+    journal = safe_path(layout.root_of(c, game["id"]), transactions / (game["id"] + ".json"))
     if not journal.exists():
         return False
     seen = ""   # 认出的事务目录（失败时写进说明）
@@ -620,8 +622,8 @@ def recover_once(c, game):
         root, transaction, previous = journal_paths(c, game, record)
         seen = str(transaction)
         old, new = previous / "data", transaction / "new"
-        safe_path(c.library, old)
-        safe_path(c.library, new)
+        safe_path(layout.root_of(c, game["id"]), old)
+        safe_path(layout.root_of(c, game["id"]), new)
         if old.exists() and not old.is_dir():
             raise ValueError("invalid original save copy")
         if record["phase"] == "committed":
@@ -823,7 +825,7 @@ def external_archive(c, game, root, source):
     """
     try:
         key = hashlib.sha256((source_digest(c, source) + fingerprint(c, root)).encode()).hexdigest()[:32]
-        cache = safe_path(c.library, c.library / "save-imports" / game["id"])
+        cache = safe_path(_lay.root_of(c, game["id"]), _lay.root_of(c, game["id"]) / "save-imports" / game["id"])
     except ValueError:
         fail(c, "存档目录包含链接，已停止操作。", "unsafe_path")
     destination = cache / (key + ".s2asave")
@@ -860,6 +862,8 @@ def external_archive(c, game, root, source):
                 for e in save_entries(read, files, dirs)
                 if e["programId"] == game["id"].lower() and (kind is None or e["type"] == kind)
             ]
+            if kind is None and len(entries) > 1:   # 同时有账户存档和设备存档的游戏：没说明类型的来源按账户存档
+                entries = [e for e in entries if e["type"] == "account"] or entries
             if len(entries) != 1:
                 fail(
                     c,
@@ -939,10 +943,117 @@ def checked_archive(c, game, root):
         fail(c, "备份损坏、格式不支持或包含不安全路径，已拒绝恢复。", "invalid")
 
 
+SEED_NOTICE = "这款游戏在这台电脑上还没玩过：存档会在下次启动游戏时放进去。"
+SEED_DONE_LINE = "S2A 带存档起局："
+
+
+def pending_seed(c, gid):
+    """没玩过的游戏没有存档位置：社区存档先放这里，下次启动时由运行时建好存档再灌入（S2A_SAVE_DIR，同内部带存档起局）"""
+    return safe_path(c.library, c.library / "save-imports" / gid / "pending-seed")
+
+
+def has_save_target(c, game, root):
+    if not root.exists():
+        return False
+    files, dirs = scan(c, root)
+    if SAVE_INDEX not in files:
+        return False
+    return any(e["programId"] == game["id"].lower() for e in save_entries(lambda name: (root / name).read_bytes(), files, dirs))
+
+
+def seed_source(c, game, root):
+    """这次该走「下次启动时放进去」的来源；不是（有存档位置，或来源是我方备份）返回 None"""
+    source = Path(c.r["path"]).expanduser()
+    try:
+        if not source.exists() or own_backup(source) or has_save_target(c, game, root):
+            return None
+    except (ValueError, OSError, zipfile.BadZipFile):
+        return None
+    return source
+
+
+def seed_kind(c, game, kind):
+    """来源说明了类型就用；否则看游戏的 control.nacp：只有设备存档的按设备，其余按账户"""
+    if kind:
+        return kind
+    nacp = next(_lay.image_mac(c, game["id"], create=False).rglob("control.nacp"), None)
+    with contextlib.suppress(OSError, struct.error, AttributeError):
+        data = nacp.read_bytes()[:0x30A0]
+        account, device = struct.unpack_from("<q", data, 0x3080)[0], struct.unpack_from("<q", data, 0x3090)[0]
+        if account <= 0 < device:
+            return "device"
+    return "account"
+
+
+def seed_target_mark(c, root):
+    return fingerprint(c, root) if root.exists() else "no-save-yet"
+
+
+@contextlib.contextmanager
+def opened_seed(c, game, source):
+    try:
+        with save_formats.extracted(source, tid=game["id"]) as (_, data, program, kind, why):
+            if program != game["id"].lower():
+                fail(c, "这份存档属于另一款游戏（程序号 %s），已拒绝导入。" % program, "wrong_game")
+            yield data, kind
+    except (ValueError, OSError, zipfile.BadZipFile):
+        fail(c, "备份损坏、格式不支持或包含不安全路径，已拒绝恢复。", "invalid")
+
+
+def seed_preview(c, game, root, source):
+    with opened_seed(c, game, source) as (data, _):
+        files = [os.path.join(data, f) for f in save_formats.files_under(data)]
+        total = sum(os.path.getsize(f) for f in files)
+    return dict(
+        manifest=dict(game=identity(game) | dict(name=game.get("name") or game["id"]), files=[]),
+        archiveSha256=source_digest(c, source),
+        targetFingerprint=seed_target_mark(c, root),
+        previewLibraryId=c.r["libraryId"],
+        fileCount=len(files),
+        totalBytes=total,
+        notice=SEED_NOTICE,
+    )
+
+
+def seed_restore(c, game, root, source):
+    if (
+        c.r.get("archiveSha256") != source_digest(c, source)
+        or c.r.get("targetFingerprint") != seed_target_mark(c, root)
+        or c.r.get("previewLibraryId") != c.r["libraryId"]
+    ):
+        fail(c, "备份或当前存档已变化，请重新检查备份后再确认恢复。", "changed")
+    pending = pending_seed(c, game["id"])
+    stage = pending.with_name(".pending-seed.new")
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True, mode=0o700)
+    with opened_seed(c, game, source) as (data, kind):
+        copy_tree(c, Path(data), stage / seed_kind(c, game, kind))
+    shutil.rmtree(pending, ignore_errors=True)
+    os.replace(stage, pending)
+    return dict(committed=True, hadOriginal=False, outputPath=str(pending), previousBackup="", cleanupWarning="")
+
+
+def claim_seed(c, gid):
+    """启动时调：有待放入的存档就返回目录，给 S2A_SAVE_DIR"""
+    pending = pending_seed(c, gid)
+    return pending if pending.is_dir() and any(pending.iterdir()) else None
+
+
+def finish_seed(c, gid, log):
+    """一局结束后：运行时报了灌入成功才删；没成功留着，下次启动再放"""
+    pending = pending_seed(c, gid)
+    with contextlib.suppress(OSError):
+        if SEED_DONE_LINE in Path(log).read_text(encoding="utf-8", errors="replace"):
+            shutil.rmtree(pending, ignore_errors=True)
+
+
 def inspect(c):
     c.begin("校验存档备份")
     with stopped(c, tolerate=True) as (game, _, _):
         root, _, _ = locations(c, game)
+        seed = seed_source(c, game, root)
+        if seed is not None:
+            return seed_preview(c, game, root, seed)
         _, manifest, sha, notice = checked_archive(c, game, root)
         return dict(
             manifest=manifest,
@@ -976,6 +1087,9 @@ def restore(c):
     c.begin("验证恢复条件", 1, 3)
     with stopped(c) as (game, _, _):
         root, transactions, backups = locations(c, game)
+        seed = seed_source(c, game, root)
+        if seed is not None:
+            return seed_restore(c, game, root, seed)
         source, manifest, sha, _ = checked_archive(c, game, root)
         target_hash = fingerprint(c, root)
         if (
@@ -991,7 +1105,7 @@ def restore(c):
         atomic(transaction / "owner.json", dict(schema=1, gameId=game["id"], transaction=token))
         previous = backups / token
         previous.mkdir(parents=True, mode=0o700)
-        sync_parents(transaction, c.library)
+        sync_parents(transaction, layout.root_of(c, game["id"]))
         sync_parents(previous, c.library)
         new, old = transaction / "new", previous / "data"
         journal = transactions / (game["id"] + ".json")

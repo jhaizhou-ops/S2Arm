@@ -58,21 +58,21 @@ Cut-off date: 2026-11-08.
 
 ## Speed and efficiency
 
-**Claim**: cold builds on a MacBook Air take 6.4 minutes for Diablo III, 8.6 minutes for Animal Crossing: New Horizons and 34 minutes for Tears of the Kingdom; the Switch 2 edition of Ocarina of Time on an iPhone 17 Pro Max holds 60 fps while cool, 37–43 fps once hot, at about 0.15 J per frame.
+**Claim**: cold builds on a MacBook Air take 6.4 minutes for Diablo III, 8.6 minutes for a 12 GB life-sim game and 34 minutes for a 17.5 GB open-world game; a Switch 2 game on an iPhone 17 Pro Max holds 60 fps while cool, 37–43 fps once hot, at about 0.15 J per frame.
 
 ### Cold build
 
 | Game | Game files | Shaders | Import | Build | Total |
 |---|---|---|---|---|---|
 | Diablo III | 23.49 GB | 1,222 | 11 s | 371 s | **382 s (6.4 min)** |
-| Animal Crossing: New Horizons | 11.97 GB | 9,315 | 6 s | 511 s | **517 s (8.6 min)** |
-| The Legend of Zelda: Tears of the Kingdom | 17.48 GB | 26,999 | 8 s | 2032 s | **2040 s (34 min)** |
+| Life-sim game (program ID 01006F8002326000) | 11.97 GB | 9,315 | 6 s | 511 s | **517 s (8.6 min)** |
+| Open-world game (program ID 0100F2C0115B6000) | 17.48 GB | 26,999 | 8 s | 2032 s | **2040 s (34 min)** |
 
 **Method**: MacBook Air (M3, 16 GB), 2026-11-08. A fresh library, an empty work area and no caches. Timing starts at importing the game and ends when the app and resource pack are done, excluding install. Measured through the launcher's normal job flow on a dedicated machine, one game at a time. Build time depends mainly on shader count, not game size.
 
 ### Frame rate and energy per frame
 
-The Nintendo Switch 2 edition of *The Legend of Zelda: Ocarina of Time*, iPhone 17 Pro Max, 2026-11-07.
+A Switch 2 game, iPhone 17 Pro Max, 2026-11-07.
 
 | Phone state | Frame rate |
 |---|---|
@@ -107,8 +107,8 @@ Over the same 240-second measurement window: **43.3 fps** on average, 6.63 W for
 |---|---|---|
 | Ni no Kuni: Wrath of the White Witch | 1.0.2 | 32-bit |
 | Goat Simulator | 1.0.0 | 32-bit |
-| New Super Mario Bros. U Deluxe | 1.0.0 | 32-bit |
+| A side-scrolling action game | 1.0.0 | 32-bit |
 | Monster Hunter XX (Nintendo Switch Ver.) | 1.5.0 | 32-bit |
 | Minecraft: Story Mode | — | Needs a 36-bit address space |
 
-**Method**: each game's main executable (NSO) is read to confirm its instruction set; the executable actually read is authoritative. Captain Toad: Treasure Tracker is 64-bit after update 1.1.0 and passed the survey, so it is not listed. Newly found unsupported games are added here with their version.
+**Method**: each game's main executable (NSO) is read to confirm its instruction set; the executable actually read is authoritative. A puzzle game is 64-bit after update 1.1.0 and passed the survey, so it is not listed. Newly found unsupported games are added here with their version.

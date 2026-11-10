@@ -199,7 +199,7 @@ GLB(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface sf) { @autoreleasepool 
     double per = nvn_fps_period(s->interval / (double)nvn_be_fps_target());
     __atomic_store_n(&g_gl_game_fps, s->interval ? nvn_be_fps_target() / (int)s->interval : 0, __ATOMIC_RELAXED);   // 节拍周期 interval / 目标帧率 的倒数（上限另算）
     // interval 0 原来不等；显式上限启用后也应限帧。上限 30 由链接自身降为 30 Hz，interval 2 只等同一拍。
-    if (per > 0 && nvn_be_link_active()) nvn_be_link_wait_tick(s->interval ? (int)s->interval : nvn_fps_limit() == 120 ? 0 : 1, (uint64_t)(2e9 * per));
+    if (per > 0 && nvn_be_link_active()) nvn_be_link_wait_tick(s->interval ? (int)s->interval : nvn_fps_limit() > 60 ? 0 : 1, (uint64_t)(2e9 * per));
     else if (per > 0) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ts.tv_sec + ts.tv_nsec * 1e-9;
         if (s->next_swap <= 0 || now - s->next_swap > per) s->next_swap = now;

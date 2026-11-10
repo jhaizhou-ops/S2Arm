@@ -45,6 +45,26 @@ def metal_cmd(sdk, tool, *args):
     return ['xcrun', '-sdk', sdk, tool, *[str(a) for a in args]]
 
 
+def metal_run(cmd, work, **kw):
+    """跑 metal_cmd 给的命令。Windows 版 metal.exe / metallib.exe 会把参数里的空格再拆开（#257），metallib.exe 还按 ANSI 代码页开文件、
+    路径里有非 ASCII 字符就「LLVM ERROR: Error opening」（11-09 外部报告：中文用户名，Windows 出包机实测中文绝对路径失败、工作目录 + 相对路径通过）。
+    所以 Windows 上工作目录设成 work（调用方的临时目录，输入 / 输出都放在它下面），work 下的绝对路径一律改成相对路径；改完仍含空格或非 ASCII 就报错，
+    不交给编译器（同 graphics/tools/direct/dsh/batch/Build.cs WinRelative）。Mac 原样跑"""
+    if os.name != 'nt':
+        return subprocess.run(cmd, **kw)
+    out = [cmd[0]]
+    for a in cmd[1:]:
+        a = str(a)
+        if os.path.isabs(a):
+            r = os.path.relpath(a, work)
+            if not r.startswith('..'):
+                a = r
+        if any(ch == ' ' or ord(ch) > 127 for ch in a):
+            raise ValueError(f'Metal 编译器（Windows 版）不认带空格或非 ASCII 字符的路径，而 {a} 不在工作目录 {work} 下，没法改成相对路径')
+        out.append(a)
+    return subprocess.run(out, cwd=work, **kw)
+
+
 def red(msg):
     sys.exit("[RED] " + msg)
 

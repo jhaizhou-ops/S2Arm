@@ -30,6 +30,8 @@ void *s2a_shell_library_vc(const char *catalogue_json_path);
 //     实现在宿主 ios/app.m（按 Documents/games/<游戏号> 跑 pack_apply.c 同一判据）；本包 s2a_shell.c 里弱定义缺省 1（Swift 单测不链宿主）
 //   s2a_shell_pick_game_data：库里点「需要游戏数据」那款 → 宿主给导入说明（含「重新检查」）；弱定义缺省只记日志
 int s2a_shell_game_data_ready(const char *game_id);
+// 库界面第一次出现（启动打点「游戏库界面可操作」）；弱定义缺省什么都不做
+void s2a_shell_library_appeared(void);
 void s2a_shell_pick_game_data(const char *game_id);
 // 宿主让库界面重判各款资源包（说明里「重新检查」后调）。库界面建好时登记；没登记时 s2a_shell_refresh 什么都不做
 typedef void (*s2a_shell_refresh_fn)(void *ctx);
@@ -49,6 +51,15 @@ int s2a_shell_vpad_save(const char *game_id, const char *centers_json, double sa
 int s2a_shell_vpad_select(const char *game_id, const char *layout_id);
 // ZL / ZR 按住锁定开关（按游戏，与游戏内设置同一份数据），返回 1 成功 / 0 失败
 int s2a_shell_vpad_set_hold_lock(const char *game_id, int enabled);
+
+// iCloud 存档同步（新功能线 11-09；方案见 launchers/shared/SaveSync）：
+//   s2a_shell_save_context：本款存档作业的公共字段 {"game":<存档身份>,"dataRoot":…,"workRoot":…}，malloc 出的 UTF-8、调用方 free；
+//     没选游戏 / 没有存档身份 / 没链服务层回 NULL（不同步）。实现在宿主 ios/save_transfer.m；本包弱定义缺省 NULL
+//   s2a_shell_save_request：转给服务层 S2A_SaveTransfer（请求 / 回应 JSON 同 ios/save_transfer.m），回 malloc 出的 UTF-8、调用方 free；没链服务层回 NULL
+//   s2a_shell_cloud_sync_vc：实现在 S2ArmShellHost（Swift）。玩家开了云存档就返回 +1 的同步页（同步完 / 玩家放弃后主线程调 done(ctx)），没开回 NULL
+char *s2a_shell_save_context(void);
+char *s2a_shell_save_request(const char *json);
+void *s2a_shell_cloud_sync_vc(const char *game_id, void (*done)(void *ctx), void *ctx);
 
 #ifdef __cplusplus
 }

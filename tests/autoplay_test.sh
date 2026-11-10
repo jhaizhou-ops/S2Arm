@@ -200,7 +200,7 @@ urllib.request.OpenerDirector.open = fake_open
 _eu = os.path.expanduser
 os.path.expanduser = lambda p: os.environ["VO_HOME"] + p[1:] if p.startswith("~/") else _eu(p)
 PYEOF
-vo2() { VO_DROP=$2 VO_HOME=$T/vo/home VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet2; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
+vo2() { S2A_VISION_RELAY_URL=https://relay.example/v1/chat/completions VO_DROP=$2 VO_HOME=$T/vo/home VO_LOG=$T/vo/$1.log python3 -c 'import sys, runpy; sys.path.insert(0, sys.argv[1]); import vo_fakenet2; sys.argv = sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")' $T/vo/site $H/autoplay/vision_or.py $T/vf/s.png 题 > $T/vo/$1.out 2> $T/vo/$1.err; echo $?; }
 d2=$(vo2 d2 1); d9=$(vo2 d9 9); d9b=$(vo2 d9b 9)
 h0=$SECONDS; hd=$(VO_SLOW1=4 S2A_VISION_RELAY_HEDGE=0.5 vo2 hd 0); hs=$((SECONDS - h0))
 ck "㉔b 中转站丢图：每次请求都带截图（中转站请求 $(grep -vc openrouter $T/vo/d2.log) 次、带图 $(grep -v openrouter $T/vo/d2.log | grep -c '带图=1') 次）；丢 1 次后第 2 次答出（退出 ${d2}、判丢图 $(grep -c 判丢图 $T/vo/d2.err) 次）；一直丢 → 退出非零（${d9}），OpenRouter 只撞 $(grep -c openrouter $T/vo/d9.log) 次 402、下一问 $(grep -c openrouter $T/vo/d9b.log) 次" \

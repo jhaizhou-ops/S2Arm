@@ -3,6 +3,10 @@
 sed_edit() { sed -i.s2a-bak "$1" "$2" && rm -f "$2.s2a-bak"; }
 # 分配闸门 + 记分板五格单测（造局目录，期望值手算）：bash tests/score_test.sh
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0
+# 看板 board.py 是维护方工具，迁仓时按规定留在 private-tools（11-09：公开仓里 import board 从首次公开快照起一直红）：
+#   有 $S2A_PRIVATE_TOOLS/board.py 才测看板那几例，没有就逐条写明跳过（公开贡献者的环境里本来就没有看板）
+BD=${S2A_PRIVATE_TOOLS:-}; [ -n "$BD" ] && [ -f "$BD/board.py" ] || BD=
+bck() { if [ -n "$BD" ]; then ck "$@"; else echo "跳过 $1（看板 board.py 在 private-tools，公开仓不带；设 S2A_PRIVATE_TOOLS 才测）"; fi; }
 # 噪声底表缺省给空表：既有用例测的是「近 3 局中位」等规则，不受「临界」档影响；临界档另有用例显式给表（10-30）
 : > "$T/noise_empty.tsv"; export S2A_AB_NOISE_TSV=$T/noise_empty.tsv
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
@@ -32,8 +36,8 @@ mkp $T/w2 500 77270 16667; ck "60 帧、可玩段 77.27 ms → 红" '[ "$(gate $
 # 看板 GC 停顿一行（board.gc_line）：同包两局取最大。局 a：第 50 帧 9 ms gen0；局 b：第 70 帧 40 ms gen2、第 80 帧 12 ms gen1（帧表没有 draw_n → gen2 单列）
 mkdir -p $T/gl/a/out $T/gl/b/out; mkp $T/gl/a/out 50 9000; mkp $T/gl/b/out 70 40000
 awk 'NR>1 && $1>=70{$6=1} NR>1 && $1==80{$8=12000} NR>1 && $1>=80{$5=1}1' OFS='\t' $T/gl/b/out/frames.tsv > $T/gl/f && mv $T/gl/f $T/gl/b/out/frames.tsv
-glo=$(python3 -c "import sys; sys.path.insert(0, '$H/tools'); import board; r = lambda d: ['', 'acnh', 'p'] + ['']*7 + [d]; print(board.gc_line([r('$T/gl/a/out'), r('$T/gl/b/out')]))" 2>&1)
-ck "看板 GC 行：整局最长 12.00 ms（帧 80，b）、读盘中 gen2 最长 40.00 ms（帧 70，b）、同包 2 局（${glo}）" '[ "$glo" = "整局最长 12.00 ms（帧 80，b）；读盘中 gen2（不判）最长 40.00 ms（帧 70，b）（同包 2 局）" ]'
+glo=$(python3 -c "import sys; sys.path.insert(0, '$BD'); import board; r = lambda d: ['', 'acnh', 'p'] + ['']*7 + [d]; print(board.gc_line([r('$T/gl/a/out'), r('$T/gl/b/out')]))" 2>&1)
+bck "看板 GC 行：整局最长 12.00 ms（帧 80，b）、读盘中 gen2 最长 40.00 ms（帧 70，b）、同包 2 局（${glo}）" '[ "$glo" = "整局最长 12.00 ms（帧 80，b）；读盘中 gen2（不判）最长 40.00 ms（帧 70，b）（同包 2 局）" ]'
 # gen2 游玩中照判（10-23 维护者）：帧号 > MARK，或前后 30 帧 draw_n 中位 ≥ MARK 后 draw_n 中位的 1/4。造 3000 帧、MARK 100、MARK 后 draw_n 400（门槛 100）
 mkd() { mkdir -p $1; awk -v at=$2 -v dlo=$3 'BEGIN{print "frame\twall_us\talloc_b\tgc0\tgc1\tgc2\trb_us\tdraw_n\tgc_pause_us"; for(i=1;i<=3000;i++) printf "%d\t33333\t100\t0\t0\t%d\t0\t%d\t%d\n", i, (i>=at?1:0), (i<=100?dlo:400), (i==at?40000:0)}' > $1/frames.tsv; }
 mkd $T/d1 50 20; ck "MARK 前 gen2、前后绘制中位 20 < 门槛 100（读盘）→ 单列不判、绿" '[ "$(gate $T/d1 30 100)" = 绿 ]'
@@ -229,8 +233,8 @@ mkd $T/jobs/mhrise_1022000100_2/out_1 120; R=$(sc $T/jobs/mhrise_1022000100_2/ou
 # M3 计数按 milestones/M3_*/<款>/ 证据：marked=true 且有 MARK 截图才算；没截图 / marked=false 不算
 M=$T/ms; mkdir -p $M/M3_a/acnh $M/M3_a/d3 $M/M3_a/mk8d; echo '{"marked": true}' > $M/M3_a/acnh/ap_summary.json; : > $M/M3_a/acnh/ap_mark.png; echo abc1234 > $M/M3_a/acnh/读数.txt
 echo '{"marked": true}' > $M/M3_a/d3/ap_summary.json; echo '{"marked": false}' > $M/M3_a/mk8d/ap_summary.json; : > $M/M3_a/mk8d/ap_mark.png
-m3() { S2A_MILESTONES=$M python3 -c "import sys; sys.path.insert(0, '$H/tools'); import board; print(sum(1 for g in board.GAMES if board.m3(g)), board.m3('acnh')[0])"; }
-ck "M3 证据：acnh 有截图算、d3 缺截图不算、mk8d marked=false 不算 → 1 款，提交 abc1234" '[ "$(m3)" = "1 abc1234" ]'
+m3() { S2A_MILESTONES=$M python3 -c "import sys; sys.path.insert(0, '$BD'); import board; print(sum(1 for g in board.GAMES if board.m3(g)), board.m3('acnh')[0])"; }
+bck "M3 证据：acnh 有截图算、d3 缺截图不算、mk8d marked=false 不算 → 1 款，提交 abc1234" '[ "$(m3)" = "1 abc1234" ]'
 # 判格按同包近 3 个有效局（score_cells.vote；10-21 维护者：取最新一条单局噪声直接翻格）。夹具 = 记分板真实行（5dcfe4994）：
 #   怪猎能耗 3.80 红 / 3.54 绿 → 中位 3.67 ≤ 3.7 → 绿、2 局暂定；马车8 3.55 / 3.18 / 4.37 → 中位 3.55 → 绿（取最新会是红）；塞尔达 3.65 / 3.92 → 中位 3.785 → 红
 #   稳定：同一组行打乱先后，中位判出的格不变（取最新一条会翻：反证）；事件格多数：马车8 能玩 绿绿绿 → 绿
@@ -261,33 +265,33 @@ ck "能耗门槛按帧率：4.50 W 要 60 → 绿、要 30 → 红、4.90 W 要 
 #   维护者 判绿（包 A）→ 新包 B 的自动局画面未测 → 画面仍绿、注明「维护者 判 … 包 A」；包 B 自动局画面报红 → 红、注明自动判据报红
 J=$T/bj; mkdir -p $J/jobs/acnh_1/out_1 $J/jobs/acnh_2/out_1; for x in 1 2; do printf 'OWNER=%q\n' 自动正式局 > $J/jobs/acnh_$x.job; done
 H0=$(head -1 $H/tests/fixtures/score_vote/board.tsv)
-bj() { python3 -c "import sys; sys.path.insert(0, '$H/tools'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); s = st[last['acnh'][0]]; print(s.get('画面', '未测'), '|', s['#注']['画面'][2])"; }
+bj() { python3 -c "import sys; sys.path.insert(0, '$BD'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); s = st[last['acnh'][0]]; print(s.get('画面', '未测'), '|', s['#注']['画面'][2])"; }
 { echo "$H0"; printf '10-21 08:40\tacnh\tAAA\t绿\t绿\t\t\t\t\t画面：维护者 测试设备1 实机判，包 AAA\t—\t—\t—\t—\n'
   printf '10-21 12:00\tacnh\tBBB\t绿\t未测\t绿\t绿\t红\t绿\t16.7 ms / 慢帧 0.10%% / 3.00 W\t%s/jobs/acnh_1/out_1\t1\t—\t—\n' $J; } > $J/b.tsv
-o=$(bj); ck "维护者 判绿（包 AAA）后换新包 BBB：画面仍 绿、注明 维护者 判定（${o}）" '[ "${o%% *}" = 绿 ] && grep -q "维护者 判 10-21 08:40 包 AAA" <<< "$o"'
+o=$(bj); bck "维护者 判绿（包 AAA）后换新包 BBB：画面仍 绿、注明 维护者 判定（${o}）" '[ "${o%% *}" = 绿 ] && grep -q "维护者 判 10-21 08:40 包 AAA" <<< "$o"'
 printf '10-21 13:00\tacnh\tBBB\t绿\t红\t绿\t绿\t红\t绿\t16.7 ms / 慢帧 0.10%% / 3.00 W\t%s/jobs/acnh_2/out_1\t1\t—\t—\n' $J >> $J/b.tsv
-o=$(bj); ck "之后新包 BBB 的自动局画面报红 → 画面 红、注明自动判据报红（${o}）" '[ "${o%% *}" = 红 ] && grep -q "之后自动判据 10-21 13:00 包 BBB 报红" <<< "$o"'
+o=$(bj); bck "之后新包 BBB 的自动局画面报红 → 画面 红、注明自动判据报红（${o}）" '[ "${o%% *}" = 红 ] && grep -q "之后自动判据 10-21 13:00 包 BBB 报红" <<< "$o"'
 # 旧包的自动红不粘住（10-22 维护者：d3 挂着旧包贴边暗带误报的红）：之后新包 EEE 的自动局画面未测（满屏过、真值未测）→ 画面未测、注明旧红作废待 维护者 判；
 #   EEE 有一局报红 → 照旧红
 cp $J/b.tsv $J/b0.tsv; mkdir -p $J/jobs/acnh_4/out_1 $J/jobs/acnh_5/out_1; for x in 4 5; do printf 'OWNER=%q\n' 自动正式局 > $J/jobs/acnh_$x.job; done
 printf '10-21 13:10\tacnh\tEEE\t绿\t未测\t绿\t绿\t红\t绿\t16.7 ms / 慢帧 0.10%% / 3.00 W\t%s/jobs/acnh_4/out_1\t1\t—\t—\n' $J >> $J/b.tsv
-o=$(bj); ck "旧包 BBB 自动报红后现行包 EEE 自动局画面未测 → 画面 未测、注明旧红作废待 维护者 判（${o}）" '[ "${o%% *}" = 未测 ] && grep -q "现行包 EEE 的 1 局自动局都没报红 → 旧红作废，待 维护者 判" <<< "$o"'
+o=$(bj); bck "旧包 BBB 自动报红后现行包 EEE 自动局画面未测 → 画面 未测、注明旧红作废待 维护者 判（${o}）" '[ "${o%% *}" = 未测 ] && grep -q "现行包 EEE 的 1 局自动局都没报红 → 旧红作废，待 维护者 判" <<< "$o"'
 printf '10-21 13:20\tacnh\tEEE\t绿\t红\t绿\t绿\t红\t绿\t16.7 ms / 慢帧 0.10%% / 3.00 W\t%s/jobs/acnh_5/out_1\t1\t—\t—\n' $J >> $J/b.tsv
-o=$(bj); ck "现行包 EEE 有一局画面报红 → 画面 红（${o}）" '[ "${o%% *}" = 红 ] && grep -q "之后自动判据 10-21 13:20 包 EEE 报红" <<< "$o"'
+o=$(bj); bck "现行包 EEE 有一局画面报红 → 画面 红（${o}）" '[ "${o%% *}" = 红 ] && grep -q "之后自动判据 10-21 13:20 包 EEE 报红" <<< "$o"'
 python3 -c "import sys; p=sys.argv[1]; L=[l.rstrip('\n').split('\t') for l in open(p)]; L=[r for r in L if r[0] != '10-21 13:20']
 for r in L:
     if '实机判，包 AAA' in r[9]: r[4] = '红'
 open(p, 'w').write(''.join('\t'.join(r) + '\n' for r in L))" $J/b.tsv
-o=$(bj); ck "维护者 自己判红（包 AAA）、之后 BBB 自动红、现行包 EEE 自动局不报红 → 仍 红（维护者 的红只等 维护者 新判定）（${o}）" '[ "${o%% *}" = 红 ] && ! grep -q 旧红作废 <<< "$o"'
+o=$(bj); bck "维护者 自己判红（包 AAA）、之后 BBB 自动红、现行包 EEE 自动局不报红 → 仍 红（维护者 的红只等 维护者 新判定）（${o}）" '[ "${o%% *}" = 红 ] && ! grep -q 旧红作废 <<< "$o"'
 mv $J/b0.tsv $J/b.tsv
 printf '10-21 13:30\tacnh\tCCC\t\t绿\t\t\t\t\t画面：维护者 测试设备1 实机判，包 CCC\t—\t—\t—\t—\n' >> $J/b.tsv
-o=$(python3 -c "import sys; sys.path.insert(0, '$H/tools'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); k = last['acnh'][0]; s = st[k]; print(k[1], s.get('帧率', '未测'), s.get('画面', '未测'))")
-ck "维护者 又在包 CCC 判画面（之后没有 CCC 的自动局）：现行包仍按自动局定 BBB、帧率照 BBB 判绿、画面取 维护者 新判定绿（${o}）" '[ "$o" = "BBB 绿 绿" ]'
+o=$(python3 -c "import sys; sys.path.insert(0, '$BD'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); k = last['acnh'][0]; s = st[k]; print(k[1], s.get('帧率', '未测'), s.get('画面', '未测'))")
+bck "维护者 又在包 CCC 判画面（之后没有 CCC 的自动局）：现行包仍按自动局定 BBB、帧率照 BBB 判绿、画面取 维护者 新判定绿（${o}）" '[ "$o" = "BBB 绿 绿" ]'
 # 现行包 = 最新一条自动正式局的包、无效也算（10-21 维护者：八方2 最新包的局全记局无效后，看板退回显示更早的包当「最新包」）
 mkdir -p $J/jobs/acnh_3/out_1; printf 'OWNER=%q\n' 自动正式局 > $J/jobs/acnh_3.job
 printf '10-21 14:00\tacnh\tDDD\t—\t—\t—\t—\t—\t—\t【局无效】MARK 打在菜单上 / — ms\t%s/jobs/acnh_3/out_1\t1\t—\t—\n' $J >> $J/b.tsv
-o=$(python3 -c "import sys; sys.path.insert(0, '$H/tools'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); k = last['acnh'][0]; s = st[k]; print(k[1], s.get('能玩', '未测'), s.get('帧率', '未测'))")
-ck "最新包 DDD 只有一条局无效：现行包是 DDD、能玩 / 帧率都未测，不退回 BBB（${o}）" '[ "$o" = "DDD 未测 未测" ]'
+o=$(python3 -c "import sys; sys.path.insert(0, '$BD'); import board; board.SB = '$J/b.tsv'; st, last, _ = board.board('通用'); k = last['acnh'][0]; s = st[k]; print(k[1], s.get('能玩', '未测'), s.get('帧率', '未测'))")
+bck "最新包 DDD 只有一条局无效：现行包是 DDD、能玩 / 帧率都未测，不退回 BBB（${o}）" '[ "$o" = "DDD 未测 未测" ]'
 # 能耗口径（10-23 维护者「在充电 / 充满 / 未充电 / 热机 / 冷机的读数都可以作为依据，标清当时状态就行」）：每局标「充电状态·热档位」，最近 3 个有效局全部投票；期望按规则手算
 o=$(python3 - "$H/tools" "$T/eb" <<'PY'
 import os, sys, plistlib; sys.path.insert(0, sys.argv[1]); from score_cells import energy_state, vote

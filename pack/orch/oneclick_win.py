@@ -25,6 +25,8 @@
 """
 import argparse, glob, json, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+from pack.orch import shortroot   # noqa: E402
 
 R = Path(__file__).resolve().parents[2]
 PY = sys.executable
@@ -64,8 +66,20 @@ def mixed(p):   # Windows 原生 Python 与 Git Bash 都认的写法（R:/a/b）
     return str(p).replace('\\', '/')
 
 
+def metal_exe(environ=None):
+    """Windows Metal：显式目录优先，再查玩家的 PATH，最后用官方安装目录；显式配置无效时不另选一份。
+    玩家的 PATH：随包 s2arm_env.cmd 把作业 PATH 换成只含随包工具，换之前存进 S2A_USER_PATH（11-09 Windows 出包机实测 #137 合入后：
+    只设 PATH 的自定义安装在启动器里照样用默认目录），有它就查它。作业层（core.env）在父进程按这里选一次，显式写成子进程的 S2A_METAL_BIN"""
+    e = os.environ if environ is None else environ
+    configured = e.get('S2A_METAL_BIN')
+    if configured: return Path(configured) / 'metal.exe'
+    found = shutil.which('metal.exe', path=e.get('S2A_USER_PATH') or e.get('PATH'))
+    # PATH 可以含相对目录；后续编译在仓库目录运行，传给子进程前固定为绝对路径。
+    return Path(found).absolute() if found else Path(r'C:\Program Files\Metal Developer Tools\bin') / 'metal.exe'
+
+
 def metal_bin():
-    return Path(os.environ.get('S2A_METAL_BIN') or r'C:\Program Files\Metal Developer Tools\bin')
+    return metal_exe().parent
 
 
 def prebuilt(rel, ident=None):
@@ -115,7 +129,8 @@ def env_items(target, shell):
         add('clang', not miss, f'预编直连翻译库 dsx / Yaz0 / CRI 小库（{pre}）' + (f'缺 {"、".join(miss)}' if miss else '齐'))
     else:
         add('clang', os.environ.get('S2A_CLANG') or shutil.which('clang'), '直连翻译库 dsx / Yaz0 小库现编')
-    add('metal', (metal_bin() / ('metal.exe' if WIN else 'metal')).is_file() if WIN else True, f'Metal Developer Tools（{metal_bin()}；S2A_METAL_BIN 可改）')
+    metal = metal_exe()
+    add('metal', metal.is_file() if WIN else True, f'Metal Developer Tools（{metal.parent}；S2A_METAL_BIN 可指定，否则查 PATH / 官方安装目录）')
     sys.path.insert(0, str(R / 'graphics/tools/shbake')); import zstd_lib
     try: zstd_lib._lib(); zok, zwhy = True, 'libzstd 已装上'
     except zstd_lib.ZstdError as e: zok, zwhy = False, f'{e}（zstd 官方发行包加进 PATH）'
@@ -164,10 +179,11 @@ class Run:
         self.evf = open(events, 'w', encoding='utf-8', newline='\n') if events else None; self.k = 0
 
     def ev(self, kind, **kw):   # 事件流一行（--events，见文件头）；没给就不写
+        kw = {k: shortroot.show(v) if isinstance(v, str) else v for k, v in kw.items()}   # 事件给界面：玩家只看到自己选的路径
         if self.evf: self.evf.write(json.dumps({'ev': kind, 't': int(time.time()), **kw}, ensure_ascii=False) + '\n'); self.evf.flush()
 
     def say(self, msg):
-        print(msg, flush=True); self.ev('say', msg=msg)
+        msg = shortroot.show(msg); print(msg, flush=True); self.ev('say', msg=msg)
 
     def step(self, name, fn):
         t = time.time(); rc = 0; self.k += 1; self.ev('stage', k=self.k, n=None, name=name)
@@ -353,7 +369,10 @@ def stages(run, game, x, src_dir, own=False):
     roots = run.out / 'roots'
     # S2A_SEED_AOC=1：同 Mac 一键出包（pack/oneclick/oneclick.sh 私有产物根）——解包目录里的追加内容播进产物根。Switch 2 导出（ns2_dump）的 DLC 只在解包目录里、
     #   没有原件 NSP 给 aoc 阶段解，不播就整份丢（11-05 Windows 出包机金刚：导出 DLC 1 个 7270 文件 958 MB，产物根 / 资源包里都没有，直连库并集 15150 对 Mac 包 21036）
-    env = dict(os.environ, PYTHONUTF8='1', S2A_GAME_SRC=str(src_dir), S2A_SEED_AOC='1')
+    # 轻阶段里的追加内容解包（pack/orch/stages.py _nxu）用本单选定的同一份 nx_unpack：原先它自己去 <S2A_RUN_ROOT>/s2arm/bin 找、找不到又只肯 --no-restore 现编，
+    #   而本单解包步编在 run.out/bin（11-09 Windows 出包机 GRID 两单：nx_unpack 源码改了、身份变了，解包步现编成功、轻阶段退 75「离线还原资产未就绪」）。
+    #   选一次（预编件 → 已编的 → 现编），显式交下去，两处不再各认各的目录
+    env = dict(os.environ, PYTHONUTF8='1', S2A_GAME_SRC=str(src_dir), S2A_SEED_AOC='1', S2A_NX_UNPACK=str(nx_unpack(run)))
     run.step('播种', lambda: run.sh([PY, '-X', 'utf8', '-m', 'pack.orch.refresh', game, '--roots', str(roots), '--from-extract', str(x), *(['--move-romfs'] if own else []), '--stages', ''], 'seed.log', env=env))
     # RomFS 索引阶段按合同 --no-restore 编（不在阶段里悄悄下载）：新检出的代码树（Windows 出包机道按提交新建，11-05 海贼无双4 联调退 75）先在这里还原一次；
     #   包都在本机 NuGet 全局缓存里时不联网，缺包才会去源取
@@ -417,6 +436,8 @@ def direct(run, cur, target, jobs, tid=None, name='direct'):
     env = dict(os.environ, PYTHONUTF8='1', S2A_DIRECT_TARGETS=target, S2A_DIRECT_PUBLISH=target, J=str(jobs), S2A_CPU_BAKE=str(jobs),
                DM_GAMES_DIR=mixed(games), DM_GAMES_FIRST='1',
                S2A_PY=sys.executable, S2A_PYTHON=sys.executable)
+    # Python / C# 编译器包装都读这个目录，metal 与 metallib 必须来自同一安装。
+    if WIN: env['S2A_METAL_BIN'] = mixed(metal_bin())
     if dsx: env['DSX_LIB'] = mixed(dsx)
     gv = prebuilt('glslang/glslangValidator.exe')   # OpenGL 款离线翻译（gl_shaders.py 认 GLSLANG）：预编的在、调用方没另给就用它
     if gv and 'GLSLANG' not in env: env['GLSLANG'] = mixed(gv)
@@ -445,7 +466,9 @@ def direct(run, cur, target, jobs, tid=None, name='direct'):
 
 
 def junction(dst, src):
-    if WIN: subprocess.run(['cmd', '/c', 'mklink', '/J', str(dst), str(src)], check=True, stdout=subprocess.DEVNULL)
+    if WIN:   # 目标写真实长路径：短根是工作期的入口，产物里的联接要在它之外也有效；CreateJunction 不受 cmd 的长度限制
+        import _winapi
+        _winapi.CreateJunction(shortroot.to_long(src, shortroot.table_now()), str(dst))
     else: os.symlink(src, dst)
 
 
@@ -487,12 +510,18 @@ def sub_programs(run, a, x, w, src_dir):
         run.say(f'🟢 多程序合集序号 {i}（{tid_i}）→ {w / "programs" / str(i)}')
 
 
+def save_identity_args():
+    """存档游戏身份（作业层 pack/jobs/ipa.py 按游戏库目录写好、经 S2A_SAVE_IDENTITY 交来）：带进包，iPhone 的存档管理 / iCloud 同步靠它认游戏（#298 同批根修）"""
+    si = os.environ.get('S2A_SAVE_IDENTITY')
+    return ['--save-identity', si] if si else []
+
+
 def ipa(run, w, game, shell, bundle_id, suffix=''):
     title = subprocess.run([PY, '-X', 'utf8', str(R / 'pack/display_name.py'), str(w), '--title'], capture_output=True, text=True, encoding='utf-8').stdout.strip()
     env = dict(os.environ, PYTHONUTF8='1')
     run.step('ipa 收尾', lambda: run.sh([PY, '-X', 'utf8', str(R / 'pack/ipa_tail.py'), '--work', str(w), '--game', game, '--shell', str(shell),
                                         '--bundle-id', bundle_id or f'io.github.s2arm.{game}', '--suffix', suffix, '--key', f'tianyan {game}',
-                                        '--title', title, '--sign', 'none'], 'ipa_tail.log', env=env))
+                                        '--title', title, '--sign', 'none', *save_identity_args()], 'ipa_tail.log', env=env))
     return w / 'pkg' / f'{game}.ipa', title
 
 
@@ -513,7 +542,7 @@ def Early(run, a, cur, game):
         with open(log, 'w', encoding='utf-8', newline='\n') as f:
             p = subprocess.run([PY, '-X', 'utf8', str(R / 'pack/ipa_tail.py'), '--work', str(w), '--game', game, '--shell', str(a.shell),
                                 '--bundle-id', a.bundle_id or f'io.github.s2arm.{game}', '--suffix', suffix, '--key', f'tianyan {game} early',
-                                '--title', title, '--sign', 'none'], stdout=f, stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONUTF8='1'), cwd=R)
+                                '--title', title, '--sign', 'none', *save_identity_args()], stdout=f, stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONUTF8='1'), cwd=R)
         if p.returncode or not (w / 'pkg' / f'{game}.ipa').is_file(): raise RuntimeError(f'早期包没出成（ipa_tail 退 {p.returncode}，见 {log}）')
         return w
 
@@ -545,12 +574,19 @@ def share_walk_dir(out):
     os.environ.setdefault('S2A_ROMFS_WALK', str(Path(out).resolve() / '.romfs-walk'))
 
 
+TEMP_MAX = 200   # TMP / TEMP 的上限：超过 MAX_PATH 时 CreateProcess 的兼容性查询（BasepQueryAppCompat）在 GetTempPath 上无限循环，子进程永远起不来
+
+
 def work_temp(out):
     """临时文件跟工作目录走（11-06 维护者：Windows 出包机 C 盘被编库临时文件写满，时之笛出库两次失败；玩家机 C 盘常常很小）：
     本进程与全部子进程（C# 编库 Path.GetTempPath、Python tempfile、dotnet、bash）的 TMP / TEMP / TMPDIR 指到 <工作目录>/tmp，
     不再落系统盘的用户 Temp。在 main 起步时设一次，之后起的子进程都继承；S2A_KEEP_SYSTEM_TEMP=1 时保持原样（排查用）"""
     if os.environ.get('S2A_KEEP_SYSTEM_TEMP') == '1': return None
-    t = Path(out).resolve() / 'tmp'; t.mkdir(parents=True, exist_ok=True)
+    t = Path(out).resolve() / 'tmp'   # out 已是短入口下的路径：实际落在玩家选的目录
+    if WIN and len(str(t)) > TEMP_MAX:   # 只有建不了短入口才会走到这里：TEMP 不能超长，退回系统 Temp
+        print('【黄】工作目录路径太长且建不了短路径入口，临时文件用系统 Temp', file=sys.stderr)
+        return None
+    t.mkdir(parents=True, exist_ok=True)
     for k in ('TMP', 'TEMP', 'TMPDIR'): os.environ[k] = str(t)
     tempfile.tempdir = None   # tempfile 缓存过系统 Temp 的话重新按环境变量取
     return t
@@ -573,6 +609,11 @@ def main(argv=None):
         for n, ok, why, *_ in items: print(f'{"✅" if ok else "❌"} {n}：{why}')
         return 75 if bad else 0
     if not (a.source or a.from_extract) or not a.out: ap.error('要 <原件>（或 --from-extract <解包目录>）与 --out')
+    if WIN:   # 工作区走短根：之后的路径（工具参数、bash、dotnet、TEMP）都短；深路径的玩家数据目录不再踩 MAX_PATH
+        mapped = shortroot.enter(a.out, *([a.from_extract] if a.from_extract else []))
+        if mapped:
+            a.out = mapped[os.path.abspath(a.out)]
+            if a.from_extract: a.from_extract = mapped[os.path.abspath(a.from_extract)]
     run = Run(a.out, a.events); t0 = time.time(); cur = None
     work_temp(run.out)
     share_walk_dir(a.out)

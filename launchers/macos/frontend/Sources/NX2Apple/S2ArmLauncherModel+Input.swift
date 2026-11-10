@@ -1,7 +1,7 @@
 // S2Arm（不是上游文件）：键位设置（InputSettingsSheet）的数据与读写。键位格式同旧启动器 Models.swift 的 InputConfig
 // （作业层 pack/jobs/library.py validate_input 的契约：schema 1、keyboard / mouse / gamepad / axes / mouseOptions / deadzone），
-// 读：游戏库 mappings/<id>.json → 私有目录 default-input.json → 标准键位（同旧启动器 Store.input(for:) 与起局 build.py 的取法）；
-// 写：saveInput 作业（作业层校验后原子写 mappings/<id>.json），下次开始游戏时生效。
+// 读：这款文件夹里的 input.json（catalog 给的文件夹）→ 私有目录 default-input.json → 标准键位（同起局 build.py 的取法）；
+// 写：saveInput 作业（作业层校验后原子写这款文件夹的 input.json），下次开始游戏时生效。
 import Foundation
 import S2ArmAppleAdapter
 
@@ -96,12 +96,12 @@ struct InputConfig: Codable, Equatable {
 struct LoadedInput { let config: InputConfig; let problem: Bool }
 
 extension S2ArmLauncherModel {
-    /// 这款现在的键位：游戏库 mappings/<id>.json，没有就用私有目录的 default-input.json，再没有用标准键位。
+    /// 这款现在的键位：这款文件夹里的 input.json，没有就用私有目录的 default-input.json，再没有用标准键位。
+    /// 游戏库结构 v3 起键位在每款自己的文件夹（作业层 layout 把旧的 mappings/<号>.json 搬进去了）；原先还读 mappings/ 永远读不到，存过的键位重开显示成默认
     func loadInput(gameID: String) -> LoadedInput {
         let env = provider.client.environment
         var problem = false
-        if !env.library.isEmpty {
-            let path = URL(fileURLWithPath: env.library).appendingPathComponent("mappings/\(gameID).json")
+        if let path = games.first(where: { $0.id == gameID })?.location.file("input.json") {
             if let data = try? Data(contentsOf: path) {
                 if let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: false) }
                 problem = true

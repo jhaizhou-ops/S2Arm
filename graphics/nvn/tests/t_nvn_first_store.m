@@ -7,6 +7,8 @@
 //   ③ 槽 0 没绑 → 跳过、不崩，派发照常（着色器读写的槽没绑：这里只验不崩）
 //   ④ 绑定只有 4 字节（字 1 在界外）→ 跳过：out[1] 仍 0
 //   ⑤ 反射里 5 条 → 拒载；槽号 16 → 拒载；负字号 → 拒载
+//   ⑥ 11-09 Raiders：反射 first_store 的 reg 是着色器内存储缓冲序号（绑定项 index），不是 NVN 槽。绑定表 sbuf index 0 → reg 4（NVN 槽 4），first_store reg 0 word 1 value 41；
+//      槽 4 绑缓冲 B、槽 0 绑无关缓冲 A → 解析出的槽 = 4；派发后 B[1] = 41、B[2] = 42，A 一个字不碰（旧实现写进 A[1]，B[2] = 1）
 // NVN_FS_SOURCE 可指向别的 nvn_mtl.m 副本（修前 / 负对照编同一份单测）。
 #ifndef NVN_FS_SOURCE
 #define NVN_FS_SOURCE "../gfx/nvn/nvn_mtl.m"
@@ -55,6 +57,21 @@ int main(void) {
         memset(&r, 0, sizeof r); int r16 = nvn_refl_from_json(refl(@[ @{ @"reg": @16, @"word": @0, @"value": @1 } ]), &r, err, sizeof err);
         memset(&r, 0, sizeof r); int rneg = nvn_refl_from_json(refl(@[ @{ @"reg": @0, @"word": @-1, @"value": @1 } ]), &r, err, sizeof err);
         CHECK(r5 && r16 && rneg, "⑤ 5 条 / 槽 16 / 负字号：拒载 %d / %d / %d（期望都非 0）", r5 != 0, r16 != 0, rneg != 0);
+        {   // ⑥ 序号 → 槽
+            NvShader *c2 = [NvShader new]; c2->stage = 5; c2->fn = cs->fn; c2->ae = cs->ae; c2->arg_len = cs->arg_len;
+            NSDictionary *j6 = @{ @"route": @"B", @"threadgroup_size": @[@1, @1, @1], @"bindings": @[ @{ @"kind": @"sbuf", @"index": @0, @"reg": @4, @"arg_id": @0, @"rw": @YES } ],
+                                  @"first_store": @[ @{ @"reg": @0, @"word": @1, @"value": @41 } ] };
+            REQUIRE(!nvn_refl_from_json(j6, &c2->rf, err, sizeof err));
+            CHECK(c2->rf.nfirst == 1 && c2->rf.first[0].reg == 4, "⑥ 首写序号 0 按绑定表换成 NVN 槽：%d（期望 4）", c2->rf.first[0].reg);
+            prog_t pg2 = {.magic = MAGIC('P', 'R', 'O', 'G'), .serial = nvn_new_serial()}; NvProg *np2 = [NvProg new]; np2->sh[5] = c2; serial_put(pg2.serial, np2);
+            uint32_t *A = mem + 1024, *B = mem + 2048; memset(A, 0, 256); memset(B, 0, 256);
+            nvn_be_sub_begin(); state_reset(); S.cprog = &pg2;
+            S.ssbo[5][0] = (p_bind_buf){.stage = 5, .index = 0, .addr = (uint64_t)(uintptr_t)A, .size = 256};
+            S.ssbo[5][4] = (p_bind_buf){.stage = 5, .index = 4, .addr = (uint64_t)(uintptr_t)B, .size = 256}; args_dirty_all();
+            p_dispatch d = {.x = 1, .y = 1, .z = 1}; dispatch(&d);
+            uint64_t f = nvn_be_sub_commit(); REQUIRE(nvn_be_wait(f, 10000000000ull)); REQUIRE(!mtl_last_commit_error());
+            CHECK(B[1] == 41 && B[2] == 42 && A[1] == 0 && A[2] == 0, "⑥ 槽 4 的缓冲 B[1] = %u、B[2] = %u（期望 41 / 42）；槽 0 的无关缓冲 A[1] = %u、A[2] = %u（期望 0 / 0）", B[1], B[2], A[1], A[2]);
+        }
         printf("%s t_nvn_first_store: %u checks %u failures; backend Metal%d\n", failures ? "✗" : "✓", checks, failures, g_m3 ? 3 : 4);
         return failures != 0;
     }

@@ -439,10 +439,10 @@ class EnvironmentTests(unittest.TestCase):
             "metal": {"output": "Apple metal version 99.1 (fixture-only)\n"},
             "usbmux_port": {"connected": True},
             "usb_devices": {"USB": 1, "Network": 0},
-            "icloud": {"packages": [{"Name": "AppleInc.iCloud", "Publisher":
-                "CN=Apple Inc., O=Apple Inc., L=Cupertino, S=California, C=US",
+            "icloud": {"packages": [{"Name": "AppleInc.iCloud", "Publisher":   # 取自玩家机器 Get-AppxPackage 实际输出（#165）
+                "CN=5BD5593D-A41B-4F89-884E-B4F3E0FBAA75",
                 "SignatureKind": "Store", "Status": "Ok",
-                "PackageFamilyName": "AppleInc.iCloud_fixturepublisher", "Version": "15.0.0.0"}],
+                "PackageFamilyName": "AppleInc.iCloud_nzyj5cx40ttqa", "Version": "15.10.39.0"}],
                 "legacy": []},
         })
         previous = self.mod._text
@@ -560,6 +560,12 @@ class EnvironmentTests(unittest.TestCase):
         self.probe.values["icloud"] = {"packages": [], "legacy": [{"DisplayName": "iCloud", "Publisher": "Apple Inc."}]}
         item = self.item(self.report(anisette={"source": "local"}), "anisette")
         self.assertEqual(item["status"], "ok")   # 官方传统安装版（非商店）也算装好（11-08 维护者 实机）
+        real = {"Name": "AppleInc.iCloud", "Publisher": "CN=5BD5593D-A41B-4F89-884E-B4F3E0FBAA75", "SignatureKind": "Store", "Status": "Ok",
+                "PackageFamilyName": "AppleInc.iCloud_nzyj5cx40ttqa", "Version": "15.10.39.0"}   # #165 玩家机器的实际输出：商店版发布者不是 Apple Inc.
+        for change, want in (({}, "ok"), ({"SignatureKind": "Developer"}, "unverified"), ({"Status": "Tampered"}, "unverified"),
+                             ({"PackageFamilyName": "AppleInc.iCloud_aaaaaaaaaaaaa", "Publisher": "CN=Apple Inc., O=Apple Inc."}, "unverified")):
+            self.probe.values["icloud"] = {"packages": [{**real, **change}], "legacy": []}
+            self.assertEqual(self.item(self.report(anisette={"source": "local"}), "anisette")["status"], want, change)
         self.probe.values["icloud"] = {"packages": [], "legacy": [{"DisplayName": "iCloud", "Publisher": "Someone Else"}]}
         self.assertEqual(self.item(self.report(anisette={"source": "local"}), "anisette")["status"], "unverified")
 
@@ -688,6 +694,30 @@ class EnvironmentTests(unittest.TestCase):
                     self.mod.NativeProbe()("metal", executable=None)
                 self.assertEqual(run.call_args.args, ([paths[2], "--version"],))
 
+    def test_cap_native_metal_bin_wins_path(self):
+        with tempfile.TemporaryDirectory(prefix="metal bin 中文 ") as tmp:
+            selected = Path(tmp) / "explicit" / "metal.exe"
+            other = Path(tmp) / "PATH" / "metal.exe"
+            for path in (selected, other):
+                path.parent.mkdir()
+                path.write_bytes(b"original fixture, never executed")
+            with patch.dict(os.environ, {"S2A_METAL_BIN": str(selected.parent)}, clear=True), \
+                 patch.object(self.mod.shutil, "which", return_value=str(other)), \
+                 patch.object(self.mod.NativeProbe, "run", return_value=b"Apple metal version 9\n") as run:
+                self.mod.NativeProbe()("metal", executable=None)
+            self.assertEqual(run.call_args.args, ([str(selected), "--version"],))
+
+    def test_cap_native_missing_explicit_metal_bin_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            other = Path(tmp) / "metal.exe"
+            other.write_bytes(b"original fixture, never executed")
+            with patch.dict(os.environ, {"S2A_METAL_BIN": str(Path(tmp) / "missing")}, clear=True), \
+                 patch.object(self.mod.shutil, "which", return_value=str(other)), \
+                 patch.object(self.mod.NativeProbe, "run") as run:
+                with self.assertRaises(FileNotFoundError):
+                    self.mod.NativeProbe()("metal", executable=None)
+                run.assert_not_called()
+
     def test_cap_metal_nonzero_is_missing_timeout_and_overflow_still_error(self):
         self.capabilities()
         for error, expected in ((self.mod.ProbeError("exit", nonzero=True), "missing"),
@@ -730,7 +760,7 @@ class EnvironmentTests(unittest.TestCase):
             package("dlc", 1, 5_000_000_000, "b", "0000000000000004"),
         ]}
         self.catalog_path.write_text(json.dumps({"schema": 1, "games": [self.budget_game]}), encoding="utf-8")
-        self.probe.values["disk"] = {"free": 40_000_000_000}
+        self.probe.values["disk"] = {"free": 60_000_000_000}
         self.request.pop("requiredFreeBytes")
         self.request.pop("targetDir")
         return {"catalog": str(self.catalog_path), "gameId": "budget-fixture"}
@@ -756,14 +786,15 @@ class EnvironmentTests(unittest.TestCase):
         scope = {"os": os, "Path": Path, "SPACE_UNKNOWN": [], "_volume": lambda _: "fixture-volume"}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), "library.py budget fixture", "exec"), scope)
         scope["_unpacked_on_disk"] = lambda c, game: False
+        scope["_extract_bytes"] = lambda c, gid: None   # 还没抽过着色器：直连按经验值（#265 按抽取量估的那支见 test_jobs）
         return scope
 
     def test_budget_direct_catalog_matches_handwritten_bytes(self):
         fields = self.budget_catalog()
         before = self.catalog_path.read_bytes()
         c = self.item(self.budget_report(**fields), "disk")
-        # Windows：10,700,000,000 × 1.1 × 2 + 15,000,000,000，独立手算
-        self.assertEqual(c["detected"]["requiredFreeBytes"], 38_540_000_000)
+        # Windows：10,700,000,000 × 1.1 × 3（解包 + 拷贝 + 单文件镜像）+ 15,000,000,000，独立手算
+        self.assertEqual(c["detected"]["requiredFreeBytes"], 50_310_000_000)
         self.assertTrue(c["ok"])
         self.assertEqual(self.catalog_path.read_bytes(), before)
         self.assertIn("library.py", c["source"])
@@ -774,7 +805,7 @@ class EnvironmentTests(unittest.TestCase):
         context = types.SimpleNamespace(library=self.catalog_path.parent)
         with patch("shutil.disk_usage", return_value=types.SimpleNamespace(free=40_000_000_000)):
             result = scope["space_budget"](context, self.budget_game)
-        self.assertEqual(result["volumes"][0]["needBytes"], 26_770_000_000)   # Mac：资源包是克隆，只算一份 × 1.1 + 15 GB
+        self.assertEqual(result["volumes"][0]["needBytes"], 38_540_000_000)   # Mac：解包 + 单文件镜像，两份 × 1.1 + 15 GB
         self.assertEqual(result["gameBytes"], 10_700_000_000)
         self.assertIn("直连着色器上限", result["volumes"][0]["note"])
 
@@ -855,7 +886,7 @@ class EnvironmentTests(unittest.TestCase):
             return text.replace("int(15e9)", "int(22e9)") if name == "pack/jobs/library.py" else text
         with patch.object(self.mod, "_text", side_effect=changed):
             c = self.item(self.budget_report(**fields), "disk")
-        self.assertEqual(c["detected"]["requiredFreeBytes"], 45_540_000_000)
+        self.assertEqual(c["detected"]["requiredFreeBytes"], 57_310_000_000)   # 10.7 GB × 1.1 × 3 + 22 GB，独立手算
 
     def test_budget_missing_shared_function_is_error_no_fallback(self):
         fields = self.budget_catalog()
@@ -872,7 +903,7 @@ class EnvironmentTests(unittest.TestCase):
         before = set(sys.modules)
         rules = self.mod._budget_rules()
         selected = rules["selected_packages"](self.budget_game)
-        self.assertEqual(rules["pack_need_bytes"](selected, windows=True), 38_540_000_000)
+        self.assertEqual(rules["pack_need_bytes"](selected, windows=True), 50_310_000_000)
         self.assertFalse({"core", "fcntl", "library"} & (set(sys.modules) - before))
 
     def test_budget_native_cli_valid_catalog_no_mac_context_import(self):
@@ -884,7 +915,7 @@ class EnvironmentTests(unittest.TestCase):
                            capture_output=True, env=env, timeout=30)
         self.assertEqual(p.returncode, 1, p.stderr)
         report = json.loads(p.stdout.decode("utf-8"))
-        self.assertEqual(self.item(report, "disk")["detected"]["requiredFreeBytes"], 38_540_000_000)
+        self.assertEqual(self.item(report, "disk")["detected"]["requiredFreeBytes"], 50_310_000_000)
         self.assertFalse(any(x.name == "sources" for x in self.catalog_path.parent.iterdir()))
 
     def test_budget_request_types_remain_strict(self):

@@ -53,7 +53,9 @@ s2armctl next --json    # 同上，给程序读：{step, who, do, why, game, tas
 | `human` | 只能玩家本人做：把 `do` 用大白话告诉玩家，等他说做完再 `next` |
 | `confirm` | 有破坏性：先说明要做什么、问玩家同意，同意了再执行 |
 
-一次完整的流程：环境 → 密钥 → 导入游戏 → 导出 → 装到 iPhone → 玩家打开游戏。每做完一步就再 `next`。库里不止一款时，`next` 按本体大小认主游戏，其余列在 `others`；要出别的那款就 `next <游戏号>`。
+默认目标是 iOS，流程依次是检查环境、导入密钥和游戏、导出、装到 iPhone、请玩家打开游戏。每做完一步就再运行 `next`。库里有多款游戏时，`next` 按本体大小选主游戏，其余列在 `others`。可以用 `next <游戏号>` 指定另一款。
+
+如果玩家要在这台 Mac 上玩，每次运行 `s2armctl next <游戏号> --target mac`（也可加 `--json`）。未准备的游戏会提示 `s2armctl build <游戏号> mac`，用 `s2armctl wait <游戏号> --op build` 等待。准备好后，按提示运行 `s2armctl launch <游戏号>`。Windows 只支持 `--target ios`。
 
 ## 各步命令
 
@@ -94,11 +96,11 @@ s2armctl state | errors [游戏号] | logs <任务号|游戏号> [--lines N]
 
 | 现象 / 错误码 | 谁 | 怎么办 |
 |---|---|---|
-| `keys_missing` / `keys_invalid` | ask | 问玩家自己从 Switch 导出的 prod.keys 在哪，`keys <路径>`；文件不完整就请他重新导出一份 |
+| `keys_missing` / `keys_invalid` | ask | 问玩家自己的 prod.keys 在哪，`keys <路径>`；文件不完整就请他换一份完整的 |
 | `content_unreadable` 无法读取 | human | 核对源文件和票据是否完整 |
 | `ticket_missing` 缺少票据 | human | 核对源文件是否含有所需票据 |
 | `content_truncated` 文件不完整 | human | 从原始位置重新复制完整的游戏文件 |
-| `keys_outdated` 密钥版本不足 | human | 请玩家用系统版本更新的 Switch 重新导出 prod.keys，再 `keys <路径>` |
+| `keys_outdated` 密钥版本不足 | human | 请玩家换一份版本更新的、自己的 prod.keys，再 `keys <路径>` |
 | `input_base_missing` | ask | 只放了更新或 DLC：问玩家游戏本体在哪，`games <本体所在文件夹>` |
 | `input_empty` / `input_type_unsupported` | ask | 文件夹里没有 NSP / XCI / NSZ / XCZ：问玩家游戏文件到底在哪 |
 | `input_missing` / `content_invalid` | ask | 文件找不到（外接盘没接）或损坏：请玩家接上磁盘或换一份完整的原版文件 |
@@ -139,8 +141,10 @@ s2armctl state | errors [游戏号] | logs <任务号|游戏号> [--lines N]
 | `device_pairing_required` | human | 请玩家拔掉重插、解锁，在手机上重新点「信任此电脑」 |
 | `developer_mode_required` | human | 请玩家在 iPhone「设置 → 隐私与安全性 → 开发者模式」打开，按提示重启，重启后解锁 |
 | `device_locked` | human | 请玩家解锁手机、停在主屏幕，装的过程中别锁屏 |
-| `free_app_limit` | human | 免费 Apple ID 同时最多 3 个自签 App、每 7 天最多 10 个新包名：请玩家删掉不玩的自签 App，或过几天再装 |
+| `free_app_limit` | human | 这台 iPhone 上免费签名的自签 App 已满 3 个：请玩家删掉一个不玩的自签 App 再装 |
+| `free_appid_limit` | human | 免费 Apple ID 7 天内最多注册 10 个包名，已用满（Apple 错误 9120）；删 App 不退额度，别让玩家删：请玩家等几天（最早那批满 7 天恢复），或在 Xcode 换一个 Apple ID 登录（你不代做），或用付费开发者账号 |
 | `provisioning_expired` / `signing_failed` | ai | 再 `install` 一次（会重新申请）；还不行 `logs` 看签名哪步报错，必要时改用 AltStore（启动器「装到 iPhone」页底部有步骤，玩家本人登录） |
+| `manual_unpack_required`（警告） | human | 资源包已传完，电脑拉不起手机上的 App：让玩家在 iPhone 上打开这款游戏、保持前台等导入完，不要重推 |
 | `usb_slow`（警告） | human | 数据线是 USB 2：换 USB 3 的 USB-C 线、直插 Mac 会快很多（只有 iPhone 15 Pro 及更新的 Pro 机型支持 USB 3） |
 | `shell_sdk_old`（警告） | human | 包是旧版 Xcode 出的、iPhone 系统更新：iPhone Duo 等新机型上 App 缩小居中。请玩家更新 Xcode（不低于 iPhone 系统大版本）、启动器里选它后重新打 iPhone 包 |
 | `resource_transfer_failed` / `pack_missing` | ai | 资源没拷完：`push-pack <游戏号>`；提示没有资源包就重新导出 iPhone 版 |

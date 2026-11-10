@@ -38,7 +38,7 @@ public struct JobEnvironment: Equatable {
         var env = JobEnvironment(privateRoot: privateRoot, resources: resources, buildId: buildId)
         guard let data = try? Data(contentsOf: privateRoot.appendingPathComponent("preferences.json")),
               let p = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return env }
-        env.library = p["library"] as? String ?? ""
+        env.library = S2ArmPaths.library(privateRoot: privateRoot, saved: p["library"] as? String ?? "")   // 旧默认库已搬到 ~/S2Arm 时用新位置
         env.libraryId = p["libraryId"] as? String ?? ""
         env.developerDir = p["developerDir"] as? String ?? ""
         env.engineDir = p["engineDir"] as? String

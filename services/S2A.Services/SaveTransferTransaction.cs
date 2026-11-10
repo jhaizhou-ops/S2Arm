@@ -55,10 +55,10 @@ public static partial class SaveTransfer
             if (skipSaves && Allowed(file.Key)) continue;
             string sourcePath = Path.Combine(source, file.Key), target = Path.Combine(destination, file.Key);
             Directory.CreateDirectory(Path.GetDirectoryName(target));
-            using (var src = ReadFile(sourcePath)) Require(src.Length == file.Value, "复制期间目标存档发生变化。", "save_changed");
+            using (var src = ReadFile(sourcePath)) Require(src.Length == file.Value, T("复制期间目标存档发生变化。", "The target save changed during copying."), "save_changed");
             File.Copy(sourcePath, target);
             using var dst = new FileStream(target, FileMode.Open, FileAccess.ReadWrite);
-            Require(dst.Length == file.Value, "复制期间目标存档发生变化。", "save_changed");
+            Require(dst.Length == file.Value, T("复制期间目标存档发生变化。", "The target save changed during copying."), "save_changed");
             dst.Flush(flushToDisk: true);
         }
     }
@@ -85,9 +85,9 @@ public static partial class SaveTransfer
         string current = path;
         while (!Directory.Exists(current))
         {
-            Require(!File.Exists(current), "目录路径已被普通文件占用。");
+            Require(!File.Exists(current), T("目录路径已被普通文件占用。", "A regular file is in the way of a folder path."));
             missing.Push(current);
-            current = Path.GetDirectoryName(current) ?? throw new Failure("save_invalid", "找不到可访问的父目录。");
+            current = Path.GetDirectoryName(current) ?? throw new Failure("save_invalid", T("找不到可访问的父目录。", "No accessible parent folder was found."));
         }
         while (missing.Count != 0)
         {
@@ -108,21 +108,21 @@ public static partial class SaveTransfer
             string phase = Str(record, "phase");
             bool hadOriginal = record["hadOriginal"].GetValue<bool>();
             Require(record["schema"].GetValue<int>() == 1 && Str(record, "gameId") == Str(c.Game, "id") &&
-                Str(record, "dataRoot") == c.Root && Hex(token, 32) && phase is "prepared" or "committed", "恢复记录无效。");
+                Str(record, "dataRoot") == c.Root && Hex(token, 32) && phase is "prepared" or "committed", T("恢复记录无效。", "Invalid recovery record."));
             string transaction = Path.Combine(c.Transactions, token);
             string previous = Path.Combine(c.Backups, token);
             string old = Path.Combine(previous, "data");
             string next = Path.Combine(transaction, "new");
             CheckLinks(old); CheckLinks(next);
             var expectedOwner = new JsonObject { ["schema"] = 1, ["gameId"] = Copy(c.Game["id"]), ["dataRoot"] = c.Root, ["transaction"] = token };
-            Require(JsonNode.DeepEquals(Parse(SmallFile(Path.Combine(transaction, "owner.json"))), expectedOwner), "事务归属记录不符。");
-            Require(!File.Exists(old), "原存档副本不是目录。");
-            if (phase == "committed") Require(Directory.Exists(c.Root), "已提交存档根缺失。");
+            Require(JsonNode.DeepEquals(Parse(SmallFile(Path.Combine(transaction, "owner.json"))), expectedOwner), T("事务归属记录不符。", "The transaction ownership record doesn’t match."));
+            Require(!File.Exists(old), T("原存档副本不是目录。", "The original save copy is not a folder."));
+            if (phase == "committed") Require(Directory.Exists(c.Root), T("已提交存档根缺失。", "The committed save root is missing."));
             else if (Directory.Exists(old))
             {
                 if (Directory.Exists(c.Root))
                 {
-                    Require(!Directory.Exists(next) && !File.Exists(next), "恢复状态不明确。");
+                    Require(!Directory.Exists(next) && !File.Exists(next), T("恢复状态不明确。", "The recovery state is unclear."));
                     Directory.Move(c.Root, next);
                     SyncDirectory(Path.GetDirectoryName(c.Root)); SyncDirectory(transaction);
                 }
@@ -131,10 +131,10 @@ public static partial class SaveTransfer
                 SyncDirectory(Path.GetDirectoryName(c.Root)); SyncDirectory(previous);
             }
             else if (hadOriginal)
-                Require(Directory.Exists(c.Root) && Directory.Exists(next), "原存档副本缺失。");
+                Require(Directory.Exists(c.Root) && Directory.Exists(next), T("原存档副本缺失。", "The original save copy is missing."));
             else if (Directory.Exists(c.Root))
             {
-                Require(!Directory.Exists(next), "恢复时出现未知存档根。");
+                Require(!Directory.Exists(next), T("恢复时出现未知存档根。", "An unknown save root appeared during recovery."));
                 Directory.Move(c.Root, next);
                 SyncDirectory(Path.GetDirectoryName(c.Root)); SyncDirectory(transaction);
             }
@@ -146,7 +146,7 @@ public static partial class SaveTransfer
         }
         catch (Exception ex) when (ex is Failure or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Text.Json.JsonException)
         {
-            throw new Failure("save_recovery", "未完成的存档事务无法安全恢复，已阻止后续操作。请保留原副本和事务记录。");
+            throw new Failure("save_recovery", T("未完成的存档事务无法安全恢复，已阻止后续操作。请保留原副本和事务记录。", "An unfinished save transaction can’t be recovered safely, so further operations are blocked. Keep the original copy and transaction records."));
         }
     }
     private static JsonObject Restore(Context c)
@@ -155,7 +155,7 @@ public static partial class SaveTransfer
         Identity(c, archive.Manifest);
         string fingerprint = Fingerprint(c.Root);
         Require(c.Request["archiveSha256"]?.GetValue<string>() == archive.Sha &&
-            c.Request["targetFingerprint"]?.GetValue<string>() == fingerprint, "备份或目标已变化，请重新检查后确认。", "save_changed");
+            c.Request["targetFingerprint"]?.GetValue<string>() == fingerprint, T("备份或目标已变化，请重新检查后确认。", "The backup or target has changed. Check again, then confirm."), "save_changed");
         long total = Scan(c.Root).Files.Sum(p => p.Value) + archive.Manifest["files"].AsArray().Sum(f => f["size"].GetValue<long>());
         Space(c.Work, checked(2 * total + (64 << 20)));
         string token = Guid.NewGuid().ToString("N");
@@ -164,13 +164,14 @@ public static partial class SaveTransfer
         string next = Path.Combine(transaction, "new");
         string old = Path.Combine(previous, "data");
         bool hadOriginal = Directory.Exists(c.Root);
-        DurableDirectory(transaction);
-        DurableDirectory(previous);
-        Atomic(Path.Combine(transaction, "owner.json"), new JsonObject { ["schema"] = 1, ["gameId"] = Copy(c.Game["id"]), ["dataRoot"] = c.Root, ["transaction"] = token });
-        SyncParents(transaction, c.Work); SyncParents(previous, c.Work);
         string priorArchive = "";
         try
         {
+            DurableDirectory(transaction);
+            DurableDirectory(previous);
+            Atomic(Path.Combine(transaction, "owner.json"), new JsonObject { ["schema"] = 1, ["gameId"] = Copy(c.Game["id"]), ["dataRoot"] = c.Root, ["transaction"] = token });
+            SyncParents(transaction, c.Work); SyncParents(previous, c.Work);
+            Checkpoint("dirsCreated");
             if (Scan(c.Root).Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)))
             {
                 priorArchive = Path.Combine(previous, "before-restore.s2asave");
@@ -195,7 +196,7 @@ public static partial class SaveTransfer
                 dst.Flush(flushToDisk: true);
             }
             archive.Source.Position = 0;
-            Require(Hash(archive.Source) == archive.Sha && Fingerprint(c.Root) == fingerprint, "确认后备份或目标发生变化。", "save_changed");
+            Require(Hash(archive.Source) == archive.Sha && Fingerprint(c.Root) == fingerprint, T("确认后备份或目标发生变化。", "The backup or target changed after confirmation."), "save_changed");
             SyncTree(next);
             var record = new JsonObject { ["schema"] = 1, ["gameId"] = Copy(c.Game["id"]), ["dataRoot"] = c.Root,
                 ["transaction"] = token, ["hadOriginal"] = hadOriginal, ["phase"] = "prepared" };
@@ -223,7 +224,18 @@ public static partial class SaveTransfer
         catch
         {
             if (File.Exists(c.Journal)) Recover(c);
+            else Abandon(transaction, previous);
             throw;
+        }
+    }
+    // 审计 P2-177：恢复记录写出之前失败，活存档根还没动，本次新建的事务目录与备份目录（含恢复前备份）一并删掉；
+    //   清理失败不盖住原失败（调用方照抛原异常）
+    private static void Abandon(params string[] paths)
+    {
+        foreach (string path in paths)
+        {
+            try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
     // No implementation is linked into production. The process-exit tests pause

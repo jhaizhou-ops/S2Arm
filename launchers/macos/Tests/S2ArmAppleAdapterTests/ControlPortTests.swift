@@ -45,6 +45,17 @@ import XCTest
         XCTAssertFalse(FileManager.default.fileExists(atPath: port.controlFile.path), "停了就删 control.json")
     }
 
+    func testStartFailureIsWrittenAndClearedOnSuccess() throws {
+        let r = root(); defer { try? FileManager.default.removeItem(at: r) }
+        let error = r.appendingPathComponent("control.error")
+        ControlPort.reportStartFailure(privateRoot: r, why: "端口被占用")
+        XCTAssertEqual(try String(contentsOf: error, encoding: .utf8), "端口被占用")
+        let port = try ControlPort(privateRoot: r, state: { [:] }, handle: { _ in .ok() }, failed: { XCTFail($0) })
+        defer { port.stop() }
+        waitFor { port.port != 0 && !FileManager.default.fileExists(atPath: error.path) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: error.path), "起来了就清掉旧原因")
+    }
+
     func testControlFileWriteFailureIsNotOpen() throws {
         let r = root(); defer { try? FileManager.default.removeItem(at: r) }
         try FileManager.default.createDirectory(at: r.appendingPathComponent("control.json"), withIntermediateDirectories: true)
@@ -57,7 +68,7 @@ import XCTest
 
     func testJournalTasksAreVisibleJobsOldestFirst() throws {
         let r = root(); defer { try? FileManager.default.removeItem(at: r) }
-        let jobs = r.appendingPathComponent("jobs"); try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)
+        let jobs = r.appendingPathComponent("logs/jobs"); try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)
         func put(_ name: String, _ o: [String: Any]) throws { try JSONSerialization.data(withJSONObject: o).write(to: jobs.appendingPathComponent(name)) }
         try put("b.json", ["id": "b", "operation": "ipa", "state": "running", "started": 20.0])
         try put("a.json", ["id": "a", "operation": "import", "state": "completed", "started": 10.0])
@@ -66,5 +77,29 @@ import XCTest
         try Data("not json".utf8).write(to: jobs.appendingPathComponent("d.json"))                          // 坏文件跳过
         XCTAssertEqual(ControlJournal.tasks(privateRoot: r).compactMap { $0["id"] as? String }, ["a", "b"])
         XCTAssertEqual(ControlJournal.tasks(privateRoot: r, limit: 1).compactMap { $0["id"] as? String }, ["b"])
+    }
+
+    /// 任务列表有缓存（控制口每秒刷一次，原先每次全量重读）：新增、删除、原子改名更新、正在跑的任务原地改写，都要当场反映出来
+    func testJournalTasksCacheFollowsEveryKindOfChange() throws {
+        let r = root(); defer { try? FileManager.default.removeItem(at: r) }
+        let jobs = r.appendingPathComponent("logs/jobs"); try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)   // 还没建库：任务记录在 <私有目录>/logs/jobs（S2ArmPaths.jobsDir）
+        func put(_ name: String, _ o: [String: Any]) throws {   // 原子写（同 pack/jobs/core.py atomic：临时文件再改名）
+            let tmp = jobs.appendingPathComponent(name + ".tmp")
+            try JSONSerialization.data(withJSONObject: o).write(to: tmp)
+            _ = try FileManager.default.replaceItemAt(jobs.appendingPathComponent(name), withItemAt: tmp)
+        }
+        func states() -> [String] { ControlJournal.tasks(privateRoot: r).map { "\($0["id"]!):\($0["state"]!)" } }
+        try put("a.json", ["id": "a", "operation": "ipa", "state": "running", "started": 1.0])
+        XCTAssertEqual(states(), ["a:running"])
+        XCTAssertEqual(states(), ["a:running"])                                   // 没变：走缓存，结果一样
+        try put("b.json", ["id": "b", "operation": "build", "state": "running", "started": 2.0])
+        XCTAssertEqual(states(), ["a:running", "b:running"])                      // 新增
+        try put("a.json", ["id": "a", "operation": "ipa", "state": "completed", "started": 1.0, "ended": 3.0])
+        XCTAssertEqual(states(), ["a:completed", "b:running"])                    // 原子改名更新
+        try JSONSerialization.data(withJSONObject: ["id": "b", "operation": "build", "state": "failed", "started": 2.0, "message": "x"])
+            .write(to: jobs.appendingPathComponent("b.json"))                     // 正在跑的任务被原地改写（目录修改时间不变）
+        XCTAssertEqual(states(), ["a:completed", "b:failed"])
+        try FileManager.default.removeItem(at: jobs.appendingPathComponent("a.json"))
+        XCTAssertEqual(states(), ["b:failed"])                                    // 删除
     }
 }

@@ -4,6 +4,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using static Ryujinx.Graphics.Nvdec.Vp9.Dsp.Filter;
 
@@ -12,6 +13,146 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
     internal static class Convolve
     {
         private const bool UseIntrinsics = true;
+
+        // S2Arm: vector 8-tap path for the unscaled case, so ARM64 gets vector code too. Upstream only had
+        // SSE4.1 / AVX2, and ARM64 ran the scalar loops (P4G's 1080p VP9 cutscenes played at about half speed on
+        // a Dimensity 9000+). On AdvSimd it is libvpx's vpx_convolve8 NEON scheme: int16 multiply-accumulate of
+        // the six outer taps, saturating adds of the two centre taps, then a rounding, saturating narrow. For the
+        // VP9 kernels (Luts.FilterKernels, the only ones the decoder passes) that equals the scalar int32 sum,
+        // rounded and clipped: the outer-tap sum cannot overflow, the centre products are non-negative, and a
+        // saturated sum still clips to 255 (tests/vp9_convolve_simd checks every kernel and phase byte for byte).
+        // Other targets without SSE4.1 take the int32 Vector128 form of the same sum.
+        internal static bool UseVector128 = Vector128.IsHardwareAccelerated && !Sse41.IsSupported;
+
+        private struct Taps8
+        {
+            public Vector128<int> K0, K1, K2, K3, K4, K5, K6, K7;
+            public Vector128<short> S0, S1, S2, S3, S4, S5, S6, S7;
+
+            public Taps8(ReadOnlySpan<short> f)
+            {
+                K0 = Vector128.Create((int)f[0]);
+                K1 = Vector128.Create((int)f[1]);
+                K2 = Vector128.Create((int)f[2]);
+                K3 = Vector128.Create((int)f[3]);
+                K4 = Vector128.Create((int)f[4]);
+                K5 = Vector128.Create((int)f[5]);
+                K6 = Vector128.Create((int)f[6]);
+                K7 = Vector128.Create((int)f[7]);
+                S0 = Vector128.Create(f[0]);
+                S1 = Vector128.Create(f[1]);
+                S2 = Vector128.Create(f[2]);
+                S3 = Vector128.Create(f[3]);
+                S4 = Vector128.Create(f[4]);
+                S5 = Vector128.Create(f[5]);
+                S6 = Vector128.Create(f[6]);
+                S7 = Vector128.Create(f[7]);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static unsafe Vector128<short> Px(byte* p)
+        {
+            // 8 pixels -> 8 x u16 (as i16: 0..255)
+            return Vector128.WidenLower(Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(p)).AsByte()).AsInt16();
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static unsafe void Tap(byte* p, Vector128<int> k, ref Vector128<int> lo, ref Vector128<int> hi)
+        {
+            Vector128<short> px = Px(p);
+            lo += Vector128.WidenLower(px) * k;
+            hi += Vector128.WidenUpper(px) * k;
+        }
+
+        // Eight output pixels: dst[i] = ClipPixel(RoundPowerOfTwo(sum_k p[i + k * step] * tap[k], FilterBits)).
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static unsafe void Filter8(byte* p, nint step, byte* dst, in Taps8 t)
+        {
+            if (AdvSimd.IsSupported)
+            {
+                Vector128<short> sum = AdvSimd.Multiply(Px(p), t.S0);
+                sum = AdvSimd.MultiplyAdd(sum, Px(p + step), t.S1);
+                sum = AdvSimd.MultiplyAdd(sum, Px(p + (2 * step)), t.S2);
+                sum = AdvSimd.MultiplyAdd(sum, Px(p + (5 * step)), t.S5);
+                sum = AdvSimd.MultiplyAdd(sum, Px(p + (6 * step)), t.S6);
+                sum = AdvSimd.MultiplyAdd(sum, Px(p + (7 * step)), t.S7);
+                sum = AdvSimd.AddSaturate(sum, AdvSimd.Multiply(Px(p + (3 * step)), t.S3));
+                sum = AdvSimd.AddSaturate(sum, AdvSimd.Multiply(Px(p + (4 * step)), t.S4));
+                Vector64<byte> px8 = AdvSimd.ShiftRightArithmeticRoundedNarrowingSaturateUnsignedLower(sum, FilterBits);
+                Unsafe.WriteUnaligned(dst, px8.AsUInt64().ToScalar());
+                return;
+            }
+
+            Vector128<int> lo = Vector128<int>.Zero;
+            Vector128<int> hi = Vector128<int>.Zero;
+            Tap(p, t.K0, ref lo, ref hi);
+            Tap(p + step, t.K1, ref lo, ref hi);
+            Tap(p + (2 * step), t.K2, ref lo, ref hi);
+            Tap(p + (3 * step), t.K3, ref lo, ref hi);
+            Tap(p + (4 * step), t.K4, ref lo, ref hi);
+            Tap(p + (5 * step), t.K5, ref lo, ref hi);
+            Tap(p + (6 * step), t.K6, ref lo, ref hi);
+            Tap(p + (7 * step), t.K7, ref lo, ref hi);
+
+            Vector128<int> round = Vector128.Create(1 << (FilterBits - 1));
+            Vector128<int> max = Vector128.Create(255);
+            lo = Vector128.Min(Vector128.Max(Vector128.ShiftRightArithmetic(lo + round, FilterBits), Vector128<int>.Zero), max);
+            hi = Vector128.Min(Vector128.Max(Vector128.ShiftRightArithmetic(hi + round, FilterBits), Vector128<int>.Zero), max);
+            Vector128<ushort> w16 = Vector128.Narrow(lo.AsUInt32(), hi.AsUInt32());
+            Vector128<byte> b8 = Vector128.Narrow(w16, w16);
+            Unsafe.WriteUnaligned(dst, b8.AsUInt64().ToScalar());
+        }
+
+        private static unsafe void ConvolveHorizVector128(
+            byte* src,
+            int srcStride,
+            byte* dst,
+            int dstStride,
+            Array8<short>[] xFilters,
+            int x0Q4,
+            int w,
+            int h)
+        {
+            Taps8 taps = new(xFilters[x0Q4 & SubpelMask].AsSpan());
+            src += (x0Q4 >> SubpelBits) - ((SubpelTaps / 2) - 1);
+
+            for (int y = 0; y < h; ++y)
+            {
+                for (int x = 0; x < w; x += 8)
+                {
+                    Filter8(src + x, 1, dst + x, taps);
+                }
+
+                src += srcStride;
+                dst += dstStride;
+            }
+        }
+
+        private static unsafe void ConvolveVertVector128(
+            byte* src,
+            int srcStride,
+            byte* dst,
+            int dstStride,
+            Array8<short>[] yFilters,
+            int y0Q4,
+            int w,
+            int h)
+        {
+            Taps8 taps = new(yFilters[y0Q4 & SubpelMask].AsSpan());
+            src += (nint)srcStride * ((y0Q4 >> SubpelBits) - ((SubpelTaps / 2) - 1));
+
+            for (int y = 0; y < h; ++y)
+            {
+                for (int x = 0; x < w; x += 8)
+                {
+                    Filter8(src + x, srcStride, dst + x, taps);
+                }
+
+                src += srcStride;
+                dst += dstStride;
+            }
+        }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static Vector128<int> MultiplyAddAdjacent(
@@ -122,6 +263,26 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
                 return;
             }
 
+            if (UseVector128 && xStepQ4 == 1 << SubpelBits && (w & 7) == 0)
+            {
+                ConvolveHorizVector128(src, srcStride, dst, dstStride, xFilters, x0Q4, w, h);
+                return;
+            }
+
+            ConvolveHorizScalar(src, srcStride, dst, dstStride, xFilters, x0Q4, xStepQ4, w, h);
+        }
+
+        internal static unsafe void ConvolveHorizScalar(
+            byte* src,
+            int srcStride,
+            byte* dst,
+            int dstStride,
+            Array8<short>[] xFilters,
+            int x0Q4,
+            int xStepQ4,
+            int w,
+            int h)
+        {
             src -= (SubpelTaps / 2) - 1;
 
             for (int y = 0; y < h; ++y)
@@ -268,6 +429,26 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
                 return;
             }
 
+            if (UseVector128 && yStepQ4 == 1 << SubpelBits && (w & 7) == 0)
+            {
+                ConvolveVertVector128(src, srcStride, dst, dstStride, yFilters, y0Q4, w, h);
+                return;
+            }
+
+            ConvolveVertScalar(src, srcStride, dst, dstStride, yFilters, y0Q4, yStepQ4, w, h);
+        }
+
+        internal static unsafe void ConvolveVertScalar(
+            byte* src,
+            int srcStride,
+            byte* dst,
+            int dstStride,
+            Array8<short>[] yFilters,
+            int y0Q4,
+            int yStepQ4,
+            int w,
+            int h)
+        {
             src -= srcStride * ((SubpelTaps / 2) - 1);
 
             for (int x = 0; x < w; ++x)

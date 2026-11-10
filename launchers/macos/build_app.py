@@ -32,9 +32,10 @@ def copy_launcher_resources(bindir, resources):
     relative = specifications[0].relative_to(source_bundle)
     for p in bindir.glob("*.bundle"):
         shutil.copytree(p, resources / p.name)
-    packaged = resources / source_bundle.name / relative
-    if packaged.is_symlink() or packaged.read_bytes() != (ROOT / "launchers/shared/experience.v1.json").read_bytes():
-        raise SystemExit("Mac 应用中的共享体验规格缺失或与源码不一致")
+    for name in ("experience.v1.json", "game_settings.v1.json"):   # 游戏设置定义表（启动设置页按它画）同样只认原件
+        packaged = resources / source_bundle.name / relative.parent / name
+        if packaged.is_symlink() or not packaged.is_file() or packaged.read_bytes() != (ROOT / "launchers/shared" / name).read_bytes():
+            raise SystemExit("Mac 应用中的共享规格 %s 缺失或与源码不一致" % name)
 
 
 def release_identity(engine_json):

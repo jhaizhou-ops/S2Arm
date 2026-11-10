@@ -390,6 +390,9 @@ namespace S2A.Services.Tests
             _rows.Add((name, e, a, e == a));
         }
 
+        // 不随仓库分发的玩家数据（游戏 romfs、系统数据）：缺了打「未覆盖」一行、不计不符；判据不符仍走 Check
+        internal static void CheckUncovered(string name, string why) => _rows.Add((name, "未覆盖", why, true));
+
         private static string Fmt(object o) => o switch
         {
             uint u => $"0x{u:X}",
@@ -600,6 +603,7 @@ namespace S2A.Services.Tests
         private static void Run()
         {
             TimeZoneBinaryTest.Run(Check);
+            CheatsTest.Run(Check);
             GuestBufferAllocatorTest.Run(Check);
             GuestMemoryFar();
             ShaderCodeTableTest.Run(Check);
@@ -2464,6 +2468,29 @@ namespace S2A.Services.Tests
                     Check("带存档起局 device/：拷入回读、重播清旧", "main.dat 30 万字节一致、子目录文件 [1,2,3]、重播后 main.dat 不在、other.dat [9]、报红 +0",
                         $"main.dat {(back != null && back.AsSpan().SequenceEqual(main) ? "30 万字节一致" : "不一致")}、子目录文件 {(back2 == null ? "缺" : "[" + string.Join(",", back2) + "]")}、重播后 main.dat {(oldGone ? "不在" : "还在")}、other.dat {(other == null ? "缺" : "[" + string.Join(",", other) + "]")}、报红 +{Red.Total - red0}");
 
+                    // 带存档起局按块拷入 + 链接拒收（审计 P2-176 / P2-194，11-09）：先播一份 250 万字节（跨 3 个 1 MB 块）→ 回读一致；
+                    //   再在种子里放一个指向种子外文件的软链重播 → Seed 抛 InvalidOperationException（本次起局失败）、链接目标没进存档、
+                    //   已提交的旧档原样（big.dat 仍一致）。旧代码：链接目标 [7,7,7] 被读进存档、不抛
+                    {
+                        byte[] big = new byte[2_500_000];
+                        new Random(13).NextBytes(big);
+                        string bigPath = Path.Combine(devDir, "big.dat"), linkPath = Path.Combine(devDir, "link.dat");
+                        string outside = Path.Combine(Path.GetTempPath(), $"s2a_seed_outside_{Environment.ProcessId}");
+                        File.WriteAllBytes(bigPath, big);
+                        string e1 = "无", e2 = "无";
+                        try { Saves.Seed(Host.Device, Application.ProgramId); } catch (Exception e) { e1 = e.GetType().Name; }
+                        byte[] bigBack = ReadDeviceSave("/big.dat");
+                        File.WriteAllBytes(outside, [7, 7, 7]);
+                        File.CreateSymbolicLink(linkPath, outside);
+                        try { Saves.Seed(Host.Device, Application.ProgramId); } catch (Exception e) { e2 = e.GetType().Name; }
+                        byte[] bigAfter = ReadDeviceSave("/big.dat");
+                        bool linkIn = ReadDeviceSave("/link.dat") != null;
+                        File.Delete(linkPath); File.Delete(outside); File.Delete(bigPath);
+                        Check("带存档起局：按块拷入、种子含软链则起局失败且已提交档不动",
+                            "首播 异常 无、big.dat 250 万字节一致；带链接重播 异常 InvalidOperationException、link.dat 不在、big.dat 仍一致",
+                            $"首播 异常 {e1}、big.dat {(bigBack != null && bigBack.AsSpan().SequenceEqual(big) ? "250 万字节一致" : bigBack == null ? "缺" : "不一致")}；带链接重播 异常 {e2}、link.dat {(linkIn ? "在" : "不在")}、big.dat {(bigAfter != null && bigAfter.AsSpan().SequenceEqual(big) ? "仍一致" : bigAfter == null ? "缺" : "不一致")}");
+                    }
+
                     // 带存档起局 account/：当前用户的账号存档（10-20 塞尔达：LibHac.Fs.SaveData 收 Uid 的 MountSaveData 是 throw NotImplementedException，S2A_Init 当场失败）
                     {
                         var uid = Host.Device.System.AccountManager.LastOpenedUser.UserId;
@@ -2534,7 +2561,7 @@ namespace S2A.Services.Tests
             }
             else
             {
-                Check("动森登记 + fs 读 RomFS", "已测", $"未测（没有 {game}/romfs）");
+                CheckUncovered("动森登记 + fs 读 RomFS", $"未覆盖（没有 {game}/romfs，玩家自己的游戏数据）");
             }
 
             // ---- 系统数据按号（fsp-srv OpenDataStorageByDataId）：马车8 产物根的 0100000000000802 Mii 资源 ----
@@ -2562,7 +2589,7 @@ namespace S2A.Services.Tests
             }
             else
             {
-                Check("系统数据按号", "已测", $"未测（没有 {sysRoot}/0100000000000802）");
+                CheckUncovered("系统数据按号", $"未覆盖（没有 {sysRoot}/0100000000000802，玩家自己的游戏数据）");
             }
 
             // ---- 共享字体（pl:u）：本机旧库字体数据（S2A_SHARED_FONT_DIR，不进仓库；没有就记未测）----

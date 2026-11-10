@@ -117,6 +117,7 @@ namespace S2A.Services
                     continue;
                 }
 
+                // 清空后拷入或提交失败：不提交（已提交的旧档原样留着），本次起局失败（审计 P2-176：原先只报红照样开局）
                 try
                 {
                     r = hc.Fs.CleanDirectoryRecursively("s2asave:/"u8);
@@ -138,7 +139,7 @@ namespace S2A.Services
 
                     if (r.IsFailure())
                     {
-                        Red.Report($"带存档起局：写入 {kind} 存档失败", r.ToStringWithName());
+                        throw new InvalidOperationException($"带存档起局：写入 {kind} 存档失败：{r.ToStringWithName()}");
                     }
                 }
                 finally
@@ -234,10 +235,12 @@ namespace S2A.Services
                         string save = Path.Combine(Ryujinx.Common.Configuration.AppDataManager.BaseDirPath, "bis", "user", "save", info.SaveDataId.ToString("x16"));
                         string src = Path.Combine(save, "0");
 
+                        // 缺一类已提交目录：整次副本失败、旧副本也不留（审计 P2-22：原先 continue 后照样换上只含另一类的副本）
                         if (!Directory.Exists(src))
                         {
                             Red.Report($"存档点副本：{kind} 存档 {info.SaveDataId:x16} 没有已提交目录", src);
-                            continue;
+                            Discard(tmp, dir);
+                            return 0;
                         }
 
                         string dst = Path.Combine(tmp, kind);
@@ -262,7 +265,7 @@ namespace S2A.Services
                     }
                 }
 
-                // 一种存档都没拷成（都没有已提交目录，或这款没有存档）：不换上只有 user 的空副本（11-01 18:00 全量审计 P2-22）
+                // 一种存档都没有（这款没有存档）：不换上只有 user 的空副本（11-01 18:00 全量审计 P2-22）
                 if (kinds == 0)
                 {
                     Discard(tmp, dir);
@@ -309,6 +312,8 @@ namespace S2A.Services
             }
         }
 
+        // 种子拷入：只收普通文件和目录，碰到链接整次失败（审计 P2-194，同 SaveTransfer.Scan 的「不跟链接」判断）；
+        //   按 1 MB 块写，不整文件进内存（审计 P2-176）
         private static Result CopyIn(HorizonClient hc, string hostDir, string savePath, out int files, out long bytes)
         {
             files = 0;
@@ -316,6 +321,7 @@ namespace S2A.Services
 
             foreach (string d in Directory.EnumerateDirectories(hostDir))
             {
+                NoLink(d);
                 string p = savePath + "/" + Path.GetFileName(d);
                 Result r = hc.Fs.CreateDirectory(U8(p));
 
@@ -334,11 +340,15 @@ namespace S2A.Services
                 }
             }
 
+            byte[] chunk = new byte[1 << 20];
+
             foreach (string f in Directory.EnumerateFiles(hostDir))
             {
-                byte[] data = File.ReadAllBytes(f);
+                NoLink(f);
+                using FileStream src = new(f, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.SequentialScan);
+                long length = src.Length;
                 byte[] p = U8(savePath + "/" + Path.GetFileName(f));
-                Result r = hc.Fs.CreateFile(p, data.Length);
+                Result r = hc.Fs.CreateFile(p, length);
 
                 if (r.IsFailure())
                 {
@@ -352,8 +362,35 @@ namespace S2A.Services
                     return r;
                 }
 
-                r = hc.Fs.WriteFile(h, 0, data, WriteOption.Flush);
-                hc.Fs.CloseFile(h);
+                try
+                {
+                    long offset = 0;
+
+                    while (offset < length)
+                    {
+                        int n = src.Read(chunk, 0, (int)Math.Min(chunk.Length, length - offset));
+
+                        if (n == 0)
+                        {
+                            throw new IOException($"带存档起局：种子文件读到一半变短（{offset}/{length} 字节）：{f}");
+                        }
+
+                        r = hc.Fs.WriteFile(h, offset, chunk.AsSpan(0, n), WriteOption.None);
+
+                        if (r.IsFailure())
+                        {
+                            return r;
+                        }
+
+                        offset += n;
+                    }
+
+                    r = hc.Fs.FlushFile(h);
+                }
+                finally
+                {
+                    hc.Fs.CloseFile(h);
+                }
 
                 if (r.IsFailure())
                 {
@@ -361,10 +398,18 @@ namespace S2A.Services
                 }
 
                 files++;
-                bytes += data.Length;
+                bytes += length;
             }
 
             return Result.Success;
+        }
+
+        private static void NoLink(string path)
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException($"带存档起局：种子里有链接，拒绝拷入：{path}");
+            }
         }
 
         // LibHac 路径要 NUL 结尾的 UTF-8

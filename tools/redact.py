@@ -100,6 +100,26 @@ def _private_path(match):
     return f"[PRIVATE_PATH len={len(path)} depth={path.count(chr(92))}]"
 
 
+# 系统错误原文（strerror）：路径匹配会一直吞到行尾（路径本身可能带空格，不能按空白截断），「cp: <路径>: Operation not permitted」的原因
+#   原先跟着路径一起变成 [PRIVATE_PATH]，玩家诊断里看不出是没权限、没空间还是文件不在（11-09 旷野之息拷字体失败 7 行全是这样）。
+#   只认这张表里的原文（不收任意尾巴，免得把路径里冒号后的名字漏出去）：末尾是「: 原文」就只换前面的路径
+ERRNO_REASONS = ("Operation not permitted", "Permission denied", "No such file or directory", "File exists", "Read-only file system",
+                 "No space left on device", "Is a directory", "Not a directory", "Input/output error", "Resource busy", "Device not configured",
+                 "File name too long", "Too many open files", "Disc quota exceeded", "Bad file descriptor", "Directory not empty", "Invalid argument",
+                 "Cross-device link", "Operation not supported", "Operation timed out", "Resource deadlock avoided", "Resource temporarily unavailable",
+                 "Too many levels of symbolic links", "Bad address", "Result too large")
+# macOS cp -c 在系统错误前还带系统调用名（#290：「…bfttf: clonefile failed: Cross-device link」），一起保留
+_REASON_TAIL = re.compile(r'(?i): (?:(?:clonefile|fclonefileat|copyfile) failed: )?(?:' + '|'.join(map(re.escape, ERRNO_REASONS)) + r')\.?[ \t]*$')
+
+
+def _private_path_keep_reason(match):
+    text = match.group(0)
+    tail = _REASON_TAIL.search(text)
+    if not tail or tail.start() == 0:
+        return _private_path(match)
+    return _private_path(re.match(r'.*', text[:tail.start()], re.S)) + text[tail.start():]
+
+
 def redact_text(text, *, key_values=None, preserve_identity=False) -> str:
     """Redact known values before shape rules, including formal identity fields."""
     values = load_key_values() if key_values is None else key_values
@@ -113,8 +133,8 @@ def redact_text(text, *, key_values=None, preserve_identity=False) -> str:
     s = re.sub(r'(?i)([?&](?:token|key|api_key|secret|password|auth|signature|session|access_token)=)[^&#\s]+', r'\1[REDACTED]', s)
     s = re.sub(r'(?i)((?:password|passwd|secret|token|api[_-]?key|[a-z0-9_]*_key(?:_[a-z0-9]+)*|titlekek|masterkey|headerkey|cookie|serial(?:number)?|udid|uuid|imei|device[_-]?id|android[_-]?id|idfa|idfv|mac[_-]?address|uniqueidentifier|identifierforvendor)\s*["\x27]?\s*[:=]\s*["\x27]?)[^\s,"\x27;}]+', r'\1[REDACTED]', s)
     s = redact_identity(s)
-    s = re.sub(r'(?:/Volumes/|/private/var/|/var/mobile/|/data/user/|/data/data/|\\\\)[^\r\n\"\x27<>]*', _private_path, s)
-    s = re.sub(r'(?:/Users/|/home/|[A-Za-z]:[\\/](?:Users|Documents)[\\/])[^\r\n\"\x27<>]*', _private_path, s)
+    s = re.sub(r'(?:/Volumes/|/private/var/|/var/mobile/|/data/user/|/data/data/|\\\\)[^\r\n\"\x27<>]*', _private_path_keep_reason, s)
+    s = re.sub(r'(?:/Users/|/home/|[A-Za-z]:[\\/](?:Users|Documents)[\\/])[^\r\n\"\x27<>]*', _private_path_keep_reason, s)
     s = re.sub(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '[DEVICE_ID]', s)
     if not preserve_identity:
         s = re.sub(r'(?i)\b[0-9a-f]{64,}\b', '[KEY_MATERIAL]', s)

@@ -6,7 +6,7 @@
 #   ① 解包（pack/stages/unpack.sh extract，用你自己的 prod.keys）→ ② 出包（oneclick --from-extract --target mac：改写 / 系统数据 / 追加内容 / RomFS 索引 /
 #   直连配置推导 / 抽取 / 直连库，不给玩家出包）→ ③ Mac 零配置直连局（不设 S2A_GFX，自动玩家开）≤ QT_RUN_S 秒，崩了同一产物根自动补一局
 #   → ④ tools/quicktest/verdict.py 定性 → 往 <输出目录>/结果.tsv 追加一行，并打一行摘要。
-#   Mac 局走 tools/entry_check.sh（与能力关 / 开对照局 tools/ab_pair.sh 同一入口：同存档 / 进局路线挑选、独占局槽、宿主局外先编），
+#   Mac 局走 维护方 entry_check.sh（${S2A_PRIVATE_TOOLS}）（与能力关 / 开对照局 tools/ab_pair.sh 同一入口：同存档 / 进局路线挑选、独占局槽、宿主局外先编），
 #   末列「进局」= 自动玩家到 MARK（游戏场景里可操作）。只有直连（11-07 拆通用模式：精简档 --lite、QT_DUAL=0 通用局两条一并删）：
 #   根里没出成本链直连库就记直连失败。
 # 输出目录缺省 ./build/quicktest；每款工作目录 <输出目录>/work/<名>，跑完删掉（QT_KEEP=1 留下，之后可拿产物根 roots/*@现行 直接起局复现、不用再出包）；
@@ -95,10 +95,10 @@ else
   # 动作环拉到局时长（S2A_AP_LOOP_S）：到 MARK 后接着玩到 RUN_S 才收局，局内 0 崩照局时长判（缺省动作环 60 秒跑完就收局）
   # 进局档位（10-30 维护者 S 级 ①）：docs/名单_进局档位.tsv 登记过主机档（docked）的款直接主机档起局，其余掌机档；不全局切
   DOCK=handheld; [ "$PID" != - ] && awk -F'\t' -v p="$PID" '$1 == p && $2 == "docked" {f = 1} END {exit !f}' docs/名单_进局档位.tsv 2> /dev/null && DOCK=docked
-  mac_once() {   # mac_once <局目录> <日志后缀> [<档位>]：tools/entry_check.sh 起局，局本身秒数记进 MS；直连单轨（10-30 维护者）：根里没有本链直连库（退出 5）记直连失败、不补跑通用局
+  mac_once() {   # mac_once <局目录> <日志后缀> [<档位>]：维护方 entry_check.sh（${S2A_PRIVATE_TOOLS}） 起局，局本身秒数记进 MS；直连单轨（10-30 维护者）：根里没有本链直连库（退出 5）记直连失败、不补跑通用局
     local t1 erc; t1=$(date +%s)
     env -u S2A_GFX ${MENV[@]+"${MENV[@]}"} S2A_ROOTS="$O/roots" S2A_LOOP_SEC="$RUN_S" S2A_RUN_EXTEND_MAX=${QT_RUN_EXTEND:-300} S2A_LOOP_CAP=$((RUN_S + 35 + ${QT_RUN_EXTEND:-300})) S2A_AP_LOOP_S="$RUN_S" S2A_MEM_MB=${QT_MEM_MB:-7680} \
-      bash tools/entry_check.sh "$G" "${3:-$DOCK}" "$1" > "$KL/entry$2.out" 2>&1; erc=$?
+      bash "${S2A_PRIVATE_TOOLS:?Mac 局要设 S2A_PRIVATE_TOOLS（entry_check.sh 是维护方工具）}/entry_check.sh" "$G" "${3:-$DOCK}" "$1" > "$KL/entry$2.out" 2>&1; erc=$?
     [ $erc = 5 ] && { cp "$KL/entry$2.out" "$KL/entry$2.direct_missing"; echo "【红】$G 直连局起不来：根里没有本链直连库（只有直连）" >> "$KL/entry$2.out"; }
     MS=$(( $(date +%s) - t1 ))
     cp "$1/run.out" "$KL/run_mac$2.out" 2> /dev/null

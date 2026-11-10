@@ -15,6 +15,7 @@ import unittest
 import unittest.mock
 
 REPO = Path(__file__).resolve().parents[1]
+os.environ["S2A_DISK_FREE_G"] = "999"   # 盘判定不看本机实况：出库开工前的空间复核（pack/jobs/space_rule.py）与刷新磁盘闸都按注入余量判（11-09 门禁机余量紧时假红）
 sys.path.insert(0, str(REPO / "graphics/nvn/tools"))
 import direct_profile as dp
 
@@ -965,6 +966,7 @@ class Profiles(unittest.TestCase):
         shutil.copyfile(REPO / "graphics/nvn/games/zero_skip.tsv", games / "zero_skip.tsv")   # 出库按程序号挑零源跳过事实写进 game.tsv（direct_lib.sh）
         pack = sandbox / "pack"; pack.mkdir()
         shutil.copyfile(REPO / "pack/srcs.sh", pack / "srcs.sh")
+        (pack / "jobs").mkdir(); shutil.copyfile(REPO / "pack/jobs/space_rule.py", pack / "jobs" / "space_rule.py")   # 出库开工前的空间复核（#265，direct_lib.sh 调）
         consumer = sandbox / "graphics/tools/direct"; consumer.mkdir(parents=True)
         shutil.copyfile(REPO / "graphics/tools/direct/direct_lib.sh", consumer / "direct_lib.sh")
         shutil.copyfile(REPO / "graphics/tools/direct/extract.sh", consumer / "extract.sh")   # 10-25「抽着色器只做一次」：产物根没有 extract/ 时当场抽（真脚本，抽取器是下面的合成桩）

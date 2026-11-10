@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>disable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <ItemGroup>
+    <!-- Convolve is internal: compile the three files it needs straight in, so the test calls both paths. -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Dsp/Convolve.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Dsp/Filter.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Common/BitUtils.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Common/MemoryUtil.cs" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

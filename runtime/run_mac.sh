@@ -24,7 +24,7 @@ elif [ -d "$IN/exefs" ]; then
   cp "$IN/exefs/main.npdm" "$MODS/"
   "$PY" "$ROOT/graphics/nvn/games/profile_guess.py" --gpu-drivers "$IN/exefs" > "$MODS/gpu_drivers.tsv" || { echo "🔴 $G 判 GPU 驱动模块失败"; exit 1; }   # 直连跳过的驱动模块（同 pack/stage_rewrite.sh）
 else echo "🔴 ${G}：S2A_IN=$IN 里既没有改写产物也没有 exefs/"; exit 1; fi
-# S2A_HOST_PREBUILT=1：调用方已在局时限外编好宿主（tools/entry_check.sh），这里不再 make（10-29 本机：多棵工作树共用 NativeAOT 缓存，
+# S2A_HOST_PREBUILT=1：调用方已在局时限外编好宿主（维护方 entry_check.sh），这里不再 make（10-29 本机：多棵工作树共用 NativeAOT 缓存，
 #   排局槽空档里别的工作树一编，这里的 make 就重新链接，几十秒算进局时，游戏正常收局却被 335 秒局槽杀、记成偶发崩溃）
 if [ "${S2A_HOST_PREBUILT:-}" = 1 ]; then [ -x "$ROOT/build/s2arm-host" ] || { echo "🔴 S2A_HOST_PREBUILT=1 但没有 $ROOT/build/s2arm-host"; exit 1; }
 else bash "$ROOT/tools/host_build.sh" || { echo "🔴 构建失败"; exit 1; }; fi   # 11-04：同树一把锁、S2A_CS 只升不降（tools/host_build.sh）

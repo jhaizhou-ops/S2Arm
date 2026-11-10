@@ -128,7 +128,7 @@ sys.exit(99)
         linked = Path(self.tmp.name) / 'linked worktree'
         subprocess.run(['git','-C',str(self.root),'worktree','add','--detach',str(linked)],
                        check=True, capture_output=True)
-        for name in ('tests','platforms'):
+        for name in ('tests','android'):   # 同 setUp 拷进假仓库的两棵（迁仓前安卓在 platforms/android，11-09 这里漏改，首次公开快照起一直红）
             shutil.copytree(self.root / name, linked / name)
         self.root = linked
         self.assertTrue((linked / '.git').is_file())

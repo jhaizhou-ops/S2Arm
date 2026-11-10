@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from jobcase import JobCase, ROOT
 from core import Context, Failure
+import layout
 import library
 
 sys.path.insert(0, str(ROOT))
@@ -64,6 +65,46 @@ class SpaceMeasured(JobCase):
         self.assertGreaterEqual(both - one, MIB)       # 克隆那份不算
         self.assertGreaterEqual(one, MIB)              # 解包那份还算
 
+    @unittest.skipUnless(sys.platform == "darwin", "APFS 克隆只在 macOS")
+    def test_apfs_clones_count_shared_blocks_once(self):
+        """#303：同一份 RomFS 的克隆（解包 / 各层产物根 / .romfs_store / Mac 运行版本，cp -c）只算一份共享块。
+        8 MiB 随机文件克隆成 4 份 → 约 8 MiB（不是 32 MiB）；其中一份改 1 字节（换新克隆族、份数 1）→ 它按整份再算一遍：约 16 MiB（偏大、保守）"""
+        import subprocess
+        root = Path(tempfile.mkdtemp(dir=self.c.library))
+        src = write(root / "build" / "extract" / "romfs" / "data.arc", 8 * MIB)
+        if library._CloneInfo.get(src) is None:
+            self.skipTest("这台机器取不到 APFS 克隆信息（非 APFS 卷）")
+        for rel in ("build/k/roots/a@1/romfs", "build/k/roots/.romfs_store/x", "image/mac/romfs"):
+            (root / rel).mkdir(parents=True)
+            subprocess.run(["cp", "-c", str(src), str(root / rel / "data.arc")], check=True)
+        dev = root.stat().st_dev
+        got = library.disk_bytes([root], dev)
+        self.assertGreaterEqual(got, 8 * MIB); self.assertLess(got, 8 * MIB + 2 * MIB, got)   # 余量 = 目录元数据
+        with open(root / "image/mac/romfs/data.arc", "r+b") as f:
+            f.seek(100); f.write(b"\x00" if f.read(1) != b"\x00" else b"\x01")
+        got = library.disk_bytes([root], dev)
+        self.assertGreaterEqual(got, 16 * MIB); self.assertLess(got, 16 * MIB + 2 * MIB, got)
+        # 负对照：stat 口径（不认克隆）是 4 份满额
+        stat_sum = sum(p.stat().st_blocks * 512 for p in root.rglob("data.arc"))
+        self.assertGreaterEqual(stat_sum, 32 * MIB)
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS 克隆只在 macOS")
+    def test_pack_footprint_counts_romfs_clones_once_and_skips_saves(self):
+        """#303 记账：宝可梦 Z-A 一类，解包 + 多层产物根 + Mac 运行版本都是同一份 RomFS 的克隆 → 记一份；存档 / 运行时着色器缓存不算出包占用"""
+        import subprocess
+        c = self.context("build")
+        library.atomic(self.c.library / "catalog.json", dict(schema=1, games=[self.game(8 * MIB)]))
+        d = layout.game_dir(c, GID, english="Zelda")
+        src = write(d / "build" / "extract" / "romfs" / "data.arc", 8 * MIB)
+        if library._CloneInfo.get(src) is None:
+            self.skipTest("这台机器取不到 APFS 克隆信息（非 APFS 卷）")
+        for rel in ("build/k/roots/a@1/romfs", "build/k/roots/b@1/romfs", "build/k/roots/.romfs_store/x", "image/mac/romfs"):
+            (d / rel).mkdir(parents=True)
+            subprocess.run(["cp", "-c", str(src), str(d / rel / "data.arc")], check=True)
+        write(d / "saves" / "s.bin", 4 * MIB); write(d / "shader-cache" / "p.bin", 4 * MIB)
+        got = library.pack_footprint(c, GID)
+        self.assertGreaterEqual(got, 8 * MIB); self.assertLess(got, 8 * MIB + 2 * MIB, got)
+
     def test_disk_bytes_counts_hardlink_once_skips_symlink_and_other_volume(self):
         root = self.root / "measure"
         a = write(root / "a.bin", MIB)
@@ -84,14 +125,15 @@ class SpaceMeasured(JobCase):
         c = self.context("ipa")
         game = self.game(10 * 10**9)
         library.atomic(self.c.library / "catalog.json", dict(schema=1, games=[game]))
-        extract = write(self.c.library / "cache" / GID / "extract" / "romfs.bin", MIB)
-        write(self.c.library / "iPhone" / GID / "junk.tmp", 2 * MIB)   # 成功后会被清掉的中间产物
-        (self.c.library / "iPhone" / GID / "roots" / "r@1").mkdir(parents=True)
-        os.link(extract, self.c.library / "iPhone" / GID / "roots" / "r@1" / "romfs.bin")   # 产物根硬链解包：不重复算
+        ios = layout.ios_work(self.c, GID)   # iPhone 出包工作目录 build/ios
+        extract = write(layout.build_dir(self.c, GID) / "extract" / "romfs.bin", MIB)
+        write(ios / "junk.tmp", 2 * MIB)   # 成功后会被清掉的中间产物
+        (ios / "roots" / "r@1").mkdir(parents=True)
+        os.link(extract, ios / "roots" / "r@1" / "romfs.bin")   # 产物根硬链解包：不重复算
         write(self.c.library / "runtime-cache" / GID / "play.bin", MIB)   # 玩的时候才长的运行时缓存：不算
-        write(self.c.library / "iPhone" / "0100000000000001" / "other.bin", MIB)   # 别款：不算
+        write(layout.ios_work(self.c, "0100000000000001") / "other.bin", MIB)   # 别款：不算
         library.prune_build(c, GID)
-        self.assertFalse((self.c.library / "iPhone" / GID / "junk.tmp").exists())   # 清理照常
+        self.assertFalse((ios / "junk.tmp").exists())   # 清理照常
         lines = [l.split("\t") for l in (self.c.library / library.SPACE_LEDGER).read_text(encoding="utf-8").splitlines() if not l.startswith("#")]
         self.assertEqual(len(lines), 1)
         r = dict(zip(library.SPACE_LEDGER_FIELDS, lines[0]))
@@ -106,26 +148,26 @@ class SpaceMeasured(JobCase):
         return library.pack_need_bytes([dict(size=size, sha256="a" * 64)], **kw)
 
     def test_formula_acceptance_numbers(self):
-        self.assertEqual(self.need(29_130_000_000, windows=False), 32_043_000_000 + 15_000_000_000)
-        self.assertEqual(self.need(17_480_000_000, windows=False), 19_228_000_000 + 15_000_000_000)
-        self.assertEqual(self.need(2_700_000_000, windows=False), 2_970_000_000 + 5_000_000_000)
+        self.assertEqual(self.need(29_130_000_000, windows=False), 32_043_000_000 * 2 + 15_000_000_000)
+        self.assertEqual(self.need(17_480_000_000, windows=False), 19_228_000_000 * 2 + 15_000_000_000)
+        self.assertEqual(self.need(2_700_000_000, windows=False), 2_970_000_000 * 2 + 5_000_000_000)
 
     def test_unpacked_counts_zero_and_windows_adds_a_copy(self):
-        self.assertEqual(self.need(10_000_000_000, unpacked=True, windows=False), 15_000_000_000)
-        self.assertEqual(self.need(10_000_000_000, windows=True), 11_000_000_000 * 2 + 15_000_000_000)
+        self.assertEqual(self.need(10_000_000_000, unpacked=True, windows=False), 11_000_000_000 + 15_000_000_000)
+        self.assertEqual(self.need(10_000_000_000, windows=True), 11_000_000_000 * 3 + 15_000_000_000)
 
     def test_ledger_does_not_change_budget(self):
         c = self.context("ipa")
         self.ledger(("2026-11-07T10:00:00", GID, "ipa", "1", 16 * 10**9, 500 * 10**9, "旧账"))
         v = self.budget(c, self.game(16 * 10**9))
-        self.assertEqual((v["basis"], v["needBytes"]), ("rule", 17_600_000_000 + 15_000_000_000))
+        self.assertEqual((v["basis"], v["needBytes"]), ("rule", 17_600_000_000 * 2 + 15_000_000_000))
 
     def test_rejection_names_need_and_free(self):
         with patch("shutil.disk_usage", return_value=DU(0, 0, 20 * 10**9)):
             with self.assertRaises(Failure) as e:
                 library.check_pack_space(self.context("ipa"), self.game(16 * 10**9))
         self.assertEqual(e.exception.code, "disk_full")
-        self.assertIn("要 33 GB", str(e.exception)); self.assertIn("只剩 20 GB", str(e.exception)); self.assertIn("「仍然继续」", str(e.exception))
+        self.assertIn("要 50 GB", str(e.exception)); self.assertIn("只剩 20 GB", str(e.exception)); self.assertIn("「仍然继续」", str(e.exception))
 
     def test_space_override_passes_with_warning(self):
         c = self.context("ipa", spaceOverride=True)

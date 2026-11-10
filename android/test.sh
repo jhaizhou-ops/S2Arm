@@ -192,6 +192,11 @@ s2a_gate_step javac -encoding UTF-8 -d "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/GamepadState.java" \
     "$android_dir/tests/GamepadStateTest.java"
 s2a_gate_step java -cp "$out/java" org.s2arm.android.GamepadStateTest
+# B3（#48）：buffer_geometry 下 SurfaceView 的同比例 frame 取整，与 native publish_touch 同口径
+s2a_gate_step javac -encoding UTF-8 -d "$out/java" \
+    "$android_dir/app/src/main/java/org/s2arm/android/BufferGeometry.java" \
+    "$android_dir/tests/BufferGeometryTest.java"
+s2a_gate_step java -cp "$out/java" org.s2arm.android.BufferGeometryTest
 # Vulkan 款直连三态（#274）：intent 取值、缺省不是手动直连、与 native direct_choice.h 同值
 s2a_gate_step javac -encoding UTF-8 -d "$out/java" \
     "$android_dir/app/src/main/java/org/s2arm/android/VulkanDirectChoice.java" \
@@ -393,12 +398,14 @@ s2a_gate_step "$PY" "$android_dir/tests/native_rewriter_packaging_test.py" --for
 s2a_gate_step "$PY" "$android_dir/contracts/validate.py"
 s2a_gate_step "$PY" "$android_dir/tests/contract_validation_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/device_retirement_test.py"
+s2a_gate_step "$PY" "$android_dir/tests/copy_3d_depth_test.py"
 # A3：记录快照的对象身份复核 + 有界退休墓碑 + 附件解析类型化失败（宿主 mock，--source-ref 红）。
 s2a_gate_step "$PY" "$android_dir/tests/tex_identity_state_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/tex_identity_state_test.py" --withdraw
 # 批次 1/A：命令流拍平（A2 延迟参数在所有权转移点入记录 + A4 记录内引用重定位 + 拍不到即失败）。
 # 默认全绿；--source-ref 旧源码必须红；--withdraw 的 5 条行为撤回变异必须各自转红。
 s2a_gate_step "$PY" "$android_dir/tests/record_flat_test.py"
+s2a_gate_step "$PY" "$android_dir/tests/direct_replayed_fence_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/record_flat_test.py" --withdraw
 s2a_gate_step "$PY" "$android_dir/core-runtime/metrics-tests/cli_test.py"
 s2a_gate_step bash "$android_dir/core-runtime/fps-tests/test.sh"

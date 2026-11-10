@@ -21,6 +21,8 @@ class Explain(unittest.TestCase):
                 ('The name for this app is invalid.', 'ipa_needs_repack'),   # AltServer 中文显示名（11-04）
                 ('You have reached the maximum number of apps', 'free_app_limit'),
                 ('Application verification failed: This device has reached the maximum number of installed apps using a free developer profile', 'free_app_limit'),   # 11-06 Windows 出包机 plumesign 原文（测试设备2 iOS 27）
+                ('Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.', 'free_appid_limit'),   # Apple 9120 的 Xcode 原文措辞
+                ('Developer services error 9120: Your maximum App ID limit has been reached.', 'free_appid_limit'),   # 带 Apple 错误码的转述形态
                 ('Developer Mode is disabled', 'developer_mode_required'),
                 ('完全看不懂的报错', 'device_install_failed')):
             with self.subTest(text=text): self.assertEqual(impactor.explain(text), code)

@@ -16,6 +16,8 @@
 
 // Main thread only. A shell without a game may leave runtime capabilities nil.
 void s2a_settings_set_runtime(S2ASettingsRuntime *runtime);
+// 游戏内齿轮菜单（ios/vpad.m）用：存档管理 / 重启 / 是否多款容器；没登记时 nil
+S2ASettingsRuntime *s2a_settings_runtime(void);
 // Main thread only, after the visible shell presenter and its ordinary input /
 // diagnostic attachments are ready. Works before a game starts and during play;
 // missing game capabilities are disabled. A nil or already-presenting controller

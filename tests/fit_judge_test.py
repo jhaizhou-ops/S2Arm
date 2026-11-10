@@ -135,6 +135,37 @@ class FitJudge(unittest.TestCase):
         _, line = self.judge(self.raw["bars"], 0, 1)
         self.assertIn(" 种类 4 判定 2 ", line, "几何已判没满屏：只记几何、不当扩展区异常")
 
+    def test_mid_black_void(self):   # 11-09 哈迪斯 II 强制整套放宽：中段整列纯黑、两侧是场景，旧判据报满屏 0 红。期望按构造写死
+        good = Image.open(self.d / "good.png") if (self.d / "good.png").exists() else None
+        w0 = world(2400, H, seed=21).crop((0, 0, W_WIDE, H))
+        void = w0.copy(); void.paste(Image.new("RGB", (300, H)), (900, 0))          # 中间 300 列纯黑，两侧紧挨是场景（断崖）
+        vign = w0.copy(); a = np.asarray(vign, dtype=np.float32)                   # 游戏自己的暗角：右侧约 500 列渐暗到纯黑，黑区里零星亮点（丝之歌萤火虫）
+        ramp = np.clip((1480 - np.arange(W_WIDE)) / 500.0, 0, 1)[None, :, None] ** 1.5; a = (a * ramp).astype(np.uint8); a[300, 1500] = (200, 220, 90); a[500, 1530] = (200, 220, 90)
+        vign = Image.fromarray(a)
+        page = Image.new("RGB", (W_WIDE, H)); page.paste(world(650, 120, seed=4), (0, 560)); page.paste(world(260, 140, seed=6), (1300, 540))   # 黑底页：左对话框、右小图（动森）
+        for name, im, want, word in (("mid_void", void, 1, "中间第"), ("mid_vign", vign, 0, ""), ("mid_page", page, 0, "")):
+            q = self.d / f"{name}.raw"; raw(im, q)
+            n, line = self.judge(q, 0)
+            self.assertEqual(n, want, f"{name}: {line}")
+            if word: self.assertIn(word, line)
+        q = self.d / "mid_void.raw"   # 只在常规帧判：标了原比例页 / 两侧是游戏画的 / 纯 2D 合成 / 回退不判
+        for g in (1, 2, 4, 5):
+            n, line = self.judge(q, g)
+            self.assertNotIn("中间第", line, f"g={g}: {line}")
+        # 真截图（本机有才跑；哈迪斯那局自动玩家截图把 2.17:1 画面上下加黑边缩进 1280×720，先裁掉上下全黑行再喂）：人工看过——哈迪斯强制整套放宽两张必须报；丝之歌暗角、动森黑底对话页不许报
+        real = [("hades2_wide_mid.png", 1, 1), ("hades2_wide_mark.png", 1, 1), ("silk_vignette_a.png", 0, 0), ("silk_vignette_b.png", 0, 0),
+                ("acnh_black_page.png", 0, 0)]   # (RUN/evidence/fit_mid 下的文件, 该不该报, 要不要裁掉截图缩放加的上下黑边：只有哈迪斯那局窗口 16:9、画面 2.17:1)
+        ran = 0
+        for name, want, crop in real:
+            p = RUN / "evidence/fit_mid" / name
+            if not p.is_file(): continue
+            im = Image.open(p).convert("RGB")
+            if crop: a = np.asarray(im, dtype=np.int32).sum(axis=2); rows = np.where(a.max(axis=1) > 0)[0]; im = im.crop((0, int(rows.min()), im.width, int(rows.max()) + 1))
+            q = self.d / "mid_real.raw"; raw(im, q)
+            _, line = self.judge(q, 0); ran += 1
+            self.assertEqual("中间第" in line, bool(want), f"{p}: {line}")
+        print(f"  中间整列纯黑真截图：跑了 {ran} / {len(real)} 张")
+
     def test_game_wide_2d_exempt(self):
         n, line = self.judge(self.raw["stale"], 4)
         self.assertEqual(n, 0, line)

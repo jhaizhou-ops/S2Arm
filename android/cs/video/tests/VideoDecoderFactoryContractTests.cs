@@ -125,6 +125,10 @@ internal static class VideoDecoderFactoryContractTests
         Check(h.GetType().Assembly == platform && v.GetType().Assembly == platform, "both decoders live in platform assembly");
         Check(h.GetType().Assembly != typeof(S2AVideoDecoders).Assembly, "decoders are outside shared Nvdec assembly");
         Check(ReferenceEquals(h, context.H264()) && ReferenceEquals(v, context.Vp8()), "registered decoders cached per context");
+        // VP9: the libvpx backend with S2Arm's NVDEC hook, on by default (docs/设计_原生VP9/design_phase2_B.md); not created here,
+        // because creating it is free but decoding needs the native library, which this host test does not load.
+        Check(S2AVideoDecoders.Vp9 != null, "VP9 native backend registered");
+        Check(S2AVideoDecoders.Vp9DefaultMode == "native", "VP9 native by default on Android");
         Check(Errors.Count == 0, "android-registered path has no red log");
     }
 

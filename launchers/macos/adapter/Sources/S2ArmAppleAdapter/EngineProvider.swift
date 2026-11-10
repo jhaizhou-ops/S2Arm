@@ -73,9 +73,11 @@ public struct BuildJob {
     public var deviceTarget: [String: Any]?
     /// 空间预检没过时玩家选了「仍然继续」。
     public var spaceOverride = false
+    /// 出包页选的存放位置（游戏库结构 v3）：这款放到哪个文件夹；在别的位置就先整个搬过去。nil = 不动
+    public var location: String?
 
-    public init(gameId: String, target: EngineTarget, deviceTarget: [String: Any]? = nil, spaceOverride: Bool = false) {
-        self.gameId = gameId; self.target = target; self.deviceTarget = deviceTarget; self.spaceOverride = spaceOverride
+    public init(gameId: String, target: EngineTarget, deviceTarget: [String: Any]? = nil, spaceOverride: Bool = false, location: String? = nil) {
+        self.gameId = gameId; self.target = target; self.deviceTarget = deviceTarget; self.spaceOverride = spaceOverride; self.location = location
     }
 }
 

@@ -15,7 +15,8 @@ import ShellUI
     #expect(c.tiles[1].state == .needsGameData)
     #expect(c.tiles[2].state == .needsAppUpdate)
     #expect(c.tiles[3].state == .broken(reason: "R", detail: "D"))
-    #expect(c.tiles[4].state == .broken(reason: "", detail: "", technical: "未知状态 \"flying\""))
+    // technical 一行按 App 语言取 ShellUI 文字表（#316）：中文系统是原句，其余是英文原文（期望两种都手写）
+    #expect([GameState.broken(reason: "", detail: "", technical: "未知状态 \"flying\""), .broken(reason: "", detail: "", technical: "Unknown state \"flying\"")].contains(c.tiles[4].state))
     if case .broken = c.tiles[5].state {} else { Issue.record("非法 title_id 应显示为不可用") }
     #expect(c.tiles[6].state == .playable)   // 缺 state 按可运行
     #expect(c.problems.count == 2)           // 重复 1 + 非法 id 1
@@ -26,6 +27,38 @@ import ShellUI
     #expect(Catalogue.parse(Data("not json".utf8), baseDirectory: base).tiles.isEmpty)
     #expect(Catalogue.parse(Data(#"{"schema":2,"games":[]}"#.utf8), baseDirectory: base).problems.count == 1)
     #expect(Catalogue.load(path: "/nonexistent/s2a.json").problems.count == 1)
+}
+
+/// 宿主没接的功能必须是 nil：界面据此不显示按钮。接上一项，就把它从这张表挪走，入口自动出现。
+@MainActor @Test func unwiredActionsStayNilSoTheirButtonsAreHidden() throws {
+    let data = Data(#"{"games":[]}"#.utf8)
+    let a = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/"))).actions
+    #expect(a.onUseAppData == nil && a.onPickCloudSaves == nil && a.onDisableCloudSaves == nil && a.onUseShellCloud == nil)
+    #expect(a.onResetDefaults == nil && a.onShowLog == nil && a.onAppUpdate == nil)
+    #expect(a.onPickShellData == nil && a.onClearShellData == nil && a.onPickShellCloud == nil && a.onClearShellCloud == nil)
+    #expect(a.onGlobalPadMapChange == nil && a.onGlobalPadMapReset == nil)
+}
+
+// 删除游戏（#227 iPad 点了没反应：宿主从没给 onDeleteGame 实现）：不勾存档 → 数据根下只留 S2A/（存档），勾了 → 整个删；删完库里不再显示。期望按目录手写
+@MainActor @Test func deleteGameRemovesDataAndKeepsSavesUnlessAsked() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("s2a-del-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (a, b) = ("0100000000010000", "0100000000020000")
+    for id in [a, b] {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("\(id)/资源包"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("\(id)/S2A/ryujinx/bis/user/save"), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: root.appendingPathComponent("\(id)/identity.json"))
+    }
+    let data = Data(#"{"schema":1,"games":[{"title_id":"0100000000010000","name":"A"},{"title_id":"0100000000020000","name":"B"}]}"#.utf8)
+    let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")),
+                                    gameDataReady: { FileManager.default.fileExists(atPath: root.appendingPathComponent("\($0)/资源包").path) }, gamesRoot: root)
+    #expect(model.games.map(\.id) == [a, b])
+    let delete = try #require(model.actions.onDeleteGame)
+    delete(a, false)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(a).path) == ["S2A"])
+    delete(b, true)
+    #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(b).path))
+    #expect(model.games.isEmpty)
 }
 
 @MainActor @Test func playOnlyForPlayable() {
@@ -46,18 +79,19 @@ import ShellUI
     var played: [String] = [], picked: [String] = []
     let model = S2ArmShellHostModel(catalogue: Catalogue.parse(data, baseDirectory: URL(fileURLWithPath: "/")), play: { played.append($0) },
                                     gameDataReady: { ready.contains($0) }, pickGameData: { picked.append($0) })
-    #expect(model.games.map(\.game.state) == [.needsGameData, .needsGameData])
+    #expect(model.games.map(\.id) == ["0100000000020000"])   // 只显示这台设备上资源到位的款
     model.actions.onPlay("0100000000010000")
     #expect(played.isEmpty && picked == ["0100000000010000"])
     model.actions.onPickGameData("0100000000010000")
     #expect(picked == ["0100000000010000", "0100000000010000"])
     ready.insert("0100000000010000"); model.refreshGameData()
-    #expect(model.games.map(\.game.state) == [.playable, .needsGameData])
+    #expect(model.games.map(\.id) == ["0100000000010000", "0100000000020000"] && model.games.map(\.game.state) == [.playable, .needsGameData])   // 再推一款，刷新后多一款
     model.actions.onPlay("0100000000010000")
     #expect(played == ["0100000000010000"])
     ready.remove("0100000000010000")              // 库开着时资源包被拿走：Play 当场重判、不放行
     model.actions.onPlay("0100000000010000")
     #expect(played == ["0100000000010000"] && picked.count == 3)
+    #expect(model.games.map(\.id) == ["0100000000020000"])   // 删掉后不再显示
 }
 
 // 宿主「重新检查」→ s2a_shell_refresh → 登记的处理函数
@@ -138,4 +172,44 @@ nonisolated(unsafe) private var lastPlayed = ""
     #expect(store.load(b) == nil && !model.hasCustomIdentity(b))
     model.resetIdentity(a)
     #expect(model.games[0].game.title == "原名一" && store.load(a) == nil)
+}
+
+// 名字和封面一次提交（审计 P2-221）：提交点失败时两样都不变、编辑页不关并给原因；存成后旧封面才删。期望值手写
+@MainActor @Test func gameIdentitySaveIsAllOrNothing() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let json = #"{"schema":1,"games":[{"title_id":"0100000000000001","name":"原名一"}]}"#
+    let catalogue = Catalogue.parse(Data(json.utf8), baseDirectory: root)
+    let store = GameIdentityStore(root: root)
+    let a = "0100000000000001"
+    let folder = root.appendingPathComponent("games/\(a)", isDirectory: true)
+    func covers() -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasPrefix("identity-cover") }.sorted() }
+
+    // 早先版本留下的固定名封面照样认；换新封面后它被删、只剩一份
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data([1, 2, 3]).write(to: folder.appendingPathComponent("identity-cover.jpg"))
+    #expect(store.load(a)?.cover?.lastPathComponent == "identity-cover.jpg")
+    try store.save(a, name: "名一", cover: Data([4, 5]))
+    #expect(covers().count == 1 && covers() != ["identity-cover.jpg"])
+    #expect(store.load(a)?.name == "名一" && store.load(a)?.cover.flatMap { try? Data(contentsOf: $0) } == Data([4, 5]))
+    // 只改名字：封面沿用
+    try store.save(a, name: "名二", cover: nil)
+    #expect(store.load(a)?.name == "名二" && store.load(a)?.cover.flatMap { try? Data(contentsOf: $0) } == Data([4, 5]) && covers().count == 1)
+
+    // 提交点失败：identity.json 的位置被一个非空目录占着，原子替换必然失败
+    try FileManager.default.removeItem(at: folder)
+    try FileManager.default.createDirectory(at: folder.appendingPathComponent("identity.json/x", isDirectory: true), withIntermediateDirectories: true)
+    let model = S2ArmShellHostModel(catalogue: catalogue, gameDataReady: { _ in true }, pickGameData: { _ in }, identityStore: store)
+    model.change(a, S2ArmGameSettings.identity, S2ArmGameSettings.editIdentity)
+    model.saveIdentity(a, name: "新名", cover: Data([9]))
+    #expect(model.editingIdentity == a, "没存成：编辑页不关")
+    #expect(model.identityError?.isEmpty == false, "给编辑页显示原因")
+    #expect(covers().isEmpty, "新封面没留下半套")
+    #expect(store.load(a) == nil && model.games[0].game.title == "原名一", "名字也没变")
+    // 负对照：挡路的东西挪走后同样的保存成功、关页、清掉原因
+    try FileManager.default.removeItem(at: folder.appendingPathComponent("identity.json"))
+    model.saveIdentity(a, name: "新名", cover: Data([9]))
+    #expect(model.editingIdentity == nil && model.identityError == nil && model.games[0].game.title == "新名" && covers().count == 1)
+    model.resetIdentity(a)
+    #expect(covers().isEmpty && store.load(a) == nil)
 }

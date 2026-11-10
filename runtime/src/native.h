@@ -97,6 +97,7 @@ void s2a_window_need(uint64_t *need, uint64_t *fit);   // 本款要的跨度、�
 // 客体窗口里在内存 / 已压缩换出的字节（mincore 扫整窗，心跳用）
 void s2a_window_resident(uint64_t *res, uint64_t *out);
 int s2a_guest_fd(void); int s2a_guest_zero(uint64_t a, uint64_t n); void *s2a_guest_map_any(uint64_t len);   // vawin.c：客体内存文件后备（S2A_GUEST_FILE）——文件 fd（-1 = 没开）；还页打洞 + 原偏移重映射成不可访问（不在窗口 / 没开 = 0）
+int s2a_guest_in_file(uint64_t a, uint64_t n);   // vawin.c：[a, a+n) 全在文件后备窗口里（#258 懒清零按它判走不走）
 int s2a_guest_file_wanted(const char *e, uint64_t pool, uint64_t room);   // vawin.c：文件后备开不开（e = S2A_GUEST_FILE：设了按设的，"0" 关；没设 → room 非 0 且池 > room 才开；room = 起局 os_proc_available_memory，Mac 传 0）
 void s2a_range_resident(uint64_t lo, uint64_t len, uint64_t *res, uint64_t *out);   // vawin.c：[lo, lo + len) ∩ 窗口的常驻 / 压缩字节
 void s2a_mem_guest_split(uint64_t *heap_lo, uint64_t *heap_len, uint64_t *alias_lo, uint64_t *alias_len, uint64_t *phys);   // svc_mem.c：堆区当前段、别名区（物理映射）范围、已物理映射字节（诊断，不取锁）

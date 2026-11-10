@@ -34,9 +34,9 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     static readonly UTF8Encoding U8 = new(false);
 
     // 编译约定（与原 dmsh_build.py MAC_METAL / ios_metal.py 逐字相同：记录写进每个反射 chain_metal）
-    static readonly string[] MacMetal = { "xcrun", "-sdk", "macosx", "metal", "-c", "-w", "-fmetal-math-mode=relaxed", "-fpreserve-invariance", "-mmacosx-version-min=15.0" };
+    internal static readonly string[] MacMetal = { "xcrun", "-sdk", "macosx", "metal", "-c", "-w", "-fmetal-math-mode=relaxed", "-fpreserve-invariance", "-mmacosx-version-min=15.0" };
     static readonly string[] IosMetal = { "xcrun", "-sdk", "iphoneos", "metal", "-c", "-w", "-mios-version-min=18.0", "-fmetal-math-mode=relaxed", "-fpreserve-invariance" };
-    static readonly string MacRecord = string.Join(' ', MacMetal) + "; xcrun -sdk macosx metallib";
+    internal static readonly string MacRecord = string.Join(' ', MacMetal) + "; xcrun -sdk macosx metallib";
     static readonly string IosRecord = string.Join(' ', IosMetal) + "; xcrun -sdk iphoneos metallib";
 
     static Dictionary<string, (string Pkg, int Idx)> Loc = new();
@@ -256,6 +256,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         if (flushed)
         {
             var failed = UnityFlush(); Phase("编批库");
+            if (Metal.Tally(Say) is { } none) { Say(none); return 1; }
             res = res.Select(r => failed.TryGetValue(r.Key, out var e) ? (r.Key, "metal failed", e, (PyDict)null) : r).ToList();
             Say($"unity batches: {N("unity batches")} batches of {N("unity keys")} keys compiled as one unit each; {N("unity reused batches")} batches ({N("unity reused keys")} keys) and {N("vin reused batches")} shadow-input batches ({N("vin reused keys")} keys) taken whole from earlier builds (their members' code unchanged); {N("unity fallback batches")} batches ({N("unity fallback keys")} keys) built key by key, "
               + $"{failed.Count} keys still failing; {N("unity same MSL keys")} keys with the MSL of another key took its library; {N("unity main0_u shared")} main0_u entry points compiled on main0's body (dmsh_ushare.py)");
@@ -877,7 +878,11 @@ static class Metal
     //   Spare-host 30 支 4.13 → 1.67 秒，产物 .air 逐字节相同（本机另核 600 支）——所以缓存键（Ident）不带它，换不换预编头都命中同一份库。
     //   预编头绑定模块缓存目录（clang 按编译选项哈希定缓存路径，建与用必须同一个 -fmodules-cache-path）。建不出（如编译器不认）就不带、照旧编；
     //   带预编头编不过的那支第二次不带重编（同原「编不过重试一次」），不把预编头的问题算成着色器编不过。S2A_METAL_PCH=0 关掉（对照用）
-    static readonly Dictionary<string, string[]> Pch = new();
+    static readonly ConcurrentDictionary<string, string[]> Pch = new();
+    // 熔断：同一次出库里某个目标带预编头编不过（去掉预编头重编成了）已有 PchTrip 支、带预编头编成的一支都没有 = 这台机器的预编头整体用不了，
+    //   本次出库对这个目标关掉预编头，不再每支编两遍（11-09 外部分析报「Windows 上预编头完全失效」：Windows 出包机实测 430 支 0 支重编、未复现，熔断作安全阀）
+    const int PchTrip = 8;
+    const int FailTrip = 64;   // 全败熔断阈值（Compile 里）：真实出库里逐支编不过是零星的，编成第一支前就连败 64 支只会是编译器本身用不了
     const string PchPrelude = "#include <metal_stdlib>\n#include <simd/simd.h>\nusing namespace metal;\n"
         + "struct s2a_pch_force {\n"   // 类型取自出库 MSL 实际出现的拼法（马车8 / 旷野之息 1.4 万份统计），多放的只在建预编头时花时间
         + "  texture2d<float> a; texture2d_array<float> b; texturecube<float> c; texturecube_array<float> d; texture3d<float> e;\n"
@@ -959,17 +964,32 @@ static class Metal
         File.WriteAllBytes(m, src);
         Gate.Wait();
         var sw = Stopwatch.StartNew();
+        bool withPch = false;
         try
         {
             for (int attempt = 1; ; attempt++)
             {
                 var pre = attempt == 1 && Pch.TryGetValue(target, out var p) ? p : Array.Empty<string>();   // 第二次不带预编头（见 BuildPch 注）
+                if (attempt == 1) withPch = pre.Length > 0;
                 var (rc, err) = Exec(Native(cmd).Concat(pre).Concat(new[] { m, "-o", air }).ToArray());
                 if (rc == 0) (rc, err) = Exec(Tool(sdk, "metallib", air, "-o", lib));
-                if (rc == 0) { if (attempt == 2) St.AddOrUpdate(target + " retried", 1, (_, v) => v + 1); break; }
-                var bad = EnvProblem();
+                if (rc == 0)
+                {
+                    if (attempt == 1 && withPch) St.AddOrUpdate(target + " pch ok", 1, (_, v) => v + 1);
+                    if (attempt == 2) St.AddOrUpdate(target + " retried", 1, (_, v) => v + 1);
+                    if (attempt == 2 && withPch && St.AddOrUpdate(target + " pch failed", 1, (_, v) => v + 1) >= PchTrip && St.GetValueOrDefault(target + " pch ok") == 0 && Pch.TryRemove(target, out _))
+                        Note($"🟡 {target} 预编头连续 {PchTrip} 支带着编不过、去掉才编成，一支带着编成的都没有：本次出库不再带预编头（免得每支编两遍）");
+                    break;
+                }
+                var bad = EnvProblem() ?? DiskFull(err) ?? OpenFail(err);
                 if (bad != null) throw new InvalidOperationException($"Metal 编译环境坏了（{bad}），不是这支着色器编不过");
-                if (attempt == 2) throw new CompileError(CompilerWhy(err) ?? $"Command '{string.Join(' ', cmd)} {m} -o {air}' returned non-zero exit status {rc}. {err}");
+                if (attempt == 2)
+                {
+                    // 全败熔断：某个目标已有 FailTrip 支编不过、一支都没编成 = 编译器在这台机器上整体用不了（路径、权限、装坏），不是逐支的翻译缺陷，整次停
+                    if (St.AddOrUpdate(target + " failed", 1, (_, v) => v + 1) >= FailTrip && St.GetValueOrDefault(target + " compiled") == 0)
+                        throw new InvalidOperationException($"Metal 编译环境坏了（{target} 连续 {FailTrip} 支编不过、一支都没编成，最后一支：{Trunc(CompilerWhy(err) ?? err.Trim(), 200)}），不是这支着色器编不过");
+                    throw new CompileError(CompilerWhy(err) ?? $"exit status {rc}: {err.Trim()} (Command '{string.Join(' ', cmd)} {m} -o {air}')");   // 原话放前面：汇总只留前 160 字符，命令回显占满就看不到原因（#165）
+                }   // 原话放前面：汇总只留前 160 字符，命令回显占满就看不到原因（#165）
             }
             var data = File.ReadAllBytes(lib);
             key = data.AsSpan().IndexOf(fname) >= 0 ? kNamed : kSrc;
@@ -994,21 +1014,75 @@ static class Metal
         //   本进程常驻约 5 GB，马车8 一局 1.4 万次 fork，Spare-host 翻译段 CPU 只用到 3.1 / 8 核）
         if (OperatingSystem.IsMacOS()) return Spawn.Run(a);
         var psi = new ProcessStartInfo(a[0]) { RedirectStandardError = true, UseShellExecute = false };
-        foreach (var x in a[1..]) psi.ArgumentList.Add(x);
+        string[] args = a[1..];
+        if (WinBin != null && args.Any(WinUnsafe)) { args = WinRelative(args, Work); psi.WorkingDirectory = Work; }
+        foreach (var x in args) psi.ArgumentList.Add(x);
         using var p = Process.Start(psi);
         var err = p.StandardError.ReadToEnd(); p.StandardError.Dispose(); p.WaitForExit();   // 显式关管道：Process.Dispose 不关重定向的流，每次漏一个描述符等 GC（实测 1000 次 25→1059），mk8d 编到上限 Too many open files
         return (p.ExitCode, err);
+    }
+    // 苹果官方 Windows 版 metal.exe / metallib.exe 会把参数里的空格再拆开，引号挡不住（#257：用户名带空格「C:\Users\<带空格的用户名>」时工作区在
+    //   AppData 下，每支都报 no such file 'C:\Users\<用户名前半>'，一个键都没出；11-09 Windows 出包机实测按参数整体传、源文件 / 输出 / 模块缓存 / metallib 输出
+    //   四种带空格全失败，工作目录设成带空格的目录、参数只写相对路径则全过）。所以带空格的路径参数（含 -xxx=<路径>）改成相对工作区 Work 的写法、
+    //   工作目录设为 Work；我方建的段名（<目标>-<guid>、pch-<目标>）不带空格。相对之后仍带空格（文件不在工作区下）就直说，不交给编译器去拆
+    //   11-09 外部报告（中文用户名「C:\Users\<中文>」，S2Arm 0.1.7）：短入口 %LOCALAPPDATA%\S2A\j\<短号> 把中文带进路径，metallib.exe 用 ANSI 代码页开文件，
+    //   「LLVM ERROR: Error opening …（没有此 Unicode 字符可以映射到的字符）」，一支 metallib 都没出。Windows 出包机（代码页 936）实测：中文绝对路径 metal 过、
+    //   metallib 失败；经中文路径下的联接同样失败；工作目录设成中文 / 联接目录、参数只写相对路径则两者都过。所以非 ASCII 与空格同样处理
+    internal static bool WinUnsafe(string x) => x.Any(ch => ch == ' ' || ch > 127);
+    internal static string[] WinRelative(string[] args, string cwd) => args.Select(x =>
+    {
+        if (!WinUnsafe(x)) return x;
+        int eq = x.StartsWith('-') ? x.IndexOf('=') : -1;
+        string head = eq >= 0 ? x[..(eq + 1)] : "", path = eq >= 0 ? x[(eq + 1)..] : x;
+        if (!Path.IsPathFullyQualified(path)) return x;
+        string rel = Path.GetRelativePath(cwd, path);
+        if (WinUnsafe(rel) || Path.IsPathRooted(rel))
+            throw new InvalidOperationException($"Metal 编译器（Windows 版）不认带空格或非 ASCII 字符的路径，而 {path} 不在出库工作区 {cwd} 下，没法改成相对路径");
+        return head + rel;
+    }).ToArray();
+    // 盘写满（#265）：编译器写 .air / .metallib 时报 ENOSPC。原先按「这一支编不过、其余照出」记，写满后每支都失败、出一份残缺的库还退 0（失败当成功）；
+    //   归进上面「编译环境坏了」整次停，原话带上 No space left on device，出包作业的错误分类（pack/jobs/errors.py）据此报 disk_full
+    static readonly System.Text.RegularExpressions.Regex NoSpace = new(@"No space left on device|\bENOSPC\b|There is not enough space on the disk|\bDisk full\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+    internal static string DiskFull(string err) => err != null && NoSpace.IsMatch(err) ? "磁盘写满：No space left on device" : null;
+    // 编译器打不开自己的输入 / 输出（LLVM ERROR: Error opening …）是路径 / 权限问题，换哪支着色器都一样，归「编译环境坏了」整次停（11-09 外部报告：
+    //   原先逐支记编不过，1364 支全败照退 0，出了一个没有着色器库的包）
+    internal static string OpenFail(string err) => err != null && err.Contains("LLVM ERROR: Error opening", StringComparison.Ordinal)
+        ? "编译器打不开文件：" + Trunc(err.Trim().Split('\n')[0], 200) : null;
+    /// <summary>单测入口（dsh_batch --metal-compile &lt;工作目录&gt; &lt;源文件&gt;）：按 Mac 编译约定走一次真实的 Init + Compile → 0 编成 / 1 这一支编不过 / 2 整次停（编译环境坏了）</summary>
+    internal static int CompileCli(string[] a)
+    {
+        Store.Open(Path.Combine(a[0], "store")); Init((Build.MacMetal, Build.MacRecord, "macosx"), null, a[0], 1);
+        try
+        {
+            string last = null;
+            foreach (var src in a[1..])
+                try { Compile("mac", File.ReadAllText(src), Path.GetFileNameWithoutExtension(src)); } catch (CompileError e) { last = e.Message; }
+            Console.WriteLine(last == null ? "ok" : "compile error: " + last); Console.WriteLine(Summary()); return last == null ? 0 : 1;
+        }
+        catch (InvalidOperationException e) { Console.WriteLine("stop: " + e.Message); return 2; }
     }
     static string EnvProblem()
     {
         try { _ = Directory.GetCurrentDirectory(); } catch (Exception e) { return $"当前工作目录已不存在（{e.Message}）"; }
         // 不按整卷剩余判「环境坏了」（审计 #1417 P1-78）：同一卷上别的出库把剩余压到 1 GB 以下时，本款任意一支编不过就整单停；
-        //   盘真写满时编译器自己报写失败，按这一支 CompileError 记（其余照出），出库清单里看得见
+        //   盘真写满时编译器自己报写失败，由 Compile 里的 DiskFull 认出、整次停（#265）
         return Directory.Exists(Work) ? null : $"工作区 {Work} 不在";
+    }
+    /// <summary>编库阶段收尾（编批库后）：每个目标「成功 N / 复用 / 失败 M」一行；某个目标有编不过的、却一份库都没出（编成 + 复用 = 0）→ 回红行（整次失败），否则 null</summary>
+    public static string Tally(Action<string> say)
+    {
+        string bad = null;
+        foreach (var t in T.Keys)
+        {
+            long ok = St.GetValueOrDefault(t + " compiled"), re = St.GetValueOrDefault(t + " reused"), no = St.GetValueOrDefault(t + " failed");
+            say($"[直连库] {t} Metal 库：编成 {ok} / 复用 {re} / 编不过 {no}");
+            if (no > 0 && ok + re == 0) bad ??= $"[RED] {t} Metal 库一份都没出（编不过 {no} 支、编成 0、复用 0）：编译器在这台机器上用不了，不发布没有着色器库的包";
+        }
+        return bad;
     }
     public static string Summary()
     {
-        var parts = T.Keys.Select(t => $"{t} {St.GetValueOrDefault(t + " reused")} reused, {St.GetValueOrDefault(t + " compiled")} compiled" + (St.GetValueOrDefault(t + " retried") > 0 ? $", {St[t + " retried"]} retried" : ""));
+        var parts = T.Keys.Select(t => $"{t} {St.GetValueOrDefault(t + " reused")} reused, {St.GetValueOrDefault(t + " compiled")} compiled, {St.GetValueOrDefault(t + " failed")} failed" + (St.GetValueOrDefault(t + " retried") > 0 ? $", {St[t + " retried"]} retried" : ""));
         var ts = Times.Select(x => x.S).OrderBy(x => x).ToList();
         var dist = ts.Count == 0 ? "" : $"; compile seconds: {ts.Count} compiles, sum {ts.Sum():F0} s, p50 {ts[ts.Count / 2]:F1} / p90 {ts[(int)(ts.Count * 0.9)]:F1} / max {ts[^1]:F1}";
         return "Metal cache: " + string.Join("; ", parts) + dist;

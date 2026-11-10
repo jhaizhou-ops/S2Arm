@@ -265,14 +265,28 @@ namespace Ryujinx.Graphics.Nvdec.Apple
 
             Remember(idr, avccLen);
 
+            nint img = _slot->ImageBuffer;
+            _slot->ImageBuffer = 0;
+            nint keep = CoreFoundation.CFRetain(img);   // 挂上面之后才认作上一张好图
+
+            if (!surface.Attach(img))   // 引用转给面；不是 y420 三平面时面已放掉它
+            {
+                // 审计 P2-198：原先格式不符也回 true，空面被当成解出来的一帧。走同一条失败路径：丢会话、等下一个 IDR，其间重复上一张好图
+                CoreFoundation.CFRelease(keep);
+                Logger.Error?.Print(LogClass.Nvdec, "VideoToolbox H.264：出帧不是 y420 三平面；丢掉会话，等下一个 IDR（其间重复上一张好图）");
+                DestroySession();
+                _gopValid = false;
+                _waitIdr = true;
+
+                return RepeatLast(surface);
+            }
+
             if (_last != 0)
             {
                 CoreFoundation.CFRelease(_last);
             }
 
-            _last = CoreFoundation.CFRetain(_slot->ImageBuffer);
-            surface.Attach(_slot->ImageBuffer);   // 引用转给面
-            _slot->ImageBuffer = 0;
+            _last = keep;
 
             if (_frames == FaultFrame)
             {
@@ -458,9 +472,7 @@ namespace Ryujinx.Graphics.Nvdec.Apple
                 return false;
             }
 
-            surface.Attach(CoreFoundation.CFRetain(_last));
-
-            return true;
+            return surface.Attach(CoreFoundation.CFRetain(_last));
         }
 
         private static bool HasIdr(ReadOnlySpan<byte> annexB)
@@ -720,7 +732,8 @@ namespace Ryujinx.Graphics.Nvdec.Apple
         public int UvHeight => (Height + 1) >> 1;
         public int UvStride => _uvStride;
 
-        public void Attach(nint buffer)
+        // 接管 buffer 的一份引用；不是 y420 三平面时放掉它、面保持空，回 false（调用方走解码失败路径，审计 P2-198）
+        public bool Attach(nint buffer)
         {
             Release();
 
@@ -728,7 +741,7 @@ namespace Ryujinx.Graphics.Nvdec.Apple
             {
                 Logger.Error?.Print(LogClass.Nvdec, $"VideoToolbox H.264：出帧像素格式 {CoreVideo.CVPixelBufferGetPixelFormatType(buffer):X8} 不是 y420 三平面");
                 CoreFoundation.CFRelease(buffer);
-                return;
+                return false;
             }
 
             CoreVideo.CVPixelBufferLockBaseAddress(buffer, 1 /* kCVPixelBufferLock_ReadOnly */);
@@ -740,6 +753,8 @@ namespace Ryujinx.Graphics.Nvdec.Apple
             _v = (byte*)CoreVideo.CVPixelBufferGetBaseAddressOfPlane(buffer, 2);
             _stride = (int)CoreVideo.CVPixelBufferGetBytesPerRowOfPlane(buffer, 0);
             _uvStride = (int)CoreVideo.CVPixelBufferGetBytesPerRowOfPlane(buffer, 1);
+
+            return true;
         }
 
         private void Release()

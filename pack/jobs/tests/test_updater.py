@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -43,6 +44,9 @@ class Base(unittest.TestCase):
         self.staged = self.root / "staged"
         (self.staged / "Engine").mkdir(parents=True)
         (self.staged / "S2Arm.exe").write_text("new")
+        # 查版本缓存放进本用例的临时目录、缺省不用（各用例会改发布内容）；测缓存的用例自己打开
+        for name, value in (("latest_cache", lambda platform, current: self.root / "latest-cache.json"), ("LATEST_TTL", 0)):
+            p = patch.object(updater, name, value); p.start(); self.addCleanup(p.stop)
 
     def data(self):
         return {k: v for k, v in tree(self.private).items() if not k.startswith("updates")}
@@ -133,6 +137,41 @@ class ApplyTests(Base):
         self.assertFalse((self.install / "incomplete").exists())
         self.assertFalse(partial.exists())
 
+    def unconfirmed_previous_update(self):
+        """上一次 apply 已把安装目录换成新版、旧版留在副本，没等到 health.ok 就中断（审计 P1-147）"""
+        backup = self.install.with_name("S2Arm.s2arm-old")
+        os.rename(self.install, backup)
+        (self.install / "Engine").mkdir(parents=True)
+        (self.install / "S2Arm.exe").write_text("unconfirmed")
+        return backup
+
+    def test_failed_retry_after_unconfirmed_update_keeps_the_known_good_install(self):
+        self.unconfirmed_previous_update()
+        self.staged = self.root / "missing-staged"   # 这次替换必然失败
+        launches = []
+        self.assertEqual(self.run_apply(lambda i, a: launches.append((i / "S2Arm.exe").read_text())), 1)
+        failure = json.loads((self.private / "updates/last_failure.json").read_text())
+        self.assertEqual(failure["code"], "update_swap_failed")
+        # 失败句说「已保留旧版」：盘上必须真有确认过能用的那一版
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+        self.assertEqual(launches, ["old"])
+
+    def test_new_version_failing_after_unconfirmed_update_rolls_back_to_the_known_good_install(self):
+        backup = self.unconfirmed_previous_update()
+        launches = []
+        self.assertEqual(self.run_apply(lambda i, a: launches.append((i / "S2Arm.exe").read_text())), 1)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+        self.assertEqual(launches, ["new", "old"])
+        self.assertFalse(backup.exists())
+
+    def test_confirmed_previous_update_becomes_the_rollback_target(self):
+        self.unconfirmed_previous_update()
+        (self.private / "updates/health.ok").write_text("ok")   # 上次换上的版本后来起来过
+        launches = []
+        self.assertEqual(self.run_apply(lambda i, a: launches.append((i / "S2Arm.exe").read_text())), 1)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "unconfirmed")
+        self.assertEqual(launches, ["new", "unconfirmed"])
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     routes = {}
@@ -146,6 +185,228 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+
+class FlakyHandler(http.server.BaseHTTPRequestHandler):
+    """按脚本回应：每项是一次请求给多少字节（None = 全给）、支不支持续传"""
+    body = b""
+    plan = []
+    ranges = []
+
+    def do_GET(self):
+        header = self.headers.get("Range")
+        start = int(header[6:-1]) if header else 0
+        type(self).ranges.append(start)
+        limit, resume = type(self).plan.pop(0) if type(self).plan else (None, True)
+        if not resume:
+            start = 0
+        data = self.body[start:]
+        self.send_response(206 if start else 200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data if limit is None else data[:limit])
+        self.wfile.flush()
+        self.connection.close()
+
+    def log_message(self, *a):
+        pass
+
+
+class DownloadTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FlakyHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        FlakyHandler.body = bytes(range(256)) * 4096
+        FlakyHandler.ranges = []
+        self.target = self.root / "package"
+        for name, value in (("trusted", lambda url: True), ("emit", lambda **k: None)):
+            p = patch.object(updater, name, value); p.start(); self.addCleanup(p.stop)
+        p = patch.object(updater, "RETRY_SECONDS", 0); p.start(); self.addCleanup(p.stop)
+
+    def get(self):
+        updater.download(f"http://127.0.0.1:{self.server.server_port}/p", self.target, len(FlakyHandler.body))
+
+    def test_dropped_connection_resumes_where_it_stopped(self):
+        FlakyHandler.plan = [(1 << 18, True), (1 << 18, True), (None, True)]
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertEqual(FlakyHandler.ranges, [0, 1 << 18, 1 << 19])
+
+    def test_server_without_resume_starts_over(self):
+        FlakyHandler.plan = [(1 << 18, True), (None, False)]
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+
+    def test_gives_up_when_nothing_arrives(self):
+        FlakyHandler.plan = [(0, True)] * updater.DOWNLOAD_ATTEMPTS
+        with self.assertRaises(updater.UpdateError) as caught:
+            self.get()
+        self.assertEqual(caught.exception.code, "update_download_failed")
+        self.assertFalse(self.target.exists())
+
+    def test_retry_in_a_new_process_resumes_from_the_saved_part(self):
+        """跨进程重试（审计 P2-220）：上次进程留下的 .part 接着下，不从头来"""
+        Path(str(self.target) + ".part").write_bytes(FlakyHandler.body[:1 << 18])
+        FlakyHandler.plan = [(None, True)]
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertEqual(FlakyHandler.ranges, [1 << 18])
+
+    def test_part_longer_than_the_manifest_is_discarded(self):
+        Path(str(self.target) + ".part").write_bytes(b"x" * (len(FlakyHandler.body) + 1))
+        FlakyHandler.plan = [(None, True)]
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertEqual(FlakyHandler.ranges, [0])
+
+    def test_slow_progress_keeps_going_past_the_attempt_limit(self):
+        FlakyHandler.plan = [(1 << 16, True)] * (updater.DOWNLOAD_ATTEMPTS + 3) + [(None, True)]
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+
+
+class MacUnpackTests(Base):
+    def test_failed_attach_reports_why_and_mounts_outside_the_data_folder(self):
+        calls = []
+        def run(cmd, **k):
+            calls.append(cmd)
+            return type("R", (), {"returncode": 1, "stderr": b"hdiutil: attach failed - Permission denied"})
+        dest = self.root / "unpack"; dest.mkdir()
+        with patch.object(updater.subprocess, "run", run), self.assertRaises(updater.UpdateError) as caught:
+            updater.extract_mac(self.root / "x.dmg", dest)
+        self.assertEqual(caught.exception.code, "update_unpack_failed")
+        self.assertIn("Permission denied", caught.exception.detail)
+        mount = Path(calls[0][calls[0].index("-mountpoint") + 1])
+        self.assertFalse(mount.is_relative_to(self.root)); self.assertFalse(mount.exists())
+
+    def test_failure_reason_reaches_the_log(self):
+        args = type("A", (), {"private_root": str(self.root / "p")})
+        updater.record_failure(args, "update_unpack_failed", "打不开", "hdiutil: attach failed")
+        text = (self.root / "p/logs/update.log").read_text(encoding="utf-8")
+        self.assertIn("update_unpack_failed", text); self.assertIn("hdiutil: attach failed", text)
+
+
+class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+    """每个路径按脚本逐次回应：(状态码, 头, 正文) 或 "sleep"（不回，等客户端超时）"""
+    scripts = {}
+    hits = []
+
+    def do_GET(self):
+        type(self).hits.append(self.path)
+        queue = type(self).scripts.get(self.path) or []
+        step = queue.pop(0) if len(queue) > 1 else (queue[0] if queue else (404, {}, b""))
+        if step == "sleep":
+            time.sleep(3)
+            return
+        status, headers, body = step
+        self.send_response(status)
+        for k, v in headers.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+class NetworkErrorTests(Base):
+    """查版本 / 取清单 / 下安装包遇到国内常见的网络情况时报什么码（界面按码显示原因 + 打开下载页）。期望码按 network_error 的规则手写"""
+    def setUp(self):
+        super().setUp()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ScriptedHandler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        ScriptedHandler.scripts, ScriptedHandler.hits = {}, []
+        for name, value in (("trusted", lambda url: True), ("emit", lambda **k: None), ("FETCH_RETRY_SECONDS", 0), ("RETRY_SECONDS", 0)):
+            p = patch.object(updater, name, value); p.start(); self.addCleanup(p.stop)
+
+    def check(self, api):
+        emitted = []
+        with patch.dict(os.environ, {"S2A_UPDATE_API": api}), patch("builtins.print") as out, patch.object(updater, "emit", lambda **k: emitted.append(k)):
+            code = updater.main(["check", "--platform", "windows", "--current", "0.1.1"])
+        return code, (emitted[-1] if emitted else json.loads(out.call_args.args[0]))
+
+    def test_rate_limit_has_its_own_code_and_is_not_retried(self):
+        reset = str(int(time.time()) + 600)
+        ScriptedHandler.scripts["/latest"] = [(403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}, b'{"message":"API rate limit exceeded"}')]
+        code, out = self.check(self.base + "/latest")
+        self.assertEqual((code, out["state"], out["code"]), (1, "failed", "update_rate_limited"))
+        self.assertIn("约 10 分钟", out["message"])
+        self.assertEqual(ScriptedHandler.hits, ["/latest"])   # 限流不重试
+
+    def test_transient_server_error_is_retried(self):
+        ScriptedHandler.scripts["/latest"] = [(503, {}, b""), (200, {}, json.dumps({"tag_name": "v0.0.1", "assets": []}).encode())]
+        code, out = self.check(self.base + "/latest")
+        self.assertEqual((code, out), (0, {"available": False}))
+        self.assertEqual(ScriptedHandler.hits, ["/latest", "/latest"])
+
+    def test_offline_reports_network_after_retries(self):
+        import socket
+        with socket.socket() as s:   # 拿一个没人听的端口：连接被拒 = 断网 / 被墙
+            s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]
+        calls = []
+        real = updater.open_url
+        with patch.object(updater, "open_url", lambda *a, **k: (calls.append(1), real(*a, **k))[1]):
+            code, out = self.check(f"http://127.0.0.1:{port}/latest")
+        self.assertEqual((code, out["code"]), (1, "update_network"))
+        self.assertEqual(len(calls), updater.FETCH_ATTEMPTS)
+
+    def test_timeout_reports_network(self):
+        ScriptedHandler.scripts["/slow"] = ["sleep"]
+        with self.assertRaises(updater.UpdateError) as caught:
+            updater.fetch(self.base + "/slow", 0.5, 1024)
+        self.assertEqual(caught.exception.code, "update_network")
+        self.assertIn("超时", str(caught.exception))
+
+    def test_missing_package_fails_fast_with_server_code(self):
+        ScriptedHandler.scripts["/pkg"] = [(404, {}, b"")]
+        with self.assertRaises(updater.UpdateError) as caught:
+            updater.download(self.base + "/pkg", self.root / "p", 1000)
+        self.assertEqual(caught.exception.code, "update_server")
+        self.assertEqual(ScriptedHandler.hits, ["/pkg"])   # 地址本身出错：不空耗重试
+
+
+class ThrottledDropHandler(http.server.BaseHTTPRequestHandler):
+    """限速 + 中途掐连接：每次最多给 cut 字节、每 16 KB 停 2 毫秒，然后断开（国内连 GitHub 下大文件的常见样子）"""
+    body, cut, ranges = b"", 1 << 17, []
+
+    def do_GET(self):
+        header = self.headers.get("Range")
+        start = int(header[6:-1]) if header else 0
+        type(self).ranges.append(start)
+        data = self.body[start:]
+        self.send_response(206 if start else 200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        sent, limit = 0, min(len(data), type(self).cut)
+        while sent < limit:
+            n = min(16384, limit - sent)
+            self.wfile.write(data[sent:sent + n]); self.wfile.flush(); sent += n
+            time.sleep(0.002)
+        self.connection.close()
+
+    def log_message(self, *a):
+        pass
+
+
+class ThrottledDownloadTests(Base):
+    def test_throttled_and_repeatedly_cut_download_resumes_to_completion(self):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ThrottledDropHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        ThrottledDropHandler.body, ThrottledDropHandler.cut, ThrottledDropHandler.ranges = bytes(range(256)) * 4096, 1 << 17, []   # 1 MiB，每次断在 128 KiB：要 8 次
+        for name, value in (("trusted", lambda url: True), ("emit", lambda **k: None), ("RETRY_SECONDS", 0)):
+            p = patch.object(updater, name, value); p.start(); self.addCleanup(p.stop)
+        target = self.root / "pkg"
+        updater.download(f"http://127.0.0.1:{server.server_port}/p", target, len(ThrottledDropHandler.body))
+        self.assertEqual(target.read_bytes(), ThrottledDropHandler.body)
+        self.assertEqual(ThrottledDropHandler.ranges, [i << 17 for i in range(8)])   # 每次从断开处接着下
 
 
 class PrepareTests(Base):
@@ -187,6 +448,19 @@ class PrepareTests(Base):
         self.assertEqual((Path(ready["staged"]) / "S2Arm.exe").read_text(), "new")
         self.assertTrue(Path(ready["python"]).is_file())
         self.assertFalse(list(Path(ready["python"]).parent.rglob("site-packages")))
+
+    def test_retry_keeps_the_partial_download_of_the_same_version(self):
+        work = self.private / "updates/9.9.9"
+        (work / "unpack").mkdir(parents=True)
+        (work / "unpack/stale").write_text("x")
+        part = work / "S2Arm-windows-x64.zip.part"
+        part.write_bytes(self.zip[:100])
+        seen = []
+        with patch.object(updater, "download", side_effect=lambda url, target, size: seen.append(Path(str(target) + ".part").read_bytes()) or Path(target).write_bytes(self.zip)):
+            ready = self.prepare()
+        self.assertEqual(ready["state"], "ready")
+        self.assertEqual(seen, [self.zip[:100]])   # prepare 没删已下的字节，交给 download 续传
+        self.assertFalse((work / "unpack/stale").exists())
 
     def test_checksum_mismatch_deletes_download_and_keeps_old(self):
         self.publish("0" * 64); before = tree(self.install)
@@ -240,6 +514,35 @@ class PrepareTests(Base):
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(out.call_args.args[0])["state"], "failed")
         self.assertEqual(tree(self.install), before)
+
+    def test_check_then_prepare_and_retry_query_github_once(self):
+        """启动时查一次、接着下载、失败后重试：15 分钟内只调一次查版本接口（匿名每 IP 每小时 60 次，共享出口容易被限流）"""
+        Handler.hits = []
+        with patch.object(updater, "LATEST_TTL", 900):
+            with patch("builtins.print"):
+                updater.main(["check", "--platform", "windows", "--current", "0.1.1"])
+            Handler.routes["/pkg"] = None   # 第一次下载失败
+            with patch("builtins.print"):
+                self.assertEqual(updater.main(["prepare", "--platform", "windows", "--current", "0.1.1", "--private-root", str(self.private), "--install", str(self.install)]), 1)
+            self.publish(hashlib.sha256(self.zip).hexdigest())   # 恢复，玩家点重试
+            self.assertEqual(self.prepare()["state"], "ready")
+        self.assertEqual(Handler.hits.count("/latest"), 1)
+
+    def test_prepare_survives_throttled_and_cut_download_then_verifies_and_unpacks(self):
+        """限速 + 每次只给五分之一就掐断连接下安装包：续传接上，校验（签名清单的 SHA-256）、解包都过，进入可重启更新"""
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ThrottledDropHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        cut = len(self.zip) // 5 + 1
+        ThrottledDropHandler.body, ThrottledDropHandler.cut, ThrottledDropHandler.ranges = self.zip, cut, []
+        p = patch.object(updater, "RETRY_SECONDS", 0); p.start(); self.addCleanup(p.stop)
+        latest = json.loads(Handler.routes["/latest"])
+        latest["assets"][0]["browser_download_url"] = f"http://127.0.0.1:{server.server_port}/pkg"
+        Handler.routes["/latest"] = json.dumps(latest).encode()
+        result = self.prepare()
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(ThrottledDropHandler.ranges, [i * cut for i in range(5)])   # 断了 4 次，每次从断开处接着下
+        self.assertEqual((Path(result["staged"]) / "S2Arm.exe").read_text(), "new")   # 解包出的新版
 
     def test_data_inside_install_is_refused(self):
         inside = self.install / "MyLibrary"; inside.mkdir()

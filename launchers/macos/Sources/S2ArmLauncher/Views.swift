@@ -193,9 +193,7 @@ struct GameDetail: View {
                                     HStack(alignment:.firstTextBaseline,spacing:8){
                                         Text(package.titleId).monospaced().textSelection(.enabled)
                                         Spacer(minLength:8)
-                                        if game.packages.first(where:{$0.sha256==package.sha256})?.id == package.id {
-                                            Text(ByteCountFormatter.string(fromByteCount:package.size,countStyle:.file)).fixedSize()
-                                        } else {Text(L("与上一项在同一个文件里"))}
+                                        Text(ByteCountFormatter.string(fromByteCount:game.ownBytes(package),countStyle:.file)).fixedSize()
                                     }.font(.caption).foregroundStyle(.secondary)
                                 }.frame(maxWidth:.infinity,alignment:.leading)
                             }

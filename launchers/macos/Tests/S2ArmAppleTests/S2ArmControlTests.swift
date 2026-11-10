@@ -13,11 +13,16 @@ import AppKit
     override func setUp() async throws {
         _ = NSApplication.shared
         root = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-ctl-apple-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("jobs"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("logs/jobs"), withIntermediateDirectories: true)
         model = S2ArmLauncherModel(client: JobClient(environment: JobEnvironment(privateRoot: root, resources: root, library: root.appendingPathComponent("lib").path)))
         control = try S2ArmControl(model: model) { XCTFail($0) }
     }
     override func tearDown() async throws { control.stop(); try? FileManager.default.removeItem(at: root) }
+
+    func testDisplayNeedsAGame() async {
+        let (code, body) = await post("/display", ["settings": ["enhance": true]])
+        XCTAssertEqual(code, 400); XCTAssertEqual(body["error"] as? String, "缺 gameId")
+    }
 
     private func post(_ path: String, _ body: [String: Any] = [:]) async -> (Int, [String: Any]) {
         let r = await control.handle(ControlRequest(method: "POST", path: path, headers: [:], body: body))
@@ -56,7 +61,7 @@ import AppKit
     func testStateHasTheFieldsS2armctlReadsAndJournalTasks() throws {
         try JSONSerialization.data(withJSONObject: ["id": "t1", "operation": "ipa", "gameId": "g", "state": "failed", "started": 1.0,
                                                      "diagnostics": [["code": "signing_failed", "summary": "s", "suggestion": "x", "logPath": "/tmp/l"]]])
-            .write(to: root.appendingPathComponent("jobs/t1.json"))
+            .write(to: root.appendingPathComponent("logs/jobs/t1.json"))
         let s = control.state()
         for k in ["selection", "showOnboarding", "onboardingStep", "keyStatus", "hasImportedKeys", "environmentReady", "checkingEnvironment",
                   "checks", "games", "tasks", "queue", "notice", "error", "installReadiness", "waitingForAccess", "cachedAt", "windows", "overlays"] {
@@ -80,5 +85,18 @@ import AppKit
         XCTAssertFalse(model.aiControl)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("control.json").path), "关了就删 control.json")
         control = try S2ArmControl(model: model) { XCTFail($0) }
+    }
+}
+
+/// #272 连着多台时用哪台：选过且还连着的 → 它；否则有线第一台；否则第一台。期望手写
+final class ExportDevicePickTests: XCTestCase {
+    private let phone = ["id": "A", "name": "我的 iPhone", "wired": false] as [String: Any]
+    private let pad = ["id": "B", "name": "iPad", "wired": true] as [String: Any]
+    func testChosenWiredFirstOrNone() {
+        XCTAssertEqual(S2ArmLauncherModel.pickDevice([phone, pad], chosen: "A")?["id"] as? String, "A")
+        XCTAssertEqual(S2ArmLauncherModel.pickDevice([phone, pad], chosen: nil)?["id"] as? String, "B")
+        XCTAssertEqual(S2ArmLauncherModel.pickDevice([phone, pad], chosen: "gone")?["id"] as? String, "B")
+        XCTAssertEqual(S2ArmLauncherModel.pickDevice([phone], chosen: "gone")?["id"] as? String, "A")
+        XCTAssertNil(S2ArmLauncherModel.pickDevice([], chosen: "A"))
     }
 }

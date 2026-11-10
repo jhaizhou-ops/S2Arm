@@ -445,7 +445,8 @@ s2a_sdkmanager_hint() { printf 'sdkmanager\\n'; }
             'host/build.sh': '#!/bin/sh\nexit 0\n',
             'services/opus/build.sh': '', 'services/opus/s2a_opus.c': '',
             'services/vpx/build.sh': 'VER=1.15.0; SHA=ignored\n',
-            'services/vpx/s2a_vp8.c': '',
+            'services/vpx/s2a_vp8.c': '', 'services/vpx/s2a_vp9.c': '',
+            'services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch': '',
         }
         for name, text in files.items():
             path = android / name if not name.startswith('services/') else self.repo / name

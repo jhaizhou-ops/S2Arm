@@ -21,11 +21,13 @@ import toolchain
 INPUTS = ["runtime", "ios", "graphics", "translator", "services", "compat", "pack", "tools", "Makefile",
           "platform/build.mk", "launchers/macos/build.mk", "macos", "tests/visual/galrec",
           # 打 iPhone 包（make ios）要编 platform/apple/plat_apple.c（10-23 Spare-host 前端打 iPhone 包撞「no such file」）
-          "platform/apple", "shell", "launchers/macos/frontend", "launchers/macos/adapter", "platform/plat.h", "platform/plat_asm.h",
+          "platform/apple", "shell", "launchers/shared/SaveSync", "launchers/macos/frontend", "launchers/macos/adapter", "platform/plat.h", "platform/plat_asm.h",
           # Android target uses the same immutable engine snapshot as its pack stages.
           "android", "LICENSE", "README.md",
           # 随包 Python 的钉版依赖清单：Windows 环境检查（pack/jobs/winenv.py）按它核随包 Python 的库版本（11-07 发版产物端到端：快照缺它、整份清单报错误码合同无法核实）
           "launchers/macos/requirements-runtime.txt",
+          # 游戏设置定义表（pack/jobs/community.py 按它读写 launch.json、转宿主开关；11-09 启动设置）
+          "launchers/shared/game_settings.v1.json",
           # iPhone 宿主包的图标（pack/ipa_tail.py、pack/jobs/ipa.py）：引擎快照里没有它，容器就退回用游戏图标（11-08 维护者）
           "launchers/macos/Branding/AppIcon-1024.png",
           # 根 .gitignore（11-02 beta.3 走查）：出包会在快照副本里编出 bin/ obj/，没有忽略规则时 pack/ipa.sh「构建相关目录有未提交改动」
@@ -69,7 +71,7 @@ def bundle_tzdata(c, destination, source_root=ROOT):
     if os.environ.get("S2A_TZDATA_CACHE"):
         env["S2A_TZDATA_CACHE"] = os.environ["S2A_TZDATA_CACHE"]
     c.run(["bash", source_root / "services/systemdata/make_tzdata.sh", "--bundle-to", destination],
-          c.private / "logs/tzdata-bundle.log", env=env)
+          c.logs / "tzdata-bundle.log", env=env)
 
 
 # 随 App 分发的预编静态库（11-03 维护者：编解码库等与游戏无关，不在玩家机器上编）：发版机按 services/<库>/build.sh 照常构建（整机缓存命中秒过），
@@ -130,27 +132,27 @@ def bundle(destination, developer_dir):
     # 发布进 App 的 .NET 程序集不带出包机路径：MSBuild 把环境变量当属性读，PathMap 让编译器把仓库根（含 build/ 下的 obj）写成 /_/（C 侧同理见各 -ffile-prefix-map）
     os.environ["PathMap"] = "%s=/_/" % ROOT
     toolchain.prepare(c)
-    host = compile_host(c, fingerprint, c.env(), c.private / "logs")
+    host = compile_host(c, fingerprint, c.env(), c.logs)
     prepare = c.private / "tools/prepare"
     prepare.mkdir(parents=True, exist_ok=True)
     c.run(["make", "-C", ROOT / "graphics/metal", str(ROOT / "build/gal/gal_xc"),
-           "DEVELOPER_DIR=" + developer_dir], c.private / "logs/gal-tools.log")
+           "DEVELOPER_DIR=" + developer_dir], c.logs / "gal-tools.log")
     c.run(["make", "-C", ROOT / "graphics/dsx", str(ROOT / "build/dsx/libdsx.dylib"),
-           "DEVELOPER_DIR=" + developer_dir], c.private / "logs/dsx.log")
+           "DEVELOPER_DIR=" + developer_dir], c.logs / "dsx.log")
     c.run(["dotnet", "build", ROOT / "graphics/tools/shbake/S2A.ShBake.csproj", "-c", "Release", "--nologo"],
-          c.private / "logs/shbake.log")
+          c.logs / "shbake.log")
     c.run(["dotnet", "build", ROOT / "services/romfs_index/romfs_index.csproj", "-c", "Release", "--nologo",
-           "-o", prepare / "romfs"], c.private / "logs/romfs.log")
+           "-o", prepare / "romfs"], c.logs / "romfs.log")
     # 直连库的 C# 批量进程（translator/dsh_batch.py）随发版编好：玩家首次出包不再现编（11-06 维护者「玩家体验至上」，Spare-host 约 25 秒 CPU）
     c.run(["dotnet", "build", ROOT / "graphics/tools/direct/dsh/batch/dsh_batch.csproj", "-c", "Release", "--nologo",
-           "-p:UseSharedCompilation=false", "-o", prepare / "dsh_batch"], c.private / "logs/dsh_batch.log")
+           "-p:UseSharedCompilation=false", "-o", prepare / "dsh_batch"], c.logs / "dsh_batch.log")
     # 推资源包流式写手机（pack/devpush，Rust，只依赖 idevice MIT；11-06 维护者：玩家 Mac / Windows 两端都要）：tools/push_pack.py 见 S2A_PREBUILT_TOOLS/devpush/s2a-devpush 就用，
     #   不在就退回 devicectl copy。--locked：按仓库里的 Cargo.lock 取依赖，发版间不漂
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
     c.run([cargo, "build", "--release", "--locked", "--manifest-path", ROOT / "pack/devpush/Cargo.toml", "--target-dir", ROOT / "build/devpush"],
-          c.private / "logs/devpush.log")
+          c.logs / "devpush.log")
     c.run(["clang", "-ffile-prefix-map=%s=." % ROOT, "-fobjc-arc", "-O1", ROOT / "graphics/tools/shbake/gpu_arch.m", "-o", prepare / "gpu_arch",
-           "-framework", "Metal", "-framework", "Foundation"], c.private / "logs/gpu-arch.log")
+           "-framework", "Metal", "-framework", "Foundation"], c.logs / "gpu-arch.log")
     destination.mkdir(parents=True)
     names = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-co", "--exclude-standard", "-z", "--", *INPUTS]).split(b"\0")
     for name in sorted(set(names) - {b""}):

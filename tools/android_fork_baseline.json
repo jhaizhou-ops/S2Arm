@@ -1,0 +1,50 @@
+{
+ "compat_macros": {
+  "files": {
+   "android/native/nvn/nvn_be_compat.h": 51
+  },
+  "total": 51
+ },
+ "mtl_defs": {
+  "files": {
+   "android/native/nvn/mtl_vk_shim.c": 20,
+   "android/native/nvn/vk_nvn_adapter.c": 15
+  },
+  "total": 35
+ },
+ "op_cases": {
+  "files": {
+   "android/native/direct/record_flat.c": 12,
+   "android/native/direct/vk_record.c": 63,
+   "android/native/nvn/vk_nvn_adapter.c": 5
+  },
+  "total": 80
+ },
+ "shared_android": {
+  "files": {
+   "graphics/nvn/gfx/nvn/hle_nvn.c": 38,
+   "runtime/src/boot.c": 1,
+   "runtime/src/cpatch.c": 1,
+   "runtime/src/crash.c": 2,
+   "runtime/src/crash_android_fatal.inc": 1,
+   "runtime/src/det.c": 1,
+   "runtime/src/gate.c": 6,
+   "runtime/src/guest_main.c": 7,
+   "runtime/src/guest_main.h": 1,
+   "runtime/src/lifecycle.c": 14,
+   "runtime/src/loader.c": 19,
+   "runtime/src/logcon.c": 3,
+   "runtime/src/lowva.c": 2,
+   "runtime/src/native.h": 2,
+   "runtime/src/os.c": 2,
+   "runtime/src/selfcheck.c": 1,
+   "runtime/src/svc_mem.c": 75,
+   "runtime/src/thread.c": 8,
+   "runtime/src/traps.c": 2,
+   "runtime/src/vawin.c": 1,
+   "runtime/src/widen.c": 15,
+   "runtime/src/xstack.c": 3
+  },
+  "total": 205
+ }
+}

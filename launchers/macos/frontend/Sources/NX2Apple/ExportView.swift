@@ -14,6 +14,10 @@ struct ExportView: View {
     @ObservedObject var covers: CoverCache
     @State private var renaming = false
     @State private var renameText = ""
+    /// 存放位置（游戏库结构 v3）：选中的文件夹路径；空 = 还没定（出现时按这款现在的 / 上次用的位置填）
+    @State private var location = ""
+    /// 「选择其他文件夹…」选过、还不在位置表里的
+    @State private var pickedLocation: String?
     let game: GameSummary
     /// 打开装机页（已出过 iPhone 包的款直接装）。
     let install: () -> Void
@@ -123,6 +127,7 @@ struct ExportView: View {
             HStack(alignment: .top, spacing: 12) {
                 ForEach(ExportPlatform.allCases) { platform in tile(platform) }
             }
+            locationRow
             if model.exportTargets.contains(.ios) { deviceRow }
             if let error = model.choiceError {
                 Text(loc.backend(error)).font(.manrope(12)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
@@ -132,15 +137,62 @@ struct ExportView: View {
 
     private func x(_ id: String) -> String { BackendText.launcherText("export." + id, language: loc.lang == .zh ? "zh-Hans" : "en") }
 
+    /// 存放位置（游戏库结构 v3，像 Steam 的库文件夹）：这款游戏的文件夹放在哪；换了位置，出包前先整个搬过去（存档跟着走）。
+    private var locationRow: some View {
+        var options: [(value: String, label: String)] = model.locations.map { l in
+            let free = l.freeBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+            let name = l.volume.isEmpty ? (l.path as NSString).lastPathComponent : l.volume
+            return (l.path, l.connected ? x("location.free").replacingOccurrences(of: "{0}", with: name).replacingOccurrences(of: "{1}", with: free ?? "?")
+                                        : x("location.offline").replacingOccurrences(of: "{0}", with: name))
+        }
+        if let picked = pickedLocation, !options.contains(where: { $0.value == picked }) {
+            options.append((picked, (picked as NSString).abbreviatingWithTildeInPath))
+        }
+        options.append((Self.otherFolder, x("location.other")))
+        return HStack(spacing: 12) {
+            Image(systemName: "externaldrive").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
+            Text(x("location.title")).font(.manrope(13)).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            LauncherDropdown(options: options, selection: location, label: x("location.title"), style: .button) { value in
+                if value == Self.otherFolder { chooseLocation() } else { location = value }
+            }
+            .accessibilityIdentifier("export.location")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .background(LauncherPalette.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.top, 4)
+        .onAppear { model.loadLocations() }
+        .onChange(of: model.locations) { _ in if location.isEmpty { location = model.defaultLocation(for: game) } }
+    }
+
+    private static let otherFolder = "__other__"
+
+    private func chooseLocation() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.prompt = x("location.choose")
+        if panel.runModal() == .OK, let url = panel.url { pickedLocation = url.path; location = url.path }
+    }
+
     /// 目标设备：连着手机就按它优化；没连提醒插上，也可以选机型（不挡出包）。
     private var deviceRow: some View {
-        let device = model.connectedDevices.first
+        let device = model.selectedDevice
         let name = (device?["model"] as? String) ?? (device?["name"] as? String) ?? ""
+        let many = model.connectedDevices.count > 1
         return HStack(spacing: 12) {
             Image(systemName: "iphone").font(.system(size: 16, weight: .light)).foregroundStyle(LauncherPalette.cream)
-            Text(device == nil ? x("device.none") : x("device.connected").replacingOccurrences(of: "{0}", with: name))
+            Text(device == nil ? x("device.none") : many ? x("device.many") : x("device.connected").replacingOccurrences(of: "{0}", with: name))
                 .font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 12)
+            // 连着两台以上（#272）：列出每台，选中的那台用于按机型优化和装到设备，记住到下次
+            if many {
+                Picker(x("device.choose"), selection: Binding(get: { device?["id"] as? String }, set: { model.chosenDevice = $0 })) {
+                    ForEach(Array(model.connectedDevices.enumerated()), id: \.offset) { _, d in
+                        Text(deviceLabel(d)).tag(d["id"] as? String)
+                    }
+                }
+                .labelsHidden().frame(width: 300).accessibilityIdentifier("export.device")
+            }
             if device == nil, !model.targetModels.isEmpty {
                 Picker(x("device.pick"), selection: $model.chosenModel) {
                     Text(x("device.default")).tag(String?.none)
@@ -155,6 +207,13 @@ struct ExportView: View {
         .background(LauncherPalette.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 12))
         .padding(.top, 4)
         .task { while !Task.isCancelled { await model.refreshTargets(); try? await Task.sleep(nanoseconds: 5_000_000_000) } }
+    }
+
+    /// 「名字 · 机型 · iOS 版本 · 有线 / 同一网络」
+    private func deviceLabel(_ d: [String: Any]) -> String {
+        let os = (d["os"] as? Int).map { "iOS \($0)" } ?? ""
+        let link = d["wired"] as? Bool == true ? x("device.wired") : x("device.network")
+        return [d["name"] as? String ?? "", d["model"] as? String ?? "", os, link].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     private func note(_ platform: ExportPlatform) -> String {
@@ -232,6 +291,7 @@ struct ExportView: View {
         case .checking: return loc.t("s2arm.env.checking")
         case .environment: return loc.t("s2arm.export.block.environment")
         case .busy: return loc.t("s2arm.export.block.busy")
+        case .alreadyQueued: return loc.t("s2arm.export.block.alreadyQueued")
         }
     }
 
@@ -257,7 +317,7 @@ struct ExportView: View {
                 Text(loc.t("s2arm.export.hint")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
-            Button { model.export(game) } label: {
+            Button { model.export(game, location: location.isEmpty ? nil : location) } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "shippingbox.fill")
                     Text(model.busy ? x("action.queue") : count > 1 ? String(format: loc.t("s2arm.export.startCount"), count) : loc.t("s2arm.export.start")).lineLimit(1)
@@ -271,7 +331,7 @@ struct ExportView: View {
             .disabled(blocker != nil)
             .opacity(blocker == nil ? 1 : 0.4)
             .keyboardShortcut(.defaultAction)
-            .padTarget("export.start", scope: "main", radius: 26) { model.export(game) }
+            .padTarget("export.start", scope: "main", radius: 26) { model.export(game, location: location.isEmpty ? nil : location) }
             .accessibilityLabel(count > 1 ? String(format: loc.t("s2arm.export.startCount"), count) : loc.t("s2arm.export.start"))
             .accessibilityIdentifier("export.start")
         }

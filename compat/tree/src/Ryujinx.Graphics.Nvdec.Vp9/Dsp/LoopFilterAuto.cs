@@ -17,6 +17,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfHorizontal4(s, pitch, blimit, limit, thresh);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal4(s, pitch, blimit[0], limit[0], thresh[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfHorizontal4(s, pitch, blimit[0], limit[0], thresh[0]);
@@ -37,6 +41,11 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfHorizontal4Dual(s, pitch, blimit0, limit0, thresh0, blimit1, limit1, thresh1);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal4Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
+                    thresh1[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfHorizontal4Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
@@ -54,6 +63,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             if (Sse2.IsSupported)
             {
                 LoopFilterSse2.LpfHorizontal8(s, pitch, blimit, limit, thresh);
+            }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal8(s, pitch, blimit[0], limit[0], thresh[0]);
             }
             else
             {
@@ -75,6 +88,11 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfHorizontal8Dual(s, pitch, blimit0, limit0, thresh0, blimit1, limit1, thresh1);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal8Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
+                    thresh1[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfHorizontal8Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
@@ -93,6 +111,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfHorizontal16(s, pitch, blimit, limit, thresh);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal16(s, pitch, blimit[0], limit[0], thresh[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfHorizontal16(s, pitch, blimit[0], limit[0], thresh[0]);
@@ -110,6 +132,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfHorizontal16Dual(s, pitch, blimit, limit, thresh);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfHorizontal16Dual(s, pitch, blimit[0], limit[0], thresh[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfHorizontal16Dual(s, pitch, blimit[0], limit[0], thresh[0]);
@@ -126,6 +152,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             if (Sse2.IsSupported)
             {
                 LoopFilterSse2.LpfVertical4(s, pitch, blimit, limit, thresh);
+            }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical4(s, pitch, blimit[0], limit[0], thresh[0]);
             }
             else
             {
@@ -147,6 +177,11 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfVertical4Dual(s, pitch, blimit0, limit0, thresh0, blimit1, limit1, thresh1);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical4Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
+                    thresh1[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfVertical4Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
@@ -164,6 +199,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             if (Sse2.IsSupported)
             {
                 LoopFilterSse2.LpfVertical8(s, pitch, blimit, limit, thresh);
+            }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical8(s, pitch, blimit[0], limit[0], thresh[0]);
             }
             else
             {
@@ -185,6 +224,11 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfVertical8Dual(s, pitch, blimit0, limit0, thresh0, blimit1, limit1, thresh1);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical8Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
+                    thresh1[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfVertical8Dual(s, pitch, blimit0[0], limit0[0], thresh0[0], blimit1[0], limit1[0],
@@ -203,6 +247,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             {
                 LoopFilterSse2.LpfVertical16(s, pitch, blimit, limit, thresh);
             }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical16(s, pitch, blimit[0], limit[0], thresh[0]);
+            }
             else
             {
                 LoopFilterScalar.LpfVertical16(s, pitch, blimit[0], limit[0], thresh[0]);
@@ -219,6 +267,10 @@ namespace Ryujinx.Graphics.Nvdec.Vp9.Dsp
             if (Sse2.IsSupported)
             {
                 LoopFilterSse2.LpfVertical16Dual(s, pitch, blimit, limit, thresh);
+            }
+            else if (LoopFilterVector.Enabled)
+            {
+                LoopFilterVector.LpfVertical16Dual(s, pitch, blimit[0], limit[0], thresh[0]);
             }
             else
             {

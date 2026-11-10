@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 S2Arm contributors
+"""每款各部分大小（game.json sizes）+ 存储总览（storageOverview）：合成文件，期望值按文件大小手写。"""
+import os
+import unittest
+from unittest.mock import patch
+
+from jobcase import JobCase
+from core import Context, read
+import layout
+import library
+import sizes
+
+MIB = 1 << 20
+SLACK = 64 * 1024   # 目录元数据余量
+GID = "0100F2C0115B6000"
+OTHER = "0100000000000001"
+
+
+def write(path, size):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(os.urandom(size))
+    return path
+
+
+class Sizes(JobCase):
+    def setUp(self):
+        super().setUp()
+        pk = lambda sha, size: dict(type="base", titleId=GID, version=0, display="1.0.0", sha256=sha, size=size, path="/x/" + sha)
+        self.games = [dict(id=GID, name="异度神剑3", packages=[pk("a" * 64, 10 * MIB), pk("b" * 64, 4 * MIB)]),
+                      dict(id=OTHER, name="别款", packages=[pk("a" * 64, 10 * MIB)])]
+        library.atomic(self.c.library / "catalog.json", dict(schema=1, games=self.games))
+        L = self.c.library
+        d = layout.game_dir(self.c, GID, english="Xenoblade 3")
+        write(d / "image" / "mac" / "main.bin", 2 * MIB)
+        write(d / "image" / "mac" / "romfs" / "data.arc", 3 * MIB)    # 解包在时是它的克隆（APFS 上不占新空间）
+        write(d / "saves" / "slot0.bin", 1 * MIB)
+        write(d / "save-backups" / "b0.bin", 1 * MIB)
+        write(d / "build" / "extract" / "romfs" / "data.arc", 3 * MIB)
+        write(d / "shader-cache" / "pso.bin", 1 * MIB)
+        write(d / "image" / "ios" / "kit" / "main.bin", 2 * MIB)          # 容器件 → imageIos
+        write(d / "image" / "ios" / "pack" / "r.bin", 1 * MIB)           # 资源包 → imageIos
+        write(d / "build" / "ios" / "roots" / "r@1" / "x.bin", 1 * MIB)  # iPhone 出包中间产物 → cache
+        write(d / "build" / "ios" / "logs" / "build.log", 1 * MIB)       # 日志不算进任何一项
+        self.dir = d
+
+    def context(self, operation, **extra):
+        self.sequence += 1
+        return Context(self.request | dict(taskId=f"sz-{self.sequence}", operation=operation) | extra)
+
+    def assert_mib(self, got, mib, what=""):
+        self.assertGreaterEqual(got, mib * MIB, what); self.assertLess(got, mib * MIB + SLACK, what)
+
+    def test_measure_each_part(self):
+        s = sizes.measure(self.c, GID)
+        apfs = os.name != "nt"
+        want = dict(imageMac=2 if apfs else 5, imageIos=3, saves=2, cache=3 + 1 + 1)   # cache = build/extract 3 + shader-cache 1 + roots 1
+        for k, mib in want.items():
+            with self.subTest(part=k):
+                self.assert_mib(s[k], mib, k)
+        self.assertEqual(s["sources"], 5 * MIB + 4 * MIB)   # a 两款共用记一半，b 只这款
+
+    @unittest.skipIf(os.name == "nt", "NTFS 无克隆，镜像的 romfs 照实算")
+    def test_romfs_counted_in_image_once_extract_gone(self):
+        # 负对照：解包删了（出包成功后的常态），镜像里的 romfs 就是唯一一份，要算进镜像
+        library._rm(self.c, self.c.library, self.dir / "build" / "extract")
+        s = sizes.measure(self.c, GID)
+        self.assert_mib(s["imageMac"], 5)
+        self.assert_mib(s["cache"], 2)
+
+    def test_sources_share_follows_catalog(self):
+        self.assertEqual(sizes._source_share(OTHER, self.games), 5 * MIB)
+        self.assertEqual(sizes._source_share(GID, self.games[:1]), 14 * MIB)   # 别款删了：整份归这款
+        dup = [dict(id=GID, packages=[dict(sha256="c" * 64, size=6)] * 2)]   # 同一个文件列两次（整合版）只算一次
+        self.assertEqual(sizes._source_share(GID, dup), 6)
+
+    def test_catalog_reads_saved_sizes_without_measuring(self):
+        out = sizes.for_catalog(self.c, GID, self.games)
+        self.assertFalse(out["measured"])
+        self.assertEqual([out[k] for k in ("imageMac", "imageIos", "saves", "cache")], [0, 0, 0, 0])
+        saved = sizes.refresh(self.c, GID)
+        self.assertEqual(read(self.dir / "game.json")["sizes"], saved)
+        write(self.dir / "saves" / "slot1.bin", 2 * MIB)   # 量过之后又长了：catalog 不现场量，还是上次记的
+        out = sizes.for_catalog(self.c, GID, self.games)
+        self.assertTrue(out["measured"])
+        self.assert_mib(out["saves"], 2)
+        self.assertEqual(read(self.dir / "game.json")["id"], GID)   # 写回不丢 game.json 原有字段
+
+    def test_refresh_without_folder_creates_nothing(self):
+        self.assertIsNone(sizes.refresh(self.c, OTHER))
+        self.assertIsNone(layout.find_game(self.c, OTHER))
+
+    def test_clean_cache_updates_sizes(self):
+        sizes.refresh(self.c, GID)
+        self.assertGreater(layout.read_sizes(self.c, GID)["cache"], 0)
+        library.clean(self.context("clean", gameId=GID, kind="cache"))
+        self.assertEqual(layout.read_sizes(self.c, GID)["cache"], 0)
+
+    def test_clean_without_refresh_leaves_stale(self):
+        # 负对照：收尾不写回，game.json 里还是清之前的数（证明上一条测的是收尾那一步）
+        sizes.refresh(self.c, GID)
+        before = layout.read_sizes(self.c, GID)["cache"]
+        with patch.object(sizes, "refresh", lambda c, gid: None):
+            library.clean(self.context("clean", gameId=GID, kind="cache"))
+        self.assertEqual(layout.read_sizes(self.c, GID)["cache"], before)
+
+    def test_delete_moves_shared_source_to_other(self):
+        # 删了一款：和它共用原件的别款，原件均摊跟着变成整份（catalog 现算，不靠写回）
+        with patch.object(library, "drop_from_container", lambda c, gid: None):
+            library.delete(self.context("delete", gameId=GID))
+        games = self.c.catalog()["games"]
+        self.assertEqual([g["id"] for g in games], [OTHER])
+        self.assertEqual(sizes.for_catalog(self.c, OTHER, games)["sources"], 10 * MIB)
+
+    def test_space_free_updates_sizes(self):
+        sizes.refresh(self.c, GID)
+        library.space_free(self.context("spaceFree", gameId=GID, parts=["ipa"]))
+        self.assertEqual(layout.read_sizes(self.c, GID)["imageIos"], 0)
+
+    def test_overview(self):
+        L, P, W = self.c.library, self.c.private, self.c.work_root
+        write(L / "hosts" / "mac" / "abc" / "S2ArmGame.app" / "h.bin", 2 * MIB)
+        write(P / "engines" / "e1" / "x.bin", 1 * MIB)                 # 引擎副本旧位置也算进 hosts
+        write(L / "S2Arm.ipa", 3 * MIB)
+        write(W / "cache" / "air" / "a.bin", 1 * MIB)
+        write(L / "temp" / "t1" / "t.bin", 1 * MIB)
+        write(P / "logs" / "job.log", 1 * MIB)
+        other = self.root / "外接盘"
+        layout.register_location(self.c, other)
+        write(other / "temp" / "t2" / "t.bin", 1 * MIB)                # 别的位置的 temp 也算
+        out = sizes.overview(self.context("storageOverview"))
+        shared = {r["id"]: r["bytes"] for r in out["shared"]}
+        self.assertEqual(list(shared), ["hosts", "ipa", "toolCache", "temp", "logs"])
+        self.assert_mib(shared["hosts"], 3); self.assert_mib(shared["ipa"], 3); self.assert_mib(shared["temp"], 2)
+        self.assert_mib(shared["toolCache"], 1)   # 工作目录就是 <库>/tool-cache 时只算一遍（Windows 实跑曾报成两倍）
+        self.assertGreaterEqual(shared["logs"], 1 * MIB)                # 任务记录（jobs/）也在里面，只下限
+        rows = {r["path"]: r for r in out["locations"]}
+        self.assertEqual(set(rows), {str(L), str(other)})
+        self.assertTrue(rows[str(L)]["default"]); self.assertTrue(rows[str(other)]["connected"])
+        self.assertGreater(rows[str(L)]["totalBytes"], rows[str(L)]["freeBytes"])
+        self.assertGreaterEqual(rows[str(L)]["usedBytes"], (2 + 3 + 2 + 5 + 2 + 3 + 1) * MIB)   # 这款四项 + hosts + S2Arm.ipa + temp
+        self.assert_mib(rows[str(other)]["usedBytes"], 1)
+        g = {r["gameId"]: r for r in out["games"]}
+        self.assertEqual((g[GID]["state"], g[OTHER]["state"]), ("ok", "none"))
+        self.assertTrue(g[GID]["sizes"]["measured"])                    # 没量过的这里补量并写回
+        self.assertIsNotNone(layout.read_sizes(self.c, GID))
+        self.assertEqual(g[OTHER]["sizes"]["sources"], 5 * MIB)
+
+    def test_overview_offline_location(self):
+        gone = self.root / "拔掉的盘"
+        layout.register_location(self.c, gone)
+        import shutil
+        shutil.rmtree(gone)   # 测试自己建的临时位置
+        rows = {r["path"]: r for r in sizes.overview(self.context("storageOverview"))["locations"]}
+        self.assertFalse(rows[str(gone)]["connected"])
+        self.assertNotIn("freeBytes", rows[str(gone)])
+
+    def test_catalog_job_returns_sizes(self):
+        sizes.refresh(self.c, GID)
+        result, event = self.worker("catalog")
+        self.assertEqual((result.returncode, event["state"]), (0, "succeeded"), result.stderr)
+        g = {x["id"]: x for x in event["result"]["games"]}
+        self.assertEqual(set(g[GID]["sizes"]), set(sizes.PARTS) | {"measured"})
+        self.assert_mib(g[GID]["sizes"]["saves"], 2)
+        self.assertFalse(g[OTHER]["sizes"]["measured"])
+
+    def test_worker_overview(self):
+        result, event = self.worker("storageOverview")
+        self.assertEqual((result.returncode, event["state"]), (0, "succeeded"), result.stderr)
+        self.assertEqual([r["id"] for r in event["result"]["shared"]], list(sizes.SHARED))
+
+
+if __name__ == "__main__":
+    unittest.main()

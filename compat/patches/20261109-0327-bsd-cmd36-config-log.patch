@@ -1,0 +1,15 @@
+diff --git a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+index 3e558d43600080923558f7701ed273890e745aa9..ed852da334c8216749c07c0fcb732d1a36de1577 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Sockets/Bsd/IClient.cs
+@@ -1305,7 +1305,9 @@ namespace Ryujinx.HLE.HOS.Services.Sockets.Bsd
+         //   宿主不按配置调资源：收下、回 0。Pokopia 首帧后发它，原先未实现回错（命令号与形状来自 Eden-NS2 bsd.cpp，GPL，只借事实，代码自写）
+         public ResultCode InitializeSessionS2(ServiceCtx context)
+         {
+-            context.RequestData.ReadUInt32();
++            // 审计 P2-223：配置首字原先读掉不留痕。宿主没有可按它调的套接字资源，照旧回 0，但把收到的值打一行（每会话一次，SDK 每会话只发一次）
++            uint config = context.RequestData.ReadUInt32();
++            Logger.Info?.Print(LogClass.ServiceBsd, $"bsd 命令 36（Switch 2 套接字会话初始化）：配置首字 0x{config:X8}，宿主不按它限制套接字资源，收下回 0");
+             BindByPid(context);   // 本会话从此用本进程的描述符表（Switch 2 SDK 只在一条会话上 RegisterClient）
+             context.ResponseData.Write(0u);
+ 

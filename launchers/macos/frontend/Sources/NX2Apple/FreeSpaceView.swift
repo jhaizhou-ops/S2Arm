@@ -1,6 +1,7 @@
 // S2Arm（不是上游文件）：释放空间（spaceSurvey / spaceFree 作业）。列这款可删的 5 项（解包、中间产物、着色器缓存、Mac 运行版本、
 // iPhone 包），每项给大小与「删了会怎样」（作业层定句），可勾选；存档、日志只显示大小、不能删。底部是勾选合计与「释放」：
 // 直接删除、不进废纸篓，点了先二次确认；删完重读大小并显示释放了多少。有作业在跑时「释放」置灰，作业层拒绝时显示它的原话。
+// 顶上切到「存储总览」（游戏库结构 v3「查」，StorageOverview.swift）：各存放位置占用 / 剩余、公共文件、各款大小。
 import SwiftUI
 import NXCore
 import NXModel
@@ -14,6 +15,7 @@ struct FreeSpaceView: View {
     let gameID: String
     @State private var chosen: Set<String> = []
     @State private var confirming = false
+    @State private var overviewMode = false
 
     private var game: GameSummary? { model.games.first { $0.id == gameID } }
     private var space: GameSpace? { model.space?.gameId == gameID ? model.space : nil }
@@ -28,7 +30,12 @@ struct FreeSpaceView: View {
                     Text(game?.name ?? space?.name ?? gameID).font(.manrope(14)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if model.spaceLoading || model.spaceFreeing { ProgressView().controlSize(.small) }
+                if model.spaceLoading || model.spaceFreeing || model.overviewLoading { ProgressView().controlSize(.small) }
+                Picker("", selection: $overviewMode) {
+                    Text(game?.name ?? space?.name ?? gameID).tag(false)
+                    Text(storage("title")).tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize().accessibilityIdentifier("space.mode")
             }
             .padding(.horizontal, 30).padding(.top, 28).padding(.bottom, 20)
             if let error = model.spaceError {
@@ -43,7 +50,9 @@ struct FreeSpaceView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    if let space {
+                    if overviewMode {
+                        StorageOverviewSection(model: model)
+                    } else if let space {
                         CardGroup(loc.t("s2arm.space.parts")) {
                             ForEach(space.parts) { part in
                                 CardRow(loc.backend(part.title), detail: loc.backend(part.rebuild)) {
@@ -78,13 +87,16 @@ struct FreeSpaceView: View {
                     if model.busy { Text(loc.t("s2arm.space.busy")).font(.manrope(12)).foregroundStyle(.secondary) }
                 }
                 Spacer(minLength: 8)
+                if overviewMode {
+                    Button(storage("refresh")) { model.loadOverview() }.buttonStyle(LauncherSecondaryButtonStyle()).disabled(model.overviewLoading)
+                }
                 Button(loc.t("launch.done")) { dismiss() }.buttonStyle(LauncherSecondaryButtonStyle())
-                Button { confirming = true } label: {
+                if !overviewMode { Button { confirming = true } label: {
                     Text(loc.t("s2arm.space.free")).font(.manrope(13.5, .bold)).foregroundStyle(.black)
                         .padding(.horizontal, 22).padding(.vertical, 9)
                         .background(LauncherPalette.cream, in: Capsule())
                 }
-                .buttonStyle(.plain).disabled(!canFree).opacity(canFree ? 1 : 0.45)
+                .buttonStyle(.plain).disabled(!canFree).opacity(canFree ? 1 : 0.45) }
             }
             .padding(.horizontal, 30).padding(.vertical, 16)
         }
@@ -106,6 +118,8 @@ struct FreeSpaceView: View {
         .preferredColorScheme(.dark)
         .tint(LauncherPalette.cream)
     }
+
+    private func storage(_ id: String) -> String { BackendText.launcherText("storage." + id, language: loc.lang == .zh ? "zh-Hans" : "en") }
 
     private func binding(_ id: String) -> Binding<Bool> {
         Binding(get: { chosen.contains(id) }, set: { on in if on { chosen.insert(id) } else { chosen.remove(id) } })

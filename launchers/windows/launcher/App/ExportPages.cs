@@ -39,6 +39,11 @@ public sealed partial class EnvironmentWindow
 
     private const string PlatformIos = "ios";
     private bool exportIos = true;
+    // 存放位置（游戏库结构 v3）：locations 作业读回的各位置、为哪款读的、出包页选中的文件夹（"" = 还没定，不传，后端按这款现在的位置）
+    private StorageLocations? locations;
+    private string? locationsFor;
+    private string exportLocation = "";
+    private const string OtherFolder = "__other__";
     // pack job
     private LibraryGame? packGame;
     private bool packRunning;
@@ -51,6 +56,7 @@ public sealed partial class EnvironmentWindow
     private string packSummary = "", packDiagnostics = "";
     private string? packFailureCode;
     private string? packIpa;
+    private string? packLocation;
     private long? packIpaBytes, packPackBytes;
     private PackSpace? packSpace;
     // in-progress capsule (shown while session is hidden)
@@ -66,12 +72,87 @@ public sealed partial class EnvironmentWindow
     // A checklist that could not be read must not lock the player out: start and let the install job give the real reason.
     private bool InstallAllowed => readiness?.Ready == true || (readiness is null && installCheckFailed);
     private string installState = "", installMessage = "", installDiagnostics = "";
+    // 当前 / 最近一次手机作业属于哪一款（#308：原先只有一份「当前安装」状态、没记是哪款，回游戏库再点别的游戏，进度会画到那款上）。
+    //   installSeen：跑完后玩家回安装页看过结果没有；没看过时顶栏胶囊一直在。进度计数来自作业事件 done / total / unit（推资源包按字节，机上解包按包）
+    private string? installGameId, installGameName;
+    private long? installDone, installTotal;
+    private string installUnit = "";
+    private DateTime installRateAt; private long installRateBase; private double? installRate;
+    private bool installSeen = true;
+
+    /// 开始一个手机作业：记下是哪一款、清掉上次的计数
+    private void BeginPhoneJob(LibraryGame game, string message)
+    {
+        installBusy = true; installState = "running"; installMessage = message; installDiagnostics = "";
+        installGameId = game.Id; installGameName = game.Name; installSeen = false;
+        installDone = installTotal = null; installUnit = ""; installRate = null;
+        Render();
+    }
+
+    /// 作业事件 → 安装页文字与计数（推资源包：已传 / 本次待传字节；机上解包：k / n 包）。单位变了（传完进解包）计数与速度重新算
+    private void IngestPhoneEvent(JsonElement e)
+    {
+        if (e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() is { Length: > 0 } text) installMessage = text;
+        if (e.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.Number && e.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number && t.GetInt64() > 0)
+        {
+            var unit = e.TryGetProperty("unit", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() ?? "" : "";
+            var done = d.GetInt64(); var total = t.GetInt64();
+            if (unit != installUnit || total != installTotal || done < (installDone ?? 0)) { installRateAt = DateTime.UtcNow; installRateBase = done; installRate = null; }
+            else if ((DateTime.UtcNow - installRateAt).TotalSeconds >= 3 && done > installRateBase)
+                installRate = (done - installRateBase) / (DateTime.UtcNow - installRateAt).TotalSeconds;
+            installDone = done; installTotal = total; installUnit = unit;
+        }
+        Render();
+    }
+
+    /// 回到正在装 / 刚装完的那一款的安装页（同一个作业，不新起安装）
+    private void OpenPhoneJob()
+    {
+        if (installGameId is null) return;
+        libraryFolder = libraryFolderBox.Text ?? libraryFolder;
+        selectedGame = installGameId; readinessFor = null; Navigate("install");
+    }
+
+    /// 顶栏胶囊（#308，Mac 同款）：装机在跑 → 「正在装到 iPhone：X · 查看进度」；跑完没回去看 → 「已装到 / 没装完 · 查看」。正看着这款的安装页时不显示
+    private Button? PhonePill()
+    {
+        if (installGameId is null || (!installBusy && installSeen) || (page == "install" && SelectedGame?.Id == installGameId)) return null;
+        var key = installBusy ? "install.pill.running" : installState == "succeeded" ? "install.pill.done" : "install.pill.failed";
+        var text = T(key).Replace("{0}", installGameName ?? installGameId);
+        if (installBusy && installDone is { } d && installTotal is { } t && t > 0) text += " · " + (100 * d / t) + "%";
+        var pill = new Button { Content = text, Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(16),
+            Background = Brush.Parse("#29292D"), Foreground = Ink };
+        Avalonia.Automation.AutomationProperties.SetAutomationId(pill, "install.pill");
+        pill.Click += (_, _) => OpenPhoneJob();
+        return pill;
+    }
+
+    /// 计数那一行：「42% · 8.5 GB / 13.0 GB · 21.2 MB/s · 还剩约 4 分钟」或「机上解包 15 / 28」；没有计数 → 空
+    private string PhoneProgressText()
+    {
+        if (installDone is not { } done || installTotal is not { } total || total <= 0) return "";
+        var parts = new List<string> { (100 * done / total) + "%" };
+        if (installUnit == "B")
+        {
+            parts.Add(FormatBytes(done) + " / " + FormatBytes(total));
+            if (installRate is { } rate && rate > 0)
+            {
+                parts.Add(FormatBytes((long)rate) + "/s");
+                var left = (total - done) / rate;
+                parts.Add(T("install.eta").Replace("{0}", left < 90 ? Math.Max(1, (int)left) + T("install.eta_seconds") : (int)Math.Round(left / 60) + T("install.eta_minutes")));
+            }
+        }
+        else parts.Add(done + " / " + total + (installUnit.Length > 0 ? " " + installUnit : ""));
+        return string.Join(" · ", parts);
+    }
     private DateTime lastCheck = DateTime.MinValue;
     private DispatcherTimer? ticker;
     private ScrollViewer? packScroller;
     private string packScrollerPage = "";
 
     private bool PackBusy => packRunning || installBusy;
+    /// 这款现在能不能动（选、出包、移动、清缓存、删除）：游戏库作业或出包在跑时都不能；装机在跑时只锁正在装的那款（玩家装一款大游戏的十几分钟里别的照常用）
+    private bool BusyFor(LibraryGame game) => libraryBusy || packRunning || (installBusy && installGameId == game.Id);
     private LibraryGame? SelectedGame => catalog?.Games.FirstOrDefault(g => g.Id == selectedGame && !g.Hidden);
     private static double Clock => DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
 
@@ -93,6 +174,12 @@ public sealed partial class EnvironmentWindow
         var bottomBar = RenderBottomBar();
 
         var dock = new DockPanel { LastChildFill = true };
+        if (PhonePill() is { } pill)   // 出包 / 进度 / 装机页没有游戏库页那条顶栏：胶囊放在这些页顶部，在哪页都找得回装机（#308）
+        {
+            var top = new Border { Padding = new Thickness(32, 14, 32, 0), Child = pill, HorizontalAlignment = HorizontalAlignment.Right };
+            DockPanel.SetDock(top, Dock.Top);
+            dock.Children.Add(top);
+        }
         DockPanel.SetDock(bottomBar, Dock.Bottom);
         dock.Children.Add(bottomBar);
 
@@ -134,6 +221,7 @@ public sealed partial class EnvironmentWindow
         {
             var backLib = new Button { Content = T("nav.library"), Padding = new Thickness(16, 9),
                 Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8) };
+            Avalonia.Automation.AutomationProperties.SetAutomationId(backLib, "top.library");   // 同游戏库页顶栏（自动化按 id 找，不靠文字）
             backLib.Click += (_, _) => Navigate("library");
             inner.Children.Add(backLib);
         }
@@ -141,6 +229,7 @@ public sealed partial class EnvironmentWindow
         {
             var backLib = new Button { Content = T("nav.library"), Padding = new Thickness(16, 9),
                 Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8) };
+            Avalonia.Automation.AutomationProperties.SetAutomationId(backLib, "top.library");   // 同游戏库页顶栏（自动化按 id 找，不靠文字）
             backLib.Click += (_, _) => Navigate("library");
             inner.Children.Add(backLib);
         }
@@ -167,6 +256,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>The build tab opens the progress page while a pack is running or its result is on screen.</summary>
     private void OpenBuild()
     {
+        locationsFor = null;   // 出包页每次打开都重读存放位置（剩余空间是当时的）
         if (packRunning || (packState == "succeeded" && packGame?.Id == selectedGame)) { Navigate("progress"); return; }
         Navigate("build");
     }
@@ -193,20 +283,20 @@ public sealed partial class EnvironmentWindow
     private Control GameHeader(LibraryGame game)
     {
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 24 };
-        var coverButton = new Button { Content = GameCover(game, 120), Background = Brushes.Transparent, Padding = new Thickness(0), IsEnabled = !PackBusy && !customizing };
+        var coverButton = new Button { Content = GameCover(game, 120), Background = Brushes.Transparent, Padding = new Thickness(0), IsEnabled = !BusyFor(game) && !customizing };
         coverButton.Click += (_, _) => _ = ChooseCoverAsync(game);
         ToolTip.SetTip(coverButton, T("custom.cover.help"));
         AutomationId(coverButton, "export.cover");
         header.Children.Add(coverButton);
         var title = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
-        var nameButton = new Button { Content = Label(game.Name, 30), Background = Brushes.Transparent, Padding = new Thickness(0), IsEnabled = !PackBusy && !customizing };
+        var nameButton = new Button { Content = Label(game.Name, 30), Background = Brushes.Transparent, Padding = new Thickness(0), IsEnabled = !BusyFor(game) && !customizing };
         nameButton.Click += (_, _) => _ = RenameGameAsync(game);
         ToolTip.SetTip(nameButton, T("custom.name.help"));
         AutomationId(nameButton, "export.name");
         title.Children.Add(nameButton);
         if (game.CustomCover)
         {
-            var reset = new Button { Content = T("custom.cover.reset"), Background = Brushes.Transparent, Foreground = Brush.Parse("#9A9AA0"), Padding = new Thickness(0), FontSize = 13, IsEnabled = !PackBusy && !customizing };
+            var reset = new Button { Content = T("custom.cover.reset"), Background = Brushes.Transparent, Foreground = Brush.Parse("#9A9AA0"), Padding = new Thickness(0), FontSize = 13, IsEnabled = !BusyFor(game) && !customizing };
             reset.Click += (_, _) => _ = CustomizeAsync(game, null, "");
             AutomationId(reset, "export.cover.reset");
             title.Children.Add(reset);
@@ -235,7 +325,7 @@ public sealed partial class EnvironmentWindow
         // platforms
         var heading = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
         heading.Children.Add(Label(T("export.platforms"), 16));
-        var existing = Action("export.install_existing", () => { readinessFor = null; Navigate("install"); }, !PackBusy);
+        var existing = Action("export.install_existing", () => { readinessFor = null; Navigate("install"); }, !BusyFor(game) || installBusy);   // 装机中也能进装机页：看别的游戏时提示「另一款正在装 · 查看那一款」
         Grid.SetColumn(existing, 1); heading.Children.Add(existing);
         body.Children.Add(heading);
         var tiles = new UniformGrid { Columns = 4 };
@@ -255,7 +345,7 @@ public sealed partial class EnvironmentWindow
             })));
             var card = new Button
             {
-                Content = tile, IsEnabled = open && !PackBusy, Margin = new Thickness(0, 0, 12, 0), Padding = new Thickness(18),
+                Content = tile, IsEnabled = open && !BusyFor(game), Margin = new Thickness(0, 0, 12, 0), Padding = new Thickness(18),
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch, MinHeight = 120, CornerRadius = new CornerRadius(14),
                 Background = on ? Brush.Parse("#2A2722") : Surface, Foreground = Ink, Opacity = open ? 1 : 0.5,
@@ -266,6 +356,7 @@ public sealed partial class EnvironmentWindow
             tiles.Children.Add(card);
         }
         body.Children.Add(tiles);
+        body.Children.Add(LocationRow(game));
 
         // action bar
         var bar = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 16 };
@@ -280,6 +371,75 @@ public sealed partial class EnvironmentWindow
         body.Children.Add(Card(bar, 18));
     }
 
+    /// <summary>存放位置（游戏库结构 v3，照 Mac ExportView.locationRow）：这款游戏的文件夹放在哪；换了位置，出包前先整个搬过去（存档跟着走）。
+    /// 缺省：这款现在的位置（ok / offline）→ 上次用的位置 → 默认位置（StorageLocations.DefaultFor）。</summary>
+    private Control LocationRow(LibraryGame game)
+    {
+        if (locationsFor != game.Id)
+        {
+            locationsFor = game.Id; locations = null;
+            exportLocation = game.Location is { State: "ok" or "offline" } here ? here.Path : "";
+            _ = LoadLocationsAsync(game);
+        }
+        var rows = locations?.Rows ?? [];
+        var options = new List<(string path, string label)>();
+        foreach (var r in rows)
+        {
+            // 卷名重名（几个位置在同一块盘上）时用路径，免得几项分不清
+            var name = r.Volume.Length == 0 || rows.Count(o => o.Volume == r.Volume) > 1 ? r.Path : r.Volume;
+            options.Add((r.Path, r.Connected
+                ? T("export.location.free").Replace("{0}", name).Replace("{1}", r.FreeBytes is { } free ? FormatBytes(free) : "?")
+                : T("export.location.offline").Replace("{0}", name)));
+        }
+        // 「选择其他文件夹…」选的、或位置表还没读回时这款现在的位置
+        if (exportLocation.Length > 0 && !options.Any(o => SameFolder(o.path, exportLocation))) options.Add((exportLocation, exportLocation));
+        var box = new ComboBox { MinWidth = 300, IsEnabled = !BusyFor(game), VerticalAlignment = VerticalAlignment.Center };
+        foreach (var (path, label) in options) box.Items.Add(new ComboBoxItem { Content = label, Tag = path });
+        box.Items.Add(new ComboBoxItem { Content = T("export.location.other"), Tag = OtherFolder });
+        box.SelectedIndex = options.FindIndex(o => SameFolder(o.path, exportLocation));
+        box.SelectionChanged += (_, _) =>
+        {
+            if (box.SelectedItem is not ComboBoxItem { Tag: string value }) return;
+            if (value == OtherFolder) _ = ChooseLocationAsync(); else exportLocation = value;
+        };
+        AutomationId(box, "export.location");
+        var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 16 };
+        var title = Label(T("export.location.title"), 16); title.VerticalAlignment = VerticalAlignment.Center;
+        line.Children.Add(title);
+        Grid.SetColumn(box, 1); line.Children.Add(box);
+        return Card(line, 14);
+    }
+
+    private async Task LoadLocationsAsync(LibraryGame game)
+    {
+        if (connectedFolder is null || libraryId is null) return;
+        try
+        {
+            var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder, libraryId, "locations", null, CancellationToken.None);
+            if (!job.Report.Succeeded || locationsFor != game.Id) return;
+            locations = StorageLocations.Parse(job.Report.Result);
+            if (exportLocation.Length == 0) exportLocation = locations.DefaultFor(game.Location);
+        }
+        // 读不回位置表同 Mac：下拉框只剩这款现在的位置和「选择其他文件夹…」，不选就不传，后端按这款现在的位置出包
+        catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
+            InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException) { return; }
+        if (page == "build") Render();
+    }
+
+    private async Task ChooseLocationAsync()
+    {
+        try
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = T("export.location.title") });
+            if (folders.Count > 0) exportLocation = LocalPath(folders[0]);
+        }
+        catch (IOException) { }   // 不是本地文件夹：不换
+        Render();   // 取消时下拉框退回原来选的那项
+    }
+
+    private static bool SameFolder(string a, string b) =>
+        string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+
     private static void AutomationId(Control control, string id) => Avalonia.Automation.AutomationProperties.SetAutomationId(control, id);
 
     /// <summary>Why export cannot start now (null = it can). Order as the Mac export page: platform → game files → keys → busy.</summary>
@@ -288,7 +448,7 @@ public sealed partial class EnvironmentWindow
         if (!exportIos) return T("export.block.no_platform");
         if (game.Missing.Count > 0) return T("library.requirements") + " · " + string.Join(" / ", game.Missing);
         if (game.NeedsKeys && catalog?.KeysReady != true) return T("export.block.keys");
-        if (PackBusy || libraryBusy || busy) return T("export.block.busy");
+        if (BusyFor(game) || busy) return T("export.block.busy");   // 只锁正在装的那款：别的游戏装机期间照常出包（后端安装不占出包执行锁）
         return null;
     }
 
@@ -300,6 +460,8 @@ public sealed partial class EnvironmentWindow
     private void StartPack(LibraryGame game, bool spaceOverride = false)
     {
         if (ExportBlocker(game) is not null) return;
+        // 「仍然出包」重试沿用这一款上次选的位置；出包页没读到这款时不传，后端按这款现在的位置
+        if (!spaceOverride || packGame?.Id != game.Id) packLocation = locationsFor == game.Id && exportLocation.Length > 0 ? exportLocation : null;
         packGame = game; packRunning = true; packState = "running"; packTrack = new(); packStarted = DateTime.UtcNow;
         packSeconds = null; packSummary = ""; packDiagnostics = ""; packIpa = null;
         packIpaBytes = null; packPackBytes = null; packSpace = null; sessionHidden = false; packFailureCode = null;
@@ -313,7 +475,10 @@ public sealed partial class EnvironmentWindow
         packCancellation = cancellation;
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("ipa", game.Id, spaceOverride ? new Dictionary<string, object?> { ["spaceOverride"] = true } : null),
+            var extra = new Dictionary<string, object?>();
+            if (spaceOverride) extra["spaceOverride"] = true;
+            if (packLocation is not null) extra["location"] = packLocation;   // pack/jobs/library.py apply_location：在别的位置就先整个搬过去
+            var job = await PackJobClient.RunAsync(PackRequest("ipa", game.Id, extra),
                 e => Dispatcher.UIThread.Post(() =>
                 {
                     packTrack.Ingest(e, Clock);
@@ -348,6 +513,8 @@ public sealed partial class EnvironmentWindow
             {
                 packTrack.Finish(Clock); packSeconds = (DateTime.UtcNow - packStarted).TotalSeconds;
                 packCancellation = null; packRunning = false;
+                // 换了存放位置 / 第一次建文件夹：游戏库里这款的位置变了（搬到一半失败也可能已经动了），重读游戏库，出包页下次重读位置表
+                if (packLocation is not null && !SameFolder(packLocation, game.Location?.Path ?? "") && !libraryBusy) { locationsFor = null; libraryOperation = RunLibraryAsync("catalog", null); }
                 if (packState == "succeeded")
                 {
                     readinessFor = null;
@@ -359,22 +526,27 @@ public sealed partial class EnvironmentWindow
         }
     }
 
+    /// 「本次操作与处理建议」折叠区：给玩家看的原因与建议，同一句只出现一次（9120 时原先同一段中文重复三遍）。
+    /// 作业层的失败事实（failureSummary：阶段、末行原文，常是英文）不放这里，只在「复制错误摘要」里带走
     private string JobDiagnostics(LibraryJobOutput job)
     {
-        var text = job.Report.Message + "\n" + T("diagnostics.exit_code") + ": " + job.Output.ExitCode;
+        var lines = new List<string> { job.Report.Message, T("diagnostics.exit_code") + ": " + job.Output.ExitCode };
+        void Add(string? line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return;
+            line = line.Trim();
+            if (!lines.Any(l => l == line || l.Contains(line))) lines.Add(line);   // 已有（或被更长的一句包含）就不重复
+        }
         if (job.Report.Diagnostics.ValueKind == JsonValueKind.Array)
             foreach (var diagnostic in job.Report.Diagnostics.EnumerateArray())
             {
                 if (diagnostic.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String)
-                    text += "\n" + T("errors." + code.GetString() + ".title") + "\n" + T("errors." + code.GetString() + ".detail");
+                { Add(T("errors." + code.GetString() + ".title")); Add(T("errors." + code.GetString() + ".detail")); }
                 foreach (var key in new[] { "summary", "suggestion" })
-                    if (diagnostic.TryGetProperty(key, out var message) && message.ValueKind == JsonValueKind.String)
-                        text += "\n" + message.GetString();
-                if (diagnostic.TryGetProperty("failureSummary", out var failureSummary) && failureSummary.ValueKind == JsonValueKind.String)
-                    text += "\n" + failureSummary.GetString();
+                    if (diagnostic.TryGetProperty(key, out var message) && message.ValueKind == JsonValueKind.String) Add(message.GetString());
             }
-        if (!string.IsNullOrWhiteSpace(job.Output.StandardError)) text += "\n" + job.Output.StandardError;
-        return text;
+        if (!string.IsNullOrWhiteSpace(job.Output.StandardError)) Add(job.Output.StandardError);
+        return string.Join("\n", lines);
     }
 
     private void RenderProgress(StackPanel body)
@@ -761,7 +933,7 @@ public sealed partial class EnvironmentWindow
             retry.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(retry);
             if (packFailureCode == "disk_full")   // 磁盘预算偏保守：和 Mac 一样允许玩家自己决定继续
             {
-                var proceed = Action("export.fix.continue", () => StartPack(game, spaceOverride: true), !PackBusy);
+                var proceed = Action("export.fix.continue", () => StartPack(game, spaceOverride: true), !BusyFor(game));
                 proceed.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(proceed);
             }
             if (packState == "failed")
@@ -857,7 +1029,7 @@ public sealed partial class EnvironmentWindow
     private void RenderInstall(StackPanel body)
     {
         var game = SelectedGame ?? packGame;
-        body.Children.Add(Action("export.back", () => Navigate("build"), !installBusy));
+        body.Children.Add(Action("export.back", () => Navigate("library")));   // 回游戏库首页（原先回「出包到」页）；装机在后台照跑，顶栏胶囊能回来（#308）
         if (game is null || connectedFolder is null || libraryId is null) { body.Children.Add(Label(T("export.no_game"), 18)); return; }
         if (readinessFor != game.Id && !installChecking) { readinessFor = game.Id; readiness = null; installCheckFailed = false; _ = CheckInstallAsync(); }
         body.Children.Add(GameHeader(game));
@@ -909,6 +1081,17 @@ public sealed partial class EnvironmentWindow
         AutomationId(remove, "install.remove_game");
         remove.Click += (_, _) => _ = ConfirmRemoveAsync(game);
         buttons.Children.Add(remove);
+        if (game.IphoneRestorable)
+        {
+            // 手机上的 S2Arm 换了新版运行层（只换宿主）后不好用：装回上一版（installRestore，同 Mac 装机页）
+            var restore = new Button { Content = T("install.restore"), IsEnabled = !installBusy && !packRunning,
+                Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(8),
+                Background = Brush.Parse("#29292D"), Foreground = Ink, Margin = new Thickness(12, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center };
+            AutomationId(restore, "install.restore");
+            restore.Click += (_, _) => _ = ConfirmRestoreAsync(game);
+            buttons.Children.Add(restore);
+        }
         if (readiness is { IpaPath.Length: > 0 } located)
         {
             var reveal = Action("progress.reveal_ipa", () => Reveal(located.IpaPath));
@@ -919,18 +1102,34 @@ public sealed partial class EnvironmentWindow
         list.Children.Add(buttons);
         body.Children.Add(Card(list));
 
-        if (installState != "")
+        if (installState != "" && installGameId is not null && installGameId != game.Id)
         {
+            // 正在装 / 刚装完的是另一款：这里不画它的进度（原先会画到当前这款上），给一个回去的入口
+            var other = new StackPanel { Spacing = 8 };
+            other.Children.Add(Muted(T(installBusy ? "install.pill.running" : installState == "succeeded" ? "install.pill.done" : "install.pill.failed").Replace("{0}", installGameName ?? installGameId)));
+            other.Children.Add(Action("install.pill.open", OpenPhoneJob));
+            body.Children.Add(Card(other));
+        }
+        else if (installState != "")
+        {
+            if (!installBusy) installSeen = true;   // 回到这款的安装页看过结果，顶栏胶囊收起
             var state = new StackPanel { Spacing = 8 };
             state.Children.Add(Label(T(installState switch
             {
                 "running" => "install.running", "succeeded" => "install.done", "cancelled" => "progress.cancelled",
                 "invalid" => "library.invalid_result", _ => "install.failed"
             }), 18));
-            if (installBusy) state.Children.Add(new ProgressBar { IsIndeterminate = true, Height = 4 });
+            if (installBusy)
+            {
+                var counted = installDone is { } d && installTotal is { } t && t > 0;
+                state.Children.Add(counted
+                    ? new ProgressBar { Minimum = 0, Maximum = 1, Value = (double)installDone!.Value / installTotal!.Value, Height = 6 }
+                    : new ProgressBar { IsIndeterminate = true, Height = 4 });
+                if (PhoneProgressText() is { Length: > 0 } progress) state.Children.Add(Muted(progress));
+            }
             if (installMessage.Length > 0) state.Children.Add(Muted(installMessage));
             if (installState is "failed" or "invalid")
-                state.Children.Add(CopyReportButton(game.Id, ["install", "installRemove"], () => installMessage + "\n" + installDiagnostics));
+                state.Children.Add(CopyReportButton(game.Id, ["install", "installRemove", "installRestore"], () => installMessage + "\n" + installDiagnostics));
             body.Children.Add(Card(state));
         }
         if (installDiagnostics.Length > 0)
@@ -962,14 +1161,10 @@ public sealed partial class EnvironmentWindow
     private async Task InstallAsync(LibraryGame game)
     {
         if (installBusy || !InstallAllowed) return;
-        installBusy = true; installState = "running"; installMessage = ""; installDiagnostics = ""; Render();
+        BeginPhoneJob(game, "");
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id), e => Dispatcher.UIThread.Post(() =>
-            {
-                if (e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() is { Length: > 0 } text)
-                { installMessage = text; Render(); }
-            }), CancellationToken.None);
+            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
             installState = job.Report.State;
             installMessage = job.Report.Succeeded && job.Report.Result.TryGetProperty("device", out var device) && device.ValueKind == JsonValueKind.String
                 ? T("install.device") + " · " + device.GetString() : job.Report.Message;
@@ -1028,7 +1223,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>name / coverPath: null leaves it alone, empty restores the default.</summary>
     private async Task CustomizeAsync(LibraryGame game, string? name, string? coverPath)
     {
-        if (customizing || PackBusy) return;
+        if (customizing || BusyFor(game)) return;
         customizing = true; customizeError = ""; Render();
         var extra = new Dictionary<string, object?>();
         if (name is not null) extra["name"] = name;
@@ -1048,54 +1243,62 @@ public sealed partial class EnvironmentWindow
 
     private async Task ConfirmRemoveAsync(LibraryGame game)
     {
-        if (installBusy || packRunning) return;
+        if (await ConfirmInstallActionAsync("install.remove")) await RunPhoneJobAsync(game, "installRemove", "install.remove");
+    }
+
+    private async Task ConfirmRestoreAsync(LibraryGame game)
+    {
+        if (await ConfirmInstallActionAsync("install.restore")) await RunPhoneJobAsync(game, "installRestore", "install.restore");
+    }
+
+    /// <summary>Confirm dialog for a phone-side action; texts are &lt;prefix&gt;_title / _body / _confirm.</summary>
+    private async Task<bool> ConfirmInstallActionAsync(string prefix)
+    {
+        if (installBusy || packRunning) return false;
         var dialog = new Window
         {
-            Title = T("install.remove_title"), Width = 420, SizeToContent = SizeToContent.Height,
+            Title = T(prefix + "_title"), Width = 420, SizeToContent = SizeToContent.Height,
             CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = Canvas, Foreground = Ink,
             FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
         };
         var confirmed = false;
         var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
-        body.Children.Add(Label(T("install.remove_title"), 20));
-        body.Children.Add(Muted(T("install.remove_body"), 14));
+        body.Children.Add(Label(T(prefix + "_title"), 20));
+        body.Children.Add(Muted(T(prefix + "_body"), 14));
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9),
             Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8),
             Margin = new Thickness(0, 0, 12, 0) };
         cancel.Click += (_, _) => dialog.Close();
         buttons.Children.Add(cancel);
-        var confirm = new Button { Content = T("install.remove_confirm"), Padding = new Thickness(16, 9),
+        var confirm = new Button { Content = T(prefix + "_confirm"), Padding = new Thickness(16, 9),
             Background = Accent, Foreground = Canvas, CornerRadius = new CornerRadius(8) };
-        AutomationId(confirm, "install.remove_confirm");
+        AutomationId(confirm, prefix + "_confirm");
         confirm.Click += (_, _) => { confirmed = true; dialog.Close(); };
         buttons.Children.Add(confirm);
         body.Children.Add(buttons);
         dialog.Content = body;
         await dialog.ShowDialog(this);
-        if (confirmed) await RemoveAsync(game);
+        return confirmed;
     }
 
-    private async Task RemoveAsync(LibraryGame game)
+    /// <summary>installRemove / installRestore; texts are &lt;prefix&gt;_running / _done / _failed.</summary>
+    private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix)
     {
         if (installBusy || packRunning) return;
-        installBusy = true; installState = "running"; installMessage = T("install.remove_running"); installDiagnostics = ""; Render();
+        BeginPhoneJob(game, T(prefix + "_running"));
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("installRemove", game.Id), e => Dispatcher.UIThread.Post(() =>
-            {
-                if (e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() is { Length: > 0 } text)
-                { installMessage = text; Render(); }
-            }), CancellationToken.None);
+            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), CancellationToken.None);
             installState = job.Report.State;
-            installMessage = job.Report.Succeeded ? T("install.remove_done") : job.Report.Message;
+            installMessage = job.Report.Succeeded ? T(prefix + "_done") : job.Report.Message;
             installDiagnostics = JobDiagnostics(job);
         }
         catch (LibraryProtocolException error) { installState = "invalid"; installDiagnostics = error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
-        { installState = "failed"; installMessage = T("install.remove_failed"); installDiagnostics = error.Message; }
+        { installState = "failed"; installMessage = T(prefix + "_failed"); installDiagnostics = error.Message; }
         finally { installBusy = false; Render(); }
     }
 

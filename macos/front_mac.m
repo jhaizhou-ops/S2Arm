@@ -4,8 +4,10 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <GameController/GameController.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "../runtime/include/s2a_pad.h"
+#include "../runtime/include/phone_axes.h"
 #import "input_guide.h"
 #include <stdatomic.h>
 #include <stdint.h>
@@ -17,6 +19,12 @@
 #include "../runtime/include/s2a_direct_prompt.h"
 #include "../runtime/include/s2a_gfx_mode.h"
 #include "../runtime/include/s2a_hud.h"
+#include "../runtime/include/s2a_home_quit.h"
+#include "../runtime/include/s2a_ui_text.h"
+// 界面语言（runtime/include/s2a_ui_text.h，#316），盖过 runtime/src 各 .c 返回 1 的弱缺省。Mac 宿主程序不带 .lproj、主 bundle 首选本地化
+//   总是开发区域，判不出玩家语言，所以按系统首选语言以 zh 开头判（目前 Mac 上没有显示路径用到它）
+int s2a_ui_zh(void) { return [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"]; }
+#include "../ios/haptic_retry.h"
 int s2a_screen_fit(int pw, int ph);   // runtime/src/widen.c：按窗口像素跟屏
 
 void s2a_host_shutdown(const char *why);
@@ -308,9 +316,217 @@ static GCExtendedGamepad *active_pad(NSArray *controllers) {
     }
     return best;
 }
+// 手柄事件驱动（A2）：valueChangedHandler 走 GameController 的回调队列，切到主队列后与 AppKit 键盘 / 鼠标事件串行，
+//   sample_input 可以直接读 keys / mouse / config。120Hz 定时器仍保留给键盘 / 鼠标的粘键核对，并顺手补装新连接的手柄。
+static void install_pad_handler(GCController *controller) {
+    GCExtendedGamepad *pad = controller.extendedGamepad;
+    if (!pad || pad.valueChangedHandler) return;
+    controller.handlerQueue = dispatch_get_main_queue();
+    pad.valueChangedHandler = ^(GCExtendedGamepad *profile, GCControllerElement *element) {
+        (void)profile; (void)element;
+        sample_input();
+    };
+}
+static void install_pad_handlers(void) {
+    for (GCController *controller in GCController.controllers) install_pad_handler(controller);
+}
+// 手柄六轴（同 iOS 的 s2a_pad_read_motion 约定）：游戏要六轴时才开传感器。主线程跟着输入采样读 GCMotion，游戏线程取最新一份
+static _Atomic int g_motion_wanted;
+static pthread_mutex_t g_motion_mu = PTHREAD_MUTEX_INITIALIZER;
+static s2a_pad_motion g_motion;
+static int g_motion_known;
+static GCMotion *g_motion_source;
+// 换了六轴源（两只带六轴的手柄按「最近有输入」切换，审计 P2-215）：读的一方下一次先拿到一次 known = 0，
+//   服务层 ControllerFeedback.TickMotion 走已有的「没有六轴 → 清姿态」，新手柄从头积分，不接着上一只的姿态。
+//   标记由读取方消费（主线程采样、HID 线程读，只改一帧样本可能被下一帧盖掉、读不到）；单只拔掉本来就是 known = 0，不另标
+static int g_motion_switched;   // 持 g_motion_mu
+static void set_motion_source(GCMotion *source) {
+    if (source == g_motion_source) return;
+    if (source && g_motion_source) { pthread_mutex_lock(&g_motion_mu); g_motion_switched = 1; pthread_mutex_unlock(&g_motion_mu); }
+    if (g_motion_source.sensorsRequireManualActivation) g_motion_source.sensorsActive = NO;
+    g_motion_source = source;
+    if (source.sensorsRequireManualActivation) source.sensorsActive = YES;
+}
+static void sample_motion(GCExtendedGamepad *pad) {
+    GCMotion *m = atomic_load(&g_motion_wanted) ? pad.controller.motion : nil;
+    set_motion_source(m.hasRotationRate && m.hasGravityAndUserAcceleration ? m : nil);
+    s2a_pad_motion sample = {0};
+    int known = g_motion_source != nil;
+    if (known) {
+        double gravity[3] = {m.gravity.x, m.gravity.y, m.gravity.z}, user[3] = {m.userAcceleration.x, m.userAcceleration.y, m.userAcceleration.z};
+        double rotation[3] = {m.rotationRate.x, m.rotationRate.y, m.rotationRate.z};
+        float acceleration[3], gyro[3];
+        s2a_gc_motion_axes(gravity, user, rotation, acceleration, gyro);
+        sample = (s2a_pad_motion){clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000, acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]};
+    }
+    pthread_mutex_lock(&g_motion_mu);
+    g_motion = sample; g_motion_known = known;
+    pthread_mutex_unlock(&g_motion_mu);
+}
+// 启动设置「体感」关（S2A_MOTION=0，pack/jobs/community.py launch_env）：游戏要六轴也不开手柄传感器
+__attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) {
+    const char *off = getenv("S2A_MOTION");
+    atomic_store(&g_motion_wanted, enabled != 0 && !(off && !strcmp(off, "0")));
+}
+__attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_motion *out) {
+    pthread_mutex_lock(&g_motion_mu);
+    int known = g_motion_switched ? 0 : g_motion_known;
+    *out = g_motion; g_motion_switched = 0;
+    pthread_mutex_unlock(&g_motion_mu);
+    return known;
+}
+// 实体手柄退出游戏（#276）：决策在 runtime/include/s2a_home_quit.h，界面（提示条、失焦、退出）在 S2AMacDelegate 后面的 home_quit_ui
+static s2a_hq_state g_hq;
+static void home_quit_ui(s2a_hq_action action);
+static void sample_home_quit(GCExtendedGamepad *pad) {
+    if (!pad) return;
+    static __weak GCController *claimed;   // Home 默认归系统（启动台 / 游戏面板）：每个手柄接管一次
+    if (pad.controller != claimed && pad.buttonHome) { pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled; claimed = pad.controller; }
+    // 确认 / 取消按 Switch 的 A / B（与游戏内同一套对应：s2a_pad_abxy_order，按字母 / 按位置）
+    GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
+    int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
+        [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_face_by_letter(), order);
+    BOOL home = pad.buttonHome.isPressed, a = face[order[0]].isPressed, b = face[order[1]].isPressed;
+    s2a_hq_action act = s2a_hq_step(&g_hq, now_ns(), home || (pad.buttonMenu.isPressed && pad.buttonOptions.isPressed), home, a, b);
+    if (act != S2A_HQ_NONE) home_quit_ui(act);
+}
+// 手柄震动（启动设置「震动」「震动强度」，11-09）：同 iOS ios/controller.m 系统手柄那一支——当前手柄的 GCDeviceHaptics 建一个 CHHapticEngine，
+//   连续事件循环播放、按游戏给的两侧振幅取大调强度，1 秒没新帧自动停；失败退避 / 判死同 ios/haptic_retry.h。
+//   游戏侧按符号查询这几个导出（s2a_pad.h），Mac 之前没提供 = 游戏的震动全丢。S2A_RUMBLE=0 关掉；S2A_RUMBLE_SCALE 是强度档倍率（定义表 rumbleLevel.scale）
+#define MAC_RUMBLE_BASE 0x534d000000000000ull
+static dispatch_queue_t g_rumble_q;
+static _Atomic uint64_t g_rumble_epoch;          // 0 = 没有能震的手柄 / 玩家关了震动
+static uint64_t g_rumble_counter;                // 主线程：换一次手柄加一
+static GCController *g_rumble_main;              // 主线程：当前手柄
+static GCController *g_rumble_device;            // 以下只在 g_rumble_q 上碰
+static CHHapticEngine *g_rumble_engine;
+static id<CHHapticAdvancedPatternPlayer> g_rumble_player;
+static BOOL g_rumble_playing;
+static dispatch_source_t g_rumble_timer;
+static s2a_hp_state g_rumble_retry;
+static pthread_mutex_t g_rumble_mu = PTHREAD_MUTEX_INITIALIZER;
+static s2a_pad_vibration g_rumble_pair[2];       // g_rumble_mu：单侧提交时拼成整对
+static float rumble_scale(void) {
+    static float scale = -1;
+    if (scale < 0) { const char *e = getenv("S2A_RUMBLE_SCALE"); float v = e ? strtof(e, NULL) : 1; scale = isfinite(v) && v > 0 ? v : 1; }
+    return scale;
+}
+static BOOL rumble_off(void) { const char *e = getenv("S2A_RUMBLE"); return e && !strcmp(e, "0"); }
+static void rumble_stop_on_queue(void) {
+    if (g_rumble_player && g_rumble_playing) [g_rumble_player stopAtTime:CHHapticTimeImmediate error:nil];
+    g_rumble_playing = NO;
+    if (g_rumble_timer) dispatch_source_set_timer(g_rumble_timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+}
+static void rumble_reset_on_queue(void) {
+    rumble_stop_on_queue();
+    [g_rumble_engine stopWithCompletionHandler:nil];
+    g_rumble_player = nil; g_rumble_engine = nil;
+}
+static void rumble_fail_on_queue(const char *what, NSError *error) {
+    BOOL died = s2a_hp_on_fail(&g_rumble_retry, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    if (!g_rumble_retry.reported) {
+        g_rumble_retry.reported = YES;
+        fprintf(stderr, "【红】手柄震动：%s（%s/%ld）%s\n", what, error.domain.UTF8String ?: "-", error ? (long)error.code : 0L, error.localizedDescription.UTF8String ?: "");
+    }
+    if (died) fprintf(stderr, "【红】手柄震动：本手柄本局停用（连续 %d 次失败）；换手柄会再试\n", S2A_HP_MAX_FAILS);
+}
+static float rumble_clamp(float x, float lo, float hi) { return isfinite(x) ? fminf(hi, fmaxf(lo, x)) : lo; }
+static void rumble_play_on_queue(s2a_pad_vibration pair[2]) {
+    float amplitude = 0, weighted = 0, weights = 0;
+    for (int i = 0; i < 2; i++) {
+        float lo = rumble_clamp(pair[i].low_amp, 0, 1), hi = rumble_clamp(pair[i].high_amp, 0, 1);
+        amplitude = fmaxf(amplitude, fmaxf(lo, hi));
+        weighted += lo * rumble_clamp(pair[i].low_hz, 0, 1250) + hi * rumble_clamp(pair[i].high_hz, 0, 1250);
+        weights += lo + hi;
+    }
+    amplitude = fminf(1, amplitude * rumble_scale());
+    if (amplitude <= 0.001f || !g_rumble_device.haptics) { rumble_stop_on_queue(); return; }
+    if (s2a_hp_should_try(&g_rumble_retry, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) == S2A_HP_SKIP) return;
+    float hz = weights > 0 ? weighted / weights : 160;
+    float sharp = rumble_clamp((hz - 160) / 160 * 0.5f + 0.3f, 0, 1);
+    NSError *error = nil;
+    if (!g_rumble_engine) {
+        g_rumble_engine = [g_rumble_device.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+        if (!g_rumble_engine) { rumble_fail_on_queue("无法创建引擎", nil); return; }
+        g_rumble_engine.playsHapticsOnly = YES;
+        __weak CHHapticEngine *weakEngine = g_rumble_engine;
+        void (^invalidate)(void) = ^{
+            CHHapticEngine *engine = weakEngine;
+            if (engine) dispatch_async(g_rumble_q, ^{ if (g_rumble_engine == engine) rumble_reset_on_queue(); });
+        };
+        g_rumble_engine.resetHandler = ^{ invalidate(); };
+        g_rumble_engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { (void)reason; invalidate(); };
+    }
+    if (!g_rumble_player) {
+        if (![g_rumble_engine startAndReturnError:&error]) { rumble_fail_on_queue("启动引擎失败", error); rumble_reset_on_queue(); return; }
+        CHHapticEvent *event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1],
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0.5]] relativeTime:0 duration:30];
+        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
+        g_rumble_player = pattern ? [g_rumble_engine createAdvancedPlayerWithPattern:pattern error:&error] : nil;
+        if (!g_rumble_player) { rumble_fail_on_queue("创建播放器失败", error); rumble_reset_on_queue(); return; }
+        g_rumble_player.loopEnabled = YES;
+    }
+    if (!g_rumble_playing && ![g_rumble_player startAtTime:CHHapticTimeImmediate error:&error]) { rumble_fail_on_queue("播放失败", error); rumble_reset_on_queue(); return; }
+    g_rumble_playing = YES;
+    if (![g_rumble_player sendParameters:@[
+        [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl value:amplitude relativeTime:0],
+        [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticSharpnessControl value:sharp - 0.5f relativeTime:0]] atTime:CHHapticTimeImmediate error:&error]) {
+        rumble_fail_on_queue("更新强度失败", error); rumble_reset_on_queue(); return;
+    }
+    s2a_hp_on_ok(&g_rumble_retry);
+    static BOOL logged; if (!logged) { logged = YES; fprintf(stderr, "手柄震动：播放 强度 %.2f（倍率 %.2f）锐度 %.2f\n", amplitude, rumble_scale(), sharp); }
+    if (!g_rumble_timer) {
+        g_rumble_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, g_rumble_q);
+        dispatch_source_set_event_handler(g_rumble_timer, ^{ rumble_stop_on_queue(); });
+        dispatch_resume(g_rumble_timer);
+    }
+    dispatch_source_set_timer(g_rumble_timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
+}
+// 主线程（输入采样）：当前手柄换了就换会话号，旧会话的提交一律丢掉
+static void rumble_select(GCController *device) {
+    if (device == g_rumble_main) return;
+    g_rumble_main = device;
+    if (!g_rumble_q) g_rumble_q = dispatch_queue_create("dev.s2arm.mac-rumble", DISPATCH_QUEUE_SERIAL);
+    atomic_store(&g_rumble_epoch, device.haptics && !rumble_off() ? ++g_rumble_counter : 0);
+    dispatch_async(g_rumble_q, ^{ rumble_reset_on_queue(); g_rumble_device = device; g_rumble_retry = (s2a_hp_state){0}; });
+}
+static void rumble_submit(uint64_t session, const s2a_pad_vibration pair[2]) {
+    uint64_t epoch = atomic_load(&g_rumble_epoch);
+    if (!epoch || session != (MAC_RUMBLE_BASE | epoch) || !g_rumble_q) return;
+    s2a_pad_vibration left = pair[0], right = pair[1];   // 块里不能捕获数组：拆成两个值
+    dispatch_async(g_rumble_q, ^{ s2a_pad_vibration p[2] = {left, right}; rumble_play_on_queue(p); });
+}
+__attribute__((visibility("default"), used)) uint64_t s2a_pad_rumble_session(void) {
+    uint64_t epoch = atomic_load(&g_rumble_epoch);
+    return epoch ? (MAC_RUMBLE_BASE | epoch) : 0;
+}
+__attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64_t session, const s2a_pad_vibration values[2]) {
+    if (!values) return;
+    pthread_mutex_lock(&g_rumble_mu); g_rumble_pair[0] = values[0]; g_rumble_pair[1] = values[1]; pthread_mutex_unlock(&g_rumble_mu);
+    rumble_submit(session, values);
+}
+__attribute__((visibility("default"), used)) void s2a_pad_set_rumble(uint64_t session, unsigned side, float low_amp, float low_hz, float high_amp, float high_hz) {
+    if (side >= 2) return;
+    pthread_mutex_lock(&g_rumble_mu);
+    g_rumble_pair[side] = (s2a_pad_vibration){low_amp, low_hz, high_amp, high_hz};
+    s2a_pad_vibration pair[2] = {g_rumble_pair[0], g_rumble_pair[1]};
+    pthread_mutex_unlock(&g_rumble_mu);
+    rumble_submit(session, pair);
+}
+__attribute__((visibility("default"), used)) void s2a_pad_stop_rumble(uint64_t session) {
+    pthread_mutex_lock(&g_rumble_mu); memset(g_rumble_pair, 0, sizeof g_rumble_pair); pthread_mutex_unlock(&g_rumble_mu);
+    s2a_pad_vibration zero[2] = {{0}};
+    rumble_submit(session, zero);
+}
 static void sample_input(void) {
     int32_t sticks[4] = {0}; uint32_t buttons = 0;
+    GCExtendedGamepad *active = focused ? active_pad(GCController.controllers) : nil;
+    sample_motion(active);
+    if (active) rumble_select(active.controller);   // 失焦不换会话：切回来同一个手柄接着震
     if (!focused) { publish(0, sticks); return; }
+    sample_home_quit(active);
+    if (g_hq.open) { publish(0, sticks); return; }
     NSDictionary *keyboard = config[@"keyboard"];
     NSUInteger consumed = 0;
     for (NSString *name in keyboard) {
@@ -330,9 +546,11 @@ static void sample_input(void) {
     GCExtendedGamepad *pad = active_pad(GCController.controllers);
     if (pad) {
         // GameController 通常按物理方位上报（buttonA 在南侧）；Switch Pro 手柄在 macOS 上按键面字母上报（A 在东侧、X 在北侧）
-        BOOL labelled = s2a_pad_labels_abxy(pad.controller.productCategory.UTF8String, pad.controller.vendorName.UTF8String);
-        NSDictionary *pad_buttons = @{@"east": labelled ? pad.buttonA : pad.buttonB, @"south": labelled ? pad.buttonB : pad.buttonA,
-            @"north": labelled ? pad.buttonX : pad.buttonY, @"west": labelled ? pad.buttonY : pad.buttonX,
+        //   位序调共用的 s2a_pad_abxy_order（同 iOS controller.m publishSystem；审计 P2-213：两端各写一套，以后只改一处就会一端错）。order 按任天堂 A / B / X / Y = 东 / 南 / 北 / 西
+        GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
+        int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
+            [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_face_by_letter(), order);   // 按字母 / 按位置（pad.c，同 iOS）
+        NSDictionary *pad_buttons = @{@"east": face[order[0]], @"south": face[order[1]], @"north": face[order[2]], @"west": face[order[3]],
             @"leftShoulder": pad.leftShoulder, @"rightShoulder": pad.rightShoulder,
             @"leftTrigger": pad.leftTrigger, @"rightTrigger": pad.rightTrigger, @"menu": pad.buttonMenu,
             @"dpadLeft": pad.dpad.left, @"dpadRight": pad.dpad.right, @"dpadUp": pad.dpad.up, @"dpadDown": pad.dpad.down};
@@ -395,6 +613,7 @@ static void release_stale_mouse(void) {
     reconcile_held(mouse, stale_mouse, mouse_up_polls, ^BOOL(unsigned b) { return b < 64 && ((pressed >> b) & 1); }, nil);
 }
 static void poll_input(void) {
+    install_pad_handlers();
     release_stale_keys();
     release_stale_mouse();
     sample_input();
@@ -563,6 +782,7 @@ static NSString *lan_warning(void) {
 @property(strong) S2APromptBanner *banner;
 @property(strong) S2AMacInputGuide *inputGuide;
 @end
+static __weak S2AMacDelegate *g_delegate;
 @implementation S2AMacDelegate
 - (void)pollPrompt {
     // 存档不能原子提交（审计 P2-13；判定与 iOS 共用 runtime/src/direct_prompt.c s2a_save_atomic_poll）：非 0 提示一次
@@ -583,6 +803,23 @@ static NSString *lan_warning(void) {
 - (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; reset_input(); }
 - (void)applicationDidBecomeActive:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); focused = self.window.isKeyWindow; }
 @end
+
+// 确认条：打开时游戏失焦（同 Switch 的 HOME 菜单）、不收手柄输入；A / 点「退出」走关窗同一条收尾（等存档写完），B / Home / 点「回到游戏」/ 30 秒没理会收起
+static void home_quit_ui(s2a_hq_action action) {
+    S2AMacDelegate *d = g_delegate;
+    if (!d) return;
+    switch (action) {
+        case S2A_HQ_OPEN:
+            fprintf(stderr, "[s2a] 手柄按住 Home：弹出退出确认\n");
+            display_focus_publish(NO);
+            d.banner.onAnswer = ^(BOOL accept) { s2a_hq_close(&g_hq); if (accept) [g_delegate shutdown]; else display_focus_publish(NSApp.isActive && g_delegate.window.isKeyWindow); };
+            [d.banner showTitle:@S2A_DPROMPT_HOME_QUIT_TITLE body:@S2A_DPROMPT_HOME_QUIT_BODY accept:@S2A_DPROMPT_HOME_QUIT_ACCEPT decline:@S2A_DPROMPT_HOME_QUIT_DECLINE seconds:30];
+            break;
+        case S2A_HQ_QUIT: [g_delegate shutdown]; d.banner.onAnswer = nil; d.banner.hidden = YES; fprintf(stderr, "[s2a] 手柄按 A：退出游戏\n"); break;
+        case S2A_HQ_CANCEL: d.banner.onAnswer = nil; d.banner.hidden = YES; display_focus_publish(NSApp.isActive && d.window.isKeyWindow); break;
+        default: break;
+    }
+}
 
 // 整块面板穿透鼠标；refusesFirstResponder 本身并不能避免 NSTextField 截住点击。
 @interface S2AHUDPanel : NSView
@@ -621,7 +858,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         apply_mouse_options();
         NSApplication *app = NSApplication.sharedApplication;
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-        S2AMacDelegate *delegate = [S2AMacDelegate new]; app.delegate = delegate;
+        S2AMacDelegate *delegate = [S2AMacDelegate new]; app.delegate = delegate; g_delegate = delegate;
         // 游戏日历（#863）：Mac 睡眠时游戏计数器停（同 Switch 睡眠），唤醒后把睡掉的时长补进 Ryujinx 稳态时钟
         [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; s2a_clock_catchup(); s2a_host_sleep_set(0); }];
         // 系统睡眠报给服务层（接口 v2.15）：psc 向游戏发休眠请求，唤醒时发唤醒请求
@@ -677,6 +914,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         }
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
         [app activateIgnoringOtherApps:YES]; focused = YES;
+        install_pad_handlers();
         display_focus_publish(app.isActive && window.isKeyWindow);
         delegate.inputGuide = [[S2AMacInputGuide alloc] initWithName:window.title gameID:gameIdentity[@"gameId"] mapping:config gameWindow:window];
         controls.target = delegate.inputGuide;

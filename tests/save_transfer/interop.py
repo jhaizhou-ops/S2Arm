@@ -21,6 +21,7 @@ import zipfile
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "pack/jobs"))
+import layout
 import saves
 
 DOTNET, DRIVER = sys.argv[1:]
@@ -92,7 +93,11 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
              path=str(REPO / "README.md"))])
     write_json(library / "catalog.json", dict(schema=1, games=[game]))
     identity = saves.identity(game)
-    source = library / "saves" / GAME_ID
+    # 游戏库结构 v3：存档在这款的文件夹 games/<英文名>/saves 下，game.json 记游戏号（pack/jobs/layout.py）
+    folder = library / "games" / layout.folder_name(game["name"], GAME_ID)
+    folder.mkdir(parents=True)
+    write_json(folder / layout.GAME_JSON, dict(id=GAME_ID))
+    source = folder / "saves"
     subprocess.run([DOTNET, DRIVER, "--create", str(source), str(REPO), USER], check=True, timeout=60)
     assert next(source.glob("bis/user/save/*/0/nested/readme.md")).read_bytes() == (REPO / "README.md").read_bytes()
     payloads = list(source.glob("bis/user/save/*/0/contributing.md"))
@@ -102,12 +107,13 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
     exported = snapshot(source, exported=True)
 
     def csharp_call(operation, path=None, *, root=source, game_identity=identity,
-                    expected_code=None, **extra):
+                    expected_code=None, env=None, **extra):
         request = dict(operation=operation, dataRoot=str(root), workRoot=str(scratch / "csharp-work"),
                        game=game_identity, path=str(path) if path else None) | extra
         write_json(request_path, request)
         process = subprocess.run([DOTNET, DRIVER, "--request", str(request_path)],
-                                 capture_output=True, text=True, check=True, timeout=60)
+                                 capture_output=True, text=True, check=True, timeout=60,
+                                 env=None if env is None else os.environ | env)
         response = json.loads(process.stdout)
         if expected_code:
             assert not response["ok"] and response["error"]["code"] == expected_code, response
@@ -258,6 +264,28 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
     for g, (t, code, word) in zip(got, want):
         assert (g["type"], g["code"]) == (t, code) and word in g["message"] and t not in g["message"], (g, t, code, word)
         print(f"PASS 失败原因人话 {t} → {code}：{g['message']}")
+    # #316：请求带 language 时说明按它出。期望手写：zh-Hans / 不带 = 上面同一组中文原句（逐字相同）；en = 同码、同条数、一句中文都没有、
+    #   且与中文一一对应（8 条里相同中文句对应相同英文句，不同中文句对应不同英文句）；英文也不带异常类型名
+    cjk = lambda s: any("\u4e00" <= ch <= "\u9fff" for ch in s)
+    run = lambda *a: [json.loads(l) for l in subprocess.run([DOTNET, DRIVER, "--describe", *a], check=True, timeout=60, capture_output=True, text=True).stdout.splitlines()]
+    zh_named, en_got = run("zh-Hans"), run("en")
+    assert [g["message"] for g in zh_named] == [g["message"] for g in got], (zh_named, got)
+    assert [g["code"] for g in en_got] == [g["code"] for g in got], en_got
+    assert all(not cjk(g["message"]) and g["type"] not in g["message"] and g["message"].strip() for g in en_got), en_got
+    pairs = {(z["message"], e["message"]) for z, e in zip(got, en_got)}
+    assert len({z for z, _ in pairs}) == len({e for _, e in pairs}) == len(pairs), pairs
+    print(f"PASS 失败原因按 language 出英文：{len(en_got)} 条同码、无中文、与中文 {len(pairs)} 句一一对应")
+    # 整个请求走一遍：同一份坏备份，不带 language 回中文、带 en 回英文，码相同
+    bad = scratch / "language-probe.s2asave"; bad.write_bytes(b"not a zip")
+    def reject(**extra):
+        request = dict(operation="inspect", dataRoot=str(source), workRoot=str(scratch / "csharp-work"), game=identity, path=str(bad)) | extra
+        write_json(request_path, request)
+        r = json.loads(subprocess.run([DOTNET, DRIVER, "--request", str(request_path)], capture_output=True, text=True, check=True, timeout=60).stdout)
+        assert not r["ok"], r
+        return r["error"]
+    plain, english = reject(), reject(language="en")
+    assert plain["code"] == english["code"] and cjk(plain["message"]) and not cjk(english["message"]), (plain, english)
+    print(f"PASS 请求带 language=en：{english['code']} 回英文「{english['message']}」，不带回中文「{plain['message']}」")
     # 审计 P2-24：恢复复制数据根时跳过存档三处、其余文件走 APFS 克隆。期望手算：512 MiB 非存档文件原样出现在目标、内容一致；
     #   存档文件（bis/user/save 下）不出现；走的是 APFS 克隆：克隆出的文件写入前与源共用物理块，首块物理设备偏移（fcntl F_LOG2PHYS）
     #   与源相同，流式拷贝则不同。11-02 起按这个事实判，不按耗时判（原判据 < 200 ms，gate-host 负载高时克隆调用本身 385 ms 误红）
@@ -282,4 +310,33 @@ with tempfile.TemporaryDirectory(prefix="s2arm-public-save-interop-") as tempora
         print(f"PASS 恢复复制数据根：跳过存档三处、512 MiB 非存档文件走 APFS 克隆（首块物理偏移同 {src_at}，{ms} ms）")
     else:
         print(f"PASS 恢复复制数据根：跳过存档三处、512 MiB 非存档文件内容一致（{ms} ms；非 macOS 不核克隆）")
+    # 审计 P2-175：目标指纹只算存档三处。期望手算：数据根里加一份非存档文件（着色器缓存）→ 指纹不变；改一个存档文件 → 指纹变
+    fp_root = scratch / "fingerprint-root"
+    shutil.copytree(source, fp_root)
+    fp0 = csharp_call("inspect", python_archive, root=fp_root)["targetFingerprint"]
+    (fp_root / "games/shader").mkdir(parents=True)
+    (fp_root / "games/shader/cache.bin").write_bytes(os.urandom(4096))
+    fp1 = csharp_call("inspect", python_archive, root=fp_root)["targetFingerprint"]
+    save_file = next(fp_root.glob("bis/user/save/*/0/contributing.md"))
+    save_file.write_bytes(save_file.read_bytes() + b"x")
+    fp2 = csharp_call("inspect", python_archive, root=fp_root)["targetFingerprint"]
+    assert fp1 == fp0 and fp2 != fp0, (fp0, fp1, fp2)
+    print("PASS 目标指纹：加着色器缓存不变、改存档文件变（审计 P2-175）")
+
+    # 审计 P2-177：恢复在事务 / 备份目录建好、恢复记录写出之前失败。期望手算：报错；save-transactions 与 save-backups/<游戏号>
+    #   下的子目录与调用前相同（本次建的都删了，前面用例正常恢复留下的备份不算）；活存档根逐文件不变
+    tx_root = scratch / "abandon-root"
+    shutil.copytree(source, tx_root)
+    before = snapshot(tx_root)
+    work = scratch / "csharp-work"
+    def subdirs():
+        return sorted(p for d in (work / "save-transactions", work / "save-backups" / GAME_ID) if d.exists() for p in d.iterdir() if p.is_dir())
+    dirs_before = subdirs()
+    preview = csharp_call("inspect", python_archive, root=tx_root)
+    csharp_call("restore", python_archive, root=tx_root, archiveSha256=preview["archiveSha256"],
+                targetFingerprint=preview["targetFingerprint"], expected_code="save_invalid",
+                env=dict(SAVE_TRANSFER_FAIL_AT="dirsCreated"))
+    left = subdirs()
+    assert left == dirs_before and snapshot(tx_root) == before, (dirs_before, left, snapshot(tx_root) == before)
+    print("PASS 恢复记录写出前失败：事务 / 备份目录不残留、活存档根不变（审计 P2-177）")
     print("Public-file G05/G06 interoperability passed; no game or player progress was tested.")

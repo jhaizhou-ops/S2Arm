@@ -116,7 +116,11 @@ def need(exefs, img, nros=()):
         p = os.path.join(exefs, m)
         if m in ('main', 'rtld') or m.endswith('.npdm') or not os.path.isfile(p): continue
         try: syms = nso_syms.dynsyms(nso_syms.load(p))
-        except Exception: continue
+        except Exception as e:   # 不是 NSO 的旁路文件本来就解析不了，照旧跳过；带 NSO 魔数却解析失败 = 判不了它定不定义 glslcCompile，
+            #   走红通道（审计 P2-209：原先一律跳过，扫完没找到就答「不需要」退 0，该编的款没编）
+            with open(p, 'rb') as fh:
+                if fh.read(4) == b'NSO0': red(f'GLSLC 离线编：ExeFS 的 {m} 是 NSO 却解析不了（{type(e).__name__}: {e}），判不了它是否定义 glslcCompile')
+            continue
         if any(s == 'glslcCompile' and defined for s, defined, _ in syms): return m, ''
     return None, 'main 导入 glslcCompile，但 ExeFS 里没有模块定义它（导入不会被绑定）'
 

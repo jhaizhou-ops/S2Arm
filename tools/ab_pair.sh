@@ -2,7 +2,7 @@
 # 能力关 / 开对照局（名单线 10-28 梳理「合 2」：60 帧与满屏的 Mac 读数共用一个入口，取代各次手写的一次性起局脚本）：
 #   bash tools/ab_pair.sh <款> fps60 [局目录]
 #   bash tools/ab_pair.sh <款> widen:<档位> [局目录]      档位 19.5:9 / 16:10 / 1.42 / 4:3（同 docs/名单_满屏比例/ 表头）
-# 同根、同存档、同进局路线（tools/entry_check.sh，掌机档）先关后开各一局，然后跑该能力的判据，最后一行打印可登记的结论：
+# 同根、同存档、同进局路线（维护方 entry_check.sh，掌机档）先关后开各一局，然后跑该能力的判据，最后一行打印可登记的结论：
 #   fps60  → S2A_FPS60=0 / 1 + S2A_AP_SPEED=1（MARK 后逻辑速度探测），判据 tools/fps_speed_judge.py（画面横移速度比 ρ≈1 绿、≈帧率倍数红）→ docs/名单_60帧/ 的「逻辑速度」
 #   widen  → S2A_WIDEN_VERIFIED=0 / 1 + 档位屏幕尺寸，判据 tools/widen_accept.py（关局 MARK 截图当 16:9 对照）→ docs/名单_满屏比例/ 一行（平台 Mac）；
 #            路线有 SHOT:scene_<名>（读盘页锚后固定帧的游戏场景）时两局同名截图当主判据对，MARK 帧只认「不过」；

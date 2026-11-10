@@ -215,7 +215,17 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             for (NSDictionary *u in fe[@"outputs"]) { if (o->nfo >= 4) FAIL("more than 4 fetch outputs"); o->fo_color[o->nfo++] = (uint8_t)[u[@"color"] intValue]; }
         }
         for (NSDictionary *u in j[@"first_store"]) { if (![u isKindOfClass:[NSDictionary class]]) FAIL("first_store entry is not an object"); if (o->nfirst >= 4) FAIL("more than 4 first-invocation stores");
-            int reg = [u[@"reg"] intValue], word = [u[@"word"] intValue]; if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
+            int reg = [u[@"reg"] intValue], word = [u[@"word"] intValue];
+            // 反射里的 reg 是着色器内存储缓冲的序号（绑定项的 index，graphics/tools/direct/dsh/Dsh.cs first_store），宿主派发时按 NVN 存储槽取缓冲（S.ssbo[5][reg]）：
+            //   同一份绑定表里 kind = sbuf、index = 它的那一项，把它换成该项的 reg（NVN 槽）。11-09 质量线 Raiders 卡顿：剔除着色器 029d9c3ec1fcb39f 的 5 个存储缓冲
+            //   index 0..4 对应槽 4 / 2 / 0 / 1 / 3，首写「index 0 第 1 字清零」落到了槽 0 的别的缓冲上，槽 4 里间接绘制的实例数从不归零、每帧 +40，GPU 一帧从 90 ms 涨到 600 ms 以上。
+            //   绑定表里找不到这个序号（旧反射 / index 与槽本来相同）就照原值
+            for (NSDictionary *b in [j[@"bindings"] isKindOfClass:[NSArray class]] ? j[@"bindings"] : @[]) {
+                if (![b isKindOfClass:[NSDictionary class]] || ![b[@"kind"] isEqual:@"sbuf"] || ![b[@"index"] isKindOfClass:[NSNumber class]] || [b[@"index"] intValue] != reg) continue;
+                if ([b[@"reg"] isKindOfClass:[NSNumber class]]) reg = [b[@"reg"] intValue];
+                break;
+            }
+            if (reg < 0 || reg >= 16) FAIL("first-invocation store to storage slot %d", reg);
             if (word < 0 || word > 0xffff) FAIL("first-invocation store to word %d", word);
             o->first[o->nfirst].reg = (uint8_t)reg; o->first[o->nfirst].word = (uint16_t)word; o->first[o->nfirst++].value = (uint32_t)[u[@"value"] unsignedIntValue]; }
         NSArray *tg = j[@"threadgroup_size"];

@@ -25,8 +25,9 @@ o=$(r tests compat/tree/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs);
 o=$(r tests compat/tree/src/Ryujinx.Graphics.Gpu/Shader/S2AShaderFaultCache.cs); ck "C# 负缓存自身改动 → 对应纯逻辑测试" '[[ "$o" == *tests/shader_fault_cache_test.sh* ]]'
 o=$(r tests docs/坑记录.md); ck "普通文档负对照 → 不跑三个C#目标测试" '[[ "$o" != *drain_readflush/build_run.sh* ]] && [[ "$o" != *shader_garbage_guard_test.sh* ]] && [[ "$o" != *shader_fault_cache_test.sh* ]]'
 o=$(r tests graphics/metal/cs/NxTrack.cs.bak); ck "仅文件名近似 → 不选排空测试" '[[ "$o" != *drain_readflush/build_run.sh* ]]'
-EV=$(grep -l '^# 门禁：每次' tests/*_test.sh | tr '\n' ' ')   # 头部声明「每次」的单测（共享位置扫描等）
-ck "改文档 → 只有「每次」单测、钩子不跑、iOS 不跑" '[ "$(r tests docs/a.md)" = "$EV" ] && [ -z "$(r hooks docs/a.md | tr -d " ")" ] && [ "$(r ios docs/a.md)" = "no " ]'
+# 改文档要跑的 = 「每次」单测 + 头部「门禁覆盖」点名 *.md 的单测（如 no_remote_exec_pipe：用户照抄的文档里不许「下载 + 执行」一步走；11-09 它加了 *.md 覆盖后本断言没跟上，main 已知红）
+MD=$( { grep -l '^# 门禁：每次' tests/*_test.sh; grep -lE '^# 门禁覆盖：.*[*][.]md( |$)' tests/*_test.sh; } | sort -u | tr '\n' ' ')
+ck "改文档 → 只有「每次」与点名覆盖 *.md 的单测、钩子不跑、iOS 不跑（实得：$(r tests docs/a.md)）" '[ "$(r tests docs/a.md)" = "$MD" ] && [ -z "$(r hooks docs/a.md | tr -d " ")" ] && [ "$(r ios docs/a.md)" = "no " ]'
 o=$(r hooks graphics/tools/shbake/x.py); ck "改出包期着色器工具 graphics/tools → 跑 gfx 钩子、不跑画幅回放（10-24 门禁整改：回放器不编 graphics/tools；实得：${o}）" '[[ "$o" == *graphics/gate.sh* ]] && [[ "$o" != *tests/visual/gate.sh* ]]'
 o=$(r hooks graphics/metal/x.m); ck "改渲染器 graphics/metal → 画幅回放照跑（实得：${o}）" '[[ "$o" == *tests/visual/gate.sh* ]]'
 o=$(r hooks services/S2A.Services/A.cs); ck "改服务 → 服务钩子，不跑原生钩子（原生门禁 make host 不带 S2A_CS、不链 C#，99 组 C 单测不碰服务层；10-28 梳理）、不跑 gfx 钩子、不跑画幅回放；iOS 跑（实得：${o}）" '[[ "$o" != *runtime/gate.sh* ]] && [[ "$o" == *services/gate.sh* ]] && [[ "$o" != *tests/visual/gate.sh* ]] && [[ "$o" != *graphics/gate.sh* ]] && [ "$(r ios services/S2A.Services/A.cs)" = "yes " ]'
@@ -76,5 +77,17 @@ T=$(mktemp -d); git clone -q --shared "$H" "$T/c" 2> /dev/null && (cd "$T/c" && 
   grep -q '^# 门禁路由：runtime/src/' android/core-link/gate.sh && echo "负对照没删掉 runtime/src/ 登记行"
   python3 tools/gate_route.py hooks runtime/src/alt.c) > "$T/o" 2>&1
 ck "负对照：临时克隆去掉 runtime/src/ 登记 → 改 runtime/src/alt.c 不选 core-link 钩子、原生钩子照选（实得：$(tr '\n' ' ' < "$T/o" | cut -c1-200)）" 'grep -qx runtime/gate.sh "$T/o" && ! grep -qx android/core-link/gate.sh "$T/o"'
+rm -rf "$T"
+# 构建清单自动进覆盖面（11-09 维护方：present_settings_test 现算 $(HOST_SRCS) 把 macos/front_mac.m 编进来，头上「门禁只看」手写清单没有它，
+#   feat/launch-settings 改 front_mac.m 列车没跑、合入后 main 链接红）：期望按 launchers/macos/build.mk 的 HOST_SRCS += macos/front_mac.m 手写
+o=$(r tests macos/front_mac.m); ck "改 macos/front_mac.m（HOST_SRCS 的 Mac 前端源文件）→ 含 present_settings_test（实得：${o}）" '[[ "$o" == *tests/present_settings_test.sh* ]]'
+o=$(r tests runtime/src/input_config.c); ck "改 runtime/src/input_config.c（HOST_SRCS）→ 含 present_settings_test、shared_matrix_test（实得：${o}）" '[[ "$o" == *tests/present_settings_test.sh* ]] && [[ "$o" == *tests/shared_matrix_test.sh* ]]'
+o=$(r tests launchers/macos/build.mk); ck "改 launchers/macos/build.mk（拼 HOST_SRCS 的清单）→ 含 present_settings_test（实得：${o}）" '[[ "$o" == *tests/present_settings_test.sh* ]]'
+# 算构建清单不许有副作用（11-09：make 解析就改写 build/.host_cfg，门禁里一算路由 runtime/gate.sh 并行各组同时重编同一批 .o、链接读到空文件）：
+#   在 clone 里放一份已知配置戳、带 S2A_CS=1 环境算一次路由 → 戳内容与修改时间都不变、没起 C# 构建（build/cs 不出现）
+T=$(mktemp -d); git clone -q --shared "$H" "$T/c" 2> /dev/null && cp "$H/tools/gate_route.py" "$T/c/tools/" && mkdir -p "$T/c/build" && printf 'S2A_CS= sentinel' > "$T/c/build/.host_cfg" && touch -t 202601010000 "$T/c/build/.host_cfg"
+m0=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.host_cfg"); (cd "$T/c" && S2A_CS=1 python3 tools/gate_route.py tests macos/front_mac.m > "$T/o" 2> /dev/null)
+m1=$(stat -f %m "$T/c/build/.host_cfg" 2> /dev/null || stat -c %Y "$T/c/build/.host_cfg")
+ck "算构建清单不碰本树 build/：配置戳内容 / 修改时间不变、不起 C# 构建，路由照常（含 present_settings_test）" '[ "$(cat "$T/c/build/.host_cfg")" = "S2A_CS= sentinel" ] && [ "$m0" = "$m1" ] && [ ! -e "$T/c/build/cs" ] && grep -q present_settings_test "$T/o"'
 rm -rf "$T"
 [ $bad = 0 ] && echo "gate_route 单测全过" || { echo "gate_route 单测有不通"; exit 1; }

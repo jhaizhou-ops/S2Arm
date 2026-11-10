@@ -3,8 +3,8 @@
 //   A 前端第 2 次周期调用返回 1：warm_prepare 返回 0（剩下的转后台），转后台原因 = 玩家；开始那次参数 (0, N)；后台编完后 (N, N) 正好一次
 //   B 前端一直返回 0：warm_prepare 返回 1（全部编完才进），之后 warm_finish 发 (N, N) 正好一次（再调一次也不重发）
 //   E 上限到点（11-05 恢复开局阻塞预热：上限 15 s 是 维护者 判据「首装 loading ≤ 15 s」，前端也不能延长）：DM_PSO_PREPARE_MAX_MS=100、前端一直返回 0（想一直等）→
-//     warm_prepare 在 ~100 ms 返回 0、原因 = 上限，剩下的由后台工人接着编（后台编的行数 > 0），编完 (N, N) 一次
-//   G 清单全部领走、只剩在编的（11-06 异度3：首帧等满 15 s、剩 26 行）：1 个工人、最后一行编 2 s、前端一直返回 0 → warm_prepare 不等那 2 s，<1 s 返回 0、
+//     warm_prepare 返回 0、原因 = 上限、返回那一刻还没全部编完，剩下的由后台工人接着编（后台编的行数 > 0），编完 (N, N) 一次（按事件判，不按墙钟）
+//   G 清单全部领走、只剩在编的（11-06 异度3：首帧等满 15 s、剩 26 行）：1 个工人、最后一行编 2 s、前端一直返回 0 → warm_prepare 不等那行编完就返回 0（返回时 (N, N) 还没发）、
 //     原因 = TAIL、通知前端放行恰好一次；那一行编完后 (N, N) 一次。B 前端一直返回 0 时原先只能「全部编完才返回 1」，现在最后一行在编时放行（TAIL）同样合规
 //   F 缺省开：没设 DM_PSO_PREPARE → prepare_on() = 1；DM_PSO_PREPARE=0 → 0
 //   C 首帧前宣告（warm_announce，mtl_init 末尾调；10-30 真机线怪猎冷启：首帧回调 0.96 s 先于懒载入的预热，加载页早收）：着色器表旁 pso_manifest.tsv 3 行 + 1 行注释，
@@ -25,7 +25,7 @@ static NSArray<WarmTask *> *tasks(void) {
 static int run(int enter_at) {   // in a child: 0 = everything as expected
     g_tick_enter_at = enter_at; g_tick_total = N;
     NSArray *ts = tasks(); g_t_tasks = ts; uint64_t t0 = bp_now();
-    int all = warm_prepare(ts, N); uint64_t back = bp_now() - t0;
+    int all = warm_prepare(ts, N); uint64_t back = bp_now() - t0; long full_at_back = atomic_load(&g_tick_full);   // 放行那一刻是否已全部编完（事件判据，不靠墙钟）
     if (all) warm_finish();
     for (int i = 0; i < 3000 && atomic_load(&g_tick_full) == 0; i++) usleep(10000);   // A: the rest finishes in the background, then warm_finish
     warm_finish();   // a second call must not send (N, N) again
@@ -35,9 +35,9 @@ static int run(int enter_at) {   // in a child: 0 = everything as expected
     int ok = atomic_load(&g_tick_first_done) == 0 && atomic_load(&g_tick_first_total) == N && full == 1;
     if (enter_at) ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_PLAYER && calls >= 3;
     else if (getenv("T_WARM_CAP")) { printf("  上限：返回 %d、原因 %d、%.0f ms 后放行、后台接着编 %ld 行\n", all, atomic_load(&g_wp_why), back / 1e6, atomic_load(&g_warm_bg_after_cap));
-        ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_LIMIT && back < 250000000ull && atomic_load(&g_warm_bg_after_cap) > 0; }
+        ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_LIMIT && full_at_back == 0 && atomic_load(&g_warm_bg_after_cap) > 0; }   // 到点放行 = 原因上限 + 放行时还没编完 + 后台接着编（11-09 原「< 250 ms」负载重时偶发红）
     else if (g_t_hold_ms) { printf("  领完放行：返回 %d、原因 %d、%.0f ms 后放行、通知前端 %ld 次\n", all, atomic_load(&g_wp_why), back / 1e6, atomic_load(&g_tick_released));
-        ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_TAIL && back < 1000000000ull && atomic_load(&g_tick_released) == 1; }
+        ok = ok && all == 0 && atomic_load(&g_wp_why) == WARM_WHY_TAIL && full_at_back == 0 && atomic_load(&g_tick_released) == 1; }   // 不等最后那行 = 原因 TAIL + 放行时那行还没编完（11-09 原「< 1 s」负载重时偶发红）
     else ok = ok && (all == 1 || atomic_load(&g_wp_why) == WARM_WHY_TAIL);
     return !ok;
 }

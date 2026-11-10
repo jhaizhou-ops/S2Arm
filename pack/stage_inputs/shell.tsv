@@ -160,6 +160,7 @@
 入	android/tools/fetch_source.sh
 入	platform/apple/cs
 入	shell
+入	launchers/shared/SaveSync
 入	platform/apple/plat_apple.c
 入	platform/build.mk
 入	launchers/macos/build.mk

@@ -349,7 +349,10 @@ static int host_run(int argc, char **argv) {
     { int s2a_oodle_tool_on(void), s2a_oodle_tool_needs_sdk(void), s2a_glslc_tool_on(void); int oodle = s2a_oodle_tool_on(); if (oodle || s2a_glslc_tool_on()) {
         if (oodle) { void s2a_oodle_tool_claim_stdout(void); s2a_oodle_tool_claim_stdout(); }   // 应答管道只给解码结果：之后（含 C# 起局）的日志都进 stderr
         int sdk = !oodle || s2a_oodle_tool_needs_sdk();
-        if (sdk) { if (!S2A_Init) die("【红】%s 工具模式要 C# 服务层（S2A_CS=1 编宿主）：SDK 初始化要连系统服务", oodle ? "LZ5" : "GLSLC"); S2A_Init(); }
+        // 有 S2A_InitSession 就走它（同下面正式起局，回 0 / -1）：初始化失败 die 非 0 退出（审计 P1-126：原先调 void 的 S2A_Init，失败只报红、照起游戏主线程、最后退 0）
+        if (sdk) { if (!S2A_InitSession && !S2A_Init) die("【红】%s 工具模式要 C# 服务层（S2A_CS=1 编宿主）：SDK 初始化要连系统服务", oodle ? "LZ5" : "GLSLC");
+                   if (!S2A_InitSession) S2A_Init();
+                   else if (s2a_session_prepare() || S2A_InitSession()) die("【红】%s 工具模式：C# 服务层初始化失败（原因见上面的红行），不起游戏主线程", oodle ? "LZ5" : "GLSLC"); }
         LOG("出包期工具模式（%s）：%s，直接起游戏主线程", oodle ? (sdk ? "LZ5" : "Oodle") : "GLSLC", sdk ? "C# 服务层已起、不起前端" : "跳过 C# 初始化");
         struct s2a_guest_main_args tool_args = {.stack_top = g_main_stack_top, .argc = g_argc, .argv = g_argv};
         pthread_t tth; pthread_attr_t tat; pthread_attr_init(&tat); pthread_attr_setstacksize(&tat, 8 << 20);

@@ -33,4 +33,9 @@ void s2a_shell_refresh(void) { if (g_refresh) g_refresh(g_refresh_ctx); }
 
 // 本款资源包：宿主（ios/app.m）有强定义时用它；本包单独编时按就绪、点了只记日志
 __attribute__((weak)) int s2a_shell_game_data_ready(const char *game_id) { (void)game_id; return 1; }
+__attribute__((weak)) void s2a_shell_library_appeared(void) {}
 __attribute__((weak)) void s2a_shell_pick_game_data(const char *game_id) { fprintf(stderr, "S2Arm 游戏库：要导入 %s 的游戏数据（宿主没接说明页，只记日志）\n", game_id ? game_id : ""); }
+
+// iCloud 存档同步：宿主（ios/save_transfer.m）有强定义时用它；本包单独编时不同步
+__attribute__((weak)) char *s2a_shell_save_context(void) { return NULL; }
+__attribute__((weak)) char *s2a_shell_save_request(const char *json) { (void)json; return NULL; }

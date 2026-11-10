@@ -23,8 +23,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from core import Failure, atomic, contained
+from core import Failure, atomic, contained, read
 from errors import recovery
+import layout
 
 
 def profile_teams(env=None):
@@ -115,12 +116,19 @@ def keychain_teams(env=None):
     return out
 
 
+PREFS_UNREADABLE = "S2ArmPrefsUnreadable"
+
+
 def _xcode_prefs(env):
     p = subprocess.run(["defaults", "export", "com.apple.dt.Xcode", "-"], capture_output=True, env=env, timeout=20)
-    try:
-        return plistlib.loads(p.stdout) if p.returncode == 0 else {}
-    except Exception:
+    if p.returncode:
         return {}
+    # 第三方 Xcode 扩展的快捷键键名可能带控制字符（如 ESC），defaults 原样导出，XML 不允许，解析会失败：先去掉（#144）
+    text = re.sub(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]", b"", p.stdout)
+    try:
+        return plistlib.loads(text)
+    except Exception:
+        return {PREFS_UNREADABLE: True}
 
 
 def signing_summary(env=None):
@@ -134,7 +142,7 @@ def signing_summary(env=None):
         prefs, version = {}, []
     accounts = prefs.get("DVTDeveloperAccountManagerAppleIDLists") or {}
     count = sum(len(xs) for xs in accounts.values() if isinstance(xs, list)) if isinstance(accounts, dict) else 0
-    return (f"{version[0] if version else 'Xcode 未知'}；账号 {count} 个；团队缓存键{'有' if 'IDEProvisioningTeamByIdentifier' in prefs else '无'}；"
+    return (f"{version[0] if version else 'Xcode 未知'}；账号 {count} 个；团队缓存键{'读不了偏好' if PREFS_UNREADABLE in prefs else '有' if 'IDEProvisioningTeamByIdentifier' in prefs else '无'}；"
             f"可用团队 {len(xcode_account(env)[1])} 个；开发证书 {len(development_identities(env))} 张")
 
 
@@ -217,11 +225,24 @@ def pick_team(teams, want=None):
 #   包名固定 io.s2arm.games.<团队号小写>：本来就按团队分（不会被别的团队占），不用 NX2Apple 那样「缺省包名被占 → 团队变体 → 落盘沿用」；
 #     加款 / 换款都是同一个包名覆盖安装（不卸载，Documents 保留），一个团队只占一个 App ID（免费账号 7 天 10 个的额度）。换团队 = 换包名 = 新沙盒，旧存档要迁
 #   设备侧每款文档根 Documents/games/<游戏号>（资源包 / 存档 / 直连见过的键都在它下面），起这一款的启动上下文 @bundle/Games/<游戏号>/launch.ctx——与 ship_ext 容器布局同口径
-CONTAINER_DIR = "container"   # 游戏库 iPhone/container/：S2Arm.app（下次加款的底子）+ S2Arm.ipa
 
 
 def container_bundle_id(team):
-    return f"io.s2arm.games.{team.lower()}"
+    """S2A_CONTAINER_SUFFIX（开发用：同一台手机上同时装几份测试包）：包名加后缀 io.s2arm.games.<团队>.<后缀>，几份并存互不覆盖；
+    只收小写字母 / 数字 / 连字符，不设时与玩家完全一样。付费团队没有免费账号每周 10 个包名的限制"""
+    suffix = re.sub(r"[^a-z0-9-]", "", os.environ.get("S2A_CONTAINER_SUFFIX", "").lower())[:40]
+    return f"io.s2arm.games.{team.lower()}" + (f".{suffix}" if suffix else "")
+
+
+def container_display_name(app):
+    """S2A_CONTAINER_NAME（开发用，与 S2A_CONTAINER_SUFFIX 配套）：主屏显示名，连各语言 InfoPlist.strings 里的一起换；不设时不动"""
+    name = os.environ.get("S2A_CONTAINER_NAME", "").strip()
+    if not name:
+        return None
+    for strings in Path(app).glob("*.lproj/InfoPlist.strings"):
+        text = strings.read_text(encoding="utf-8", errors="replace")
+        strings.write_text(re.sub(r'"CFBundleDisplayName"\s*=\s*".*?";', '"CFBundleDisplayName" = "%s";' % name.replace('"', ''), text), encoding="utf-8")
+    return name
 
 
 def game_docs(gid):
@@ -232,15 +253,169 @@ def game_ctx(gid):
     return f"@bundle/Games/{gid.upper()}/launch.ctx"
 
 
+S_NO_USB = "这台 Mac 的 USB 上没看到 iPhone / iPad：换一根能传数据的线（充电线不行）、换个接口直连 Mac，并解锁手机。"
+S_NOT_LISTED = "这台 Mac 看到手机插着，但设备服务还没列出它：解锁手机，在弹出的框里点「信任」；还不行就拔掉重插一次。"
+S_MANY_WIRED = "连着不止一台 iPhone / iPad：只留要装的那一台。"
+S_MANY_NETWORK = "同一网络上有多台配对过的 iPhone / iPad：用数据线连上要装的那一台。"
+S_STALE_CHOICE = "之前选的设备「{0}」现在不在，可选：{1}。用数据线只连要装的那一台再试。"
+S_TRUST = "在 iPhone 上点「信任」，再输入手机的锁屏密码。"
+S_DEV_MODE = "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。"
+S_TUNNEL = "和手机建立开发连接失败：解锁手机后再试；走无线的话换成数据线。"
+S_DDI = "手机的开发者服务没准备好：解锁手机后再试；还不行就重启手机。"
+PREPARE_COOLDOWN = 30   # 清单几秒问一次：配对框、更新映像这类有动静的步骤隔一会儿才重试
+
+
+def _link(d):
+    return d.get("connectionProperties", {})
+
+
+def _mask(value):
+    return f"{value[:4]}…{value[-2:]}" if len(value or "") > 8 else "…"
+
+
+def _clean(text):
+    """诊断里的 devicectl 原文：设备序列号、UUID 不进诊断包"""
+    return re.sub(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4,16}(?:-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})?\b", "…", str(text or ""))
+
+
+def _with_raw(sentence, raw):
+    """定句走翻译，原文另起一行照原样显示"""
+    tail = _clean(raw).strip().splitlines()
+    return sentence + ("\n" + tail[-1] if tail else "")
+
+
+def _pick_device(devices, want):
+    """要装的那台：返回 (设备, 连接环节的问题)。旧选择对不上时不算没连：只有一台就用它，多台列出来让玩家选"""
+    phones = [d for d in devices if d.get("hardwareProperties", {}).get("reality") == "physical" and d.get("hardwareProperties", {}).get("platform") in ("iOS", "iPadOS")]
+    live = [d for d in phones if _link(d).get("transportType") in ("wired", "localNetwork") or _link(d).get("tunnelState") == "connected"]
+    if want:
+        def named(d):
+            return want in (d.get("identifier"), d.get("hardwareProperties", {}).get("udid"), (d.get("deviceProperties", {}).get("name") or "").strip())
+        chosen = [d for d in live if named(d)]
+        if chosen:
+            live = chosen
+        elif len(pool := [d for d in live if _link(d).get("transportType") == "wired"] or live) > 1:   # 有线优先，同网配对过的不列
+            return None, S_STALE_CHOICE.replace("{0}", want).replace("{1}", "、".join(dict.fromkeys((d.get("deviceProperties", {}).get("name") or "").strip() for d in pool)))
+    wired = [d for d in live if _link(d).get("transportType") == "wired"]
+    if len(wired) > 1:
+        return None, S_MANY_WIRED
+    if not wired and len(live) > 1:
+        return None, S_MANY_NETWORK
+    if wired or live:
+        return (wired or live)[0], ""
+    return None, ""
+
+
+def _cooled(c, device, step, polling):
+    """清单轮询时同一步隔 PREPARE_COOLDOWN 秒才再做一次；真正装机时总是做"""
+    if not polling:
+        return True
+    path = c.private / "device-prepare.json"
+    try:
+        marks = json.loads(path.read_text())
+    except (OSError, ValueError):
+        marks = {}
+    key = f"{device.get('identifier')}:{step}"
+    if time.time() - marks.get(key, 0) < PREPARE_COOLDOWN:
+        return False
+    marks[key] = time.time()
+    atomic(path, marks)
+    return True
+
+
+def device_link(c, want="", polling=False):
+    """读设备并把它准备到能装（玩家不用打开 Xcode）：配对 → 开发者模式 → 拉起隧道和开发者服务 → 必要时更新开发者磁盘映像。
+    返回 {device, stage, problem, trace}：stage 是没过的环节（connected / trusted / developerMode / prepare，全过为空）；polling = 装机前清单轮询。"""
+    import target
+    from diag import devicectl
+    trace, limits = [], (30, 20, 120) if polling else (120, 60, 240)
+    def note(step, rc, raw): trace.append(dict(step=step, rc=rc, raw=_clean(raw)[-1500:]))
+    def say(text):
+        if not polling: c.emit("progress", text)
+    def read():
+        devices, why, rc, raw = target.device_list(c, timeout=30 if polling else 60)
+        note("list devices", rc, raw)
+        return devices, why
+    def step(name, *args, timeout):
+        try:
+            rc, _, raw = devicectl(c, *args, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            rc, raw = "timeout", f"超过 {timeout} 秒"
+        except OSError as e:
+            rc, raw = "oserror", str(e)
+        note(name, rc, raw)
+        return rc, raw
+    def out(device, stage, problem, devices=()):
+        return dict(device=device, stage=stage, problem=problem, trace=trace, devices=list(devices))
+    def again(dev):
+        devices, why = read()
+        fresh = next((d for d in devices if d.get("identifier") == dev.get("identifier")), None)
+        return devices, why, fresh
+    devices, why = read()
+    if why:
+        return out(None, "connected", why)
+    dev, problem = _pick_device(devices, want)
+    if problem:
+        return out(None, "connected", problem, devices)
+    if dev is None:
+        usb = target.usb_idevices()
+        note("usb", 0, "、".join(usb) or "没有 iPhone / iPad")
+        return out(None, "connected", S_NOT_LISTED if usb else S_NO_USB, devices)
+    if _link(dev).get("pairingState") != "paired":
+        raw = ""
+        if _cooled(c, dev, "pair", polling):
+            say("正在请手机信任这台 Mac")
+            _, raw = step("manage pair", "manage", "pair", "--device", dev["identifier"], timeout=limits[0])
+            devices, why, fresh = again(dev)
+            dev = fresh or dev
+        if _link(dev).get("pairingState") != "paired":
+            return out(dev, "trusted", _with_raw(S_TRUST, raw), devices)
+    if dev.get("deviceProperties", {}).get("developerModeStatus") not in ("enabled", None):
+        return out(dev, "developerMode", S_DEV_MODE, devices)
+    def services_ready(d):
+        return d.get("deviceProperties", {}).get("ddiServicesAvailable") is not False
+    if _link(dev).get("tunnelState") != "connected" or not services_ready(dev):
+        say("正在和手机建立开发连接")
+        rc, raw = step("device info details", "device", "info", "details", "--device", dev["identifier"], timeout=limits[1])
+        if rc != 0:
+            return out(dev, "prepare", _with_raw(S_TUNNEL, raw), devices)
+        devices, why, fresh = again(dev)
+        dev = fresh or dev
+        if not services_ready(dev):
+            raw = ""
+            if _cooled(c, dev, "ddi", polling):
+                say("正在准备手机的开发者服务")
+                _, raw = step("manage ddis update", "manage", "ddis", "update", timeout=limits[2])
+                _, raw2 = step("device info details", "device", "info", "details", "--device", dev["identifier"], timeout=limits[1])
+                raw = raw2 or raw
+                devices, why, fresh = again(dev)
+                dev = fresh or dev
+            if not services_ready(dev):
+                return out(dev, "prepare", _with_raw(S_DDI, raw), devices)
+    return out(dev, "", "", devices)
+
+
+def _write_link_report(c, link):
+    """失败时写进诊断包（日志目录 core.logs_root）：每步退出码和原文、每台设备的连接状态；序列号打码，不写设备名"""
+    lines = ["# 设备连接诊断"]
+    lines += [f"{t['step']}: rc={t['rc']} {t['raw']}" for t in link["trace"]]
+    for d in link["devices"]:
+        h, p, cp = d.get("hardwareProperties", {}), d.get("deviceProperties", {}), _link(d)
+        lines.append(f"device {_mask(h.get('udid') or d.get('identifier') or '')} {h.get('productType')} reality={h.get('reality')} transport={cp.get('transportType')} pairing={cp.get('pairingState')} "
+                     f"tunnel={cp.get('tunnelState')} boot={p.get('bootState')} developerMode={p.get('developerModeStatus')} ddi={p.get('ddiServicesAvailable')}")
+    lines.append(f"结论: stage={link['stage']} {link['problem']}")
+    target = c.logs / f"{c.task}-device.log"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def phone(c):
     import target
-    want = (c.r.get("device") or "").strip()
-    ds = target.cable_first([d for d in target.connected(c, with_link=True) if not want or want in (d["id"], d["name"])])
-    if not ds:
-        raise Failure("没连 iPhone：用数据线连上并解锁，在手机上点「信任」；第一次还要在「设置 → 隐私与安全性 → 开发者模式」打开开发者模式。", code="device_not_connected")
-    if len(ds) > 1:
-        raise Failure("连着不止一台 iPhone / iPad：只留要装的那一台再试。", code="device_not_connected")
-    return ds[0]
+    link = device_link(c, (c.r.get("device") or "").strip())
+    if link["problem"]:
+        _write_link_report(c, link)
+        raise Failure(link["problem"], code="device_not_connected" if link["stage"] == "connected" else "device_not_ready")
+    return target._row(link["device"], c.env()["DEVELOPER_DIR"], with_link=True)
 
 
 def udid_of(c, ident):
@@ -280,7 +455,18 @@ def usb_mbps(udid, env=None):
 SIGN_ERRORS = (
     (r"等钥匙串授权超时", "keychain_prompt"),   # pack/ensure_profile.sh：第一次签名的钥匙串框没人点（11-08 Spare-host 实测）
     (r"needs to be unlocked|device is locked|Unlock the device", "device_locked"),   # 10-26 测试设备2 锁屏：xcodebuild 等不到目的设备超时
-    (r"maximum number of (?:installed )?(?:apps|App IDs)|App ID limit|(?:maximum|limit)[^\n]{0,100}free development profiles", "free_app_limit"),
+    # 免费 Apple ID 有两个不同的上限，原文措辞能分开，办法也不同：
+    #   ① 包名（App ID）额度：签名前向 Apple 注册包名时被拒，Apple 错误 9120，Xcode 原文
+    #      「Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.」——
+    #      说的是「App ID」，按 7 天窗口计，删 App 不退额度 → free_appid_limit；
+    #   ② 设备同时装 3 个自签 App：签名已过、装机（devicectl / 系统安装服务）时设备拒收，原文
+    #      「This device has reached the maximum number of installed apps using a free developer profile」（iOS 27）、
+    #      「The maximum number of apps for free development profiles has been reached」（较早 iOS / Xcode）——
+    #      说的是「apps」装在这台设备上，删一个就能装 → free_app_limit。
+    # 两条正则互不相交：①只认「App ID(s)」字样或带 error / code 前缀的 9120，②的「apps」后面不跟「ID」；
+    # ①仍排在前面，万一一行里两种字样都有，按删 App 无效的那件事报，免得玩家白删。
+    (r"App ID limit|\b10 App IDs\b|maximum number of App IDs|(?:error|code)\D{0,20}\b9120\b", "free_appid_limit"),
+    (r"maximum number of (?:installed )?apps\b|(?:maximum|limit)[^\n]{0,100}free development profiles", "free_app_limit"),
     (r"Developer\s*Mode\s*(?:is\s*)?(?:disabled|not enabled|required)|DeveloperModeDisabled", "developer_mode_required"),
     (r"pairing (?:record|relationship)[^\n]{0,80}(?:invalid|missing|expired)|not paired|pair (?:the )?device again|InvalidHostID", "device_pairing_required"),
     (r"provisioning profile[^\n]{0,100}(?:has expired|is expired|expired on)|expired provisioning profile", "provisioning_expired"),
@@ -296,15 +482,28 @@ def classify(text, default="signing_failed"):
     return default
 
 
-def latest_ipa(c, gid):
-    out = c.library / "iPhone" / gid
-    ipas = sorted(out.glob("*.ipa"), key=lambda p: p.stat().st_mtime) if out.is_dir() else []
-    if not ipas:
+def ios_pack(c, gid):
+    """这款的资源包（image/ios/pack）；还没出 iPhone 版 / 没有资源包就不装、不报成功（审计 18:00 P1-58：原先照装、启动器写死「资源包也拷好了」，打开游戏才进缺资源页）"""
+    if not (layout.ios_kit(c, gid) / "main.npdm").is_file():
         raise Failure("这款游戏还没出 iPhone 包：先点「打 iPhone 包」。", code="job_failed")
-    pack = next((p for p in sorted(out.iterdir()) if p.is_dir() and p.name.endswith("资源包")), None)
-    if pack is None:   # 没有资源包就不装、不报成功（审计 18:00 P1-58：原先照装、启动器写死「资源包也拷好了」，打开游戏才进缺资源页）
-        raise Failure(f"没找到这款的资源包目录（{out} 下以「资源包」结尾的文件夹），没有装。请重新「打 iPhone 包」后再装。", code="pack_missing")
-    return ipas[-1], pack
+    pack = layout.ios_pack(c, gid)
+    if not (pack / "manifest.json").is_file():
+        raise Failure(f"没找到这款的资源包（{pack}），没有装。请重新「打 iPhone 包」后再装。", code="pack_missing")
+    return pack
+
+
+def pack_id(pack):
+    return read(Path(pack) / "manifest.json", {}).get("index_sha256") or ""
+
+
+PUSHING = "正在传输资源"   # 推送阶段的进度消息（定文案，两端前端按它本地化；数字走 done / total / unit）
+
+
+def push_progress(c, done, total, step, steps):
+    """推资源包的作业计数（Mac 解析 push_pack 的机器读行、Windows 直接回调，同一出口）：done / total 字节，unit = B；前端据此画百分比、速度、剩余时间。
+    没有要推的（total = 0）不发计数，免得画出 0/0；传完（done = total）也只是「传完」，之后的机上解包另有「机上解包 k/n」计数，最终成功仍以解包确认为准"""
+    if total > 0:
+        c.emit(message=PUSHING, done=done, total=total, unit="B")
 
 
 def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None):
@@ -320,16 +519,20 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None):
         raise Failure(f"资源包缺清单或清单没有 index_sha256（{pack}）：请重新打 iPhone 包。", code="job_failed")
     got = {}
     def line(text):
+        m = re.match(r"S2A_PUSH_PROGRESS (\d+) (\d+) (\d+) (\d+)$", text.strip())   # tools/push_pack.py --progress-lines：每推完一批的已传 / 本次待传总字节（#266）
+        if m:
+            push_progress(c, *map(int, m.groups()))
+            return
         m = re.search(r"推 (\d+) 个文件 (\d+) MB", text)
         if m: got.update(files=int(m.group(1)), mb=int(m.group(2)))
         m = re.search(r"机上解包 (\d+)/(\d+)", text)   # tools/push_pack.py apply 每解完一包打一行：启动器显示「机上解包 13/17」
         if m: c.emit(message=f"机上解包 {m.group(1)}/{m.group(2)}", done=int(m.group(1)), total=int(m.group(2)), unit="包")
     env = dict(c.env(), S2A_DEVICECTL=str(diag.COREDEVICE / "Resources/bin/devicectl"))
     if udid: env["S2A_PUSH_UDID"] = udid   # 有 UDID + App 内置 s2a-devpush（S2A_PREBUILT_TOOLS/devpush）→ 每批流式写手机，否则退回 devicectl（11-06）
-    log = c.private / "logs" / (c.task + "-push" + (f"-{docs.rsplit('/', 1)[-1]}" if docs else "") + ".log")
+    log = c.logs / (c.task + "-push" + (f"-{docs.rsplit('/', 1)[-1]}" if docs else "") + ".log")
     extra = (["--docs", docs] if docs else []) + (["--launch-ctx", ctx] if ctx else [])
     try:
-        c.run([sys.executable, "-B", c.engine / "tools/push_pack.py", "run", ident, bid, pack, "--via", "devicectl", "--apply", *extra], log, env=env, on_line=line)
+        c.run([sys.executable, "-B", c.engine / "tools/push_pack.py", "run", ident, bid, pack, "--via", "devicectl", "--apply", "--progress-lines", *extra], log, env=env, on_line=line)
     except Failure as e:
         if e.code != "tool_exit":
             raise
@@ -337,9 +540,10 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None):
         m = re.search(r"资源包推进去了，但(机上解包 \d+ 秒没有新进展[^：\n]*|起 App 后 \d+ 秒机上解包没有开始)", text)   # tools/push_pack.py apply：按进度判停住（11-07）
         if m:
             raise Failure(f"资源包推进去了，但{m.group(1)}：请打开这款游戏，保持在前台等它导入完，会自动进入游戏。", code="job_failed") from e
-        m = re.search(r"起 App 失败：([^\n]*)", text)
+        m = re.search(r"资源包已传完，还差最后一步：[^\n]*", text)   # tools/push_pack.py NeedsPlayer：电脑拉不起 App，传输本身成功（#192）
         if m:
-            raise Failure("起 App 解开资源包失败：" + m.group(1).strip()[:200], code="job_failed") from e
+            c.diagnostic(m.group(0), code="manual_unpack_required", severity="warning")
+            return got.get("files", 0), got.get("mb", 0) << 20
         from errors import tool_reason
         raise Failure("资源包推不进 iPhone：" + tool_reason(log), code="resource_transfer_failed") from e
     return got.get("files", 0), got.get("mb", 0) << 20
@@ -350,7 +554,7 @@ def pull_seen(c, ident, bid, gid, tag, docs="Documents"):
     下次打包按它重算两段式热键（hotset.py）；第一次装 / 没开过直连 / 拉不到都不算错。设备上是追加写：拉回的是已有那份的续写就覆盖，
     否则（换包后机上重新记了）另存一份，多份由 hotset.rank 合并去重"""
     from diag import devicectl
-    dest = c.library / "games" / gid / "seen" / (re.sub(r"[^0-9A-Za-z-]", "", tag) + ".tsv")
+    dest = layout.path(c, gid, "seen", re.sub(r"[^0-9A-Za-z-]", "", tag) + ".tsv")
     with tempfile.TemporaryDirectory(dir=c.private) as d:
         rc, _, _ = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
                              "--source", f"{docs}/wire/{gid.upper()}/pso_user.tsv", "--destination", f"{d}/s", timeout=120)
@@ -408,7 +612,7 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
         return None
     if not files:
         return None
-    dest = c.library / "games" / gid / "save_backup" / time.strftime("%Y%m%d-%H%M%S")
+    dest = layout.path(c, gid, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
     for rel in files:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         rc, _, err = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
@@ -426,39 +630,28 @@ def readiness(c):
     gid = c.r.get("gameId") or ""
     if os.name == "nt":
         return readiness_windows(c, gid)
-    from diag import devicectl
     items = []
     ipa_path = ""
     def item(key, ok, title, detail, who="human", waiting=False):
         wait = waiting and not ok
         items.append(dict(id=key, ok=bool(ok), waiting=wait, blocking=key == "package" and not ok, title=title, detail="" if ok or wait else detail, who=who))   # 等前一步的不给说明，免得 AI 拿去催玩家
     try:
-        ipa_path = str(latest_ipa(c, gid)[0])
+        ipa_path = str(ios_pack(c, gid).parent)
         item("package", True, "这款游戏的 iPhone 版已经做好", "")
     except Failure:
         item("package", False, "这款游戏的 iPhone 版已经做好", "还没做好：先做 iPhone 版，做好后这里自动打勾。", who="app")
     teams = xcode_teams(c.env())
     team = (pick_team(teams) if teams else None)
     item("appleId", team, "已登录 Apple ID", "" if team else (TEAM_PENDING if xcode_account(c.env())[0] else ACCOUNT_NONE))
-    try:
-        rc, data, _ = devicectl(c, "list", "devices", timeout=30)
-    except (subprocess.TimeoutExpired, OSError):
-        rc, data = 1, {}
-    ds = [d for d in data.get("result", {}).get("devices", []) if rc == 0
-          and d.get("hardwareProperties", {}).get("reality") == "physical" and d.get("hardwareProperties", {}).get("platform") in ("iOS", "iPadOS")
-          and (d.get("connectionProperties", {}).get("transportType") == "wired" or d.get("connectionProperties", {}).get("tunnelState") == "connected")]
-    ds = [d for d in ds if d.get("connectionProperties", {}).get("transportType") == "wired"] or ds   # 有线连着的优先，同网配对的其他手机不算「连了两台」（同 target.cable_first）
-    name = (ds[0].get("deviceProperties", {}).get("name") or "").strip() if len(ds) == 1 else ""
-    if len(ds) > 1:
-        item("connected", False, "iPhone 已用数据线连上", "连着不止一台 iPhone / iPad：只留要装的那一台。")
-    else:
-        item("connected", ds, "iPhone 已用数据线连上", "用数据线把 iPhone 连到这台 Mac，并解锁手机。")
-    one = ds[0] if len(ds) == 1 else None
-    paired = bool(one) and one.get("connectionProperties", {}).get("pairingState") == "paired"
-    item("trusted", paired, "iPhone 已信任这台 Mac", "在 iPhone 上点「信任」，再输入手机的锁屏密码。", waiting=not one)
-    dev_mode = paired and one.get("deviceProperties", {}).get("developerModeStatus") == "enabled"
-    item("developerMode", dev_mode, "iPhone 已打开开发者模式",
-         "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。", waiting=not paired)
+    link = device_link(c, (c.r.get("device") or "").strip(), polling=True)
+    one, stage = link["device"], link["stage"]
+    name = (one.get("deviceProperties", {}).get("name") or "").strip() if one else ""
+    item("connected", one, "iPhone 已用数据线连上", link["problem"] if stage == "connected" else "")
+    paired = bool(one) and stage != "trusted"
+    item("trusted", paired, "iPhone 已信任这台 Mac", link["problem"] if stage == "trusted" else S_TRUST, waiting=not one)
+    dev_mode = paired and stage != "developerMode"
+    item("developerMode", dev_mode, "iPhone 已打开开发者模式", S_DEV_MODE, waiting=not paired)
+    item("deviceReady", dev_mode and stage == "", "iPhone 已准备好安装", link["problem"] if stage == "prepare" else "", who="app", waiting=not dev_mode)
     return dict(gameId=gid, items=items, ready=not any(i["blocking"] for i in items), device=name, account=(team["name"] or team["id"]) if team else "", ipaPath=ipa_path, signing=signing_summary(c.env()))
 
 
@@ -505,7 +698,7 @@ def sign_and_install(c, ipa, team, dev, udid, bid, games, steps=True):
     按各款文档根 Documents/games/<游戏号> 拉跑局知识与存档备份 → devicectl 覆盖装（不卸载，Documents 保留）"""
     ents = c.engine / "pack/app.entitlements"
     stage = Path(tempfile.mkdtemp(prefix="s2a-install-", dir=c.private))
-    log = c.private / "logs" / (c.task + "-install.log")
+    log = c.logs / (c.task + "-install.log")
     try:
         # ditto 解：保留可执行位与符号链接（zipfile 会丢，codesign / 安装都要）
         r = subprocess.run(["/usr/bin/ditto", "-x", "-k", str(ipa), str(stage)], capture_output=True, text=True)
@@ -514,6 +707,9 @@ def sign_and_install(c, ipa, team, dev, udid, bid, games, steps=True):
             raise Failure("解不开 iPhone 包：" + (r.stderr.strip()[-200:] or str(ipa)), code="job_failed")
         info = app / "Info.plist"
         pl = plistlib.loads(info.read_bytes()); pl["CFBundleIdentifier"] = bid
+        shown = container_display_name(app)
+        if shown:
+            pl["CFBundleDisplayName"] = shown
         info.write_bytes(plistlib.dumps(pl))
         check_shell_sdk(c, app, dev)
         if steps: c.begin("申请开发描述文件（第一次要几十秒）", 3, 6)
@@ -584,7 +780,7 @@ def readiness_windows(c, gid):
                           url=None if ok else url,   # 玩家自装件的官方下载页（同环境检查 winenv 的 url 字段）：启动器渲染成「打开官方下载页」，不从说明文字里抠链接
                           action=None if ok else action))   # 启动器本地动作（openImpactor：打开随包的 Impactor）；只认枚举，不传路径
     try:
-        ipa_path = str(latest_ipa(c, gid)[0])
+        ipa_path = str(ios_pack(c, gid).parent)
         item("package", True, "这款游戏的 iPhone 版已经做好", "")
     except Failure:
         item("package", False, "这款游戏的 iPhone 版已经做好", "还没做好：先做 iPhone 版，做好后这里自动打勾。", who="app")
@@ -608,19 +804,6 @@ def readiness_windows(c, gid):
     return dict(gameId=gid, items=items, ready=not any(i["blocking"] for i in items), device=udids[0] if len(udids) == 1 else "", account="", ipaPath=ipa_path)
 
 
-def latest_container(c):
-    """游戏库里组装好的容器 → (ipa, 各款游戏号)（目录清单 s2a_catalogue.json 的顺序）"""
-    out = c.library / "iPhone" / CONTAINER_DIR
-    ipa, cat = out / "S2Arm.ipa", out / "S2Arm.app" / "s2a_catalogue.json"
-    if not ipa.is_file() or not cat.is_file():
-        raise Failure("这台电脑还没往 iPhone 装过游戏。", code="job_failed")
-    try:
-        games = [g["title_id"] for g in json.loads(cat.read_text(encoding="utf-8"))["games"]]
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise Failure(f"容器的目录清单读不了（{cat}）：请重新装一次。", code="job_failed") from e
-    return ipa, games
-
-
 def devpush_client(c, udid, bid, work):
     """s2a-devpush（house_arrest + AFC）：两端都随发版带，devicectl 没有的「删容器里的目录」「整目录拉回」走它"""
     sys.path.insert(0, str(c.engine / "tools"))
@@ -641,6 +824,7 @@ class MacPhone:
         self.dev = dev or phone(c)
         self.udid = udid if udid is not None else udid_of(c, self.dev["id"])
         self.bid = container_bundle_id(self.team["id"])
+        self.key = self.udid or self.dev["id"]   # devices/<设备>.json 的键
         self.info = dict(device=self.dev["name"], team=self.team["name"], free=self.team["free"])
 
     def backup(self, g):
@@ -665,13 +849,13 @@ class MacPhone:
 
 
 class WinPhone:
-    """Windows：Impactor 同版 plumesign 签名装机（包名由它按账号定、装完才知道，记在容器目录下 bundle.txt 供下次覆盖前备份）+ s2a-devpush 备份 / 推 / 删"""
+    """Windows：Impactor 同版 plumesign 签名装机（包名由它按账号定、装完才知道，记在这台的设备记录 devices/<设备>.json 的 bundleId，供下次覆盖前备份）+ s2a-devpush 备份 / 推 / 删"""
 
     def __init__(self, c):
         self.c, self.W = c, win_install_mod(c)
         self.udid = win_udid(c, self.W)
-        self.record = c.library / "iPhone" / CONTAINER_DIR / "bundle.txt"
-        self.bid = self.record.read_text(encoding="utf-8").strip() if self.record.is_file() else None
+        self.key = self.udid
+        self.bid = layout.load_device(c, self.key).get("bundleId") or None
         self.devpush = c.engine / "Binaries/Prepare/devpush/s2a-devpush.exe"
         self.info = dict(device=self.udid)
 
@@ -682,7 +866,7 @@ class WinPhone:
         """覆盖装前备份本款存档（同 Mac backup_saves 口径：拉失败就停装）。还没装过（没记录包名 / 机上没这个 App）= 没有存档"""
         if not self.bid:
             return None
-        dest = self.c.library / "games" / g / "save_backup" / time.strftime("%Y%m%d-%H%M%S")
+        dest = layout.path(self.c, g, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
         with tempfile.TemporaryDirectory(dir=self.c.private) as w:
             ok, out = self.client(w).get_tree(f"{game_docs(g)}/{SAVE_REL}", dest)
         if not ok and "取不到" not in out:   # 取不到 = 这个包名的 App 不在机上（s2a-devpush vend_container 的报错）
@@ -694,14 +878,21 @@ class WinPhone:
             self.backup(g)
         if steps: self.c.begin("签名并装到 iPhone（Impactor 官方命令行 plumesign）", 3, 6)
         b = self.W.impactor.bundled(self.c.r.get("resources")) or {}   # 发版启动器随包的 plumesign（11-07）；源码树没有 → install_win 照旧找
-        log = self.c.private / "logs" / (self.c.task + "-install.log")
+        log = self.c.logs / (self.c.task + "-install.log")
         self.c.last_log = log
         ns = argparse.Namespace(ipa=str(ipa), udid=self.udid, name=None, plumesign=b.get("plumesign"), log=str(log))
         try:
             self.bid = self.W.install_app(ns, say=lambda m: self.c.emit("message", m))
         except self.W.Fail as e:
-            raise Failure(str(e), code=e.err or "device_install_failed") from e
-        self.record.write_text(self.bid, encoding="utf-8")
+            # 有对应处理建议的码（free_appid_limit = Apple 9120 等）：上屏说人话的原因与办法，plumesign 英文原文只进诊断（Windows 实机：
+            #   原先整句英文「Developer API error 9120 …」直接上屏，玩家只看到签名失败）；没有专门建议的照旧上屏原文
+            code = e.err or "device_install_failed"
+            from errors import RECOVERY
+            if code in RECOVERY and code not in ("device_install_failed", "job_failed"):
+                raise Failure("签名装机没成：" + RECOVERY[code], code=code, internal=str(e)) from e
+            raise Failure(str(e), code=code) from e
+        rec = layout.load_device(self.c, self.key)
+        layout.save_device(self.c, self.key, dict(rec, bundleId=self.bid))
 
     def before_push(self, packs):
         pass
@@ -709,8 +900,12 @@ class WinPhone:
     def push(self, g, pack):
         try:
             return self.W.push_pack(self.udid, self.bid, str(pack), str(self.devpush) if self.devpush.is_file() else None,
-                                    say=lambda m: self.c.emit("message", m), docs=game_docs(g), ctx=game_ctx(g), apply_after=True)
+                                    say=lambda m: self.c.emit("message", m), docs=game_docs(g), ctx=game_ctx(g), apply_after=True,
+                                    progress=lambda d, t, k, n: push_progress(self.c, d, t, k, n))
         except self.W.Fail as e:
+            if e.err == "manual_unpack_required":
+                self.c.diagnostic(str(e), code=e.err, severity="warning")
+                return e.transferred
             raise Failure(str(e), code=e.err or "resource_transfer_failed") from e
 
     def purge(self, g):
@@ -723,55 +918,102 @@ def phone_for(c):
 
 
 def put_game(c, gid, ph, steps=True):
-    """把这款放进容器并装到手机：组装（已有各款原样带过来）→ 覆盖装 → 只推本次组装的款的资源包（其余款的数据和存档不动）"""
+    """把这款放进容器并装到手机：现组容器（这款 + 这台手机上已有的各款，ipa.assemble）→ 覆盖装 → 推资源包：这款照推，
+    别的款只推「游戏库里的资源包比手机上记的新」的（重新打过 iPhone 包、还没装到这台的），没变的不推（数据和存档不动）。
+    装上后记进 devices/<设备>.json，装机产物放默认位置根 S2Arm.ipa（换了壳的话原来那份留作 S2Arm.previous.ipa）"""
     import ipa as packer
-    latest_ipa(c, gid)   # 这款没有资源包就不组装、不装
+    gid = gid.upper()
+    ios_pack(c, gid)   # 这款没有资源包就不组装、不装
+    rec = layout.load_device(c, ph.key)
+    others = [g for g in rec.get("games", {}) if g != gid]
     if steps: c.begin("把这款放进手机上的 S2Arm", 2, 6)
-    ipa, games, fresh = packer.assemble(c, gid)
-    packs = {g: latest_ipa(c, g)[1] for g in fresh}   # 本次组装的每款都要有资源包，缺一款就不装（不装半套）
+    ipa, games, sid = packer.assemble(c, gid, others, failed=rec.get("failedShells", []))
+    packs = {g: ios_pack(c, g) for g in games}   # 每款都要有资源包，缺一款就不装（不装半套）
+    stale = [g for g in games if g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack")]
     ph.install(ipa, games, steps=steps)
-    ph.before_push(packs)
+    ph.before_push({g: packs[g] for g in stale})
     if steps: c.begin("把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）", 6, 6)
     files = size = 0
-    for g in fresh:
-        f, n = ph.push(g, packs[g])
-        files += f; size += n
-    if "free" in ph.info:   # 记下这次签名（游戏库页的「还有几天到期 / 续签」读 games/<id>/ios-install.json）：免费账号的描述文件 7 天到期，容器里每款同一次签名
-        for g in games:
-            record = contained(c.library, c.library / "games" / g / "ios-install.json")
-            record.parent.mkdir(parents=True, exist_ok=True)
-            atomic(record, dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"]))
-    return dict(outputPath=str(ipa.parent), bundleId=ph.bid, games=games, packFiles=files, packBytes=size, **ph.info)
+    pushed = dict((g, (rec["games"].get(g) or {}).get("pack", "")) for g in games)
+    try:
+        for g in stale:
+            f, n = ph.push(g, packs[g])
+            files += f; size += n
+            pushed[g] = pack_id(packs[g])
+    finally:   # 推到一半失败：已推好的记下，没推的下次照推
+        rec = layout.load_device(c, ph.key)
+        # signed：这次签名（游戏库页的「还有几天到期 / 续签」读 layout.install_record）：免费账号的描述文件 7 天到期，容器里每款同一次签名
+        signed = dict(signed=dict(at=time.time(), free=bool(ph.info["free"]), device=ph.info["device"])) if "free" in ph.info else {}
+        layout.save_device(c, ph.key, dict(rec, games={g: dict(pack=pushed[g]) for g in games}, shellId=sid, bundleId=ph.bid or rec.get("bundleId", ""), at=time.time(), **signed))
+    packer.commit_phone_ipa(c, ipa, sid)
+    return dict(outputPath=str(layout.phone_ipa(c)), bundleId=ph.bid, games=games, packFiles=files, packBytes=size, **ph.info)
 
 
 def install(c):
     """默认「装到 iPhone」：这款进容器（一个 App 装下整个游戏库，免费账号也只占 1 个 App 额度）。加款 = 同一个包名覆盖安装，Documents 保留"""
     gid = c.r.get("gameId") or ""
-    latest_ipa(c, gid)
+    ios_pack(c, gid)
     c.begin("找签名账号与 iPhone", 1, 6)
     return put_game(c, gid, phone_for(c))
 
 
+def restore_previous(c):
+    """装回换壳前的那一版手机 S2Arm（默认位置根 S2Arm.previous.ipa）：新运行层在手机上不好用时的回滚。
+    装上后现行与上一版对调（再点一次 = 换回来）；被换下的壳号记进这台的 failedShells，之后给这台装机不再把旧款只换宿主带进它（要按新版重出）。
+    手机 Documents 里的资源包和存档不动；换宿主之后才新装的游戏不在上一版里，App 里暂时看不到（数据还在）"""
+    import ipa as packer
+    current, previous = layout.phone_ipa(c), layout.phone_ipa(c, previous=True)
+    games, old_sid = packer.ipa_games(previous)
+    _, dropped = packer.ipa_games(current)
+    if not games:
+        raise Failure("没有可以装回的上一版手机 S2Arm。", code="job_failed")
+    c.begin("找签名账号与 iPhone", 1, 3)
+    ph = phone_for(c)
+    c.begin("装回上一版 S2Arm", 2, 3)
+    ph.install(previous, games, steps=False)
+    c.begin("记下手机上现在的版本", 3, 3)
+    tmp = current.with_name(current.name + ".swap")
+    if current.is_file():
+        os.replace(current, tmp)
+    os.replace(previous, current)
+    if tmp.is_file():
+        os.replace(tmp, previous)
+    rec = layout.load_device(c, ph.key)
+    failed = sorted((set(rec.get("failedShells", [])) | ({dropped} if dropped else set())) - {old_sid})   # 装回的这一版不算「不好用」：连点两次 = 换回来，那一版照常能只换宿主
+    layout.save_device(c, ph.key, dict(rec, games={g: rec["games"].get(g) or {} for g in games}, shellId=old_sid, failedShells=failed, bundleId=ph.bid or rec.get("bundleId", "")))
+    return dict(games=games, bundleId=ph.bid, restoredShell=old_sid, **ph.info)
+
+
 def remove_from_phone(c):
-    """从手机上的 S2Arm 里删一款，只动这一款：备份本款存档 → 容器摘掉本款（其余各款逐字节不变、不换壳）→ 覆盖装 → 删机上本款文档根。
-    新容器装上之后才替换游戏库里的那份（装失败时两边还一致）；机上目录没删掉只报黄字（App 里这款已经没了，占的空间下次再清）"""
+    """从手机上的 S2Arm 里删一款：备份本款存档 → 用剩下各款现组容器 → 覆盖装 → 删机上本款文档根。
+    剩下的款有新运行层认不得的（升级后还没重出）：退回从 S2Arm.ipa 里摘掉这款（pack/ship_ext.py container-drop，其余各款逐字节不变、不换壳）。
+    装上之后才改设备记录（装失败时两边还一致）；机上目录没删掉只报黄字（App 里这款已经没了，占的空间下次再清）"""
     import ipa as packer
     gid = (c.r.get("gameId") or "").upper()
-    _, games = latest_container(c)
-    if gid not in games:
-        raise Failure("手机上的 S2Arm 里没有这款。", code="job_failed")
-    if len(games) == 1:
-        raise Failure("这是手机上最后一款：在 iPhone 桌面长按 S2Arm 删除 App 即可。", code="container_last_game")
     c.begin("找签名账号与 iPhone", 1, 4)
     ph = phone_for(c)
+    rec = layout.load_device(c, ph.key)
+    if gid not in rec.get("games", {}):
+        raise Failure("手机上的 S2Arm 里没有这款。", code="job_failed")
     if not ph.bid:
         raise Failure("这台电脑没记录手机上的 S2Arm：先装一次再删。", code="job_failed")
     c.begin("备份这款的存档", 2, 4)
     backup = ph.backup(gid)
     c.begin("更新手机上的 S2Arm", 3, 4)
-    with packer.dropped(c, gid) as (ipa, left):
+    left = [g for g in rec["games"] if g != gid]
+    # 最后一款（#227）：不装空容器（宿主 0 款的启动路径没在真机验过，vawin.c 报红不占窗口），手机上的 App 原样留着，
+    #   下一步删掉它的数据后库界面按「数据不在」不再显示 = 空库；下次装新游戏时覆盖装把旧程序一起换掉
+    if left:
+        try:
+            ipa, left, sid = packer.assemble(c, None, left, failed=rec.get("failedShells", []))
+        except Failure as e:
+            if e.code != "container_stale":
+                raise
+            ipa, left, sid = packer.drop_from_ipa(c, layout.phone_ipa(c), gid)
         ph.install(ipa, left, steps=False)
-        packer.commit_drop(c, ipa)
+        packer.commit_phone_ipa(c, ipa, sid)
+    rec = layout.load_device(c, ph.key)
+    layout.save_device(c, ph.key, dict(rec, games={g: rec["games"].get(g) or {} for g in left}))
     c.begin("删除手机上这款的数据", 4, 4)
     ok, out = ph.purge(gid)
     if not ok:

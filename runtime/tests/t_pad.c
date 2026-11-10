@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -93,18 +94,24 @@ static void *writer(void *unused) {
     }
     atomic_store(&finished, 1); return NULL;
 }
-// #40：任天堂手柄按键帽字母上报，其他手柄按物理方位（期望手写）
+// #40 / 11-09 按字母：期望手写——系统 buttonA/B/X/Y 下标 0/1/2/3；「同字母」= {0,1,2,3}，「按位置」= Switch A/B/X/Y 在东/南/北/西 = 系统 B/A/Y/X = {1,0,3,2}
 static void face_buttons(void) {
-    assert(s2a_pad_labels_abxy("Switch Pro Controller", NULL));
-    assert(s2a_pad_labels_abxy("Pro Controller", "Nintendo"));
-    assert(s2a_pad_labels_abxy("Joy-Con (L/R)", NULL));
-    assert(s2a_pad_labels_abxy(NULL, "Nintendo Switch JOYCON"));
-    assert(!s2a_pad_labels_abxy("Xbox Wireless Controller", "Xbox"));
-    assert(!s2a_pad_labels_abxy("DualSense", "Sony"));
-    assert(!s2a_pad_labels_abxy(NULL, NULL));
+    assert(s2a_pad_kind("Switch Pro Controller", 0, 0) == S2A_PAD_KIND_NINTENDO);
+    assert(s2a_pad_kind("Nintendo Switch Joy-Con (L/R)", 0, 0) == S2A_PAD_KIND_NINTENDO);
+    assert(s2a_pad_kind("Joy-Con (L/R)", 0, 0) == S2A_PAD_KIND_NINTENDO);
+    assert(s2a_pad_kind("Xbox One", 1, 0) == S2A_PAD_KIND_XBOX);
+    assert(s2a_pad_kind("DualSense", 0, 1) == S2A_PAD_KIND_PLAYSTATION);
+    assert(s2a_pad_kind("8BitDo Pro Controller", 0, 0) == S2A_PAD_KIND_OTHER);   // P2-213：名字里带 Pro Controller 的第三方不是任天堂
+    assert(s2a_pad_kind(NULL, 0, 0) == S2A_PAD_KIND_OTHER);
     int o[4];
-    s2a_pad_abxy_order(1, o); assert(o[0] == 0 && o[1] == 1 && o[2] == 2 && o[3] == 3);   // 任天堂：A/B/X/Y 对系统 A/B/X/Y
-    s2a_pad_abxy_order(0, o); assert(o[0] == 1 && o[1] == 0 && o[2] == 3 && o[3] == 2);   // 物理方位：对系统 B/A/Y/X
+#define ORDER(k, l, a, b, c, d) do { s2a_pad_abxy_order(k, l, o); assert(o[0] == a && o[1] == b && o[2] == c && o[3] == d); } while (0)
+    ORDER(S2A_PAD_KIND_NINTENDO, 1, 0, 1, 2, 3); ORDER(S2A_PAD_KIND_NINTENDO, 0, 0, 1, 2, 3);   // 任天堂：两种口径都同字母
+    ORDER(S2A_PAD_KIND_XBOX, 1, 0, 1, 2, 3);                                                   // Xbox 按字母：Xbox A = Switch A
+    ORDER(S2A_PAD_KIND_XBOX, 0, 1, 0, 3, 2);                                                   // Xbox 按位置：Switch A（东）= Xbox B
+    ORDER(S2A_PAD_KIND_PLAYSTATION, 1, 1, 0, 3, 2); ORDER(S2A_PAD_KIND_OTHER, 1, 1, 0, 3, 2);  // PS / 第三方没有可对的字母：只按位置
+#undef ORDER
+    unsetenv("S2A_PAD_FACE"); assert(s2a_pad_face_by_letter() == 1);   // 缺省按字母
+    s2a_pad_face_set(0); assert(s2a_pad_face_by_letter() == 0); s2a_pad_face_set(1); assert(s2a_pad_face_by_letter() == 1);
 }
 
 int main(void) {

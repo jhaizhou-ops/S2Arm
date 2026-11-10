@@ -24,34 +24,42 @@
 # Usage: vk_shaders.py <SPIR-V dir>... <out dir> [--ios <dir>]   (SPIR-V dirs: the RomFS, capture folders)
 #        vk_shaders.py --header-only <out dir> [--ios <dir>]   a game whose RomFS holds no SPIR-V (it generates them at run time): tables with the header only and no
 #        library, every shader is compiled on the device the first time it is met (hle_vk.m → vk_rt.inc); packing never boots the game to capture them
-import concurrent.futures as cf, os, subprocess, sys, tempfile
+import concurrent.futures as cf, os, shutil, subprocess, sys, tempfile
 
 # GL / Vulkan share the resource remapping and MSL backend; defaults match main.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../graphics/tools')))
-from spirv_msl import MAGIC, metal_cmd, red, spirv_files, translate
+from spirv_msl import MAGIC, metal_cmd, metal_run, red, spirv_files, translate
 
 VK_LIB_ABI = 3   # = graphics/nvn/gfx/vk/vk_lib.h S2A_VK_LIB_ABI（3：MSL 3.1）
 
 def one(path, tmp, root):
     return translate(path, tmp, root, stages=('vert', 'frag', 'comp'))
 
-def metallib(msls, out, sdk, extra):
+def metallib(msls, out, sdk, extra, work):
+    """work：临时目录（msls 都在它下面）；编译器的输入输出都放在这里（Windows 按相对路径交给编译器，见 spirv_msl.metal_run），库编好再挪进 out"""
     os.makedirs(out, exist_ok=True)
     airs = []
     def comp(m):
         a = m[:-6] + f'.{sdk}.air'
-        r = subprocess.run(metal_cmd(sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a), capture_output=True, text=True)
+        try: r = metal_run(metal_cmd(sdk, 'metal', '-c', '-fpreserve-invariance', *extra, m, '-o', a), work, capture_output=True, text=True)
+        except ValueError as e: red(str(e))
         if r.returncode: red(f'{m}: metal compile failed: {r.stderr.strip()[:400]}')
         return a
     with cf.ThreadPoolExecutor(os.cpu_count()) as ex: airs = list(ex.map(comp, msls))
-    lib = os.path.join(out, 'vk_shaders.metallib')
+    lib = os.path.join(work, f'vk_shaders.{sdk}.metallib')
     # .air 清单走响应文件（同 graphics/metal/tools/gal_offline.py link）：11-06 Windows 出包机银河 2 第二包 3795 支，路径全拼在命令行上超 Windows 32767 字符（WinError 206）。
     #   每行一个带引号的路径；Windows 上反斜杠换成正斜杠（响应文件按转义规则读，反斜杠会被吃掉；metallib.exe 认正斜杠，Windows 出包机实测 @响应文件 链出含两函数的库）
-    rsp = os.path.join(out, f'vk_airs.{sdk}.rsp')
-    with open(rsp, 'w', encoding='utf-8') as f: f.write(''.join('"' + (a.replace(os.sep, '/') if os.name == 'nt' else a) + '"\n' for a in airs))
-    try: subprocess.run(metal_cmd(sdk, 'metallib', '@' + rsp, '-o', lib), check=True)
+    #   Windows 上清单里的路径同样写成相对 work（工作目录 = work），理由同 metal_run
+    rsp = os.path.join(work, f'vk_airs.{sdk}.rsp')
+    with open(rsp, 'w', encoding='utf-8') as f: f.write(''.join('"' + (os.path.relpath(a, work).replace(os.sep, '/') if os.name == 'nt' else a) + '"\n' for a in airs))
+    try:
+        if os.name == 'nt': r = metal_run(metal_cmd(sdk, 'metallib', '@' + os.path.basename(rsp), '-o', lib), work)
+        else: r = metal_run(metal_cmd(sdk, 'metallib', '@' + rsp, '-o', lib), work)
+        if r.returncode: red(f'metallib failed (rc={r.returncode})')
+    except ValueError as e: red(str(e))
     finally: os.remove(rsp)
-    return lib
+    dst = os.path.join(out, 'vk_shaders.metallib'); shutil.move(lib, dst)
+    return dst
 
 def main():
     a = sys.argv[1:]
@@ -86,7 +94,7 @@ def main():
                 if os.path.exists(lib): os.remove(lib)
                 open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write('\n'.join(tsv) + '\n')
                 print(f'{sdk}: 0 shaders, table header only → {d}/vk_shaders.tsv'); continue
-            lib = metallib(msls, d, sdk, extra)
+            lib = metallib(msls, d, sdk, extra, tmp)
             open(os.path.join(d, 'vk_shaders.tsv'), 'w', encoding='utf-8', newline='\n').write(   # 一律 \n：Windows 文本模式缺省写 CRLF（11-05 Windows 出包机实测）
                 '\n'.join(tsv) + '\n')
             print(f'{sdk}: {len(seen)} shaders → {lib}')

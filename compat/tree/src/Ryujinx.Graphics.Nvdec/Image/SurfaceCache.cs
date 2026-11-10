@@ -124,6 +124,25 @@ namespace Ryujinx.Graphics.Nvdec.Image
             }
         }
 
+        // S2Arm: guest memory at these offsets was rewritten outside this cache (native VP9 decoding,
+        // Vp9NativePath). Cached surfaces for them no longer match; the next Get re-reads guest memory.
+        public void Invalidate(uint lumaOffset, uint chromaOffset)
+        {
+            lock (_pool)
+            {
+                for (int i = 0; i < MaxItems; i++)
+                {
+                    ref CacheItem item = ref _pool[i];
+
+                    if (item.Surface != null && (item.LumaOffset == lumaOffset || item.ChromaOffset == chromaOffset))
+                    {
+                        item.LumaOffset = uint.MaxValue;
+                        item.ChromaOffset = uint.MaxValue;
+                    }
+                }
+            }
+        }
+
         public void Put(ISurface surface)
         {
             lock (_pool)

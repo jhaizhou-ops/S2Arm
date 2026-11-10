@@ -8,7 +8,7 @@
 #include <sys/ucontext.h>
 module_t *module_of(const void *p) { (void)p; return NULL; }   // 单测不装模块：点全记成宿主代码
 static uint64_t g_he; uint64_t s2a_mem_heap_end(void) { return g_he; }   // 堆顶（svc_mem.c 的桩）：缺省 0 = 没有堆
-int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } void *s2a_guest_map_any(uint64_t len) { (void)len; return MAP_FAILED; }   // vawin.c 的桩：没有客体内存文件后备
+int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } int s2a_guest_in_file(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; } void *s2a_guest_map_any(uint64_t len) { (void)len; return MAP_FAILED; }   // vawin.c 的桩：没有客体内存文件后备
 static int bad, cnt;
 int s2a_far_session_reset(void);
 #define EQ(name, want, got) do { unsigned long long w_ = (unsigned long long)(want), g_ = (unsigned long long)(got); cnt++; if (w_ != g_) { bad++; printf("✗ %s：期望 %#llx → 真结果 %#llx\n", name, w_, g_); } } while (0)

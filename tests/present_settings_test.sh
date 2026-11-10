@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁只看：graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/gfx/nvn/nvn_present_aa.inc graphics/nvn/Makefile graphics/nvn/tests/t_present_settings.* graphics/metal/shaders/aa_* graphics/metal/tools/embed_* tests/present_settings_test.sh
+# 门禁只看：graphics/nvn/gfx/nvn/nvn_mtl.m graphics/nvn/gfx/nvn/nvn_present_aa.inc graphics/nvn/Makefile graphics/nvn/tests/t_present_settings.* macos/front_mac.m graphics/metal/shaders/aa_* graphics/metal/tools/embed_* tests/present_settings_test.sh
 # 门禁预算：600
 # 门禁显卡：独占
 # 上屏设置矩阵（graphics/nvn/tests/t_present_settings.sh：M3 / M4 × 四种抗锯齿 × 三种过滤，真上屏器、GPU 现生成输入、逐像素独立判）的合入前入口，本机约 2.5 分钟

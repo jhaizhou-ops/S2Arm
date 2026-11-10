@@ -17,6 +17,8 @@
 #endif
 int s2a_pack_apply(const char *docs); int s2a_untar(const char *tar, const char *root, unsigned *nf, uint64_t *nb);
 int s2a_import_docs_pick(const s2a_launch_ctx *c, int game_data_env, const char *proc_docs, char *out, size_t n); int s2a_import_state_game(const char *proc_docs, const char *gid);
+int s2a_import_state_game_quick(const char *proc_docs, const char *gid);
+int s2a_game_on_device(const char *proc_docs, const char *gid);
 int s2a_import_state(const char *docs); void s2a_pack_help_detail(int st, int again, char *d, size_t n); extern void (*s2a_pack_apply_progress)(int done, int total);
 // 与 runtime/src/pack_apply.c 同（闸门下一步与指纹记录）
 enum { S2A_GATE_READY, S2A_GATE_IMPORT, S2A_GATE_SETTLE, S2A_GATE_WAIT, S2A_GATE_STALLED, S2A_GATE_NONE, S2A_GATE_BROKEN };
@@ -24,6 +26,7 @@ struct s2a_gate_watch { int n, moved; uint64_t fp; time_t changed; };
 int s2a_import_transferring(const char *root, char *why, size_t n); int s2a_import_decide(const char *docs, struct s2a_gate_watch *w, time_t now, char *why, size_t n);
 static int g_pd = -1, g_pt = -1, g_pcalls; static void prog(int d, int t) { g_pd = d; g_pt = t; g_pcalls++; }
 uint64_t now_ns(void) { return 0; }
+static int g_ui_zh = 1; int s2a_ui_zh(void) { return g_ui_zh; }   // 界面语言（s2a_ui_text.h）：盖过 pack_apply.c 的弱缺省，⑨b 切英文
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { printf("✗ " __VA_ARGS__); printf("\n"); bad++; } } while (0)
 static int sh(const char *c) { return system(c); }
@@ -199,6 +202,12 @@ int main(void) {
       char hd[1024]; s2a_pack_help_detail(2, 1, hd, sizeof hd); CHECK(!strncmp(hd, "刚刚查过，还是没有完整的资源包。", strlen("刚刚查过，还是没有完整的资源包。")), "⑨ 重新检查后仍缺：开头说刚刚查过");
       s2a_pack_help_detail(2, 0, hd, sizeof hd); CHECK(!strstr(hd, "刚刚查过") && strstr(hd, "外壳"), "⑨ 首次显示：不说刚刚查过");
       s2a_pack_help_detail(3, 1, hd, sizeof hd); CHECK(strstr(hd, "刚刚查过") && strstr(hd, "没拷全"), "⑨ 不完整重新检查后：也说刚刚查过");
+      // ⑨b #316：英文界面（s2a_ui_zh 回 0）说明页正文出英文（文字手写），且除照写的「资源包」文件夹名外不含中文
+      g_ui_zh = 0;
+      s2a_pack_help_detail(2, 1, hd, sizeof hd); CHECK(!strncmp(hd, "Checked just now", 16) && strstr(hd, "shell"), "⑨b 英文：重新检查后仍缺 → 「Checked just now」开头、说 shell（实得 %s）", hd);
+      s2a_pack_help_detail(3, 0, hd, sizeof hd); CHECK(!strncmp(hd, "Some files in the resources", 27) && !strstr(hd, "Checked"), "⑨b 英文：不完整首次 → 不说 Checked just now（实得 %s）", hd);
+      { char *z = strstr(hd, "资源包"); if (z) memset(z, 'x', strlen("资源包")); int cjk = 0; for (unsigned char *q = (unsigned char *)hd; *q; q++) if (*q == 0xE4 || (*q >= 0xE5 && *q <= 0xE9)) cjk = 1; CHECK(!cjk, "⑨b 英文：除文件夹名外无中文（实得 %s）", hd); }
+      g_ui_zh = 1;
       // ⑩ 审计 P2-7：index.tsv 由 pack/pack.py 与 manifest.json 同写，出包保证在。manifest.json 在而 index.tsv 不在 / 打不开（自环软链 ELOOP，root 下也打不开）/ 读不了（目录，fopen 成功、读 EISDIR）
       //   → 期望都判 3 不完整；旧代码打不开当「老包不核」判 0 就绪。11-02 维护者：说明页不点名 index.tsv 这类内部词（缺哪个只进日志）
       snprintf(D, sizeof D, "%s/imp4", T); snprintf(c2, sizeof c2, "mkdir -p '%s/资源包/ctl' && echo '{}' > '%s/资源包/manifest.json' && echo n > '%s/资源包/ctl/control.nacp'", D, D, D); sh(c2);
@@ -279,6 +288,30 @@ int main(void) {
         CHECK(s2a_import_state_game(NULL, "0100FD70134FA000") == 2 && s2a_import_state_game(pd, "../x") == 2 && s2a_import_state_game(pd, ".hid") == 2 && s2a_import_state_game(pd, "") == 2, "不合规游戏号 → 按没有资源");
         snprintf(cmd, sizeof cmd, "rm %s/Documents/games/0100FD70134FA000/资源包/exefs/main.npdm", h); sh(cmd);
         CHECK(s2a_import_state_game(pd, "0100FD70134FA000") == 3, "缺 main.npdm（Duo 那种没导完）→ S2A_IMPORT_BROKEN(3)");
+        // 库界面快判：.applied 等于清单的 index_sha256 就不逐文件核（主线程上 10 万文件要几秒）；不等 / 没有 .applied 退回完整核对；非法游戏号同完整判据
+        { char qc[4096], qr[2300]; snprintf(qr, sizeof qr, "%s/games/0100FD70134FA000/资源包", pd);
+          snprintf(qc, sizeof qc, "printf '{\"version\":2,\"index_sha256\":\"abc123\"}' > '%s/manifest.json' && printf 'abc123' > '%s/.applied'", qr, qr); CHECK(sh(qc) == 0, "造快判夹具失败");
+          CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") == 3, "快判（审计 P2-212）：.applied 等于清单但缺 main.npdm → 不报就绪，退回完整核对(3)");
+          CHECK(s2a_import_state_game(pd, "0100FD70134FA000") == 3, "完整判据不受影响：照旧查出缺文件(3)");
+          snprintf(qc, sizeof qc, "printf x > '%s/exefs/main.npdm'", qr); CHECK(sh(qc) == 0, "放回 main.npdm 失败");
+          CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") == 0, "快判：.applied 等于清单、main.npdm 在 → 就绪(0)，不逐文件核");
+          snprintf(qc, sizeof qc, "rm '%s/exefs/main.npdm'", qr); sh(qc);
+          snprintf(qc, sizeof qc, "printf 'other' > '%s/.applied'", qr); sh(qc);
+          CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") == 3, "快判：.applied 不等于清单 → 退回完整核对(3)");
+          snprintf(qc, sizeof qc, "rm '%s/.applied'", qr); sh(qc);
+          CHECK(s2a_import_state_game_quick(pd, "0100FD70134FA000") == 3, "快判：没有 .applied → 退回完整核对(3)");
+          CHECK(s2a_import_state_game_quick(pd, "../x") == 2, "快判：非法游戏号 → 没有资源(2)");
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, "资源不完整：游戏库不显示");
+          CHECK(s2a_game_on_device(pd, "0100C2500FC20000") == 0, "没放资源：游戏库不显示");
+          snprintf(qc, sizeof qc, "printf 'abc123' > '%s/.applied'", qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, ".applied 等于清单但缺 main.npdm：游戏库不显示（审计 P2-212）");
+          snprintf(qc, sizeof qc, "printf x > '%s/exefs/main.npdm'", qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, ".applied 等于清单、main.npdm 在：游戏库显示");
+          snprintf(qc, sizeof qc, "rm '%s/exefs/main.npdm'", qr); sh(qc);
+          snprintf(qc, sizeof qc, "mkdir -p '%s/.incoming' && printf x > '%s/.incoming/1_000.tar' && printf '' > '%s/.applied'", qr, qr, qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 0, ".applied 被清空（传镜像被打断）：不显示");
+          snprintf(qc, sizeof qc, "rm '%s/.applied'", qr); sh(qc);
+          CHECK(s2a_game_on_device(pd, "0100FD70134FA000") == 1, "推送包齐了只等解开：显示"); }
     }
     printf("%s t_pack_apply：%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }

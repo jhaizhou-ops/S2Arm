@@ -10,8 +10,9 @@ using Path = System.IO.Path;
 
 Ryujinx.HLE.FileSystem.S2AHostFileSystem.Transaction = new S2A.Apple.SaveCommit.AppleHostDirectoryTransaction();
 
-if (args.Length == 1 && args[0] == "--describe")   // 审计 P2-11：失败原因转人话的映射，interop.py 按手算期望逐条比
+if (args.Length is 1 or 2 && args[0] == "--describe")   // 审计 P2-11：失败原因转人话的映射，interop.py 按手算期望逐条比；第二参数 = 请求里的 language（#316）
 {
+    S2A.Services.SaveTransfer.UseLanguage(args.Length == 2 ? JsonSerializer.Serialize(new { language = args[1] }) : "{}");
     foreach (var ex in new Exception[] { new IOException("disk", 28), new IOException("quota", 69), new UnauthorizedAccessException("no"), new IOException("perm", 13),
                                          new InvalidDataException("bad"), new JsonException("bad"), new IOException("other", 5), new ArgumentException("arg") })
     {
@@ -80,4 +81,16 @@ void Write(LibHac.Common.U8Span path, byte[] bytes)
     Check(client.Fs.OpenFile(out FileHandle handle, path, OpenMode.Write));
     try { Check(client.Fs.WriteFile(handle, 0, bytes, WriteOption.Flush)); }
     finally { client.Fs.CloseFile(handle); }
+}
+
+namespace S2A.Services
+{
+    public static partial class SaveTransfer
+    {
+        // 审计 P2-177：interop.py 设 SAVE_TRANSFER_FAIL_AT=<阶段> 让恢复在该检查点抛错，核失败后不留目录
+        static partial void Checkpoint(string phase)
+        {
+            if (Environment.GetEnvironmentVariable("SAVE_TRANSFER_FAIL_AT") == phase) throw new IOException("injected failure at " + phase);
+        }
+    }
 }

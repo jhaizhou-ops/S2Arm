@@ -316,9 +316,10 @@ For a no-game interactive native preview, run its built test binary with
 
 Jobs use their own cache/lock/output roots and never call the scheduler, train,
 device deployment, shared root refresh or a game-specific SDK hook. Engine resources
-are verified and cloned from the signed app to `engines/<bundle-content-id>/` in
-private application storage. The signed application and runtime stay immutable; the precompiled preparation
-helpers run from the private engine copy. The original source-checkout pipeline
+are verified and cloned from the signed app to `hosts/engine/<bundle-content-id>/` in
+the default library location (only the copy in use and the previous one are kept; before a library exists the
+copy goes to `engines/` in private application storage). The signed application and runtime stay immutable; the
+precompiled preparation helpers run from that engine copy. The original source-checkout pipeline
 retains its default build behavior unless `S2A_PREBUILT_TOOLS` is explicitly set. The bundled preparation
 source closure contains a fresh local-only Git snapshot for the existing pipeline
 HEAD-based keys, without remotes, developer history or player data. Git maintenance

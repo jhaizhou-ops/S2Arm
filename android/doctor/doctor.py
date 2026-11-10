@@ -290,12 +290,14 @@ def requirements(repo):
     if (len(re.findall(r'(?<![\w])cache_root\s*=', codecs)) != 1
             or 'cache_root=${S2A_BUILD_CACHE:-$HOME/.cache/s2arm-build}' not in codecs):
         raise ValueError('unsupported codecs cache root')
+    # vpx 的配方键另带 S2Arm 的 libvpx 补丁（services/vpx/patches，Nvdec VP9 作业接口）。
+    extra = {'vpx': ' "$repo_dir/services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch"'}
     for name in ('opus', 'vpx'):
         recipe = read(f'android/codecs/{name}-build.sh')
         if (len(re.findall(r'(?<![\w-])(?:target|key)\s*=', recipe)) != 2
                 or one(recipe, r'^\s*target=\$cache_root/codecs/(\S+)$') != f'{name}-${name}_ver-$key'
                 or one(recipe, r'^\s*key=\$\(([^\n]+)\)$')
-                != f'codec_recipe_key {name} "${name}_sha" "$repo_dir/android/codecs/{name}-build.sh"'):
+                != f'codec_recipe_key {name} "${name}_sha" "$repo_dir/android/codecs/{name}-build.sh"{extra.get(name, "")}'):
             raise ValueError('unsupported codec cache layout: ' + name)
         want[name + '_cache'] = f'codecs/{name}-{want[name]["version"]}-'
     want['sources'] = files

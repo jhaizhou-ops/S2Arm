@@ -59,7 +59,7 @@ class ExtractImportTests(JobCase):
                          (f"{tid:016X}", "Zelda NS2", "base", "dump", 0))
         self.assertEqual(pkg["path"], str(dump.resolve()))
         self.assertTrue(pkg["size"] > 0)  # 目录内文件总字节
-        self.assertEqual((self.c.library / "games" / game["id"] / "cover.jpg").read_bytes(), b"DUMP_ICON")
+        self.assertEqual((self.c.library / "games" / "Zelda NS2" / "cover.jpg").read_bytes(), b"DUMP_ICON")   # 文件夹按英文名（NACP 美式英语）
         # 没有控制分区：标题取目录名
         dump2 = self.make_dump(self.root / "RawDump", 0x0100AABBCCDD0000)
         (self.c.library / "catalog.json").write_text('{"schema": 1, "games": []}')
@@ -78,7 +78,9 @@ class ExtractImportTests(JobCase):
         self.assertEqual((game["id"], game["name"], pkg["type"], pkg["format"], pkg["display"]),
                          (f"{tid:016X}", "马力欧", "base", "extract", "2.1.0"))
         self.assertEqual(pkg["path"], str(extract.resolve()))
-        self.assertEqual((self.c.library / "games" / game["id"] / "cover.jpg").read_bytes(), b"EXTRACT_ICON")
+        # 界面名取中文、文件夹按英文名（unpack.tsv 的 name），英文名记进 catalog
+        self.assertEqual(game["englishName"], "Mario")
+        self.assertEqual((self.c.library / "games" / "Mario" / "cover.jpg").read_bytes(), b"EXTRACT_ICON")
 
     def test_loose_folder_reaches_ns2_dump(self):
         # 玩家 #9：已解包目录出包走 extract_folder 的 loose 分支，用到 tempfile（曾漏 import，NameError）。手算期望：起 ns2_dump.py 一次，第一个位置参数 = 临时目录，里面 base 是指向源目录的链接
@@ -108,7 +110,7 @@ class ExtractImportTests(JobCase):
         [pkg] = game["packages"]
         self.assertEqual((game["id"], game["name"], pkg["type"], pkg["format"]),
                          (f"{tid:016X}", "Splatoon", "base", "loose"))
-        self.assertEqual((self.c.library / "games" / game["id"] / "cover.jpg").read_bytes(), b"LOOSE_ICON")
+        self.assertEqual((self.c.library / "games" / "Splatoon" / "cover.jpg").read_bytes(), b"LOOSE_ICON")
 
     def test_extract_dir_in_subfolder(self):
         # 解包目录嵌在子目录里：扫描时能找到，认到就不再往里走

@@ -5,16 +5,20 @@
 # 源码按固定版本 + sha256 取，不进仓库；源码包按 sha256 缓存在 ${S2A_BUILD_CACHE:-~/.cache/s2arm-build}/sources/（android/tools/fetch_source.sh）。
 set -euo pipefail
 RID=${1:-osx-arm64}
-VER=1.15.0; SHA=e935eded7d81631a538bfae703fd1e293aad1c7fd3407ba00440c95105d2011e
+VER=1.17.0; SHA=1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# S2Arm 对 libvpx 的补丁（Nvdec 的 VP9 作业接口 vpx/s2a_vp9_nvdec.h，设计 docs/设计_原生VP9/design_phase2_B.md）。
+#   S2A_VPX_VARIANT=ship（缺省，打补丁）/ nopatch（不打补丁，只出 libvpx.a，给 tests/vpx_patch_identity_test.sh 对拍）；变体名与补丁内容都进 H1
+PATCH=$ROOT/services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch; VARIANT=${S2A_VPX_VARIANT:-ship}
+case $VARIANT in ship|nopatch) ;; *) echo "🔴 vpx：不认识的 S2A_VPX_VARIANT=${VARIANT}（ship / nopatch）" >&2; exit 1 ;; esac
 source "$ROOT/android/tools/fetch_source.sh"   # 源码包按 sha256 进本机共享缓存（S2A_BUILD_CACHE/sources），命中不联网；下载按进展判挂死
 TCE=$ROOT/tools/toolchain.env; MMAC=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p' "$TCE"); MIOS=$(sed -n 's/^IPHONEOS_DEPLOYMENT_TARGET=//p' "$TCE")   # 产物下限只取统一工具链那两行
 [ -n "$MMAC" ] && [ -n "$MIOS" ] || { echo "🔴 $(basename "$(dirname "$0")")：$TCE 里没有部署目标" >&2; exit 1; }
 # 构建键：版本 + 本脚本与系统下限 + 垫片，只按内容算、不含路径（发版机与玩家机引擎路径不同；缓存目录、预编库都按它认）；--key 只打印它（发版打包 bundle_engine.py 记进 build.txt）
-H1=$( { cat "$0"; echo "$MMAC $MIOS"; } | shasum -a 256 | cut -c1-12); K=$(cat "$ROOT/services/vpx/s2a_vp8.c" "$ROOT/services/vpx/s2a_vp9.c" "$0" | shasum -a 256 | cut -c1-12); KEY=$VER-$H1-$K
+H1=$( { cat "$0"; echo "$MMAC $MIOS $VARIANT"; [ "$VARIANT" = nopatch ] || cat "$PATCH"; } | shasum -a 256 | cut -c1-12); K=$(cat "$ROOT/services/vpx/s2a_vp8.c" "$ROOT/services/vpx/s2a_vp9.c" "$0" | shasum -a 256 | cut -c1-12); KEY=$VER-$H1-$K
 [ "${2:-}" = --key ] && { echo "$KEY"; exit 0; }
 # 出包作业（S2A_PREBUILT_TOOLS）用 App 里的预编库，不构建（services/prebuilt_lib.sh）
-source "$ROOT/services/prebuilt_lib.sh"; s2a_prebuilt_lib vpx "$RID" "$KEY" libs2a_vpx.a
+[ "$VARIANT" = ship ] && { source "$ROOT/services/prebuilt_lib.sh"; s2a_prebuilt_lib vpx "$RID" "$KEY" libs2a_vpx.a; }
 C=${S2A_VPX_CACHE:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/cache/vpx}; mkdir -p "$C"   # 整机级缓存（10-20 出包提速）：键 = 本脚本内容（含版本与 sha256）+ 平台，各工作树共用
 OUT=$C/$RID-$VER-$H1
 until mkdir "$C/.lock" 2> /dev/null; do p=$(cat "$C/.lock/pid" 2> /dev/null || true); [ -n "$p" ] && ! kill -0 "$p" 2> /dev/null && rm -rf "$C/.lock"; sleep 0.5; done
@@ -37,6 +41,7 @@ if [ ! -s "$OUT/libvpx.a" ]; then
   TGZ=$(s2a_source_fetch "libvpx-$VER.tar.gz" "https://github.com/webmproject/libvpx/archive/refs/tags/v$VER.tar.gz" "$SHA") || { echo "🔴 vpx：取不到源码包" >&2; exit 1; }
   W=$OUT.tmp; rm -rf "$W"; mkdir -p "$W/src" "$W/obj"
   tar xzf "$TGZ" -C "$W/src" --strip-components 1
+  if [ "$VARIANT" != nopatch ]; then patch -p1 -s -d "$W/src" < "$PATCH" || { echo "🔴 vpx：补丁打不上（${PATCH}）" >&2; exit 1; }; fi
   # 缓存在带空格目录（启动器：~/Library/Application Support）时 configure / make 拆路径：走无空格别名（tools/nospace.sh）
   source "$ROOT/tools/nospace.sh"; WN=$(s2a_nospace "$W")
   ( cd "$WN/obj" &&
@@ -50,6 +55,8 @@ if [ ! -s "$OUT/libvpx.a" ]; then
   printf '%s\n' "$TCV" > "$W/out/toolchain.txt"
   rm -rf "$OUT"; mv "$W/out" "$OUT"; rm -rf "$W"
 fi
+# 不打补丁的变体只给对拍用 libvpx.a（垫片 s2a_vp9.c 要补丁里的 vpx/s2a_vp9_nvdec.h）
+if [ "$VARIANT" = nopatch ]; then touch "$OUT"; echo "$OUT/libvpx.a"; exit 0; fi
 # 垫片与 libvpx 合成一个静态库（DirectPInvoke s2a_vpx 链它）
 L=$OUT/s2a-$K/libs2a_vpx.a
 if [ ! -s "$L" ]; then
@@ -60,5 +67,5 @@ if [ ! -s "$L" ]; then
   [[ $RID = osx-* ]] && xcrun clang -arch "$ARCH" $MIN -dynamiclib -o "$OUT/s2a-$K.tmp/libs2a_vpx.dylib" "$OUT/s2a-$K.tmp/s2a_vp8.o" "$OUT/s2a-$K.tmp/s2a_vp9.o" "$OUT/libvpx.a"
   rm -rf "$OUT/s2a-$K"; mv "$OUT/s2a-$K.tmp" "$OUT/s2a-$K"
 fi
-touch "$OUT"   # 取用即更新目录时间：tools/gc.sh 每平台留 2 份、30 分钟内动过的不删，在用的这份不被别的键挤掉
+touch "$OUT"   # 取用即更新目录时间：维护方 gc.sh（${S2A_PRIVATE_TOOLS}，公开仓没有）每平台留 2 份、30 分钟内动过的不删；公开检出没有清理方，旧键目录要手动删
 echo "$L"

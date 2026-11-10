@@ -28,6 +28,7 @@ uint64_t s2a_far_bind(const char *name, uint64_t v) {
 }
 void *s2a_libc_lookup(const char *name) { (void)name; return NULL; }
 void *sw_xstack_wrap(const char *name, void *fn) { (void)name; return fn; }
+int s2a_loader_store64(uint64_t *where, uint64_t v) { *where = v; return 0; }   // svc_mem.c 的装载器写入口（本测不链 svc_mem.c；页可写时生产实现也是直接写）
 int s2a_gfx_mode(void) { return 0; }
 int plat_tsd_init(void) { return 0; }
 uint64_t plat_tsd_base(void) { return 0; }

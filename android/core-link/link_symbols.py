@@ -843,7 +843,7 @@ def check_once(root, mode, cs_projects, native_files=None, verbose=False, cmake=
     # the bundled third-party opus/vpx entry points are link-only (below).
     definition_files = list(native_files)
     for shim in ("services/opus/s2a_opus.c", "services/vpx/s2a_vp8.c",
-                 "android/codecs/s2a_avc.c"):
+                 "services/vpx/s2a_vp9.c", "android/codecs/s2a_avc.c"):
         candidate = root / shim
         if candidate.is_file() and candidate not in definition_files:
             definition_files.append(candidate)

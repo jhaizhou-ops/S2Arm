@@ -16,6 +16,9 @@
     <RyuSrc Condition="'$(RyuSrc)' == ''">$(MSBuildThisFileDirectory)../../../compat/tree/src</RyuSrc>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="S2A.Services.Tests" />   <!-- 单测直接测 VideoToolboxSurface.Attach 的格式判断（审计 P2-198） -->
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../../../services/S2A.Services/S2A.Services.csproj" />
     <ProjectReference Include="$(RyuSrc)/Ryujinx.Audio.Backends.Apple/Ryujinx.Audio.Backends.Apple.csproj" />
     <ProjectReference Include="$(RyuSrc)/Ryujinx.Common/Ryujinx.Common.csproj" />

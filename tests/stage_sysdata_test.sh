@@ -68,4 +68,16 @@ ck "⑨ 戳过期 → 跑生成器现做、换进位、戳 = 生成器哈希（r
 echo stale > $T/of/.generator.sha256; mk fa 0100FAFA00000000 66666666
 o=$(F0 S2A_PYTHON=false bash $T/repo/pack/stage_sysdata.sh fa 2>&1); r=$?
 ck "⑩ 戳过期且生成器失败 → 报红、退非 0、不留临时目录（rc=${r}）" '[ $r != 0 ] && [[ "$o" == *【红】*开源替代字体* ]] && ! ls -d $T/of.tmp.* > /dev/null 2>&1'
+# ⑪ 拷字体失败要报原因（审计：玩家只见「拷字体失败」）：PATH 前插假 cp，只对拷进 systemdata/fonts/ 的那次动手脚，其余照真 cp
+#   ⑪a 克隆复制（-c）报 clonefile failed: Cross-device link（#290 原文：旧 macOS 字体源与库不同卷）、普通复制能成 → 退 0、字体在、黄行带第一次的原因
+#   ⑪b 两次都报 Permission denied → 退非 0、红行「拷字体失败：」后带两次 cp 的原文
+mkdir -p $T/fakecp; printf '#!/bin/bash\nfor a in "$@"; do last=$a; done\ncase "$last" in */systemdata/fonts/) case "$1:$FAKECP" in -c:*) echo "cp: $2: clonefile failed: Cross-device link" >&2; exit 1 ;; *:both) echo "cp: $last: Permission denied" >&2; exit 1 ;; esac ;; esac\nexec /bin/cp "$@"\n' > $T/fakecp/cp; chmod +x $T/fakecp/cp
+if [ "$(uname -s)" = Darwin ]; then
+  mk fc 0100FCFC00000000 77777777
+  o=$(PATH=$T/fakecp:$PATH FAKECP=clone S fc 2>&1); r=$?
+  ck "⑪a 克隆复制失败、普通复制成 → 退 0、字体在、黄行带原因（rc=${r}）" '[ $r = 0 ] && [ -f "$(c fc)/systemdata/fonts/a.bfttf" ] && [[ "$o" == *【黄】*克隆复制失败*"Cross-device link"* ]]'
+  mk fd 0100FDFD00000000 88888888
+  o=$(PATH=$T/fakecp:$PATH FAKECP=both S fd 2>&1); r=$?
+  ck "⑪b 两次都失败 → 退非 0、红行带两次原因（rc=${r}）" '[ $r != 0 ] && [[ "$o" == *"【红】拷字体失败："*"Cross-device link"*"普通复制："*"Permission denied"* ]]'
+fi
 chmod -R u+w $T; rm -rf $T; [ $bad = 0 ] && echo "stage_sysdata 单测全过" || { echo "stage_sysdata 单测有不通"; exit 1; }

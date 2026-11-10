@@ -228,8 +228,8 @@ PY
   fi
 fi
 NNEW=$(grep -c '^新	' < <(printf '%s\n' "$CMP")); NSAME=$(grep -c '^同	' < <(printf '%s\n' "$CMP")); NTO=$(grep -c '^超	' < <(printf '%s\n' "$CMP")); NMISS=$(grep -c '^缺	' < <(printf '%s\n' "$CMP"))
-NEWR=$(awk -F'\t' '$1 == "新" { printf "%s（%s）；", $2, $3 }' < <(printf '%s\n' "$CMP"))
-UNPROVEN=$(awk -F'\t' -v h="$(git rev-parse HEAD)" -v b="$(git rev-parse "$MB")" '$1 == "同" || $1 == "超" || $1 == "缺" { print "未证\t" $2 "\t" $3 "\t" h "\t" b }' < <(printf '%s\n' "$CMP"))
+NEWR=$(printf '%s\n' "$CMP" | grep '^新	' | awk -F'\t' '{ printf "%s（%s）；", $2, $3 }')
+UNPROVEN=$(printf '%s\n' "$CMP" | grep -E '^(同|超|缺)	' | awk -F'\t' -v h="$(git rev-parse HEAD)" -v b="$(git rev-parse "$MB")" '{ print "未证\t" $2 "\t" $3 "\t" h "\t" b }')
 if [ $RC = 75 ]; then VERD=环境未就绪; EXIT=75   # 门禁：远端没就绪、本机步无真红（tools/gate.sh）——不是红，重跑即可
 elif [ $RC != 0 ]; then VERD=红; EXIT=1; elif [ -n "$EMPTY" ] || [ -n "$NORES" ] || [ ${#SKIP[@]} -gt 0 ]; then VERD=不完整; EXIT=2
 elif [ ${#MACS[@]} -gt 0 ] || [ -n "$HPEND" ]; then VERD="本机已证绿，$([ ${#MACS[@]} -gt 0 ] && echo "待 Mac 证 ${#MACS[@]} 步")${HPEND:+$([ ${#MACS[@]} -gt 0 ] && echo "，")待宿主证 $(grep -c . <<< "$HPEND") 项}"; EXIT=0   # 两段结论：本机能证的全绿；苹果步交列车在 gate-host 上证（入队按此放行）

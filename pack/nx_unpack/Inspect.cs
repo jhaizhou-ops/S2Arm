@@ -77,7 +77,7 @@ static partial class P {
                         ContentMetaType.AddOnContent => "dlc", _ => null
                     };
                     if (kind == null) continue;
-                    string name = "", display = "", guestIsa = "unknown", icon = "";
+                    string name = "", englishName = "", display = "", guestIsa = "unknown", icon = "";
                     var builds = new Dictionary<string,string>(); int controls = 0;
                     foreach (var content in m.ContentEntries) {
                         string id = Convert.ToHexString(content.NcaId).ToLowerInvariant();
@@ -90,6 +90,8 @@ static partial class P {
                             byte[] nacp = InspectRead(control, "/control.nacp", 1 << 20);
                             if (nacp.Length < 0x3070) throw new IOException("Short NACP");
                             name = TitleName(nacp, 14) ?? TitleName(nacp, 0) ?? TitleName(nacp, -1) ?? "";
+                            // 英文名（美式 → 英式）：库里每款的文件夹按它取名（layout.folder_name）；界面名优先简体中文，两者分开给
+                            englishName = TitleName(nacp, 0) ?? TitleName(nacp, 1) ?? "";
                             display = Encoding.UTF8.GetString(nacp, 0x3060, 16).TrimEnd('\0');
                             if (args.Length > 3) {
                                 Directory.CreateDirectory(args[3]);
@@ -130,9 +132,11 @@ static partial class P {
                     }
                     // 解包后要占的字节：清单里本包内容的原始 NCA 大小之和（nsz / xcz 的 NCZ 比文件大，启动器空间预算按它算）
                     long contentBytes = m.ContentEntries.Where(c => Where.ContainsKey(Convert.ToHexString(c.NcaId).ToLowerInvariant())).Sum(c => c.Size);
+                    // 本包在这个文件里的各 NCA 的 content ID（任天堂按内容算的哈希）：导入按它与文件大小定原件身份，不再整份读一遍算 SHA-256（玩家反馈「只是添加也要跑几分钟」）
+                    string[] contentIds = m.ContentEntries.Select(c => Convert.ToHexString(c.NcaId).ToLowerInvariant()).Where(Where.ContainsKey).OrderBy(x => x, StringComparer.Ordinal).ToArray();
                     packages.Add(new { titleId=m.TitleId.ToString("X16"),
                         baseId=(kind == "base" ? m.TitleId : m.ApplicationTitleId).ToString("X16"),
-                        version=m.TitleVersion.Version, type=kind, name, display, builds, guestIsa, icon, controls, contentBytes });
+                        version=m.TitleVersion.Version, type=kind, name, englishName, display, builds, guestIsa, icon, controls, contentBytes, contentIds });
                 }
             }
             if (packages.Count == 0) throw new IOException("No application metadata");

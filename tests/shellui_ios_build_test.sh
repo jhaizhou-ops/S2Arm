@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：shell/ runtime/build.mk tools/toolchain.env tests/shellui_ios_build_test.sh
+# 门禁覆盖：shell/ launchers/shared/SaveSync/ runtime/build.mk tools/toolchain.env tests/shellui_ios_build_test.sh
 # 带游戏库的容器壳（S2A_SHELLUI=1）的 iOS Release 编译进门禁（11-07 维护者）：main 上 ShellUI TouchLayoutEditorView 在 Xcode 27.1 Release iOS
 #   「unable to type-check this expression in reasonable time」、容器壳编不过，却一路绿着合入——门禁原先只跑宿主层 swift test（macOS），不编 iOS Release。
 #   这里跑出壳同一条命令（runtime/build.mk ios-shellui：xcodebuild -scheme S2ArmShellHost generic/platform=iOS Release），只编不签不装；门禁机上每个 Xcode 各编一遍，各约 30 秒。

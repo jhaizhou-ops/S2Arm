@@ -64,7 +64,7 @@ import AppKit
         XCTAssertEqual(task.milestones?.map(\.source),["history","default"])
         XCTAssertEqual(task.milestones?.first?.samples,3)
         store.persistTask(task)
-        let restored=try JSONDecoder().decode(TaskRecord.self,from:Data(contentsOf:root.appendingPathComponent("jobs/fixture.json")))
+        let restored=try JSONDecoder().decode(TaskRecord.self,from:Data(contentsOf:root.appendingPathComponent("logs/jobs/fixture.json")))
         XCTAssertEqual(restored.space,task.space)
         XCTAssertEqual(restored.milestones,task.milestones)
         XCTAssertEqual(restored.state,"failed")

@@ -23,6 +23,7 @@ int plat_layout_override(const char *p, uint32_t t, uint64_t r, uint64_t id, uin
 void s2a_vaguard_open(void);
 S2A_TEST_MOD_TABLE(64); int g_nmod;
 void s2a_mem_test_setup(uint64_t, uint64_t, uint64_t, uint64_t, void *, uint64_t);
+uint64_t s2a_mem_test_punch_pending(void); void s2a_mem_test_punch_stats(uint64_t *inline_zero, uint64_t *forget);   // #258 懒清零
 void s2a_mem_test_subpage(uint64_t a, int on); void s2a_mem_test_map(uint64_t b, uint64_t n);
 void s2a_mem_test_map_diag_reset(void); void s2a_mem_test_stack(uint64_t base, uint64_t size);
 void s2a_mem_test_astype(uint32_t t);
@@ -46,7 +47,10 @@ int s2a_svc_check_perm(const uint64_t perm[3], char *out, size_t cap) { (void)pe
 uint64_t guest_tick(void) { return 0; }
 static uint64_t g_t_hz = 19200000; void s2a_guest_tick_hz_set(uint64_t hz) { g_t_hz = hz; } uint64_t s2a_guest_tick_hz(void) { return g_t_hz; }   // os.c 替身（本测不链 os.c）
 uint64_t s2a_ns_to_tick(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * g_t_hz / 1000000000u); } module_t *module_of(const void *p) { (void)p; return NULL; }
-void s2a_window_get(uint64_t *b, uint64_t *s) { *b = *s = 0; } void s2a_window_trim(uint64_t s) { (void)s; } int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }   // 没有文件后备（vawin.c S2A_GUEST_FILE）：还页照旧换匿名占位
+void s2a_window_get(uint64_t *b, uint64_t *s) { *b = *s = 0; } void s2a_window_trim(uint64_t s) { (void)s; } int s2a_guest_zero(uint64_t a, uint64_t n) { (void)a; (void)n; return 0; }
+// #258 懒清零的桩：g_gfile=1 时把 [g_gfile_lo, g_gfile_hi) 当成文件后备窗口（没有文件后备时还页照旧换匿名占位）
+static int g_gfile; static uint64_t g_gfile_lo, g_gfile_hi;
+int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfile && n && a >= g_gfile_lo && a + n <= g_gfile_hi; }
 uint64_t s2a_module_span(const char *d) { (void)d; return 0; }   // 桩：模块跨度（loader.c；本单测不装模块）
 
 static int bad, checks;
@@ -295,6 +299,25 @@ int main(void) {
         nz = 0; for (uint64_t i = 0; i < 0x1000; i++) nz += ap[i] != 0;
         CHECK(!rp[0] && !rp[1] && !rp[2] && !rp[3] && nz == 0, "物理映射 16 KB → 设只读 → 解除首个 4 KB → 再映射：四次应成功、再映射的 4 KB 非零字节应 0，实 %#llx/%#llx/%#llx/%#llx、%llu",
               (unsigned long long)rp[0], (unsigned long long)rp[1], (unsigned long long)rp[2], (unsigned long long)rp[3], (unsigned long long)nz);
+        // 11-09 玩家 iPhone 17 Pro Max（01001BA027DD8000）：游戏 DT_INIT 后 SetMemoryPermission 把 main 的 RELRO 改只读，nn::ro 装 NRO 时装载器补绑导入槽直接写 → SIGBUS。
+        //   期望（手写）：堆里一个宿主页写好桩值 → 游戏设只读（svc 0x02 读）→ 子进程直接写被信号杀（修前现场）→ s2a_loader_store64 回 0、槽 = 新值 →
+        //   子进程直接写仍被杀（权限恢复成只读）、查询仍报游戏设的「读」；可执行页（模拟签名代码页）回 -1、内容不变
+        {
+            int s2a_loader_store64(uint64_t *where, uint64_t v);
+            uint64_t *slot = (uint64_t *)(hz + 0x8000 + 0x8d0); *slot = 0x1111;
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 1; svc_mem(0x02, r, 0); uint64_t prc = r[0];
+            #define DIES_STORE(p) ({ fflush(stdout); pid_t c_ = fork(); if (!c_) { *(volatile uint64_t *)(p) = 0x3333; _exit(0); } int st_ = 0; waitpid(c_, &st_, 0); WIFSIGNALED(st_); })
+            int d0 = DIES_STORE(slot), w = s2a_loader_store64(slot, 0x2222); uint64_t got = *slot; int d1 = DIES_STORE(slot);
+            s2a_meminfo mi; s2a_mem_query((uint64_t)slot, &mi);
+            CHECK(prc == 0 && d0 && w == 0 && got == 0x2222 && d1 && mi.perm == 1,
+                  "装载器补绑只读页：设只读 %#llx、修前直接写被杀 %d、装载器写回 %d、槽 %#llx（应 0x2222）、写后直接写仍被杀 %d、游戏看到的权限 %u（应 1）",
+                  (unsigned long long)prc, d0, w, (unsigned long long)got, d1, mi.perm);
+            uint64_t *xp = mmap(NULL, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0); xp[0] = 0x5555; mprotect(xp, 0x4000, PROT_READ | PROT_EXEC);
+            CHECK(s2a_loader_store64(xp, 0x6666) == -1 && xp[0] == 0x5555, "装载器不写可执行页（签名代码页同类）：回 -1、内容不变");
+            munmap(xp, 0x4000);
+            memset(r, 0, sizeof r); r[0] = (uint64_t)(hz + 0x8000); r[1] = 0x4000; r[2] = 3; svc_mem(0x02, r, 0);
+            #undef DIES_STORE
+        }
         #undef PHYS
         #undef HEAPSZ
     }
@@ -854,5 +877,51 @@ int main(void) {
         CHECK(mi.state == 0x10 && mi.base == W36 + 32 * G && mi.base + mi.size == 1ull << 39, "39 位对照：窗口末之上止于 2^39（实 起 %#llx 止 %#llx）", (unsigned long long)mi.base, (unsigned long long)(mi.base + mi.size));
     }
     printf("%s t_svc_mem：%d / %d 项通过（对拍 %d 区间不一致 %d；64 MB 整段查 8 字节 %d 次 老 %.1f ms → 新 %.2f ms）\n", bad ? "✗" : "✓", checks - bad, checks, N, diff, M, told, tnew);
+    {   // #258 文件后备下还页懒清零：解除时锁内只改成不可访问并记「待清零」，不打洞；页重新放出来时就地清零（0x2C / MapMemory 拷贝路径）或只撤销标记（MapMemory 对齐路径盖掉原映射）。
+        //   期望按语义手写：解除后页立刻不可访问、待清零计数 = 页数；放出来一律读到零 / 源内容；非文件后备路径行为不变
+        const uint64_t HP = 0x4000, AZ = 4ull << 20;
+        uint8_t *az = mmap(NULL, AZ, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        CHECK(az != MAP_FAILED, "#258 懒清零单测：预留别名区");
+        uint64_t b = (uint64_t)az, r[8], inl, fg, inl0, fg0;
+        #define PHYS(n, a, sz) (memset(r, 0, sizeof r), r[0] = (uint64_t)(a), r[1] = (sz), svc_mem((n), r, 0), r[0])
+        #define SV3(n, x0, x1, x2) (memset(r, 0, sizeof r), r[0] = (x0), r[1] = (x1), r[2] = (x2), svc_mem((n), r, 0), r[0])
+        #define NZ(p, n) ({ uint64_t _z = 0; for (uint64_t _i = 0; _i < (n); _i++) _z += ((uint8_t *)(p))[_i] != 0; _z; })
+        // 0) 非文件后备（桩判不在窗口）：解除即按原路还页，没有待清零
+        g_gfile = 0;
+        s2a_mem_test_setup(b, AZ, b, AZ, NULL, 0); s2a_mem_test_sysres(0x2000000, 0);
+        uint64_t rc0 = PHYS(0x2C, b, 8 * HP); memset(az, 0xA5, 8 * HP); uint64_t rc1 = PHYS(0x2D, b, 8 * HP);
+        CHECK(!rc0 && !rc1 && kprot(b) == 0 && s2a_mem_test_punch_pending() == 0, "#258 非文件后备：解除后不可访问、无待清零（rc %#llx/%#llx 保护 %d 待 %llu）", (unsigned long long)rc0, (unsigned long long)rc1, kprot(b), (unsigned long long)s2a_mem_test_punch_pending());
+        // 1) 文件后备：解除 8 页 → 立刻不可访问、待清零 8；映射回来 → 128 KB 全零、就地清零 8 页、待清零 0
+        g_gfile = 1; g_gfile_lo = b; g_gfile_hi = b + AZ;
+        s2a_mem_test_setup(b, AZ, b, AZ, NULL, 0); s2a_mem_test_sysres(0x2000000, 0); s2a_mem_test_punch_stats(&inl0, &fg0);
+        rc0 = PHYS(0x2C, b, 8 * HP); memset(az, 0xA5, 8 * HP); rc1 = PHYS(0x2D, b, 8 * HP);
+        uint64_t pend1 = s2a_mem_test_punch_pending(); int kp0 = kprot(b), kp7 = kprot(b + 7 * HP);
+        uint64_t rc2 = PHYS(0x2C, b, 8 * HP); uint64_t nz = NZ(az, 8 * HP); s2a_mem_test_punch_stats(&inl, &fg);
+        CHECK(!rc0 && !rc1 && !rc2 && pend1 == 8 && kp0 == 0 && kp7 == 0 && nz == 0 && inl == inl0 + 8 && s2a_mem_test_punch_pending() == 0, "#258 解除 8 页再映射回来：立刻不可访问、待清零 8，回来全零、就地清零 8、待 0（rc %#llx/%#llx/%#llx 待 %llu 保护 %d/%d 非零 %llu 清零 %llu→%llu）", (unsigned long long)rc0, (unsigned long long)rc1, (unsigned long long)rc2, (unsigned long long)pend1, kp0, kp7, (unsigned long long)nz, (unsigned long long)inl0, (unsigned long long)inl);
+        // 2) 解除前 4 页、只映射回第 1 页：待清零 3，第 1 页全零可访问，第 0 / 2 页仍不可访问；再全部映射回来 → 待 0
+        memset(az, 0xA5, 8 * HP); rc1 = PHYS(0x2D, b, 4 * HP); rc2 = PHYS(0x2C, b + HP, HP);
+        uint64_t pend3 = s2a_mem_test_punch_pending(); nz = NZ(az + HP, HP); kp0 = kprot(b); int kp1 = kprot(b + HP), kp2 = kprot(b + 2 * HP);
+        uint64_t rc3 = PHYS(0x2C, b, 8 * HP);
+        CHECK(!rc1 && !rc2 && !rc3 && pend3 == 3 && nz == 0 && kp0 == 0 && kp2 == 0 && kp1 != 0 && s2a_mem_test_punch_pending() == 0, "#258 中间一页映射回来：待 3、该页全零可访问、两侧仍不可访问，全映射回来后待 0（rc %#llx/%#llx/%#llx 待 %llu 非零 %llu 保护 %d/%d/%d 待 %llu）", (unsigned long long)rc1, (unsigned long long)rc2, (unsigned long long)rc3, (unsigned long long)pend3, (unsigned long long)nz, kp0, kp1, kp2, (unsigned long long)s2a_mem_test_punch_pending());
+        // 3) 栈区 MapMemory 拷贝路径（大小不按宿主页对齐）：UnmapMemory 释放的整宿主页记待清零、不可访问；再 MapMemory 到同处先清零再拷 → 待清零撤销、就地清零 +1、内容等于源
+        uint64_t S = b + (1ull << 20); s2a_mem_test_stack(S, 4 * HP);
+        memset(az, 0x3C, 2 * HP); s2a_mem_test_punch_stats(&inl0, &fg0);
+        rc0 = SV3(0x04, S, b, HP + 0x1000); rc1 = SV3(0x05, S, b, HP + 0x1000);
+        uint64_t pendS = s2a_mem_test_punch_pending(); int kpS = kprot(S);
+        memset(az, 0x5A, 2 * HP); rc2 = SV3(0x04, S, b, HP + 0x1000); s2a_mem_test_punch_stats(&inl, &fg);
+        int eq = memcmp((void *)S, (void *)b, HP + 0x1000) == 0; uint64_t pendS2 = s2a_mem_test_punch_pending();
+        rc3 = SV3(0x05, S, b, HP + 0x1000);
+        CHECK(!rc0 && !rc1 && !rc2 && !rc3 && pendS == 1 && kpS == 0 && inl == inl0 + 1 && fg == fg0 && eq && pendS2 == 0 && s2a_mem_test_punch_pending() == 1, "#258 栈区拷贝路径：解除后待 1 不可访问，再映射就地清零 +1、内容等于源、待 0，再解除待 1（rc %#llx/%#llx/%#llx/%#llx 待 %llu 保护 %d 清零 %llu→%llu 撤销 %llu→%llu 相等 %d 待 %llu→%llu）", (unsigned long long)rc0, (unsigned long long)rc1, (unsigned long long)rc2, (unsigned long long)rc3, (unsigned long long)pendS, kpS, (unsigned long long)inl0, (unsigned long long)inl, (unsigned long long)fg0, (unsigned long long)fg, eq, (unsigned long long)pendS2, (unsigned long long)s2a_mem_test_punch_pending());
+        // 4) 栈区 MapMemory 对齐路径（vm_remap 共享源页盖掉原映射）：上面留下的待清零页只撤销标记、不清零，内容等于源；解除后待清零仍 0
+        memset(az, 0x77, HP); s2a_mem_test_punch_stats(&inl0, &fg0);
+        rc0 = SV3(0x04, S, b, HP); s2a_mem_test_punch_stats(&inl, &fg); eq = memcmp((void *)S, (void *)b, HP) == 0; pendS = s2a_mem_test_punch_pending();
+        rc1 = SV3(0x05, S, b, HP);
+        CHECK(!rc0 && !rc1 && fg == fg0 + 1 && inl == inl0 && eq && pendS == 0 && s2a_mem_test_punch_pending() == 0, "#258 栈区对齐路径：待清零只撤销标记 +1、不清零、内容等于源、待 0（rc %#llx/%#llx 撤销 %llu→%llu 清零 %llu→%llu 相等 %d 待 %llu/%llu）", (unsigned long long)rc0, (unsigned long long)rc1, (unsigned long long)fg0, (unsigned long long)fg, (unsigned long long)inl0, (unsigned long long)inl, eq, (unsigned long long)pendS, (unsigned long long)s2a_mem_test_punch_pending());
+        PHYS(0x2D, b, 8 * HP);
+        #undef NZ
+        #undef SV3
+        #undef PHYS
+        g_gfile = 0; munmap(az, AZ);
+    }
     return bad ? 1 : 0;
 }

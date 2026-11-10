@@ -33,6 +33,9 @@ def main(git, base, br):
             subprocess.run(['rm', '-rf', d])
 
     a, b = fp(base), fp(merged)
+    # 任一侧取不到指纹（缺 .NET SDK 等）= 判不了翻译缓存键变没变：走「核不了」退出码 2（审计 P1-130：原先两边同一句错误比相等就判不冷）
+    bad = [f'{n} {v}' for n, v in (('main', a), ('合并后', b)) if v == '无' or v.startswith('取不到')]
+    if bad: print('核不了：翻译指纹 ' + '；'.join(bad)); return 2
     files = run('diff', '--name-only', base, merged).decode().split()
     stage = []
     for t in ('direct', 'extract'):

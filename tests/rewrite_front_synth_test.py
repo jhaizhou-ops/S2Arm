@@ -18,7 +18,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 GOLDEN = {
-    'patched.bin': '43b833f9204f4eaf2c1461c5b368161a99f0fbb593202edc3feeb97f183f208b',
+    'patched.bin': '1cab8fba723864a73ed7840150022a29557413747385d9cbeaff350ab646560c',
     'fixups.tsv': '9a396b26c2d4283eeb84a372fe03adf31ddc6eea0ed7e0551ade4e1bb36cc7df',
     'gates.tsv': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     'sites.tsv': '8edcbde343bc1a11c2713b88613d9c095a81f7c2c1a1b908e93efd3916f3e5c5',

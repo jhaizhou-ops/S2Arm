@@ -76,7 +76,8 @@ print(next((d['version'].strip('[]').split(',')[0] for fw in j['project']['frame
     echo "运行时包 ${RV}；用时 $(( $(date +%s) - t0 )) 秒" > "$O.tmp/info.txt"
     rm -rf "$O"; mv "$O.tmp" "$O"
     # 不在这里清旧版本（10-21 原生层线实证：「每平台只留最新 2 份」删掉了别的树刚拿到路径、还没链接完的那份，ld 报 libs2a_cs.a not found）：
-    #   清理统一归 tools/gc.sh——每平台留最新 3 份，30 分钟内用过的一律不动（下面每次取用都刷新目录时间）
+    #   清理归维护方 gc.sh（${S2A_PRIVATE_TOOLS}，公开仓没有）——每平台留最新 3 份，30 分钟内用过的一律不动（下面每次取用都刷新目录时间）；
+#   公开检出没有清理方，换键后的旧版本留在缓存目录里，要回收空间就手动删旧键目录
 fi
 touch "$O"   # 取用即续租：gc 按目录时间判「30 分钟内用过」不删，链接方拿到路径后不会被清掉
 say "🟢 nxaot（${RID}）：$(cat "$O/info.txt")，libs2a_cs.a $(( $(stat -f %z "$O/libs2a_cs.a") >> 20 )) MB（键 ${K}）"

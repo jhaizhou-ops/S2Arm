@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><Nullable>disable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <ItemGroup>
+    <!-- Both loop filters are internal: compile them straight in, so the test calls each entry point on both. -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Dsp/LoopFilterScalar.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Dsp/LoopFilterVector.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Common/BitUtils.cs" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Common/Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

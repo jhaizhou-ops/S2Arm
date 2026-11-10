@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import "settings.h"
+#import "s2a_l10n.h"
 #include "caps.h"
 #include "s2a_launch_ctx.h"
 #include <errno.h>
@@ -36,14 +37,14 @@ int s2a_ios_caps_value(const char *cap) {
 
 NSArray<NSDictionary *> *s2a_ios_graphics_options(void) {
     return @[
-        @{@"key": @"S2AResolutionScale", @"title": @"渲染分辨率", @"initial": @"1",
+        @{@"key": @"S2AResolutionScale", @"title": S2AL(@"gfx.resolution"), @"initial": @"1",
           @"values": @[@"0.5", @"0.75", @"1", @"1.5", @"2"], @"labels": @[@"0.5×", @"0.75×", @"1×", @"1.5×", @"2×"]},
-        @{@"key": @"S2AAntiAliasing", @"title": @"抗锯齿", @"initial": @"None",
-          @"values": @[@"None", @"SmaaMedium", @"SmaaHigh"], @"labels": @[@"关闭", @"SMAA 中", @"SMAA 高"]},
-        @{@"key": @"S2AScalingFilter", @"title": @"缩放滤镜", @"initial": @"Bilinear",
-          @"values": @[@"Bilinear", @"Nearest"], @"labels": @[@"双线性（平滑）", @"最近邻（像素清晰）"]},
-        @{@"key": @"S2AFrameRateLimit", @"title": @"帧率上限", @"initial": @"0",
-          @"values": @[@"30", @"60", @"120", @"0"], @"labels": @[@"30", @"60", @"120", @"不限"]}
+        @{@"key": @"S2AAntiAliasing", @"title": S2AL(@"gfx.antiAliasing"), @"initial": @"None",
+          @"values": @[@"None", @"SmaaMedium", @"SmaaHigh"], @"labels": @[S2AL(@"gfx.antiAliasing.off"), S2AL(@"gfx.antiAliasing.medium"), S2AL(@"gfx.antiAliasing.high")]},
+        @{@"key": @"S2AScalingFilter", @"title": S2AL(@"gfx.filter"), @"initial": @"Bilinear",
+          @"values": @[@"Bilinear", @"Nearest"], @"labels": @[S2AL(@"gfx.filter.bilinear"), S2AL(@"gfx.filter.nearest")]},
+        @{@"key": @"S2AFrameRateLimit", @"title": S2AL(@"gfx.fpsLimit"), @"initial": @"0",
+          @"values": @[@"30", @"60", @"120", @"0"], @"labels": @[@"30", @"60", @"120", S2AL(@"gfx.fpsLimit.none")]}
     ];
 }
 
@@ -191,7 +192,7 @@ int s2a_dev_plist_from(NSDictionary *info, int *on) {
 __attribute__((visibility("default"))) int s2a_dev_plist(int *on) { @autoreleasepool { return s2a_dev_plist_from(NSBundle.mainBundle.infoDictionary, on); } }
 
 // 设置页「关于本包」只读三行（#377 F09）：画面模式、直连库版本、出包时间。数据全部来自包内 Info.plist —— 出包时写进去，
-// 这里只负责把英文键名换成中文展示串；缺字段不猜，直接显示「未知」，免得把「没出直连库」显示成「直连成功」。
+// 这里只负责把英文键名换成当前语言的展示串（#316，S2ArmHost.strings）；缺字段不猜，直接显示「未知」，免得把「没出直连库」显示成「直连成功」。
 void s2a_ios_publish_bundle_info(NSDictionary *info, NSUserDefaults *defaults) {
     NSString *mode = [info[@"S2AGraphicsMode"] isKindOfClass:NSString.class] ? info[@"S2AGraphicsMode"] : nil;
     NSString *lib = [info[@"S2ADirectLibVersion"] isKindOfClass:NSString.class] ? info[@"S2ADirectLibVersion"] : nil;
@@ -199,13 +200,13 @@ void s2a_ios_publish_bundle_info(NSDictionary *info, NSUserDefaults *defaults) {
     NSString *build = [info[@"S2ABuildID"] isKindOfClass:NSString.class] ? info[@"S2ABuildID"] : nil;
 
     NSString *text;
-    if ([mode isEqual:@"direct"]) text = @"直连";   // 包只出直连（11-07 拆掉通用模式）；与 Mac 启动器同一句，不是 direct 一律未知
-    else text = @"未知（这个包没有记录画面模式）";
+    if ([mode isEqual:@"direct"]) text = S2AL(@"about.mode.direct");   // 包只出直连（11-07 拆掉通用模式）；与 Mac 启动器同一句，不是 direct 一律未知
+    else text = S2AL(@"about.mode.unrecorded");
 
     [defaults setObject:text forKey:@"S2AGraphicsModeText"];
-    [defaults setObject:(lib.length ? lib : @"无（这一包没带直连库）") forKey:@"S2ADirectLibVersionText"];
-    [defaults setObject:(packed.length ? packed : @"未知") forKey:@"S2APackTimeText"];
-    [defaults setObject:(build.length ? build : @"未知") forKey:@"S2ABuildIDText"];
+    [defaults setObject:(lib.length ? lib : S2AL(@"about.directLib.none")) forKey:@"S2ADirectLibVersionText"];
+    [defaults setObject:(packed.length ? packed : S2AL(@"about.unknown")) forKey:@"S2APackTimeText"];
+    [defaults setObject:(build.length ? build : S2AL(@"about.unknown")) forKey:@"S2ABuildIDText"];
 }
 
 float s2a_ios_res_scale(NSUserDefaults *defaults) {

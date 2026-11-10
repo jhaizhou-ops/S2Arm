@@ -1,0 +1,284 @@
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondEQ.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondEQ.cs
+index 529ed25b6484f4a51895d7bb11a5a32fe4e01478..e7ade1dc7b4b329f8377e2fd8d26804fdc077a2a 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondEQ.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondEQ.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() == (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) == TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGE.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGE.cs
+index 94877c2a6da7d9c1f1294185bde9238eaf8dd63c..34883591215d79f6046e26feae37257e4f21a1ed 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGE.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGE.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() >= (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) >= TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGT.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGT.cs
+index 350688164f29abf05fc98411f7d5d15c42297028..7756d949d80312c221617129529694e7aafddd85 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGT.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondGT.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() > (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) > TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLE.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLE.cs
+index dd9cf70cc62cbc4fe58a8631e7870912f33340b8..ac9fdf8c6dad59c027c88dca790fe43ee581ecca 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLE.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLE.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() <= (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) <= TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLT.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLT.cs
+index 0c85f5e47d5acbee3ddae6f07c326452fd4c1d46..d448c08d7f9269e8baff2dc7c01a0e44af170da0 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLT.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondLT.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() < (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) < TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondNE.cs b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondNE.cs
+index b649eccee469565226a6c6a543a1b82a4b7d1ee6..b7b234e9c433e8d401fd77cf162897673af867f6 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondNE.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Conditions/CondNE.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
+ 
+         public bool Evaluate()
+         {
+-            return (dynamic)_lhs.Get<T>() != (dynamic)_rhs.Get<T>();
++            return TamperNum.ToU64(_lhs.Get<T>()) != TamperNum.ToU64(_rhs.Get<T>());
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAdd.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAdd.cs
+index 855245e3424511eb4749308c046e95e662c2565f..7df72a07c38d450e16fbcad84730380301253cc6 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAdd.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAdd.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() + (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) + TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAnd.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAnd.cs
+index 7d1fa10b99a7cbe3630a4e927f1369f6ed2649ba..26e4d8d92a5469398a9d14d96cb6c24bb3a0293f 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAnd.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpAnd.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() & (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) & TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLog.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLog.cs
+index 4017e5f75c2f24791297735a4db38dcbda74e1c7..0c726f9f1da2ded00cd8c7d654f41fd5eec96e83 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLog.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLog.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            Logger.Debug?.Print(LogClass.TamperMachine, $"Tamper debug log id={_logId} value={(dynamic)_source.Get<T>():X}");
++            Logger.Debug?.Print(LogClass.TamperMachine, $"Tamper debug log id={_logId} value={TamperNum.ToU64(_source.Get<T>()):X}");
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLsh.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLsh.cs
+index 6c846425fb47f30ff9adca787df33bc479e71938..9f8d42613960bca3dbd9d941ee128c87a7943572 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLsh.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpLsh.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() << (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) << (int)TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpMul.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpMul.cs
+index a1b080f0047493fe32cf6ca39c1b5e2b139c0d91..bacc953e4930359946d02cf50b95d0875f49741a 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpMul.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpMul.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() * (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) * TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpNot.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpNot.cs
+index 034e220084bc3a34160215cf2cb7061fac8813b8..6ba7c9f7c1d86bf9ed07e735097e72f557303cfa 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpNot.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpNot.cs
+@@ -13,7 +13,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)(~(dynamic)_source.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(~TamperNum.ToU64(_source.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpOr.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpOr.cs
+index 0afdc3f4b64403812d10f30e50d8750df531dd6a..0d17a789ed59a32433827d1b7daccd8a8a58fc78 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpOr.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpOr.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() | (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) | TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpRsh.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpRsh.cs
+index e7e0f870e39cb8fe6146f2d74f0ba7af54cd72b1..6a8dfc0846fb4b37b784356ef327dde06f8db3f0 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpRsh.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpRsh.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() >> (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) >> (int)TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpSub.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpSub.cs
+index d860d66fdbf7beeb972cb9d78e8f144d2c5cd819..5a648664e0c8ebaeb1e5e6f25d5f92186f76c1fa 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpSub.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpSub.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() - (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) - TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpXor.cs b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpXor.cs
+index 07ba6b335836417e968e9961736596da5f92b3a8..d3cd5701b849b8ff28fc5d085fde55a20e0b909c 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Operations/OpXor.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Operations/OpXor.cs
+@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
+ 
+         public void Execute()
+         {
+-            _destination.Set((T)((dynamic)_lhs.Get<T>() ^ (dynamic)_rhs.Get<T>()));
++            _destination.Set(TamperNum.FromU64<T>(TamperNum.ToU64(_lhs.Get<T>()) ^ TamperNum.ToU64(_rhs.Get<T>())));
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Register.cs b/src/Ryujinx.HLE/HOS/Tamper/Register.cs
+index cce13ee69044fd3f27d7794fa2fff772b4cb84d3..658b1e0e5a4763cac679228044ad3c30826aeecd 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Register.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Register.cs
+@@ -15,14 +15,14 @@ namespace Ryujinx.HLE.HOS.Tamper
+ 
+         public T Get<T>() where T : unmanaged
+         {
+-            return (T)(dynamic)_register;
++            return TamperNum.FromU64<T>(_register);
+         }
+ 
+         public void Set<T>(T value) where T : unmanaged
+         {
+             Logger.Debug?.Print(LogClass.TamperMachine, $"{_alias}: {value}");
+ 
+-            _register = (ulong)(dynamic)value;
++            _register = TamperNum.ToU64(value);
+         }
+     }
+ }
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/TamperNum.cs b/src/Ryujinx.HLE/HOS/Tamper/TamperNum.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7236c5eca3365b05d02bfa1d6b93f223195ea803
+--- /dev/null
++++ b/src/Ryujinx.HLE/HOS/Tamper/TamperNum.cs
+@@ -0,0 +1,30 @@
++using System.Runtime.CompilerServices;
++
++namespace Ryujinx.HLE.HOS.Tamper
++{
++    // S2Arm：金手指的数值运算不用 C# dynamic（NativeAOT 不支持运行时绑定，iOS / Mac 包里一执行就抛异常）。
++    // 操作数宽度只有 1 / 2 / 4 / 8 字节、全是无符号整数：转成 64 位算，写回时按宽度截断，与原 dynamic 写法结果一致。
++    static class TamperNum
++    {
++        public static ulong ToU64<T>(T value) where T : unmanaged => Unsafe.SizeOf<T>() switch
++        {
++            1 => Unsafe.As<T, byte>(ref value),
++            2 => Unsafe.As<T, ushort>(ref value),
++            4 => Unsafe.As<T, uint>(ref value),
++            _ => Unsafe.As<T, ulong>(ref value),
++        };
++
++        public static T FromU64<T>(ulong value) where T : unmanaged
++        {
++            T result = default;
++            switch (Unsafe.SizeOf<T>())
++            {
++                case 1: Unsafe.As<T, byte>(ref result) = (byte)value; break;
++                case 2: Unsafe.As<T, ushort>(ref result) = (ushort)value; break;
++                case 4: Unsafe.As<T, uint>(ref result) = (uint)value; break;
++                default: Unsafe.As<T, ulong>(ref result) = value; break;
++            }
++            return result;
++        }
++    }
++}
+diff --git a/src/Ryujinx.HLE/HOS/Tamper/Value.cs b/src/Ryujinx.HLE/HOS/Tamper/Value.cs
+index 436fc13d37f5005b06b5be2151a4399456703f69..9afef01dcf7e16482df9af332b7fbae66ae37338 100644
+--- a/src/Ryujinx.HLE/HOS/Tamper/Value.cs
++++ b/src/Ryujinx.HLE/HOS/Tamper/Value.cs
+@@ -13,12 +13,12 @@ namespace Ryujinx.HLE.HOS.Tamper
+ 
+         public T Get<T>() where T : unmanaged
+         {
+-            return (T)(dynamic)_value;
++            return TamperNum.FromU64<T>(TamperNum.ToU64(_value));
+         }
+ 
+         public void Set<T>(T value) where T : unmanaged
+         {
+-            _value = (TP)(dynamic)value;
++            _value = TamperNum.FromU64<TP>(TamperNum.ToU64(value));
+         }
+     }
+ }

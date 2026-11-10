@@ -16,7 +16,7 @@
   10-28 出包槽 / sched / remote 三支各被推到 124–128 个文件、几乎每批都跑；清单按执行追踪写，被测脚本新调用了别的脚本同笔补进来），
 「# 门禁闭包：[--table <表>] <入口…>」= 改动落在这些入口经 tools/stage_inputs.py 算出的依赖闭包里就跑（阶段键单测：新文件进了阶段闭包要核登记）。
 钩子与 iOS 编译按各钩子文件头「# 门禁路由：<前缀…>」（tools/gate_decl.py route）；哪个钩子都没声明到的代码目录 = 全跑（宁多勿漏）。"""
-import fnmatch, os, re, subprocess, sys
+import fnmatch, os, re, subprocess, sys, tempfile
 
 TOK = re.compile(r'(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:sh|py|c|h|m|mm|cc|cpp|swift|cs|tsv|mk|json)\b')   # 带目录的写法整段取（graphics/tools/shbake/xc_key.sh），见 refs
 LOCAL = ('tools/', 'pack/', 'tests/')   # 本线目录：单测覆盖面只在这里面推
@@ -136,7 +136,7 @@ def test_cover(test, files, by_name, full=False):
     if only is not None:
         gone = [g for g in only if not re.search(r'[*?\[]', g) and g not in FILESET]   # 写错 / 改名的路径永远对不上 = 这支单测再也不跑，报红
         if gone: sys.exit(f'【红】gate_route：{test} 的「门禁只看」里 {" ".join(gone)} 不在仓库里（改名了要同笔改这行）')
-        if not full: return {test}, globs + only, always
+        if not full: return {test} | build_cover([txt] + [read_text(f) for f in FILESET if f.endswith(('.sh', '.py')) and any(fnmatch.fnmatch(f, g) for g in only)]), globs + only, always
         globs = globs + only
     while todo:
         f = todo.pop()
@@ -145,7 +145,44 @@ def test_cover(test, files, by_name, full=False):
         for g in got - seen: seen.add(g); todo.append(g)
     for a in closures:   # 10-27 维护者：#550 改 runtime/run_mac.sh、新增 tools/mac_chain_check.py，落进直连阶段闭包，门禁没选 stage_keys_test，main 红
         seen |= stage_closure(tuple(a))
+    seen |= build_cover([read_text(f) for f in seen if f.endswith(('.sh', '.py')) or f == test])
     return seen, globs, always
+
+
+# 构建清单（11-09 维护方：feat/launch-settings 改 macos/front_mac.m，present_settings_test 现算 HOST_SRCS 把它编进来，
+#   头上「门禁只看」手写清单没有它，列车没跑、合入后 main 红；同日 input_config_apple 同因退回一次——靠人手写覆盖面记不住）：
+#   单测本身或它覆盖到的 .sh / .py 里用美元号加括号展开这些构建清单 → 覆盖面并进 make 从仓库根现算的清单（Mac 前端开 / 关两种取并集），「门禁只看」也并
+BUILD_VARS = ('HOST_SRCS', 'IOS_SRCS')
+_BUILD = {}
+
+
+def read_text(f):
+    try: return open(f, encoding='utf-8', errors='replace').read()
+    except OSError: return ''
+
+
+def build_files(var):
+    if var not in _BUILD:
+        out = set()
+        # BUILD 指到临时目录、S2A_CS 置空（11-09）：Makefile 解析时就会改写 $(BUILD)/.host_cfg 配置戳（带 S2A_MAC_FRONTEND=1 时内容不同），
+        #   原先落在本树 build/ 上，门禁里一算路由就把宿主 / NVN 单测目标文件全判旧，runtime/gate.sh 并行各组同时重编同一批 .o，链接读到空 / 半截文件；
+        #   S2A_CS=1 从环境带进来还会在解析时起 NativeAOT 构建。只要源文件清单，不许有副作用
+        with tempfile.TemporaryDirectory(prefix='gate_route_mk.') as tb:
+            for extra in ([], ['S2A_MAC_FRONTEND=1']):
+                p = subprocess.run(['make', '-s', '-f', 'Makefile', '-f', '-', '_gate_route_list', f'BUILD={tb}', 'S2A_CS=', *extra],
+                                   input=f'_gate_route_list:;@echo $({var})\n', capture_output=True, text=True)
+                if p.returncode: sys.exit(f'【红】gate_route：make 算不出构建清单 {var}（{p.stderr.strip()[:200]}）——推不出覆盖面不能静默放过')
+                out |= {f for f in p.stdout.split() if f in FILESET}
+        out |= {f for f in FILESET if f == 'Makefile' or f.endswith('/build.mk')}   # 清单本身由根 Makefile 与各 build.mk 拼出：改清单（加删源文件）也跑
+        _BUILD[var] = out
+    return _BUILD[var]
+
+
+def build_cover(texts):
+    out = set()
+    for v in BUILD_VARS:
+        if any('$(' + v + ')' in t for t in texts): out |= build_files(v)   # 只认构建命令里展开清单（美元号加括号取值）；单纯提到这个词（说明文字、定义清单的 .mk）不算
+    return out
 
 
 _CLOSURE = {}

@@ -164,6 +164,9 @@ void s2a_host_shutdown(const char *why) {
 #endif
     { void s2a_widen_scan(void); s2a_widen_scan(); }   // 宽屏点首次命中：收局前补扫一次
     s2a_svc_red_summary();
+#if !defined(__ANDROID__)
+    { void s2a_punch_summary(void); s2a_punch_summary(); }   // #258 文件后备懒清零读数
+#endif
     { void s2a_det_summary(void); s2a_det_summary(); }
     LOG("未解析导入：%u 个", s2a_unresolved_count());
     s2a_direct_summary(1);   // _exit 不跑 atexit；显式打印现编汇总，不改变停机语义

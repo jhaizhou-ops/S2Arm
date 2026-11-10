@@ -201,6 +201,27 @@ class BundleTests(unittest.TestCase):
         if out is not None:   # 苹果自己的解析器读得出同一个值
             self.assertIn('泰拉瑞亚 S2Arm', out.stdout)
 
+    def test_localized_names_merge_into_template_lproj(self):
+        """#316：模板壳自带宿主界面字符串表 <语言>.lproj/S2ArmHost.strings（runtime/build.mk ios），本地化显示名要并进同一个 .lproj，不因目录已在而失败、也不丢原表"""
+        (self.app / 'zh-Hans.lproj').mkdir(); (self.app / 'zh-Hans.lproj/S2ArmHost.strings').write_text('"common.ok" = "好";\n', encoding='utf-8')
+        self.assemble(display_name='Terraria S2Arm', localized_names={'zh-Hans': '泰拉瑞亚 S2Arm'})
+        self.assertEqual((self.out / 'zh-Hans.lproj/S2ArmHost.strings').read_text(encoding='utf-8'), '"common.ok" = "好";\n')
+        self.assertEqual((self.out / 'zh-Hans.lproj/InfoPlist.strings').read_text(encoding='utf-8'), '"CFBundleDisplayName" = "泰拉瑞亚 S2Arm";\n')
+
+    def test_localized_name_keeps_template_infoplist_keys(self):
+        """#316：模板壳的 <语言>.lproj/InfoPlist.strings 带权限说明译文（本地网络 / 蓝牙）。出包写本地化显示名只换 / 补 CFBundleDisplayName 一行：
+        其它键逐字保留；模板里已有的旧显示名被替换而不是追加第二条；模板没有显示名的语言追加一行"""
+        perm = '/* 权限说明 */\n"NSLocalNetworkUsageDescription" = "本地联机：互相发现";\n"NSBluetoothAlwaysUsageDescription" = "连 \\"Pro\\" 手柄";\n'
+        (self.app / 'zh-Hans.lproj').mkdir(); (self.app / 'zh-Hans.lproj/InfoPlist.strings').write_text(perm, encoding='utf-8')
+        (self.app / 'en.lproj').mkdir(); (self.app / 'en.lproj/InfoPlist.strings').write_text('"CFBundleDisplayName" = "Old";\n"NSLocalNetworkUsageDescription" = "Local play";', encoding='utf-8')
+        self.assemble(display_name='Terraria S2Arm', localized_names={'zh-Hans': '泰拉瑞亚 S2Arm', 'en': 'Terraria S2Arm', 'ja': 'テラリア S2Arm'})
+        self.assertEqual((self.out / 'zh-Hans.lproj/InfoPlist.strings').read_text(encoding='utf-8'), perm + '"CFBundleDisplayName" = "泰拉瑞亚 S2Arm";\n')
+        self.assertEqual((self.out / 'en.lproj/InfoPlist.strings').read_text(encoding='utf-8'), '"CFBundleDisplayName" = "Terraria S2Arm";\n"NSLocalNetworkUsageDescription" = "Local play";')
+        self.assertEqual((self.out / 'ja.lproj/InfoPlist.strings').read_text(encoding='utf-8'), '"CFBundleDisplayName" = "テラリア S2Arm";\n')
+        if sys.platform == 'darwin':   # 苹果自己的解析器读得出两种键
+            out = subprocess.run(['plutil', '-convert', 'json', '-o', '-', str(self.out / 'zh-Hans.lproj/InfoPlist.strings')], capture_output=True, text=True)
+            self.assertEqual(json.loads(out.stdout), {'NSLocalNetworkUsageDescription': '本地联机：互相发现', 'NSBluetoothAlwaysUsageDescription': '连 "Pro" 手柄', 'CFBundleDisplayName': '泰拉瑞亚 S2Arm'})
+
     def test_existing_destination_is_not_overwritten(self):
         self.out.mkdir(parents=True)
         with self.assertRaises(ValueError):

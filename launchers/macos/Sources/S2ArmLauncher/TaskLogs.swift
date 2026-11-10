@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Only logs owned by this task, inside the launcher's private log directory.
-/// Journals and retry requests in jobs/ are deliberately retained.
+/// Only logs owned by this task, inside the log directory (Store.logsRoot: <library>/logs, or <private>/logs before a library exists).
+/// Journals and retry requests in logs/jobs/ are deliberately retained.
 enum TaskLogFiles {
     static func validID(_ id:String) -> Bool {
         let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn:"_-"))
@@ -30,7 +30,7 @@ enum TaskLogFiles {
 extension Store {
     func canDeleteTaskLogs(_ task:TaskRecord) -> Bool {
         let current = tasks.first {$0.id == task.id} ?? task
-        return !current.active && processes[task.id]?.isRunning != true && !TaskLogFiles.urls(root:privateRoot,task:current,tasks:tasks).isEmpty
+        return !current.active && processes[task.id]?.isRunning != true && !TaskLogFiles.urls(root:logsRoot.deletingLastPathComponent(),task:current,tasks:tasks).isEmpty
     }
     /// Recycling is injectable so tests can use an isolated, recoverable archive.
     @discardableResult func trashTaskLogs(_ task:TaskRecord,recycle:(URL)throws->Void = {url in
@@ -41,9 +41,9 @@ extension Store {
         let failure = { (message:String) in NSError(domain:"S2Arm.TaskLogs",code:1,userInfo:[NSLocalizedDescriptionKey:L(message)]) }
         guard !current.active,processes[current.id]?.isRunning != true else {throw failure("运行中的任务不能删除日志。")}
         guard TaskLogFiles.validID(current.id) else {throw failure("无法安全定位这项任务的日志。")}
-        let jobRoot = privateRoot.appendingPathComponent("jobs")
+        let jobRoot = jobsRoot
         let journal = jobRoot.appendingPathComponent(current.id+".json")
-        guard jobRoot.resolvingSymlinksInPath().deletingLastPathComponent() == privateRoot.resolvingSymlinksInPath(),
+        guard jobRoot.resolvingSymlinksInPath().deletingLastPathComponent() == logsRoot.resolvingSymlinksInPath(),
               journal.resolvingSymlinksInPath().deletingLastPathComponent() == jobRoot.resolvingSymlinksInPath() else {throw failure("无法安全定位这项任务的日志。")}
 
         if FileManager.default.fileExists(atPath:journal.path) {
@@ -52,10 +52,10 @@ extension Store {
             guard ["completed","failed","interrupted","cancelled"].contains(state) else {throw failure("运行中的任务不能删除日志。")}
             if let pid = record["pid"] as? Int,Self.jobAlive(pid,start:record["pidStart"] as? String) {throw failure("运行中的任务不能删除日志。")}
         }
-        let files = TaskLogFiles.urls(root:privateRoot,task:current,tasks:tasks)
+        let files = TaskLogFiles.urls(root:logsRoot.deletingLastPathComponent(),task:current,tasks:tasks)
         for file in files {
             // Recheck ownership immediately before moving each file; never follow a replaced link.
-            guard TaskLogFiles.urls(root:privateRoot,task:current,tasks:tasks).contains(file) else {throw failure("无法安全定位这项任务的日志。")}
+            guard TaskLogFiles.urls(root:logsRoot.deletingLastPathComponent(),task:current,tasks:tasks).contains(file) else {throw failure("无法安全定位这项任务的日志。")}
             try recycle(file)
         }
         return files.count

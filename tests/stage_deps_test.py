@@ -88,6 +88,26 @@ class StageDeps(unittest.TestCase):
                        lambda: (self.repo / 'maybe.tsv').write_text('出现了\n')):
             change(); self.assertNotEqual(self.rehash(text), text); text = self.rehash(text)
 
+    def test_records_survive_tmpdir_purge(self):
+        # #265：macOS 盘紧时会清系统临时目录。阶段开头 stage_deps_on、阶段跑着时把 $TMPDIR 清空，收尾 stage_deps_save 仍要成功：
+        #   记录放在产物根（$S2A_ROOTS/.stage_deps/<pid>）而不是 $TMPDIR；期望按规则手写——save 退 0、打出基础键、写出清单
+        b = Path(self.t.name); tmp = b / 'tmp'; tmp.mkdir(); roots = b / 'stage-roots'; roots.mkdir(); w = roots / 'k@x'; w.mkdir()
+        script = (f'source {ROOT}/pack/stage_keyfiles.sh; stage_deps_on || exit 9; '
+                  f'case $_SD_DIR in {roots}/.stage_deps/*) ;; *) echo "记录目录不在产物根：$_SD_DIR"; exit 8;; esac; '
+                  f'rm -rf {tmp}/* {tmp}/.[!.]*; stage_deps_save {w} t BASEKEY {ROOT}/pack/stage_keyfiles.sh')
+        r = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                           env=dict(os.environ, TMPDIR=str(tmp), S2A_ROOTS=str(roots), S2A_DEPS_EXTERNAL=''))
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'BASEKEY'), r.stdout + r.stderr)
+        self.assertTrue((w / '.stage_t.deps').is_file())
+        # 作业临时目录 S2A_JOB_TMP（游戏库 v3 接口）有就用它：记录在 $S2A_JOB_TMP/stage_deps/<pid>
+        job = b / 'job-tmp'; job.mkdir()
+        script = (f'source {ROOT}/pack/stage_keyfiles.sh; stage_deps_on || exit 9; '
+                  f'case $_SD_DIR in {job}/stage_deps/*) ;; *) echo "记录目录不在作业临时目录：$_SD_DIR"; exit 8;; esac; '
+                  f'rm -rf {tmp}/*; stage_deps_save {w} t BASEKEY {ROOT}/pack/stage_keyfiles.sh')
+        r = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
+                           env=dict(os.environ, TMPDIR=str(tmp), S2A_ROOTS=str(roots), S2A_JOB_TMP=str(job), S2A_DEPS_EXTERNAL=''))
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, 'BASEKEY'), r.stdout + r.stderr)
+
     def test_hook_off_without_env(self):
         env = {k: v for k, v in os.environ.items() if k != 'S2A_DEPS_OUT'}; env['PYTHONPATH'] = str(ROOT / 'tools/stage_deps_hook')
         r = subprocess.run([sys.executable, '-c', 'import sys; print(sys.audit is not None)'], env=env, capture_output=True, text=True, check=True)

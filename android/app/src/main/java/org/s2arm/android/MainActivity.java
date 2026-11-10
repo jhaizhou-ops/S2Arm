@@ -21,6 +21,7 @@ public class MainActivity extends Activity
         implements SurfaceHolder.Callback, InputManager.InputDeviceListener, NativeBridge.SessionStopListener {
     private final GamepadState gamepad = new GamepadState();
     private SurfaceView surface;
+    private FrameLayout root;
     private TextView status;
     private LinearLayout panel;   // diagnostic text over the surface
     private long host;
@@ -71,6 +72,12 @@ public class MainActivity extends Activity
     private final android.os.Handler lifecycleProbe = new android.os.Handler(android.os.Looper.getMainLooper());
     private long lastLifecyclePresent;
     private final Runnable lifecycleSample = this::sampleLifecyclePresent;
+    // B3（debug.s2a.buffer_geometry）：交换链缓冲按渲染目标尺寸出图时，native 把
+    // 缓冲尺寸报上来；这里按它把 surface 的 frame 布成同比例居中矩形，
+    // 合成器的 SCALE_TO_WINDOW 拉伸才不变形（native_window 没有 SCALE_FIT）。
+    // touchPad 不跟画面矩形：虚拟键要留在两侧黑边上，始终铺满整个窗口。
+    private final Runnable geometrySample = this::sampleBufferGeometry;
+    private int bufferGeomW, bufferGeomH;
     private android.window.OnBackInvokedCallback gameBackCallback;
 
     @Override public void onCreate(Bundle state) {
@@ -140,7 +147,7 @@ public class MainActivity extends Activity
         String runtimeRejected = loadRuntime(getIntent());
         runtimeLoaded = runtimeRejected == null;
         if (gameMode) dumpPreviousSessionLog();
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
         surface = new SurfaceView(this);
         if (runtimeLoaded) surface.getHolder().addCallback(this);   // rejected: no surface callbacks reach native
         root.addView(surface);
@@ -578,6 +585,7 @@ public class MainActivity extends Activity
         library.scanImports();   // report the library; imports require an explicit staging target
         if (host != 0) NativeBridge.setForeground(host, true);   // the window, if any, is still the render thread's
         tryStartGame();
+        if (gameMode) lifecycleProbe.postDelayed(geometrySample, 500);   // B3 输出尺寸轮询（开关关时全部回落 MATCH_PARENT）
         if (gameMode && host != 0 && !gameStopping && getIntent().getBooleanExtra(GameActivity.LIFECYCLE_TEST_EXTRA, false)
                 && (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             lastLifecyclePresent = NativeBridge.gamePresentCount();
@@ -594,11 +602,38 @@ public class MainActivity extends Activity
         }
         lifecycleProbe.postDelayed(lifecycleSample, 100);
     }
+    // B3：500 ms 轮询交换链缓冲尺寸；未开/未出图时持续按 MATCH_PARENT 收尾，旋转后重排也走这里。
+    // 轮询无条件跑，但只在算出的尺寸真变时才动 LayoutParams——开关关着不触发重布局。
+    private void sampleBufferGeometry() {
+        if (!resumed || !gameMode || !runtimeLoaded) return;
+        int[] dims = new int[2];
+        NativeBridge.bufferGeometry(dims);
+        if (dims[0] != bufferGeomW || dims[1] != bufferGeomH) {
+            bufferGeomW = dims[0]; bufferGeomH = dims[1];
+        }
+        layoutForBufferGeometry();
+        lifecycleProbe.postDelayed(geometrySample, 500);
+    }
+    private void layoutForBufferGeometry() {
+        int w = FrameLayout.LayoutParams.MATCH_PARENT, h = FrameLayout.LayoutParams.MATCH_PARENT;
+        if (bufferGeomW > 0 && bufferGeomH > 0 && root != null && root.getWidth() > 0 && root.getHeight() > 0) {
+            int[] fit = BufferGeometry.fit(bufferGeomW, bufferGeomH, root.getWidth(), root.getHeight());
+            w = fit[0]; h = fit[1];
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) surface.getLayoutParams();
+        if (lp == null) {
+            surface.setLayoutParams(new FrameLayout.LayoutParams(w, h, android.view.Gravity.CENTER));
+        } else if (lp.width != w || lp.height != h || lp.gravity != android.view.Gravity.CENTER) {
+            lp.width = w; lp.height = h; lp.gravity = android.view.Gravity.CENTER;
+            surface.setLayoutParams(lp);
+        }
+    }
     @Override protected void onPause() {
         resumed = false;
         if (gameAudioFocus != null) gameAudioFocus.pause();
         if (legacyTextInput != null) legacyTextInput.pause();
         lifecycleProbe.removeCallbacks(lifecycleSample);
+        lifecycleProbe.removeCallbacks(geometrySample);
         if (runtimeLoaded) {
             clearInput();
             hostKeyboard.pause();

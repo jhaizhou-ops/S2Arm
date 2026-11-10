@@ -41,6 +41,7 @@
     <TrimmerRootAssembly Include="S2A.Services" />
     <TrimmerRootAssembly Include="NxGal" />
     <!-- 原生层 s2a_* 与渲染器 nxgal_* 都静态链在同一进程，不走 dlopen -->
+    <RdXmlFile Include="rd.xml" />   <!-- 金手指：Ryujinx 金手指编译器按宽度现造的泛型实例（见 rd.xml 头注释） -->
     <DirectPInvoke Include="s2a_native" />
     <DirectPInvoke Include="nxgal" />
     <DirectPInvoke Include="dsx" />   <!-- 直连翻译库（S2A.Dsh SpvCross.cs，设备首遇现编 s2a_dsh_compile；graphics/build.mk 链 libdsx.a） -->

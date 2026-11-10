@@ -228,7 +228,7 @@ struct ExportGameCard: View {
     }
     var body: some View {
         let dlc = Set(game.packages.filter { $0.type == "dlc" }.map(\.titleId)).count
-        let bytes = Dictionary(grouping:game.packages, by:\.sha256).values.compactMap(\.first).reduce(Int64(0)) { $0 + $1.size }   // 同一个文件里的多项只算一次
+        let bytes = game.sourceBytes   // 同一个文件里的多项只算一次
         HStack(alignment:.top,spacing:18) {
             GameCover(game:game).frame(width:112,height:112).clipShape(RoundedRectangle(cornerRadius:22,style:.continuous))
                 .shadow(color:.black.opacity(0.12),radius:6,y:3).accessibilityHidden(true)

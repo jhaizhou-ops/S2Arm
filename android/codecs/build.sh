@@ -66,7 +66,7 @@ if [ "${1:-}" = --avc-only ]; then build_avc; exit; fi
 init_codec_toolchain
 if [ "${1:-}" = --cache-keys ]; then
     printf 'opus %s\n' "$(codec_recipe_key opus "$opus_sha" "$repo_dir/android/codecs/opus-build.sh")"
-    printf 'vpx %s\n' "$(codec_recipe_key vpx "$vpx_sha" "$repo_dir/android/codecs/vpx-build.sh")"
+    printf 'vpx %s\n' "$(codec_recipe_key vpx "$vpx_sha" "$repo_dir/android/codecs/vpx-build.sh" "$repo_dir/services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch")"
     printf 'avc %s\n' "$(avc_cache_key)"
     exit
 fi

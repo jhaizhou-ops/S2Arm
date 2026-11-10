@@ -45,7 +45,8 @@ printf '{"title": "0100AAAA00000000", "pso_seed": "gen"}\n' > "$O/direct_lib.jso
 echo "[直连库] 🟢 0100AAAA00000000 直连库 b-v1：并集 4，出库 4，没出成 0"
 EOF
 (cd $T/repo && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm x)
-export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared FAKE_CALLS=$T/calls S2A_RUN_ROOT=$T/run HOME=$T/home; unset S2A_PSO_SOURCES
+# 假仓库不读本机配置（11-09：门禁 / 维护方机器设了 S2A_MACHINE_LOCAL，machine.local 里 S2A_PY=$HOME/…/venv 在 HOME 换成临时目录后指向不存在的 Python，12 例全红）
+export S2A_ROOTS=$T/roots S2A_ROOTS_SHARED=$T/shared FAKE_CALLS=$T/calls S2A_RUN_ROOT=$T/run HOME=$T/home; unset S2A_PSO_SOURCES S2A_MACHINE_LOCAL S2A_PY
 mkdir -p $T/roots/acnh@s0/romfs $T/roots/acnh@s0/exefs $T/home; echo r > $T/roots/acnh@s0/romfs/f; echo main > $T/roots/acnh@s0/exefs/main; echo ksh > $T/roots/acnh@s0/.stage_shaders
 printf 'title_id\t0100aaaa00000000\n' > $T/roots/acnh@s0/unpack.tsv; ln -s acnh@s0 $T/roots/acnh@现行
 SD=$T/run/s2arm/pso_seed/0100AAAA00000000; mkdir -p $SD

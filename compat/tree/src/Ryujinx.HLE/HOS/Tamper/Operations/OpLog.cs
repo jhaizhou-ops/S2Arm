@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Operations
 
         public void Execute()
         {
-            Logger.Debug?.Print(LogClass.TamperMachine, $"Tamper debug log id={_logId} value={(dynamic)_source.Get<T>():X}");
+            Logger.Debug?.Print(LogClass.TamperMachine, $"Tamper debug log id={_logId} value={TamperNum.ToU64(_source.Get<T>()):X}");
         }
     }
 }

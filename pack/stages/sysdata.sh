@@ -61,7 +61,17 @@ fonts_ok "$CUR" && tz_up "$CUR" && [ "$tz_stale" = 0 ] && [ -z "$CP$SY" ] \
   && { echo "🟢 $G 系统数据已齐，跳过"; exit 0; }
 TAG=sys-$(cd "$F" && ls *.bfttf | xargs shasum -a 256 | shasum -a 256 | cut -c1-8)-tz${TZ_KEY}${CP:+-sd}${SY:+-syn}
 TAG=$(root_tag "$G" "$TAG"); W=$(root_begin "$G" "$TAG") || exit 1
-_root_rm "$W/systemdata/fonts"; mkdir -p "$W/systemdata/fonts" && _root_cp "$F"/*.bfttf "$W/systemdata/fonts/" || { root_abort "$G" "$TAG"; echo "【红】拷字体失败"; exit 1; }
+# 拷字体：先按宿主惯例（macOS 克隆复制）；macOS 上失败再普通复制一次（-X 不带扩展属性：玩家自选的字体目录可能带写不进产物根的属性），
+#   两次 cp 的原文都留在红行里（脱敏只换路径、保留原因），错误码按原因归类（没权限 → 提示去系统设置授权）
+fonts_cp() {
+  local e1 e2; e1=$(_root_cp "$F"/*.bfttf "$W/systemdata/fonts/" 2>&1) && return 0
+  [ "$(uname -s)" = Darwin ] || { FONT_ERR=$e1; return 1; }
+  if e2=$(cp -X "$F"/*.bfttf "$W/systemdata/fonts/" 2>&1 || exit $?); then
+    echo "【黄】$G 字体克隆复制失败，已改用普通复制：$(echo "$e1" | tr '\n' ' ')"; return 0
+  fi
+  FONT_ERR="$e1 / 普通复制：$e2"; return 1
+}
+_root_rm "$W/systemdata/fonts"; FONT_ERR=; mkdir -p "$W/systemdata/fonts" && fonts_cp || { root_abort "$G" "$TAG"; echo "【红】拷字体失败：$(echo "${FONT_ERR:-建字体目录失败}" | tr '\n' ' ')"; exit 1; }
 if [ "$tz_stale" = 1 ]; then _root_rm "$(tz "$W")"; fi
 if [ -z "$(tz "$W")" ]; then
   bash "$R/services/systemdata/make_tzdata.sh" "$W/systemdata/010000000000080E" > "$W/tz.log" 2>&1 || { root_abort "$G" "$TAG"; echo "【红】生成时区数据失败（$(tail -1 "$W/tz.log")）"; exit 1; }

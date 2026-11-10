@@ -345,6 +345,28 @@ namespace S2A.Services.Tests
                 }, user, "u", snap2);
                 Row("P2-22 没有已提交目录：返回 / dir 在 / dir.tmp 在 / 报红",
                     "0 / False / False / +1", $"{kinds2} / {Directory.Exists(snap2)} / {Directory.Exists(snap2 + ".tmp")} / +{reds - redsBefore}");
+
+                // P2-22 只缺一类（11-09 审计）：索引两条，device 有已提交目录、账号存档只有 1/ 没有 0/，dir 已有一份旧副本。
+                //   期望：返回 0、dir 与 dir.tmp 都不在（不换上只含 device 的副本）、报红 +1。旧代码：account continue 后照样换上 device-only 副本 → 返回 1、dir 在，判红
+                const ulong sid3 = 0xB23, sid4 = 0xB24;
+                string d3 = Path.Combine(saveRoot, sid3.ToString("x16"));
+                Directory.CreateDirectory(Path.Combine(d3, "0")); File.WriteAllText(Path.Combine(d3, "0", "dev.bin"), "DEV");
+                Directory.CreateDirectory(Path.Combine(saveRoot, sid4.ToString("x16"), "1"));
+                string snap3 = Path.Combine(root, "p2_22b.save1");
+                Directory.CreateDirectory(Path.Combine(snap3, "account")); File.WriteAllText(Path.Combine(snap3, "user"), "old");
+                int served3 = 0, redsBefore3 = reds;
+                int kinds3 = Saves.SnapshotFrom((out long n, Span<LibHac.Fs.SaveDataInfo> infos) =>
+                {
+                    n = served3++ == 0 ? 2 : 0;
+                    if (n == 2)
+                    {
+                        infos[0] = new LibHac.Fs.SaveDataInfo { SaveDataId = sid3, Type = LibHac.Fs.SaveDataType.Device };
+                        infos[1] = new LibHac.Fs.SaveDataInfo { SaveDataId = sid4, Type = LibHac.Fs.SaveDataType.Account, UserId = user };
+                    }
+                    return LibHac.Result.Success;
+                }, user, "u", snap3);
+                Row("P2-22 只缺一类已提交目录：返回 / dir 在 / dir.tmp 在 / 报红",
+                    "0 / False / False / +1", $"{kinds3} / {Directory.Exists(snap3)} / {Directory.Exists(snap3 + ".tmp")} / +{reds - redsBefore3}");
             }
 
             Ryujinx.HLE.FileSystem.S2AHostFileSystem.Transaction = null;

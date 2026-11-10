@@ -7,7 +7,7 @@ native-test-vpad_custom:
 	$(CC) $(CFLAGS) -std=gnu11 -fobjc-arc -framework Foundation -framework CoreGraphics -o $(BUILD)/tests/t_vpad_custom runtime/tests/t_vpad_custom.m ios/vpad_layout.m
 	$(BUILD)/tests/t_vpad_custom
 ifeq ($(shell uname -s),Darwin)
-	@$(IOS_CC) -fsyntax-only -fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include ios/vpad.m ios/vpad_settings.m ios/vpad_shell.m ios/settings.m
+	@$(IOS_CC) -fsyntax-only -fobjc-arc $(NATIVE_INC) -Iruntime/src -Iruntime/ns2pro/include ios/vpad.m ios/vpad_settings.m ios/vpad_shell.m ios/settings.m ios/vpad_cheats.m
 endif
 TEST_TARGETS += native-test-vpad_custom
 

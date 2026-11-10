@@ -117,6 +117,19 @@ class Client:
         self.private = Path(private_root).expanduser().resolve()
         self.entry = self.repository / 'pack/jobs/main.py'
 
+    def job_dirs(self):
+        """任务记录目录，同 pack/jobs/core.py _job_dirs 的规则（客户端是独立程序，不导入后端）：索引表 library-index.json 第一项（默认位置）
+        建好了（有 .s2arm-library.json）是 <默认位置>/logs/jobs，否则 <私有目录>/logs/jobs；再退回游戏库结构改造前的 <私有目录>/jobs"""
+        home = self.private
+        try:
+            locations = json.loads((self.private / 'library-index.json').read_text(encoding='utf-8')).get('locations') or []
+            library = Path(locations[0]['path']).expanduser().resolve() if locations else None
+            if library and (library / '.s2arm-library.json').is_file():
+                home = library
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        return list(dict.fromkeys([home / 'logs' / 'jobs', self.private / 'logs' / 'jobs', self.private / 'jobs']))
+
     def call(self, command, *args):
         if command not in ('get', 'events', 'cancel'):
             raise ProtocolError('本原型未实现此操作：不执行导入、出包、安装或续跑')
@@ -152,7 +165,8 @@ class Client:
         Historical events are display-only, not the current attempt's state.
         """
         task_id(task)
-        path = self.private / 'jobs' / (task + '.events.jsonl')
+        path = next((d / (task + '.events.jsonl') for d in self.job_dirs() if (d / (task + '.events.jsonl')).exists()),
+                    self.job_dirs()[0] / (task + '.events.jsonl'))
         if path.is_symlink() or path.parent.is_symlink():
             raise ProtocolError('拒绝链接事件文件')
         try:

@@ -9,6 +9,7 @@
 #include "s2a_qladder.h"
 #include "s2a_docs.h"   // 文档根唯一取法
 #include "s2a_unattended.h"
+#include "../include/s2a_ui_text.h"   // 横幅文字：中文原宏 + _EN，S2A_UI 按界面语言取（#316）
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@ void s2a_console_mode_set(int docked); int s2a_console_mode(void);
 __attribute__((weak)) double s2a_gpu_busy_ms(void) { return -1; }   // 直连层 graphics/nvn hle_nvn.c 强定义
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }        // iOS ios/app.m、Mac runtime/src/host_main.c 强定义
 __attribute__((weak)) void s2a_ios_ladder_note(const char *msg) { (void)msg; }   // iOS 横幅（ios/app.m）；Mac / 单测没有界面
+__attribute__((weak)) int s2a_ui_zh(void) { return 1; }   // 界面语言（s2a_ui_text.h）：iOS ios/app.m、Mac macos/front_mac.m 强定义；别的平台 / 只链本文件的单测按中文
 
 static int g_on = -1, g_kind0, g_tier0 = -1;   // g_kind0 / g_tier0：ladder.txt 里记的（-1 = 没记过）
 static char g_path[1100];
@@ -55,7 +57,7 @@ static void apply(int t, int boot) {
     if (boot) return;   // 起局档位已在构造期设好；对不上（启动环境显式给了）就按启动环境，不改
     if (s2a_widen_game()) { g_pend_docked = want;   // 宽屏第二层按起局档位装的表：局中切档补丁对不上，下次启动生效
         LOG("档位梯子：%s 要切到%s，本款宽屏第二层按起局档位装表，下次启动生效", tier_name(g_kind, t), want ? "主机" : "掌机");
-        if (!s2a_unattended()) s2a_ios_ladder_note(want ? "画面档位已调高，下次启动游戏生效" : "已调到掌机档以保持流畅，下次启动游戏生效");
+        if (!s2a_unattended()) s2a_ios_ladder_note(want ? S2A_UI(S2A_UI_LADDER_UP) : S2A_UI(S2A_UI_LADDER_DOWN));
         return; }
     s2a_console_mode_set(want); g_pend_docked = -1;
 }

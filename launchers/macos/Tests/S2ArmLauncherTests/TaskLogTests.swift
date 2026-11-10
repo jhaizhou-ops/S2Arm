@@ -22,7 +22,7 @@ import XCTest
         let owned = [task.id+".log",task.id+"-failure.log",task.id+".progress.tsv",task.id+"-ipa.events.jsonl"]
         for name in owned {try write(name,to:logs.appendingPathComponent(name))}
         try write("nested",to:logs.appendingPathComponent(task.id+"/build.log"))
-        let kept = ["jobs/\(task.id).json","jobs/\(task.id).request.json","jobs/\(task.id).events.jsonl","out/game.ipa","saves/data","logs/\(other.id)-build.log","logs/shared.log"]
+        let kept = ["logs/jobs/\(task.id).json","logs/jobs/\(task.id).request.json","logs/jobs/\(task.id).events.jsonl","out/game.ipa","saves/data","logs/\(other.id)-build.log","logs/shared.log"]
         for name in kept {try write(name.hasSuffix(task.id+".json") ? "{\"state\":\"completed\"}" : "keep",to:root.appendingPathComponent(name))}
         let archive = root.appendingPathComponent("recoverable");try FileManager.default.createDirectory(at:archive,withIntermediateDirectories:true)
         XCTAssertTrue(store.canDeleteTaskLogs(task))
@@ -45,11 +45,11 @@ import XCTest
     func testLiveWorkerJournalOverridesTerminalView() throws {
         let (root,store,task) = try fixture();defer {try? FileManager.default.removeItem(at:root)}
         try write("log",to:root.appendingPathComponent("logs/\(task.id).log"))
-        try write("{\"state\":\"running\"}",to:root.appendingPathComponent("jobs/\(task.id).json"))
+        try write("{\"state\":\"running\"}",to:root.appendingPathComponent("logs/jobs/\(task.id).json"))
         XCTAssertThrowsError(try store.trashTaskLogs(task) {_ in XCTFail("must not recycle")})
-        try write("{\"state\":\"completed\",\"pid\":\(ProcessInfo.processInfo.processIdentifier)}",to:root.appendingPathComponent("jobs/\(task.id).json"))
+        try write("{\"state\":\"completed\",\"pid\":\(ProcessInfo.processInfo.processIdentifier)}",to:root.appendingPathComponent("logs/jobs/\(task.id).json"))
         XCTAssertThrowsError(try store.trashTaskLogs(task) {_ in XCTFail("live PID must not recycle")})
-        try write("{broken",to:root.appendingPathComponent("jobs/\(task.id).json"))
+        try write("{broken",to:root.appendingPathComponent("logs/jobs/\(task.id).json"))
         XCTAssertThrowsError(try store.trashTaskLogs(task) {_ in XCTFail("unreadable state must not recycle")})
     }
     func testExternalLinksAndInvalidIDsAreNotDeletionTargets() throws {

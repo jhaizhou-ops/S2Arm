@@ -43,7 +43,7 @@ xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
     -I"$root/graphics/nvn/third_party/vulkan-headers/include" \
     "$test_root/graphics/nvn/tests/t_fps_limit.m" "${objects[@]}" "$out/nvn/mac/libnvn.a" "$out/gal/mac/libnxgal.a" "$out/dsx/mac/libdsx.a" "$widen" \
     -o "$out/t_fps_limit" -Wl,-dead_strip -Wl,-export_dynamic -Wl,-u,_s2a_mac_front_layer -Wl,-u,_nxgal_gpu_hold "${weak_flags[@]}" \
-    -Wl,-rpath,"$(dirname "$widen")" -framework AppKit -framework GameController -framework Metal -framework Foundation \
+    -Wl,-rpath,"$(dirname "$widen")" -framework AppKit -framework GameController -framework CoreHaptics -framework Metal -framework Foundation \
     -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++ > "$out/link.log" 2>&1
 shasum -a 256 "$test_root/graphics/nvn/tests/t_fps_limit.m" "${objects[@]}" "$out/nvn/mac/libnvn.a" "$out/gal/mac/libnxgal.a" "$out/dsx/mac/libdsx.a" "$widen" "$out/t_fps_limit" > "$out/link-inputs.sha256"
 if [[ ${FPS_BUILD_ONLY:-0} == 1 ]]; then exit 0; fi

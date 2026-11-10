@@ -144,6 +144,24 @@ try:
 except SystemExit as ex: code = ex.code
 G.need, G.all_sources, G.romfs_nros, G.nso_syms.load, sys.argv = sv
 ck(code in (0, None) and '【黄】' in out.getvalue() and '[RED]' not in out.getvalue(), f'⑪ 认不出源码 → 黄行、退出 0（实 退出 {code}：{out.getvalue()[:80]!r}）')
+# ⑫ ExeFS 里带 NSO 魔数却解析不了的模块（审计 P2-209）→ [RED] 退 1，不答「不需要」；不是 NSO 的旁路文件照旧跳过
+ex12 = os.path.join(T, 'exefs12'); os.makedirs(ex12)
+open(os.path.join(ex12, 'subsdk1'), 'wb').write(b'NSO0' + b'\0' * 12)          # NSO 魔数、头截断：load 必抛
+open(os.path.join(ex12, 'datafile'), 'wb').write(b'not an nso at all')           # 旁路数据文件
+main12 = b'#version 450\nvoid main(){}'
+sv12 = G.nso_syms.dynsyms
+G.nso_syms.dynsyms = lambda img: [('glslcCompile', False, 0)] if img == main12 else sv12(img)   # main 导入 glslcCompile（夹具不造整个 NSO）
+out = io.StringIO(); code = 0
+try:
+    with contextlib.redirect_stdout(out): r12 = G.need(ex12, main12)
+except SystemExit as ex: code = ex.code; r12 = None
+ck(code == 1 and '[RED]' in out.getvalue() and 'subsdk1' in out.getvalue(), f'⑫ NSO 魔数却解析不了 → [RED] 退 1（实 退出 {code}、返回 {r12!r}：{out.getvalue()[:90]!r}）')
+os.remove(os.path.join(ex12, 'subsdk1')); out = io.StringIO(); code = 0
+try:
+    with contextlib.redirect_stdout(out): r12 = G.need(ex12, main12)
+except SystemExit as ex: code = ex.code; r12 = None
+ck(code in (0, None) and r12 is not None and r12[0] is None and '定义它' in r12[1], f'⑫ 只剩非 NSO 的旁路文件 → 跳过、答没有模块定义它（实 {r12!r}）')
+G.nso_syms.dynsyms = sv12
 shutil.rmtree(T)
 print('GLSLC 离线编单测：' + ('全通' if not bad else f'{bad} 项不通'))
 sys.exit(1 if bad else 0)

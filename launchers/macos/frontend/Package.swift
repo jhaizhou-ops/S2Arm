@@ -9,13 +9,14 @@ let package = Package(
     name: "NX2AppleFrontend",
     platforms: [.macOS(.v13)],
     products: [.library(name: "NX2AppleUI", targets: ["NX2AppleUI"])],
-    dependencies: [.package(path: "../adapter")],
+    dependencies: [.package(path: "../adapter"), .package(path: "../../shared/SaveSync")],
     targets: [
         .target(name: "NXCore", path: "Sources/NXCore"),
         .target(name: "NXModel", dependencies: ["NXCore"], path: "Sources/NXModel"),
         .target(name: "NXLauncher", dependencies: ["NXModel", "NXCore"], path: "Sources/NXLauncher"),
         .target(name: "NX2AppleUI",
-                dependencies: ["NXLauncher", "NXModel", "NXCore", .product(name: "S2ArmAppleAdapter", package: "adapter")],
+                dependencies: ["NXLauncher", "NXModel", "NXCore", .product(name: "S2ArmAppleAdapter", package: "adapter"),
+                               .product(name: "SaveSync", package: "SaveSync")],
                 path: "Sources/NX2Apple"),
     ],
     swiftLanguageModes: [.v5]

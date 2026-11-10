@@ -25,6 +25,20 @@ struct nvn_vk_swapchain {
     // maxImageExtent 的合法夹取误判成尺寸变化而每帧重建。
     uint32_t window_width, window_height;
     uint64_t touch_generation;  // WSI generation for the frame currently being presented
+    // B3 按渲染目标尺寸出图（debug.s2a.buffer_geometry=1 在建链时捕获一次）：
+    // window 保留给按目标尺寸重建；frame_width/height 是建链时窗口的像素尺寸（view frame），
+    // buffer_geometry 把缓冲改成渲染目标尺寸后 getWidth/getHeight 只报告缓冲尺寸，
+    // 不能再拿它当窗口像素用——view 尺寸由 Java 布成同比例居中，窗口像素只在这里记一次。
+    ANativeWindow *window;
+    int buf_geometry;
+    // setBuffersGeometry 没被兑现（调用失败，或调用成功但缓冲尺寸/夹取后的 extent 不是
+    // 渲染目标尺寸）：停止按目标尺寸重建，本交换链退回普通等比 blit；create 的 memset
+    // 清零，下条交换链重试一次。
+    int geometry_failed;
+    // 上一帧 present 的渲染目标尺寸：目标尺寸连续两帧相同才付销毁+重建的代价（#203 防抖），
+    // 逐帧换尺寸的动态分辨率永远稳不下来，留在旧缓冲上等比 blit，不会逐帧销毁重建交换链。
+    uint32_t geometry_src_w, geometry_src_h;
+    uint32_t frame_width, frame_height;
     uint32_t image_count;
     VkImage images[8];
     // acquire 只有一把：提交会 wait 它，且同步调度在下一帧 acquire 前已等到渲染 fence，

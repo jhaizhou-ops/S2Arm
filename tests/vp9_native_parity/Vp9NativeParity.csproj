@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><AllowUnsafeBlocks>true</AllowUnsafeBlocks><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <!-- Internal to Ryujinx.Graphics.Nvdec: the frame builder the game runs, and the NVDEC probability layout with its Convert. -->
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs" />
+    <Compile Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Types/Vp9/EntropyProbs.cs" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec/Ryujinx.Graphics.Nvdec.csproj" />
+    <ProjectReference Include="../../compat/tree/src/Ryujinx.Graphics.Nvdec.Vp9/Ryujinx.Graphics.Nvdec.Vp9.csproj" />
+  </ItemGroup>
+</Project>

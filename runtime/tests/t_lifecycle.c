@@ -33,6 +33,7 @@ int s2a_svc_park_all(int ms){(void)ms;return 0;}
 void s2a_widen_scan(void){}
 void s2a_svc_red_summary(void){}
 void s2a_det_summary(void){}
+void s2a_punch_summary(void){}   // svc_mem.c（#258 收局读数）；本测只链 lifecycle.c
 unsigned s2a_unresolved_count(void){return 0;}
 static void late(void){event('A');}
 int main(void){

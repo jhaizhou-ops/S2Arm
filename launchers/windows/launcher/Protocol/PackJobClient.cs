@@ -66,13 +66,15 @@ public sealed class JobEventReader(string jobId, string operation)
 
 /// <summary>
 /// Export / install operations of <c>pack/jobs/main.py run --request</c>:
-/// the iPhone package (ipa), the pre-install checklist (installCheck) and install. Same private request, same fixed
+/// the iPhone package (ipa), the pre-install checklist (installCheck) and install, plus the per-game library operations of
+/// library layout v3 (moveGame / relinkGame / forgetGame, clean = clear cache). Same private request, same fixed
 /// command line and same cancel path as the library operations; events stream to the caller as they arrive.
 /// </summary>
 public static class PackJobClient
 {
     public static readonly IReadOnlySet<string> Operations =
-        new HashSet<string>(StringComparer.Ordinal) { "ipa", "installCheck", "install", "installRemove", "customize" };
+        new HashSet<string>(StringComparer.Ordinal) { "ipa", "installCheck", "install", "installRemove", "installRestore", "customize",
+            "moveGame", "relinkGame", "forgetGame", "clean", "delete" };
 
     public sealed record Request(LauncherPaths Paths, string PrivateRoot, string Library, string LibraryId, string Operation,
         string GameId, IReadOnlyDictionary<string, object?>? Extra = null);
@@ -95,12 +97,19 @@ public static class PackJobClient
         // Bundled resources next to S2Arm.exe (bundle_win.py layout): ipa reads the shared fonts from resources/Fonts (core.fonts_dir; without it
         // "shared fonts missing", tianyan 11-07); installCheck / install use the Impactor + plumesign shipped in resources/ThirdParty/Impactor
         // (pack/jobs/impactor.py bundled, 11-07 维护者: no download detour for players).
-        if (request.Operation is "ipa" or "installCheck" or "install" or "installRemove") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
+        if (request.Operation is "ipa" or "installCheck" or "install" or "installRemove" or "installRestore") payload["resources"] = Path.GetFullPath(AppContext.BaseDirectory);
         foreach (var (key, value) in request.Extra ?? new Dictionary<string, object?>())
         {
             if (payload.ContainsKey(key)) throw new ArgumentException("Extra field overrides the request envelope: " + key);
             payload[key] = value;
         }
+        // Library layout v3 (pack/jobs/library.py): a storage location / game folder is an absolute path chosen by the player;
+        // moveGame / relinkGame need theirs, ipa may carry one (export page), clean is offered only as "clear cache".
+        foreach (var (operation, key, required) in new[] { ("ipa", "location", false), ("moveGame", "location", true), ("relinkGame", "folder", true) })
+            if (request.Operation == operation && (payload.TryGetValue(key, out var value) ? value is not string path || !Path.IsPathFullyQualified(path) : required))
+                throw new ArgumentException("An absolute folder is required: " + key, nameof(request));
+        if (request.Operation == "clean" && (payload.TryGetValue("kind", out var kind) ? kind as string : null) != "cache")
+            throw new ArgumentException("Only the cache can be cleared here.", nameof(request));
         return payload;
     }
 

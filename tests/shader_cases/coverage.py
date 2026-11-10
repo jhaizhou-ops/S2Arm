@@ -4,8 +4,8 @@
 
 Instruction coverage means decoded binary presence, not dynamic execution.
 Pass events must come from the runner's IR observation, not a case's `rules`.
-Patch attribution is intentionally unsupported: source overlap with a changed
-pass does not prove the patch's semantics ran. All patches remain uncovered.
+Patch attribution requires a semantic readback control from the runner.
+Source overlap with a changed pass does not prove the patch's semantics ran.
 """
 import hashlib
 from pathlib import Path
@@ -13,6 +13,8 @@ import re
 import struct
 
 SHADER = "compat/tree/src/Ryujinx.Graphics.Shader"
+IADD_PO_PATCH = "20261102-0640-shader-iadd-plus-one-1339.patch"
+IADD_PO_CASE = "integer/add_po"
 
 
 class CoverageError(ValueError):
@@ -118,7 +120,31 @@ def _metric(all_items, covered):
             "uncovered": sorted(all_items - covered)}
 
 
-def collect_coverage(repo, manifest, events):
+def _iadd_po_evidence(repo, patches, case_stages, readbacks):
+    if IADD_PO_PATCH not in patches or case_stages.get(IADD_PO_CASE) != "compute":
+        raise CoverageError("IADD.PO evidence requires the active patch and its compute case")
+    expected, normal, without_plus_one = readbacks
+    if len(expected) != 64 or normal != expected:
+        raise CoverageError("IADD.PO normal readback did not match the 64-word expectation")
+
+    # add_po writes the seven IADD.PO and four ISCADD.PO results to words 8–18.
+    # The original arithmetic is one less modulo 2**32 at each of those words.
+    words = range(8, 19)
+    mutant_expected = expected.copy()
+    for i in words:
+        mutant_expected[i] = (expected[i] - 1) & 0xffffffff
+    if without_plus_one != mutant_expected:
+        raise CoverageError("IADD.PO control must lose one at words 8–18 and preserve all other words")
+    patch_data = (repo / "compat/patches" / IADD_PO_PATCH).read_bytes()
+    return {
+        "case": IADD_PO_CASE,
+        "patch_sha256": hashlib.sha256(patch_data).hexdigest(),
+        "differences": [{"word": i, "normal": normal[i], "without_plus_one": without_plus_one[i]}
+                        for i in words],
+    }
+
+
+def collect_coverage(repo, manifest, events, *, iadd_po_readbacks=None):
     """Consume runner-created binary manifest and observed IR event list.
 
     Manifest: [{id, stage: compute|vertex|fragment|geometry|tess_control|
@@ -127,21 +153,22 @@ def collect_coverage(repo, manifest, events):
     before, after}; hashes are lowercase SHA256 UTF-8 text digests. Unchanged
     snapshots are valid observations but earn no coverage. Malformed evidence
     fails closed. This validates integrity, not authenticity of an arbitrary
-    caller; only the real runner's instrumentation is an evidence producer.
+    caller; only the real runner is an evidence producer. iadd_po_readbacks is
+    (independent expected words, normal readback, readback without .PO +1).
     """
     repo = Path(repo)
     bits, entries, table = instruction_table(repo)
     passes = pass_sources(repo)
     patches = shader_patches(repo)
-    decoded, changed, case_ids = set(), set(), set()
+    decoded, changed, case_stages = set(), set(), {}
     for case in manifest:
         case_id = case.get("id")
-        if not isinstance(case_id, str) or not case_id or case_id in case_ids:
+        if not isinstance(case_id, str) or not case_id or case_id in case_stages:
             raise CoverageError("missing/duplicate case id")
-        case_ids.add(case_id)
         stage = case.get("stage")
         if stage not in {"compute", "vertex", "fragment", "geometry", "tess_control", "tess_evaluation"}:
             raise CoverageError(f"unsupported stage for {case_id}: {stage}")
+        case_stages[case_id] = stage
         path = Path(case.get("binary", ""))
         if not path.is_absolute():
             raise CoverageError(f"binary path must be absolute: {case_id}")
@@ -161,10 +188,10 @@ def collect_coverage(repo, manifest, events):
                 raise CoverageError(f"unknown Maxwell opcode: {case_id}@{offset:#x}={word:#018x}")
             decoded.add(emitter)
     for event in events:
-        if event.get("case") not in case_ids:
+        if event.get("case") not in case_stages:
             raise CoverageError("IR event refers to an unknown case")
         if event.get("kind") != "pass":
-            raise CoverageError("patch attribution not implemented; do not infer from source overlap")
+            raise CoverageError("IR events cannot supply patch attribution")
         name = event.get("name")
         if name not in passes or event.get("source") != passes[name]:
             raise CoverageError(f"unregistered pass or wrong source: {name}")
@@ -176,8 +203,12 @@ def collect_coverage(repo, manifest, events):
                 raise CoverageError(f"IR {side} digest mismatch: {name}")
         if event["before_ir"] != event["after_ir"]:
             changed.add(name)
+    patch_evidence = {}
+    if iadd_po_readbacks is not None:
+        patch_evidence[IADD_PO_PATCH] = _iadd_po_evidence(repo, patches, case_stages, iadd_po_readbacks)
     result = {"instructions": _metric((e[4] for e in entries), decoded),
-              "passes": _metric(passes, changed), "patches": _metric(patches, [])}
+              "passes": _metric(passes, changed), "patches": _metric(patches, patch_evidence)}
     result["instructions"].update(table_rows=len(entries), instruction_names=len({e[3] for e in entries}), scope="decoded presence, not execution")
-    result["patches"]["limitation"] = "No patch-specific semantic attribution; all uncovered, not inferred from pass overlap."
+    result["patches"]["evidence"] = patch_evidence
+    result["patches"]["limitation"] = "Attribution is limited to the .PO result increment for IADD/ISCADD."
     return result

@@ -22,6 +22,7 @@ extension LauncherView {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
+                        staleBanner
                         renewBanner
                         if let game = model.selected {
                             hero(game, width: geometry.size.width, height: max(240, geometry.size.height - collectionHeight))
@@ -86,7 +87,11 @@ extension LauncherView {
                         .padTarget("hero.export", scope: "main", radius: 30) { model.exportFor = game.id }
                     }
                     if game.playable {
-                        heroCapsule(loc.t("library.play"), symbol: "play.fill", id: "hero.play", enabled: !model.busy) { model.play(game, uiLanguage: uiLanguage) }
+                        // 开局前在同步 iCloud 存档：按钮写明在做什么（11-09 审查：原来点了几分钟没反应）
+                        heroCapsule(loc.t(model.cloudSyncing ? "s2arm.cloud.syncing" : "library.play"), symbol: model.cloudSyncing ? "icloud" : "play.fill", id: "hero.play",
+                                    enabled: !model.busy && !model.cloudSyncing) { model.play(game, uiLanguage: uiLanguage) }
+                        // 启动设置（11-09 维护者）：开局前设这一款的画面 / 模式 / 震动 / 体感 / 浮层，按款记住
+                        heroCircle("gearshape", label: txt("game.display"), id: "hero.launchSettings", enabled: true) { displayFor = game.id }
                     }
                     if model.finishedExports[game.id] != nil, !(model.busy && model.session?.gameID == game.id) {
                         heroCapsule(txt("library.hero.results"), symbol: "checkmark.seal", id: "hero.results", enabled: true) { model.viewingResult = model.finishedExports[game.id] }
@@ -94,6 +99,14 @@ extension LauncherView {
                     heroCircle("externaldrive", label: loc.t("s2arm.action.freeSpace"), id: "hero.space") { spaceFor = game.id }
                     heroCircle("ellipsis", label: txt("game.more"), id: "hero.more") { moreFor = game.id }
                         .popover(isPresented: Binding(get: { moreFor == game.id }, set: { if !$0 { moreFor = nil } }), arrowEdge: .bottom) { moreMenu(game) }
+                }
+                if game.playable, game.hostUpdate == "incompatible" {
+                    // 新版改了宿主读产物的约定，换不了宿主：旧版本照常能玩，重新出一次 Mac 版才能用上新版修复（host_update.py）
+                    HStack(spacing: 10) {
+                        Text(txt("library.hostUpdate.incompatible")).font(.manrope(12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Button(txt("library.hostUpdate.prepare")) { model.exportFor = game.id }
+                            .buttonStyle(.link).disabled(model.busy).accessibilityIdentifier("hero.hostUpdate")
+                    }
                 }
                 if let error = model.actionError(for: game.id) {
                     Text(loc.backend(error)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
@@ -138,7 +151,7 @@ extension LauncherView {
                     HStack(alignment: .top, spacing: 14) {
                         ForEach(model.games) { game in
                             let _ = LauncherWork.count(.card)
-                            Button { model.selectedID = game.id } label: {
+                            Button { if game.location.state == "missing" { missingFor = game } else { model.selectedID = game.id } } label: {
                                 VStack(alignment: .leading, spacing: 8) {
                                     GameArtwork(covers: covers, cover: game.cover)
                                     .frame(width: cardWidth, height: cardWidth / 1.8).clipped()
@@ -158,6 +171,7 @@ extension LauncherView {
                             .accessibilityAddTraits(game.id == heroID ? .isSelected : [])
                             .accessibilityIdentifier("card." + game.id)
                             .padTarget("card." + game.id, scope: "main", radius: 7) { model.selectedID = game.id }
+                            .contextMenu { cardMenu(game) }
                         }
                     }
                     .padding(.horizontal, Self.ringRoom).padding(.top, Self.ringRoom).padding(.bottom, 5 + Self.ringRoom)
@@ -208,6 +222,27 @@ extension LauncherView {
         .buttonStyle(.plain).disabled(!enabled).accessibilityLabel(title).accessibilityIdentifier(id)
     }
 
+    /// 显示的是上次的列表（启动先显示的快照 / 刷新失败）：标明是上次的；失败时说原因、给重试。
+    @ViewBuilder var staleBanner: some View {
+        if model.showingSnapshot && !model.games.isEmpty && (model.loading || model.libraryError != nil) {
+            HStack(spacing: 12) {
+                if model.loading {
+                    ProgressView().controlSize(.small)
+                    Text(txt("library.stale.loading")).font(.manrope(13.5, .semibold))
+                } else {
+                    Image(systemName: "exclamationmark.arrow.triangle.2.circlepath").foregroundStyle(LauncherPalette.danger)
+                    Text(txt("library.stale.failed").replacingOccurrences(of: "{0}", with: loc.backend(model.staleLibraryError ?? ""))).font(.manrope(13.5, .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                if !model.loading {
+                    Button(txt("library.stale.retry")) { model.refresh() }.buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("library.stale.retry")
+                }
+            }
+            .padding(.horizontal, 34).padding(.vertical, 10).background((model.loading ? LauncherPalette.building : LauncherPalette.danger).opacity(0.10))
+        }
+    }
+
     /// 免费签名快到期 / 已到期的提醒（只提最急的一款）。
     @ViewBuilder var renewBanner: some View {
         if let game = model.games.filter({ ($0.iphoneDaysLeft() ?? 9) <= 1 }).min(by: { ($0.iphoneDaysLeft() ?? 9) < ($1.iphoneDaysLeft() ?? 9) }), let days = game.iphoneDaysLeft() {
@@ -223,6 +258,13 @@ extension LauncherView {
 
     private func moreMenu(_ game: GameSummary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(txt("library.sizes.title")).font(.manrope(11, .semibold)).foregroundStyle(.secondary)
+                GameSizesList(sizes: game.sizes, compact: true)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            Divider().opacity(0.3).padding(.vertical, 4)
+            moreRow(txt("game.display"), "slider.horizontal.3") { displayFor = game.id }
             moreRow(txt("game.saves"), "tray.full") { saveFor = game.id }
             moreRow(txt("game.input"), "gamecontroller") { inputFor = game.id }
             moreRow(txt("game.diag"), "doc.zipper") { exportDiagnostics() }
@@ -234,10 +276,45 @@ extension LauncherView {
 
     private func moreRow(_ title: String, _ symbol: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
         Button { moreFor = nil; action() } label: {
-            Label(title, systemImage: symbol).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 8).contentShape(Rectangle())
-                .foregroundStyle(danger ? LauncherPalette.danger : Color.primary)
+            // 图标放固定宽度的框里、和文字按中线对齐：Label 的图标宽度跟着符号走，各行文字起点会错开（11-09 维护者截图）
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: symbol).font(.system(size: 14, weight: .medium)).frame(width: 20, height: 20, alignment: .center)
+                Text(title).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 8).contentShape(Rectangle())
+            .foregroundStyle(danger ? LauncherPalette.danger : Color.primary)
         }
         .buttonStyle(.plain)
+    }
+
+    /// 游戏卡片右键菜单（游戏库结构 v3）：开始游戏、出包、启动设置、在访达中显示、移动到其他位置、清除缓存、删除
+    @ViewBuilder func cardMenu(_ game: GameSummary) -> some View {
+        let reachable = game.location.state != "offline" && game.location.state != "missing"
+        if game.playable && reachable {
+            Button { model.play(game, uiLanguage: uiLanguage) } label: { Label(loc.t("library.play"), systemImage: "play.fill") }
+        }
+        Button { model.exportFor = game.id } label: { Label(loc.t("s2arm.export.action"), systemImage: "shippingbox") }.disabled(!reachable)
+        Button { displayFor = game.id } label: { Label(txt("library.menu.launchSettings"), systemImage: "gearshape") }.disabled(!reachable)
+        Divider()
+        Button { model.reveal(game) } label: { Label(txt("library.menu.reveal"), systemImage: "folder") }.disabled(game.location.path.isEmpty)
+        Button { moveGame(game) } label: { Label(txt("library.menu.move"), systemImage: "arrow.right.doc.on.clipboard") }.disabled(!reachable || game.location.state == "none" || model.busy)
+        Button { model.clearCache(game) } label: { Label(txt("library.menu.clearCache"), systemImage: "sparkles") }.disabled(!reachable || model.busy)
+        Divider()
+        Button(role: .destructive) { deleteFor = game } label: { Label(txt("game.delete"), systemImage: "trash") }
+    }
+
+    func moveGame(_ game: GameSummary) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        panel.prompt = BackendText.launcherText("export.location.choose", language: uiLanguage)
+        if panel.runModal() == .OK, let url = panel.url { model.moveGame(game, to: url) }
+    }
+
+    func relinkGame(_ game: GameSummary) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.message = txt("library.missing.pick")
+        if panel.runModal() == .OK, let url = panel.url { model.relinkGame(game, folder: url) }
     }
 
     private func exportDiagnostics() {
@@ -252,6 +329,9 @@ extension LauncherView {
             return (loc.t(model.session?.kind == .play ? "s2arm.library.running" : "s2arm.job.running"), LauncherPalette.building)
         }
         if model.exportQueue.contains(where: { $0.game.id == game.id }) { return (txt("export.status.queued"), LauncherPalette.building) }
+        // 存放位置（游戏库结构 v3）：移动硬盘没插 → 灰色「未连接」，插回来自动恢复；文件夹没了 → 红字，点卡片重新指定或移除
+        if game.location.state == "offline" { return (txt("library.location.offline").replacingOccurrences(of: "{0}", with: game.location.volume), LauncherPalette.unbuilt) }
+        if game.location.state == "missing" { return (txt("library.location.missing"), LauncherPalette.danger) }
         var parts: [String] = []
         var expired = false
         if game.iphoneInstalledAt != nil {
@@ -286,8 +366,10 @@ struct CoverFill: View {
     let image: NSImage
     var body: some View {
         GeometryReader { g in
+            // 填满后溢出的部分 .clipped() 只裁显示、不裁点击区域：不限定的话，接近正方形的封面会把点击区域伸出框外，
+            //   盖住上面的「返回游戏库」、旁边的卡片（11-09 维护者：丝之歌出包页返回点不了；AX 量到封面按钮高 236、看得见的只有 131）
             Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
-                .frame(width: g.size.width, height: g.size.height).clipped()
+                .frame(width: g.size.width, height: g.size.height).clipped().contentShape(Rectangle())
         }
     }
 }

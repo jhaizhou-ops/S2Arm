@@ -20,6 +20,15 @@ public sealed partial class EnvironmentWindow : Window
     private LauncherPaths paths = LauncherPaths.Defaults(AppContext.BaseDirectory);
     private EnvironmentReport? report;
     private string summaryKey = "environment.idle";
+    private string unexpectedError = "";
+
+    /// <summary>Program.cs 全局兜底接住界面线程上没处理的异常后调：在顶部报出来，忙碌标记复位（出错的那个操作已经中断），启动器继续可用。</summary>
+    internal void ReportUnexpected(Exception error, string logPath)
+    {
+        unexpectedError = error.GetType().Name + ": " + error.Message + "\n" + T("launcher.unexpected_log") + " " + logPath;
+        busy = false; libraryBusy = false;
+        try { Render(); } catch (Exception again) { LauncherCrash.Log(again, "render after unexpected"); }
+    }
     private string diagnostics = "";
     private bool busy;
     private CancellationTokenSource? active;
@@ -34,7 +43,7 @@ public sealed partial class EnvironmentWindow : Window
         Width = 1080; Height = 820; MinWidth = 760; MinHeight = 600;
         Background = Canvas; Foreground = Ink;
         FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope");
-        Closed += (_, _) => { active?.Cancel(); ClearCovers(); CloseControl(); };
+        Closed += (_, _) => { active?.Cancel(); ClearCovers(); DisposeRetiredCovers(all: true); CloseControl(); };
         Opened += (_, _) => { StartControl(); FinishPendingUpdate(); _ = CheckForUpdateAsync(); };
         Closing += CloseLibraryAsync;
         Closing += ClosePackAsync;
@@ -53,6 +62,7 @@ public sealed partial class EnvironmentWindow : Window
     {
         var button = new Button { Content = T(key), IsEnabled = enabled, Padding = new Thickness(16, 9),
             Background = Brush.Parse("#29292D"), Foreground = Ink, CornerRadius = new CornerRadius(8) };
+        Avalonia.Automation.AutomationProperties.SetAutomationId(button, key);   // 自动化按文案键找按钮（如 library.connect），不靠显示文字
         button.Click += (_, _) => handler();
         return button;
     }
@@ -63,6 +73,12 @@ public sealed partial class EnvironmentWindow : Window
     }
 
     private void Render()
+    {
+        try { RenderCore(); }
+        finally { DisposeRetiredCovers(); }   // 新界面换上之后才释放旧封面（ClearCovers 说明）
+    }
+
+    private void RenderCore()
     {
         if (importDialog?.Targeted == true) { renderDeferred = true; return; }
         Title = T("app.title");
@@ -88,6 +104,7 @@ public sealed partial class EnvironmentWindow : Window
             if (page == "library") libraryFolder = libraryFolderBox.Text ?? "";
             language = languages.SelectedIndex == 0 ? "zh-Hans" : "en"; Render();
         };
+        if (PhonePill() is { } phonePill) rightBar.Children.Add(phonePill);
         AddUpdateControls(rightBar);
         rightBar.Children.Add(languages);
 
@@ -126,6 +143,19 @@ public sealed partial class EnvironmentWindow : Window
 
         Grid.SetColumn(rightBar, 1); header.Children.Add(rightBar);
         body.Children.Add(header);
+        if (unexpectedError.Length > 0)
+        {
+            // 全局兜底接住的意外错误（Program.cs）：启动器不退出，在顶部说清楚、给日志位置，玩家可以关掉提示继续用
+            var panel = new StackPanel { Spacing = 8 };
+            panel.Children.Add(Label(T("launcher.unexpected"), 16));
+            panel.Children.Add(Muted(unexpectedError));
+            var dismiss = new Button { Content = T("launcher.unexpected_dismiss"), Padding = new Thickness(12, 6), CornerRadius = new CornerRadius(8),
+                Background = Brush.Parse("#29292D"), Foreground = Ink };
+            Avalonia.Automation.AutomationProperties.SetAutomationId(dismiss, "launcher.unexpected_dismiss");
+            dismiss.Click += (_, _) => { unexpectedError = ""; Render(); };
+            panel.Children.Add(dismiss);
+            body.Children.Add(Card(panel));
+        }
         if (RenderPackPages(body)) return;
         if (importDialog is not null)
         {
@@ -136,6 +166,12 @@ public sealed partial class EnvironmentWindow : Window
         if (page == "library" && ShowsWelcome)
         {
             RenderWelcome(body);
+            Content = new ScrollViewer { Content = body, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+            return;
+        }
+        if (page == "storage")
+        {
+            RenderStorage(body);
             Content = new ScrollViewer { Content = body, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
             return;
         }

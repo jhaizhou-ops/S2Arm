@@ -3,6 +3,8 @@
 // 代码区一拷进来就设成只读+执行，此后装载器只写 data：iOS 上代码区是签进 App 的节，原样 remap 过来。
 // 随包表：gpu_drivers.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单）
 // 随包表：nro_modules.tsv（出包组装 pack/ship_ext.py 从产物根拷进 App，runtime/build.mk 按这行自动收清单；ro LoadNro 按 NRO 哈希查改写映像，11-02 前 iOS 漏拷：马力欧派对第一次装 NRO 即中止）
+#include "../include/s2a_docs.h"
+#include <stdatomic.h>
 #include "native.h"
 #include "loader.h"
 #include "s2a_gfx_mode.h"
@@ -146,6 +148,12 @@ module_t *module_of(const void *p) {
 // ---------- 改写器随行表 ----------
 static char g_main_build_id[40];
 const char *s2a_main_build_id(void) { return g_main_build_id; }
+// 金手指目录给 C#（services Cheats.cs）：有界面入口的宿主（ios/vpad_cheats.m 装载时）先登记，才回 <文档根>/cheats（s2a_docs.h 唯一取法）；
+//   没登记（Mac / 安卓，没有金手指界面）回空串，C# 就不起线程、不碰用户文稿夹。平台差异落在平台层登记这一步，共享代码不判平台
+static _Atomic int g_cheats_host;
+void s2a_cheats_host_enable(void) { atomic_store(&g_cheats_host, 1); }
+const char *s2a_cheats_dir(void) { static char d[1024]; if (!atomic_load(&g_cheats_host)) return ""; s2a_docs_path(d, sizeof d, "cheats"); return d; }
+uint64_t s2a_main_base(void) { return g_nmod ? (uint64_t)(uintptr_t)g_mod[0].base : 0; }   // 主程序（Horizon 序第一个模块）装载基址：金手指 Atmosphere「main」区（services Cheats.cs）
 // 同一表解析器读取目录流或已验证 APK 的借用字节；后者不落地、也不二次打开。
 struct loader_text {
     FILE *file;
@@ -1110,13 +1118,17 @@ __attribute__((visibility("default"), used)) int s2a_nro_map(const uint8_t sha[3
         read_layout(m, g_moddir); map_image(m, g_moddir); parse_dynamic(m); register_gates(m, g_moddir);
         e->mod = g_nmod; __atomic_store_n(&g_nmod, g_nmod + 1, __ATOMIC_RELEASE);
         e->loaded = 1; *base = (uint64_t)m->base;
-        size_t nb = 0, left = 0;   // 起局没解析、这个 NRO 定义了的导入：改指过来（符号地址 = 基址 + 值，与 NRO 自己的重定位无关，映射完就定）
+        size_t nb = 0, left = 0, nfail = 0;   // 起局没解析、这个 NRO 定义了的导入：改指过来（符号地址 = 基址 + 值，与 NRO 自己的重定位无关，映射完就定）
+        //   槽可能已被游戏设成只读（DT_INIT 后 SetMemoryPermission 把 RELRO 收紧）：经 svc_mem.c s2a_loader_store64 写（只读数据页临时加写再恢复），写不进就留着报错桩、打红，不崩整个进程
+        int s2a_loader_store64(uint64_t *where, uint64_t v);
         for (size_t i = 0; i < g_npend; i++) if (g_pend[i].where) {
             void *p = module_sym(m, g_pend[i].name); if (!p) { left++; continue; }
-            __atomic_store_n(g_pend[i].where, (uint64_t)p + (g_pend[i].slot && !jump_slot_addend() ? 0 : (uint64_t)g_pend[i].addend), __ATOMIC_RELEASE);
+            if (s2a_loader_store64(g_pend[i].where, (uint64_t)p + (g_pend[i].slot && !jump_slot_addend() ? 0 : (uint64_t)g_pend[i].addend))) {
+                if (!nfail++) LOG("【红】nn::ro 装 NRO %s：导入 %s 的槽 %p 写不进（页不可写且不是可放开的数据页），留着报错桩", e->name, g_pend[i].name, (void *)g_pend[i].where);
+                left++; continue; }
             g_pend[i].where = NULL; nb++;
         }
-        LOG("nn::ro 装 NRO %s：基址 %p 大小 %#zx；起局没解析的导入补绑 %zu 个（还剩 %zu 个待绑）", e->name, m->base, m->size, nb, left);
+        LOG("nn::ro 装 NRO %s：基址 %p 大小 %#zx；起局没解析的导入补绑 %zu 个（还剩 %zu 个待绑，其中写不进 %zu 个）", e->name, m->base, m->size, nb, left, nfail);
     } else {   // 卸了再装：映回原地址（数据段、bss 重新是包里的干净副本；代码页、符号表、门不变；iOS 只换可写部分，见 remap_writable）
         module_t *m = &g_mod[e->mod];
 #if TARGET_OS_IPHONE

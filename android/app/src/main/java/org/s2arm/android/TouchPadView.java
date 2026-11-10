@@ -76,12 +76,18 @@ final class TouchPadView extends View {
         if (trace) android.util.Log.i("S2Arm", "touch viewport: result=" + result + " generation=" + viewport[0]
             + " revision=" + viewport[1] + " rect=" + viewport[2] + "," + viewport[3] + "," + viewport[4] + "," + viewport[5]
             + " buffer=" + viewport[6] + "x" + viewport[7] + " view=" + getWidth() + "x" + getHeight());
-        if (result == -4 || viewport[6] != getWidth() || viewport[7] != getHeight()) {
+        // viewport[6,7] 是发布坐标系 = 画面 surface 的像素尺寸。本 view 铺满整个窗口
+        // （虚拟键留在两侧黑边上），画面 surface 在窗口里居中，所以发布的矩形平移
+        // 半个边差即本 view 坐标；surface 还没被布进窗口时撤销等下一次。
+        long bw = viewport[6], bh = viewport[7];
+        if (result == -4 || bw <= 0 || bh <= 0 || bw > getWidth() || bh > getHeight()) {
             gameTouch.revokeViewport();
             return;
         }
         if (result != 0) throw new IllegalStateException("touch viewport unavailable: " + result);
-        setGameViewport(viewport[0], viewport[1], viewport[2], viewport[3], viewport[4], viewport[5]);
+        setGameViewport(viewport[0], viewport[1],
+                viewport[2] + (getWidth() - bw) / 2, viewport[3] + (getHeight() - bh) / 2,
+                viewport[4], viewport[5]);
     }
 
     private void movePointer(int id, float x, float y) {

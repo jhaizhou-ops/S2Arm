@@ -498,6 +498,10 @@ timeout 30 "$PYV" graphics/tools/direct/tests/t_ue3_dnbc.py > "$LOG/ue3_dnbc.log
 timeout 60 "$PYV" graphics/tools/direct/tests/t_unity_layouts.py > "$LOG/unity_layouts.log" 2>&1; r=$?; reg $r "Unity 无树布局：$(tail -1 "$LOG/unity_layouts.log")（退出 ${r}）" "$LOG/unity_layouts.log"
 # 直连库整体替换（direct_lib.sh ⑥）：齐全判定的反例逐条不过、交换后新旧互换
 timeout 120 python3 graphics/tools/direct/tests/t_lib_swap.py > "$LOG/lib_swap.log" 2>&1; r=$?; reg $r "直连库发布核验：$(tail -1 "$LOG/lib_swap.log")（退出 ${r}）" "$LOG/lib_swap.log"
+# 编译时盘写满整次停、不当成单支编不过（#265，Build.cs Metal.DiskFull；假 xcrun 注入编译器输出）
+timeout 120 python3 graphics/tools/direct/tests/t_metal_nospace.py > "$LOG/metal_nospace.log" 2>&1; r=$?; reg $r "编译盘写满：$(tail -1 "$LOG/metal_nospace.log")（退出 ${r}）" "$LOG/metal_nospace.log"
+# 预编头熔断：带预编头连续编不过、一支没成就整次关掉，不每支编两遍（Build.cs Metal.PchTrip；假 xcrun 注入）
+timeout 120 python3 graphics/tools/direct/tests/t_pch_breaker.py > "$LOG/pch_breaker.log" 2>&1; r=$?; reg $r "预编头熔断：$(tail -1 "$LOG/pch_breaker.log")（退出 ${r}）" "$LOG/pch_breaker.log"
 # 直连库成批合编（dmsh_build.py unity_flush，10-26）：一批只合编一次、每键 fn_prefix / fn_lib、批编不过逐键退回且日志写明、带额外入口的去掉重编；打包时一批只存一段（lib_pack.py）
 timeout 300 python3 graphics/tools/direct/tests/t_unity.py > "$LOG/unity.log" 2>&1; r=$?; reg $r "直连库成批合编：$(tail -1 "$LOG/unity.log")（退出 ${r}）" "$LOG/unity.log"
 timeout 120 python3 graphics/tools/direct/tests/t_lib_pack.py > "$LOG/lib_pack.log" 2>&1; r=$?; reg $r "直连库打包容器：$(tail -1 "$LOG/lib_pack.log")（退出 ${r}）" "$LOG/lib_pack.log"

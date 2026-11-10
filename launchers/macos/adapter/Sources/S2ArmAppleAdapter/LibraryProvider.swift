@@ -48,11 +48,19 @@ public struct GameSummary: Identifiable, Equatable {
     /// 上次装到 iPhone 的时刻（秒）和是不是免费账号签的；没装过为 nil。
     public let iphoneInstalledAt: Double?
     public let iphoneFree: Bool
+    /// 只换宿主（pack/jobs/host_update.py）：none / current / swap / incompatible（要重新准备才能用上新版修复）/ failed
+    public let hostUpdate: String
+    /// 存放位置（游戏库结构 v3）：state = ok / offline（位置没连上）/ missing（文件夹找不到）/ none（还没出过包）
+    public let location: GameLocation
+    /// 手机上的 S2Arm 换过新宿主、游戏库留着上一版：可以「装回上一版」（installRestore 作业）
+    public let iphoneRestorable: Bool
+    /// 各部分大小（catalog 的 sizes；pack/jobs/sizes.py 在出包 / 清缓存等之后量好记下）
+    public let sizes: GameSizes
 
     public init(id: String, name: String, display: String = "", cover: String? = nil, ready: Bool = false,
                 needsPreparation: Bool = false, compatibility: String = "experimental", missing: [String] = [], packages: [GamePackage] = [],
-                iphoneReady: Bool = false, iphoneInstalledAt: Double? = nil, iphoneFree: Bool = false, customName: Bool = false, customCover: Bool = false) {
-        self.customName = customName; self.customCover = customCover
+                iphoneReady: Bool = false, iphoneInstalledAt: Double? = nil, iphoneFree: Bool = false, customName: Bool = false, customCover: Bool = false, hostUpdate: String = "none", location: GameLocation = GameLocation(), iphoneRestorable: Bool = false, sizes: GameSizes = GameSizes()) {
+        self.customName = customName; self.customCover = customCover; self.hostUpdate = hostUpdate; self.location = location; self.iphoneRestorable = iphoneRestorable; self.sizes = sizes
         self.iphoneReady = iphoneReady; self.iphoneInstalledAt = iphoneInstalledAt; self.iphoneFree = iphoneFree
         self.id = id; self.name = name; self.display = display; self.cover = cover; self.ready = ready
         self.needsPreparation = needsPreparation; self.compatibility = compatibility; self.missing = missing; self.packages = packages
@@ -69,7 +77,9 @@ public struct GameSummary: Identifiable, Equatable {
                   iphoneReady: g["iphoneReady"] as? Bool ?? false,
                   iphoneInstalledAt: ((g["iphoneInstall"] as? [String: Any])?["at"] as? NSNumber)?.doubleValue,
                   iphoneFree: (g["iphoneInstall"] as? [String: Any])?["free"] as? Bool ?? false,
-                  customName: g["customName"] as? Bool ?? false, customCover: g["customCover"] as? Bool ?? false)
+                  customName: g["customName"] as? Bool ?? false, customCover: g["customCover"] as? Bool ?? false,
+                  hostUpdate: g["hostUpdate"] as? String ?? "none", location: GameLocation(catalog: g["location"] as? [String: Any] ?? [:]), iphoneRestorable: g["iphoneRestorable"] as? Bool ?? false,
+                  sizes: GameSizes(catalog: g["sizes"] as? [String: Any] ?? [:]))
     }
 
     /// 某类原件里版本最新的那个的显示版本（base / update）；没有这类为 nil。
@@ -116,6 +126,25 @@ public final class LibraryProvider {
         lock.withLock { keys = ready }
     }
 
+    private var snapshotFile: URL { client.environment.privateRoot.appendingPathComponent("library-snapshot.json") }
+
+    /// 上一次读到的游戏列表：启动时先显示它，catalog 作业在后台跑完再替换。换了游戏库（libraryId 不符）或没读过时为 nil。
+    public func lastKnownGames() -> [GameSummary]? {
+        guard !client.environment.libraryId.isEmpty, let data = try? Data(contentsOf: snapshotFile),
+              let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              saved["libraryId"] as? String == client.environment.libraryId,
+              let result = saved["result"] as? [String: Any] else { return nil }
+        remember(result)
+        return Self.games(in: result)
+    }
+
+    private func saveSnapshot(_ result: [String: Any]) {
+        let saved: [String: Any] = ["libraryId": client.environment.libraryId,
+                                    "result": ["games": result["games"] ?? [], "keys": result["keys"] ?? [:]]]
+        guard JSONSerialization.isValidJSONObject(saved), let data = try? JSONSerialization.data(withJSONObject: saved) else { return }
+        try? data.write(to: snapshotFile, options: .atomic)
+    }
+
     public static let noLibraryMessage = "还没有游戏库：请先在 S2Arm 启动器里选择游戏库并导入游戏。"
 
     /// 读一遍游戏库。没配游戏库时不起作业，直接回失败。
@@ -132,6 +161,7 @@ public final class LibraryProvider {
                     return
                 }
                 self.remember(outcome.result)
+                self.saveSnapshot(outcome.result)
                 completion(.success(Self.games(in: outcome.result)))
             })
         } catch let error as JobClientError {
@@ -150,10 +180,10 @@ public final class LibraryProvider {
         return Self.games(in: result)
     }
 
-    /// 新玩家还没有游戏库：建在私有目录下的「游戏库」（同旧启动器 defaultLibraryURL），玩家不用选；放密钥、添加游戏前调用。已有游戏库不动。
+    /// 新玩家还没有游戏库：建在 ~/S2Arm（S2ArmPaths.defaultLibrary，同旧启动器 defaultLibraryURL），玩家不用选；放密钥、添加游戏前调用。已有游戏库不动。
     public func ensureLibrary(events: EventSink = .discard) async throws {
         guard client.environment.library.isEmpty else { return }
-        let folder = client.environment.privateRoot.appendingPathComponent("游戏库", isDirectory: true)
+        let folder = S2ArmPaths.defaultLibrary(privateRoot: client.environment.privateRoot)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try await change(to: folder, events: events)
     }
@@ -161,8 +191,10 @@ public final class LibraryProvider {
     /// 换游戏库（同旧启动器 chooseLibrary → setupLibrary）：setup 作业建好 / 认出这个文件夹（作业层拦非 APFS、云盘同步目录、非空的生文件夹），
     /// 成了把 library / libraryId 写回 preferences.json，本进程之后的作业都用新库。没成抛错、什么都不改。
     @discardableResult
-    public func change(to folder: URL, events: EventSink = .discard) async throws -> String {
-        let r = try await client.perform("setup", extra: ["library": folder.path, "libraryId": ""], events: events).result
+    public func change(to folder: URL, moveFrom: String? = nil, events: EventSink = .discard) async throws -> String {
+        var extra: [String: Any] = ["library": folder.path, "libraryId": ""]
+        if let moveFrom { extra["moveFrom"] = moveFrom }
+        let r = try await client.perform("setup", extra: extra, events: events).result
         let library = r["library"] as? String ?? folder.path
         let libraryId = r["libraryId"] as? String ?? ""
         try JobEnvironment.saveLibrary(privateRoot: client.environment.privateRoot, library: library, libraryId: libraryId)
@@ -174,5 +206,57 @@ public final class LibraryProvider {
     /// catalog 结果里的游戏（没 id / 名字、标了 hidden 的不要）。
     static func games(in result: [String: Any]) -> [GameSummary] {
         (result["games"] as? [[String: Any]] ?? []).compactMap(GameSummary.init(catalog:))
+    }
+}
+
+
+/// 一款游戏在哪个存放位置（游戏库结构 v3；catalog 的 location 字段）。
+public struct GameLocation: Equatable {
+    public var state = "none"
+    public var path = ""
+    public var folder = ""
+    public var volume = ""
+    public init() {}
+    public init(catalog l: [String: Any]) {
+        state = l["state"] as? String ?? "none"; path = l["path"] as? String ?? ""; folder = l["folder"] as? String ?? ""; volume = l["volume"] as? String ?? ""
+    }
+    /// 这款自己文件夹里的文件（按 catalog 给的文件夹，英文名或游戏号命名都行；不按游戏号自己拼路径）。位置没连上 / 文件夹找不到 → nil
+    public func file(_ name: String) -> URL? {
+        state == "ok" && !folder.isEmpty ? URL(fileURLWithPath: folder).appendingPathComponent(name) : nil
+    }
+}
+
+/// 一款的各部分大小（字节，catalog 的 sizes）：Mac 镜像、iPhone 镜像、存档、缓存（出包缓存 + 着色器缓存）、原件（多款共用的按款数均摊）。
+/// measured = 量过（没量过时前四项是 0，界面显示「未统计」）。
+public struct GameSizes: Equatable {
+    public var imageMac: Int64 = 0
+    public var imageIos: Int64 = 0
+    public var saves: Int64 = 0
+    public var cache: Int64 = 0
+    public var sources: Int64 = 0
+    public var measured = false
+    public init() {}
+    public init(imageMac: Int64, imageIos: Int64, saves: Int64, cache: Int64, sources: Int64, measured: Bool) {
+        self.imageMac = imageMac; self.imageIos = imageIos; self.saves = saves; self.cache = cache; self.sources = sources; self.measured = measured
+    }
+    public init(catalog s: [String: Any]) {
+        func n(_ k: String) -> Int64 { (s[k] as? NSNumber)?.int64Value ?? 0 }
+        imageMac = n("imageMac"); imageIos = n("imageIos"); saves = n("saves"); cache = n("cache"); sources = n("sources")
+        measured = s["measured"] as? Bool ?? false
+    }
+}
+
+/// 一个存放位置（locations 作业）：出包页下拉框的一项。
+public struct StorageLocation: Identifiable, Equatable {
+    public let id: String
+    public let path: String
+    public let volume: String
+    public let connected: Bool
+    public let freeBytes: Int64?
+    public let isDefault: Bool
+    public init?(_ r: [String: Any]) {
+        guard let id = r["id"] as? String, let path = r["path"] as? String else { return nil }
+        self.id = id; self.path = path; volume = r["volume"] as? String ?? ""; connected = r["connected"] as? Bool ?? false
+        freeBytes = (r["freeBytes"] as? NSNumber)?.int64Value; isDefault = r["default"] as? Bool ?? false
     }
 }

@@ -247,4 +247,6 @@ with open(os.path.join(out, 'gal.shards'), 'w') as fh:
 print(f'gal_offline：MSL {len(mets)} 支（缓存命中 {hits[0]}，现编 {len(mets) - hits[0]}），metal 编译失败 {len(bad)}，入库 {len(airs)} → {len(shards)} 片，最大 {max((b for _, b in big), default=0) / 1048576:.1f} MB；'
       f'链接内存预算 {budget / (1 << 30):.1f} GB（每片峰值估 ≤{max(est, default=0) / (1 << 30):.1f} GB），最多同时 {peak_par[0]} 片')
 if any(b > MB for _, b in big): sys.exit(f'【红】分片超上限 {MB >> 20} MB：' + ', '.join(f'第 {i} 片 {b / 1048576:.1f} MB' for i, b in big if b > MB))
-if bad: print(f'【红】metal 编译失败首例：{bad[0][0]}：{bad[0][1].strip()[:300]}')
+# 有支编不过 = 库缺支：走红通道非 0 退出（审计 P2-208：原先只打一行红照退 0，tests/visual/widen_gate.sh 只看退出码会把缺支的库装上）。
+#   metal_failed.txt 照写（shader_pack.sh 的红计数、pso_gen.py 跳过缺的函数都读它）
+if bad: sys.exit(f'【红】metal 编译失败 {len(bad)} 支，首例：{bad[0][0]}：{bad[0][1].strip()[:300]}')

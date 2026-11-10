@@ -15,12 +15,13 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from jobcase import JobCase, JOBS, ROOT
+from jobcase import JobCase, JOBS, ROOT, ios_fixture
 from core import Context, Failure, Cancelled, atomic
 from errors import RECOVERY
 import build
 import ipa
 import install
+import layout
 import library
 
 
@@ -182,7 +183,7 @@ class PackageFailures(JobCase):
                 self.assertIn(red, got.exception.internal)
 
     def test_refresh_log_cannot_reuse_stale_or_nonterminal_red(self):
-        log = self.c.library / "iPhone/0100000000000000/logs/refresh.log"; log.parent.mkdir(parents=True)
+        log = layout.ios_work(self.c, "0100000000000000") / "logs/refresh.log"; log.parent.mkdir(parents=True)   # 出包工作目录 build/ios 里上一轮留下的
         log.write_text("【红】fixture 刷新停在直连配置推导（rc=1）：旧错误\n")
         self.script_result("刷新各阶段", "本轮未知错误")
         with self.assertRaises(Failure) as got: self.build()
@@ -304,21 +305,20 @@ class InstallFailures(JobCase):
     def test_install_rc_four_causes_and_unknown(self):
         import diag
         gid = "0100000000000000"
-        out = self.c.library / "iPhone" / gid; out.mkdir(parents=True)
-        archive = out / "test.ipa"
+        ios_fixture(self.c, gid)   # 出好的 iPhone 版（容器件 + 资源包）：有资源包才装（审计 18:00 P1-58：没有资源包先报 pack_missing、不走到装机）
+        archive = self.root / "test.ipa"
         with zipfile.ZipFile(archive, "w") as z:
             z.writestr("Payload/Test.app/Info.plist", plistlib.dumps({"CFBundleIdentifier": "test"}))
             z.writestr("Payload/Test.app/S2Arm", b"bin")
-        (out / "test资源包").mkdir()   # 有资源包才装（审计 18:00 P1-58：没有资源包先报 pack_missing、不走到装机）
         self.c.r.update(gameId=gid)
         import ipa as packer
-        def fake_assemble(c, g, root=None, dest=None):
-            return archive, [gid], [gid]
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+            return archive, [gid], "SID1"
         def unpack(args, **kw):
             with zipfile.ZipFile(archive) as z: z.extractall(args[-1])
             import subprocess
             return subprocess.CompletedProcess(args, 0, "", "")
-        cases = (("The maximum number of apps for free development profiles has been reached", "free_app_limit"),
+        cases = (("The maximum number of apps for free development profiles has been reached", "free_app_limit"),   # 装机时设备拒收 = 同时 3 个自签 App
                  ("Developer Mode is disabled on this device", "developer_mode_required"),
                  ("The pairing record is invalid. Please pair the device again", "device_pairing_required"),
                  ("The provisioning profile has expired", "provisioning_expired"),
@@ -357,7 +357,70 @@ class InstallFailures(JobCase):
                               ("provisioning profile has a valid expiration date", "signing_failed")):
             with self.subTest(raw=raw): self.assertEqual(install.classify(raw), expected)
         self.assertNotIn("AltStore", RECOVERY["free_app_limit"])
-        self.assertIn("7", RECOVERY["free_app_limit"])
+
+
+class FreeAccountLimits(unittest.TestCase):
+    """免费 Apple ID 两个上限拆成两个码：free_app_limit = 设备上同时 3 个自签 App（删一个就能装）；
+    free_appid_limit = Apple 9120，7 天最多注册 10 个包名（删 App 不退额度）。期望手写。"""
+    DEVICE = ("This device has reached the maximum number of installed apps using a free developer profile",   # iOS 27 装机原文
+              "The maximum number of apps for free development profiles has been reached",                    # 较早 iOS / Xcode 装机原文
+              "You have reached the maximum number of apps")
+    APPID = ("error: Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.",   # Xcode 原文
+             "Developer services error 9120: Your maximum App ID limit has been reached.",
+             "You have reached the maximum number of App IDs")
+
+    def test_each_wording_maps_to_its_own_code(self):
+        import impactor
+        for raw in self.DEVICE:
+            with self.subTest(raw=raw):
+                self.assertEqual(install.classify(raw), "free_app_limit")
+                self.assertEqual(impactor.explain(raw), "free_app_limit")
+        for raw in self.APPID:
+            with self.subTest(raw=raw):
+                self.assertEqual(install.classify(raw), "free_appid_limit")
+                self.assertEqual(impactor.explain(raw), "free_appid_limit")
+        # 9120 只在带 error / code 前缀时认，日志里别处的数字不算
+        self.assertEqual(install.classify("copied 9120 bytes"), "signing_failed")
+        self.assertEqual(impactor.explain("copied 9120 bytes"), "device_install_failed")
+
+    def test_patterns_do_not_overlap(self):
+        # 两条正则互不相交：任一原文只被一条吃到，不靠排序兜底
+        import impactor
+        for table in (install.SIGN_ERRORS, impactor.EXPLAIN):
+            pats = {c: p for p, c in table if c in ("free_app_limit", "free_appid_limit")}
+            for raw in self.DEVICE + self.APPID:
+                with self.subTest(raw=raw):
+                    hits = [c for c, p in pats.items() if re.search(p, raw if table is install.SIGN_ERRORS else raw.lower(), re.I)]
+                    self.assertEqual(len(hits), 1, hits)
+
+    def test_recovery_says_the_right_thing(self):
+        dev, appid = RECOVERY["free_app_limit"], RECOVERY["free_appid_limit"]
+        self.assertIn("3 个自签 App", dev)
+        self.assertIn("删掉", dev)
+        for word in ("7 天", "10 个包名", "9120"):
+            self.assertNotIn(word, dev)
+        for word in ("7 天", "10 个包名", "不会退还", "换一个 Apple ID", "付费 Apple 开发者账号"):
+            self.assertIn(word, appid)
+        for word in ("删掉", "长按"):   # 删 App 对包名额度无效，不能建议玩家去删
+            self.assertNotIn(word, appid)
+
+    def test_registered_everywhere(self):
+        loc = {i["source"]: i.get("en") for i in json.loads((ROOT / "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/Localizable.json").read_text())}
+        spec = {i["code"]: i for i in json.loads((ROOT / "launchers/shared/experience.v1.json").read_text())["errors"]["items"]}
+        guide = {e["code"] for e in json.loads((JOBS / "impactor_guide.json").read_text())["errors"]}
+        ctl_spec = importlib.util.spec_from_file_location("s2armctl_fal", ROOT / "launchers/macos/s2armctl.py")
+        ctl = importlib.util.module_from_spec(ctl_spec); ctl_spec.loader.exec_module(ctl)
+        for code in ("free_app_limit", "free_appid_limit"):
+            with self.subTest(code=code):
+                self.assertTrue(loc.get(RECOVERY[code]))
+                self.assertTrue(spec[code]["title"]["en"] and spec[code]["detail"]["en"])
+                self.assertIn(code, guide)
+                self.assertEqual(ctl.AI_NEXT[code][0], "human")
+        en = loc[RECOVERY["free_appid_limit"]]
+        self.assertIn("10 App IDs", en)
+        self.assertNotRegex(en, r"(?i)\b(?:delete|remove) (?:a|an|one)\b")
+        self.assertNotRegex(loc[RECOVERY["free_app_limit"]], r"10 App IDs|7 days")
+        self.assertIn("9120", spec["free_appid_limit"]["detail"]["zh-Hans"])
 
 
 class LogCauses(JobCase):
@@ -408,6 +471,29 @@ class LogCauses(JobCase):
         # 原文 / 阶段 / rc / 归因依据照旧进 detail（「复制错误摘要」带走）
         for evidence in ("刷新停在 direct 阶段（rc=1）", "No space left on device", "build.log", "归因 disk_full"):
             self.assertIn(evidence, d["detail"])
+
+    def test_unknown_graphics_api_says_not_supported(self):
+        # #222 现场（0.1.7，程序号 05F42564C82B0000 同人移植）：配置推导判不出图形接口 → 直连单轨停在配置推导。上屏：这款游戏暂不支持；不是「未归类、请反馈」
+        from errors import RECOVERY
+        error, d = self.mac_refresh(["【黄】直连缺口：配置推导不支持本款：unsupported graphics API: unknown（没有 NVN / Vulkan / OpenGL 任一接口的证据）",
+                                     "【红】05F42564C82B0000 直连单轨停在 直连配置推导：直连缺口：配置推导不支持本款（direct_profile rc=3）"])
+        self.assertEqual(error.code, "graphics_api_unsupported")
+        self.assertEqual(d["summary"], "这款游戏暂不支持：没找到任天堂官方图形接口（NVN / Vulkan / OpenGL），多见于自制或移植的程序。")
+        self.assertEqual(d["suggestion"], RECOVERY["graphics_api_unsupported"])
+
+    def test_font_copy_denied_says_grant_access(self):
+        # 11-09 玩家现场：只见「拷字体失败」、原因被脱敏吃掉。sysdata.sh 红行现带 cp 原文（脱敏只换路径）→ 归到没权限，提示去系统设置授权
+        from errors import RECOVERY
+        error, d = self.mac_refresh(["【红】拷字体失败：cp: [PRIVATE_PATH]: Operation not permitted / 普通复制：cp: [PRIVATE_PATH]: Operation not permitted",
+                                     "【红】01007EF00011E000 刷新停在 sysdata 阶段（rc=1），现行 = 01007EF00011E000@ex-b3eed688"])
+        self.assertEqual(error.code, "permission_denied")
+        self.assertEqual(d["suggestion"], RECOVERY["permission_denied"])
+
+    def test_windows_precheck_missing_metal_says_metal_unavailable(self):
+        # 11-09 Windows 出包机：S2A_METAL_BIN 指到不存在的目录，预检打「环境缺件 metal」、退 75。原先落成笼统的 package_failed（出包未完成）
+        error, d = self.mac_refresh(["【红】环境缺件 metal：Metal Developer Tools（D:\\no_such_metal\\bin；S2A_METAL_BIN 可指定，否则查 PATH / 官方安装目录）",
+                                     self.STOP])
+        self.assertEqual(error.code, "metal_unavailable")
 
     def test_chain_mismatch_from_newer_xcode_says_update_s2arm(self):
         # 11-07 联合开发者现场（beta.4 + Xcode 27.2，metal 32023.922 比锁 32023.921 新）：direct_lib.sh 把编译器提示当链号读，
@@ -503,8 +589,9 @@ class RecoveryCoverage(unittest.TestCase):
 
     def test_free_quota_translation_matches_chinese(self):
         loc = json.loads((ROOT / "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/Localizable.json").read_text())
-        text = next(i["en"] for i in loc if i["source"] == RECOVERY["free_app_limit"])
-        self.assertNotIn("AltStore", text)
+        for code in ("free_app_limit", "free_appid_limit"):
+            text = next(i["en"] for i in loc if i["source"] == RECOVERY[code])
+            self.assertNotIn("AltStore", text)
 
     def test_all_literal_player_codes_have_recovery(self):
         found = set()

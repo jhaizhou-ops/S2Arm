@@ -156,6 +156,24 @@ int main(void) {
               L.tileH, nvn_tex_level_gobs(&d, 0), (unsigned long long)L.size);
     }
 
+    // 线性排布（11-09 质量线 #255 / #262）：去混排按行距逐行拷。期望手写：
+    //   L1 哈迪斯 II 8×8 BGRA8（0x9A，4 字节）LINEAR、stride 32：每行 32 字节原样到输出（输出行距 40，行尾 8 字节不碰）；旧实现对 LINEAR 返回 -1
+    //   L2 没给 stride：行距按 32 对齐 = 32（8 × 4），同 L1
+    //   L3 上古卷轴5 那样 stride 3840 < 宽 1280 × 4 = 5120：返回 -1，输出一字节不写（不越界读）
+    {
+        uint8_t mem[8 * 32], out[8 * 40];
+        for (int i = 0; i < (int)sizeof mem; i++) mem[i] = (uint8_t)(i * 7 + 3);
+        for (int pass = 0; pass < 2; pass++) {
+            nvn_texdesc d = {1, 0x9A, 0x10, 0, 8, 8, 1, 1, pass ? 0u : 32u, 0}; memset(out, 0xEE, sizeof out);
+            int rc = nvn_deswizzle(&d, 0, 0, mem, out, 40), ok = rc == 0;
+            for (int y = 0; y < 8 && ok; y++) ok = !memcmp(out + y * 40, mem + y * 32, 32) && out[y * 40 + 32] == 0xEE && out[y * 40 + 39] == 0xEE;
+            CHECK(ok, "L%d linear 8x8 BGRA stride %s: rc %d, rows copied at pitch 32 / output tail untouched", pass + 1, pass ? "auto" : "32", rc);
+        }
+        nvn_texdesc d = {1, 0x9A, 0x10, 0, 1280, 4, 1, 1, 3840, 0}; static uint8_t big[3840 * 4], bo[5120 * 4]; memset(bo, 0xEE, sizeof bo);
+        int rc = nvn_deswizzle(&d, 0, 0, big, bo, 5120), untouched = 1; for (size_t i = 0; i < sizeof bo; i++) untouched &= bo[i] == 0xEE;
+        CHECK(rc == -1 && untouched, "L3 stride 3840 < 1280 x 4: rc %d (expected -1), output untouched %d", rc, untouched);
+    }
+
     printf("%s: %d/%d checks passed\n", fails ? "RED" : "all passed", checks - fails, checks);
     return fails ? 1 : 0;
 }

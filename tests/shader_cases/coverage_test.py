@@ -103,6 +103,45 @@ Add("1010xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", InstName
         with self.assertRaises(coverage.CoverageError):
             coverage.collect_coverage(self.root, self.manifest, [event])
 
+    def test_iadd_po_attribution_requires_the_specific_readback_difference(self):
+        patches = self.root / "compat/patches"
+        patch_name = "20261102-0640-shader-iadd-plus-one-1339.patch"
+        (patches / patch_name).write_text((patches / "one.patch").read_text())
+        with (patches / "series").open("a") as series:
+            series.write(patch_name + "\n")
+        self.manifest[0]["id"] = "integer/add_po"
+        expected = list(range(64))
+        expected[8] = 0
+        mutant = expected.copy()
+        mutant[8:19] = [(word - 1) & 0xffffffff for word in expected[8:19]]
+
+        def collect(normal, without_plus_one):
+            return coverage.collect_coverage(
+                self.root, self.manifest, [],
+                iadd_po_readbacks=(expected, normal, without_plus_one),
+            )["patches"]
+
+        result = collect(expected, mutant)
+        self.assertEqual(result["covered"], [patch_name])
+        self.assertEqual(result["uncovered"], ["one.patch"])
+        evidence = result["evidence"][patch_name]
+        self.assertEqual(evidence["case"], "integer/add_po")
+        self.assertEqual([d["word"] for d in evidence["differences"]], list(range(8, 19)))
+        self.assertEqual(evidence["differences"][0], {"word": 8, "normal": 0, "without_plus_one": 0xffffffff})
+
+        bad_guard = mutant.copy()
+        bad_guard[19] ^= 1
+        for normal, wrong in ((mutant, mutant), (expected, expected), (expected, bad_guard)):
+            with self.subTest(normal=normal, wrong=wrong), self.assertRaises(coverage.CoverageError):
+                collect(normal, wrong)
+        self.manifest[0]["id"] = "test/a"
+        with self.assertRaises(coverage.CoverageError):
+            collect(expected, mutant)
+        self.manifest[0]["id"] = "integer/add_po"
+        (patches / "series").write_text("one.patch\ntwo.patch\n")
+        with self.assertRaises(coverage.CoverageError):
+            collect(expected, mutant)
+
 
 if __name__ == "__main__":
     unittest.main()

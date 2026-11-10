@@ -93,10 +93,13 @@ void s2a_guest_run_mark(int running) {
     { char d[1100]; snprintf(d, sizeof d, "%s", p); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); } }
     FILE *f = fopen(p, "w"); if (f) { fprintf(f, "%d\n", (int)getpid()); fclose(f); }
 }
+// 构造期（占窗口、判文件后备开不开）用的程序号：need_from_npdm 从本款 main.npdm 直接读（svc_mem.c s2a_npdm_pid），不经图形模式（审计 P1-139：
+//   那时 iOS 的 s2a_gfx_mode 还没放行、程序号恒 0，Mac 上调它会把模式和程序号 0 落定）。多款容器构造期没选游戏，保持 0（按最大池判，#103）
+static uint64_t g_ctor_pid; static int g_attach_phase;
 static int mem_peak_path(char *out, size_t n) {
     uint64_t (*pidf)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_npdm_program_id"); const char *ov = getenv("S2A_GUEST_MEM_PEAK");
     if (ov && *ov) { snprintf(out, n, "%s", ov); return 1; }   // 单测 / 诊断指定
-    uint64_t pid = pidf ? pidf() : 0;
+    uint64_t pid = g_attach_phase ? g_ctor_pid : pidf ? pidf() : 0;   // 构造期只认 npdm 直读的；局中（心跳记峰值）照旧按当前程序号
     if (!pid) return 0;
     s2a_docs_path(out, n, "wire/%016llX/mem_peak", (unsigned long long)pid); return 1;
 }
@@ -123,7 +126,9 @@ static uint64_t env_mb(const char *k, uint64_t def) { const char *v = getenv(k);
 static int g_ctr;
 static uint64_t g_ctr_pool;   // 多款容器：包内各款应用池的最大值（构造期还没选游戏，文件后备按最大的判）
 uint64_t s2a_window_container_pool(void) { return g_ctr_pool; }
-static void guest_file_attach(void) {
+static void guest_file_attach_(void);
+static void guest_file_attach(void) { g_attach_phase = 1; guest_file_attach_(); g_attach_phase = 0; }
+static void guest_file_attach_(void) {
     // 池：s2a_app_pool（layout.c；Switch 3285 MiB、Switch 2 9 GiB）。此刻已定：上一步 need_from_npdm → s2a_npdm_window_need → npdm_read 认出 Switch 2 时就设了 9 GiB。
     //   它是游戏能向系统要的内存总量（SetHeapSize 上限 = 池 − 映像），客体脏页最多涨到这么多；窗口跨度（几十 GB 地址）不是内存，堆区随池定，game.tsv 的 app_pool 是图形层的、要到图形初始化才读。
     //   按名字取（dlsym）：单测只链 vawin.c、不链 layout.c；取不到记 0（自动判定按装得下 = 关）
@@ -190,6 +195,8 @@ int s2a_guest_zero(uint64_t a, uint64_t n) {
     if (mmap((void *)(uintptr_t)a, n, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, (off_t)(a - g_base)) != (void *)(uintptr_t)a) return 0;
     return 1;
 }
+// [a, a + n) 全在文件后备的窗口里返回 1（没开 / 不在 / n 为 0 返回 0）。svc_mem.c 的懒清零（#258）按它判走不走
+int s2a_guest_in_file(uint64_t a, uint64_t n) { return g_gfd >= 0 && n && a >= g_base && a + n <= g_base + g_size; }
 int s2a_window_ok(void) { return g_ok; }
 void s2a_window_get(uint64_t *base, uint64_t *size) { *base = g_base; *size = g_size; }
 int s2a_window_session_reset(void) {
@@ -387,6 +394,8 @@ static uint64_t need_from_npdm(void) {
 #else
     { int ac = *_NSGetArgc(); char **av = *_NSGetArgv(); if (ac < 2) return 0; strlcpy(dir, av[1], sizeof dir); }   // Mac：s2arm-host <模块目录>
 #endif
+    { uint64_t (*pf)(const char *) = (uint64_t (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_npdm_pid"); char np[1100]; snprintf(np, sizeof np, "%s/main.npdm", dir);
+      g_ctor_pid = pf ? pf(np) : 0; }   // 单款：文件后备按它找本款实测峰值 / 死亡标记（mem_peak_path）
     return need_dir(dir);
 }
 // 跨度为 0 的红行按事实分（11-05 Minecraft: Story Mode 的 NPDM 是地址空间类型 1，被报成「读不到 main.npdm」）：

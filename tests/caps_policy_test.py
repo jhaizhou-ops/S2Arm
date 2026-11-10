@@ -51,6 +51,13 @@ d = cp.decide(repo, root)
 chk('④b 登记「帧率达不到」（10-31）→ fps60 0、原因带信号与依据', (0, True, True), (d['fps60'][0], '帧率达不到' in d['fps60'][1], '提交线程 20 ms' in d['fps60'][1]))
 cp.engine_l1 = real
 chk('⑤ 没有 romfs 的根 → engine_l1 False、不抛', False, cp.engine_l1(root))
+# ⑤b 推导本身出错（exefs/main 是目录、读不了）→ 照旧 False 不中断出包，但错误输出要有【红】行（审计 P1-138：原先静默当「不是 Unity / UE」）
+import io, contextlib
+bad_root = tempfile.mkdtemp(); os.makedirs(os.path.join(bad_root, 'exefs', 'main')); os.makedirs(os.path.join(bad_root, 'romfs'))
+err = io.StringIO()
+with contextlib.redirect_stderr(err): r5 = cp.engine_l1(bad_root)
+chk('⑤b 推导出错 → engine_l1 False、错误输出带【红】', (False, True), (r5, '【红】' in err.getvalue()))
+shutil.rmtree(bad_root)
 # ⑥–⑫ 实测退回：期望按规则手算（< 57 帧或 > 4.8 W 才关），不跑被测实现推期望
 import caps_ledger, score_cells
 shutil.rmtree(os.path.join(repo, 'docs', '名单_能力强信号')); open(os.path.join(root, 'fps.tsv'), 'w').write('build aa\n')

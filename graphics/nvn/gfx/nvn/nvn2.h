@@ -66,6 +66,7 @@ int nvn2_device_integer(unsigned item, int *out);
 // nvnDeviceInitialize 时调：贴图 GOB 内次序切到 Switch 2（gfx/tex/nvn_deswizzle.h nvn_gob_switch2），记一行日志
 void nvn2_device_init(void);
 void nvn2_vi_vsync_register(void *f);   // nvn2_codec.c 构造函数登记 vi::GetDisplayVsyncEvent 的实现（nvn2.c 不对视频解码有链接依赖）
+void nvn2_sev_attach_register(uint64_t (*f)(void *sev, int autoclear));   // nvn2_codec.c 构造函数登记「宿主事件挂到游戏 SystemEvent」（nn::chat 的 Attach*ChangedEvent 用；同上，无链接依赖）
 
 // ---------- 宿主做不到的 SDK 函数：红桩（nvn2.c）----------
 // 回一个桩：装载时打红行，被调到就中止并点名 name 与 why（与 sdk 原路径同样中止，但可诊断）；同名复用一个槽，256 槽满回 NULL

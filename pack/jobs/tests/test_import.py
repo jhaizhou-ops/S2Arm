@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jobcase import JobCase, synthetic_nacp, synthetic_npdm, synthetic_nup
+import library
+from core import atomic
 
 APP = 0x0400486024DEC000   # 时之笛的程序号（合成容器，内容是测试字节）
 
@@ -54,6 +56,21 @@ class ImportTests(JobCase):
         self.assertEqual(terminal["state"], "succeeded")
         self.assertFalse(terminal["result"]["verified"])
 
+    def test_ticket_missing_key_candidate_is_not_evidence_against_keys(self):
+        # #242：库里候选游戏缺票据，同一份格式有效的密钥重新导入要成功、记未验证；再导这款游戏时照报缺票据
+        self.import_keys()
+        self.install_reader_fixture()
+        source = self.root / "source.nsp"
+        source.write_bytes(b"complete fixture")
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assertEqual(terminal["state"], "succeeded")
+        source.write_bytes(b"ticket fixture")
+        _, terminal = self.worker("keys", path=str(self.c.keys))
+        self.assertEqual(terminal["state"], "succeeded")
+        self.assertFalse(terminal["result"]["verified"])
+        _, terminal = self.worker("import", paths=[str(source)])
+        self.assert_failure(terminal, "ticket_missing")
+
     def test_missing_keys_outdated_keys_and_missing_ticket_are_distinct(self):
         self.install_reader_fixture()
         source = self.root / "source.nsp"
@@ -68,6 +85,47 @@ class ImportTests(JobCase):
         diagnostic = self.assert_failure(terminal, "ticket_missing")
         self.assertNotIn("prod.keys", diagnostic["summary"])
         self.assertNotIn("重新导出", diagnostic["suggestion"])
+
+    def test_identity_from_content_ids_without_reading_whole_file(self):
+        # 11-09 玩家反馈「只是添加也要跑几分钟」：读取器给了 content ID 就按 titleId / 类型 / 版本 / 排序后的 content ID / 文件大小算身份，不整份算 SHA-256；
+        #   期望按 library.source_identity 文件头的公式手算（不调被测函数）
+        import hashlib, json
+        self.import_keys(); self.install_reader_fixture()
+        source = self.root / "big.nsp"; source.write_bytes(b"content id fixture" + b"x" * 1000)
+        _, done = self.worker("import", paths=[str(source)])
+        self.assertEqual(done["state"], "succeeded")
+        rows = [["0100000000000000", "base", 0, ["000000000000000000000000000000aa", "000000000000000000000000000000bb"]]]
+        want = hashlib.sha256(json.dumps(dict(v=1, packages=rows, size=1018), separators=(",", ":")).encode()).hexdigest()
+        [p] = self.c.catalog()["games"][0]["packages"]
+        self.assertEqual(p["sha256"], want)
+        self.assertNotEqual(p["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+        # 同一份再加一次：判重，不多一条
+        _, done = self.worker("import", paths=[str(source)])
+        self.assertEqual(done["result"]["imports"][0]["duplicate"], True)
+        self.assertEqual(len(self.c.catalog()["games"][0]["packages"]), 1)
+
+    def test_old_whole_file_record_still_dedups_and_keeps_sha(self):
+        # 老库里的记录是整份 SHA-256：同一份文件（同 titleId / 类型 / 版本 / 大小）再加，要判重且不改老记录的 sha256（它进构建键，改了老游戏要冷重出）
+        import hashlib
+        self.import_keys(); self.install_reader_fixture()
+        source = self.root / "old.nsp"; source.write_bytes(b"content id fixture" + b"y" * 100)
+        old_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id="0100000000000000", name="Synthetic", display="", hidden=False, packages=[
+            dict(titleId="0100000000000000", baseId="0100000000000000", type="base", version=0, name="Synthetic", path=str(source), sha256=old_sha, size=source.stat().st_size)])]))
+        before = library.input_identity(self.c.catalog()["games"][0])   # 构建键（出包按它判要不要重出）
+        _, done = self.worker("import", paths=[str(source)])
+        self.assertEqual(done["result"]["imports"][0]["duplicate"], True)
+        [p] = self.c.catalog()["games"][0]["packages"]
+        self.assertEqual(p["sha256"], old_sha)
+        self.assertEqual(library.input_identity(self.c.catalog()["games"][0]), before)
+
+    def test_reader_without_content_ids_falls_back_to_whole_file_hash(self):
+        import hashlib
+        self.import_keys(); self.install_reader_fixture()
+        source = self.root / "plain.nsp"; source.write_bytes(b"synthetic game fixture")
+        self.worker("import", paths=[str(source)])
+        [p] = self.c.catalog()["games"][0]["packages"]
+        self.assertEqual(p["sha256"], hashlib.sha256(b"synthetic game fixture").hexdigest())
 
     def test_import_folder_follows_symlinked_files_and_folders(self):
         # 原件挪走、原位置留软链（10-26 维护者把 Downloads 原件挪外置盘）：文件夹里指向文件的软链、软链目录都认；软链成环不转圈
@@ -135,7 +193,7 @@ class NupImportTests(JobCase):
                                        ("update", "0400486024DEC800", 131072, str(src.resolve()), "nup", "1.2.0"),
                                        ("dlc", "0400486024DED001", 0, str(src.resolve()), "nup", "1.2.0")]))
         self.assertEqual((game["id"], game["name"]), ("0400486024DEC000", "Ocarina T"))
-        self.assertEqual((self.c.library / "games/0400486024DEC000/cover.jpg").read_bytes(), b"JPGICON")
+        self.assertEqual((self.c.library / "games/Ocarina T/cover.jpg").read_bytes(), b"JPGICON")   # 文件夹按标题（英文）
         self.assertFalse((self.c.private / "keys/status.json").exists())
         # 没带控制分区：标题取文件名去掉「 [程序号][版本]」（同一键出包）
         bare = self.nup(self.root / "drive2" / "Bare Name [0400486024dec000].nup", nacp=False)
@@ -169,6 +227,18 @@ class NupImportTests(JobCase):
                          ("0100000000000000", "base", str(nsp.resolve()), False, "aarch64"))
         self.assertTrue(json.loads((self.c.private / "keys/status.json").read_text())["verified"])
 
+
+    def test_chinese_title_folder_uses_english_name(self):
+        # 读取器给的界面名是中文、英文名另给：catalog 名字照中文、记 englishName；这款的文件夹按英文名建，封面在里面（不是游戏号文件夹）
+        nsp = self.root / "drive" / "silksong.nsp"; nsp.parent.mkdir(); nsp.write_bytes(b"chinese title fixture")
+        self.import_keys(); self.install_reader_fixture()
+        result, done = self.worker("import", paths=[str(nsp)])
+        self.assertEqual(done["state"], "succeeded", result.stderr)
+        [game] = self.c.catalog()["games"]
+        self.assertEqual((game["name"], game["englishName"]), ("空洞骑士：丝之歌", "Hollow Knight: Silksong"))
+        self.assertEqual("englishName" in game["packages"][0], False)
+        self.assertEqual((self.c.library / "games" / "Hollow Knight Silksong" / "cover.jpg").read_bytes(), b"ICON")
+        self.assertFalse((self.c.library / "games" / "0100000000000000").exists())
 
 if __name__ == "__main__":
     unittest.main()

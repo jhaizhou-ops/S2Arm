@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：tools/host_build.sh runtime/run_mac.sh pack/stage_extract.sh tools/census/census.sh tools/entry_check.sh tools/frame_replay.sh tools/mac_health.sh
+# 门禁覆盖：tools/host_build.sh runtime/run_mac.sh pack/stage_extract.sh tools/census/census.sh tools/frame_replay.sh tools/mac_health.sh
 # tools/host_build.sh 单测（11-04 合入运维线）：同一棵树两个入口并发编宿主，不再互相覆盖。期望全部按规则手写：
 #   替身 make 模拟 Makefile 的构建配置戳：.host_cfg 里的 S2A_CS 和这次不同就重链 build/s2arm-host（写「cs=<值>」，链接期间 1 秒，
 #   期间另一次 make 进来记一行「并发」）；相同就是空操作。

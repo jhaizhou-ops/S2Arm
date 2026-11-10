@@ -134,7 +134,7 @@ import SwiftUI
         XCTAssertEqual(task.ipaPath, path.path)
         XCTAssertEqual(task.outputPath, root.path)
         store.persistTask(task)
-        let restored = try JSONDecoder().decode(TaskRecord.self, from: Data(contentsOf: root.appendingPathComponent("private/jobs/fixture.json")))
+        let restored = try JSONDecoder().decode(TaskRecord.self, from: Data(contentsOf: root.appendingPathComponent("private/logs/jobs/fixture.json")))
         XCTAssertEqual(restored.ipaPath, path.path)
         XCTAssertEqual(Store(privateRoot: root.appendingPathComponent("reloaded")).packMode(for: restored), .direct)
     }

@@ -22,6 +22,11 @@ ck "② …07 单编出了自己的 .air" '[ -s "$T/out/msl/0000000000000007.air
 allf=$(for f in "$T"/out/gal.*.metallib; do strings "$f"; done | grep -oE 's0{11}0[0-9a-f]{4}' | sort -u | wc -l | tr -d ' ')
 ck "③ 各片 metallib 里 12 个函数一个不少（实得 ${allf}）" '[ "$allf" = 12 ]'
 ck "④ 内存预算极小照样编完（退出 ${rc}）、日志写出预算" '[ $rc = 0 ] && echo "$out" | grep -q "编译内存预算"'
+# ⑥ 有一支编不过（审计 P2-208）：退出码非 0、错误行写明失败支数，metal_failed.txt 记下那一支；全好时 ④ 已证退 0
+mkdir -p "$T/bad/msl" "$T/badin"; : > "$T/bad/gal.idx"; cp "$T"/out/msl/*.metal "$T/bad/msl/"
+printf '#include <metal_stdlib>\nusing namespace metal;\nfragment float4 s000000000000000d() { return undefined_symbol_xyz; }\n' > "$T/bad/msl/000000000000000d.metal"
+bo=$(GAL_XC_DONE=1 GAL_UNITY_N=4 GAL_AIR_CACHE="$T/cache" GAL_SHARD_MB=0.001 J=4 timeout 120 python3 "$GO" "$T/badin" "$T/bad" macos 2>&1); brc=$?
+ck "⑥ 有一支编不过：退出 ${brc}（非 0）、红行写失败 1 支、metal_failed.txt 记这一支" '[ $brc != 0 ] && echo "$bo" | grep -q "metal 编译失败 1 支" && grep -q "^000000000000000d.metal" "$T/bad/metal_failed.txt"'
 # ⑤ 按运行时规则（gal_prog.m：最后一个首键 ≤ 函数键）查每个函数，必须落进真含它的那片（11-01 审计 P1-35：大 MSL 单独成组、键落在别批区间中间，切片后首键乱序 → 找错片）
 #   另造一组：把键 …06 垫大（批切点在键 mod 4 == 0，…04 …05 …07 同批、…06 单独编，键落在这批区间正中间）；分片上限极小 → 每组一片
 mkdir -p "$T/o5/msl" "$T/c5"; : > "$T/o5/gal.idx"; cp "$T"/out/msl/*.metal "$T/o5/msl/"

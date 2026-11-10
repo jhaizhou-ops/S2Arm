@@ -81,7 +81,7 @@ xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
     "$nvn" "$gal" "$dsx" "$widen" -o "$out/t_present_residency" \
     -Wl,-dead_strip -Wl,-export_dynamic -Wl,-u,_s2a_mac_front_layer -Wl,-u,_nxgal_gpu_hold "${weak_flags[@]}" \
     -Wl,-rpath,"$(dirname "$widen")" \
-    -framework AppKit -framework GameController -framework Metal -framework Foundation \
+    -framework AppKit -framework GameController -framework CoreHaptics -framework Metal -framework Foundation \
     -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++
 # -u 拉入真实前端与 GAL 定义；仅沿用 NVN_TEST_WEAK 的生产弱引用放行，不启用 dynamic_lookup。
 shasum -a 256 "$root/graphics/nvn/tests/t_present_residency.m" "${objects[@]}" "$nvn" "$gal" "$dsx" "$widen" \

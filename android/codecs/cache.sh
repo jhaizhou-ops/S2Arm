@@ -45,8 +45,9 @@ codec_unpack() {
     else tar -xzf "$archive" -C "$2/src" --strip-components 1; fi
 }
 
+# codec_recipe_key <name> <source sha> <recipe file>...：配方文件按给出顺序进键（vpx 另带 S2Arm 补丁）
 codec_recipe_key() {
-    { printf '%s\n' "$1" "$2" "$toolchain_key"; cat "$3"; } | s2a_sha256 | cut -d' ' -f1
+    { printf '%s\n' "$1" "$2" "$toolchain_key"; cat "${@:3}"; } | s2a_sha256 | cut -d' ' -f1
 }
 
 codec_cached() {
@@ -69,16 +70,23 @@ codec_publish() {
     mv "$1" "$2"
 }
 
+# codec_shim <name> <archive> <include> <parent> <source.c>...：C 垫片（可多个，按给出顺序进键）与第三方静态库合成 lib<name>.a
 codec_shim() (
     set -euo pipefail
-    local name=$1 archive=$2 source=$3 include=$4 parent=$5 key target work
-    key=$({ declare -f codec_shim; printf '%s\n' 'shim-v1 -std=c11 -O2 -fPIC llvm-ar-qcL' "$toolchain_key"; cat "$source"; s2a_sha256 "$archive"; } | s2a_sha256 | cut -d' ' -f1)
+    local name=$1 archive=$2 include=$3 parent=$4 key target work source
+    local -a objects=()
+    shift 4
+    [ "$#" -gt 0 ] || { echo "codec_shim $name: no shim sources" >&2; return 1; }
+    key=$({ declare -f codec_shim; printf '%s\n' 'shim-v2 -std=c11 -O2 -fPIC llvm-ar-qcL' "$toolchain_key"; for source in "$@"; do printf '%s\n' "${source##*/}"; cat "$source"; done; s2a_sha256 "$archive"; } | s2a_sha256 | cut -d' ' -f1)
     target=$parent/s2a-$key
     if ! codec_cached "$target"; then
         work=$(mktemp -d "$cache_root/codecs/shim-build.XXXXXX")
         trap 'rm -rf "$work"' EXIT
-        "$cc" -std=c11 -O2 -fPIC -I"$include" -c "$source" -o "$work/$name.o"
-        llvm-ar qcL "$work/lib$name.a" "$archive" "$work/$name.o"
+        for source in "$@"; do
+            objects+=("$work/$(basename "${source%.c}").o")
+            "$cc" -std=c11 -O2 -fPIC -I"$include" -c "$source" -o "${objects[${#objects[@]}-1]}"
+        done
+        llvm-ar qcL "$work/lib$name.a" "$archive" "${objects[@]}"
         llvm-ranlib "$work/lib$name.a"
         codec_publish "$work" "$target"
     fi

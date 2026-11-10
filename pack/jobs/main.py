@@ -21,23 +21,30 @@ import time
 import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+if os.name == "nt":   # 作业主程序自己也要长路径处理：子 Python 进程靠 sitecustomize 装，主进程没人装（注册表 LongPathsEnabled 关着时，数据目录 ~200 字符起启动器后端就起不来）
+    sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
+    from pack.orch import winlong as _winlong
+    _winlong.install()
 import community
 import diag
 import embedded
 import install
 import ipa
+import layout
 import library
 import winproc
 import saves
+import sizes
 import target
 import toolchain
-from core import (Cancelled, Context, Failure, TERMINAL_STATES, cancel, describe, journal, pid_alive, prune_jobs,
+from core import (KEEP_DAYS, KEEP_FAILED_PER_OPERATION, KEEP_PER_OPERATION, KEEP_TOTAL, Cancelled, Context, Failure, TERMINAL_STATES, cancel, describe, journal, pid_alive, prune_jobs,
                   read_events, request_path, status)
 
 import build
 
 
 def run_request(request_path, *, context_class=Context, operation_overrides=None):
+    winproc.prepare_child_environment()
     path = Path(request_path)
     if not winproc.request_is_private(path):
         raise SystemExit("request must be owned by this user and private (0600)")
@@ -69,9 +76,10 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
     operations = {"preflight": toolchain.preflight, "prepareEngine": toolchain.prepare, "downloadMetal": toolchain.download_metal, "downloadIosPlatform": toolchain.download_ios_platform,
                   "setup": library.setup, "keys": library.keys, "import": library.import_games,
                   "catalog": library.catalog, "customize": library.customize, "remove": library.remove, "delete": library.delete, "clean": library.clean,
-                  "spaceSurvey": library.space_survey, "spaceFree": library.space_free,
+                  "spaceSurvey": library.space_survey, "spaceFree": library.space_free, "storageOverview": sizes.overview,
                   "diagnostics": library.diagnostics, "saveInput": library.save_input,
-                  "build": build.prepare, "launch": build.launch, "pullDiagnostics": diag.pull, "ipa": ipa.build, "install": install.install, "installRemove": install.remove_from_phone, "installCheck": install.readiness, "signingProject": install.signing_project, "installDotnet": toolchain.install_dotnet, "targetDevice": target.probe,
+                  "locations": library.list_locations, "moveGame": library.move_game, "relinkGame": library.relink_game, "forgetGame": library.forget_game,
+                  "build": build.prepare, "launch": build.launch, "pullDiagnostics": diag.pull, "ipa": ipa.build, "install": install.install, "installRemove": install.remove_from_phone, "installRestore": install.restore_previous, "installCheck": install.readiness, "signingProject": install.signing_project, "installDotnet": toolchain.install_dotnet, "targetDevice": target.probe,
                   "saveStatus": saves.status, "saveBackup": saves.backup, "saveInspect": saves.inspect, "saveRestore": saves.restore,
                   "community": community.listing, "communitySave": community.save}
     if operation_overrides:
@@ -81,6 +89,8 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
             raise Failure("不支持的任务类型。")
         if c.operation not in saves.OPERATIONS:
             embedded.install(c)
+        if c.operation not in NO_LIBRARY:
+            layout.ensure(c)   # 旧布局的库先一次性整理成新结构（layout.py），之后各作业只按新布局找路径
         result = operations[c.operation](c)
         # A completed save-directory swap is the commit point. A later cancel
         # signal cannot turn a committed restore into a misleading cancelled job.
@@ -95,6 +105,8 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
         # 一局被停是玩家自己关游戏，不是「任务取消」（11-07 新前端验收）
         # 下载 Xcode 组件的传输由系统资产服务持有：停掉本进程只是不再等，传输可能还在继续（实测 11-08：取消后 Xcode 仍在下载）
         waiting = c.operation in ("downloadIosPlatform", "downloadMetal")
+        if c.operation in CLEANS_AFTER_STOP:
+            library.clean_after_stop(c)
         c.finish("cancelled", "游戏已停止。" if c.operation == "launch" else
                  "已停止等待：Xcode 的下载可能仍在继续（可在 Xcode → 设置 → Components 里查看）。" if waiting else
                  "任务已取消；上次成功的运行版本和存档已保留。")
@@ -102,17 +114,35 @@ def run_request(request_path, *, context_class=Context, operation_overrides=None
     except Exception as error:
         ended.set()
         if not isinstance(error, Failure) or c.last_log is None:
-            log = c.private / "logs" / (c.task + "-exception.log")
+            log = c.logs / (c.task + "-exception.log")
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text(c.redact(traceback.format_exc()))
             os.chmod(log, 0o600)
             c.last_log = log
         diagnostic = c.report_failure(error)
         message = diagnostic["summary"]
+        if c.operation in CLEANS_AFTER_STOP:   # 错误摘要要读产物根里的日志，所以排在它后面
+            library.clean_after_stop(c)
         c.finish("failed", message)
         return 1
     finally:
         ended.set()
+        _drop_job_tmp(c)
+
+
+def _drop_job_tmp(c):
+    """作业临时目录（Context.env 设的 S2A_JOB_TMP）随作业结束删掉；删不掉留给下次清 temp/"""
+    gid = c.r.get("gameId")
+    if gid and c.r.get("library"):
+        try:
+            import shutil
+            shutil.rmtree(layout.job_tmp(c, gid, c.task), ignore_errors=True)
+        except Exception:   # noqa: BLE001 —— 收尾不影响作业结果
+            pass
+
+
+CLEANS_AFTER_STOP = ("build", "ipa")
+NO_LIBRARY = ("preflight", "prepareEngine", "downloadMetal", "downloadIosPlatform", "installDotnet", "targetDevice", "setup", "signingProject")
 
 
 def parser():
@@ -138,10 +168,12 @@ def parser():
     resume.add_argument("--dry-run", action="store_true", help="print what a resume would do, without running it")
     status_parser = sub.add_parser("status", help="counts and size of the whole job store")
     status_parser.add_argument("--private-root", required=True)
-    pruner = sub.add_parser("prune", help="drop old finished job records (running ones and the newest N are kept)")
+    pruner = sub.add_parser("prune", help="drop old finished job records (core.prune_jobs: total and age caps, per-operation floors; running ones are kept)")
     pruner.add_argument("--private-root", required=True)
-    pruner.add_argument("--keep-days", type=float, default=14)
-    pruner.add_argument("--keep-count", type=int, default=50)
+    pruner.add_argument("--keep-days", type=float, default=KEEP_DAYS)
+    pruner.add_argument("--keep-count", type=int, default=KEEP_TOTAL)
+    pruner.add_argument("--per-operation", type=int, default=KEEP_PER_OPERATION, help="newest finished records kept per operation regardless of the caps")
+    pruner.add_argument("--failed-per-operation", type=int, default=KEEP_FAILED_PER_OPERATION, help="newest failed / cancelled records kept per operation")
     pruner.add_argument("--dry-run", action="store_true")
     events = sub.add_parser("events", help="print the NDJSON events of one task")
     events.add_argument("--private-root", required=True)
@@ -172,7 +204,8 @@ def cli(argv, *, context_class=Context, operation_overrides=None):
             print(json.dumps(status(args.private_root), ensure_ascii=False))
             return 0
         if args.command == "prune":
-            print(json.dumps(prune_jobs(args.private_root, args.keep_days, args.keep_count, args.dry_run), ensure_ascii=False))
+            print(json.dumps(prune_jobs(args.private_root, args.keep_days, args.keep_count, args.dry_run, per_operation=args.per_operation,
+                                        failed_per_operation=args.failed_per_operation), ensure_ascii=False))
             return 0
         if args.command == "resume":
             record = journal(args.private_root, args.task)

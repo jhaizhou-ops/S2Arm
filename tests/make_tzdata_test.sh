@@ -90,6 +90,7 @@ sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / 'launchers/macos'))
 import bundle_engine
 class Context:
     private = pathlib.Path(sys.argv[4])
+    logs = private   # 作业日志目录（core.Context.logs）
     def env(self): return dict(os.environ)
     def run(self, args, log, env): subprocess.run(list(map(str,args)), env=env, check=True)
 bundle_engine.bundle_tzdata(Context(), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2]))
@@ -119,7 +120,7 @@ files={p.relative_to(source).as_posix():[p.stat().st_size,hashlib.sha256(p.read_
        for p in source.rglob('*') if p.is_file() and not p.is_symlink()}
 (source/'engine.json').write_text(json.dumps({'schema':1,'id':'a'*64,'files':files}))
 private=tmp/'app-private'; private.mkdir()
-c=types.SimpleNamespace(r={'engineBundle':str(source)}, private=private, begin=lambda *_:None,
+c=types.SimpleNamespace(r={'engineBundle':str(source)}, private=private, library=None, begin=lambda *_:None,   # 还没建库：引擎副本放私有目录（embedded.engines_root）
                         check=lambda:None, progress=lambda *_:None, require_source=lambda:None)
 embedded.install(c)
 runenv=dict(env); runenv.pop('S2A_TZDATA_CACHE',None)

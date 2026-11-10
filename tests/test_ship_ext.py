@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "ios"))
@@ -243,14 +244,16 @@ class ContainerTest(unittest.TestCase):
         from PIL import Image
         icon = Path(d) / "brand.png"
         if not icon.exists(): Image.new("RGB", (64, 64), (1, 2, 3)).save(icon)
-        cmd = [sys.executable, str(REPO / "pack/ship_ext.py"), "container", "--shell", str(shell), "--out", str(out), "--bundle-id", "dev.example.games", "--icon", str(icon)]
+        cmd = [sys.executable, str(REPO / "pack/ship_ext.py"), "container", "--shell", str(shell), "--out", str(out), "--bundle-id", "dev.example.games", "--icon", str(icon), "--host-abi", "7"]
         cmd += [x for r in roots for x in ("--game", str(r))] + (["--base", str(base)] if base else [])
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              env={**os.environ, "S2A_BANNER_FETCH": "0"})   # 单测零联网：抓图关掉，A 的 banner 走产物根自带拷贝路径
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory(); self.d = Path(self.td.name)
         self.shell = ShipExtTest.shell(None, self.d)
         self.a = self.game(self.d, "a", 3, 0, 0x0100000000010000, "甲游戏")
+        (self.a / "banner.jpg").write_bytes(b"JPGbanner-a")   # A 的产物根自带横版图：组装走拷贝路径，目录期望里的 banner 与联网无关
         self.b = self.game(self.d, "b", 3, 0x1000, 0x0100000000020000, "乙游戏", b"")
 
     def tearDown(self): self.td.cleanup()
@@ -269,9 +272,10 @@ class ContainerTest(unittest.TestCase):
         self.assertEqual((app / "Games" / self.A / "addr_need.tsv").read_text(), "a\n")
         self.assertEqual((app / "Games" / self.B / "icon.jpg").read_bytes(), b"JPGb")
         cat = json.loads((app / "s2a_catalogue.json").read_text(encoding="utf-8"))
+        chain = json.loads((self.shell / "manifest.json").read_text(encoding="utf-8"))["details"]["chain"]   # 每款记 --host-abi 与壳清单的链号（只换宿主判兼容用）
         self.assertEqual(cat, {"schema": 1, "shell_id": shell_manifest.current_id(), "games": [
-            {"title_id": self.A, "name": "甲游戏", "display_version": "1.2.0", "icon": f"Games/{self.A}/icon.jpg", "state": "playable"},
-            {"title_id": self.B, "name": "乙游戏", "icon": f"Games/{self.B}/icon.jpg", "state": "playable"}]})
+            {"title_id": self.A, "name": "甲游戏", "display_version": "1.2.0", "icon": f"Games/{self.A}/icon.jpg", "banner": f"Games/{self.A}/banner.jpg", "state": "playable", "host_abi": 7, "chain": chain},
+            {"title_id": self.B, "name": "乙游戏", "icon": f"Games/{self.B}/icon.jpg", "state": "playable", "host_abi": 7, "chain": chain}]})
         self.assertEqual((app / "Games" / self.A / "launch.ctx").read_text(encoding="utf-8"),
                          f"version\t1\ngame_id\t{self.A}\nimages\t@bundle/Frameworks/S2AImages-{self.A}.dylib\nmodule_dir\t@bundle/Games/{self.A}\n"
                          f"game_data\t@home/Documents/games/{self.A}/资源包\ndocs\t@home/Documents/games/{self.A}\n")
@@ -314,6 +318,37 @@ class ContainerTest(unittest.TestCase):
         (base / "s2a_catalogue.json").write_text(json.dumps(cat))
         r = self.run_c(self.d, self.shell, self.d / "o7/S2Arm.app", [a2], base=base)
         self.assertEqual(r.returncode, 1); self.assertIn("要按本壳重出", r.stderr); self.assertIn(self.B, r.stderr)   # 已有款 B 是别的壳组装的：不混装
+
+
+class BannerPlaceTest(unittest.TestCase):
+    """_place_banner 的联网分支打桩测（进程内直调 ship_ext，mock 掉 banner_fetch.fetch_banner，零真联网；#101 评审 1 项）。
+    子进程组装测（ContainerTest）已用 S2A_BANNER_FETCH=0 + 产物根自带图保证离线确定性，这里补抓图分支本身。"""
+    GID = "0100000000010000"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory(); self.d = Path(self.td.name)
+        self.gd = self.d / "Games" / self.GID; self.gd.mkdir(parents=True)
+        self.root = self.d / "root"; self.root.mkdir()   # 无 banner.jpg 的产物根 → 逼出联网分支
+
+    def tearDown(self): self.td.cleanup()
+
+    def test_library_banner_copied_never_network(self):
+        # 横图是游戏库的元数据（作业层导入时抓好）：给了 --banner 那份就拷；组装本身绝不联网
+        from pack import ship_ext
+        lib = self.d / "lib-banner.jpg"; lib.write_bytes(b"LIB")
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("组装不许联网")):
+            entry = {}
+            ship_ext._place_banner(self.GID, self.root, self.gd, entry, lib)
+        self.assertEqual(entry.get("banner"), f"Games/{self.GID}/banner.jpg")
+        self.assertEqual((self.gd / "banner.jpg").read_bytes(), b"LIB")
+
+    def test_no_banner_anywhere_keeps_icon_only(self):
+        from pack import ship_ext
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("组装不许联网")):
+            entry = {}
+            ship_ext._place_banner(self.GID, self.root, self.gd, entry)
+        self.assertNotIn("banner", entry)
+        self.assertFalse((self.gd / "banner.jpg").exists())
 
 
 if __name__ == "__main__":

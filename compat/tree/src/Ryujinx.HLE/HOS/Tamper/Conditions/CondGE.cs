@@ -15,7 +15,7 @@ namespace Ryujinx.HLE.HOS.Tamper.Conditions
 
         public bool Evaluate()
         {
-            return (dynamic)_lhs.Get<T>() >= (dynamic)_rhs.Get<T>();
+            return TamperNum.ToU64(_lhs.Get<T>()) >= TamperNum.ToU64(_rhs.Get<T>());
         }
     }
 }

@@ -140,6 +140,22 @@ def case_c(t, rew_c):
         ck(ex[0][1] == '0x8040010' and not (0 <= int(ex[0][0], 16) < 0x8080000), f'（c）出口 期望 岛里 → 0x8040010 → {ex[0]}')
 
 
+def case_d(t, rew_c):
+    # #283 Core Keeper：尾调用 br x18（ldr x18,[x0,#8]; br x18，type 4）两岛都够不着 → 原先记 br_tail 缺口，现在同（c）走远跳。
+    #   中段 0x8040020 / 0x8040024 放这两条，0x8040100 / 0x8040104 两条 bl 指到 0x8040020 / 0x8040028，围出只有这两条指令的函数边界
+    #   （否则无 FDE 的中段按跳转目标界定函数，会把整段代码段当一个函数解码）。期望：rc 0、没有缺口、br 原位是 brk #0xA000、有一条从 0x8040024 出发的远跳入口
+    nso = os.path.join(t, 'd.nso')
+    make(nso, 0x8080000, 0x7FDA000, {**B_WORDS, 0x8040020: 0xF9400412, 0x8040024: 0xD61F0240, 0x8040100: 0x97FFFFC8, 0x8040104: 0x97FFFFC9})
+    rc, log, out = one('（d）中段尾调用两岛都够不着 → 远跳', nso, t, rew_c)
+    rows = [l.rstrip('\n').split('\t') for l in open(os.path.join(out, 'main.gaps.tsv')) if l.startswith('0x')]
+    ck(rows == [], f'（d）远跳后没有缺口 → {rows}')
+    if rc or not os.path.exists(os.path.join(out, 'main.patched.bin')): return
+    img = open(os.path.join(out, 'main.patched.bin'), 'rb').read()
+    ck(word(img, 0x8040024) == 0xD4340000, f'（d）0x8040024 原字 期望 brk #0xA000（0xd4340000）→ {word(img, 0x8040024):#x}')
+    far = [l.split('\t')[1:] for l in open(os.path.join(out, 'main.fixups.tsv')).read().splitlines() if l.startswith('# FAR\t')]
+    ck(any(f[0] == '0x8040024' and f[2] == 'E' and not (0 <= int(f[1], 16) < 0x8080000) for f in far), f'（d）有一条 0x8040024 → 岛里 的远跳入口 → {far}')
+
+
 B_WORDS = {0x1000: SVC, 0x2000: 0xD53BD045, 0x3000: SPIN[0], 0x3004: SPIN[1],
            0x8040000: 0xD53BD047, 0x8040004: 0xD51BD046, 0x8040008: 0xD53B0020, 0x8040010: SPIN[0], 0x8040014: SPIN[1],
            0x8078000: 0xD53BD049, 0x8078004: SVC, 0x8078010: SPIN[0], 0x8078014: SPIN[1]}
@@ -175,6 +191,7 @@ def main():
         case_a(t, rew_c)
         case_b(t, rew_c)
         case_c(t, rew_c)
+        case_d(t, rew_c)
     for err in GOLDEN.finish():
         ck(False, err)
     print(f'{"✓" if not bad else "✗"} rewrite_islands：{bad} 处不符')

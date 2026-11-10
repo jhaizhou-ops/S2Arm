@@ -14,12 +14,13 @@ let package = Package(
         // app.m 托管用的静态库：库界面 UIViewController 的 C 入口 + Play 回调（include/s2a_shell.h）
         .library(name: "S2ArmShellHost", type: .static, targets: ["S2ArmShellHost"])
     ],
+    dependencies: [.package(path: "../launchers/shared/SaveSync")],
     targets: [
         .target(name: "ShellUI", resources: [.process("Resources")]),
         .target(name: "ShellControllers", dependencies: ["ShellUI"]),
         // C 边界：Play 回调登记与转发（app.m / 宿主 C 侧只看这一个头文件）
         .target(name: "S2ArmShellBridge", path: "Sources/S2ArmShellBridge"),
-        .target(name: "S2ArmShellHost", dependencies: ["ShellUI", "ShellControllers", "S2ArmShellBridge"]),
+        .target(name: "S2ArmShellHost", dependencies: ["ShellUI", "ShellControllers", "S2ArmShellBridge", .product(name: "SaveSync", package: "SaveSync")]),
         .testTarget(name: "S2ArmShellHostTests", dependencies: ["S2ArmShellHost", "S2ArmShellBridge", "ShellUI"],
                     resources: [.copy("Fixtures")])
     ]

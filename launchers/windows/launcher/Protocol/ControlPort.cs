@@ -85,7 +85,18 @@ public sealed class ControlPort : IDisposable
         File.WriteAllText(temporary, JsonSerializer.Serialize(new Dictionary<string, object?>
             { ["port"] = Port, ["token"] = Token, ["pid"] = Environment.ProcessId }));
         File.Move(temporary, ControlFile, overwrite: true);
+        try { File.Delete(Path.Combine(privateRoot, ErrorFileName)); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         _ = AcceptAsync();
+    }
+
+    public const string ErrorFileName = "control.error";
+
+    /// <summary>控制口起不来时也就没有 /state：把原因写进数据目录，s2armctl start 读它报给用户。写不上不影响启动器本身。</summary>
+    public static void ReportStartFailure(string privateRoot, string why)
+    {
+        try { File.WriteAllText(Path.Combine(privateRoot, ErrorFileName), why); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     public void UpdateState(byte[] json) => Volatile.Write(ref state, json);
@@ -147,7 +158,7 @@ public sealed class ControlPort : IDisposable
 public static class ControlJournal
 {
     private static readonly HashSet<string> Visible = new(StringComparer.Ordinal)
-        { "install", "installRemove", "import", "keys", "ipa", "setup" };
+        { "install", "installRemove", "installRestore", "import", "keys", "ipa", "moveGame", "setup" };
 
     // 进程被强制结束时作业层来不及写终态：记录还是 running 而进程已不在，要按中断报，否则 s2armctl 一直等
     private static JsonElement Reconcile(JsonElement task)
@@ -165,11 +176,12 @@ public static class ControlJournal
         catch (Exception error) when (error is ArgumentException or InvalidOperationException) { return false; }
     }
 
-    public static List<JsonElement> Tasks(string privateRoot, int limit = 60)
+    /// <summary>作业记录在 LibraryPaths.JobsDir（库\logs\jobs，库没建好时 私有目录\logs\jobs）；library 不给就读设置。</summary>
+    public static List<JsonElement> Tasks(string privateRoot, int limit = 60, string? library = null)
     {
         var found = new List<(double Started, JsonElement Task)>();
         string[] files;
-        try { files = Directory.GetFiles(Path.Combine(privateRoot, "jobs"), "*.json"); }
+        try { files = Directory.GetFiles(LibraryPaths.JobsDir(privateRoot, library), "*.json"); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return []; }
         foreach (var file in files.Where(f => !f.EndsWith(".request.json", StringComparison.OrdinalIgnoreCase)))
         {

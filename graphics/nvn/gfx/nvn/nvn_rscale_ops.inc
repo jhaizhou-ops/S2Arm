@@ -13,7 +13,10 @@ static id<MTLTexture> rs_rescale(id<MTLTexture> base, int to_scaled, const char 
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.textureType = base.textureType; d.pixelFormat = base.pixelFormat; d.width = w; d.height = h; d.depth = base.depth;
     d.arrayLength = base.arrayLength; d.mipmapLevelCount = base.mipmapLevelCount; d.sampleCount = base.sampleCount;
-    d.storageMode = base.storageMode; d.cpuCacheMode = base.cpuCacheMode; d.hazardTrackingMode = base.hazardTrackingMode; d.resourceOptions = base.resourceOptions; d.usage = base.usage;
+    d.storageMode = base.storageMode; d.cpuCacheMode = base.cpuCacheMode; d.hazardTrackingMode = base.hazardTrackingMode; d.resourceOptions = base.resourceOptions;
+    // 新存储一定当渲染目标用（缩放拷贝画进去、之后游戏在上面画）：旧存储没有渲染目标用途时补上（打包贴图建时不带，copy_t2t_draw 见目标没有这一用途就画不了，
+    //   11-09 #312 暗黑地牢2：1280x720 RG11B10Float 颜色目标「缩放拷贝画不了，不缩」，同遍深度却缩了）
+    d.usage = base.usage | (mtl_fmt_block(base.pixelFormat) ? 0 : MTLTextureUsageRenderTarget);
     id<MTLTexture> n = [g_dev newTextureWithDescriptor:d];
     if (!n) { g_rs_fail++; RED_ONCE(114, "内部分辨率：%lux%lu 格式 %lu 的存储换成 %lux%lu 失败（建不出），不缩", (unsigned long)base.width, (unsigned long)base.height, (unsigned long)base.pixelFormat, (unsigned long)w, (unsigned long)h);
         rs_set_info(base, RS_BLACK, 0, 0); return nil; }
@@ -72,7 +75,13 @@ static void rs_rts(void) {
         id<MTLTexture> b = tex_mtl(ts[k]); int st = rs_state(b);
         if (!b) continue;
         if (block) { if (st == RS_SCALED) rs_rescale(b, 0, "同一遍有不缩的附件"); else if (st == RS_NONE) rs_set_info(b, RS_BLACK, 0, 0); }
-        else if (st == RS_NONE) rs_rescale(b, 1, NULL);
+        else if (st == RS_NONE && !rs_rescale(b, 1, NULL)) block = 1;   // 换存储失败（rs_rescale 已把它记成不缩）
+    }
+    // 同一遍里有附件没缩成：已缩的附件退回原尺寸，同一遍的附件尺寸必须一致（11-09 #312：颜色目标缩放拷贝失败、深度照样缩到一半，同遍尺寸不一，iPhone 上闪粉色块）
+    if (block) for (int k = 0; k < n; k++) {
+        id<MTLTexture> b = tex_mtl(ts[k]); int st = rs_state(b);
+        if (!b) continue;
+        if (st == RS_SCALED) rs_rescale(b, 0, "同一遍有附件没缩成"); else if (st == RS_NONE) rs_set_info(b, RS_BLACK, 0, 0);
     }
 }
 

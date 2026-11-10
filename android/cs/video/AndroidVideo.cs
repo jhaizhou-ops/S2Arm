@@ -11,6 +11,10 @@ namespace S2A.Android.Video
         {
             S2AVideoDecoders.H264 = static () => new AvcH264Decoder();
             S2AVideoDecoders.Vp8 = static () => new AndroidVp8Decoder();
+            // VP9: NVDEC jobs through libvpx with S2Arm's hook (docs/设计_原生VP9/design_phase2_B.md); the managed decoder
+            // takes any job libvpx cannot represent exactly. A missing native library is caught in Vp9Decoder's routing.
+            S2AVideoDecoders.Vp9 = static () => new Ryujinx.Graphics.Nvdec.Vpx.VpxVp9Backend();
+            S2AVideoDecoders.Vp9DefaultMode = "native";
         }
     }
 }

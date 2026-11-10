@@ -152,6 +152,28 @@ class Apply(Base):
     def test_pushed_waits_for_new_done_line(self):
         self.assertTrue(self.ap({}, 1, True)); self.assertEqual(self.dev.launches, [{"S2A_PACK_APPLY_ONLY": "1"}])
 
+    def cant_launch(self, player_opens_at=None):
+        """电脑拉不起 App（#192）；player_opens_at 给了就在该时刻起算玩家手动打开、解完。返回 (结果或异常, 结束时刻)"""
+        dev = Fake({}); self.dev = dev; clock = [0.0]
+        def boom(env): raise push.Fail("起 App 失败：RSD 里没有 app_service")
+        dev.launch = boom
+        def sleep(x):
+            clock[0] += x
+            if player_opens_at is not None and clock[0] >= player_opens_at:
+                dev.files[f"{RP}/.applied"] = self.WANT; dev.files["Documents/unpack.log"] = f"11-08 解开 1 个包 2 个文件 0 MB，.applied = {self.WANT}（0.2 秒）\n"
+        try: return push.apply(dev, self.pk, self.w, 1, say=self.log.append, sleep=sleep, now=lambda: clock[0]), clock[0]
+        except push.Fail as e: return e, clock[0]
+
+    def test_cant_launch_player_opens_by_hand(self):   # 玩家在第 60 秒手动打开：等到解完算装好，不报错
+        r, t = self.cant_launch(player_opens_at=60)
+        self.assertIs(r, True); self.assertGreaterEqual(t, 60); self.assertLess(t, 70)
+        self.assertTrue(any(l.startswith("资源包已传完。") and "打开 S2Arm" in l for l in self.log))
+
+    def test_cant_launch_nobody_opens_is_needs_player(self):   # 180 秒没人打开：需要玩家操作，文案不说失败，带原因
+        r, t = self.cant_launch()
+        self.assertIsInstance(r, push.NeedsPlayer); self.assertGreater(t, 180); self.assertLess(t, 190)
+        self.assertTrue(str(r).startswith("资源包已传完，还差最后一步：")); self.assertIn("app_service", str(r)); self.assertNotIn("失败，", str(r))
+
     def test_same_pack_repush_without_new_line_fails(self):   # .applied 推前已是本包、日志旧行也对得上，但这次没解 → 不能判装好
         old = {f"{RP}/.applied": self.WANT, "Documents/unpack.log": f"10-01 解开 3 个包 9 个文件 1 MB，.applied = {self.WANT}（0.2 秒）\n"}
         with self.assertRaises(push.Fail) as e: self.ap(old, 1, False)
@@ -239,6 +261,81 @@ class SpaceNeed(Base):
         d = push.Devpush("exe", "U", "b", self.w)
         d.call = lambda *a: (0, "1234\n"); self.assertEqual(d.free(), 1234)
         d.call = lambda *a: (1, "不认识的操作 free"); self.assertIsNone(d.free())
+
+
+class ImagePush(Base):
+    def setUp(self):
+        super().setUp()
+        self.data = {"romfs.img": b"IMAGE", "b": b"BB"}
+        for k, v in self.data.items(): (self.pk / k).write_bytes(v)
+        (self.pk / "index.tsv").write_text("".join(self.row(k) for k in self.data))
+
+    def phone(self, applied):
+        f = {f"{RP}/manifest.json": '{"version": 2}', f"{RP}/index.applied.tsv": self.row("romfs.img") + self.row("b"), f"{RP}/b": b"BB", f"{RP}/romfs.img": b"IMAGE"}
+        if applied is not None: f[f"{RP}/.applied"] = applied
+        return f
+
+    def test_image_is_direct_not_tar(self):
+        self.dev = Fake({}); self.dev.put_big = lambda src, rel: self.dev.puts.append(rel)
+        nb, nt, n = push.plan(self.dev, self.pk, self.w, full=True, say=self.log.append)
+        self.assertEqual((nb, nt), (1, 2)); self.assertEqual((self.w / "direct_img.tsv").read_text().split("\t")[0], "romfs.img")
+        self.assertNotIn("romfs.img", (self.w / "push_000.tsv").read_text())
+
+    def test_interrupted_image_is_pushed_again(self):   # .applied 被清空 = 上次传到一半：账上有也要重传
+        self.dev = Fake(self.phone(""))
+        nb, nt, n = push.plan(self.dev, self.pk, self.w, say=self.log.append)
+        self.assertEqual((nt, (self.w / "direct_img.tsv").read_text().split("\t")[0]), (1, "romfs.img"))
+        self.assertTrue(any("被打断" in l for l in self.log))
+
+    def test_applied_image_is_not_pushed_again(self):
+        self.dev = Fake(self.phone("abc"))
+        self.assertEqual(push.plan(self.dev, self.pk, self.w, say=self.log.append)[1], 0)
+
+    def test_send_invalidates_applied_before_writing_image(self):
+        self.dev = Fake({}); order = []
+        put = self.dev.put; self.dev.put = lambda src, rel: (order.append(rel), put(src, rel))[1]
+        self.dev.put_big = lambda src, rel: order.append(rel)
+        push.plan(self.dev, self.pk, self.w, full=True, say=self.log.append); push.send(self.dev, self.pk, self.w, say=self.log.append)
+        self.assertLess(order.index(f"{RP}/.applied"), order.index(f"{RP}/romfs.img"))
+
+
+class SendProgress(Base):
+    """#266：推送进度计数。3 批不同大小（上限 60 字节：a30+b30 | c50 | e90）；分母 = 本次待传量，不是整包"""
+    def setUp(self):
+        super().setUp()
+        self.data = {"a": b"A" * 30, "b": b"B" * 30, "c": b"C" * 50, "e": b"E" * 90}
+        for k, v in self.data.items(): (self.pk / k).write_bytes(v)
+        (self.pk / "index.tsv").write_text("".join(self.row(k) for k in self.data))
+        self.old = push.LIM; push.LIM = 60
+        self.calls = []
+
+    def tearDown(self): push.LIM = self.old; super().tearDown()
+
+    def run_push(self, files):
+        self.dev = Fake(files)
+        return push.run(self.dev, self.pk, self.w, False, say=self.log.append, progress=lambda *a: self.calls.append(a))
+
+    def test_three_batches_cumulative(self):
+        self.run_push({})
+        self.assertEqual(self.calls, [(0, 200, 0, 3), (60, 200, 1, 3), (110, 200, 2, 3), (200, 200, 3, 3)])
+
+    def test_denominator_is_this_push_not_whole_pack(self):   # 机上已有 a、b：只推 c、e（两批 50 | 90），总量 140
+        self.run_push(self.on_phone("a", "b"))
+        self.assertEqual(self.calls, [(0, 140, 0, 2), (50, 140, 1, 2), (140, 140, 2, 2)])
+
+    def test_nothing_to_push_reports_zero_total(self):   # 机上全有：只报一次 0/0，作业层见 total=0 不发计数（不画 0/0）
+        self.run_push(self.on_phone("a", "b", "c", "e"))
+        self.assertEqual(self.calls, [(0, 0, 0, 0)])
+
+    def test_failed_batch_never_reports_done(self):   # 第一批就写满：不许报任何已完成量
+        self.dev = Fake({}, full_disk=True)
+        with self.assertRaises(push.Fail):
+            push.run(self.dev, self.pk, self.w, False, say=self.log.append, progress=lambda *a: self.calls.append(a))
+        self.assertEqual([c for c in self.calls if c[0] > 0], [])
+
+    def test_cli_progress_lines(self):   # Mac 装机作业读的机器行
+        line = push.PROGRESS_PREFIX + " 60 200 1 3"
+        self.assertRegex(line, r"^S2A_PUSH_PROGRESS \d+ \d+ \d+ \d+$")
 
 
 class SendFail(Base):

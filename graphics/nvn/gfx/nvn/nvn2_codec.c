@@ -113,7 +113,7 @@ uint32_t nvn2_vi_vsync_event(void *sev, void *disp) {
     pthread_detach(th);
     LOG("vi::GetDisplayVsyncEvent：宿主线程按 60 Hz 触发（自动清除）"); return 0;
 }
-__attribute__((constructor)) static void vi_vsync_reg(void) { nvn2_vi_vsync_register((void *)nvn2_vi_vsync_event); }
+__attribute__((constructor)) static void vi_vsync_reg(void) { nvn2_vi_vsync_register((void *)nvn2_vi_vsync_event); nvn2_sev_attach_register(sev_attach); }
 
 // ---------- 同步计数器与 nn::syncpt::sdk 事件 ----------
 typedef struct { uint32_t id_inv, mode; uint64_t value; } cv_sync;

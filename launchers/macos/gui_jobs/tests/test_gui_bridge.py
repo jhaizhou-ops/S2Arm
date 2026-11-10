@@ -167,7 +167,7 @@ class BridgeTests(unittest.TestCase):
                 events.seek(0)
                 terminal = json.loads(events.read().splitlines()[-1])
                 self.assertEqual(terminal["state"], "cancelled")
-                saved = json.loads((Path(self.request["privateRoot"]) / "jobs/fixture.json").read_text())
+                saved = json.loads((Path(self.request["privateRoot"]) / "logs/jobs/fixture.json").read_text())   # 没有游戏库：任务记录退回 <私有目录>/logs/jobs
                 self.assertEqual(saved["target"], "ohos")
                 self.assertEqual(saved["state"], "cancelled")
             finally:

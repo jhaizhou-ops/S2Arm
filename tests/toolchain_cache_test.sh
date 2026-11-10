@@ -1,5 +1,5 @@
 #!/bin/bash
-# 门禁覆盖：tools/toolchain.sh pack/ipa.sh pack/shell_build.sh services/opus/build.sh services/vpx/build.sh services/dav1d/build.sh
+# 门禁覆盖：tools/toolchain.sh pack/ipa.sh pack/shell_build.sh services/opus/build.sh services/vpx/build.sh services/vpx/patches/* services/dav1d/build.sh
 # 审计 #1534 P1-107：Mac 本地编译缓存跟编译器走（壳编号不变，只在取本机缓存时比工具链版本行）。假 xcrun（版本行由 FAKE_CLANG / FAKE_METAL 定）放 PATH 最前：
 #   ① s2a_tc_sweep（shell_build.sh 清引擎树 iOS 中间产物）：记录与本机相同 → 目录留；不同 / 没有记录 → 删掉、写新记录
 #   ② pack/ipa.sh 判壳缓存命中的那一行（原样取出求值）：记录同 → 命中；不同 / 没有记录 → 不命中；给了发布源 → 不按本机编译器判；出壳后写记录那一行写的就是命中要的
@@ -48,6 +48,8 @@ MMAC=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p' "$H/tools/toolchain.env"); MIOS=
 tag() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }   # 版本行（假 xcrun 输出的第一行）→ 目录名后缀
 for lib in opus vpx dav1d; do
   s=$H/services/$lib/build.sh; v=$(sed -n 's/^VER=\([^;]*\);.*/\1/p' "$s"); h1=$( { cat "$s"; echo "$MMAC $MIOS"; } | shasum -a 256 | cut -c1-12)
+  # vpx 的 H1 另带变体名与 S2Arm 补丁（services/vpx/build.sh 的 S2A_VPX_VARIANT，缺省 ship）
+  [ "$lib" = vpx ] && h1=$( { cat "$s"; echo "$MMAC $MIOS ship"; cat "$H/services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch"; } | shasum -a 256 | cut -c1-12)
   up=$(echo "$lib" | tr a-z A-Z); C=$T/cache/$lib; B0=$C/ios-arm64-$v-$h1
   O=$B0-$(tag "Apple clang version 1 (fake)"); OX=$B0-$(tag "Apple clang version 0 (fake)")
   seed() { rm -rf "$C"; for d; do mkdir -p "$d/include"; echo a > "$d/lib$lib.a"; done; }

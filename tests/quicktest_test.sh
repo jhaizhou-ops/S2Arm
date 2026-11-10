@@ -46,7 +46,8 @@ if [ -f "$FAKE/rostore" ]; then s=$O/roots/.romfs_store/tstub/oc-1; mkdir -p "$s
 if [ -f "$FAKE/directgap" ]; then echo "🔴 刷新停在：【红】tstub 直连单轨停在 直连配置推导：直连缺口：配置推导不支持本款"; exit 1; fi
 if [ -f "$FAKE/packfail" ]; then mkdir -p "$O/roots/.failed"; echo "PFRW gaps=1" > "$O/roots/.failed/tstub_main.log"; echo "【红】tstub 改写 main 失败"; exit 1; fi
 EOF
-cat > "$F/tools/entry_check.sh" <<'EOF'
+mkdir -p "$F/priv"; export S2A_PRIVATE_TOOLS=$F/priv   # entry_check.sh 是维护方工具（同 tools/ab_pair.sh 的调法）
+cat > "$F/priv/entry_check.sh" <<'EOF'
 D=$3; echo "${S2A_ENTRY_GFX:-unset}" >> "$FAKE/gfx"; [ -f "$FAKE/nodirect" ] && { echo "🟡 待直连根"; exit 5; }
 [ -f "$FAKE/noslot" ] && { echo "🟡 局没起 tstub handheld：局槽排队超时"; exit 3; }
 rm -rf "$D"; mkdir -p "$D"; n=$(cat "$FAKE/runs" 2> /dev/null || echo 0); n=$((n + 1)); echo $n > "$FAKE/runs"

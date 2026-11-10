@@ -336,9 +336,9 @@ with patch.object(Path, 'home', return_value=Path(home)):
         request = dict(schema=1, taskId='synthetic', operation='diagnostics', privateRoot=str(private), library=str(self.root / 'library'), path=str(destination))
         with contextlib.redirect_stdout(io.StringIO()):
             c = Context(request)
-            atomic(private / 'jobs' / 'complete.json', dict(state='completed', diagnostics=[dict(code='TEST', severity='error', summary='failure', suggestion='retry', detail={'header_key': 'd' * 64}, stage='run', logPath='logs/tool.log', component='host', exitCode=0)]))
-            atomic(private / 'jobs' / 'large.json', {'detail': 'x' * 5000})
-            (private / 'logs').mkdir(); (private / 'logs' / 'tool.log').write_text('synthetic tool log')
+            atomic(c.logs / 'jobs' / 'complete.json', dict(state='completed', diagnostics=[dict(code='TEST', severity='error', summary='failure', suggestion='retry', detail={'header_key': 'd' * 64}, stage='run', logPath='logs/tool.log', component='host', exitCode=0)]))
+            atomic(c.logs / 'jobs' / 'large.json', {'detail': 'x' * 5000})   # 任务记录在 core.logs_root 的 jobs/（还没建库：私有目录 logs/jobs）
+            (c.logs / 'tool.log').write_text('synthetic tool log')
             library.diagnostics(c)
         result = dr.generate(destination, self.output)
         jobs = {j['source']: j for j in result['jobs']}

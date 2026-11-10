@@ -89,7 +89,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(view.state,'completed')
 
     def test_physical_cursor_attempt_and_bad_line(self):
-        self.run_worker('ok'); path=self.private/'jobs/sample.events.jsonl'
+        self.run_worker('ok'); path=self.private/'logs/jobs/sample.events.jsonl'   # 还没建库：任务记录在私有目录 logs/jobs（core.logs_root）
         with path.open('ab') as f: f.write(b'\n{invalid}\n')
         cursor=Cursor(); first=self.client.events('sample',cursor)
         self.assertEqual(len(first),4); self.assertEqual(cursor.line,6)
@@ -100,7 +100,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.client.events('sample',cursor),[])
 
     def test_source_replacement_and_truncation_refused(self):
-        self.run_worker('ok'); path=self.private/'jobs/sample.events.jsonl'; c=Cursor()
+        self.run_worker('ok'); path=self.private/'logs/jobs/sample.events.jsonl'; c=Cursor()
         self.client.events('sample',c); path.write_bytes(b'')
         with self.assertRaises(ProtocolError): self.client.events('sample',c)
         self.run_worker('ok'); c=Cursor(); self.client.events('sample',c)

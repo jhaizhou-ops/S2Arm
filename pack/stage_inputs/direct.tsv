@@ -173,3 +173,4 @@
 
 入	pack/resource_input_key.py	抽取/直连共用资源内容抽样键（P2-53）
 入	translator/rt_dump_merge.py	真机转储着色器（产物根 rt_shaders/）并进直连库（direct_lib.sh 合并两边抽取之后调用）
+外	pack/jobs/space_rule.py	开工前空间复核（direct_lib.sh 抽取后调 direct-check）：只决定开不开编，不改直连产物

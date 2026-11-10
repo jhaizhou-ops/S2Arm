@@ -18,9 +18,9 @@
 - `event_map`：`s2a.job-event.v1` 的事件落到哪个界面状态。字段含义表在 `fields` 里。任务终态 `job.succeeded` / `job.cancelled` **不是错误码**，放在 `terminal_results`，不查 `errors` 表。
 - `stage_labels`：`stageId` 到中文 / 英文阶段名。键集合必须与 `pack/contracts/protocol.py` 的 `STAGES` 右值一致（外加 `job` 这个兜底值）。
 - `errors`：错误码表。**码集合的唯一来源是 `pack/jobs/errors.py` 的 `RECOVERY`**，自检直接 import 那个文件比集合，多一个少一个都红。每条只写 `title` / `detail` / `severity` / `retryable` / `recoverable`；**「下一步」不在这里写第二份文案**，只留来源指针 `"next_action": {"from": "pack/jobs/errors.py"}`，四端显示时去读 `RECOVERY[code]`（`errors.py` 的 `recovery()` 已含 packaged / 开发版的回落与 `job_failed` 兜底）。唯一的例外是 `artifact_invalid`（`pack/targets/ios/adapter.py` 抛，`RECOVERY` 里没有），指针指向 `pack/contracts/README.md` 的恢复口径。
-- `prompts`：`items` 是游戏内横幅文案，与 `runtime/include/s2a_direct_prompt.h` 的宏**逐字**相同——那个头文件仍是 iOS / Mac 游戏窗口的唯一实现来源，这里只是把它们列进同一份规格，方便四端对齐；宏集合也一一对应，头文件新增一条横幅而规格没跟上同样判红。（10-26 维护者改定直连运行中不切换，「已切回通用」横幅、直连失败确认弹窗与 #366 退回原因正文一并删掉，revision 3。）
-- `init_fail_page`：iOS 人手局初启失败提示页（审计 #1534 P1-4）的文案与错误码归类。`items` 与 `runtime/include/s2a_init_fail.h` 的文案宏**逐字**相同（游戏进程不读本 JSON，头文件是实现来源）；`codes` 与头文件 `S2A_INIT_FAIL_CODES` 一一对应（码 id、枚举名、映射到哪句玩家话术），码表外按 `unknown` 用通用句。上屏只放玩家话术，内部摘要只进「复制诊断」（11-02 维护者：内部词不上屏）。每句带中英文，不复制进 `Localizable.json`。
-- `selfcheck_page`：iOS 起局自检不过时的提示页文案（`runtime/src/selfcheck.c` `s2a_selfcheck_screen`）。`items` 与 `runtime/include/s2a_selfcheck_page.h` 的宏**逐字**相同、宏集合一一对应（头文件是实现来源）；NPDM 地址空间类型 0–2（32 / 36 位）上屏说「暂不支持」，不再落到「游戏资源不完整」。每句带中英文，不复制进 `Localizable.json`。
+- `prompts`：`items` 是游戏内横幅文案，与 `runtime/include/s2a_direct_prompt.h` 的宏**逐字**相同——那个头文件仍是 iOS / Mac 游戏窗口的唯一实现来源，这里只是把它们列进同一份规格，方便四端对齐；宏集合也一一对应，头文件新增一条横幅而规格没跟上同样判红。（10-26 维护者改定直连运行中不切换，「已切回通用」横幅、直连失败确认弹窗与 #366 退回原因正文一并删掉，revision 3。）每条都带 `en`，头文件同时有 `<宏>_EN` 与之逐字相同：iOS 宿主按 App 语言取中 / 英（`ios/s2a_l10n.h` 的 `S2APICK`，#316 在 revision 39 补齐）。
+- `init_fail_page`：iOS 人手局初启失败提示页（审计 #1534 P1-4）的文案与错误码归类。`items` 与 `runtime/include/s2a_init_fail.h` 的文案宏**逐字**相同（游戏进程不读本 JSON，头文件是实现来源）；`codes` 与头文件 `S2A_INIT_FAIL_CODES` 一一对应（码 id、枚举名、映射到哪句玩家话术），码表外按 `unknown` 用通用句。上屏只放玩家话术，内部摘要只进「复制诊断」（11-02 维护者：内部词不上屏）。每句带中英文，不复制进 `Localizable.json`。英文同样落在头文件 `<宏>_EN`，与 `en` 逐字相同（iOS 按 App 语言显示）。
+- `selfcheck_page`：iOS 起局自检不过时的提示页文案（`runtime/src/selfcheck.c` `s2a_selfcheck_screen`）。`items` 与 `runtime/include/s2a_selfcheck_page.h` 的宏**逐字**相同、宏集合一一对应（头文件是实现来源）；NPDM 地址空间类型 0–2（32 / 36 位）上屏说「暂不支持」，不再落到「游戏资源不完整」。每句带中英文，不复制进 `Localizable.json`。英文同样落在头文件 `<宏>_EN`，与 `en` 逐字相同（iOS 按 App 语言显示）。
 - `actions`：按钮 id 与文案。
 
 ## 口径号（revision）怎么改

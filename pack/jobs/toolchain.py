@@ -194,7 +194,7 @@ def prepare(c):
     folder.mkdir(parents=True, exist_ok=True)
     c.run(["dotnet", "build", c.engine / "pack/nx_unpack/nx_unpack.csproj", "-c", "Release",
            "-o", folder, "--nologo", "-p:UseAppHost=false", "-p:BaseIntermediateOutputPath=" + str(folder / "obj") + "/"],
-          c.private / "logs" / (c.task + "-reader.log"))
+          c.logs / (c.task + "-reader.log"))
     (folder / "nx_unpack").unlink(missing_ok=True)
     path = folder / "nx_unpack.dll"
     if not path.is_file():
@@ -232,7 +232,7 @@ def preflight(c):
     if os.name == "nt":   # Windows 走 winenv；本函数体（Mac 清单）里 add("Python", …) 的最低版本 winenv 按源码读（_python_minimum），别把它挪出本函数
         return preflight_windows(c)
     checks = []
-    c.last_log = c.private / "logs" / (c.task + "-preflight.log")
+    c.last_log = c.logs / (c.task + "-preflight.log")
     c.last_log.parent.mkdir(parents=True, exist_ok=True)
     c.last_log.touch(mode=0o600)
     def add(name, ok, message, scopes=("prepare",), action=None, code=None, group=None):
@@ -280,13 +280,16 @@ def preflight(c):
     add(".NET 10", ok and ("Microsoft.NETCore.App 10." in version if packaged else any(line.startswith("10.") for line in version.splitlines())),
         "应用内置 .NET 10 运行时。" if packaged else "开发构建需要 .NET 10 SDK。")
     ok, version = probe(c, ["xcrun", "--sdk", "macosx", "metal", "--version"])
-    developer = Path(c.r.get("developerDir", ""))
-    has_xcode = (developer / "usr/bin/xcodebuild").is_file()
+    developer = Path(c.r.get("developerDir") or "")
+    # 没找到 Xcode 时启动器传空串：Path("") 拼出的相对路径会按工作目录（从 Finder 打开是 /）落到系统自带的
+    # /usr/bin/xcodebuild 空壳上，误判成装了 Xcode（#109）。只认绝对路径下的 xcodebuild
+    has_xcode = developer.is_absolute() and (developer / "usr/bin/xcodebuild").is_file()
     # 外部依赖只有这两项（其余全随应用）：缺什么就给一键处理（维护者 10-23）——Xcode 跳 App Store；装了没打开过（许可没同意）就打开它；缺 Metal 组件就一键下载
     # Xcode's missing-component shim can return zero while printing an error.
     metal_ok = ok and "Apple metal version" in version and "error:" not in version.lower()
     first_launch = has_xcode and not metal_ok and "license" in version.lower()
     add("Metal 编译组件", metal_ok,
+        "Xcode 的 Metal 编译组件已就绪。" if metal_ok else
         "Xcode 还没完成首次设置：点「打开 Xcode」，同意许可后回来点重新检查。" if first_launch else
         "缺 Xcode 的 Metal 编译组件：点「一键下载」自动安装（约 1 GB），下完自动重新检查。" if has_xcode else
         "准备游戏需要 Xcode 的 Metal 编译组件；先安装 Xcode。",
@@ -313,16 +316,21 @@ def preflight(c):
             code="xcode_team_pending" if logged_in else "xcode_account_missing", group="apple")
     ok, _ = probe(c, ["xcrun", "--sdk", "macosx", "--show-sdk-path"])
     add("Xcode", has_xcode and ok,
+        "已找到完整的 Xcode。" if has_xcode and ok else
         "没找到完整的 Xcode：点「去 App Store 安装」，装好打开一次后回来点重新检查；S2Arm 会自动找到它。",
         action="appStoreXcode")
     if packaged:
         from embedded import artifact
+        why = ""
         try:
             tools = artifact(c, "Prepare")
             ready_tools = tools is not None
-        except (Failure, OSError):
-            ready_tools = False
-        add("S2Arm 游戏准备工具", ready_tools, "应用内置着色器翻译器、资源索引器和 GAL 工具。")
+            if not ready_tools:
+                why = "内置引擎里没有准备工具清单"
+        except (Failure, OSError) as e:   # 原因写进检查项和日志，不再只剩一个 FAIL（v0.2.0 前回归时查不到为什么）
+            ready_tools, why = False, str(e)
+            c.emit("message", "S2Arm 游戏准备工具不可用：" + why)
+        add("S2Arm 游戏准备工具", ready_tools, "应用内置着色器翻译器、资源索引器和 GAL 工具。" + ("（" + why + "）" if why else ""))
     for module in ("capstone", "lz4", "numpy", "zstandard"):   # zstandard：读 zstd 存储的 Switch 2 .nup（pack/ns2_nup.py；内置 Python 3.12 没有 compression.zstd）
         ok, _ = probe(c, [sys.executable, "-c", "import " + module])
         add("Python / " + module, ok, "应用内置 " + module + "；组件损坏时请重新安装完整应用。")

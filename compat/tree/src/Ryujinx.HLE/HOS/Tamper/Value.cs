@@ -13,12 +13,12 @@ namespace Ryujinx.HLE.HOS.Tamper
 
         public T Get<T>() where T : unmanaged
         {
-            return (T)(dynamic)_value;
+            return TamperNum.FromU64<T>(TamperNum.ToU64(_value));
         }
 
         public void Set<T>(T value) where T : unmanaged
         {
-            _value = (TP)(dynamic)value;
+            _value = TamperNum.FromU64<TP>(TamperNum.ToU64(value));
         }
     }
 }

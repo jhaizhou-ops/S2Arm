@@ -24,7 +24,8 @@ SHARED = (
     # 源码包共用下载 + 按 SHA 的共享缓存（docker/prepare.sh、codecs/build.sh、openssl/build.sh、services/*/build.sh 都 source）。
     'android/tools/fetch_source.sh',
     'services/opus/build.sh', 'services/opus/s2a_opus.c',
-    'services/vpx/build.sh', 'services/vpx/s2a_vp8.c',
+    'services/vpx/build.sh', 'services/vpx/s2a_vp8.c', 'services/vpx/s2a_vp9.c',
+    'services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch',
 )
 REQUIRED = {
     'docker': (

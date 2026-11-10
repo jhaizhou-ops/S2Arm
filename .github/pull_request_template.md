@@ -28,7 +28,7 @@
 ```
 
 ## 平台耦合只减不增（改 `compat/tree`、`services/` 时必写）
-<!-- 跑 `bash tests/platform_scan_test.sh`，贴「B 真仓库对 origin/main 只减不增」那一行。共享代码不新增平台判断 / 平台库导入 / 按名找导出，平台实现放 platforms/<平台>/ 并登记接缝（docs/架构_多终端.md 第 7 节）。不知道落点就在这里问原生层；「// 平台例外：」只有原生层确认没有接口可用才写。 -->
+<!-- 跑 `bash tests/platform_scan_test.sh`，贴「B 真仓库对 origin/main 只减不增」那一行。共享代码不新增平台判断 / 平台库导入 / 按名找导出，平台实现放各平台目录（android/、ios/、macos/、shell/；共用接缝在 platform/）并登记接缝（docs/架构_多终端.md 第 7 节）。不知道落点就在这里问原生层；「// 平台例外：」只有原生层确认没有接口可用才写。 -->
 
 ## 苹果路径不受影响的证明（改共用目录时必写）
 

@@ -46,12 +46,15 @@ public final class SettingsProvider {
     private var targets: [String]?
     /// 「允许 AI 操作 S2Arm」（本机控制口，见 ControlPort）：缺省关；--control / S2ARM_CONTROL=1 启动时强制开、不写这里。
     private var ai: Bool
+    /// iCloud 存档同步的云盘文件夹（玩家在环境页选的；iPhone 上选同一个）。没选 = 不同步
+    private var cloud: String?
 
     public init(client: JobClient, store: URL? = nil) {
         self.client = client
         self.store = store ?? client.environment.privateRoot.appendingPathComponent("apple-frontend/launch-settings.json")
         targets = Self.read(self.store)
         ai = Self.object(self.store)?["aiControl"] as? Bool ?? false
+        cloud = Self.object(self.store)?["cloudSavesFolder"] as? String
     }
 
     private static func object(_ url: URL) -> [String: Any]? {
@@ -68,6 +71,13 @@ public final class SettingsProvider {
     public func setAIControl(_ on: Bool) throws {
         lock.lock(); ai = on; lock.unlock()
         do { try write() } catch { throw JobClientError("「允许 AI 操作」的开关没能写进磁盘（\(error.localizedDescription)）。") }
+    }
+
+    public var cloudSavesFolder: String? { lock.withLock { cloud } }
+
+    public func setCloudSavesFolder(_ path: String?) throws {
+        lock.lock(); cloud = path; lock.unlock()
+        do { try write() } catch { throw JobClientError("iCloud 存档文件夹没能写进磁盘（\(error.localizedDescription)）。") }
     }
 
     /// 出包页勾了哪些平台（平台 id，ExportPlatform.rawValue）。缺省一个都不勾（维护者 11-02）；新前端没存过就接着用旧启动器的勾选。
@@ -88,6 +98,7 @@ public final class SettingsProvider {
         var file: [String: Any] = ["schema": 1]
         if let saved = lock.withLock({ targets }) { file["exportTargets"] = saved }
         if lock.withLock({ ai }) { file["aiControl"] = true }
+        if let folder = lock.withLock({ cloud }) { file["cloudSavesFolder"] = folder }
         let data = try JSONSerialization.data(withJSONObject: file, options: [.sortedKeys])
         try data.write(to: store, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: store.path)

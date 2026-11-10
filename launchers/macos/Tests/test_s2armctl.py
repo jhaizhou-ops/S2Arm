@@ -31,6 +31,133 @@ def state(*tasks, queue=(), error=None):
     return {"tasks": list(tasks), "queue": list(queue), "error": error}
 
 
+class StartFailureTests(unittest.TestCase):
+    def run_start(self, why, stale=False):
+        now = [0]
+        with tempfile.TemporaryDirectory() as root:
+            error = Path(root) / "control.error"
+            def launch(*_args, **_kwargs):
+                error.write_text(why, encoding="utf-8")
+                if not stale:
+                    os.utime(error, (2000, 2000))
+            if stale:
+                error.write_text("上一次的错", encoding="utf-8")
+                os.utime(error, (1000, 1000))
+            def sleep(seconds):
+                now[0] += seconds
+            with mock.patch.object(ctl, "ROOT", root), mock.patch.object(ctl, "WINDOWS", False), \
+                 mock.patch.object(ctl, "info", side_effect=SystemExit("no control")), \
+                 mock.patch.object(ctl.subprocess, "run", side_effect=None if stale else launch), \
+                 mock.patch.object(ctl.time, "time", side_effect=lambda: now[0]), \
+                 mock.patch.object(ctl.time, "sleep", side_effect=sleep), \
+                 self.assertRaises(SystemExit) as caught:
+                ctl.start("/Applications/S2Arm.app")
+        return str(caught.exception.code), now[0]
+
+    def test_reason_is_reported_without_waiting(self):
+        message, waited = self.run_start("Private job root inherits permissions.")
+        self.assertIn("Private job root inherits permissions.", message)
+        self.assertIn("还不存在的路径", message)
+        self.assertEqual(waited, 0)
+
+    def test_other_reason_gets_no_data_root_advice(self):
+        message, _ = self.run_start("地址已被占用")
+        self.assertEqual(message, "控制口没起来：地址已被占用")
+
+    def test_failure_from_an_earlier_start_is_ignored(self):
+        message, waited = self.run_start("", stale=True)
+        self.assertIn("60 秒内控制口没就绪", message)
+        self.assertNotIn("上一次的错", message)
+        self.assertGreaterEqual(waited, 60)
+
+
+class LogsRootTests(unittest.TestCase):
+    """游戏库结构 P3：库建好（有 .s2arm-library.json）→ <库>/logs；没建好 → <数据目录>/logs；旧默认库搬走后按搬库标记跟过去"""
+    def test_rules(self):
+        with tempfile.TemporaryDirectory() as root, mock.patch.object(ctl, "ROOT", root), mock.patch.object(ctl, "WINDOWS", False):
+            lib = Path(root) / "lib"; lib.mkdir()
+            (Path(root) / "preferences.json").write_text(json.dumps({"library": str(lib)}))
+            self.assertEqual(ctl.logs_root(), os.path.join(root, "logs"))
+            (lib / ".s2arm-library.json").write_text("{}")
+            self.assertEqual(ctl.logs_root(), os.path.join(str(lib), "logs"))
+            old = Path(root) / "游戏库"
+            (Path(root) / "preferences.json").write_text(json.dumps({"library": str(old)}))
+            (Path(root) / "library-relocate.json").write_text(json.dumps({"from": str(old), "to": str(lib), "state": "done"}))
+            self.assertEqual(ctl.logs_root(), os.path.join(str(lib), "logs"))
+            (Path(root) / "preferences.json").write_text(json.dumps({"library": str(Path(root) / "other")}))   # 别的路径不跟标记
+            self.assertEqual(ctl.logs_root(), os.path.join(root, "logs"))
+
+
+class TaskLogTests(unittest.TestCase):
+    def test_build_logs_command_reads_the_nested_stage_log(self):
+        with tempfile.TemporaryDirectory() as root:
+            stage = Path(root) / "logs" / "build-task" / "refresh.log"
+            stage.parent.mkdir(parents=True)
+            stage.write_text("第一行\n第二行\n第三行\n", encoding="utf-8")
+            record = task("build-task", "running", 1)
+            output = io.StringIO()
+            with mock.patch.object(ctl, "ROOT", root), \
+                    mock.patch.object(ctl, "call", return_value=state(record)), \
+                    mock.patch.object(ctl.sys, "argv", ["s2armctl", "logs", "build-task", "--lines", "2"]), \
+                    contextlib.redirect_stdout(output):
+                ctl.main()
+            self.assertIn(str(stage), output.getvalue())
+            self.assertIn("第二行\n第三行", output.getvalue())
+            self.assertNotIn("第一行", output.getvalue())
+
+    def test_game_reference_reads_the_latest_tasks_nested_log(self):
+        with tempfile.TemporaryDirectory() as root:
+            logs = Path(root) / "logs"
+            logs.mkdir()
+            (logs / "old-game.log").write_text("old run", encoding="utf-8")
+            stage = logs / "new" / "extract.log"
+            stage.parent.mkdir()
+            stage.write_text("new build", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(ctl, "ROOT", root), \
+                    mock.patch.object(ctl, "call", return_value=state(
+                        task("old", "completed", 1, operation="launch"),
+                        task("new", "running", 2))), \
+                    contextlib.redirect_stdout(output):
+                ctl.logs("game", 40)
+            self.assertIn("new build", output.getvalue())
+            self.assertNotIn("old run", output.getvalue())
+
+    def test_newest_log_is_selected_across_flat_and_nested_layouts(self):
+        with tempfile.TemporaryDirectory() as root:
+            logs = Path(root) / "logs"
+            nested = logs / "job" / "refresh.log"
+            nested.parent.mkdir(parents=True)
+            flat = logs / "job-failure.log"
+            nested.write_text("stage", encoding="utf-8")
+            flat.write_text("failure", encoding="utf-8")
+            with mock.patch.object(ctl, "ROOT", root):
+                os.utime(nested, (200, 200))
+                os.utime(flat, (100, 100))
+                self.assertEqual(ctl.task_log("job"), str(nested))
+                os.utime(flat, (300, 300))
+                self.assertEqual(ctl.task_log("job"), str(flat))
+
+    def test_flat_game_log_still_works_and_other_tasks_are_ignored(self):
+        with tempfile.TemporaryDirectory() as root:
+            logs = Path(root) / "logs"
+            logs.mkdir()
+            game = logs / "launch-game.log"
+            game.write_text("game", encoding="utf-8")
+            unrelated = logs / "other" / "refresh.log"
+            unrelated.parent.mkdir()
+            unrelated.write_text("other task", encoding="utf-8")
+            with mock.patch.object(ctl, "ROOT", root):
+                self.assertEqual(ctl.task_log("launch"), str(game))
+                self.assertIsNone(ctl.task_log("missing"))
+
+    def test_log_named_directories_are_not_returned_as_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "logs" / "job-empty.log").mkdir(parents=True)
+            with mock.patch.object(ctl, "ROOT", root):
+                self.assertIsNone(ctl.task_log("job"))
+
+
 class WaitTests(unittest.TestCase):
     def run_wait(self, states, operation="build", limit=10):
         now = [0]
@@ -55,6 +182,24 @@ class WaitTests(unittest.TestCase):
                 (["ipa", "G"], "/ipa", {"gameId": "G"})]:
             with mock.patch.object(ctl, "call", return_value={"ok": True}) as call, mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), \
                     mock.patch("builtins.print"):
+                ctl.main()
+            call.assert_called_once_with("POST", path, body)
+
+    def test_install_passes_team_and_device_only_when_given(self):
+        for argv, body in [(["install", "G"], {"gameId": "G"}),
+                           (["install", "G", "--team", "ABCDE12345"], {"gameId": "G", "teamId": "ABCDE12345"}),
+                           (["install", "G", "--device", "测试 iPhone", "--team", "ABCDE12345"],
+                            {"gameId": "G", "teamId": "ABCDE12345", "device": "测试 iPhone"})]:
+            with mock.patch.object(ctl, "call", return_value={"ok": True}) as call, mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), mock.patch("builtins.print"):
+                ctl.main()
+            call.assert_called_once_with("POST", "/install", body)
+
+    def test_cloud_commands_reach_the_app(self):
+        # iCloud 存档：cloud-folder 给绝对路径、不给 = 关闭（空串）；cloud-sync 带游戏号
+        for argv, path, body in [(["cloud-folder", "/tmp/云盘"], "/cloudFolder", {"path": "/tmp/云盘"}),
+                                 (["cloud-folder"], "/cloudFolder", {"path": ""}),
+                                 (["cloud-sync", "G"], "/cloudSync", {"gameId": "G"})]:
+            with mock.patch.object(ctl, "call", return_value={"ok": True}) as call, mock.patch.object(ctl.sys, "argv", ["s2armctl", *argv]), mock.patch("builtins.print"):
                 ctl.main()
             call.assert_called_once_with("POST", path, body)
 
@@ -205,7 +350,7 @@ class NextStepTests(unittest.TestCase):
         self.assertEqual((n["step"], n["who"], n["ipa"]), ("装机", "ai", "/lib/iPhone/g/tg.ipa"))
         self.assertIn("s2armctl install g", n["do"])
         # 装机失败按错误码：Xcode 没登录 → 玩家本人登录；没连设备 → 问玩家连上
-        for code, who in (("xcode_account_missing", "human"), ("device_not_connected", "ask"), ("free_app_limit", "human"), ("signing_failed", "ai")):
+        for code, who in (("xcode_account_missing", "human"), ("device_not_connected", "ask"), ("free_app_limit", "human"), ("free_appid_limit", "human"), ("signing_failed", "ai")):
             inst = {"id": "t4", "gameId": "g", "operation": "install", "state": "failed", "started": 5, "diagnostics": [{"code": code, "summary": "x"}]}
             n = ctl.next_step(full_state(games=[game("g", "G", 1e9)], tasks=[done, inst]))
             self.assertEqual((n["step"], n["who"], n["code"]), ("装机失败", who, code))
@@ -223,6 +368,98 @@ class NextStepTests(unittest.TestCase):
         n = ctl.next_step(full_state(environmentReady=False, checks=[{"name": "Xcode", "ok": False, "message": "没装"}]))
         self.assertEqual((n["step"], n["who"]), ("环境", "human"))
 
+
+
+class NextTargetTests(unittest.TestCase):
+    def run_next(self, snapshot, *args):
+        out = io.StringIO()
+        with mock.patch.object(ctl, "WINDOWS", False), \
+             mock.patch.object(sys, "argv", ["s2armctl", "next", *args, "--json"]), \
+             mock.patch.object(ctl, "call", return_value=snapshot) as call, \
+             contextlib.redirect_stdout(out):
+            ctl.main()
+        call.assert_called_once_with("GET", "/state")
+        return json.loads(out.getvalue())
+
+    def test_ready_mac_game_launches_without_ipa(self):
+        s = full_state(games=[game("g", "G", 1, ready=True)],
+                       tasks=[task("mac", "completed", 1, game="g")])
+        n = self.run_next(s, "g", "--target", "mac")
+        self.assertEqual(n["do"], "s2armctl launch g")
+
+    def test_ready_mac_uses_runtime_environment(self):
+        s = full_state(games=[game("g", "G", 1, ready=True)],
+                       environmentReady=False, runtimeReady=True, hasImportedKeys=False)
+        n = self.run_next(s, "g", "--target", "mac")
+        self.assertEqual(n["do"], "s2armctl launch g")
+
+    def test_ready_mac_waits_if_launcher_is_busy(self):
+        for busy in ({"executionTask": "other-task"}, {"queue": ["other-game"]}):
+            with self.subTest(busy=busy):
+                s = full_state(games=[game("g", "G", 1, ready=True)], **busy)
+                n = self.run_next(s, "g", "--target", "mac")
+                self.assertEqual(n["step"], "等待")
+                self.assertIn("s2armctl next g --target mac", n["do"])
+
+    def test_mac_reprepares_stale_artifact(self):
+        stale = dict(game("g", "G", 1, ready=True), needsPreparation=True)
+        n = self.run_next(full_state(games=[stale]), "g", "--target", "mac")
+        self.assertIn("s2armctl build g mac", n["do"])
+
+    def test_mac_game_needs_preparation_even_with_ipa(self):
+        ipa = dict(task("ipa", "completed", 1, game="g", operation="ipa"),
+                   ipaPath="/lib/iPhone/g/g.ipa")
+        s = full_state(games=[game("g", "G", 1)], tasks=[ipa])
+        n = self.run_next(s, "--target", "mac", "g")
+        self.assertIn("s2armctl build g mac", n["do"])
+        self.assertIn("s2armctl wait g --op build", n["do"])
+
+    def test_mac_waits_for_its_build_or_queue_entry(self):
+        ipa = task("ipa", "running", 2, game="g", operation="ipa")
+        for tasks, queue in (([task("mac", "running", 1, game="g"), ipa], []),
+                             ([ipa], ["g"])):
+            with self.subTest(queue=queue):
+                s = full_state(games=[game("g", "G", 1)], tasks=tasks, queue=queue)
+                n = self.run_next(s, "g", "--target", "mac")
+                self.assertEqual(n["step"], "等待")
+                self.assertIn("s2armctl wait g --op build", n["do"])
+                self.assertIn("s2armctl next g --target mac", n["do"])
+
+    def test_mac_reports_build_failure_with_diagnostics(self):
+        failed = dict(task("mac", "failed", 1, game="g"),
+                      diagnostics=[{"code": "disk_full", "summary": "磁盘空间不足"}])
+        s = full_state(games=[game("g", "G", 1)], tasks=[failed])
+        n = self.run_next(s, "g", "--target", "mac")
+        self.assertEqual((n["step"], n["who"], n["code"]), ("准备失败", "confirm", "disk_full"))
+        self.assertIn("s2armctl retry mac", n["do"])
+
+    def test_explicit_ios_matches_omitted_target(self):
+        s = full_state(games=[game("g", "G", 1, ready=True)])
+        default = self.run_next(s, "g")
+        self.assertIn("s2armctl build g ios", default["do"])
+        self.assertEqual(self.run_next(s, "g", "--target", "ios"), default)
+
+    def test_windows_rejects_mac_before_contacting_launcher(self):
+        err = io.StringIO()
+        with mock.patch.object(ctl, "WINDOWS", True), \
+             mock.patch.object(sys, "argv", ["s2armctl", "next", "g", "--target", "mac"]), \
+             mock.patch.object(ctl, "call") as call, contextlib.redirect_stderr(err), \
+             self.assertRaises(SystemExit) as caught:
+            ctl.main()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("Windows", err.getvalue())
+        self.assertIn("--target mac", err.getvalue())
+        call.assert_not_called()
+
+    def test_bad_target_fails_before_contacting_launcher(self):
+        for args in (["--target"], ["--target", "android"]):
+            with self.subTest(args=args), \
+                 mock.patch.object(sys, "argv", ["s2armctl", "next", *args]), \
+                 mock.patch.object(ctl, "call") as call, contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as caught:
+                ctl.main()
+            self.assertEqual(caught.exception.code, 2)
+            call.assert_not_called()
 
 
 class LaunchArgsTests(unittest.TestCase):
@@ -321,10 +558,10 @@ if __name__ == "__main__":
 
 class ControlStuckTests(unittest.TestCase):
     """10-26 Spare-host：内存吃紧时启动器控制口不应答，wait 一次超时就判失败、整个出包作业跟着丢。
-    控制口卡住时 wait 要按作业记录（<数据目录>/jobs/<任务>.json，pack/jobs/core.py 写）判：作业进程活着就接着等。期望按场景手写。"""
+    控制口卡住时 wait 要按作业记录（库没建好时 <数据目录>/logs/jobs/<任务>.json，pack/jobs/core.py 写）判：作业进程活着就接着等。期望按场景手写。"""
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="s2armctl-stuck-")
-        os.makedirs(os.path.join(self.root, "jobs"))
+        os.makedirs(os.path.join(self.root, "logs", "jobs"))
         # 卡死的控制口：接连接、读请求、永远不回
         self.server = socket.socket(); self.server.bind(("127.0.0.1", 0)); self.server.listen(8)
         self.held = []
@@ -346,7 +583,7 @@ class ControlStuckTests(unittest.TestCase):
 
     def job(self, finish_after, final="completed"):
         """假作业进程：按 core.py 的格式写作业记录（running + pid / pidStart），finish_after 秒后写终态退出；final=None = 中途被杀、记录停在 running"""
-        path = os.path.join(self.root, "jobs", "job1.json")
+        path = os.path.join(self.root, "logs", "jobs", "job1.json")
         code = f"""
 import json, os, subprocess, sys, time
 p = {path!r}

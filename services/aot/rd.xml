@@ -1,0 +1,78 @@
+<!-- NativeAOT 运行时指令：金手指（services/S2A.Services/Cheats.cs）复用 Ryujinx AtmosphereCompiler，InstructionHelper.Create 按宽度
+     MakeGenericType(byte/ushort/uint/ulong) 再 Activator.CreateInstance 造操作与条件；AOT 只生成编译期见过的泛型实例，不在这里点名，
+     真机编译就报「CondGT`1[UInt32] is missing native code」（11-09 真机实测；JIT 单测测不到）。
+     名单 = Ryujinx.HLE.HOS.Tamper.Operations / Conditions 里全部泛型类 × 4 种宽度；服务层单测 CheatsTest 反射核对没有漏的 -->
+<Directives xmlns="http://schemas.microsoft.com/netfx/2013/01/metadata">
+  <Application>
+    <Assembly Name="Ryujinx.HLE">
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAdd`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAdd`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAdd`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAdd`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAnd`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAnd`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAnd`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpAnd`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLog`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLog`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLog`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLog`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLsh`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLsh`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLsh`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpLsh`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMov`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMov`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMov`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMov`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMul`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMul`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMul`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpMul`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpNot`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpNot`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpNot`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpNot`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpOr`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpOr`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpOr`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpOr`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpRsh`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpRsh`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpRsh`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpRsh`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpSub`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpSub`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpSub`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpSub`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpXor`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpXor`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpXor`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Operations.OpXor`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondEQ`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondEQ`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondEQ`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondEQ`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGE`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGE`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGE`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGE`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGT`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGT`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGT`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondGT`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLE`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLE`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLE`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLE`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLT`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLT`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLT`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondLT`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondNE`1[[System.Byte,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondNE`1[[System.UInt16,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondNE`1[[System.UInt32,System.Private.CoreLib]]" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Tamper.Conditions.CondNE`1[[System.UInt64,System.Private.CoreLib]]" Dynamic="Required All" />
+    </Assembly>
+  </Application>
+</Directives>

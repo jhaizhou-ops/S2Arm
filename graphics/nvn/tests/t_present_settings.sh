@@ -46,7 +46,7 @@ xcrun --sdk macosx clang "${common[@]}" -std=gnu11 -fobjc-arc \
     -I"$root/graphics/nvn/gfx/nvn" -I"$root/graphics/nvn/gfx/nvn/include" -I"$root/graphics/nvn/host" \
     "$root/graphics/nvn/tests/t_present_settings.m" "${objects[@]}" "$nvn" "$gal" "$dsx" "$widen" -o "$out/t_present_settings" \
     -Wl,-dead_strip -Wl,-export_dynamic -Wl,-u,_s2a_mac_front_layer -Wl,-u,_nxgal_gpu_hold "${weak_flags[@]}" \
-    -Wl,-rpath,"$(dirname "$widen")" -framework AppKit -framework GameController -framework Metal -framework Foundation \
+    -Wl,-rpath,"$(dirname "$widen")" -framework AppKit -framework GameController -framework CoreHaptics -framework Metal -framework Foundation \
     -framework QuartzCore -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -lc++
 shasum -a 256 "$root/graphics/nvn/tests/t_present_settings.m" "$root/graphics/nvn/tests/t_present_settings.sh" \
     "${objects[@]}" "$nvn" "$gal" "$dsx" "$widen" "$out/t_present_settings" > "$out/link-inputs.sha256"

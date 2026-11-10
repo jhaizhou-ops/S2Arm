@@ -171,6 +171,11 @@ int nvn_vk_swapchain_create(struct nvn_vk_swapchain *sc, struct s2a_vk_device *d
     memset(sc, 0, sizeof *sc);
     sc->d = d;
     if (!d || !window) return fail(why, why_size, "null device/window");
+    sc->window = window;
+    // B3 输出尺寸出图：开关在建链时读一次；会话中途改开关只影响下一次窗口 attach。
+    char bg[PROP_VALUE_MAX] = {0};
+    __system_property_get("debug.s2a.buffer_geometry", bg);
+    sc->buf_geometry = bg[0] == '1';
     // 首版直连合同：present 必须有真实呈现退休证据（VK_EXT_swapchain_maintenance1 的 present fence）。
     // 只有渲染 fence 能证明“画完”，不能证明呈现引擎已释放图像；缺项在 prepare 阶段就拒绝 direct
     // （AUTO 在 commit 前退回 generic），不能拿渲染完成冒充呈现退休。
@@ -250,6 +255,10 @@ int nvn_vk_swapchain_create(struct nvn_vk_swapchain *sc, struct s2a_vk_device *d
     sc->format = chosen.format; sc->extent = (VkExtent2D){w, h};
     sc->window_width = ww ? ww : w;
     sc->window_height = wh ? wh : h;
+    // B3：此时缓冲还没被改成游戏输出尺寸，getWidth/getHeight 仍是 view 的像素尺寸；
+    // 之后 buffer_geometry 重建会让这两个 API 报告缓冲尺寸，窗口像素只能用这里记下的值。
+    sc->frame_width = sc->window_width;
+    sc->frame_height = sc->window_height;
     sc->ready = 1;
     return 0;
 }
@@ -575,8 +584,70 @@ static void publish_touch(const struct nvn_vk_swapchain *sc, uint64_t epoch,
     uint64_t a = (uint64_t)crop_w * 9, b = (uint64_t)crop_h * 16;
     uint64_t diff = a > b ? a - b : b - a;
     int standard = diff * 1000 < (uint64_t)crop_h * 9;
+    int bw = (int)sc->extent.width, bh = (int)sc->extent.height;
+    if (sc->buf_geometry && !sc->geometry_failed && sc->frame_width && sc->frame_height &&
+        sc->extent.width && sc->extent.height) {
+        // B3：缓冲=渲染目标尺寸，合成器把整幅缓冲放大到 view frame（Java 把 view 布成同比例
+        // 居中矩形）。blit dst 矩形在缓冲像素里，按同一比例放大回 view 像素发布——crop
+        // 不满缓冲时矩形反映画面在 view 里的真实区域；dst 填满缓冲时退化为整幅 view。
+        // 缓冲尺寸没兑现的降级交换链走下面缓冲像素路径，与 blit 同一坐标系。
+        x = (int32_t)((int64_t)x * (int32_t)sc->frame_width / (int32_t)sc->extent.width);
+        y = (int32_t)((int64_t)y * (int32_t)sc->frame_height / (int32_t)sc->extent.height);
+        width = (uint32_t)((int64_t)width * (int32_t)sc->frame_width / (int32_t)sc->extent.width);
+        height = (uint32_t)((int64_t)height * (int32_t)sc->frame_height / (int32_t)sc->extent.height);
+        bw = (int)sc->frame_width; bh = (int)sc->frame_height;
+    }
     s2a_android_game_touch_viewport_checked(epoch, standard ? sc->touch_generation : 0,
-        x, y, (int)width, (int)height, (int)sc->extent.width, (int)sc->extent.height);
+        x, y, (int)width, (int)height, bw, bh);
+}
+
+// B3：把窗口缓冲改成渲染目标尺寸，SurfaceFlinger/显示硬件把它放大到 view frame。
+// 先改缓冲尺寸并核对 getWidth/getHeight 真变了再付销毁+重建的代价：调用失败或返回 0 但
+// 缓冲尺寸没动（平台没兑现）时记 geometry_failed 退回普通等比 blit，本帧照常出图，
+// 不能整帧失败、也不能每帧销毁重建。
+// 旧交换链按正常退休合同销毁（present fence 未证明就失败），新交换链建在改过的缓冲上，
+// extent=目标尺寸，present 里的等比 blit 对整幅 crop 退化成 1:1 拷贝。
+static int geometry_resize(struct nvn_vk_swapchain *sc, uint32_t w, uint32_t h, char *why, size_t why_size) {
+    ANativeWindow *window = sc->window;
+    struct s2a_vk_device *d = sc->d;
+    uint32_t fw = sc->frame_width, fh = sc->frame_height;
+    uint64_t tg = sc->touch_generation;
+    // format=0 保留现有像素格式；兑现后 ANativeWindow_getWidth/getHeight 报告的是缓冲尺寸。
+    if (ANativeWindow_setBuffersGeometry(window, (int32_t)w, (int32_t)h, 0) != 0) {
+        sc->geometry_failed = 1;
+        __android_log_print(ANDROID_LOG_WARN, "S2Arm",
+            "buffer geometry: setBuffersGeometry(%dx%d) failed — "
+            "staying on the aspect-fit blit for this swapchain", (int)w, (int)h);
+        return 0;
+    }
+    if (ANativeWindow_getWidth(window) != (int32_t)w || ANativeWindow_getHeight(window) != (int32_t)h) {
+        sc->geometry_failed = 1;
+        __android_log_print(ANDROID_LOG_WARN, "S2Arm",
+            "buffer geometry: setBuffersGeometry accepted but buffer size is %dx%d, not %ux%u — "
+            "platform did not honor it; staying on the aspect-fit blit for this swapchain",
+            (int)ANativeWindow_getWidth(window), (int)ANativeWindow_getHeight(window), w, h);
+        return 0;
+    }
+    if (nvn_vk_swapchain_destroy(sc))
+        return fail(why, why_size, "buffer geometry resize: previous swapchain has no retirement proof");
+    if (nvn_vk_swapchain_create(sc, d, window, why, why_size)) return -1;
+    // create 重新 memset：窗口像素与 WSI generation 不属于某一条交换链，交还原值。
+    sc->frame_width = fw; sc->frame_height = fh;
+    sc->touch_generation = tg;
+    if (sc->extent.width != w || sc->extent.height != h) {
+        // 驱动按 surface min/max 夹取后 extent 不等于缓冲尺寸：缓冲已改但交换链到不了目标尺寸，
+        // 同样降级（继续按 extent 等比 blit，不再重试）。
+        sc->geometry_failed = 1;
+        __android_log_print(ANDROID_LOG_WARN, "S2Arm",
+            "buffer geometry: swapchain extent clamped to %ux%u, not %ux%u — "
+            "staying on the aspect-fit blit for this swapchain",
+            sc->extent.width, sc->extent.height, w, h);
+        return 0;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "S2Arm",
+        "buffer geometry: buffer=%ux%u (render target) frame=%ux%u — compositor/display upscales",
+        sc->extent.width, sc->extent.height, fw, fh);
+    return 0;
 }
 
 int nvn_vk_swapchain_present_image(struct nvn_vk_swapchain *sc, VkImage src, VkFormat src_format,
@@ -595,6 +666,24 @@ int nvn_vk_swapchain_present_image(struct nvn_vk_swapchain *sc, VkImage src, VkF
         return fail(why, why_size, "present image: previous acquire has no consuming submit; swapchain unusable");
     if (sc->present_failed)
         return fail(why, why_size, "present image: swapchain present path already failed (window retirement required)");
+    // 有效裁剪区 = 游戏真实输出区域；crop 不合法时按整幅源图。crop 只决定下面 blit 的
+    // 源矩形与等比适配，不再驱动缓冲尺寸（#203）。
+    uint32_t crop_x = 0, crop_y = 0, crop_w = src_w, crop_h = src_h;
+    if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] >= 0 && crop[1] >= 0 &&
+        (uint32_t)crop[0] + (uint32_t)crop[2] <= src_w && (uint32_t)crop[1] + (uint32_t)crop[3] <= src_h) {
+        crop_x = (uint32_t)crop[0]; crop_y = (uint32_t)crop[1];
+        crop_w = (uint32_t)crop[2]; crop_h = (uint32_t)crop[3];
+    }
+    // buffer_geometry 按渲染目标尺寸（src）出图：目标尺寸与上一帧相同才付销毁+重建的
+    // 代价——连续两帧稳定 = 真换了渲染目标；逐帧换尺寸的动态分辨率永远稳不下来，留在
+    // 旧缓冲上等比 blit，crop/目标逐帧变都不会销毁重建交换链。
+    int target_stable = sc->geometry_src_w == src_w && sc->geometry_src_h == src_h;
+    sc->geometry_src_w = src_w; sc->geometry_src_h = src_h;
+    if (sc->buf_geometry && !sc->geometry_failed && sc->window && target_stable &&
+        (sc->extent.width != src_w || sc->extent.height != src_h)) {
+        int gr = geometry_resize(sc, src_w, src_h, why, why_size);
+        if (gr) return gr;
+    }
     g_present_sc = sc;
     // 先机会式回收上一帧已 signal 的 present fence；仍在途不是错误（FIFO 可能等下一个 vsync）。
     if (sc->npresent_pending && nvn_vk_swapchain_retire_present(sc, 0) < 0)
@@ -662,12 +751,6 @@ int nvn_vk_swapchain_present_image(struct nvn_vk_swapchain *sc, VkImage src, VkF
     }
     VkImageBlit blit = {0};
     blit.srcSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    uint32_t crop_x = 0, crop_y = 0, crop_w = src_w, crop_h = src_h;
-    if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] >= 0 && crop[1] >= 0 &&
-        (uint32_t)crop[0] + (uint32_t)crop[2] <= src_w && (uint32_t)crop[1] + (uint32_t)crop[3] <= src_h) {
-        crop_x = (uint32_t)crop[0]; crop_y = (uint32_t)crop[1];
-        crop_w = (uint32_t)crop[2]; crop_h = (uint32_t)crop[3];
-    }
     blit.srcOffsets[0] = (VkOffset3D){(int32_t)crop_x, (int32_t)crop_y, 0};
     blit.srcOffsets[1] = (VkOffset3D){(int32_t)(crop_x + crop_w), (int32_t)(crop_y + crop_h), 1};
     blit.dstSubresource = (VkImageSubresourceLayers){VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};

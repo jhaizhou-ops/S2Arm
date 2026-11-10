@@ -35,7 +35,8 @@ class DoctorTest(unittest.TestCase):
         self.root.mkdir()
         self.repo = self.root / 'repo'
         pins = d.requirements(d.REPO)
-        for name in [*pins['sources'], 'services/opus/s2a_opus.c', 'services/vpx/s2a_vp8.c']:
+        for name in [*pins['sources'], 'services/opus/s2a_opus.c', 'services/vpx/s2a_vp8.c', 'services/vpx/s2a_vp9.c',
+                     'services/vpx/patches/0001-s2a-vp9-nvdec-hook.patch']:
             dest = self.repo / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(d.REPO / name, dest)

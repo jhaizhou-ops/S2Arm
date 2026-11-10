@@ -71,6 +71,7 @@ public final class S2ArmEngineProvider: EngineProvider {
         case .mac:
             var extra: [String: Any] = ["gameId": job.gameId]
             if job.spaceOverride { extra["spaceOverride"] = true }
+            if let location = job.location { extra["location"] = location }
             let r = try await client.perform("build", extra: extra, events: events).result
             return BuildResult(gameId: job.gameId, target: .mac, outputPath: r["outputPath"] as? String, ipa: nil, raw: r)
         case .iPhone:
@@ -82,6 +83,7 @@ public final class S2ArmEngineProvider: EngineProvider {
             var extra: [String: Any] = ["gameId": job.gameId]
             if let target = job.deviceTarget { extra["target"] = target }
             if job.spaceOverride { extra["spaceOverride"] = true }
+            if let location = job.location { extra["location"] = location }
             let r = try await client.perform("ipa", extra: extra, events: events).result
             return BuildResult(gameId: job.gameId, target: .iPhone, outputPath: r["outputPath"] as? String, ipa: r["ipa"] as? String, raw: r)
         }
@@ -102,6 +104,34 @@ public final class S2ArmEngineProvider: EngineProvider {
     /// 删这款（delete 作业：IPA / 资源包 / 出包中间产物 / 缓存，存档与原始游戏文件保留）。
     public func deleteGame(_ gameId: String, events: EventSink = .discard) async throws {
         _ = try await client.perform("delete", extra: ["gameId": gameId], events: events)
+    }
+
+    // MARK: 存放位置（游戏库结构 v3，pack/jobs/layout.py）
+
+    /// 各存放位置（出包页下拉框）和上次用的位置号。
+    public func locations() async throws -> (rows: [StorageLocation], last: String) {
+        let r = try await client.perform("locations", extra: [:], events: .discard).result
+        return ((r["locations"] as? [[String: Any]] ?? []).compactMap(StorageLocation.init), r["last"] as? String ?? "")
+    }
+
+    /// 把这款整个搬到另一个存放位置（同一卷改名，跨卷拷完核对再删旧的；存档跟着走）。
+    public func moveGame(_ gameId: String, to location: String, events: EventSink = .discard) async throws {
+        _ = try await client.perform("moveGame", extra: ["gameId": gameId, "location": location], events: events)
+    }
+
+    /// 「重新指定文件夹」：选到的文件夹里 game.json 的游戏号对得上才接受。
+    public func relinkGame(_ gameId: String, folder: String) async throws {
+        _ = try await client.perform("relinkGame", extra: ["gameId": gameId, "folder": folder], events: .discard)
+    }
+
+    /// 「从游戏库移除」：清单和索引里去掉，磁盘上的文件不动。
+    public func forgetGame(_ gameId: String) async throws {
+        _ = try await client.perform("forgetGame", extra: ["gameId": gameId], events: .discard)
+    }
+
+    /// 清这款的缓存（出包缓存 + 运行时着色器缓存）。
+    public func clearCache(_ gameId: String, events: EventSink = .discard) async throws {
+        _ = try await client.perform("clean", extra: ["gameId": gameId, "kind": "cache"], events: events)
     }
 
     /// 改游戏显示名 / 封面：nil 不动，空字符串恢复默认。
@@ -155,8 +185,12 @@ public final class S2ArmEngineProvider: EngineProvider {
     public func signingProject() async throws -> String { try await installer.signingProject() }
     public func installReadiness(gameId: String) async throws -> InstallReadiness { try await installer.readiness(gameId: gameId) }
 
-    public func install(gameId: String, teamId: String? = nil, events: EventSink = .discard) async throws -> InstallResult {
-        try await installer.install(gameId: gameId, teamId: teamId, events: events)
+    public func install(gameId: String, teamId: String? = nil, device: String? = nil, events: EventSink = .discard) async throws -> InstallResult {
+        try await installer.install(gameId: gameId, teamId: teamId, device: device, events: events)
+    }
+
+    public func restorePhone(events: EventSink = .discard) async throws {
+        try await installer.restorePrevious(events: events)
     }
 
     public func removeFromPhone(gameId: String, events: EventSink = .discard) async throws -> RemoveResult {

@@ -1,0 +1,597 @@
+diff --git a/vp9/common/vp9_onyxc_int.h b/vp9/common/vp9_onyxc_int.h
+index 4c8fcf6..334bfd8 100644
+--- a/vp9/common/vp9_onyxc_int.h
++++ b/vp9/common/vp9_onyxc_int.h
+@@ -204,6 +204,9 @@ typedef struct VP9Common {
+   // Whether to use previous frame's motion vectors for prediction.
+   int use_prev_frame_mvs;
+ 
++  // S2Arm NVDEC hook: when set, the previous frame's MVs come from here instead of prev_frame->mvs.
++  MV_REF *s2a_prev_mvs;
++
+   // Persistent mb segment id map used in prediction.
+   int seg_map_idx;
+   int prev_seg_map_idx;
+diff --git a/vp9/decoder/vp9_decodeframe.c b/vp9/decoder/vp9_decodeframe.c
+index 9008e54..b058036 100644
+--- a/vp9/decoder/vp9_decodeframe.c
++++ b/vp9/decoder/vp9_decodeframe.c
+@@ -42,6 +42,7 @@
+ #include "vp9/common/vp9_tile_common.h"
+ 
+ #include "vp9/decoder/vp9_decodeframe.h"
++#include "vp9/decoder/vp9_s2a_nvdec.h"
+ #include "vp9/decoder/vp9_detokenize.h"
+ #include "vp9/decoder/vp9_decodemv.h"
+ #include "vp9/decoder/vp9_decoder.h"
+@@ -2866,6 +2867,64 @@ static size_t read_uncompressed_header(VP9Decoder *pbi,
+   return sz;
+ }
+ 
++// S2Arm NVDEC hook: stop this frame as not representable (s2a_vp9_nvdec_decode returns S2A_VP9_NEED_KEY).
++static void s2a_unrepresentable(VP9Decoder *pbi, const char *why) {
++  pbi->s2a_unrepr = 1;
++  vpx_internal_error(&pbi->common.error, VPX_CODEC_UNSUP_FEATURE,
++                     "S2Arm NVDEC hook: %s", why);
++}
++
++// S2Arm NVDEC hook: in place of parsing the compressed header, install the guest's
++// tx mode, reference mode and probability tables (vpx/s2a_vp9_nvdec.h).
++static int s2a_install_compressed_header(VP9Decoder *pbi) {
++  VP9_COMMON *const cm = &pbi->common;
++  MACROBLOCKD *const xd = &pbi->mb;
++  const s2a_vp9_nvdec_io *const io = pbi->s2a_io;
++
++  if (xd->lossless) {
++    if (io->tx_mode != ONLY_4X4)
++      s2a_unrepresentable(pbi, "lossless frame with tx_mode other than ONLY_4X4");
++    cm->tx_mode = ONLY_4X4;
++  } else {
++    if (io->tx_mode < ONLY_4X4 || io->tx_mode > TX_MODE_SELECT)
++      s2a_unrepresentable(pbi, "tx_mode out of range");
++    cm->tx_mode = (TX_MODE)io->tx_mode;
++  }
++
++  s2a_vp9_probs_to_fc((const s2a_vp9_probs_layout *)io->probs, cm->fc);
++
++  if (!frame_is_intra_only(cm)) {
++    if (io->reference_mode < SINGLE_REFERENCE ||
++        io->reference_mode > REFERENCE_MODE_SELECT)
++      s2a_unrepresentable(pbi, "reference_mode out of range");
++    cm->reference_mode = (REFERENCE_MODE)io->reference_mode;
++    if (cm->reference_mode != SINGLE_REFERENCE) {
++      if (!vp9_compound_reference_allowed(cm))
++        s2a_unrepresentable(pbi, "compound prediction with equal sign bias");
++      vp9_setup_compound_reference_mode(cm);
++      if (cm->comp_fixed_ref != io->comp_fixed_ref ||
++          cm->comp_var_ref[0] != io->comp_var_ref0 ||
++          cm->comp_var_ref[1] != io->comp_var_ref1)
++        s2a_unrepresentable(pbi, "compound references differ from libvpx's");
++    }
++  }
++  return 0;
++}
++
++// S2Arm NVDEC hook: this frame's MVs and symbol counts in Ryujinx's layouts.
++static void s2a_export_frame(VP9Decoder *pbi) {
++  VP9_COMMON *const cm = &pbi->common;
++  const s2a_vp9_nvdec_io *const io = pbi->s2a_io;
++  s2a_vp9_counts_layout counts;
++
++  s2a_vp9_counts_from(&cm->counts, &counts);
++  memcpy(io->counts, &counts, sizeof(counts));
++  if (frame_is_intra_only(cm))
++    memset(io->mvs, 0, (size_t)io->mi_count * S2A_VP9_MVREF_SIZE);
++  else
++    s2a_vp9_export_mvs(cm->cur_frame->mvs, io->mvs, io->mi_count);
++}
++
+ static int read_compressed_header(VP9Decoder *pbi, const uint8_t *data,
+                                   size_t partition_size) {
+   VP9_COMMON *const cm = &pbi->common;
+@@ -2874,6 +2933,8 @@ static int read_compressed_header(VP9Decoder *pbi, const uint8_t *data,
+   vpx_reader r;
+   int k;
+ 
++  if (pbi->s2a_io) return s2a_install_compressed_header(pbi);
++
+   if (vpx_reader_init(&r, data, partition_size, pbi->decrypt_cb,
+                       pbi->decrypt_state))
+     vpx_internal_error(&cm->error, VPX_CODEC_MEM_ERROR,
+@@ -2991,6 +3052,17 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
+       cm->height == cm->last_height && !cm->last_intra_only &&
+       cm->last_show_frame && (cm->last_frame_type != KEY_FRAME);
+ 
++  cm->s2a_prev_mvs = NULL;
++  if (pbi->s2a_io) {
++    // S2Arm NVDEC hook: start from zeroed mode info, as the C# decoder does, so
++    // fields a block does not set (e.g. MVs of intra blocks) export as 0.
++    memset(cm->mip, 0, cm->mi_alloc_size * sizeof(*cm->mip));
++    if (pbi->s2a_io->mi_count != cm->mi_rows * cm->mi_cols)
++      s2a_unrepresentable(pbi, "MV buffer size differs from the frame size");
++    cm->use_prev_frame_mvs = pbi->s2a_io->use_prev_frame_mvs != 0;
++    if (cm->use_prev_frame_mvs) cm->s2a_prev_mvs = pbi->s2a_mvs;
++  }
++
+   vp9_setup_block_planes(xd, cm->subsampling_x, cm->subsampling_y);
+ 
+   *cm->fc = cm->frame_contexts[cm->frame_context_idx];
+@@ -3050,7 +3122,8 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
+   }
+ 
+   if (!xd->corrupted) {
+-    if (!cm->error_resilient_mode && !cm->frame_parallel_decoding_mode) {
++    if (!cm->error_resilient_mode && !cm->frame_parallel_decoding_mode &&
++        !pbi->s2a_io) {
+       vp9_adapt_coef_probs(cm);
+ 
+       if (!frame_is_intra_only(cm)) {
+@@ -3063,6 +3136,8 @@ void vp9_decode_frame(VP9Decoder *pbi, const uint8_t *data,
+                        "Decode failed. Frame data is corrupted.");
+   }
+ 
++  if (pbi->s2a_io) s2a_export_frame(pbi);
++
+   // Non frame parallel update frame context here.
+   if (cm->refresh_frame_context && !context_updated)
+     cm->frame_contexts[cm->frame_context_idx] = *cm->fc;
+diff --git a/vp9/decoder/vp9_decodemv.c b/vp9/decoder/vp9_decodemv.c
+index 0989cde..8bf9e76 100644
+--- a/vp9/decoder/vp9_decodemv.c
++++ b/vp9/decoder/vp9_decodemv.c
+@@ -491,7 +491,8 @@ static int dec_find_mv_refs(const VP9_COMMON *cm, const MACROBLOCKD *xd,
+   int different_ref_found = 0;
+   const MV_REF *const prev_frame_mvs =
+       cm->use_prev_frame_mvs
+-          ? cm->prev_frame->mvs + mi_row * cm->mi_cols + mi_col
++          ? (cm->s2a_prev_mvs ? cm->s2a_prev_mvs : cm->prev_frame->mvs) +
++                mi_row * cm->mi_cols + mi_col
+           : NULL;
+   const TileInfo *const tile = &xd->tile;
+   // If mode is nearestmv or newmv (uses nearestmv as a reference) then stop
+diff --git a/vp9/decoder/vp9_decoder.c b/vp9/decoder/vp9_decoder.c
+index 1554361..3dec463 100644
+--- a/vp9/decoder/vp9_decoder.c
++++ b/vp9/decoder/vp9_decoder.c
+@@ -236,6 +236,7 @@ void vp9_decoder_remove(VP9Decoder *pbi) {
+ 
+   vpx_free(pbi->tile_worker_data);
+   vpx_free(pbi->tile_workers);
++  vpx_free(pbi->s2a_mvs);
+ 
+   if (pbi->num_tile_workers > 0) {
+     vp9_loop_filter_dealloc(&pbi->lf_row_sync);
+diff --git a/vp9/decoder/vp9_decoder.h b/vp9/decoder/vp9_decoder.h
+index b3ee4ea..a497b11 100644
+--- a/vp9/decoder/vp9_decoder.h
++++ b/vp9/decoder/vp9_decoder.h
+@@ -14,6 +14,7 @@
+ #include "./vpx_config.h"
+ 
+ #include "vpx/vpx_codec.h"
++#include "vpx/s2a_vp9_nvdec.h"
+ #include "vpx_dsp/bitreader.h"
+ #include "vpx_scale/yv12config.h"
+ #include "vpx_util/vpx_pthread.h"
+@@ -125,6 +126,12 @@ typedef struct VP9Decoder {
+   int row_mt;
+   int lpf_mt_opt;
+   RowMTWorkerData *row_mt_worker_data;
++
++  // S2Arm NVDEC hook (vpx/s2a_vp9_nvdec.h): s2a_io is set only during s2a_vp9_nvdec_decode.
++  const s2a_vp9_nvdec_io *s2a_io;
++  int s2a_unrepr;     // set when the hooked frame turned out not representable
++  MV_REF *s2a_mvs;    // previous-frame MVs imported from the guest
++  int s2a_mvs_size;   // entries allocated in s2a_mvs
+ } VP9Decoder;
+ 
+ int vp9_receive_compressed_data(struct VP9Decoder *pbi, size_t size,
+diff --git a/vp9/decoder/vp9_s2a_nvdec.c b/vp9/decoder/vp9_s2a_nvdec.c
+new file mode 100644
+index 0000000..875389a
+--- /dev/null
++++ b/vp9/decoder/vp9_s2a_nvdec.c
+@@ -0,0 +1,124 @@
++/*
++ * S2Arm: Ryujinx layout conversions for the NVDEC hook (see vp9_s2a_nvdec.h and vpx/s2a_vp9_nvdec.h).
++ */
++#include <assert.h>
++#include <string.h>
++
++#include "vp9/decoder/vp9_s2a_nvdec.h"
++
++static_assert(sizeof(s2a_vp9_probs_layout) == S2A_VP9_PROBS_SIZE, "Vp9EntropyProbs size");
++static_assert(sizeof(s2a_vp9_counts_layout) == S2A_VP9_COUNTS_SIZE, "Vp9BackwardUpdates size");
++static_assert(sizeof(((FRAME_COUNTS *)0)->coef) == sizeof(((s2a_vp9_counts_layout *)0)->coef), "coef counts");
++static_assert(sizeof(((FRAME_COUNTS *)0)->eob_branch) == sizeof(((s2a_vp9_counts_layout *)0)->eob_branch),
++              "eob counts");
++static_assert(sizeof(((FRAME_CONTEXT *)0)->coef_probs) == sizeof(((s2a_vp9_probs_layout *)0)->coef), "coef probs");
++
++int s2a_vp9_kf_tables_match(const s2a_vp9_probs_layout *p) {
++  return memcmp(p->kf_y_mode, vp9_kf_y_mode_prob, sizeof(p->kf_y_mode)) == 0 &&
++         memcmp(p->kf_uv_mode, vp9_kf_uv_mode_prob, sizeof(p->kf_uv_mode)) == 0 &&
++         memcmp(p->kf_partition, vp9_kf_partition_probs, sizeof(p->kf_partition)) == 0;
++}
++
++int s2a_vp9_pivot_probs_nonzero(const s2a_vp9_probs_layout *p) {
++  int t, pl, r, b, c;
++  for (t = 0; t < 4; ++t)
++    for (pl = 0; pl < 2; ++pl)
++      for (r = 0; r < 2; ++r)
++        for (b = 0; b < 6; ++b)
++          for (c = 0; c < BAND_COEFF_CONTEXTS(b); ++c)
++            if (p->coef[t][pl][r][b][c][PIVOT_NODE] == 0) return 0;
++  return 1;
++}
++
++void s2a_vp9_probs_to_fc(const s2a_vp9_probs_layout *p, FRAME_CONTEXT *fc) {
++  int i;
++  memcpy(fc->y_mode_prob, p->y_mode, sizeof(fc->y_mode_prob));
++  memcpy(fc->uv_mode_prob, p->uv_mode, sizeof(fc->uv_mode_prob));
++  memcpy(fc->partition_prob, p->partition, sizeof(fc->partition_prob));
++  memcpy(fc->coef_probs, p->coef, sizeof(fc->coef_probs));
++  memcpy(fc->switchable_interp_prob, p->switchable_interp, sizeof(fc->switchable_interp_prob));
++  memcpy(fc->inter_mode_probs, p->inter_mode, sizeof(fc->inter_mode_probs));
++  memcpy(fc->intra_inter_prob, p->intra_inter, sizeof(fc->intra_inter_prob));
++  memcpy(fc->comp_inter_prob, p->comp_inter, sizeof(fc->comp_inter_prob));
++  memcpy(fc->single_ref_prob, p->single_ref, sizeof(fc->single_ref_prob));
++  memcpy(fc->comp_ref_prob, p->comp_ref, sizeof(fc->comp_ref_prob));
++  memcpy(fc->tx_probs.p32x32, p->tx32x32, sizeof(fc->tx_probs.p32x32));
++  memcpy(fc->tx_probs.p16x16, p->tx16x16, sizeof(fc->tx_probs.p16x16));
++  memcpy(fc->tx_probs.p8x8, p->tx8x8, sizeof(fc->tx_probs.p8x8));
++  memcpy(fc->skip_probs, p->skip, sizeof(fc->skip_probs));
++  memcpy(fc->nmvc.joints, p->joints, sizeof(fc->nmvc.joints));
++  for (i = 0; i < 2; ++i) {
++    nmv_component *const comp = &fc->nmvc.comps[i];
++    comp->sign = p->sign[i];
++    memcpy(comp->classes, p->classes[i], sizeof(comp->classes));
++    memcpy(comp->class0, p->class0[i], sizeof(comp->class0));
++    memcpy(comp->bits, p->bits[i], sizeof(comp->bits));
++    memcpy(comp->class0_fp, p->class0_fp[i], sizeof(comp->class0_fp));
++    memcpy(comp->fp, p->fp[i], sizeof(comp->fp));
++    comp->class0_hp = p->class0_hp[i];
++    comp->hp = p->hp[i];
++  }
++}
++
++void s2a_vp9_counts_from(const FRAME_COUNTS *c, s2a_vp9_counts_layout *o) {
++  int i;
++  memcpy(o->y_mode, c->y_mode, sizeof(o->y_mode));
++  memcpy(o->uv_mode, c->uv_mode, sizeof(o->uv_mode));
++  memcpy(o->partition, c->partition, sizeof(o->partition));
++  memcpy(o->coef, c->coef, sizeof(o->coef));
++  memcpy(o->eob_branch, c->eob_branch, sizeof(o->eob_branch));
++  memcpy(o->switchable_interp, c->switchable_interp, sizeof(o->switchable_interp));
++  memcpy(o->inter_mode, c->inter_mode, sizeof(o->inter_mode));
++  memcpy(o->intra_inter, c->intra_inter, sizeof(o->intra_inter));
++  memcpy(o->comp_inter, c->comp_inter, sizeof(o->comp_inter));
++  memcpy(o->single_ref, c->single_ref, sizeof(o->single_ref));
++  memcpy(o->comp_ref, c->comp_ref, sizeof(o->comp_ref));
++  memcpy(o->tx32x32, c->tx.p32x32, sizeof(o->tx32x32));
++  memcpy(o->tx16x16, c->tx.p16x16, sizeof(o->tx16x16));
++  memcpy(o->tx8x8, c->tx.p8x8, sizeof(o->tx8x8));
++  memcpy(o->skip, c->skip, sizeof(o->skip));
++  memcpy(o->joints, c->mv.joints, sizeof(o->joints));
++  for (i = 0; i < 2; ++i) {
++    const nmv_component_counts *const comp = &c->mv.comps[i];
++    memcpy(o->sign[i], comp->sign, sizeof(o->sign[i]));
++    memcpy(o->classes[i], comp->classes, sizeof(o->classes[i]));
++    memcpy(o->class0[i], comp->class0, sizeof(o->class0[i]));
++    memcpy(o->bits[i], comp->bits, sizeof(o->bits[i]));
++    memcpy(o->class0_fp[i], comp->class0_fp, sizeof(o->class0_fp[i]));
++    memcpy(o->fp[i], comp->fp, sizeof(o->fp[i]));
++    memcpy(o->class0_hp[i], comp->class0_hp, sizeof(o->class0_hp[i]));
++    memcpy(o->hp[i], comp->hp, sizeof(o->hp[i]));
++  }
++}
++
++int s2a_vp9_import_mvs(const uint8_t *src, MV_REF *dst, int n) {
++  int i, j;
++  for (i = 0; i < n; ++i, src += S2A_VP9_MVREF_SIZE) {
++    int16_t mv[4];
++    int32_t ref[2];
++    memcpy(mv, src, sizeof(mv));
++    memcpy(ref, src + 8, sizeof(ref));
++    for (j = 0; j < 2; ++j) {
++      if (ref[j] < -1 || ref[j] > 3) return 0;
++      dst[i].mv[j].as_mv.row = mv[2 * j];
++      dst[i].mv[j].as_mv.col = mv[2 * j + 1];
++      dst[i].ref_frame[j] = (MV_REFERENCE_FRAME)ref[j];
++    }
++  }
++  return 1;
++}
++
++void s2a_vp9_export_mvs(const MV_REF *src, uint8_t *dst, int n) {
++  int i, j;
++  for (i = 0; i < n; ++i, dst += S2A_VP9_MVREF_SIZE) {
++    int16_t mv[4];
++    int32_t ref[2];
++    for (j = 0; j < 2; ++j) {
++      mv[2 * j] = src[i].mv[j].as_mv.row;
++      mv[2 * j + 1] = src[i].mv[j].as_mv.col;
++      ref[j] = src[i].ref_frame[j];
++    }
++    memcpy(dst, mv, sizeof(mv));
++    memcpy(dst + 8, ref, sizeof(ref));
++  }
++}
+diff --git a/vp9/decoder/vp9_s2a_nvdec.h b/vp9/decoder/vp9_s2a_nvdec.h
+new file mode 100644
+index 0000000..5bdfaed
+--- /dev/null
++++ b/vp9/decoder/vp9_s2a_nvdec.h
+@@ -0,0 +1,90 @@
++/*
++ * S2Arm: Ryujinx data layouts and conversions for vpx/s2a_vp9_nvdec.h.
++ * The structs mirror Ryujinx.Graphics.Video.Vp9EntropyProbs / Vp9BackwardUpdates field for field (C# sequential
++ * layout, no padding); the sizes are asserted in vp9_s2a_nvdec.c and in the S2Arm tests.
++ */
++#ifndef VPX_VP9_DECODER_VP9_S2A_NVDEC_H_
++#define VPX_VP9_DECODER_VP9_S2A_NVDEC_H_
++
++#include "vpx/s2a_vp9_nvdec.h"
++#include "vp9/common/vp9_entropymode.h"
++#include "vp9/common/vp9_onyxc_int.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct {
++  uint8_t kf_y_mode[10][10][9];
++  uint8_t seg_tree[7];
++  uint8_t seg_pred[3];
++  uint8_t kf_uv_mode[10][9];
++  uint8_t y_mode[4][9];
++  uint8_t uv_mode[10][9];
++  uint8_t kf_partition[16][3];
++  uint8_t partition[16][3];
++  uint8_t coef[4][2][2][6][6][3];
++  uint8_t switchable_interp[4][2];
++  uint8_t inter_mode[7][3];
++  uint8_t intra_inter[4];
++  uint8_t comp_inter[5];
++  uint8_t single_ref[5][2];
++  uint8_t comp_ref[5];
++  uint8_t tx32x32[2][3];
++  uint8_t tx16x16[2][2];
++  uint8_t tx8x8[2][1];
++  uint8_t skip[3];
++  uint8_t joints[3];
++  uint8_t sign[2];
++  uint8_t classes[2][10];
++  uint8_t class0[2][1];
++  uint8_t bits[2][10];
++  uint8_t class0_fp[2][2][3];
++  uint8_t fp[2][3];
++  uint8_t class0_hp[2];
++  uint8_t hp[2];
++} s2a_vp9_probs_layout;
++
++typedef struct {
++  uint32_t y_mode[4][10];
++  uint32_t uv_mode[10][10];
++  uint32_t partition[16][4];
++  uint32_t coef[4][2][2][6][6][4];
++  uint32_t eob_branch[4][2][2][6][6];
++  uint32_t switchable_interp[4][3];
++  uint32_t inter_mode[7][4];
++  uint32_t intra_inter[4][2];
++  uint32_t comp_inter[5][2];
++  uint32_t single_ref[5][2][2];
++  uint32_t comp_ref[5][2];
++  uint32_t tx32x32[2][4];
++  uint32_t tx16x16[2][3];
++  uint32_t tx8x8[2][2];
++  uint32_t skip[3][2];
++  uint32_t joints[4];
++  uint32_t sign[2][2];
++  uint32_t classes[2][11];
++  uint32_t class0[2][2];
++  uint32_t bits[2][10][2];
++  uint32_t class0_fp[2][2][4];
++  uint32_t fp[2][4];
++  uint32_t class0_hp[2][2];
++  uint32_t hp[2][2];
++} s2a_vp9_counts_layout;
++
++/* 1 when the guest's key-frame tables equal libvpx's constants (libvpx cannot use other tables). */
++int s2a_vp9_kf_tables_match(const s2a_vp9_probs_layout *p);
++/* 1 when every reachable coefficient context has a non-zero pivot-node probability (0 would index
++ * vp9_pareto8_full[-1]). Band 0 contexts 3..5 are unreachable and stay 0 in libvpx's own tables. */
++int s2a_vp9_pivot_probs_nonzero(const s2a_vp9_probs_layout *p);
++void s2a_vp9_probs_to_fc(const s2a_vp9_probs_layout *p, FRAME_CONTEXT *fc);
++void s2a_vp9_counts_from(const FRAME_COUNTS *c, s2a_vp9_counts_layout *out);
++/* Guest Vp9MvRef entries -> MV_REF. Returns 0 if any reference index is outside -1..3. */
++int s2a_vp9_import_mvs(const uint8_t *src, MV_REF *dst, int n);
++void s2a_vp9_export_mvs(const MV_REF *src, uint8_t *dst, int n);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#endif  // VPX_VP9_DECODER_VP9_S2A_NVDEC_H_
+diff --git a/vp9/vp9_dx_iface.c b/vp9/vp9_dx_iface.c
+index bd892d2..dd85c24 100644
+--- a/vp9/vp9_dx_iface.c
++++ b/vp9/vp9_dx_iface.c
+@@ -17,6 +17,7 @@
+ #include "vpx/internal/vpx_codec_internal.h"
+ #include "vpx/vp8dx.h"
+ #include "vpx/vpx_decoder.h"
++#include "vpx/s2a_vp9_nvdec.h"
+ #include "vpx_dsp/bitreader_buffer.h"
+ #include "vpx_dsp/vpx_dsp_common.h"
+ 
+@@ -24,6 +25,7 @@
+ #include "vp9/common/vp9_frame_buffers.h"
+ 
+ #include "vp9/decoder/vp9_decodeframe.h"
++#include "vp9/decoder/vp9_s2a_nvdec.h"
+ 
+ #include "vp9/vp9_dx_iface.h"
+ #include "vp9/vp9_iface_common.h"
+@@ -337,6 +339,82 @@ static vpx_codec_err_t decode_one(vpx_codec_alg_priv_t *ctx,
+   return VPX_CODEC_OK;
+ }
+ 
++// S2Arm NVDEC hook: decode exactly one frame (no superframe index, no trailing
++// frames) with the caller's tables and MVs. See vpx/s2a_vp9_nvdec.h.
++int s2a_vp9_nvdec_decode(vpx_codec_ctx_t *ctx, const uint8_t *frame,
++                         size_t size, const s2a_vp9_nvdec_io *io,
++                         s2a_vp9_nvdec_picture *pic) {
++  vpx_codec_alg_priv_t *priv;
++  VP9Decoder *pbi;
++  const s2a_vp9_probs_layout *probs;
++  const uint8_t *data = frame;
++  const YV12_BUFFER_CONFIG *shown;
++
++  if (ctx == NULL || ctx->priv == NULL || ctx->iface != vpx_codec_vp9_dx() ||
++      frame == NULL || size < 3 || io == NULL || io->probs == NULL ||
++      io->mvs == NULL || io->counts == NULL || pic == NULL ||
++      io->mi_count <= 0 || (io->use_prev_frame_mvs && io->prev_mvs == NULL))
++    return S2A_VP9_UNREPR;
++  priv = (vpx_codec_alg_priv_t *)ctx->priv;
++  probs = (const s2a_vp9_probs_layout *)io->probs;
++  if (!s2a_vp9_pivot_probs_nonzero(probs)) return S2A_VP9_UNREPR;
++  if (io->intra_frame && !s2a_vp9_kf_tables_match(probs))
++    return S2A_VP9_UNREPR;
++
++  if (priv->pbi == NULL) {
++    const vpx_codec_err_t res = init_decoder(priv);
++    if (res != VPX_CODEC_OK) {
++      ctx->err = res;
++      return S2A_VP9_ERROR;
++    }
++  }
++  pbi = priv->pbi;
++
++  if (io->use_prev_frame_mvs) {
++    if (pbi->s2a_mvs_size < io->mi_count) {
++      vpx_free(pbi->s2a_mvs);
++      pbi->s2a_mvs = (MV_REF *)vpx_malloc(sizeof(*pbi->s2a_mvs) * io->mi_count);
++      pbi->s2a_mvs_size = pbi->s2a_mvs ? io->mi_count : 0;
++      if (pbi->s2a_mvs == NULL) {
++        ctx->err = VPX_CODEC_MEM_ERROR;
++        return S2A_VP9_ERROR;
++      }
++    }
++    if (!s2a_vp9_import_mvs(io->prev_mvs, pbi->s2a_mvs, io->mi_count))
++      return S2A_VP9_UNREPR;
++  }
++
++  pbi->decrypt_cb = priv->decrypt_cb;
++  pbi->decrypt_state = priv->decrypt_state;
++  pbi->s2a_unrepr = 0;
++  pbi->common.s2a_prev_mvs = NULL;
++  pbi->s2a_io = io;
++  if (vp9_receive_compressed_data(pbi, size, &data)) {
++    const int unrepr = pbi->s2a_unrepr;
++    pbi->s2a_io = NULL;
++    pbi->common.s2a_prev_mvs = NULL;
++    pbi->cur_buf->buf.corrupted = 1;
++    pbi->need_resync = 1;
++    priv->need_resync = 1;
++    ctx->err = update_error_state(priv, &pbi->common.error);
++    return unrepr ? S2A_VP9_NEED_KEY : S2A_VP9_ERROR;
++  }
++  pbi->s2a_io = NULL;
++  pbi->common.s2a_prev_mvs = NULL;
++  ctx->err = VPX_CODEC_OK;
++
++  shown = pbi->common.frame_to_show;
++  pic->planes[0] = shown->y_buffer;
++  pic->planes[1] = shown->u_buffer;
++  pic->planes[2] = shown->v_buffer;
++  pic->strides[0] = shown->y_stride;
++  pic->strides[1] = shown->uv_stride;
++  pic->strides[2] = shown->uv_stride;
++  pic->width = shown->y_crop_width;
++  pic->height = shown->y_crop_height;
++  return S2A_VP9_OK;
++}
++
+ static vpx_codec_err_t decoder_decode(vpx_codec_alg_priv_t *ctx,
+                                       const uint8_t *data, unsigned int data_sz,
+                                       void *user_priv) {
+diff --git a/vp9/vp9dx.mk b/vp9/vp9dx.mk
+index 93a5f36..a3415cc 100644
+--- a/vp9/vp9dx.mk
++++ b/vp9/vp9dx.mk
+@@ -25,6 +25,8 @@ VP9_DX_SRCS-yes += decoder/vp9_detokenize.c
+ VP9_DX_SRCS-yes += decoder/vp9_decodemv.h
+ VP9_DX_SRCS-yes += decoder/vp9_detokenize.h
+ VP9_DX_SRCS-yes += decoder/vp9_decoder.c
++VP9_DX_SRCS-yes += decoder/vp9_s2a_nvdec.c
++VP9_DX_SRCS-yes += decoder/vp9_s2a_nvdec.h
+ VP9_DX_SRCS-yes += decoder/vp9_decoder.h
+ VP9_DX_SRCS-yes += decoder/vp9_dsubexp.c
+ VP9_DX_SRCS-yes += decoder/vp9_dsubexp.h
+diff --git a/vpx/s2a_vp9_nvdec.h b/vpx/s2a_vp9_nvdec.h
+new file mode 100644
+index 0000000..5634764
+--- /dev/null
++++ b/vpx/s2a_vp9_nvdec.h
+@@ -0,0 +1,61 @@
++/*
++ * S2Arm: decode one Switch NVDEC VP9 job with libvpx.
++ *
++ * NVDEC hands the decoder only the tile data plus the parsed frame state: the probability tables the frame uses
++ * (already including its forward updates), the previous frame's motion vectors, and buffers for this frame's motion
++ * vectors and symbol counts. The caller writes an uncompressed VP9 header (refresh_frame_context 0,
++ * frame_parallel_decoding_mode 0, error_resilient_mode 0, header_size_in_bytes 1), one stand-in byte for the
++ * compressed header, then the tile data. This entry point decodes that frame with the caller's tables instead of
++ * parsing a compressed header, takes the previous frame's MVs from the caller, skips backward adaptation, and writes
++ * MVs and counts in Ryujinx's layouts. With no call to this function libvpx behaves exactly as without the patch.
++ * Design: docs/设计_原生VP9/design_phase2_B.md (S2Arm repository).
++ */
++#ifndef VPX_VPX_S2A_VP9_NVDEC_H_
++#define VPX_VPX_S2A_VP9_NVDEC_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "./vpx_decoder.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define S2A_VP9_PROBS_SIZE 3087  /* Ryujinx.Graphics.Video.Vp9EntropyProbs */
++#define S2A_VP9_COUNTS_SIZE 13208 /* Ryujinx.Graphics.Video.Vp9BackwardUpdates */
++#define S2A_VP9_MVREF_SIZE 16    /* Ryujinx.Graphics.Video.Vp9MvRef: int16 row,col x2, int32 ref x2 */
++
++#define S2A_VP9_OK 0
++#define S2A_VP9_UNREPR 1   /* not representable; libvpx state untouched; decode this job elsewhere */
++#define S2A_VP9_NEED_KEY 2 /* not representable after the header was read; libvpx now needs a key frame */
++#define S2A_VP9_ERROR (-1) /* decode error; libvpx now needs a key frame */
++
++typedef struct {
++  const uint8_t *probs;        /* S2A_VP9_PROBS_SIZE bytes */
++  int32_t intra_frame;         /* 1 for a key or intra-only frame, else 0 */
++  int32_t tx_mode;             /* 0..4 */
++  int32_t reference_mode;      /* 0..2; ignored on intra frames */
++  int32_t comp_fixed_ref;      /* checked against libvpx's derivation when reference_mode != 0 */
++  int32_t comp_var_ref0, comp_var_ref1;
++  int32_t use_prev_frame_mvs;
++  int32_t mi_count;            /* entries in prev_mvs and mvs: mi_rows * mi_cols of this frame */
++  const uint8_t *prev_mvs;     /* mi_count Vp9MvRef entries; NULL when use_prev_frame_mvs is 0 */
++  uint8_t *mvs;                /* mi_count Vp9MvRef entries, written on S2A_VP9_OK */
++  uint8_t *counts;             /* S2A_VP9_COUNTS_SIZE bytes, written on S2A_VP9_OK */
++} s2a_vp9_nvdec_io;
++
++typedef struct {
++  const uint8_t *planes[3];
++  int32_t strides[3];
++  int32_t width, height;       /* visible size; valid until the next decode call */
++} s2a_vp9_nvdec_picture;
++
++int s2a_vp9_nvdec_decode(vpx_codec_ctx_t *ctx, const uint8_t *frame, size_t size, const s2a_vp9_nvdec_io *io,
++                         s2a_vp9_nvdec_picture *pic);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#endif  // VPX_VPX_S2A_VP9_NVDEC_H_

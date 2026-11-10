@@ -45,7 +45,22 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
     return 0;
 }
 
+// 线性排布（LINEAR 0x10 / LINEAR_RENDER_TARGET 0x40，单级 2D，nvn_tex_layout 同口径：行距 = stride 或按 32 / 128 对齐）：逐行拷贝，不是块线性。
+//   11-09 质量线（#255 / #262）：原先这里对线性贴图直接返回 -1，宿主建不了零拷贝视图的线性贴图（iPhone 行距要 64 字节对齐、行距不够 Metal 要求）走上传路径时内容一字节没传
+//   （哈迪斯 II iPhone 日志「deswizzle failed format 0x9a target 1」）。行距放不下一行像素（stride < 宽 × 每像素字节）返回 -1，不越界读写
+static int move_linear(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *mem, uint8_t *lin, size_t pitch, int to_linear) {
+    if (level || layer || d->target != 1 || d->samples > 1) return -1;
+    int bw, bh; uint32_t bpb = (uint32_t)nvn_fmt_bpb(d->format, &bw, &bh);
+    if (!bpb) return -1;
+    uint32_t row_bytes = (d->width + bw - 1) / bw * bpb, rows = (d->height + bh - 1) / bh;
+    nvn_texlayout L; nvn_tex_layout(d, &L);
+    uint64_t sp = rows ? L.size / rows : 0;
+    if (!rows || sp < row_bytes || pitch < row_bytes) return -1;
+    for (uint32_t y = 0; y < rows; y++) { if (to_linear) memcpy(lin + (size_t)y * pitch, mem + y * sp, row_bytes); else memcpy(mem + y * sp, lin + (size_t)y * pitch, row_bytes); }
+    return 0;
+}
 static int move(const nvn_texdesc *d, unsigned level, unsigned layer, uint8_t *bl, uint8_t *lin, size_t pitch, int to_linear) {
+    if ((d->flags & (0x10 | 0x40)) && d->target != 10) return move_linear(d, level, layer, bl, lin, pitch, to_linear);
     uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
     if (pitch < row_bytes) return -1;

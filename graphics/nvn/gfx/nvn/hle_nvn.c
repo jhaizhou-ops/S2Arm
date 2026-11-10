@@ -1522,7 +1522,7 @@ static void used_set(cmd_t *o, uint64_t v) { __atomic_store_n(&o->used, v, __ATO
 // command carries (addresses, parameters, inline data such as UpdateUniformBuffer's) and count their own size; the listed ones carry host-only data (texture snapshots, object
 // pointers) and count well under it. The estimate only decides when the game is called back for more memory and how much it reserves by Used; nothing is written there and
 // replay never depends on it, so erring low is the safe side. BindTexture is 0x18: its handle sits 0x10 into the device command (rec_bind_tex1).
-// END: an empty recording takes 8 bytes, so every recording has a device interval to be released by
+// END: an empty recording takes 8 bytes, so every recording has a device interval to be released by (NVN2: END takes none, see dev_bytes and sh_anchor_empty)
 // DEV_CTL: the device writes no command memory for it. 纹理池 / 采样器池绑定在真机驱动里是控制内存的 16 字节令牌（类型 0x13 / 0x14，满了发 OUT_OF_CONTROL_MEMORY），
 //   不进命令内存、不发 OUT_OF_COMMAND_MEMORY（游戏自带驱动反汇编，SDK 4.4.1 与更新一代 sdk 同形）。按记录大小算会在游戏还没给命令内存时回调：
 //   Outlast 2（0100DE70085E8000，UE4）建 RHI 时只给控制内存就 BeginRecording、绑两个池，之后才建回调要用的命令内存环，回调读到未初始化的环指针崩在 main+0xf3a574
@@ -1531,7 +1531,12 @@ static const uint16_t g_dev_bytes[OP_COUNT_] = {
     [OP_END] = 8, [OP_CALL] = 16, [OP_SET_RT] = 96, [OP_BIND_PROGRAM] = 64, [OP_BIND_TEX1] = 24, [OP_DRAW] = 32, [OP_DRAW_IDX] = 48, [OP_DRAW_TEX] = 64,
     [OP_DISPATCH] = 48, [OP_COPY_B2T] = 64, [OP_COPY_T2B] = 64, [OP_COPY_T2T] = 64, [OP_CLEAR_TEX] = 48, [OP_SET_TEX_POOL] = DEV_CTL, [OP_SET_SAMP_POOL] = DEV_CTL,
 };
-static uint32_t dev_bytes(uint32_t op, uint32_t size) { uint32_t d = op < OP_COUNT_ ? g_dev_bytes[op] : 0; return d == DEV_CTL ? 0 : d ? d : size; }
+// NVN2 的带索引绘制按入口取驱动真值（draw_elements 设置），不走上表的 Maxwell 估算；间接绘制不是这三个入口，仍查表（0 = 查表）
+static __thread uint32_t t_dev_draw_idx;
+static uint32_t dev_bytes(uint32_t op, uint32_t size) {
+    if (op == OP_DRAW_IDX && t_dev_draw_idx) return t_dev_draw_idx;
+    if (op == OP_END && nvn2_on()) return 0;   // NVN2 驱动的 EndRecording 只写控制内存，不推进 cmd[0]（sh_anchor_empty 给空录制留释放锚点）
+    uint32_t d = op < OP_COUNT_ ? g_dev_bytes[op] : 0; return d == DEV_CTL ? 0 : d ? d : size; }
 #define DEV_LEND (16u << 10)   // device bytes of a host-lent window (the game gave no memory): the callback is asked again only after this many
 
 NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
@@ -1796,8 +1801,15 @@ static uint8_t *cmd_alloc_cb(cmd_t *o, uint32_t op, uint32_t size, int cb_ok) {
 }
 static uint8_t *cmd_alloc(cmd_t *o, uint32_t op, uint32_t size) { return cmd_alloc_cb(o, op, size, 1); }
 // The recording's end (or an abandoned one): its last piece noted, indexed by its device intervals; a recording with none (the game never gave memory) can never be released
+// 没占设备字节的录制（NVN2 的 END 不占字节：空录制、只有控制令牌的录制）也要能被释放：挂在一个字节上，随覆盖它的重录或内存池销毁一起死。
+//   取游标前一字节（前一条录制的尾巴，紧接着的下一条录制不会写到它）；段首没有前一字节，取段尾。从没给过内存的录制没有可挂的字节，照旧留到局末
+static void sh_anchor_empty(cmd_t *o, srec *r) {
+    if (r->niv) return;
+    uintptr_t a = o->gvirt ? o->vanc : o->gcur > o->gstart ? o->gcur - 1 : o->gend ? o->gend - 1 : 0;
+    if (a) { r->iv[0] = (siv){a, a + 1}; r->niv = 1; }
+}
 static void sh_end(cmd_t *o) {
-    srec *r = o->rec; sh_piece(o);
+    srec *r = o->rec; sh_piece(o); sh_anchor_empty(o, r);
     uint64_t h = r->rbytes + OP_RESERVE + sizeof(sblk); o->hint = (uint32_t)(h < 256 ? 256 : h > (1u << 20) ? (1u << 20) : h);
     pthread_mutex_lock(&g_sh_mu); r->open = 0;
     uint64_t un = 0; if (r->niv) sh_index(r); else un = ++g_sh_unanchored;
@@ -2143,9 +2155,17 @@ NVN(nvnCommandBufferDrawArraysIndirect, void, NVNcommandBuffer *c, NVNdrawPrimit
 //   回放 nvn_geometry.inc mesh_tasks_draw；间接版的 {工作组数, 起始号} 由 GPU 写在 ind，回放时在 GPU 上换成 Metal 的间接网格参数（nvn_mtl.m ixc_run），不在录制 / 回放时读
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasks, void, NVNcommandBuffer *c, int first, int count) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, first, count, 1, 0, 0}); }
 NVN_NOPROTO(nvnCommandBufferDrawMeshTasksIndirect, void, NVNcommandBuffer *c, NVNbufferAddress ind) { rec_draw(c, (p_draw){DM_PRIM_MESH_TASKS, 0, 0, 1, 0, GA(ind)}); }
+// 三个带索引绘制入口共用。nvn2_bytes：游戏自带 NVN2 驱动该入口实际写入命令内存的字节（反汇编各入口推进 cmd[0] 的立即数，SDK 20.5 / 21.4 / 22 与 Sports Resort 的 sdk 一致）。
+//   游戏靠 GetCommandMemoryUsed 定大小：Sports Resort main+0x114660 录一笔 DrawElementsInstanced 量每个着色器程序的预录命令，算进 MatBlock 的 backing；按 Maxwell 的 48 算时
+//   Car00 / Marinebike00 / Building00 越过 4 KB 进位，按真机校准的局部 heap 放不下管理物件，MatBlock 失败后拿空内存池建 buffer 崩溃
+static void draw_elements(NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv, int bi, int inst, uint32_t nvn2_bytes) {
+    t_dev_draw_idx = nvn2_on() ? nvn2_bytes : 0;
+    rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, GA(ib)});
+    t_dev_draw_idx = 0;
+}
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
-    rec_draw_idx(c, (p_draw_idx){pr, it, n, bv, bi, inst, GA(ib)});
+    draw_elements(c, pr, it, n, ib, bv, bi, inst, 44 + (bv || bi ? 4 : 0));
 }
 NVN(nvnCommandBufferDispatchCompute, void, NVNcommandBuffer *c, int x, int y, int z) {
     // The thunk is a tail jump (br), so the return address here is the call site in the game
@@ -2919,6 +2939,12 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     int nact = __atomic_load_n(&o->nactive, __ATOMIC_RELAXED);
     if (nact <= 0) { static int n; if (n++ < 4) LOG("【红】 [nvn] WindowAcquireTexture: the window has no active texture (%d of %d): no texture handed out", nact, o->ntex); *idx = -1; return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_NATIVE_ERROR; }
     *idx = (int)((unsigned)__atomic_fetch_add(&o->next, 1, __ATOMIC_RELAXED) % (unsigned)nact);
+    {   // #141（伊苏 8 闪退）：真机只交已归还的图——最近一次呈现的那张还在屏上（等下一次呈现翻走才归还），绝不会被取到。
+        //   这里报出交出的正是它的次数：前 20 次逐次报，之后每到 2 的幂报一次（带累计），修前修后比这个数
+        int sh = __atomic_load_n(&o->shown, __ATOMIC_RELAXED);
+        if (sh && *idx == sh - 1) { static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
+            if (k <= 20 || !(k & (k - 1))) LOG("【红】 [nvn] WindowAcquireTexture 交出了还在屏上的那张：图 %d 是最近一次呈现的、还没被下一次呈现翻走（真机不会交出），累计 %llu 次；活跃 %d / %d 张、间隔 %d、已呈现 %llu 次",
+                                               *idx, (unsigned long long)k, nact, o->ntex, o->interval, (unsigned long long)o->presents); } }
     if (*idx >= 0 && *idx < 4) atomic_store_explicit(&g_acq_thr[*idx], (uintptr_t)pthread_self(), memory_order_relaxed);
     uintptr_t pt = atomic_load_explicit(&g_present_thr, memory_order_relaxed);
     if (pt && pt != (uintptr_t)pthread_self()) {
@@ -3482,6 +3508,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     int crop[4]; dm_vi_layer_crop(crop); if (!crop[2] || !crop[3]) memcpy(crop, o->crop, sizeof crop);   // 上屏区域 = 系统窗口裁切：游戏最后设的显示层裁切，没设就是窗口自己的
     if (idx >= 0 && idx < o->ntex && idx < 4 && nvn_frec_on()) { pthread_mutex_lock(&g_sub_mu); nvn_frec_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop); pthread_mutex_unlock(&g_sub_mu); }   // 帧录：持提交锁落盘，这一帧之后的提交等它
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = nvn_be_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop);   // enqueue only, return immediately
+    if (idx >= 0 && idx < o->ntex) __atomic_store_n(&o->shown, idx + 1, __ATOMIC_RELAXED);   // 屏上换成这张：上一张归还（AcquireTexture 的 #141 报红看它）
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
     uint64_t f = g_frame, ps, dr; nvn_be_stats(&ps, &dr);
@@ -4607,8 +4634,8 @@ NVN(nvnCommandBufferBindImage, void, NVNcommandBuffer *c, NVNshaderStage st, int
 NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbufferAddress a, size_t n) { NVNbufferRange r = {a, n}; h_nvnCommandBufferBindVertexBuffers(c, i, 1, &r); }
 
 // Draws
-NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
-NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, bv, 0, 1); }
+NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { draw_elements(c, pr, it, n, ib, 0, 0, 1, 24); }
+NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { draw_elements(c, pr, it, n, ib, bv, 0, 1, bv ? 72 : 48); }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
     rec_draw(c, (p_draw){pr, first, n, inst, bi});
 }

@@ -17,7 +17,12 @@ import AppKit
         let game=Game(id:gid,name:"Synthetic save fixture",display:"1.0",packages:[],hidden:false)
         try JSONSerialization.data(withJSONObject:["schema":1,"id":"fixture-library"]).write(to:library.appendingPathComponent(".s2arm-library.json"))
         try JSONSerialization.data(withJSONObject:["schema":1,"games":[["id":gid,"name":game.name,"display":"1.0","hidden":false,"packages":[]]]]).write(to:library.appendingPathComponent("catalog.json"))
-        let root=library.appendingPathComponent("saves/\(gid)")
+        // 游戏库结构 v2（pack/jobs/layout.py）：每款一个文件夹，game.json 认游戏号，存档在它的 saves/；布局标记写好，作业不再迁移
+        let folder=library.appendingPathComponent("games/Synthetic save fixture")
+        try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+        try JSONSerialization.data(withJSONObject:["schema":1,"id":gid]).write(to:folder.appendingPathComponent("game.json"))
+        try JSONSerialization.data(withJSONObject:["version":2,"games":[String]()]).write(to:library.appendingPathComponent(".s2arm-layout.json"))
+        let root=folder.appendingPathComponent("saves")
         let progress=root.appendingPathComponent("bis/user/save/0000000000000001/0/progress.bin")
         try FileManager.default.createDirectory(at:progress.deletingLastPathComponent(),withIntermediateDirectories:true)
         try Data("checkpoint-one".utf8).write(to:progress)

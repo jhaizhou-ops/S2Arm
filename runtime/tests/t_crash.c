@@ -70,7 +70,8 @@ int main(void) {
       char *raw = strstr(out, "崩溃原始现场"), *rich = strstr(out, "CRASH 信号");
       eq("④ 第一段在第二段之前", 1, raw && rich && raw < rich); }
     // ⑤ 两条线程同时崩（1-2-Switch 10-29：第二条崩的线程直接 _exit 整个进程，第一条的现场写到一半，host.log 断在行中间、rc=138）：
-    //   子进程两条线程过同一屏障后各读一个坏地址（0x10 / 0x20）。期望两份原始现场都在、第一条的完整报告写到收尾、没有被插断的行、退出码 128 + 11
+    //   子进程两条线程过同一屏障后各读一个坏地址（0x10 / 0x20）。期望两份原始现场都在、第一条的完整报告写到收尾、没有被插断的行、
+    //   最后被 SIGSEGV 结束（#141：现场写完重抛默认处置，让 macOS / iOS 出系统崩溃报告；原先 _exit(139) 是正常退出）
     { char path[] = "/tmp/t_crash_two_XXXXXX"; int fd = mkstemp(path);
       pid_t c = fork();
       if (c == 0) {
@@ -82,7 +83,7 @@ int main(void) {
       }
       int ws = 0; waitpid(c, &ws, 0);
       static char out[65536]; lseek(fd, 0, SEEK_SET); ssize_t k = read(fd, out, sizeof out - 1); out[k > 0 ? k : 0] = 0; close(fd); unlink(path);
-      eq("⑤ 退出码 128 + SIGSEGV", 139, WIFEXITED(ws) ? WEXITSTATUS(ws) : -WTERMSIG(ws));
+      eq("⑤ 现场写完后按默认处置重抛：子进程被 SIGSEGV 结束（系统出崩溃报告）", SIGSEGV, WIFSIGNALED(ws) ? WTERMSIG(ws) : -1);
       eq("⑤ 地址 0x10 那条线程的原始现场在", 1, strstr(out, " 地址 0000000000000010") != NULL);
       eq("⑤ 地址 0x20 那条线程的原始现场在", 1, strstr(out, " 地址 0000000000000020") != NULL);
       int chains = 0; for (char *q = out; (q = strstr(q, "[s2a]   帧链")); q++) chains++;

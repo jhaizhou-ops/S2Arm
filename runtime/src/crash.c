@@ -192,6 +192,16 @@ static void crash_other_wait(int sig) {
     for (int i = 0; i < 200; i++) nanosleep(&t, NULL);
     _exit(128 + sig);
 }
+// 现场写完后按默认处置重新抛一次同一信号（#141 玩家提议）：进程以「被信号结束」收场，macOS 的 ReportCrash 生成带完整回溯的 .ips
+//   （控制台「崩溃报告」/ ~/Library/Logs/DiagnosticReports），iOS 进系统崩溃日志——原先 _exit(128 + sig) 是正常退出，系统不出报告。
+//   处理函数里本信号是屏蔽的，先放开再抛；万一没结束（不该发生）照旧 _exit(128 + sig)。
+//   读退出码的地方：shell 里被信号结束的 $? 仍是 128 + sig；作业层 Context.run 把 Python 的负返回码折回 128 + sig（pack/jobs/core.py）
+static void crash_reraise(int sig) {
+    signal(sig, SIG_DFL);
+    sigset_t m; sigemptyset(&m); sigaddset(&m, sig); pthread_sigmask(SIG_UNBLOCK, &m, NULL);
+    raise(sig);
+    _exit(128 + sig);
+}
 static void on_crash(int sig, siginfo_t *si, void *ctx) {
     // 先给 16 KB 写跟踪（graphics/track）认领：游戏 / 原生层写到被写保护的游戏页，跟踪模块记脏、放开后返回重执行那条指令。
     // 是否写取 ESR 的 WnR 位（数据中止 EC = 0x24 / 0x25 时有效）
@@ -267,7 +277,7 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
     { void s2a_direct_wait_dump(void); s2a_direct_wait_dump(); }   // 直连模式：各等待点（s2a_crash_wait_dump_register 登记）
     { int s2a_dump_threads(const char *why); char w[64]; snprintf(w, sizeof w, "崩溃 信号 %d", sig); s2a_dump_threads(w); }
     void s2a_svc_red_summary(void); s2a_svc_red_summary();
-    s2a_logcon_flush(); _exit(128 + sig);
+    s2a_logcon_flush(); crash_reraise(sig);
 }
 // 每线程一份信号备用栈：游戏栈可能只有几 KiB，崩在上面时处理函数不能再往游戏栈压。内存从窗口尾部取（10-24 低区让给 GC；尾部放不下平台层自己 mmap）
 static void *alt_tail_alloc(size_t n) { return s2a_tail_map(n, S2A_TAIL_ALTSTACK | S2A_TAIL_ONLY, PROT_READ | PROT_WRITE); }

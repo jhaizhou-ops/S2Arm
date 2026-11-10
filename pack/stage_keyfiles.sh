@@ -24,10 +24,13 @@ stage_files_key() {
 #   S2A_DEPS_KEYED（冒号分隔、仓库相对路径）= 阶段已经更细地进键的文件（如验证账只取本款行），不再整份记
 stage_deps_on() {
   local base d
-  base=${TMPDIR:-/tmp}; base=${base%/}/s2a_stage_deps
+  # 记录放在本款产物根旁（游戏库卷上，同 refresh.sh 的 $S2A_ROOTS/.refresh），不放系统临时目录：macOS 盘紧时会清 ${TMPDIR}，
+  #   #265 怪猎崛起直连库编了 880 秒，收尾时记录目录已被清掉，整阶段判失败。没给产物根（单测单独 source）才退回 $TMPDIR
+  #   作业临时目录 S2A_JOB_TMP（<游戏所在存放位置>/temp/<任务号>，和游戏数据同卷，作业开始建、结束删；启动器线游戏库 v3 定的接口）有就用它
+  if [ -n "${S2A_JOB_TMP:-}" ]; then base=${S2A_JOB_TMP%/}/stage_deps; else base=${S2A_ROOTS:-${TMPDIR:-/tmp}}; base=${base%/}/.stage_deps; fi
   mkdir -p "$base" || return 1
   # 只清本机制自己的记录目录：名字全是数字（进程号）且进程已经不在的（跳过 / 只算键的路径不收尾）
-  case $base in */s2a_stage_deps) for d in "$base"/*; do [ -d "$d" ] || continue; case ${d##*/} in *[!0-9]*) continue;; esac; kill -0 "${d##*/}" 2> /dev/null || rm -rf "$d"; done;; esac
+  case $base in */.stage_deps|*/stage_deps) for d in "$base"/*; do [ -d "$d" ] || continue; case ${d##*/} in *[!0-9]*) continue;; esac; kill -0 "${d##*/}" 2> /dev/null || rm -rf "$d"; done;; esac
   _SD_DIR=$base/$$; rm -rf "$_SD_DIR"; mkdir -p "$_SD_DIR" || return 1
   export S2A_DEPS_OUT=$_SD_DIR PYTHONPATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/stage_deps_hook${PYTHONPATH:+:$PYTHONPATH}"
 }

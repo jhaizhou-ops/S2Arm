@@ -180,7 +180,7 @@ public sealed partial class EnvironmentWindow
         EnsureLibrary(() => { });
     }
 
-    // 默认库：S2Arm 私有目录下的 DefaultLibrary，如果还没连接就先 setup。
+    // 默认库：%USERPROFILE%\S2Arm（LibraryPaths.DefaultLibrary；玩家选过就用选的），如果还没连接就先 setup。
     private void EnsureLibrary(Action next)
     {
         if (connectedFolder is not null && libraryId is not null) { next(); Render(); return; }
@@ -200,7 +200,8 @@ public sealed partial class EnvironmentWindow
             connectedFolder = null; libraryId = null; catalog = null; selectedGame = null; ClearCovers();
             PrivateJobRequest.EnsurePrivateRoot(privateRoot);
             Directory.CreateDirectory(folder);
-            var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, cancellation.Token);
+            var setup = await LibraryJobClient.RunAsync(paths, privateRoot, folder, null, "setup", null, cancellation.Token, libraryMoveFrom);
+            libraryMoveFrom = null;
             DisplayJob(setup);
             if (!setup.Report.Succeeded) { librarySummary = "library.failed"; importError = setup.Report.Message; return; }
             var conn = LibraryConnection.Parse(setup.Report.Result);
@@ -215,8 +216,7 @@ public sealed partial class EnvironmentWindow
         catch (LibraryProtocolException error)
         { librarySummary = "library.invalid_result"; libraryDiagnostics += "\n" + error.Message; importError = error.Message; }
         catch (OperationCanceledException) { librarySummary = "library.interrupted"; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
-            InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException)
+        catch (Exception error)   // 玩家输入驱动的连接 / 创建：任何异常都报出来、不逃出去（玩家反馈：点「连接或创建游戏库」闪退）
         { librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.Message; importError = error.Message; }
         finally { libraryCancellation = null; libraryBusy = false; Render(); }
     }

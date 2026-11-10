@@ -36,22 +36,22 @@ public enum S2ArmGameSettings {
         let on60 = (g?.object(forKey: "S2AFps60") as? Bool) ?? true
         let force = g?.bool(forKey: "S2AWidenForce") ?? false
         let op = (stores.app.object(forKey: "S2AVPadOpacity") as? Double).map { min(1, max(0.1, $0)) } ?? 1
-        var options = [SettingOption("default", "默认布局")]
-        if state.hasMine { options.append(SettingOption("mine", "我的布局")) }
-        options.append(SettingOption(editLayout, "调整位置…"))
+        var options = [SettingOption("default", "Default layout")]
+        if state.hasMine { options.append(SettingOption("mine", "My layout")) }
+        options.append(SettingOption(editLayout, "Adjust positions…"))
         let current = state.selected == "mine" && state.hasMine ? "mine" : "default"
         return [
-            SettingSection(id: "s2a.identity", title: "显示", rows: [
-                SettingRow(id: identity, label: "名字和封面", note: "只改这台 iPhone 上的显示", kind: .choice([SettingOption("current", state.customIdentity ? "已自定义" : "默认"), SettingOption(editIdentity, "修改…")]), value: "current"),
+            SettingSection(id: "s2a.identity", title: "Display", rows: [
+                SettingRow(id: identity, label: "Name and Cover", note: "Only changes how it appears on this iPhone", kind: .choice([SettingOption("current", state.customIdentity ? "Customized" : "Default"), SettingOption(editIdentity, "Edit…")]), value: "current"),
             ]),
-            SettingSection(id: "s2a.picture", title: "画面", rows: [
-                SettingRow(id: fps60, label: "60 帧", note: "关掉回到游戏自己的帧率（多为 30 帧），更省电", kind: .toggle(on: "on", off: "off"), value: on60 ? "on" : "off"),
-                SettingRow(id: widenForce, label: "宽屏强制启用", note: "没验证过的游戏也铺满全屏；画面若被拉伸会自动退回 16:9", kind: .toggle(on: "on", off: "off"), value: force ? "on" : "off"),
+            SettingSection(id: "s2a.picture", title: "Picture", rows: [
+                SettingRow(id: fps60, label: "60 FPS", note: "Off returns to the game’s own frame rate (usually 30 FPS) and saves power", kind: .toggle(on: "on", off: "off"), value: on60 ? "on" : "off"),
+                SettingRow(id: widenForce, label: "Force widescreen", note: "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches", kind: .toggle(on: "on", off: "off"), value: force ? "on" : "off"),
             ]),
-            SettingSection(id: "s2a.vpad", title: "虚拟手柄", rows: [
-                SettingRow(id: layout, label: "按键布局", note: "调整位置只对这款游戏生效", kind: .choice(options), value: current),
-                SettingRow(id: holdLock, label: "按住锁定 ZL / ZR", note: "按住 2 秒锁定，再点一下解锁；只对这款游戏生效", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"),
-                SettingRow(id: opacity, label: "按键透明度", note: "全部游戏共用，下次进游戏生效", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))),
+            SettingSection(id: "s2a.vpad", title: "Virtual controller", rows: [
+                SettingRow(id: layout, label: "Button layout", note: "Position changes apply to this game only", kind: .choice(options), value: current),
+                SettingRow(id: holdLock, label: "Hold-lock ZL / ZR", note: "Hold for 2 s to lock, tap again to unlock; this game only", kind: .toggle(on: "on", off: "off"), value: state.holdLock ? "on" : "off"),
+                SettingRow(id: opacity, label: "Button opacity", note: "Shared by all games; takes effect the next time you enter a game", kind: .range(min: 10, max: 100, step: 5, unit: "%"), value: String(Int((op * 100).rounded()))),
             ]),
         ]
     }

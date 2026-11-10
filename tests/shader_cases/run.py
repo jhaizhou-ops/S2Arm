@@ -12,11 +12,13 @@ import struct
 import subprocess
 import tempfile
 import time
-from coverage import collect_coverage
+from coverage import IADD_PO_CASE, IADD_PO_PATCH, collect_coverage
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[1]
 EXIT=0xe30000000007000f
+IADD_PO_CARRY_CASE = 'integer/add_po_carry'
+IADD_PO_CARRY_MUTATION = 'S2A_TEST_IADD_PO_CARRY_MUTATION'
 
 def register(s):
     if s=='RZ': return 255
@@ -97,12 +99,19 @@ def encode(line):
         return base[kind]|bits|((m[0]=='FLO' and m[1]=='S32')<<48)|(('SH' in m)<<41)|(nb<<40)|(7<<16)|(255<<8)|register(a[0])
     # T221 add / min-max: IADD[.PO] Rd [-]Ra [-]B (one of -A / -B / .PO), IADD3 Rd [-]Ra [-]B [-]Rc, ISCADD[.PO] Rd [-]Ra [-]B shift,
     # ISCADD32I Rd Ra imm32 shift, IMNMX.<U32|S32>.<MIN|MAX> Rd Ra B; '-' on a register or c[][] is two's-complement negation
-    # (.SAT, IADD3 half selects / shifts, .CC / .X not modelled).
+    # IADD.PO.CC and IADD.X are restricted to the non-negated register forms used to observe carry.
+    # .SAT and IADD3 half selects / shifts are outside this subset.
     neg=lambda s: (1,s[1:]) if s[:1]=='-' and s[1:2] in ('R','c') else (0,s)
-    if m[0] in ('IADD','ISCADD') and set(m[1:])<={'PO'} and len(a)==(3 if m[0]=='IADD' else 4):
+    carry_form = op in ('IADD.PO.CC', 'IADD.X')
+    if m[0] in ('IADD','ISCADD') and (set(m[1:]) <= {'PO'} or carry_form) and len(a)==(3 if m[0]=='IADD' else 4):
         na,ra=neg(a[1]); nb,b=neg(a[2]); assert na+nb+('PO' in m)<=1, 'one of -A / -B / .PO'
         kind,bits=source_b(b); mode=3 if 'PO' in m else 2 if na else 1 if nb else 0
-        if m[0]=='IADD': return {'r':0x5c10000000000000,'i':0x3810000000000000,'c':0x4c10000000000000}[kind]|bits|(mode<<48)|(7<<16)|(register(ra)<<8)|register(a[0])
+        if m[0]=='IADD':
+            if carry_form and (kind != 'r' or na or nb):
+                raise ValueError('IADD.PO.CC and IADD.X require non-negated registers: ' + line)
+            flags = (('CC' in m) << 47) | (('X' in m) << 43)  # InstIaddR.WriteCC and X.
+            base = {'r': 0x5c10000000000000, 'i': 0x3810000000000000, 'c': 0x4c10000000000000}[kind]
+            return base | bits | (mode << 48) | flags | (7 << 16) | (register(ra) << 8) | register(a[0])
         s=int(a[3],0); assert 0<=s<32
         return {'r':0x5c18000000000000,'i':0x3818000000000000,'c':0x4c18000000000000}[kind]|bits|(mode<<48)|(s<<39)|(7<<16)|(register(ra)<<8)|register(a[0])
     if op=='ISCADD32I' and len(a)==4:
@@ -304,6 +313,32 @@ def build(temp):
             if (mutation == "1") srcB = GetSrcImm(context, 0);
             else if (mutation != "0") throw new System.InvalidOperationException("test mutation must be explicitly 0 or 1");'''
     s=s[:start]+part.replace(old,injection)+s[end:];p.write_text(s)
+    # In the same isolated build, remove only the .PO increment when requested.
+    p=src/'Instructions/InstEmitIntegerArithmetic.cs'
+    s=(ROOT/'compat/tree/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs').read_text()
+    start=s.index('private static Operand PlusOne(')
+    end=s.index('private static void SetPlusOneCarry(',start)
+    part=s[start:end]
+    old='            srcB = context.IAdd(srcB, Const(1));'
+    if part.count(old)!=1: raise RuntimeError('IADD.PO source injection point changed')
+    injection='''            string mutation = System.Environment.GetEnvironmentVariable("S2A_TEST_IADD_PO_MUTATION");
+            if (mutation == "1") return null;
+            if (mutation != "0") throw new System.InvalidOperationException("test mutation must be explicitly 0 or 1");
+'''+old
+    s = s[:start] + part.replace(old, injection) + s[end:]
+
+    # Remove only the CF compensation, after the normal add and flag write.
+    start = s.index('private static void SetPlusOneCarry(')
+    end = s.index('private static void SetIaddFlags(', start)
+    part = s[start:end]
+    old = '            if (setCC && poCarry != null)'
+    if part.count(old) != 1:
+        raise RuntimeError('IADD.PO carry injection point changed')
+    injection = f'''            string mutation = System.Environment.GetEnvironmentVariable("{IADD_PO_CARRY_MUTATION}");
+            if (mutation == "1") return;
+            if (mutation != "0") throw new System.InvalidOperationException("test mutation must be explicitly 0 or 1");
+''' + old
+    p.write_text(s[:start] + part.replace(old, injection) + s[end:])
     # 产物按「编译输入摘要」缓存在持久目录，命中不编（11-05 不稳定项 #12/#13：容器带 --rm、中间目录在临时区，
     #   原先每次在 amd64 模拟容器里全量冷编，10-31 撞 55 秒超时；4736ade9d 只把超时放宽到 900 秒，不算根修）。900 秒只当挂死兜底。
     key=build_key(src);cache=cache_root()
@@ -384,6 +419,10 @@ def main():
     if {c['stage'] for c in cases}!={'compute','fragment'}: raise ValueError('both real stages required')
     ids=[c['id'] for c in cases]
     if len(ids)!=len(set(ids)) or not all(isinstance(i,str) and i for i in ids): raise ValueError('duplicate/invalid case IDs')
+    po_index=ids.index(IADD_PO_CASE)
+    po_case=cases[po_index]
+    carry_index = ids.index(IADD_PO_CARRY_CASE)
+    carry_case = cases[carry_index]
     manifest=[]
     for i,c in enumerate(cases):
         stem=temp/str(i);b=stem.with_suffix('.bin');b.write_bytes(binary(c))
@@ -404,8 +443,29 @@ def main():
                           'injected_source_sha256':hashlib.sha256((temp/'shader-source/Instructions/InstEmitFloatArithmetic.cs').read_bytes()).hexdigest(),
                           'normal_command':['dotnet',str(dll),str(mf),str(temp/'events.json')]+(['--probe-clamp'] if os.getenv('SHADER_CASES_PROBE_CLAMP')=='1' else []),
                           'mutant_command':['dotnet',str(dll),str(temp/'mutant-manifest.json'),str(temp/'mutant-events.json')]}
+    po_entry=manifest[po_index]
+    po_mutant=dict(po_entry,spirv=po_entry['spirv']+'.without-plus-one')
+    po_mf=temp/'iadd-po-mutant-manifest.json'
+    po_mf.write_text(json.dumps([po_mutant]))
+    po_command=['dotnet',str(dll),str(po_mf),str(temp/'iadd-po-mutant-events.json')]
+    po_source=temp/'shader-source/Instructions/InstEmitIntegerArithmetic.cs'
+    identity['iadd_po_mutation']={'environment':'S2A_TEST_IADD_PO_MUTATION','normal':'0','mutant':'1',
+                                 'injected_source_sha256':hashlib.sha256(po_source.read_bytes()).hexdigest(),
+                                 'mutant_command':po_command}
+    carry_entry = manifest[carry_index]
+    carry_mutant = dict(carry_entry, spirv=carry_entry['spirv'] + '.without-plus-one-carry')
+    carry_mf = temp / 'iadd-po-carry-mutant-manifest.json'
+    carry_mf.write_text(json.dumps([carry_mutant]))
+    carry_command = ['dotnet', str(dll), str(carry_mf), str(temp / 'iadd-po-carry-mutant-events.json')]
+    identity['iadd_po_carry_mutation'] = {
+        'environment': IADD_PO_CARRY_MUTATION, 'normal': '0', 'mutant': '1',
+        'injected_source_sha256': identity['iadd_po_mutation']['injected_source_sha256'],
+        'mutant_command': carry_command,
+    }
     (temp/'identity.json').write_text(json.dumps(identity,indent=2))
-    command(['dotnet',dll,mf,temp/'events.json']+(['--probe-clamp'] if os.getenv('SHADER_CASES_PROBE_CLAMP')=='1' else []),env={**os.environ,'S2A_TEST_FADD32I_MUTATION':'0'})
+    normal_env={**os.environ,'S2A_TEST_FADD32I_MUTATION':'0','S2A_TEST_IADD_PO_MUTATION':'0',
+                IADD_PO_CARRY_MUTATION:'0'}
+    command(identity['mutation']['normal_command'],env=normal_env)
     val=tool('spirv-val');glsl=tool('glslc')
     vs=temp/'harness.vert.spv'
     command([glsl,'--target-env=vulkan1.1',HERE/'harness.vert','-o',vs]);command([val,'--target-env','vulkan1.1',vs])
@@ -431,21 +491,21 @@ def main():
         got=execute(c,m)
         print(f"{c['id']}: expected {c['expected']} -> actual {got}",flush=True)
         compare(c['id'],c['expected'],got)
+        if c is po_case:
+            po_readback=got
+        if c is carry_case:
+            carry_readback = got
         if c['stage']=='compute' and os.getenv('SHADER_CASES_PROBE_CLAMP')=='1':
             cm=dict(m);cm['spirv']+='.clamped'
             clamped=execute(c,cm)
             compare(c['id']+' clamped',c['expected'],clamped)
             print(c['id']+': clamped readback matches all64 words',flush=True)
-    report=collect_coverage(ROOT,manifest,json.loads((temp/'events.json').read_text()))
-    (temp/'coverage.json').write_text(json.dumps(report,indent=2))
-    for key in ('instructions','passes','patches'):
-        d=report[key]; print(f"{key}: {d['count']}/{d['total']}",flush=True)
     # Effective negative controls use the same actual comparison, not a mocked result.
     bad=cases[0]['expected'].copy();bad[0]^=1
     expect_mismatch('wrong expectation '+cases[0]['id'],bad,execute(cases[0],manifest[0]))
     mm=[dict(m,spirv=m['spirv']+'.mutant') for m in manifest]
     mmf=temp/'mutant-manifest.json';mmf.write_text(json.dumps(mm))
-    command(['dotnet',dll,mmf,temp/'mutant-events.json'],env={**os.environ,'S2A_TEST_FADD32I_MUTATION':'1'})
+    command(identity['mutation']['mutant_command'],env={**normal_env,'S2A_TEST_FADD32I_MUTATION':'1'})
     index=next(i for i,c in enumerate(cases) if c['id']=='float/add')
     positive_hash=hashlib.sha256(Path(manifest[index]['spirv']).read_bytes()).hexdigest()
     negative_hash=hashlib.sha256(Path(mm[index]['spirv']).read_bytes()).hexdigest()
@@ -453,6 +513,37 @@ def main():
     (temp/'negative-proof.json').write_text(json.dumps({'positive_spirv':positive_hash,'negative_spirv':negative_hash,'expected':cases[index]['expected'],'mutation':identity['mutation']},indent=2))
     wrong=execute(cases[index],mm[index])
     expect_mismatch('wrong FADD32I emitter',cases[index]['expected'],wrong)
+    command(po_command,env={**normal_env,'S2A_TEST_IADD_PO_MUTATION':'1'})
+    po_without_plus_one=execute(po_case,po_mutant)
+    report=collect_coverage(ROOT,manifest,json.loads((temp/'events.json').read_text()),
+                            iadd_po_readbacks=(po_case['expected'],po_readback,po_without_plus_one))
+    evidence=report['patches']['evidence'][IADD_PO_PATCH]
+    evidence['spirv_sha256']={label:hashlib.sha256(Path(entry['spirv']).read_bytes()).hexdigest()
+                             for label,entry in [('normal',po_entry),('without_plus_one',po_mutant)]}
+    print(f"NEGATIVE rejected: {IADD_PO_CASE} without +1 changed {len(evidence['differences'])}/64 words",flush=True)
+    command(carry_command, env={**normal_env, IADD_PO_CARRY_MUTATION: '1'})
+    without_carry = execute(carry_case, carry_mutant)
+    expected = carry_case['expected']
+    # Word 9 is CF for A = 0, B = 0xffffffff. Keep every other word intact.
+    carry_word = 9
+    if expected[carry_word] != 1:
+        raise AssertionError('IADD.PO carry case must expect 1 at word 9')
+    mutant_expected = expected.copy()
+    mutant_expected[carry_word] = 0
+    expect_mismatch(IADD_PO_CARRY_CASE + ' without carry compensation', expected, without_carry)
+    compare(IADD_PO_CARRY_CASE + ' control readback', mutant_expected, without_carry)
+    carry_proof = {
+        'case': IADD_PO_CARRY_CASE,
+        'differences': [{'word': carry_word, 'normal': carry_readback[carry_word],
+                         'without_plus_one_carry': without_carry[carry_word]}],
+        'spirv_sha256': {label: hashlib.sha256(Path(entry['spirv']).read_bytes()).hexdigest()
+                         for label, entry in [('normal', carry_entry), ('without_plus_one_carry', carry_mutant)]},
+    }
+    (temp / 'iadd-po-carry-proof.json').write_text(json.dumps(carry_proof, indent=2))
+    print(f'NEGATIVE rejected: {IADD_PO_CARRY_CASE} word 9 changed 1 -> 0; other 63 words unchanged', flush=True)
+    (temp/'coverage.json').write_text(json.dumps(report,indent=2))
+    for key in ('instructions','passes','patches'):
+        d=report[key]; print(f"{key}: {d['count']}/{d['total']}",flush=True)
     report_elapsed(len(cases),start,build_elapsed)
     if holder: holder.cleanup()
 if __name__=='__main__': main()

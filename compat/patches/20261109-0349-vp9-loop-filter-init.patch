@@ -1,0 +1,42 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+index fa99aeb34aaee935cc1d11c737abade86737c3ca..f8c01a155b8a12b4b20b92bf261b28519f67dc8a 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+@@ -91,6 +91,7 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             cm.Lf.ModeRefDeltaEnabled = pictureInfo.ModeRefDeltaEnabled;
+             cm.Lf.RefDeltas = pictureInfo.RefDeltas;
+             cm.Lf.ModeDeltas = pictureInfo.ModeDeltas;
++            LoopFilter.LoopFilterInit(ref cm);
+ 
+             Span<RefBuffer> frameRefsSpan = cm.FrameRefs.AsSpan();
+             frameRefsSpan[0].Buf = (Surface)pictureInfo.LastReference;
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/LoopFilter.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/LoopFilter.cs
+index f4ddba36a64ca07c05a69f8a236217ae9dcb9173..529424eb76d2d70b61ece2178082e30372d4ee37 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/LoopFilter.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/LoopFilter.cs
+@@ -616,6 +616,25 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             }
+         }
+ 
++        // S2Arm: port of libvpx vp9_loop_filter_init (limits for the current sharpness, HEV thresholds), which the C# port
++        // was missing. The NVDEC path builds a fresh Vp9Common for every frame, so without it HevThr stayed 0 and, at
++        // sharpness 0 (LastSharpnessLevel also 0), Lim / Mblim stayed 0 too: the deblocking filter almost never fired.
++        public static void LoopFilterInit(ref Vp9Common cm)
++        {
++            ref LoopFilterInfoN lfi = ref cm.LfInfo;
++            ref Types.LoopFilter lf = ref cm.Lf;
++
++            UpdateSharpness(ref lfi, lf.SharpnessLevel);
++            lf.LastSharpnessLevel = lf.SharpnessLevel;
++
++            Span<LoopFilterThresh> lfthr = lfi.Lfthr.AsSpan();
++
++            for (int lvl = 0; lvl <= MaxLoopFilter; lvl++)
++            {
++                lfthr[lvl].HevThr.AsSpan().Fill((byte)(lvl >> 4));
++            }
++        }
++
+         public static void LoopFilterFrameInit(ref Vp9Common cm, int defaultFiltLvl)
+         {
+             int segId;

@@ -14,7 +14,7 @@
 set -u; H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); bad=0; trap 'rm -rf "$T"' EXIT
 ck() { if eval "$2"; then echo "通 $1"; else echo "不通 $1"; bad=1; fi; }
 P=$T/repo; mkdir -p $P/graphics/tools/direct/vklib $P/graphics/nvn/tools $P/graphics/nvn/games $P/translator $P/pack $P/tools
-cp "$H/graphics/tools/direct/direct_lib.sh" $P/graphics/tools/direct/; cp "$H/pack/srcs.sh" $P/pack/; cp "$H/tools/progress.sh" "$H/tools/clonedir.py" "$H/tools/nostall.py" $P/tools/
+cp "$H/graphics/tools/direct/direct_lib.sh" $P/graphics/tools/direct/; mkdir -p $P/pack/jobs && cp "$H/pack/jobs/space_rule.py" $P/pack/jobs/; cp "$H/pack/srcs.sh" $P/pack/; cp "$H/tools/progress.sh" "$H/tools/clonedir.py" "$H/tools/nostall.py" $P/tools/
 export FAKE_CALLS=$T/calls
 cat > $P/graphics/nvn/tools/gfx_api.py <<'EOF'
 import os
@@ -69,6 +69,7 @@ echo main > $G/exefs/main; printf 'title_id\t0100abcd00000000\n' > $G/unpack.tsv
 printf 'split\t1\ns2a_extract\t2\n' > $G/extract/ok; echo s > $G/extract/split.log; echo x > $G/extract/s2x.log
 printf 'vs_0.bin\t0\t-\tcccccccccccccccc\t-\n' > $G/extract/split/shader_map.tsv; : > $G/extract/split/shader_facts.tsv; : > $G/extract/split/shader_pairs.tsv
 echo 'title	桩' > $T/prof/0100ABCD00000000/game.tsv
+export S2A_DISK_FREE_G=999   # 出库开工前的空间复核（pack/jobs/space_rule.py）按注入余量判，单测结果不随本机磁盘余量变（11-09 门禁机余量紧时假红）
 export FAKE_PROF=$T/prof S2A_PYTHON=python3 S2A_DIRECT_CACHE=$T/cache S2A_CPU_LEDGER=0 S2A_PSO_SOURCES=$T/nopso J=2 DSX_LIB=$T/libdsx.so
 O=$T/out
 D() { S2A_DIRECT_TARGETS=android S2A_DIRECT_PUBLISH=${PUB:-android} bash $P/graphics/tools/direct/direct_lib.sh $G $O 2>&1; }

@@ -15,8 +15,10 @@ if sys.argv[1:] == ['--resolve'] and git('diff', '--name-only', '--diff-filter=U
 sys.path.insert(0, HERE); import dmsh_chain as dc
 
 def repo_path(f): return os.path.relpath(os.path.normpath(os.path.join(dc.GFX, f)), ROOT)
+# dmsh_chain.py 在本文件旁（translator/），read(f) 的路径相对 dc.GFX：按实际位置算，不写死布局（11-09：迁仓后仍读旧的 GFX/tools/dmsh_chain.py，FileNotFoundError）
+CHAIN = os.path.relpath(os.path.join(HERE, 'dmsh_chain.py'), dc.GFX)
 def version(read):   # dmsh_chain.version() over contents from read(f): V follows ABI alone (read off dmsh_chain.py at that revision)
-    m = re.search(rb'^ABI = (\d+)', read('tools/dmsh_chain.py'), re.M)
+    m = re.search(rb'^ABI = (\d+)', read(CHAIN), re.M)
     if m: return dc.version(int(m.group(1)))
     h = hashlib.sha256()   # a revision from before 10-30 (no ABI line): V was the digest of the translation tools themselves
     for f in dc.xfp_files():   # 10-30 前的老修订才走这里；那时的文件清单已不可考，按现行指纹输入近似（只用于比两个老修订之间变没变）

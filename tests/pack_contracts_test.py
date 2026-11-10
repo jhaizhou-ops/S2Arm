@@ -183,7 +183,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(new[2]["stageId"], "direct")
         self.assertEqual(new[-1]["code"], "job.succeeded")
         validate("artifact", new[-1]["result"]["artifactManifest"])
-        persisted = Path(self.request["privateRoot"]) / "jobs/contract-test.events.jsonl"
+        persisted = Path(self.request["privateRoot"]) / "logs/jobs/contract-test.events.jsonl"   # 库没建好：任务记录退回 <私有目录>/logs/jobs
         # Both runs use the same fixture ID: only the new run has contract fields.
         for event in [json.loads(line) for line in persisted.read_text().splitlines()][len(old):]:
             validate("event", event)

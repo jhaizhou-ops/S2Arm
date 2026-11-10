@@ -11,7 +11,23 @@
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType>embedded</DebugType>
+    <!-- 文件属性里的版本号（11-09 合入运维：曾显示 1.0.0+944ad83…）：构建时从最近的发版 tag 取，同 launchers/macos/build_app.py release_identity；不拼提交号 -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+  <!-- 版本号来源：构建参数 S2ArmVersion=x.y.z 显式给的优先；否则取 git 最近 tag 的数字段（v0.1.7 → 0.1.7）；都没有用 0.1.0（同 Mac） -->
+  <Target Name="S2ArmVersionFromTag" BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;GenerateNuspec">
+    <Exec Condition="'$(S2ArmVersion)' == ''" Command="git describe --tags --abbrev=0" WorkingDirectory="$(MSBuildProjectDirectory)" ConsoleToMSBuild="true" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="S2ArmTag" />
+    </Exec>
+    <PropertyGroup>
+      <S2ArmVersion Condition="'$(S2ArmVersion)' == ''">$([System.Text.RegularExpressions.Regex]::Match('$(S2ArmTag)', '\d+(\.\d+)*').Value)</S2ArmVersion>
+      <S2ArmVersion Condition="'$(S2ArmVersion)' == ''">0.1.0</S2ArmVersion>
+      <Version>$(S2ArmVersion)</Version>
+      <FileVersion>$(S2ArmVersion)</FileVersion>
+      <AssemblyVersion>$(S2ArmVersion)</AssemblyVersion>
+      <InformationalVersion>$(S2ArmVersion)</InformationalVersion>
+    </PropertyGroup>
+  </Target>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="12.1.5" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.5" />

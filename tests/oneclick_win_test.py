@@ -21,7 +21,7 @@
      机上待解批按完整性分：推到一半的盖掉，推完整的留着、其中文件（.pushed）不重推；没有待解批时 .pushed 不算数；机上 .incoming 有 <时刻>_<序号>.tar 残留 → 逐个用 1024 字节全零同名包覆盖、别的名字不碰；
      盖过残留或 unpack.log 末行是截短包 → 不认机上 index.tsv（上次推上去、没落地），按已应用索引（没有 = 全推）
 反证：选款逻辑内嵌在 oneclick.sh 时没有 pack/source_pick.py（① 全红）。"""
-import json, os, re, subprocess, sys, tempfile, unittest
+import contextlib, json, os, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,6 +92,119 @@ class Check(unittest.TestCase):
                 p = subprocess.run([sys.executable, '-X', 'utf8', '-m', 'pack.orch.oneclick_win', '--check', '--target', 'mac'], cwd=R, capture_output=True, text=True, env=env)
                 line = [l for l in p.stdout.splitlines() if l[2:].startswith('zstd-cli：')]
                 self.assertEqual([l[:1] for l in line], ['✅' if ok else '❌'], f'{ver}：{line}')
+
+
+class MetalPath(unittest.TestCase):
+    """#120：目录选择与编译子进程必须一致；工具是原创合成脚本，不编游戏。"""
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='metal 中文 空格 ')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.tools = self.root / 'PATH 工具'
+        self.tools.mkdir()
+        for tool in ('metal', 'metallib'):
+            path = self.tools / (tool + '.exe')
+            path.write_text(f'#!/bin/sh\nprintf "%s\\n" "fixture {tool}"\n', encoding='utf-8')
+            path.chmod(0o755)
+        decoy = self.root / 'other-install'
+        decoy.mkdir()
+        (decoy / 'metallib.exe').write_text('#!/bin/sh\nexit 99\n', encoding='utf-8')
+        (decoy / 'metallib.exe').chmod(0o755)
+        env = patch.dict(os.environ, {'PATH': os.pathsep.join((str(decoy), str(self.tools))), 'PATHEXT': '.EXE'}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_bin_from_path(self):
+        self.assertEqual(oneclick_win.metal_bin(), self.tools)
+
+    def test_relative_path_is_fixed_before_changing_working_directory(self):
+        with contextlib.chdir(self.root), patch.dict(os.environ, {'PATH': self.tools.name}):
+            self.assertEqual(oneclick_win.metal_bin(), self.tools)
+
+    def test_explicit_bin_wins_path(self):
+        explicit = self.root / '显式目录'
+        with patch.dict(os.environ, {'S2A_METAL_BIN': str(explicit)}):
+            self.assertEqual(oneclick_win.metal_bin(), explicit)
+
+    def test_player_path_wins_bundled_job_path(self):
+        # 随包 s2arm_env.cmd 把作业 PATH 换成只含随包工具、换前存进 S2A_USER_PATH（11-09 Windows 出包机：只设 PATH 的自定义安装在启动器里被忽略）
+        bundled = self.root / '随包运行时'; bundled.mkdir()
+        with patch.dict(os.environ, {'PATH': str(bundled), 'S2A_USER_PATH': str(self.tools)}):
+            self.assertEqual(oneclick_win.metal_bin(), self.tools)
+
+    def test_given_environ_is_used_instead_of_process_env(self):
+        # 作业层在父进程按玩家环境选（core.win_metal_dir），不读当前进程环境
+        explicit = self.root / '玩家显式目录'
+        with patch.dict(os.environ, {'S2A_METAL_BIN': str(self.root / '进程里的')}):
+            self.assertEqual(oneclick_win.metal_exe({'S2A_METAL_BIN': str(explicit)}).parent, explicit)
+            self.assertEqual(oneclick_win.metal_exe({'PATH': '', 'S2A_USER_PATH': str(self.tools)}).parent, self.tools)
+
+    def test_no_tools_uses_official_default(self):
+        with patch.dict(os.environ, {'PATH': ''}):
+            self.assertEqual(oneclick_win.metal_bin(), Path(r'C:\Program Files\Metal Developer Tools\bin'))
+
+    def test_path_directory_is_not_a_compiler(self):
+        (self.tools / 'metal.exe').unlink()
+        (self.tools / 'metal.exe').mkdir()
+        self.assertEqual(oneclick_win.metal_bin(), Path(r'C:\Program Files\Metal Developer Tools\bin'))
+
+    def test_env_items_reports_path_install(self):
+        with patch.object(oneclick_win, 'WIN', True):
+            item = next(row for row in oneclick_win.env_items('mac', None) if row[0] == 'metal')
+        self.assertTrue(item[1], item[2])
+        self.assertIn(str(self.tools), item[2])
+
+    @unittest.skipIf(os.name == 'nt', '合成 .exe 为 POSIX 脚本；Windows 原生编译未覆盖')
+    def test_direct_exports_selected_directory_to_both_tools(self):
+        repo = self.root / 'repo'
+        script = repo / 'graphics/tools/direct/direct_lib.sh'
+        script.parent.mkdir(parents=True)
+        script.write_text('''set -eu
+: "${S2A_METAL_BIN:?S2A_METAL_BIN missing from build environment}"
+test "$S2A_METAL_BIN" = "$S2A_EXPECT_METAL_BIN"
+"$S2A_METAL_BIN/metal.exe" --version
+"$S2A_METAL_BIN/metallib.exe" --version
+''', encoding='utf-8')
+        explicit = self.root / '显式安装'
+        explicit.mkdir()
+        for tool in ('metal', 'metallib'):
+            path = explicit / (tool + '.exe')
+            path.write_text(f'#!/bin/sh\nprintf "%s\\n" "explicit {tool}"\n', encoding='utf-8')
+            path.chmod(0o755)
+        cur = self.root / 'cur'
+        cur.mkdir()
+        for source, selected, label in (('path', self.tools, 'fixture'), ('explicit', explicit, 'explicit')):
+            with self.subTest(source=source), patch.dict(os.environ, {
+                'S2A_EXPECT_METAL_BIN': str(selected),
+                **({'S2A_METAL_BIN': str(explicit)} if source == 'explicit' else {}),
+            }), patch.object(oneclick_win, 'R', repo), patch.object(oneclick_win, 'WIN', True), \
+                 patch.object(oneclick_win, 'prebuilt', return_value=self.root / 'unused.dll'), \
+                 patch.object(oneclick_win, 'bash_exe', return_value='/bin/sh'):
+                run = oneclick_win.Run(self.root / source)
+                try:
+                    oneclick_win.direct(run, cur, 'ios', 1)
+                    self.assertEqual((run.out / 'direct_lib.log').read_text().splitlines(),
+                                     [f'{label} metal', f'{label} metallib'])
+                finally:
+                    run.timing.close()
+        self.assertNotIn('S2A_METAL_BIN', os.environ, '目录只传给本次编译，不改调用者环境')
+
+    @unittest.skipIf(os.name == 'nt', 'Mac 子进程环境回归仅在 POSIX 宿主运行')
+    def test_mac_does_not_export_windows_directory(self):
+        repo = self.root / 'mac-repo'
+        script = repo / 'graphics/tools/direct/direct_lib.sh'
+        script.parent.mkdir(parents=True)
+        script.write_text('test "${S2A_METAL_BIN+set}" != set\n', encoding='utf-8')
+        cur = self.root / 'cur'
+        cur.mkdir()
+        with patch.object(oneclick_win, 'R', repo), patch.object(oneclick_win, 'WIN', False), \
+             patch.object(oneclick_win, 'prebuilt', return_value=None), \
+             patch.object(oneclick_win, 'bash_exe', return_value='/bin/sh'):
+            run = oneclick_win.Run(self.root / 'mac-out')
+            try:
+                oneclick_win.direct(run, cur, 'mac', 1)
+            finally:
+                run.timing.close()
 
 
 class StepRc(unittest.TestCase):
@@ -189,11 +302,14 @@ class SeedAoc(unittest.TestCase):   # ④ 播种与轻阶段带 S2A_SEED_AOC=1�
     def test_seed_env(self):
         with tempfile.TemporaryDirectory() as t:
             t = Path(t); run = oneclick_win.Run(t / 'out'); seen = {}
-            def sh(args, log, env=None, ok=(0,), cwd=None): seen[log] = (env or {}).get('S2A_SEED_AOC'); return 0
+            def sh(args, log, env=None, ok=(0,), cwd=None): seen[log] = ((env or {}).get('S2A_SEED_AOC'), (env or {}).get('S2A_NX_UNPACK')); return 0
             run.sh = sh
             (t / 'out/roots').mkdir(parents=True); (t / 'ver').mkdir(); os.symlink(t / 'ver', t / 'out/roots/tx@现行')
-            oneclick_win.stages(run, 'tx', t / 'x', t / 'src')
-            self.assertEqual(seen.get('seed.log'), '1'); self.assertEqual(seen.get('light.log'), '1')
+            tool = t / 'out/bin/nx_unpack_abc/nx_unpack.exe'
+            with patch.object(oneclick_win, "nx_unpack", lambda r: tool):
+                oneclick_win.stages(run, 'tx', t / 'x', t / 'src')
+            # ⑤ 轻阶段（追加内容解包 stages._nxu）拿本单选定的同一份 nx_unpack（11-09 Windows 出包机：两处各认各的 bin 目录，身份一变轻阶段退 75）
+            self.assertEqual(seen.get('seed.log'), ('1', str(tool))); self.assertEqual(seen.get('light.log'), ('1', str(tool)))
 
 
 class Events(unittest.TestCase):   # ⑥ ⑦ ⑧ 机器读事件流与 --from-extract（满屏补丁线启动器后端 pack/jobs/ipa.py 直接读 result）

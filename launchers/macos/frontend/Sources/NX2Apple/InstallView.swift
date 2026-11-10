@@ -14,6 +14,7 @@ struct InstallView: View {
     @Environment(\.dismiss) private var dismiss
     let gameID: String
     @State private var showRemoveConfirm = false
+    @State private var showRestoreConfirm = false
 
     private var game: GameSummary? { model.games.first { $0.id == gameID } }
     private static let pollSeconds: UInt64 = 5
@@ -40,7 +41,12 @@ struct InstallView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(loc.backend(job.stage.isEmpty ? job.message : job.stage)).font(.manrope(16, .bold)).lineLimit(1)
                     InlineProgress(session: job)
-                    Text(text("install.keychain")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    // 钥匙串授权只在申请描述文件 / 签名这两步（pack/jobs/install.py sign_and_install 第 3、4 步）会弹；推资源包时还挂着它会让玩家以为在等授权（#266）
+                    if job.kind == .install, [3, 4].contains(job.progress.index ?? 0) {
+                        Text(text("install.keychain")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    // 装机在后台照跑：关掉弹层回游戏库，顶部胶囊「正在装到 iPhone · 查看进度」能回来（#308，Mac 与 Windows 同一套）
+                    HStack { Spacer(); Button(text("install.background")) { dismiss() }.buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("install.background") }
                 }
                 .padding(.horizontal, 30).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -48,7 +54,7 @@ struct InstallView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     if let failed = model.inlineFailure, failed.kind == .install {
                         Text(loc.backend(failed.message)).font(.manrope(13)).foregroundStyle(LauncherPalette.danger).fixedSize(horizontal: false, vertical: true)
-                        CopyReportButton(model: model, gameID: gameID, operations: ["install", "installRemove"], fallback: failed.message)
+                        CopyReportButton(model: model, gameID: gameID, operations: ["install", "installRemove", "installRestore"], fallback: failed.message)
                     }
                     if showManualTeam, let game {
                         VStack(alignment: .leading, spacing: 8) {
@@ -87,6 +93,18 @@ struct InstallView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(text("install.container_note")).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Text(text("install.legacy_note")).font(.manrope(12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let game, game.iphoneRestorable {
+                        // 只换宿主后（手机上的 S2Arm 换了新版运行层）新版不好用：装回上一版
+                        Button(text("install.restore")) { showRestoreConfirm = true }
+                            .buttonStyle(LauncherSecondaryButtonStyle())
+                            .disabled(model.busy)
+                            .confirmationDialog(text("install.restore_title"), isPresented: $showRestoreConfirm, titleVisibility: .visible) {
+                                Button(text("install.restore_confirm")) { model.restorePhone(game) }
+                                Button(loc.t("launch.done"), role: .cancel) {}
+                            } message: {
+                                Text(text("install.restore_body"))
+                            }
                     }
                     if let game {
                         Button(text("install.remove")) { showRemoveConfirm = true }
@@ -140,6 +158,7 @@ struct InstallView: View {
                 try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
             }
         }
+        .onAppear { if model.phoneResult?.gameID == gameID { model.phoneResult = nil } }   // 回来看过结果，顶部胶囊收起
         .frame(width: 600, height: 520)
         .background(LauncherPalette.background)
         .font(.manrope(13))
@@ -147,7 +166,7 @@ struct InstallView: View {
         .tint(LauncherPalette.cream)
     }
 
-    private var installJob: JobSession? { (model.session?.kind == .install || model.session?.kind == .installRemove) ? model.session : nil }
+    private var installJob: JobSession? { (model.session?.kind == .install || model.session?.kind == .installRemove || model.session?.kind == .installRestore) ? model.session : nil }
     private func text(_ id: String) -> String { BackendText.launcherText(id, language: loc.lang == .zh ? "zh-Hans" : "en") }
 
     private var doneContent: some View {

@@ -3,6 +3,7 @@
 #include "native.h"
 #include "dev_facilities.h"
 #include "../include/s2a_hud.h"
+#include "../include/s2a_ui_text.h"   // 停住提示文字：中文原宏 + _EN，S2A_UI 按界面语言取（#316）
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -18,6 +19,9 @@ void s2a_wg_frame(int fps);   // thread.c 帧间隔工作组（缺省关，S2A_W
 static _Atomic int g_hud_on = -1;
 int s2a_hud_on(void) { int v = atomic_load(&g_hud_on); if (v < 0) { const char *e = getenv("S2A_HUD"); v = e && !strcmp(e, "1"); atomic_store(&g_hud_on, v); } return v; }
 _Atomic uint64_t g_s2a_hud_ft[2048], g_s2a_hud_fn;
+// 简版性能浮层（11-09 B 方案，齿轮菜单「性能浮层」，玩家随时开关）：开着时同样记上屏时间戳，跨局保留（界面按偏好设）
+static _Atomic int g_hud_brief;
+void s2a_hud_brief_set(int on) { atomic_store(&g_hud_brief, on ? 1 : 0); }
 void s2a_hud_frame(void) {
     uint64_t n = atomic_load_explicit(&g_s2a_hud_fn, memory_order_relaxed);
     atomic_store_explicit(&g_s2a_hud_ft[n % 2048], now_ns(), memory_order_relaxed);
@@ -54,7 +58,7 @@ static void resume_frame(uint64_t f) {
 }
 void s2a_dguard_frame(uint64_t now); void s2a_dguard_evidence(const char *why, int stall);
 void s2a_load_first_frame(uint64_t now);   // loadprog.c：首帧上屏 → 加载页收起、全部编完的记下已完整预热   // dguard.c：直连安全网（首帧后前台满 60 秒清零连续失败）；没 arm 时一次原子读
-void s2a_frame_presented(void) { s2a_wg_frame(atomic_load_explicit(&g_nominal_fps, memory_order_relaxed)); s2a_dguard_frame(now_ns()); if (s2a_hud_on()) s2a_hud_frame(); uint64_t f = atomic_fetch_add_explicit(&g_frames, 1, memory_order_relaxed);
+void s2a_frame_presented(void) { s2a_wg_frame(atomic_load_explicit(&g_nominal_fps, memory_order_relaxed)); s2a_dguard_frame(now_ns()); if (s2a_hud_on() || atomic_load_explicit(&g_hud_brief, memory_order_relaxed)) s2a_hud_frame(); uint64_t f = atomic_fetch_add_explicit(&g_frames, 1, memory_order_relaxed);
     resume_frame(f);
     if (!f) { BOOT_MARK("nnMain → 首帧上屏（游戏自身加载 + 渲染器首帧）"); s2a_load_first_frame(now_ns()); }
     if (!f && stall_s() > 0 && !g_stall_started && s2a_dev_on()) { atomic_store(&g_stall_stop, 0); if (!pthread_create(&g_stall_thread, NULL, stall_watch, NULL)) g_stall_started = 1; }
@@ -112,6 +116,9 @@ int s2a_ap_stall_notice_after(int idle, int n, int lim, int s, int ns, int quiet
     return idle >= nt;
 }
 int s2a_ap_stall_notice_due(int idle, int n, int lim) { return s2a_ap_stall_notice_after(idle, n, lim, stall_exit_s(), stall_notice_s(), stall_notice_idle_s()); }
+__attribute__((weak)) int s2a_ui_zh(void) { return 1; }   // 界面语言（s2a_ui_text.h）：iOS ios/app.m、Mac macos/front_mac.m 强定义；别的平台 / 只链本文件的单测按中文
+// 屏上那句人话（第一段当提示页标题）：会退出 → 叫玩家划掉重开；不退出 → 可能还在加载。中英两份在 s2a_ui_text.h，按界面语言取
+static const char *stall_note(void) { return stall_exit_s() > 0 ? S2A_UI(S2A_UI_STALL_EXIT) : S2A_UI(S2A_UI_STALL_WAIT); }
 static void (*g_notice_hook)(const char *);
 void s2a_ap_set_notice_hook(void (*fn)(const char *)) { g_notice_hook = fn; }
 static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
@@ -138,8 +145,7 @@ static void *stall_watch(void *a) { s2a_thread_name("s2a-ap-stall");
             noticed = 1;
             // 停了多久按 idle 算（每格 250 ms），不是打现场的阈值秒数
             // 屏上只给人话（第几帧、停了几秒在下一行日志里，11-02 维护者：内部读数不上屏）；第一段当提示页标题
-            if (stall_exit_s() > 0) snprintf(shown, sizeof shown, "游戏画面卡住了\n\n请从后台划掉本 App，再重新打开。还是卡住的话，四指长按屏幕打开设置，导出诊断包发给我们。");
-            else snprintf(shown, sizeof shown, "游戏画面卡住了\n\n可能还在加载，可以再等一会儿；一直不动的话，请从后台划掉本 App，再重新打开。");
+            snprintf(shown, sizeof shown, "%s", stall_note());
             LOG("出图停住看门：停在第 %llu 帧已 %d 秒，屏幕上提示玩家（S2A_STALL_EXIT_S=%d%s）", (unsigned long long)f, idle / 4, stall_exit_s(), stall_exit_s() > 0 ? " 秒后退出" : "，不退出，帧走了就收掉提示");
             if (g_notice_hook) g_notice_hook(shown); else if (msg) msg(shown);
         }

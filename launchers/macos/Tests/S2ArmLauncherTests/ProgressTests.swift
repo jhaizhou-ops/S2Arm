@@ -43,7 +43,7 @@ import XCTest
         let diagnostic=store.nativeDiagnostic(code:"worker_start_failed",summary:"failed",detail:root.path)
         let task=TaskRecord(id:"failed",operation:"build",state:"failed",diagnostics:[diagnostic])
         store.persistTask(task)
-        let saved=try JSONDecoder().decode(TaskRecord.self,from:Data(contentsOf:root.appendingPathComponent("jobs/failed.json")))
+        let saved=try JSONDecoder().decode(TaskRecord.self,from:Data(contentsOf:root.appendingPathComponent("logs/jobs/failed.json")))
         XCTAssertEqual(saved.diagnostics,[diagnostic]);XCTAssertFalse(diagnostic.detail.contains(root.path))
     }
 }

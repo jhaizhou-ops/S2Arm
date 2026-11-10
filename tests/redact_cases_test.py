@@ -27,6 +27,25 @@ def load_cases(path=CASES):
     return rows
 
 
+class PathReasonTests(unittest.TestCase):
+    """路径脱敏保留系统错误原因（11-09 旷野之息 Mac 出包「拷字体失败」前 7 行 cp 报错整行变成 [PRIVATE_PATH]，看不出是没权限还是别的）。
+    期望手写：路径换成占位，末尾「: <系统错误原文>」原样保留；不在原文表里的冒号尾巴照旧算路径的一部分（免得漏出名字）"""
+    def test_keeps_errno_reason(self):
+        cases = [
+            ("cp: /private/var/Game Disk/S2Arm 库/systemdata/fonts/a.bfttf: Operation not permitted", "cp: [PRIVATE_PATH]: Operation not permitted"),
+            ("cp: /private/var/joe/Downloads/字体/a.bfttf: Permission denied", "cp: [PRIVATE_PATH]: Permission denied"),
+            ("cp: /private/var/joe/S2Arm/游戏库/cache/x/systemdata/fonts/nintendo_ext2_003.bfttf: clonefile failed: Cross-device link",
+             "cp: [PRIVATE_PATH]: clonefile failed: Cross-device link"),   # #290 原文形态（旧 macOS cp -c 跨卷不退回普通复制）
+            ("cp: /private/var/joe/a.bfttf: /private/var/X/b.bfttf: No space left on device", "cp: [PRIVATE_PATH]: No space left on device"),
+            ("cp: /private/var/joe/Library/x: No such file or directory", "cp: [PRIVATE_PATH]: No such file or directory"),
+            ("cp: /private/var/joe/My Game: Director Cut/a.xci", "cp: [PRIVATE_PATH]"),
+            ("cp: /private/var/joe/Secret Name: Operation not permitted here", "cp: [PRIVATE_PATH]"),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(redact.redact_text(original, key_values=()), expected)
+
+
 class RedactCasesTests(unittest.TestCase):
     def test_shared_cases(self):
         coverage = defaultdict(list)

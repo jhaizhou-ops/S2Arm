@@ -6,14 +6,16 @@
 2. 覆盖：issue #187 要求的状态机六态 + 失败 / 恢复分支必须在；
 3. 唯一来源：errors 的码集合 == pack/jobs/errors.py 的 RECOVERY 键集合（外加 artifact_invalid），
    「下一步」只写来源指针，不写第二份文案；
-4. 一致性：prompts 的横幅文案与 runtime/include/s2a_direct_prompt.h 的宏**逐字**相同；条目带 en 时头文件要有 <宏>_EN 且与 en 逐字相同（游戏内中英同屏的文案）；
+4. 一致性：prompts 的横幅文案与 runtime/include/s2a_direct_prompt.h 的宏**逐字**相同；每条都带 en，头文件要有 <宏>_EN 且与 en 逐字相同
+   （宿主按 App 语言取中 / 英，ios/s2a_l10n.h S2APICK，#316）；
 5. 一致性：stage_labels 的键与 pack/contracts/protocol.py 的 STAGES 右值集合相同；
 6. 一致性：出包画面模式两句与 ios/settings.m 逐字相同；Mac 消费共享标签与资源，
    Localizable.json 不再复制共享文本；
 7. 一致性：init_fail_page（iOS 初启失败页）的文案与 runtime/include/s2a_init_fail.h 的宏逐字相同、
    codes 与头文件 S2A_INIT_FAIL_CODES 一一对应（码 id、枚举名、话术归类），每句带中英文且不进 Localizable.json；
+   英文同样落在头文件 <宏>_EN，与 en 逐字相同（同第 4 条）；
 8. 一致性：selfcheck_page（iOS 起局自检不过的提示页）的文案与 runtime/include/s2a_selfcheck_page.h 的宏逐字相同、
-   宏集合一一对应，每句带中英文且不进 Localizable.json。
+   宏集合一一对应，每句带中英文且不进 Localizable.json；英文落在头文件 <宏>_EN，与 en 逐字相同。
 
 所有比对都从源文件读，不在本脚本里手抄字符串。
 
@@ -82,15 +84,40 @@ def load_recovery() -> dict:
     return dict(module.RECOVERY)
 
 
+IOS_STRINGS = {lang: ROOT / "ios" / "l10n" / f"{lang}.lproj" / "S2ArmHost.strings" for lang in ("zh-Hans", "en")}
+
+
+def ios_strings(lang: str) -> dict:
+    """iOS 宿主字符串表（ios/l10n/<语言>.lproj/S2ArmHost.strings，#316）：键 → 值"""
+    text = IOS_STRINGS[lang].read_text(encoding="utf-8")
+    return {k: v.replace('\\"', '"') for k, v in re.findall(r'^"([^"]+)"\s*=\s*"((?:[^"\\]|\\.)*)";', text, re.M)}
+
+
 def ios_pack_labels(src: str) -> dict:
-    """从 s2a_ios_publish_bundle_info 里按分支结构取两句，不做字面匹配。"""
+    """从 s2a_ios_publish_bundle_info 里按分支结构取两句的本地化键（S2AL，#316），再到中英两张字符串表取值，不做字面匹配。"""
     body = re.search(r"void\s+s2a_ios_publish_bundle_info\s*\([^)]*\)\s*\{(.*?)\n\}", src, re.S)
     assert body is not None, "ios/settings.m 里找不到 s2a_ios_publish_bundle_info"
     fn = body.group(1)
-    direct = re.search(r'isEqual:@"direct"\]\)\s*text\s*=\s*@"([^"]*)"', fn)
-    unknown = re.search(r'\belse\s+text\s*=\s*@"([^"]*)"', fn)
+    direct = re.search(r'isEqual:@"direct"\]\)\s*text\s*=\s*S2AL\(@"([^"]+)"\)', fn)
+    unknown = re.search(r'\belse\s+text\s*=\s*S2AL\(@"([^"]+)"\)', fn)
     assert direct and unknown, "settings.m 出包画面模式的分支结构变了，自检要跟着改"
-    return {"direct": direct.group(1), "unknown": unknown.group(1)}
+    tables = {lang: ios_strings(lang) for lang in IOS_STRINGS}
+    return {lid: {lang: tables[lang].get(m.group(1)) for lang in tables} for lid, m in (("direct", direct), ("unknown", unknown))}
+
+
+def c_macros(text: str, prefix: str) -> dict:
+    """头文件里 #define <prefix>… "字面" 的宏 → 字面（按 C 转义还原 \" 与 \\，英文句里有引号）。"""
+    found = re.findall(r'#define\s+(' + prefix + r'[A-Z0-9_]+)\s+"((?:[^"\\]|\\.)*)"', text)
+    return {name: re.sub(r'\\(.)', r'\1', value) for name, value in found}
+
+
+def check_en_macros(section: str, item: dict, macros: dict, names: set) -> None:
+    """规格条目的 en 与头文件 <宏>_EN 逐字一致（宿主按 App 语言选中英的实现来源）；names 收集规格覆盖到的宏名"""
+    en_name = item["macro"] + "_EN"
+    names.add(en_name)
+    ok(bool(str(item.get("en", "")).strip()), f"{section} {item.get('id')}: 缺英文")
+    ok(macros.get(en_name) == item.get("en"),
+       f"{section}: {en_name} 与规格 en 不一致（或头文件缺）\n  头文件: {macros.get(en_name)}\n  规格:   {item.get('en')}")
 
 
 def main() -> int:
@@ -228,12 +255,14 @@ def main() -> int:
        f"pack_graphics_mode.values 与 PackMode.swift 的取值不一致：{sorted(swift_values)}")
     ok(set(ios_labels) == set(pack["labels"]), "pack_graphics_mode.labels 的键应是 direct / unknown")
     for lid, label in pack["labels"].items():
-        ok(ios_labels.get(lid) == label["zh-Hans"],
-           f"pack_graphics_mode.{lid} 与 settings.m 不一致\n  settings.m: {ios_labels.get(lid)}\n  规格:       {label['zh-Hans']}")
+        for lang in ("zh-Hans", "en"):   # iOS 取自字符串表（#316）：中英两种都要和规格逐字一致
+            got = (ios_labels.get(lid) or {}).get(lang)
+            ok(got == label[lang],
+               f"pack_graphics_mode.{lid}（{lang}）与 iOS 字符串表不一致\n  S2ArmHost.strings: {got}\n  规格:              {label[lang]}")
 
     # ---------- 横幅文案：C 头文件逐字 ----------
     header = HEADER.read_text(encoding="utf-8")
-    macros = dict(re.findall(r'#define\s+(S2A_DPROMPT_[A-Z0-9_]+)\s+"([^"]*)"', header))
+    macros = c_macros(header, "S2A_DPROMPT_")
     spec_macros = set()
     for item in spec["prompts"]["items"]:
         macro = item["macro"]
@@ -242,10 +271,7 @@ def main() -> int:
         if macro in macros:
             ok(macros[macro] == item["zh-Hans"],
                f"prompts: {macro} 与头文件不一致\n  头文件: {macros[macro]}\n  规格:   {item['zh-Hans']}")
-        if "en" in item:   # 游戏内中英同屏的文案：英文宏 <宏>_EN 是实现来源，与规格 en 逐字一致
-            en = macro + "_EN"
-            spec_macros.add(en)
-            ok(macros.get(en) == item["en"], f"prompts: {en} 与规格 en 不一致（或头文件缺）\n  头文件: {macros.get(en)}\n  规格:   {item['en']}")
+        check_en_macros("prompts", item, macros, spec_macros)   # 每条都核：英文宏 <宏>_EN 是实现来源
     ok(spec_macros == set(macros),
        "prompts.items 与头文件的宏不是一一对应\n  只在头文件: %s\n  只在规格: %s"
        % (sorted(set(macros) - spec_macros), sorted(spec_macros - set(macros))))
@@ -254,7 +280,7 @@ def main() -> int:
     ifp = spec["init_fail_page"]
     ok(ifp.get("source") == "runtime/include/s2a_init_fail.h", "init_fail_page.source 应指向 runtime/include/s2a_init_fail.h")
     ih = INIT_FAIL_H.read_text(encoding="utf-8")
-    imacros = dict(re.findall(r'#define\s+(S2A_INIT_FAIL_[A-Z0-9_]+)\s+"([^"]*)"', ih))
+    imacros = c_macros(ih, "S2A_INIT_FAIL_")
     by_id = {}
     for item in ifp["items"]:
         macro = item["macro"]
@@ -263,9 +289,10 @@ def main() -> int:
         if macro in imacros:
             ok(imacros[macro] == item["zh-Hans"],
                f"init_fail_page: {macro} 与头文件不一致\n  头文件: {imacros[macro]}\n  规格:   {item['zh-Hans']}")
-        ok(bool(item.get("en", "").strip()), f"init_fail_page {item['id']}: 缺英文")
         ok(item["zh-Hans"] not in localizable, f"Localizable.json 重复共享文本：{item['zh-Hans']}")
     spec_imacros = {i["macro"] for i in ifp["items"]}
+    for item in ifp["items"]:
+        check_en_macros("init_fail_page", item, imacros, spec_imacros)
     ok(spec_imacros == set(imacros),
        "init_fail_page.items 与头文件的文案宏不是一一对应\n  只在头文件: %s\n  只在规格: %s"
        % (sorted(set(imacros) - spec_imacros), sorted(spec_imacros - set(imacros))))
@@ -289,7 +316,7 @@ def main() -> int:
     # ---------- 起局自检提示页：C 头文件逐字、宏集合一一对应 ----------
     scp = spec["selfcheck_page"]
     ok(scp.get("source") == "runtime/include/s2a_selfcheck_page.h", "selfcheck_page.source 应指向 runtime/include/s2a_selfcheck_page.h")
-    smacros = dict(re.findall(r'#define\s+(S2A_SELFCHECK_[A-Z0-9_]+)\s+"([^"]*)"', SELFCHECK_H.read_text(encoding="utf-8")))
+    smacros = c_macros(SELFCHECK_H.read_text(encoding="utf-8"), "S2A_SELFCHECK_")
     ok(len(smacros) > 0, "s2a_selfcheck_page.h 里找不到 S2A_SELFCHECK_* 文案宏")
     for item in scp["items"]:
         macro = item["macro"]
@@ -297,9 +324,10 @@ def main() -> int:
         if macro in smacros:
             ok(smacros[macro] == item["zh-Hans"],
                f"selfcheck_page: {macro} 与头文件不一致\n  头文件: {smacros[macro]}\n  规格:   {item['zh-Hans']}")
-        ok(bool(item.get("en", "").strip()), f"selfcheck_page {item['id']}: 缺英文")
         ok(item["zh-Hans"] not in localizable, f"Localizable.json 重复共享文本：{item['zh-Hans']}")
     spec_smacros = {i["macro"] for i in scp["items"]}
+    for item in scp["items"]:
+        check_en_macros("selfcheck_page", item, smacros, spec_smacros)
     ok(spec_smacros == set(smacros),
        "selfcheck_page.items 与头文件的文案宏不是一一对应\n  只在头文件: %s\n  只在规格: %s"
        % (sorted(set(smacros) - spec_smacros), sorted(spec_smacros - set(smacros))))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """vk_shaders.py 合库走响应文件（11-06 Windows 出包机银河 2 第二包：3795 个 .air 拼在 metallib 命令行上超 Windows 32767 字符，WinError 206）：python3 tests/vk_shaders_rsp_test.py
 期望（手写）：5000 个 .air（每个路径约 80 字符，直拼约 40 万字符）→ metallib 命令行只带「@<响应文件>」、总长 < 2000 字符；响应文件 5000 行、
-  每行一个带引号的路径、顺序同输入；调用后响应文件删掉；Windows 口径（os.name 置 nt）下路径里的反斜杠换成正斜杠。外部命令一律替身，不调 metal / metallib"""
+  每行一个带引号的路径、顺序同输入；调用后响应文件删掉；Windows 口径（os.name 置 nt）下清单写相对临时目录的路径、工作目录设成临时目录（11-09 中文用户名）。外部命令一律替身，不调 metal / metallib"""
 import os, sys, tempfile
 from pathlib import Path
 from unittest import mock
@@ -17,18 +17,24 @@ for nt in (False, True):
         msls = [os.path.join(t, f'shader_{i:05d}_' + 'x' * 50 + '.metal') for i in range(5000)]
         seen = {}
         def run(cmd, **kw):
+            cwd = kw.get('cwd') or ''
             if 'metallib' in os.path.basename(str(cmd[0])) or 'metallib' in cmd:
-                at = [c for c in cmd if str(c).startswith('@')]
-                seen['len'] = len(' '.join(map(str, cmd))); seen['rsp'] = open(at[0][1:], encoding='utf-8').read().splitlines() if at else None; seen['path'] = at[0][1:] if at else None
+                at = [os.path.join(cwd, str(c)[1:]) for c in cmd if str(c).startswith('@')]
+                seen['len'] = len(' '.join(map(str, cmd))); seen['rsp'] = open(at[0], encoding='utf-8').read().splitlines() if at else None; seen['path'] = at[0] if at else None
+                seen['cwd'] = cwd
+                open(os.path.join(cwd, str(cmd[cmd.index('-o') + 1])), 'wb').write(b'lib')   # 替身产出库文件（之后挪进 out）
             class P: returncode = 0; stderr = ''
             return P()
         sep = '\\' if nt else os.sep
         with mock.patch.object(vs.subprocess, 'run', run), mock.patch.object(vs.os, 'name', 'nt' if nt else os.name), mock.patch.object(vs.os, 'sep', sep):
-            vs.metallib(msls, os.path.join(t, 'out'), 'iphoneos', [])
-        want = ['"' + (m[:-6] + '.iphoneos.air').replace(sep, '/' if nt else sep) + '"' for m in msls]
+            lib = vs.metallib(msls, os.path.join(t, 'out'), 'iphoneos', [], t)
+        # Windows 口径：清单里写相对工作目录（= 临时目录 t）的路径（编译器按 ANSI 开文件、会拆空格，见 spirv_msl.metal_run）
+        want = ['"' + (os.path.basename(m[:-6]) + '.iphoneos.air' if nt else m[:-6] + '.iphoneos.air') + '"' for m in msls]
         tag = 'Windows 口径' if nt else '本机口径'
         chk(f'{tag}：metallib 命令行只带响应文件、长度 < 2000', (True, True), (seen.get('rsp') is not None, seen.get('len', 10**9) < 2000))
         chk(f'{tag}：响应文件 5000 行、带引号、顺序同输入', want, seen.get('rsp'))
         chk(f'{tag}：调用后响应文件已删', False, bool(seen.get('path')) and os.path.exists(seen['path']))
+        chk(f'{tag}：库挪进输出目录', (os.path.join(t, 'out', 'vk_shaders.metallib'), True), (lib, os.path.isfile(lib)))
+        if nt: chk(f'{tag}：metallib 的工作目录 = 临时目录', t, seen.get('cwd'))
 print(f'{"✓" if not bad else "✗"} vk_shaders_rsp：{bad} 不通')
 sys.exit(1 if bad else 0)

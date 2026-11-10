@@ -73,7 +73,8 @@ int main(int argc, char **argv) {
     check(count_in(source, "S2A_SYSTEM_RECHECK_MS") >= 2, "controller.m 用统一的复查延迟常量");
     check(strstr(source, "从快照消失") != NULL && strstr(source, "确认断开") != NULL && strstr(source, "已恢复") != NULL,
           "断开日志三态齐全（延迟确认中 / 确认断开 / 已恢复）");
-    check(count_in(source, "dispatch_after(") == 1, "延迟复查只有一个 dispatch_after 入口");
+    // 只数复查用的 dispatch_after（按复查延迟常量认）：别的定时用途（如菜单切震动档位的 0.3 秒试震停止）不是复查入口（11-09）
+    check(count_in(source, "dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(S2A_SYSTEM_RECHECK_MS") == 1, "延迟复查只有一个 dispatch_after 入口");
 
     // ---- 接线：「-」/「+」不再被系统手势吃掉（Minus 延迟的真根因，与本 PR 的判活健壮性独立）----
     // 「-」用 Disabled：手势识别器完全不跑、输入直接给 app。AlwaysReceive 已废弃且语义是「同时给手势识别器」

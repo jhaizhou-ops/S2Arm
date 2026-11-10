@@ -11,9 +11,11 @@ targets:
       - ios/vpad.m
       - ios/vpad_layout.m
       - ios/vpad_settings.m
+      - ios/vpad_cheats.m
       - ios/app_settings.m
       - ios/cpatch_settings.m
       - ios/cpatch_model.m
+      - ios/l10n   # 宿主界面字符串表（<语言>.lproj/S2ArmHost.strings，ios/s2a_l10n.h S2AL，#316）
       - ios/settings.m
       - ios/controller.m
       - ios/phone_motion.m

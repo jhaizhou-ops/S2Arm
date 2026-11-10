@@ -64,6 +64,12 @@
       "regex": "总指挥|天眼(?:（Windows 出包机）|\\(Windows 出包机\\))?"
     },
     {
+      "id": "internal_line_name",
+      "category": "internal_name",
+      "messages_only": true,
+      "regex": "(?:主线线|合入运维线|运维线|启动器线|出包修复线|质量线|新功能线|迁仓线|单壳线|Switch ?2 ?线|满屏补丁线|满屏线|普查线|帧率能耗线|能耗线|一次成功线|画质性能线|性能线|体验线|合入线|列车线|众包线|直连线|出包速度线|卡顿线|Windows ?出包线)(?![程性路索条框])"
+    },
+    {
       "id": "internal_device_word",
       "category": "internal_name",
       "regex": "测试机"
@@ -82,6 +88,32 @@
       "id": "private_host_air",
       "category": "internal_name",
       "regex": "(?<![A-Za-z0-9_./-])(?<!iPad )(?<!MacBook )(?<!Kirby )Air(?![A-Za-z0-9_-])|(?<![A-Za-z0-9_])mac[-_]air(?![A-Za-z0-9_])"
+    },
+    {
+      "id": "compliance_readme_decrypt_tools",
+      "category": "compliance_copy",
+      "regex": "(?i)libhac|hactool",
+      "paths": [
+        "README.md",
+        "README.*.md",
+        "docs/site/index.html"
+      ],
+      "reason_note": "11-09 维护者批合规文案：README / 下载页不单列解密相关组件；许可声明留在 NOTICE / THIRD_PARTY_LICENSES"
+    },
+    {
+      "id": "compliance_first_party_titles",
+      "category": "compliance_copy",
+      "regex": "(?i)(?:塞尔达|旷野之息|王国之泪|时之笛|马力欧|马里奥|马车8|动森|动物森友会|宝可梦|斯普拉遁|喷射战士|异度神剑|火焰纹章|星之卡比|密特罗德|银河战士|皮克敏|大乱斗|大金刚|脑锻炼|健身环|奇诺比奥|奥德赛|Zelda|Mario|Animal Crossing|Pok[eé]mon|Pokopia|Splatoon|Xenoblade|Fire Emblem|Kirby|Metroid|Pikmin|Smash Bros|Donkey Kong|Ring Fit|Captain Toad|Ocarina of Time|Tears of the Kingdom|Breath of the Wild|\\bacnh\\b|\\bbotw\\b|\\btotk\\b|\\bmk8d?\\b|\\bsmg2\\b|\\bxc3\\b)|(?-i:\\bARMS\\b)",
+      "paths": [
+        "README.md",
+        "README.*.md",
+        "docs/site/*",
+        "docs/validation/*",
+        "docs/兼容性清单.md",
+        "docs/名单_*",
+        "docs/名单_*/*"
+      ],
+      "reason_note": "11-09 维护者批统一规则：公开仓不出现任天堂第一方游戏名；第三方只在说明性场合保留。先管给人看的文档与名单，代码注释另议；pack/display_names.tsv 第一列是与 pack/oneclick/titles.tsv 对上的内部键，不在本规则内（显示名已是程序号）"
     }
   ],
   "metadata_rules": [
@@ -487,10 +519,10 @@
       "shell/Sources/ShellUI/Resources/*.ttf",
       "runtime/tests/cpatch_loader/module.nso",
       "tests/fixtures/shader_split_reuse/fixture.nso",
-      "tests/fixtures/merge_reconcile/*.bundle",
       "tests/fixtures/iml_signed/*",
       "android/tests/replay_fixture/samples/*.rfx",
       "services/S2A.Services.Tests/data/*.ivf",
+      "tests/data/vp9_synth/*.ivf",
       "translator/dmsh_xlate_bin/*.dll",
       "translator/dmsh_xlate_bin/*.pdb",
       "translator/dmsh_xlate_bin/dmsh_xlate",

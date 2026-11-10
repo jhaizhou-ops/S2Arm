@@ -8,6 +8,8 @@ struct NSPPackage: Codable, Identifiable {
     var id: String { sha256 + ":" + titleId + ":" + String(version) }
     var titleId: String; var baseId: String; var version: Int; var type: String; var name: String; var display: String
     var path: String; var size: Int64; var sha256: String; var builds: [String:String]
+    /// 读取器记的本项内容字节（同一原件里装了多项时 size 是整个原件，见 Game.ownBytes）；老记录没有
+    var contentBytes: Int64?
     var kindName: String { ["base":L("本体"),"update":L("更新"),"dlc":"DLC"][type] ?? L("未知内容") }
 }
 struct Game: Codable, Identifiable {
@@ -16,6 +18,13 @@ struct Game: Codable, Identifiable {
     var requirementDiagnostics: [TaskDiagnostic]?
     var compatibilityName: String { ["startup":L("仅验证启动"),"verified":L("Mac 已验证"),"experimental":L("实验性"),"unsupported":L("暂不支持")][compatibility ?? "unsupported"] ?? L("实验性") }
     var buildable: Bool { compatibility != "unsupported" && (missing ?? []).isEmpty }
+    /// 这一项自己的字节：同一个原件里装了多项（合集 XCI / NUP 容器）时用本项内容字节，否则用原件大小（同 pack/jobs/report.py own_bytes；#141）
+    func ownBytes(_ p: NSPPackage) -> Int64 {
+        let shared = !p.sha256.isEmpty && packages.filter { $0.sha256 == p.sha256 }.count > 1
+        return shared ? (p.contentBytes.flatMap { $0 > 0 ? $0 : nil } ?? p.size) : p.size
+    }
+    /// 原包合计：同一个原件里的多项只算一次
+    var sourceBytes: Int64 { Dictionary(grouping:packages, by:\.sha256).values.compactMap(\.first).reduce(Int64(0)) { $0 + $1.size } }
 }
 /// 里程碑与它的时间推算在适配层（S2ArmAppleAdapter Milestones.swift），新旧两个前端共用一份
 typealias Milestone = S2ArmAppleAdapter.Milestone

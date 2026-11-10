@@ -49,6 +49,9 @@ time.sleep(60)
 """
 
 
+NO_FLOOR = ("--per-operation", 0, "--failed-per-operation", 0)   # 只测总量 / 时间上限（每类操作保底另见 test_layout_p3.PruneJobsTests）
+
+
 class ControlPlaneTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="s2arm job ctl ")
@@ -72,6 +75,16 @@ class ControlPlaneTests(unittest.TestCase):
         self.tmp.cleanup()
 
     # ---- helpers ----
+    def jobs_dir(self, task=None):
+        """任务记录目录（游戏库结构 P3）：任务起跑时库已建好（有库标识）→ <库>/logs/jobs，否则 <私有目录>/logs/jobs。
+        setup 起跑时库还没建好，它的记录留在私有目录，等下一个作业收进库：给了 task 就看它在哪一边"""
+        built = self.library / "logs" / "jobs"
+        fallback = self.private / "logs" / "jobs"
+        name = (task or self.task) + ".json"
+        if (built / name).exists() or not (fallback / name).exists() and (self.library / ".s2arm-library.json").is_file():
+            return built
+        return fallback
+
     def request(self, task=None, **extra):
         body = dict(schema=1, taskId=task or self.task, operation="setup", engineDir=str(ROOT),
                     privateRoot=str(self.private), library=str(self.library), libraryId="")   # 不传 developerDir：走缺省（装着的最新 Xcode）
@@ -86,24 +99,24 @@ class ControlPlaneTests(unittest.TestCase):
         return result
 
     def journal(self, task=None):
-        return json.loads((self.private / "jobs" / ((task or self.task) + ".json")).read_text())
+        return json.loads((self.jobs_dir(task) / ((task or self.task) + ".json")).read_text())
 
     def wait_state(self, state, task=None, timeout=10):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            path = self.private / "jobs" / ((task or self.task) + ".json")
+            path = self.jobs_dir(task) / ((task or self.task) + ".json")
             if path.exists():
                 record = json.loads(path.read_text())
                 if record.get("state") == state:
                     return record
             time.sleep(0.05)
-        self.fail(f"任务没有在 {timeout} 秒内进入 {state}：{self.journal(task) if (self.private / 'jobs' / ((task or self.task) + '.json')).exists() else '无记录'}")
+        self.fail(f"任务没有在 {timeout} 秒内进入 {state}：{self.journal(task) if (self.jobs_dir(task) / ((task or self.task) + '.json')).exists() else '无记录'}")
 
     def wait_attempt(self, attempt, task=None, timeout=10):
         """同一个 task 再被拉起来时，journal 里的 attemptNo 要变成第 N 次——不能只看 state=running（上一条被杀记录本来就是 running）。"""
         deadline = time.time() + timeout
         while time.time() < deadline:
-            path = self.private / "jobs" / ((task or self.task) + ".json")
+            path = self.jobs_dir(task) / ((task or self.task) + ".json")
             if path.exists() and json.loads(path.read_text()).get("attemptNo") == attempt:
                 return
             time.sleep(0.05)
@@ -124,7 +137,7 @@ class ControlPlaneTests(unittest.TestCase):
     def wait_stage(self, stage, task=None, timeout=10):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            path = self.private / "jobs" / ((task or self.task) + ".json")
+            path = self.jobs_dir(task) / ((task or self.task) + ".json")
             if path.exists() and json.loads(path.read_text()).get("stage") == stage:
                 return
             time.sleep(0.05)
@@ -202,7 +215,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_cancel_refuses_a_pid_that_is_no_longer_that_worker(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)
-        path = self.private / "jobs" / (self.task + ".json")
+        path = self.jobs_dir() / (self.task + ".json")
         record = json.loads(path.read_text())
         record.update(state="running", pid=os.getpid(), pidStart="Thu Jan  1 00:00:00 1970")
         record.pop("ended", None)
@@ -214,11 +227,11 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_cancel_on_a_finished_task_changes_nothing(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)
-        before = (self.private / "jobs" / (self.task + ".json")).read_text()
+        before = (self.jobs_dir() / (self.task + ".json")).read_text()
         result = self.cli("cancel", "--private-root", self.private, "--task", self.task)
         self.assertEqual(result.returncode, 2)
         self.assertFalse(json.loads(result.stdout)["cancelled"])
-        self.assertEqual((self.private / "jobs" / (self.task + ".json")).read_text(), before)
+        self.assertEqual((self.jobs_dir() / (self.task + ".json")).read_text(), before)
 
     def test_resume_reruns_a_killed_task_and_counts_the_attempt(self):
         child = self.start_worker(operation="setup")
@@ -234,11 +247,11 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_resume_refuses_a_finished_task_without_force(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)
-        before = (self.private / "jobs" / (self.task + ".json")).read_text()
+        before = (self.jobs_dir() / (self.task + ".json")).read_text()
         result = self.cli("resume", "--private-root", self.private, "--task", self.task)
         self.assertEqual(result.returncode, 2)
         self.assertFalse(json.loads(result.stdout)["resumed"])
-        self.assertEqual((self.private / "jobs" / (self.task + ".json")).read_text(), before)
+        self.assertEqual((self.jobs_dir() / (self.task + ".json")).read_text(), before)
 
     def test_resume_force_reruns_a_finished_task(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)
@@ -248,7 +261,7 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_the_request_is_kept_private_beside_the_journal(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)
-        stored = self.private / "jobs" / (self.task + ".request.json")
+        stored = self.jobs_dir() / (self.task + ".request.json")
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.stat().st_mode & 0o077, 0)
         self.assertEqual(json.loads(stored.read_text())["taskId"], self.task)
@@ -256,7 +269,7 @@ class ControlPlaneTests(unittest.TestCase):
     # ---- job store pruning ----
     def finish_task(self, name, state="completed", age=0):
         """A finished job record as the worker leaves it, aged on disk."""
-        jobs = self.private / "jobs"
+        jobs = self.jobs_dir()
         jobs.mkdir(parents=True, exist_ok=True)
         for suffix, body in ((".json", json.dumps(dict(schema=1, id=name, state=state, ended=1.0))),
                              (".request.json", "{}"),
@@ -270,27 +283,27 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_prune_drops_old_finished_jobs_and_keeps_the_newest(self):
         for index in range(5):
-            self.finish_task(f"task-{index}", age=30 * 86400 - index)   # all older than 14 days
-        result = self.cli("prune", "--private-root", self.private, "--keep-count", 2, "--keep-days", 14)
+            self.finish_task(f"task-{index}", age=3600 - index)   # all inside 14 days: only the count cap applies
+        result = self.cli("prune", "--private-root", self.private, "--keep-count", 2, "--keep-days", 14, *NO_FLOOR)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         report = json.loads(result.stdout)
         self.assertEqual(sorted(report["removed"]), ["task-0", "task-1", "task-2"])
         self.assertEqual(report["kept"], 2)
         self.assertGreater(report["bytes"], 0)
-        left = sorted(p.name[:-len(".events.jsonl")] for p in (self.private / "jobs").glob("*.events.jsonl"))
+        left = sorted(p.name[:-len(".events.jsonl")] for p in (self.jobs_dir()).glob("*.events.jsonl"))
         self.assertEqual(left, ["task-3", "task-4"])
-        self.assertFalse((self.private / "jobs" / "task-0.request.json").exists())
+        self.assertFalse((self.jobs_dir() / "task-0.request.json").exists())
 
     def test_prune_never_touches_a_running_job(self):
         self.finish_task("ancient", age=400 * 86400)
         child = self.start_worker(task="running-one")
         try:
-            result = self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1)
+            result = self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1, *NO_FLOOR)
             report = json.loads(result.stdout)
             self.assertEqual(report["removed"], ["ancient"])
             self.assertEqual(report["skippedRunning"], 1)
-            self.assertTrue((self.private / "jobs" / "running-one.json").exists())
-            self.assertTrue((self.private / "jobs" / "running-one.events.jsonl").exists())
+            self.assertTrue((self.jobs_dir() / "running-one.json").exists())
+            self.assertTrue((self.jobs_dir() / "running-one.events.jsonl").exists())
         finally:
             child.kill()
             child.wait(timeout=10)
@@ -298,7 +311,7 @@ class ControlPlaneTests(unittest.TestCase):
     def test_prune_leaves_a_job_that_is_finishing_right_now_alone(self):
         """一个刚写完终态、worker 还没退出的任务不能被清掉：它在 journal 里已经是终态，但文件还在被追加。"""
         import main as worker
-        jobs = self.private / "jobs"
+        jobs = self.jobs_dir()
         path = jobs / (self.task + ".json")
         # 模拟「终态已写、进程还在」：先正常跑完一个任务，再把它的记录年龄改成很老
         self.assertEqual(worker.run_request(self.stub_request(), operation_overrides={"stub": lambda c: {"ok": True}}), 0)
@@ -308,7 +321,7 @@ class ControlPlaneTests(unittest.TestCase):
         # 另一个仍在跑的任务：prune 必须只清前者，不能因为「都是老的」就一起清
         child = self.start_worker(task="still-running")
         try:
-            report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1).stdout)
+            report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1, *NO_FLOOR).stdout)
             self.assertEqual(report["removed"], [self.task])
             self.assertEqual(report["skippedRunning"], 1)
             self.assertTrue((jobs / "still-running.json").exists())
@@ -319,24 +332,24 @@ class ControlPlaneTests(unittest.TestCase):
     def test_prune_keeps_a_recent_finished_job_inside_the_window(self):
         self.finish_task("fresh", age=3600)
         self.finish_task("stale", age=30 * 86400)
-        report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 14).stdout)
+        report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 100, "--keep-days", 14, *NO_FLOOR).stdout)
         self.assertEqual(report["removed"], ["stale"])
-        self.assertTrue((self.private / "jobs" / "fresh.json").exists())
+        self.assertTrue((self.jobs_dir() / "fresh.json").exists())
 
     def test_prune_dry_run_reports_without_deleting(self):
         self.finish_task("stale", age=30 * 86400)
-        report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1, "--dry-run").stdout)
+        report = json.loads(self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1, *NO_FLOOR, "--dry-run").stdout)
         self.assertEqual(report["removed"], ["stale"])
-        self.assertTrue((self.private / "jobs" / "stale.json").exists())
+        self.assertTrue((self.jobs_dir() / "stale.json").exists())
 
     def test_prune_leaves_foreign_files_and_links_alone(self):
         self.finish_task("stale", age=30 * 86400)
-        jobs = self.private / "jobs"
+        jobs = self.jobs_dir()
         (jobs / "notes.txt").write_text("keep me")
         outside = self.root / "outside.json"
         outside.write_text("{}")
         (jobs / "linked.json").symlink_to(outside)
-        self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1)
+        self.cli("prune", "--private-root", self.private, "--keep-count", 0, "--keep-days", 1, *NO_FLOOR)
         self.assertTrue((jobs / "notes.txt").is_file())
         self.assertTrue((jobs / "linked.json").is_symlink())
         self.assertTrue(outside.is_file())
@@ -358,7 +371,7 @@ class ControlPlaneTests(unittest.TestCase):
         with patch("os.fsync", side_effect=OSError(errno.ENOSPC, "No space left on device")):
             code = worker.run_request(request, operation_overrides={"stub": lambda c: {"ok": True}})
         self.assertEqual(code, 1, "记录写不进磁盘时仍然报了成功")
-        record = self.private / "jobs" / (self.task + ".json")
+        record = self.jobs_dir() / (self.task + ".json")
         if record.exists():   # 连首条记录都没写进去时文件就该不存在；写进去了就绝不许是 completed
             self.assertNotEqual(json.loads(record.read_text()).get("state"), "completed", "磁盘没写进去，记录却写着完成")
 
@@ -366,7 +379,7 @@ class ControlPlaneTests(unittest.TestCase):
         import main as worker
         code = worker.run_request(self.stub_request(), operation_overrides={"stub": lambda c: {"ok": True}})
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads((self.private / "jobs" / (self.task + ".json")).read_text())["state"], "completed")
+        self.assertEqual(json.loads((self.jobs_dir() / (self.task + ".json")).read_text())["state"], "completed")
 
     def test_a_stage_that_cannot_write_its_events_fails_with_a_named_code(self):
         import errno
@@ -384,7 +397,7 @@ class ControlPlaneTests(unittest.TestCase):
         import main as worker
         code = worker.run_request(self.stub_request(), operation_overrides={"stub": lambda c: (c.begin("导出 1/3"), c.begin("导出 2/3"), {})[-1]})
         self.assertEqual(code, 0)
-        record = json.loads((self.private / "jobs" / (self.task + ".json")).read_text())
+        record = json.loads((self.jobs_dir() / (self.task + ".json")).read_text())
         self.assertNotIn("completedStages", record, "job 层又记了一份阶段完成状态，会和产物键对不上")
         self.assertEqual(record["attempts"], {"导出 1/3": 1, "导出 2/3": 1})   # 只留展示用的次数
         described = json.loads(self.cli("get", "--private-root", self.private, "--task", self.task).stdout)
@@ -437,7 +450,7 @@ class ControlPlaneTests(unittest.TestCase):
         child = self.start_worker()
         child.send_signal(signal.SIGKILL)
         child.wait(timeout=15)
-        before = (self.private / "jobs" / (self.task + ".json")).read_text()
+        before = (self.jobs_dir() / (self.task + ".json")).read_text()
         result = self.cli("resume", "--private-root", self.private, "--task", self.task, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         plan = json.loads(result.stdout)
@@ -446,7 +459,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(plan["operation"], "build")
         self.assertEqual(plan["stage"], "导出 1/3")
         self.assertEqual(plan["attemptNo"], 2)
-        self.assertEqual((self.private / "jobs" / (self.task + ".json")).read_text(), before, "dry-run 改了 journal")
+        self.assertEqual((self.jobs_dir() / (self.task + ".json")).read_text(), before, "dry-run 改了 journal")
 
     def test_resume_dry_run_on_a_finished_task_says_it_would_not_resume(self):
         self.assertEqual(self.cli("--request", self.request()).returncode, 0)

@@ -18,7 +18,7 @@ import XCTest
 
     func testRecoverAdoptsLiveJobAndInterruptsDeadOne() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("adopt-\(UUID().uuidString)")
-        let jobs = root.appendingPathComponent("jobs"); try FileManager.default.createDirectory(at:jobs, withIntermediateDirectories:true)
+        let jobs = root.appendingPathComponent("logs/jobs"); try FileManager.default.createDirectory(at:jobs, withIntermediateDirectories:true)
         let me = ProcessInfo.processInfo.processIdentifier
         func write(_ id: String, pid: Int, start: String) throws {
             let obj: [String:Any] = ["schema":1,"id":id,"operation":"ipa","gameId":"g","state":"running","started":1.0,"pid":pid,"pidStart":start,"stage":"直连库"]

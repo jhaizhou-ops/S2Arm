@@ -14,8 +14,9 @@ namespace S2A.Services.Tests
     //   前台：① Start 返回时未交（事件未置 / PopOutData 0x480），宿主收到一次弹框（JSON 带模式 / 长短）；② 玩家没答前 1.5 秒仍未交（不自动应答）；
     //         ③ 玩家确定「12345」→ 按最长 3 截成「123」交回（结果 0）；④ 玩家取消 → 结果 1，文本按缺省「Ryujinx」截到最长 4「Ryuj」。
     //   内嵌：① Calc 0x15 当批照旧 0 2 1，宿主弹一次框；② 玩家没答时再来一次 Calc 不重复弹框、不交 DecidedEnter；
-    //         ③ 玩家确定「李雷abc」→ ChangedString（Shown）→ DecidedEnter「李雷ab」（最长 4）→ 回 Initialized；④ 再出现一次键盘后游戏 Finalize → 宿主收框（Cancel 收到同一 id），
-    //         开框标记（输入泵据此静音手柄）落回 false。
+    //         ③ 玩家确定「李雷abc」→ 当即只到 ChangedString（Shown），隔约 150 毫秒才到 DecidedEnter「李雷ab」（最长 4）→ 回 Initialized
+    //           （#279 怪物猎人 崛起：改字和确定同一批到，名字框留空、键盘又弹）；④ 键盘收起后游戏发 UnsetCustomizedDictionaries → 回专门回包 12@1（不是 Default 1@1）；
+    //         ⑤ 再出现一次键盘后游戏 Finalize → 宿主收框（Cancel 收到同一 id），开框标记（输入泵据此静音手柄）落回 false。
     public static unsafe partial class Program
     {
         [SvcCase]
@@ -154,7 +155,7 @@ namespace S2A.Services.Tests
             }
 
             int OutObj(Reply r) => *(int*)r.Data;
-            string first, waiting, answered, finalize;
+            string first, waiting, changed, answered, unset, finalize;
 
             try
             {
@@ -225,8 +226,12 @@ namespace S2A.Services.Tests
                 Push(103, Calc(KeyboardCalcFlags.SetCursorPos));   // 键盘开着时游戏照常每帧 Calc
                 waiting = $"{Drain()}；弹框 {begun.Count}";
                 TextInput.Answer(begun[0], true, "李雷abc");
+                Thread.Sleep(30);
+                changed = Drain();
                 Thread.Sleep(1000);
                 answered = $"{Drain()}；开框 {TextInput.Open}";
+                Push(103, Bytes(0xCu));            // UnsetCustomizedDictionaries
+                unset = Drain();
 
                 Push(103, Calc(KeyboardCalcFlags.Appear | KeyboardCalcFlags.SetCursorPos));   // 再出现一次
                 Drain();
@@ -238,7 +243,7 @@ namespace S2A.Services.Tests
             }
             catch (InvalidOperationException e)
             {
-                first = waiting = answered = finalize = $"应答解析失败：{e.Message}";
+                first = waiting = changed = answered = unset = finalize = $"应答解析失败：{e.Message}";
             }
             finally
             {
@@ -251,7 +256,9 @@ namespace S2A.Services.Tests
 
             Check("内嵌键盘接系统输入框：出现当批照旧、弹框一次、开框标记置上", "0@0 2@3 1@3；弹框 1；开框 True", first);
             Check("内嵌键盘接系统输入框：玩家没答时再来 Calc 只回 Default、不重复弹框", "1@3；弹框 1", waiting);
-            Check("内嵌键盘接系统输入框：确定「李雷abc」先报改字、再按最长 4 交回、回 Initialized、开框标记落下", "2@3 5@4「李雷ab」 1@4 1@1；开框 False", answered);
+            Check("内嵌键盘接系统输入框：确定「李雷abc」当即只报改字（确定不同批）", "2@3", changed);
+            Check("内嵌键盘接系统输入框：改字之后再按最长 4 交回确定、回 Initialized、开框标记落下", "5@4「李雷ab」 1@4 1@1；开框 False", answered);
+            Check("内嵌键盘收起后 UnsetCustomizedDictionaries 回专门回包", "12@1", unset);
             Check("内嵌键盘再出现后游戏 Finalize：宿主收框", "弹框 2；收框 True；开框 False", finalize);
         }
     }

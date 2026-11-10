@@ -10,6 +10,7 @@
 #include "debug_environment.h"
 #include "debug_gate.h"
 #include "capacity_affinity.h"
+#include "adpf_hint.h"
 #include "aaudio_sink.h"
 #include "wsi_qa.h"
 #include "redlog.h"
@@ -141,6 +142,21 @@ Java_org_s2arm_android_NativeBridge_gamePresentCount(JNIEnv *, jclass) {
 #else
     return -1;
 #endif
+}
+
+// B3：直连交换链按渲染目标尺寸出图时的缓冲尺寸；只在游戏运行时（mtl_vk_adapter）里存在。
+extern "C" int s2a_vk_adapter_buffer_geometry(uint32_t *, uint32_t *) __attribute__((weak));
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_s2arm_android_NativeBridge_bufferGeometry(JNIEnv *env, jclass, jintArray out) {
+    int on = 0;
+    uint32_t w = 0, h = 0;
+    if (s2a_vk_adapter_buffer_geometry) on = s2a_vk_adapter_buffer_geometry(&w, &h);
+    if (out && env->GetArrayLength(out) >= 2) {
+        jint dims[2] = {(jint)w, (jint)h};
+        env->SetIntArrayRegion(out, 0, 2, dims);
+    }
+    return on;
 }
 
 #ifndef S2A_ANDROID_GAME_RUNTIME
@@ -457,6 +473,7 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_org_s2arm_android_NativeBridge_offerSurface(JNIEnv *env, jclass, jlong handle, jobject surface) {
     if (!handle) return text(env, "Native host unavailable");
     ANativeWindow *window = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
+    s2a_adpf_set_surface(window != nullptr);
     return text(env, get(handle)->window.offer(window));
 }
 extern "C" JNIEXPORT jstring JNICALL
@@ -1160,6 +1177,7 @@ Java_org_s2arm_android_NativeBridge_stopGame(JNIEnv *env, jclass, jlong handle, 
     AndroidHost *host = get(handle);
     if (!host || host != g_game_host || !host->game_runtime || host->stop_started.exchange(true)) return;
     s2a_capacity_stop();
+    s2a_adpf_stop();
     host->stop_reason = jstring_or(env, why, "game stop requested");
     host->stop_normal.store(normal == JNI_TRUE);
     // 后台冻着的客机先放开（同 Mac display_focus_publish_ex(NO, NO) 的「收尾只报不冻」）：
@@ -1270,6 +1288,7 @@ Java_org_s2arm_android_NativeBridge_setForeground(JNIEnv *, jclass, jlong handle
     AndroidHost *host = get(handle);
     s2a_aaudio_set_foreground(foreground != JNI_FALSE);
     s2a_capacity_foreground(foreground != JNI_FALSE);
+    s2a_adpf_set_foreground(foreground != JNI_FALSE);
     host->window.set_foreground(foreground);
     if (foreground) { s2a_host_sleep_set(0); s2a_host_focus_set(1); }
     else            { s2a_host_focus_set(0); s2a_host_sleep_set(1); }
@@ -1307,6 +1326,7 @@ Java_org_s2arm_android_NativeBridge_setConsoleMode(JNIEnv *, jclass, jlong handl
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_s2arm_android_NativeBridge_releaseSurface(JNIEnv *env, jclass, jlong handle) {
+    if (handle) s2a_adpf_set_surface(0);
     return text(env, handle ? get(handle)->window.release() : "Native host unavailable");
 }
 extern "C" JNIEXPORT void JNICALL

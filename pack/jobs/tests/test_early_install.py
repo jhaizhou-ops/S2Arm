@@ -2,7 +2,8 @@
 # Copyright 2026 S2Arm contributors
 """出包与装机重叠（pack/jobs/early.py + ipa.py installAfter，11-06 出包速度线）：一键出包与装机全换替身，只验编排。
 期望按 early.py 头注手写：
-  ① 旁路信号到 → 早装件（early_pack.sh）→ 签名装 App → 推早期资源包，都在出包结束之前；出包结束 → 装正式包 → 推正式资源包；返回的推送量 = 两次之和；早装件目录收尾删掉
+  ① 旁路信号到 → 早装件（early_pack.sh）→ 签名装 App → 推早期资源包（.early/pack），都在出包结束之前；出包结束 → 交付进 image/ios → 装正式包 → 推正式资源包（image/ios/pack）；
+     返回的推送量 = 两次之和；早装件目录收尾删掉
   ② 早装件出不来（early_pack.sh 退 1）→ 不判整单失败、记一条进度消息、正式安装照装照推
   ③ 出包失败 → 抛出包的失败、不装正式包；没写信号时早装线程直接退出、不调早装件
   ④ 不带 installAfter → 不认设备、不设 S2A_EARLY_READY、不装
@@ -31,7 +32,7 @@ GID = '0100000000000000'
 
 
 class EarlyInstallCase(JobCase):
-    def run_ipa(self, suffix, *, install_after=True, signal=True, oneclick_fail=False, early_rc=0):
+    def run_ipa(self, suffix, *, install_after=True, signal=True, oneclick_fail=False, early_rc=0, push_s=0):
         c = Context(self.request | dict(taskId='early-' + suffix, operation='ipa', gameId=GID) | (dict(installAfter=True) if install_after else {}))
         calls, envs = [], []
         stamp = lambda what, *a: calls.append((time.time(), what) + a)
@@ -56,6 +57,8 @@ class EarlyInstallCase(JobCase):
                 events.write_text(json.dumps(dict(ev='result', ok=False, msg='替身出包失败')) + '\n')
                 raise Failure('替身出包失败', code='tool_exit')
             (out / 'tfake.ipa').write_bytes(b'final'); (out / 'tfake资源包').mkdir(exist_ok=True)
+            (out / 'tfake资源包' / 'manifest.json').write_text(json.dumps(dict(version=2, index_sha256='final01')))   # 收尾 deliver 要资源包清单号
+            root = out / 'roots' / ('t' + GID.lower() + '@现行'); root.mkdir(parents=True, exist_ok=True); (root / 'main.npdm').write_bytes(b'META')   # 现行产物根（存容器件用）
             events.write_text(json.dumps(dict(ev='result', ok=True, ipa=str(out / 'tfake.ipa'), graphics_mode='direct', build_id='x')) + '\n')
 
         real_run = subprocess.run
@@ -72,20 +75,21 @@ class EarlyInstallCase(JobCase):
         def mac_phone(c_, team=None, dev=None, udid=None):
             ph = um.Mock()
             def inst_(ipa, games, steps=True): stamp('装 App', Path(ipa).name)
-            def push_(g, pack): stamp('推资源包', Path(pack).name); seen_udid.append(udid); return (3, 30) if Path(pack).name == 'pack' else (2, 20)
+            def push_(g, pack):   # 早期资源包 .early/pack，正式的 image/ios/pack：记「上级目录/名字」区分
+                name = Path(pack).parent.name + '/' + Path(pack).name; is_early = name == '.early/pack'
+                time.sleep(push_s if is_early else 0); stamp('推资源包', name); seen_udid.append(udid); return (3, 30) if is_early else (2, 20)
             ph.install.side_effect = inst_; ph.push.side_effect = push_
-            ph.udid = udid; ph.bid = install.container_bundle_id('TEAM1')
+            ph.udid = udid; ph.key = udid; ph.bid = install.container_bundle_id('TEAM1')
             ph.info = dict(device=dev['name'], team=team['name'], free=team['free'])
             return ph
         game = dict(id=GID, packages=[])
         with contextlib.ExitStack() as st:
             for obj, name, value in (
                     (c, 'catalog', {'games': [game]}), (c, 'fonts_dir', self.root),
-                    (library, 'require_game', None), (library, 'check_pack_space', None), (library, 'prune_build', None),
+                    (library, 'require_game', None), (library, 'check_pack_space', None), (library, 'prune_build', lambda *a, **k: stamp('清理')),
                     (build, 'ensure_extract', self.root), (build, 'seed_from_sibling', False),
                     (ipa, 'dotnet_sdk', (self.root, self.root / 'dotnet')), (ipa, '_iml_device_hint', None),
                     (ipa, 'resolve_target', None), (ipa, 'current_shell_id', 'SID1'), (ipa, 'container_shell', self.root),
-                    (ipa, 'current_root', self.root),
                     (cache_retention, 'trim', dict(accountingComplete=True, evictionErrors=0, diskErrors=0, pressureRemaining=False,
                                                     keepTitles=3, retainedBytes=0, removedEntries=0, freeBytes=100, minFreeBytes=0)),
                     (install, 'xcode_teams', [dict(id='TEAM1', name='t', free=True)]), (install, 'phone', dict(id='DEV1', name='测试设备')),
@@ -95,40 +99,56 @@ class EarlyInstallCase(JobCase):
             st.enter_context(patch.object(early.subprocess, 'run', side_effect=sub_run))
             try: result, err = ipa.build(c), None
             except Failure as e: result, err = None, e
+            stamp('返回')
         return c, result, err, calls, envs
 
     def test_overlap_order_and_totals(self):
         c, r, err, calls, envs = self.run_ipa('ok')
+        calls = [x for x in calls if x[1] not in ('清理', '返回')]   # 清理 / 返回只给 P1-146 那条用
         self.assertIsNone(err)
         what = [x[1:] for x in calls]
         end = next(t for t, w, *_ in calls if w == '出包结束')
         early_steps = [(w, *a) for t, w, *a in calls if t < end]
         self.assertEqual([s[0] for s in early_steps], ['早装件', '装 App', '推资源包'], what)   # ① 都在出包结束之前，顺序正确
         self.assertEqual(early_steps[0], ('早装件', 'tfake'))
-        self.assertEqual(early_steps[2], ('推资源包', 'pack'))
+        self.assertEqual(early_steps[2], ('推资源包', '.early/pack'))
         self.assertEqual([s[0] for s in [x[1:] for x in calls][-2:]], ['装 App', '推资源包'])
-        self.assertEqual(calls[-1][2:], ('tfake资源包',), what)
+        self.assertEqual(calls[-1][2:], ('ios/pack',), what)   # 正式资源包已搬进这款的 image/ios
+        self.assertEqual(r['packFiles'], 3 + 2)   # 早推 3 + 补推 2
+        self.assertTrue(r['outputPath'].endswith(os.path.join('image', 'ios')))   # 出包页「打开位置」指这款的 image/ios
 
     def test_early_failure_falls_back_to_full_push(self):
         c, r, err, calls, _ = self.run_ipa('earlyred', early_rc=1)
+        calls = [x for x in calls if x[1] not in ('清理', '返回')]   # 清理 / 返回只给 P1-146 那条用
         self.assertIsNone(err)   # ② 不判整单失败
         what = [x[1:] for x in calls]
-        self.assertNotIn(('推资源包', 'pack'), what)
+        self.assertNotIn(('推资源包', '.early/pack'), what)
         self.assertEqual([s[0] for s in what[-2:]], ['装 App', '推资源包'], what)
-        self.assertEqual(what[-1], ('推资源包', 'tfake资源包'), what)
+        self.assertEqual(what[-1], ('推资源包', 'ios/pack'), what)
         msgs = [json.loads(l).get('message', '') for l in c.events.read_text().splitlines()]
         self.assertTrue(any('先装 App、先推资源没成' in m for m in msgs), msgs[-5:])
+
+    def test_cleanup_waits_for_early_push(self):
+        # 审计 P1-146：早装还在从 roots/ 与 .early 推（推得比出包慢），成功路径的清理要等它推完；失败路径要等早装线程退出再交回（main 随后清理）
+        c, r, err, calls, _ = self.run_ipa('slowpush', push_s=3)
+        self.assertIsNone(err)
+        t = {w if not a else (w, *a): ts for ts, w, *a in calls}
+        self.assertLess(t[('推资源包', '.early/pack')], t['清理'], [x[1:] for x in calls])
+        c, r, err, calls, _ = self.run_ipa('slowpush-red', push_s=3, oneclick_fail=True)
+        self.assertIsNotNone(err)
+        t = {w if not a else (w, *a): ts for ts, w, *a in calls}
+        self.assertLess(t[('推资源包', '.early/pack')], t['返回'], [x[1:] for x in calls])
 
     def test_package_failure_no_final_install(self):
         c, r, err, calls, _ = self.run_ipa('pkgred', oneclick_fail=True, signal=False)
         self.assertIsNotNone(err)   # ③
-        self.assertEqual([w for _, w, *_ in calls], ['出包结束'])
+        self.assertEqual([w for _, w, *_ in calls], ['出包结束', '返回'])
 
     def test_without_install_after_nothing_extra(self):
         c, r, err, calls, envs = self.run_ipa('plain', install_after=False)
         self.assertIsNone(err)   # ④
         self.assertNotIn('S2A_EARLY_READY', envs[0])
-        self.assertEqual([w for _, w, *_ in calls], ['出包结束'])
+        self.assertEqual([w for _, w, *_ in calls], ['出包结束', '清理', '返回'])
         self.assertNotIn('bundleId', r)
 
 

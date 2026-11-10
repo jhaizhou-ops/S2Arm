@@ -12,11 +12,28 @@ namespace Ryujinx.Graphics.Nvdec
     {
         public static Func<IH264Decoder> H264 { get; set; }
         public static Func<IVp8Decoder> Vp8 { get; set; }
+        // VP9 native backend (libvpx with S2Arm's hook; docs/设计_原生VP9/design_phase2_B.md). Unregistered = managed decoder only.
+        public static Func<IVp9NativeBackend> Vp9 { get; set; }
+        // "native" or "managed" when S2A_NVDEC_VP9 is not set; null = managed.
+        public static string Vp9DefaultMode { get; set; }
 
-        private static int _h264Failed, _vp8Failed;
+        private static int _h264Failed, _vp8Failed, _vp9Failed;
 
         internal static IH264Decoder CreateH264() => Create(H264, ref _h264Failed, "H.264");
         internal static IVp8Decoder CreateVp8() => Create(Vp8, ref _vp8Failed, "VP8");
+        internal static IVp9NativeBackend CreateVp9() => Create(Vp9, ref _vp9Failed, "VP9");
+
+        private static string _vp9Mode;
+
+        // S2A_NVDEC_VP9=native|managed, read once per process; otherwise the platform default.
+        internal static bool Vp9NativeEnabled
+        {
+            get
+            {
+                _vp9Mode ??= Environment.GetEnvironmentVariable("S2A_NVDEC_VP9") ?? Vp9DefaultMode ?? "managed";
+                return _vp9Mode == "native";
+            }
+        }
 
         private static T Create<T>(Func<T> factory, ref int failed, string codec) where T : class
         {

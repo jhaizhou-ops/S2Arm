@@ -10753,48 +10753,18 @@
         }
       }
     },
-    "Your games will appear here when they are included in this app.": {
+    "Install a game from S2Arm on your computer and it will appear here.": {
       "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Deine Spiele erscheinen hier, sobald sie in dieser App enthalten sind."
-          }
-        },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Your games will appear here when they are included in this app."
-          }
-        },
-        "fr": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Vos jeux apparaîtront ici dès qu’ils seront inclus dans cette app."
-          }
-        },
-        "it": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "I tuoi giochi compariranno qui quando saranno inclusi in questa app."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "このアプリにゲームが含まれると、ここに表示されます。"
-          }
-        },
-        "sv": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dina spel visas här när de ingår i appen."
+            "value": "Install a game from S2Arm on your computer and it will appear here."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "游戏加入此 App 后会显示在这里。"
+            "value": "在电脑上的 S2Arm 里把游戏装到这台设备，它就会出现在这里。"
           }
         }
       }
@@ -10887,6 +10857,870 @@
           "stringUnit": {
             "state": "translated",
             "value": "iPhone Duo 屏幕（1.43:1）"
+          }
+        }
+      }
+    },
+    "This package has no save service, so iCloud saves weren’t synced.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This package has no save service, so iCloud saves weren’t synced."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个安装包没有存档服务，iCloud 存档没同步。"
+          }
+        }
+      }
+    },
+    "The save service didn’t return a valid result.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The save service didn’t return a valid result."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存档服务没有返回有效结果。"
+          }
+        }
+      }
+    },
+    "The save was switched to the iCloud progress, but finishing up didn’t complete (%@). Save management will open before the game next starts to finish it.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The save was switched to the iCloud progress, but finishing up didn’t complete (%@). Save management will open before the game next starts to finish it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存档已经换成云端的进度，但收尾没做完（%@）。下次开始游戏前会先进存档管理页接着处理。"
+          }
+        }
+      }
+    },
+    "The save list couldn’t be read completely.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The save list couldn’t be read completely."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存档清单读不全。"
+          }
+        }
+      }
+    },
+    "This iPad": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPad"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPad"
+          }
+        }
+      }
+    },
+    "This iPhone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone"
+          }
+        }
+      }
+    },
+    "ICLOUD SAVES": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ICLOUD SAVES"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ICLOUD 存档"
+          }
+        }
+      }
+    },
+    "Checking saves with iCloud…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking saves with iCloud…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在和 iCloud 核对存档…"
+          }
+        }
+      }
+    },
+    "Skip sync and start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skip sync and start"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳过同步，直接开始"
+          }
+        }
+      }
+    },
+    "Couldn’t sync this time": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t sync this time"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这次没同步上"
+          }
+        }
+      }
+    },
+    "The save on this device wasn’t changed. You can play as usual.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The save on this device wasn’t changed. You can play as usual."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机存档没有改动，可以照常玩。"
+          }
+        }
+      }
+    },
+    "Start Game": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start Game"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开始游戏"
+          }
+        }
+      }
+    },
+    "Both sides have new progress. Pick one to keep playing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Both sides have new progress. Pick one to keep playing"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "两边各有新进度，选一份继续玩"
+          }
+        }
+      }
+    },
+    "The one you don’t pick is kept as a backup, so nothing is lost.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The one you don’t pick is kept as a backup, so nothing is lost."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没选的那份会留作备份，不会丢。"
+          }
+        }
+      }
+    },
+    "Decide later and start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decide later and start"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "先不选，直接开始"
+          }
+        }
+      }
+    },
+    "Unknown time": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown time"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知时间"
+          }
+        }
+      }
+    },
+    "On this device · %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On this device · %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "就在这台设备上 · %@"
+          }
+        }
+      }
+    },
+    "Saved %@ · %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved %@ · %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存于 %@ · %@"
+          }
+        }
+      }
+    },
+    "Saves are up to date": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saves are up to date"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "存档已是最新"
+          }
+        }
+      }
+    },
+    "Saved this device’s progress to iCloud": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved this device’s progress to iCloud"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已把这台设备的进度存到 iCloud"
+          }
+        }
+      }
+    },
+    "Switched to the progress from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switched to the progress from %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已换成 %@ 的进度"
+          }
+        }
+      }
+    },
+    "Kept this device’s progress and saved it to iCloud": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kept this device’s progress and saved it to iCloud"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已用这台设备的进度，并存到 iCloud"
+          }
+        }
+      }
+    },
+    "Not syncing this time; starting with this device’s save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not syncing this time; starting with this device’s save"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这次先不同步，用这台设备的存档开始"
+          }
+        }
+      }
+    },
+    "iCloud hasn’t downloaded %@ to this device yet, so your save wasn’t changed. Connect to the internet, wait a moment, and try again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud hasn’t downloaded %@ to this device yet, so your save wasn’t changed. Connect to the internet, wait a moment, and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud 还没把 %@ 下载到这台设备，存档没有改动。请联网稍等后再试。"
+          }
+        }
+      }
+    },
+    "%@ in iCloud is incomplete, so your save wasn’t changed. Sync again on the other device.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ in iCloud is incomplete, so your save wasn’t changed. Sync again on the other device."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud 里的 %@ 不完整，存档没有改动。请在另一台设备上重新同步一次。"
+          }
+        }
+      }
+    },
+    "Switched to the progress from %@, but couldn’t write it back to iCloud (%@). The save itself is fine; the next sync will write it again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switched to the progress from %@, but couldn’t write it back to iCloud (%@). The save itself is fine; the next sync will write it again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已换成 %@ 的进度，但没能写回 iCloud（%@）。存档本身没问题，下次同步会再写。"
+          }
+        }
+      }
+    },
+    "Name and Cover": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name and Cover"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "名字和封面"
+          }
+        }
+      }
+    },
+    "Choose Cover from Photos": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose Cover from Photos"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从相册选封面"
+          }
+        }
+      }
+    },
+    "Couldn’t save; the name and cover weren’t changed: %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t save; the name and cover weren’t changed: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没能保存，名字和封面都没改：%@"
+          }
+        }
+      }
+    },
+    "Save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        }
+      }
+    },
+    "Left stick: press anywhere on the left half": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Left stick: press anywhere on the left half"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "左摇杆：左半屏任意处按下"
+          }
+        }
+      }
+    },
+    "Right stick: press anywhere on the right half": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Right stick: press anywhere on the right half"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "右摇杆：右半屏任意处按下"
+          }
+        }
+      }
+    },
+    "Couldn’t read this game’s button layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn’t read this game’s button layout"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读不到这款游戏的按键布局"
+          }
+        }
+      }
+    },
+    "Button positions weren’t saved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Button positions weren’t saved"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按键位置没保存"
+          }
+        }
+      }
+    },
+    "Button positions weren’t saved. Try again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Button positions weren’t saved. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按键位置没保存，请再试一次"
+          }
+        }
+      }
+    },
+    "Default layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Default layout"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认布局"
+          }
+        }
+      }
+    },
+    "My layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My layout"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的布局"
+          }
+        }
+      }
+    },
+    "Adjust positions…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adjust positions…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "调整位置…"
+          }
+        }
+      }
+    },
+    "Display": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Display"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示"
+          }
+        }
+      }
+    },
+    "Only changes how it appears on this iPhone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only changes how it appears on this iPhone"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只改这台 iPhone 上的显示"
+          }
+        }
+      }
+    },
+    "Customized": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Customized"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已自定义"
+          }
+        }
+      }
+    },
+    "Edit…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "修改…"
+          }
+        }
+      }
+    },
+    "60 FPS": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "60 FPS"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "60 帧"
+          }
+        }
+      }
+    },
+    "Off returns to the game’s own frame rate (usually 30 FPS) and saves power": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off returns to the game’s own frame rate (usually 30 FPS) and saves power"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关掉回到游戏自己的帧率（多为 30 帧），更省电"
+          }
+        }
+      }
+    },
+    "Force widescreen": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Force widescreen"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "宽屏强制启用"
+          }
+        }
+      }
+    },
+    "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fills the screen even for unverified games; falls back to 16:9 if the picture stretches"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没验证过的游戏也铺满全屏；画面若被拉伸会自动退回 16:9"
+          }
+        }
+      }
+    },
+    "Virtual controller": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Virtual controller"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "虚拟手柄"
+          }
+        }
+      }
+    },
+    "Button layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Button layout"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按键布局"
+          }
+        }
+      }
+    },
+    "Position changes apply to this game only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Position changes apply to this game only"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "调整位置只对这款游戏生效"
+          }
+        }
+      }
+    },
+    "Hold-lock ZL / ZR": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hold-lock ZL / ZR"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按住锁定 ZL / ZR"
+          }
+        }
+      }
+    },
+    "Hold for 2 s to lock, tap again to unlock; this game only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hold for 2 s to lock, tap again to unlock; this game only"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按住 2 秒锁定，再点一下解锁；只对这款游戏生效"
+          }
+        }
+      }
+    },
+    "Shared by all games; takes effect the next time you enter a game": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shared by all games; takes effect the next time you enter a game"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "全部游戏共用，下次进游戏生效"
+          }
+        }
+      }
+    },
+    "title_id \"%@\" is not 16 uppercase hexadecimal digits": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "title_id \"%@\" is not 16 uppercase hexadecimal digits"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "title_id \"%@\" 不是 16 位大写十六进制"
+          }
+        }
+      }
+    },
+    "Unknown state \"%@\"": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown state \"%@\""
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知状态 \"%@\""
           }
         }
       }

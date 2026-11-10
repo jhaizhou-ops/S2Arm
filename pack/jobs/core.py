@@ -69,6 +69,33 @@ def replace_retrying(tmp, path):
             time.sleep(delay)
 
 
+REWRITE_FAILED_LOG = re.compile(r"改写 \S+ 失败.*?日志 ([^）\n]+?\.log)")
+REWRITE_DIGEST_LINES = 400
+
+
+def write_rewrite_digest(source, target):
+    """改写日志摘要：缺口按类别计数 + 非缺口行 + 前若干条缺口（地址和指令类型，不含游戏内容）"""
+    counts, other, gaps, total = {}, [], [], 0
+    with open(source, encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if line.startswith("GAP\t"):
+                total += 1
+                detail = line.split("\t", 3)[-1]
+                kind = re.sub(r"0x[0-9a-fA-F]+|\b[0-9a-f]{8}\b|#-?\w+|S\d_\d_C\d+_C\d+_\d|\b[xw]\d+\b", "_", detail)[:80]
+                counts[kind] = counts.get(kind, 0) + 1
+                if len(gaps) < REWRITE_DIGEST_LINES:
+                    gaps.append(line)
+            elif len(other) < REWRITE_DIGEST_LINES:
+                other.append(line)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"改写缺口共 {total} 条，按类别：\n")
+        f.writelines(f"{n}\t{k}\n" for k, n in sorted(counts.items(), key=lambda kv: -kv[1])[:60])
+        f.write("\n--- 非缺口行 ---\n"); f.writelines(l + "\n" for l in other)
+        f.write("\n--- 前若干条缺口 ---\n"); f.writelines(l + "\n" for l in gaps)
+
+
 def atomic(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +203,44 @@ def tree_hash(root, folders):
     return h.hexdigest()
 
 
+# ---- 默认位置下的公共目录（游戏库结构 P3：玩家指定的库是入口，私有目录只留设置、密钥和控制口文件）----
+LIBRARY_MARKER = ".s2arm-library.json"
+
+
+def default_home(private, library=None):
+    """日志、任务记录、工具缓存、引擎副本的根：默认位置（请求里的 library）建好了（有库标识文件）就是它；还没建好（setup 之前、没选库）退回私有目录。
+    只拿得到私有目录的读者（main.py get / events / cancel / prune / report）不传 library，按索引表 library-index.json 第一项记的默认位置算
+    （layout.load_index 总把默认位置排第一，layout.adopt_private_logs 每个作业开头核一次它与请求一致）"""
+    private = Path(private).expanduser().resolve()
+    if library is None:
+        try:
+            locations = (read(private / "library-index.json", {}) or {}).get("locations") or []
+        except (OSError, ValueError, AttributeError):
+            locations = []
+        library = locations[0].get("path") if locations and isinstance(locations[0], dict) else None
+    if library:
+        root = Path(library).expanduser().resolve()
+        if (root / LIBRARY_MARKER).is_file():
+            return root
+    return private
+
+
+def logs_root(private, library=None):
+    """任务日志 + 任务记录（logs/jobs/）的目录：<默认位置>/logs，库没建好退回 <私有目录>/logs。后端所有读写日志 / 任务记录的地方都调它；
+    前端各一处照同一规则算：Swift S2ArmPaths.logsRoot、C# LibraryPaths.LogsRoot、s2armctl.logs_root"""
+    return default_home(private, library) / "logs"
+
+
+def jobs_dir(private, library=None):
+    return logs_root(private, library) / "jobs"
+
+
+def _job_dirs(private):
+    """读一条任务时依次找：当前的任务记录目录；库建好前退回私有目录写的（下一个作业开头 layout.adopt_private_logs 才收进库）；P3 之前的旧位置 <私有目录>/jobs"""
+    private = Path(private).expanduser().resolve()
+    return list(dict.fromkeys([jobs_dir(private), private / "logs" / "jobs", private / "jobs"]))
+
+
 class Context:
     def __init__(self, request):
         # 空间预检没过、玩家点「仍然继续」重交的出包任务（library.check_pack_space）：只认布尔值、只给 Mac 打包 / 打 iPhone 包
@@ -192,6 +257,9 @@ class Context:
         os.chmod(self.private, 0o700)
         self.engine = Path(request.get("engineDir") or ".").expanduser().resolve()
         self.library = Path(request.get("library") or self.private / "unconfigured").expanduser().resolve()
+        import layout
+        self.library = layout.relocate_default(self.private, self.library)   # 旧默认库（私有目录里的）已搬到 ~/S2Arm：照新位置用（游戏库结构 P3）
+        self.logs = logs_root(self.private, self.library)   # 本任务的日志与任务记录（logs/jobs/）在这里，整个任务不变
         self.keys = self.private / "keys/prod.keys"
         self.t0 = time.monotonic()
         self.stage = ""
@@ -202,9 +270,10 @@ class Context:
         self.last_progress = 0
         self.last_log = None
         self.frontend_gone = False
-        self.jobpath = self.private / "jobs" / (self.task + ".json")
-        self.events = self.private / "jobs" / (self.task + ".events.jsonl")
-        self.requestpath = self.private / "jobs" / (self.task + ".request.json")
+        self.jobpath = self.logs / "jobs" / (self.task + ".json")
+        self.events = self.logs / "jobs" / (self.task + ".events.jsonl")
+        self.requestpath = self.logs / "jobs" / (self.task + ".request.json")
+        layout.follow_task(self)   # 同一任务上次跑在库建好之前（记录在私有目录）：先把它的记录搬过来，续跑的次数、阶段接得上
         # Keep the request next to the journal so `resume` can run the same task again after a kill without the caller having to keep the
         # request file around (J10). 0600 like the request itself: it holds player paths, never keys.
         if not self.requestpath.exists():
@@ -433,10 +502,23 @@ class Context:
                   diagnostics=self.job["diagnostics"], logRef=result["logPath"])
         return result
 
+    def save_rewrite_digest(self, failure):
+        """改写失败的明细日志在产物根 .failed/ 下（可达几十 MB）：诊断包只收日志目录（core.logs_root），这里存一份摘要进去，否则定不了缺的是哪类指令（#108）"""
+        match = REWRITE_FAILED_LOG.search(str(failure) + "\n" + getattr(failure, "internal", ""))
+        if not match:
+            return
+        target = self.logs / f"{self.task}-rewrite-gaps.log"
+        try:
+            write_rewrite_digest(Path(match.group(1)), target)
+            target.chmod(0o600)
+        except OSError:
+            pass
+
     def report_failure(self, error):
         failure = explain(error)
+        self.save_rewrite_digest(failure)
         if self.last_log is None:
-            self.last_log = self.private / "logs" / (self.task + "-failure.log")
+            self.last_log = self.logs / (self.task + "-failure.log")
             self.last_log.parent.mkdir(parents=True, exist_ok=True)
             self.last_log.write_text(self.redact(failure) + "\n" + (self.redact(failure.internal) + "\n" if getattr(failure, "internal", "") else ""))
             self.last_log.chmod(0o600)
@@ -467,8 +549,9 @@ class Context:
 
     @property
     def work_root(self):
-        """出包缓存和临时运行目录的根：游戏库放在别处（比如外接盘）时跟着游戏库走，不占系统盘。"""
-        return self.private if self.library.is_relative_to(self.private) else self.library / ".s2arm-work"
+        """跨游戏的工具缓存（cache/、run/）：默认位置的 tool-cache/（游戏库结构 P3；原来库在私有目录里时 = 私有目录、否则 = 库/.s2arm-work，
+        layout._upgrade_4 搬过来）。库还没建好（setup 之前的环境检查等）退回 <私有目录>/tool-cache"""
+        return default_home(self.private, self.library) / "tool-cache"
 
     def env(self):
         env = dict(os.environ)
@@ -478,6 +561,8 @@ class Context:
         cache = self.work_root / "cache"
         cache.mkdir(parents=True, exist_ok=True)
         env.pop("DEVELOPER_DIR", None)
+        if self.r.get("spaceOverride") is True:   # 玩家点过「仍然继续」：直连阶段开工前的空间复核也只打黄（pack/jobs/space_rule.py）
+            env["S2A_SPACE_OVERRIDE"] = "1"
         developer = self.r.get("developerDir") or self.default_developer   # 启动器传的 > 装着的最新 Xcode；都没有就不设
         if developer:
             env.update(DEVELOPER_DIR=developer, S2A_DEVELOPER_DIR=developer)
@@ -490,7 +575,7 @@ class Context:
                    S2A_SHCOLLECT=str(cache / "shcollect"), GAL_AIR_CACHE=str(cache / "air"),
                    S2A_CSCLOSURE_CACHE=str(cache / "csclosure"),
                    S2A_XCKEY_CACHE=str(cache / "xckey"), S2A_SCHED_DIR=str(cache / "local-observations"),
-                   S2A_PROGRESS=str(self.private / "logs" / (self.task + ".progress.tsv")),
+                   S2A_PROGRESS=str(self.logs / (self.task + ".progress.tsv")),
                    GAL_PSO_CACHE=str(cache / "pso"), S2A_ROOTS_NO_BOOT="1",
                    S2A_PACK_PLAT="macos", S2A_TARGET="macos", S2A_SEED_AOC="1", J=str(min(os.cpu_count() or 4, 8)),
                    # 出包用途 = 用户包（10-29 维护者定口径，pack/jobs/archs.py）：管线归档 / 函数体只出这个包要装的设备那几对——
@@ -504,6 +589,16 @@ class Context:
                    S2A_MACHINE_NO_LOCAL="1", S2A_CPU_LEDGER="0",
                    # 玩家导入的客体着色器缓存（启动器社区资源面板拷进 <数据目录>/着色器缓存/<程序号>/，出包时自动并入；着色器线 docs/客体着色器缓存导入.md）
                    S2A_USER_SHCACHE=str(self.private / "着色器缓存"))
+        # 作业临时目录（游戏库结构 v3，出包修复线约定）：这款所在存放位置的 temp/<任务号>，与游戏数据同卷；作业结束由 main.run_request 删
+        gid = self.r.get("gameId")
+        if gid and self.r.get("library") and (self.library / ".s2arm-library.json").is_file():
+            try:
+                import layout
+                tmp = layout.job_tmp(self, gid, self.task)
+                tmp.mkdir(parents=True, exist_ok=True)
+                env["S2A_JOB_TMP"] = str(tmp)
+            except (Failure, OSError):
+                pass
         # Git 只许在引擎目录里找仓库（出包各阶段用 git -C 引擎 取源码对象号）：不许往上认到外层仓库（10-23 走查：认到用户主目录的仓库）
         env["GIT_CEILING_DIRECTORIES"] = str(Path(self.engine).resolve().parent)
         env["S2A_PYTHON"] = os.sys.executable
@@ -515,6 +610,7 @@ class Context:
         runtime = Path(self.r.get("resources") or self.private) / "Runtime"
         if os.name == "nt" and (runtime / "s2arm_env.cmd").is_file():   # Windows 随包运行时（launchers/windows/bundle_runtime_win.py）
             env.update(win_runtime_env(runtime, self.engine, env.get("SystemRoot") or r"C:\Windows"))
+            env["S2A_METAL_BIN"] = win_metal_dir(os.environ)
             return env
         # 3 和 4 都是「作业 PATH 只有 Runtime + 系统目录」的便携运行环境。4 起不再带 oead / GNU timeout；
         # 旧 schema 3 仍走这条 PATH（构建侧 build_app 会因 schema / runtimeDeps 不符而重打，不在这里改 PATH）。
@@ -526,14 +622,15 @@ class Context:
             env["S2A_REWRITER_BUNDLED"] = str(runtime / "bin/s2a-rewrite")
             # 发版 App 自带已编好的 Mac 宿主（含 C#，S2A_CS=1）：RomFS 解码器或运行时 GLSLC 时不再现编（issue #8 根因：Runtime-only dotnet 编不出）
             from embedded import artifact
-            try:
-                bundled_host = artifact(self, "S2ArmGame.app")
-                if bundled_host and (bundled_host / "Contents/MacOS/s2arm-host").is_file() and (bundled_host / "Contents/MacOS/libs2a_vaguard.dylib").is_file():
-                    env["S2A_BUNDLED_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
-                    env["DM_GLSLC_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
-                    env["DM_OODLE_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")  # LZ5 / OodleLZ 解码器（uepak.oodle_host_find，缺省回退 build/s2arm-host 在发版包里不存在）
-            except Exception:
-                pass   # 源码树开发构建：没有内置宿主
+            # 只有源码树（没有 engine.json，artifact 回 None）才没有内置宿主、按需现编；发版清单里缺它或校验不符，artifact 抛「请重新安装完整应用」照常抛出
+            #   （审计 P2-196：原先 except Exception 一律吞掉、改去现场编，红字指向「编译 Mac 宿主失败」，玩家按缺 SDK 去排查）
+            bundled_host = artifact(self, "S2ArmGame.app")
+            if bundled_host:
+                if not ((bundled_host / "Contents/MacOS/s2arm-host").is_file() and (bundled_host / "Contents/MacOS/libs2a_vaguard.dylib").is_file()):
+                    raise Failure("应用内置引擎产物缺失，请重新安装完整应用。")
+                env["S2A_BUNDLED_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
+                env["DM_GLSLC_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")
+                env["DM_OODLE_HOST"] = str(bundled_host / "Contents/MacOS/s2arm-host")  # LZ5 / OodleLZ 解码器（uepak.oodle_host_find，缺省回退 build/s2arm-host 在发版包里不存在）
         else:
             paths = [str(Path(os.sys.executable).parent), str(runtime / "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", env.get("PATH", "")]
         env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
@@ -586,7 +683,7 @@ class Context:
         #   等它自己退出会让作业一直挂着；就绪即收（TERM 进程组），退出码不算数，判据是 until 的读数。最多每 2 秒问一次。
         self.check()
         args = list(map(str, args))
-        self.last_log = Path(log or self.private / "logs" / (self.task + ".log"))
+        self.last_log = Path(log or self.logs / (self.task + ".log"))
         self.last_log.parent.mkdir(parents=True, exist_ok=True)
         # Stage timeout (J10): a tool that hangs would otherwise hold the job (and the frontend's progress bar) until the user gives up. The
         # default comes from the request so the launcher and the CLI agree; 0 or absent means no timer, as before.
@@ -676,16 +773,19 @@ class Context:
                 if reader_errors:
                     raise reader_errors[0]
                 self.check()
-                self.last_rc = p.returncode
-                if p.returncode not in ok_codes:
+                # 被信号结束的子进程（宿主崩溃处理写完现场后按默认处置重抛，系统才出 .ips）Python 给负数：折回 shell 口径 128 + 信号，
+                #   摘要、诊断、按退出码分类的地方照旧看到 139 / 134（runtime/src/crash.c crash_reraise）
+                rc = 128 - p.returncode if p.returncode < 0 and os.name != "nt" else p.returncode
+                self.last_rc = rc
+                if rc not in ok_codes:
                     if self.operation == "build":
                         from errors import build_tool_failure
                         failure = build_tool_failure(args, getattr(self, "milestone", None), self.last_log)
-                        self.diagnostic(str(failure), failure.code, exit_code=p.returncode, internal=failure.internal)
+                        self.diagnostic(str(failure), failure.code, exit_code=rc, internal=failure.internal)
                         raise failure
                     from errors import tool_reason
-                    message = f"{self.stage or '这一步'}失败（退出码 {p.returncode}）：{self.redact(tool_reason(self.last_log), limit=240)}"
-                    self.diagnostic(message, "tool_exit", exit_code=p.returncode)
+                    message = f"{self.stage or '这一步'}失败（退出码 {rc}）：{self.redact(tool_reason(self.last_log), limit=240)}"
+                    self.diagnostic(message, "tool_exit", exit_code=rc)
                     raise Failure(message, code="tool_exit")
             finally:
                 if p.poll() is None:
@@ -738,7 +838,8 @@ def request_path(private, task):
 def job_files(private, task):
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", str(task)):
         raise Failure("无效的任务标识。", code="job_unknown")
-    jobs = Path(private).expanduser().resolve() / "jobs"
+    dirs = _job_dirs(private)
+    jobs = next((d for d in dirs if (d / (task + ".json")).is_file()), dirs[0])
     return jobs / (task + ".json"), jobs / (task + ".events.jsonl")
 
 
@@ -782,6 +883,15 @@ def pid_start(pid):
 
 
 WIN_RUNTIME_PATH = ["python", r"python\Scripts", "dotnet", r"mingit\cmd", r"git\usr\bin", "zstd"]   # 同 bundle_runtime_win.env_cmd 的 PATH（tests 核两处一致）
+
+
+def win_metal_dir(environ):
+    """Windows 出包用的 Metal 工具目录：在作业进程（还带着玩家的 S2A_METAL_BIN 与 s2arm_env.cmd 存下的 S2A_USER_PATH）按 oneclick_win.metal_exe
+    选一次，显式交给子进程——env() 剥掉 S2A_*、PATH 换成只含随包工具，子进程自己选只会落到官方默认目录（11-09 Windows 出包机实测 #137：
+    S2A_METAL_BIN 指自定义目录 / 只设 PATH / 指不存在的目录，三种都悄悄用了 C:\\Program Files 那份）。显式配置无效时原样传下去，由出包预检报缺"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from pack.orch.oneclick_win import metal_exe
+    return str(metal_exe(environ).parent)
 
 
 def win_runtime_env(runtime, engine, system_root):
@@ -829,11 +939,24 @@ def describe(private, task):
                 lastEvent=events[-1] if events else None, canResume=not terminal)
 
 
-def prune_jobs(private, keep_days=14, keep_count=50, dry_run=False):
-    """Keep the job store bounded (J10): finished tasks older than `keep_days` go, but the newest `keep_count` finished tasks always stay, and a
-    task that has not written a terminal state is never touched (its worker may still be writing). Only the three files this module owns per task
-    are removed; anything else in `jobs/` is left alone."""
-    jobs = Path(private).expanduser().resolve() / "jobs"
+# 任务记录保留（游戏库结构 P3 收紧；原规则「结束超过 14 天的清掉、最新 50 条总留着」让一台维护者机器 14 天攒到 45207 条——前端每次刷新都起
+# catalog / 空间统计等短作业，一天上千条，启动器启动时整目录读一遍、诊断包整目录打包都被拖慢）：
+#   - 总量上限 KEEP_TOTAL 条 + 时间上限 keep_days 天，取更严的：超出任一条就清。2000 条约是正常玩家半年的量、高频刷新下也够看最近一两天，
+#     记录每条几 KB，整目录几十 MB 以内，启动器读一遍在一秒内；
+#   - 每类操作（operation）至少留最近 KEEP_PER_OPERATION 条成功的、KEEP_FAILED_PER_OPERATION 条失败 / 取消的，不受上面两条限制：
+#     刷新类作业刷屏时，最近的出包 / 装机 / 存档记录不能被挤掉；失败的多留，「复制错误摘要」、s2armctl errors / report、反馈问题都要往回翻失败记录；
+#   - 没写终态的（作业可能还在写）一律不动。
+KEEP_TOTAL = 2000
+KEEP_DAYS = 14
+KEEP_PER_OPERATION = 20
+KEEP_FAILED_PER_OPERATION = 50
+
+
+def prune_jobs(private, keep_days=KEEP_DAYS, keep_count=KEEP_TOTAL, dry_run=False, *, per_operation=KEEP_PER_OPERATION,
+               failed_per_operation=KEEP_FAILED_PER_OPERATION, library=None, jobs=None):
+    """Keep the job store bounded (J10, rules above). Only the three files this module owns per task are removed; anything else in the
+    directory is left alone. `jobs` names the directory directly (layout.adopt_private_logs prunes the private fallback before moving it)."""
+    jobs = Path(jobs) if jobs is not None else jobs_dir(private, library)
     if not jobs.is_dir():
         return dict(removed=[], kept=0, skippedRunning=0, bytes=0)
     by_task = {}
@@ -849,38 +972,49 @@ def prune_jobs(private, keep_days=14, keep_count=50, dry_run=False):
         by_task.setdefault(task, []).append(path)
     cutoff = time.time() - float(keep_days) * 86400 if keep_days else None
 
-    def finished(task):
-        record = read(jobs / (task + ".json")) or {}
-        return record.get("state") in TERMINAL_STATES or bool(record.get("ended"))
+    def record(task):
+        try:
+            value = read(jobs / (task + ".json")) or {}
+        except (OSError, ValueError):
+            value = {}
+        return value if isinstance(value, dict) else {}
 
-    running = [t for t in by_task if not finished(t)]   # counted before anything is deleted: a removed record must not look like a live one
-    finished_tasks = sorted((t for t in by_task if finished(t)), key=lambda t: max(p.stat().st_mtime for p in by_task[t]), reverse=True)
-    keep = set(finished_tasks[:max(0, int(keep_count or 0))])
-    removed, freed = [], 0
+    records = {t: record(t) for t in by_task}
+    finished = {t for t, r in records.items() if r.get("state") in TERMINAL_STATES or bool(r.get("ended"))}
+    running = [t for t in by_task if t not in finished]   # counted before anything is deleted: a removed record must not look like a live one
+    newest = {t: max(p.stat().st_mtime for p in by_task[t]) for t in finished}
+    finished_tasks = sorted(finished, key=lambda t: newest[t], reverse=True)
+    floor, seen = set(), {}
     for task in finished_tasks:
-        if task in keep:
+        failed = records[task].get("state") in ("failed", "cancelled")
+        key = (records[task].get("operation") or "", failed)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] <= (failed_per_operation if failed else per_operation):
+            floor.add(task)
+    limit = max(0, int(keep_count)) if keep_count is not None else None
+    removed, freed, kept = [], 0, 0
+    for rank, task in enumerate(finished_tasks):
+        expired = (cutoff is not None and newest[task] < cutoff) or (limit is not None and rank >= limit)
+        if task in floor or not expired:
+            kept += 1
             continue
         files = by_task[task]
-        newest = max(p.stat().st_mtime for p in files)
-        if cutoff is not None and newest >= cutoff:
-            continue
         size = sum(p.stat().st_size for p in files)
         if not dry_run:
             for p in files:
                 p.unlink(missing_ok=True)
         removed.append(task)
         freed += size
-    return dict(removed=removed, kept=len(keep) + len(running), skippedRunning=len(running), bytes=freed)
+    return dict(removed=removed, kept=kept + len(running), skippedRunning=len(running), bytes=freed)
 
 
-def status(private):
-    """One look at the whole job store: how many are running vs finished, how big it is, and which task last moved."""
-    jobs = Path(private).expanduser().resolve() / "jobs"
+def status(private, library=None):
+    """One look at the whole job store: how many are running vs finished, how big it is, and which task last moved.
+    The store is every directory a record can be read from (_job_dirs: the current one plus the private fallbacks not yet adopted)."""
+    dirs = [d for d in dict.fromkeys([jobs_dir(private, library), *_job_dirs(private)]) if d.is_dir()]
     result = dict(running=0, finished=0, interrupted=0, bytes=0, newest=None, oldest=None)
-    if not jobs.is_dir():
-        return result
     newest = oldest = None
-    for path in jobs.iterdir():
+    for path in (p for d in dirs for p in d.iterdir()):
         if path.is_symlink() or not path.is_file():
             continue
         result["bytes"] += path.stat().st_size
@@ -889,7 +1023,7 @@ def status(private):
             newest = (stamp, path.name)
         if oldest is None or stamp < oldest[0]:
             oldest = (stamp, path.name)
-    for record_path in jobs.glob("*.json"):
+    for record_path in (p for d in dirs for p in d.glob("*.json")):
         if record_path.name.endswith(".request.json") or record_path.is_symlink():
             continue
         record = read(record_path) or {}

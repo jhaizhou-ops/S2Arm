@@ -44,6 +44,28 @@ static void tick(void) {
     g_panel.frame = CGRectMake(in.left + 8, in.top + 8, width, ceil(fit.height) + 20);
     g_hud.frame = CGRectMake(10, 10, width - 20, ceil(fit.height));
 }
+// 简版性能浮层（齿轮菜单「性能浮层」，偏好 S2APerfHUD，缺省关）：右上角一枚小胶囊「帧率 · 内存」，每 0.5 秒刷新，不接触摸、不进截图
+static UILabel *g_brief; static NSTimer *g_brief_timer;
+void s2a_hud_brief_show(UIView *root, BOOL on) {
+    s2a_hud_brief_set(on);
+    if (!on || !root) { [g_brief_timer invalidate]; g_brief_timer = nil; [g_brief removeFromSuperview]; g_brief = nil; return; }
+    if (g_brief.superview == root) return;
+    [g_brief removeFromSuperview];
+    g_brief = [UILabel new]; g_brief.userInteractionEnabled = NO; g_brief.textAlignment = NSTextAlignmentCenter;
+    g_brief.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold]; g_brief.textColor = UIColor.whiteColor;
+    g_brief.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55]; g_brief.layer.cornerRadius = 9; g_brief.layer.masksToBounds = YES;
+    g_brief.layer.zPosition = 10000; g_brief.accessibilityIdentifier = @"hud.brief";
+    [root addSubview:g_brief];
+    void (^tick)(void) = ^{
+        UIView *v = g_brief.superview; if (!v) return;
+        char t[128]; s2a_hud_brief(t, sizeof t); g_brief.text = @(t);
+        CGSize s = [g_brief sizeThatFits:CGSizeMake(300, 30)]; UIEdgeInsets in = v.safeAreaInsets;
+        g_brief.frame = CGRectMake(v.bounds.size.width - in.right - 8 - (s.width + 16), in.top + 6, s.width + 16, 20);
+    };
+    [g_brief_timer invalidate];
+    g_brief_timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) { (void)t; tick(); }];
+    tick();
+}
 void s2a_hud_attach(UIView *root) {
     if (!s2a_hud_on() || g_hud) return;
     g_build = [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2ABuildID"];

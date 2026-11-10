@@ -73,6 +73,28 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
 
                 if (r != 0 && (c & (nsync - 1)) == 0)
                 {
+                    // S2Arm: check the row above without the lock first, then spin briefly before blocking.
+                    // On Android the sleep / wake of Monitor.Wait costs tens to hundreds of microseconds and a
+                    // 1080p frame has on the order of a hundred of these sync points per plane; the row above is
+                    // usually only a few columns from being ready (P4G cutscenes: LfSync.SyncRead was ~60% of the
+                    // Nvdec thread's context switches). _curSbCol only grows, and SyncWrite publishes it with a
+                    // release store after the row's pixels, so an acquire read that passes the test is enough.
+                    ref int above = ref _curSbCol[r - 1];
+                    if (c <= Volatile.Read(ref above) - nsync)
+                    {
+                        return;
+                    }
+
+                    SpinWait spin = default;
+                    while (!spin.NextSpinWillYield)
+                    {
+                        spin.SpinOnce();
+                        if (c <= Volatile.Read(ref above) - nsync)
+                        {
+                            return;
+                        }
+                    }
+
                     object syncObject = _syncObjects[r - 1];
                     lock (syncObject)
                     {
@@ -117,7 +139,7 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
 
                     lock (syncObject)
                     {
-                        _curSbCol[r] = cur;
+                        Volatile.Write(ref _curSbCol[r], cur);   // S2Arm: release store, read lock-free by SyncRead
 
                         Monitor.Pulse(syncObject);
                     }
@@ -613,6 +635,25 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
 
                 lFThrSpan[lvl].Lim.AsSpan().Fill((byte)blockInsideLimit);
                 lFThrSpan[lvl].Mblim.AsSpan().Fill((byte)((2 * (lvl + 2)) + blockInsideLimit));
+            }
+        }
+
+        // S2Arm: port of libvpx vp9_loop_filter_init (limits for the current sharpness, HEV thresholds), which the C# port
+        // was missing. The NVDEC path builds a fresh Vp9Common for every frame, so without it HevThr stayed 0 and, at
+        // sharpness 0 (LastSharpnessLevel also 0), Lim / Mblim stayed 0 too: the deblocking filter almost never fired.
+        public static void LoopFilterInit(ref Vp9Common cm)
+        {
+            ref LoopFilterInfoN lfi = ref cm.LfInfo;
+            ref Types.LoopFilter lf = ref cm.Lf;
+
+            UpdateSharpness(ref lfi, lf.SharpnessLevel);
+            lf.LastSharpnessLevel = lf.SharpnessLevel;
+
+            Span<LoopFilterThresh> lfthr = lfi.Lfthr.AsSpan();
+
+            for (int lvl = 0; lvl <= MaxLoopFilter; lvl++)
+            {
+                lfthr[lvl].HevThr.AsSpan().Fill((byte)(lvl >> 4));
             }
         }
 
@@ -1973,8 +2014,9 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
             int threadCount)
         {
             int sbRows = TileInfo.MiColsAlignedToSb(cm.MiRows) >> Constants.MiBlockSizeLog2;
-            int numTileCols = 1 << cm.Log2TileCols;
-            int numWorkers = Math.Min(threadCount, Math.Min(numTileCols, sbRows));
+            // S2Arm: libvpx also caps workers at the tile-column count, but only as a scaling heuristic
+            // ("doesn't scale well beyond that"); the row sync is correct for any count up to sbRows.
+            int numWorkers = Math.Min(threadCount, sbRows);
 
             LfSync lfSync = new();
             lfSync.Initialize(cm.Width, sbRows);

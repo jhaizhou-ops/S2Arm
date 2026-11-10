@@ -1,0 +1,982 @@
+diff --git a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+index f8c01a155b8a12b4b20b92bf261b28519f67dc8a..150e0006b3ad932cc35512d5e490b279ba317fb3 100644
+--- a/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec.Vp9/Decoder.cs
+@@ -204,6 +204,34 @@ namespace Ryujinx.Graphics.Nvdec.Vp9
+             _lastSegmentMap.CopyTo(cm.LastFrameSegMap.AsSpan());
+         }
+ 
++        // S2Arm: the segment-map bookkeeping LoadSegmentMap does, for a frame decoded elsewhere (native libvpx,
++        // Ryujinx.Graphics.Nvdec Vp9NativePath). Native frames have segmentation off, so this keeps the state equal to an
++        // all-managed run and a later switch to this decoder is exact.
++        public void TrackSegmentMap(bool keyOrIntraOnly, int width, int height)
++        {
++            int miCols = (width + 7) >> 3;
++            int miRows = (height + 7) >> 3;
++            int mapLength = miRows * miCols;
++            if (mapLength == 0)
++            {
++                return;
++            }
++
++            bool reset = keyOrIntraOnly || _lastSegmentMapMiRows != miRows || _lastSegmentMapMiCols != miCols;
++
++            if (_lastSegmentMap.Length != mapLength)
++            {
++                _lastSegmentMap = new byte[mapLength];
++            }
++            else if (reset)
++            {
++                Array.Clear(_lastSegmentMap);
++            }
++
++            _lastSegmentMapMiRows = miRows;
++            _lastSegmentMapMiCols = miCols;
++        }
++
+         private void SaveSegmentMap(ref Vp9Common cm)
+         {
+             int mapLength = cm.MiRows * cm.MiCols;
+diff --git a/src/Ryujinx.Graphics.Nvdec/Image/SurfaceCache.cs b/src/Ryujinx.Graphics.Nvdec/Image/SurfaceCache.cs
+index 7359b3309e98501923b16bf9381407af08b5e9ef..2628062e67a6d73a05df9b704448d4ed4dc5031f 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Image/SurfaceCache.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Image/SurfaceCache.cs
+@@ -124,6 +124,25 @@ namespace Ryujinx.Graphics.Nvdec.Image
+             }
+         }
+ 
++        // S2Arm: guest memory at these offsets was rewritten outside this cache (native VP9 decoding,
++        // Vp9NativePath). Cached surfaces for them no longer match; the next Get re-reads guest memory.
++        public void Invalidate(uint lumaOffset, uint chromaOffset)
++        {
++            lock (_pool)
++            {
++                for (int i = 0; i < MaxItems; i++)
++                {
++                    ref CacheItem item = ref _pool[i];
++
++                    if (item.Surface != null && (item.LumaOffset == lumaOffset || item.ChromaOffset == chromaOffset))
++                    {
++                        item.LumaOffset = uint.MaxValue;
++                        item.ChromaOffset = uint.MaxValue;
++                    }
++                }
++            }
++        }
++
+         public void Put(ISurface surface)
+         {
+             lock (_pool)
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+index 55d4fafb690fb61cf235a9299adaecbbe927f555..dea1324692c97a1d8ebadf21f5ff75de082eb0b5 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDecoderContext.cs
+@@ -7,6 +7,9 @@ namespace Ryujinx.Graphics.Nvdec
+     {
+         private IH264Decoder _h264Decoder;
+         private IVp8Decoder _vp8Decoder;
++        private Vp9.Decoder _managedVp9;
++        private Vp9NativePath _nativeVp9;
++        private bool _nativeVp9Tried;
+ 
+         // 解码器一律由平台装配登记进 S2AVideoDecoders（苹果 AppleVideo、安卓 AndroidVideo）；没登记落到 Unavailable
+         public IH264Decoder GetH264Decoder()
+@@ -19,6 +22,28 @@ namespace Ryujinx.Graphics.Nvdec
+             return _vp8Decoder ??= S2AVideoDecoders.CreateVp8() ?? new UnavailableVp8Decoder();
+         }
+ 
++        // Managed VP9 decoder, one per context (its segment-map state belongs to one stream).
++        public Vp9.Decoder GetManagedVp9()
++        {
++            return _managedVp9 ??= new Vp9.Decoder();
++        }
++
++        // Native VP9 path, or null when no backend is registered, the mode is managed, or it was disabled.
++        public Vp9NativePath GetVp9Native()
++        {
++            if (!_nativeVp9Tried)
++            {
++                _nativeVp9Tried = true;
++
++                if (S2AVideoDecoders.Vp9NativeEnabled && S2AVideoDecoders.CreateVp9() is IVp9NativeBackend backend)
++                {
++                    _nativeVp9 = new Vp9NativePath(backend);
++                }
++            }
++
++            return _nativeVp9 is { Disabled: false } ? _nativeVp9 : null;
++        }
++
+         public void Dispose()
+         {
+             _h264Decoder?.Dispose();
+@@ -26,6 +51,12 @@ namespace Ryujinx.Graphics.Nvdec
+ 
+             _vp8Decoder?.Dispose();
+             _vp8Decoder = null;
++
++            _nativeVp9?.Dispose();
++            _nativeVp9 = null;
++
++            _managedVp9?.Dispose();
++            _managedVp9 = null;
+         }
+     }
+ }
+diff --git a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+index 06d251a671032fef3842f47ab1088c94482c034f..74cbb193556cecc447989225342d793f65c7c1c5 100644
+--- a/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
++++ b/src/Ryujinx.Graphics.Nvdec/NvdecDevice.cs
+@@ -74,7 +74,7 @@ namespace Ryujinx.Graphics.Nvdec
+                     Vp8Decoder.Decode(_currentContext, _rm, ref _state.State);
+                     break;
+                 case ApplicationId.Vp9:
+-                    Vp9Decoder.Decode(_rm, ref _state.State);
++                    Vp9Decoder.Decode(_currentContext, _rm, ref _state.State);
+                     break;
+                 default:
+                     Logger.Error?.Print(LogClass.Nvdec, $"Unsupported codec \"{applicationId}\".");
+diff --git a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+index 4eae2bf1b4c138b288e36c39588231f4a4f1b091..6bb0673a59f9929e8d97d0abd4a4e3167481b901 100644
+--- a/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
++++ b/src/Ryujinx.Graphics.Nvdec/S2AVideoDecoders.cs
+@@ -12,11 +12,28 @@ namespace Ryujinx.Graphics.Nvdec
+     {
+         public static Func<IH264Decoder> H264 { get; set; }
+         public static Func<IVp8Decoder> Vp8 { get; set; }
++        // VP9 native backend (libvpx with S2Arm's hook; docs/设计_原生VP9/design_phase2_B.md). Unregistered = managed decoder only.
++        public static Func<IVp9NativeBackend> Vp9 { get; set; }
++        // "native" or "managed" when S2A_NVDEC_VP9 is not set; null = managed.
++        public static string Vp9DefaultMode { get; set; }
+ 
+-        private static int _h264Failed, _vp8Failed;
++        private static int _h264Failed, _vp8Failed, _vp9Failed;
+ 
+         internal static IH264Decoder CreateH264() => Create(H264, ref _h264Failed, "H.264");
+         internal static IVp8Decoder CreateVp8() => Create(Vp8, ref _vp8Failed, "VP8");
++        internal static IVp9NativeBackend CreateVp9() => Create(Vp9, ref _vp9Failed, "VP9");
++
++        private static string _vp9Mode;
++
++        // S2A_NVDEC_VP9=native|managed, read once per process; otherwise the platform default.
++        internal static bool Vp9NativeEnabled
++        {
++            get
++            {
++                _vp9Mode ??= Environment.GetEnvironmentVariable("S2A_NVDEC_VP9") ?? Vp9DefaultMode ?? "managed";
++                return _vp9Mode == "native";
++            }
++        }
+ 
+         private static T Create<T>(Func<T> factory, ref int failed, string codec) where T : class
+         {
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+index 9474a86043da8ca6758ea3772afe6d3e02bd6683..9c5424414fe9b25b4e29fe030935a54c3a46f998 100644
+--- a/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9Decoder.cs
+@@ -8,23 +8,58 @@ using Ryujinx.Memory;
+ using System;
+ using System.Runtime.CompilerServices;
+ using System.Runtime.InteropServices;
++using System.Threading;
+ using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
+ 
+ namespace Ryujinx.Graphics.Nvdec
+ {
+     static class Vp9Decoder
+     {
+-        private static readonly Decoder _decoder = new();
+         private static bool _s2aLogged;   // S2Arm: one line on the first decoded frame, so runs show which games take this (managed) VP9 path
++        private static int _s2aNativeBroken;  // S2Arm: the native backend's library is missing or broken in this process
+ 
+-        public unsafe static void Decode(ResourceManager rm, ref NvdecRegisters state)
++        public unsafe static void Decode(NvdecDecoderContext context, ResourceManager rm, ref NvdecRegisters state)
+         {
+             PictureInfo pictureInfo = rm.MemoryManager.DeviceRead<PictureInfo>(state.SetDrvPicSetupOffset);
+             EntropyProbs entropy = rm.MemoryManager.DeviceRead<EntropyProbs>(state.Vp9SetProbTabBufOffset);
++            Decoder decoder = context.GetManagedVp9();
++
++            // S2Arm: native libvpx first (Vp9NativePath; docs/设计_原生VP9/design_phase2_B.md §4). It decodes from a key
++            // frame on and hands any job it cannot represent exactly to the managed decoder below.
++            Vp9NativePath native = Volatile.Read(ref _s2aNativeBroken) == 0 ? context.GetVp9Native() : null;
++
++            if (native != null)
++            {
++                Vp9PictureInfo nativeInfo = pictureInfo.Convert();
++                entropy.Convert(ref nativeInfo.Entropy);
++                ReadOnlySpan<byte> tiles = rm.MemoryManager.DeviceGetSpan(state.SetInBufBaseOffset, (int)pictureInfo.BitstreamSize);
++                bool done = false;
++
++                try
++                {
++                    done = native.TryDecode(rm, ref state, ref pictureInfo, ref nativeInfo, tiles);
++                }
++                catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
++                {
++                    if (Interlocked.Exchange(ref _s2aNativeBroken, 1) == 0)
++                    {
++                        Ryujinx.Common.Logging.Logger.Error?.Print(Ryujinx.Common.Logging.LogClass.Nvdec, $"【红】VP9 原生解码库不可用（{e.GetType().Name}：{e.Message}），本进程只走托管解码器");
++                    }
++
++                    native.Deactivate();
++                }
++
++                if (done)
++                {
++                    WriteBackwardUpdates(rm.MemoryManager, state.Vp9SetCtxCounterBufOffset, ref nativeInfo.BackwardUpdateCounts);
++                    decoder.TrackSegmentMap(nativeInfo.IsKeyFrame || nativeInfo.IntraOnly, pictureInfo.CurrentFrameSize.Width, pictureInfo.CurrentFrameSize.Height);
++                    return;
++                }
++            }
+ 
+             ISurface Rent(uint lumaOffset, uint chromaOffset, FrameSize size)
+             {
+-                return rm.Cache.Get(_decoder, lumaOffset, chromaOffset, size.Width, size.Height);
++                return rm.Cache.Get(decoder, lumaOffset, chromaOffset, size.Width, size.Height);
+             }
+ 
+             ISurface lastSurface = Rent(state.SetPictureLumaOffset[0], state.SetPictureChromaOffset[0], pictureInfo.LastFrameSize);
+@@ -59,7 +94,7 @@ namespace Ryujinx.Graphics.Nvdec
+             uint lumaOffset = state.SetPictureLumaOffset[3];
+             uint chromaOffset = state.SetPictureChromaOffset[3];
+ 
+-            if (_decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
++            if (decoder.Decode(ref info, currentSurface, bitstream, mvsIn, mvsOut))
+             {
+                 SurfaceWriter.Write(rm.MemoryManager, currentSurface, lumaOffset, chromaOffset);
+ 
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..203324fcfa92f37d3ba1a1133ee1cf24b782a024
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativeFrame.cs
+@@ -0,0 +1,323 @@
++using System;
++
++namespace Ryujinx.Graphics.Nvdec
++{
++    // S2Arm: the uncompressed VP9 header and reference-slot map for one NVDEC job decoded by libvpx
++    // (docs/设计_原生VP9/design_phase2_B.md §2-§3). Same rules as android/codecs/vpxbench/hdr.c, which the tests compare
++    // against byte for byte. No dependencies beyond System, so tests compile this file directly.
++
++    // The PictureInfo fields the header needs.
++    struct Vp9NativeInput
++    {
++        public int LastWidth, LastHeight, GoldenWidth, GoldenHeight, AltWidth, AltHeight, Width, Height;
++        public bool KeyFrame, IntraOnly;
++        public int SignBias1, SignBias2, SignBias3;
++        public int FilterLevel, Sharpness, BaseQIndex, YDcDeltaQ, UvDcDeltaQ, UvAcDeltaQ;
++        public bool Lossless;
++        public int TxMode, ReferenceMode, InterpFilter;
++        public bool AllowHighPrecisionMv;
++        public int Log2TileCols, Log2TileRows;
++        public bool SegmentationEnabled;
++        public bool ModeRefDeltaEnabled;
++        public int RefDelta0, RefDelta1, RefDelta2, RefDelta3, ModeDelta0, ModeDelta1;
++        public int BitDepth;                                  // 0 = not set (T210)
++        public uint LastLuma, LastChroma, GoldenLuma, GoldenChroma, AltLuma, AltChroma, OutLuma, OutChroma;
++    }
++
++    sealed class Vp9SlotMap
++    {
++        private struct Slot
++        {
++            public uint Luma, Chroma;
++            public int Width, Height;
++            public bool Valid;
++            public ulong LastUse;
++        }
++
++        private readonly Slot[] _slots = new Slot[8];
++        private ulong _now;
++
++        public void Reset()
++        {
++            Array.Clear(_slots);
++            _now = 0;
++        }
++
++        private int Find(uint luma, uint chroma, int w, int h)
++        {
++            for (int i = 0; i < 8; i++)
++            {
++                ref Slot s = ref _slots[i];
++                if (s.Valid && s.Luma == luma && s.Chroma == chroma && s.Width == w && s.Height == h)
++                {
++                    return i;
++                }
++            }
++
++            return -1;
++        }
++
++        // Resolves the three references and the slot the output refreshes (-1 = all 8, key frame). Returns null or the
++        // reason the job must go to the managed decoder.
++        public string Resolve(in Vp9NativeInput p, Span<int> refIdx, out int target)
++        {
++            target = -1;
++            _now++;
++
++            if (p.KeyFrame)
++            {
++                return null;
++            }
++
++            Span<bool> referenced = stackalloc bool[8];
++
++            if (!p.IntraOnly)
++            {
++                ReadOnlySpan<uint> luma = [p.LastLuma, p.GoldenLuma, p.AltLuma];
++                ReadOnlySpan<uint> chroma = [p.LastChroma, p.GoldenChroma, p.AltChroma];
++                ReadOnlySpan<int> w = [p.LastWidth, p.GoldenWidth, p.AltWidth];
++                ReadOnlySpan<int> h = [p.LastHeight, p.GoldenHeight, p.AltHeight];
++
++                for (int r = 0; r < 3; r++)
++                {
++                    refIdx[r] = Find(luma[r], chroma[r], w[r], h[r]);
++
++                    if (refIdx[r] < 0)
++                    {
++                        return "reference not in a slot";
++                    }
++
++                    referenced[refIdx[r]] = true;
++                    _slots[refIdx[r]].LastUse = _now;
++                }
++
++                for (int r = 0; r < 3; r++)
++                {
++                    if (luma[r] == p.OutLuma)
++                    {
++                        return "decoding in place";
++                    }
++                }
++            }
++
++            // Target slot, first rule that applies: (1) a valid slot already holding the output offset and not referenced;
++            // (2) an invalid slot; (3) the least recently used valid slot not referenced, lowest index on ties.
++            int t = -1;
++
++            for (int i = 0; i < 8 && t < 0; i++)
++            {
++                if (_slots[i].Valid && _slots[i].Luma == p.OutLuma && !referenced[i])
++                {
++                    t = i;
++                }
++            }
++
++            for (int i = 0; i < 8 && t < 0; i++)
++            {
++                if (!_slots[i].Valid)
++                {
++                    t = i;
++                }
++            }
++
++            if (t < 0)
++            {
++                ulong best = ulong.MaxValue;
++
++                for (int i = 0; i < 8; i++)
++                {
++                    if (_slots[i].Valid && !referenced[i] && _slots[i].LastUse < best)
++                    {
++                        best = _slots[i].LastUse;
++                        t = i;
++                    }
++                }
++            }
++
++            if (t < 0)
++            {
++                return "no free slot";
++            }
++
++            target = t;
++            return null;
++        }
++
++        // After a successful native decode: the target (or all 8 on a key frame) holds the output; any other slot with the
++        // same luma offset no longer matches guest memory.
++        public void Commit(in Vp9NativeInput p, int target)
++        {
++            Slot output = new() { Luma = p.OutLuma, Chroma = p.OutChroma, Width = p.Width, Height = p.Height, Valid = true, LastUse = _now };
++
++            for (int i = 0; i < 8; i++)
++            {
++                if (target < 0 || i == target)
++                {
++                    _slots[i] = output;
++                }
++                else if (_slots[i].Luma == p.OutLuma)
++                {
++                    _slots[i].Valid = false;
++                }
++            }
++        }
++    }
++
++    static class Vp9NativeHeader
++    {
++        // The §2 checks: null when libvpx can represent the job, else the reason.
++        public static string Check(in Vp9NativeInput p)
++        {
++            if (p.SegmentationEnabled) return "segmentation";
++            if (p.BitDepth != 0 && p.BitDepth != 8) return "bit depth";
++            if (p.Width < 1 || p.Height < 1 || p.Width > 8192 || p.Height > 8192) return "frame size";
++            if (p.TxMode is < 0 or > 4) return "tx_mode";
++            if (p.ReferenceMode is < 0 or > 2) return "reference_mode";
++            if (p.InterpFilter is < 0 or > 4) return "interp_filter";
++            if (p.FilterLevel is < 0 or > 63 || p.Sharpness is < 0 or > 7) return "loop filter level";
++            if (p.YDcDeltaQ is < 0 or > 15 || p.UvDcDeltaQ is < 0 or > 15 || p.UvAcDeltaQ is < 0 or > 15) return "delta_q";
++            if (p.Lossless != (p.BaseQIndex == 0 && p.YDcDeltaQ == 0 && p.UvDcDeltaQ == 0 && p.UvAcDeltaQ == 0)) return "lossless";
++            if (Math.Abs(p.RefDelta0) > 63 || Math.Abs(p.RefDelta1) > 63 || Math.Abs(p.RefDelta2) > 63 || Math.Abs(p.RefDelta3) > 63 ||
++                Math.Abs(p.ModeDelta0) > 63 || Math.Abs(p.ModeDelta1) > 63) return "loop filter delta";
++            if (p.SignBias1 is < 0 or > 1 || p.SignBias2 is < 0 or > 1 || p.SignBias3 is < 0 or > 1) return "sign bias";
++            TileRange(p.Width, out int min, out int max);
++            if (p.Log2TileCols < min || p.Log2TileCols > max) return "tile columns";
++            if (p.Log2TileRows is < 0 or > 2) return "tile rows";
++            return null;
++        }
++
++        public static void TileRange(int width, out int minLog2, out int maxLog2)
++        {
++            int miCols = (width + 7) >> 3;
++            int sb64Cols = (miCols + 7) >> 3;
++            int mn = 0, mx = 1;
++            while ((64 << mn) < sb64Cols) mn++;
++            while ((sb64Cols >> mx) >= 4) mx++;
++            minLog2 = mn;
++            maxLog2 = mx - 1;
++        }
++
++        private ref struct BitWriter
++        {
++            private readonly Span<byte> _dst;
++            public int Bit;
++
++            public BitWriter(Span<byte> dst)
++            {
++                _dst = dst;
++                Bit = 0;
++            }
++
++            public void Put(uint v, int n)
++            {
++                for (int i = n - 1; i >= 0; i--, Bit++)
++                {
++                    int b = Bit >> 3;
++                    if ((Bit & 7) == 0) _dst[b] = 0;
++                    if (((v >> i) & 1) != 0) _dst[b] |= (byte)(0x80 >> (Bit & 7));
++                }
++            }
++
++            public void PutSigned(int v, int n)
++            {
++                Put((uint)Math.Abs(v), n);
++                Put(v < 0 ? 1u : 0u, 1);
++            }
++        }
++
++        public const int MaxHeaderBytes = 64;
++
++        // Writes header + 1 stand-in byte + tiles into dst; returns the length. target: -1 on key frames.
++        public static int Write(in Vp9NativeInput p, ReadOnlySpan<int> refIdx, int target, ReadOnlySpan<byte> tiles, Span<byte> dst)
++        {
++            bool key = p.KeyFrame;
++            bool intraOnly = !key && p.IntraOnly;
++            var b = new BitWriter(dst);
++
++            b.Put(2, 2);                       // frame_marker
++            b.Put(0, 2);                       // profile 0
++            b.Put(0, 1);                       // show_existing_frame
++            b.Put(key ? 0u : 1u, 1);           // frame_type
++            b.Put(intraOnly ? 0u : 1u, 1);     // show_frame
++            b.Put(0, 1);                       // error_resilient_mode
++
++            if (key)
++            {
++                b.Put(0x49, 8); b.Put(0x83, 8); b.Put(0x42, 8);
++                b.Put(0, 3);                   // color_space
++                b.Put(0, 1);                   // color_range
++                b.Put((uint)(p.Width - 1), 16); b.Put((uint)(p.Height - 1), 16);
++                b.Put(0, 1);                   // render_and_frame_size_different
++            }
++            else
++            {
++                if (intraOnly) b.Put(1, 1);    // intra_only
++                b.Put(0, 2);                   // reset_frame_context
++
++                if (intraOnly)
++                {
++                    b.Put(0x49, 8); b.Put(0x83, 8); b.Put(0x42, 8);
++                    b.Put(1u << target, 8);
++                    b.Put((uint)(p.Width - 1), 16); b.Put((uint)(p.Height - 1), 16);
++                    b.Put(0, 1);
++                }
++                else
++                {
++                    b.Put(1u << target, 8);
++                    b.Put((uint)refIdx[0], 3); b.Put((uint)p.SignBias1, 1);
++                    b.Put((uint)refIdx[1], 3); b.Put((uint)p.SignBias2, 1);
++                    b.Put((uint)refIdx[2], 3); b.Put((uint)p.SignBias3, 1);
++                    b.Put(0, 3);               // found_ref x3
++                    b.Put((uint)(p.Width - 1), 16); b.Put((uint)(p.Height - 1), 16);
++                    b.Put(0, 1);
++                    b.Put(p.AllowHighPrecisionMv ? 1u : 0u, 1);
++                    b.Put(p.InterpFilter == 4 ? 1u : 0u, 1);
++                    if (p.InterpFilter != 4) b.Put((uint)p.InterpFilter, 2);
++                }
++            }
++
++            b.Put(0, 1);                       // refresh_frame_context
++            b.Put(0, 1);                       // frame_parallel_decoding_mode
++            b.Put(0, 2);                       // frame_context_idx
++            b.Put((uint)p.FilterLevel, 6);
++            b.Put((uint)p.Sharpness, 3);
++            b.Put(p.ModeRefDeltaEnabled ? 1u : 0u, 1);
++
++            if (p.ModeRefDeltaEnabled)
++            {
++                b.Put(1, 1);                   // mode_ref_delta_update
++                b.Put(1, 1); b.PutSigned(p.RefDelta0, 6);
++                b.Put(1, 1); b.PutSigned(p.RefDelta1, 6);
++                b.Put(1, 1); b.PutSigned(p.RefDelta2, 6);
++                b.Put(1, 1); b.PutSigned(p.RefDelta3, 6);
++                b.Put(1, 1); b.PutSigned(p.ModeDelta0, 6);
++                b.Put(1, 1); b.PutSigned(p.ModeDelta1, 6);
++            }
++
++            b.Put((uint)p.BaseQIndex, 8);
++            ReadOnlySpan<int> dq = [p.YDcDeltaQ, p.UvDcDeltaQ, p.UvAcDeltaQ];
++            foreach (int d in dq)
++            {
++                b.Put(d != 0 ? 1u : 0u, 1);
++                if (d != 0) b.PutSigned(d, 4);
++            }
++
++            b.Put(0, 1);                       // segmentation_enabled
++            TileRange(p.Width, out int min, out int max);
++            for (int k = min; k < max; k++)
++            {
++                b.Put(p.Log2TileCols > k ? 1u : 0u, 1);
++                if (p.Log2TileCols <= k) break;
++            }
++
++            b.Put(p.Log2TileRows != 0 ? 1u : 0u, 1);
++            if (p.Log2TileRows != 0) b.Put(p.Log2TileRows == 2 ? 1u : 0u, 1);
++            b.Put(1, 16);                      // header_size_in_bytes
++
++            int n = (b.Bit + 7) >> 3;
++            dst[n++] = 0;                      // stand-in compressed header
++            tiles.CopyTo(dst[n..]);
++            return n + tiles.Length;
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbf08bdf37611e15e38812ccffe819fe455068f5
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/Vp9NativePath.cs
+@@ -0,0 +1,197 @@
++using Ryujinx.Common.Logging;
++using Ryujinx.Graphics.Nvdec.Image;
++using Ryujinx.Graphics.Nvdec.Types.Vp9;
++using Ryujinx.Graphics.Nvdec.Vpx;
++using Ryujinx.Graphics.Video;
++using Ryujinx.Memory;
++using System;
++using System.Collections.Generic;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
++
++namespace Ryujinx.Graphics.Nvdec
++{
++    // S2Arm: native VP9 decoding for one NVDEC decoder context (docs/设计_原生VP9/design_phase2_B.md §3-§4). Jobs go to
++    // libvpx from a key frame on; any job it cannot represent exactly turns native off until the next key frame, and the
++    // managed decoder takes that job. Everything native writes to guest memory (picture, MVs, counts) is in the layouts the
++    // managed decoder writes, so a switch between the two is exact.
++    sealed class Vp9NativePath : IDisposable
++    {
++        private const int MaxErrors = 3;
++
++        private readonly IVp9NativeBackend _backend;
++        private readonly Vp9SlotMap _slots = new();
++        private readonly VpxSurface _surface = new(0, 0);
++        private readonly HashSet<string> _loggedReasons = [];
++        private byte[] _frame = new byte[1 << 20];
++        private readonly byte[] _counts = new byte[VpxVp9Backend.CountsSize];
++        private bool _active;
++        private int _errors;
++        private bool _loggedFirst;
++
++        public bool Disabled { get; private set; }
++
++        public Vp9NativePath(IVp9NativeBackend backend)
++        {
++            _backend = backend;
++
++            if (Unsafe.SizeOf<Vp9EntropyProbs>() != VpxVp9Backend.ProbsSize || Unsafe.SizeOf<Vp9BackwardUpdates>() != VpxVp9Backend.CountsSize)
++            {
++                Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码：概率表 / 计数布局与 libvpx 补丁不符（{Unsafe.SizeOf<Vp9EntropyProbs>()} / {Unsafe.SizeOf<Vp9BackwardUpdates>()}），只走托管解码器");
++                Disabled = true;
++            }
++        }
++
++        public void Deactivate()
++        {
++            _active = false;
++            _slots.Reset();
++        }
++
++        private void Fallback(string reason)
++        {
++            Deactivate();
++
++            if (_loggedReasons.Add(reason))
++            {
++                Logger.Info?.Print(LogClass.Nvdec, $"VP9 原生解码 → 托管解码器（到下一个关键帧）：{reason}");
++            }
++        }
++
++        private static Vp9NativeInput Input(ref PictureInfo p, ref NvdecRegisters state)
++        {
++            return new Vp9NativeInput
++            {
++                LastWidth = p.LastFrameSize.Width, LastHeight = p.LastFrameSize.Height,
++                GoldenWidth = p.GoldenFrameSize.Width, GoldenHeight = p.GoldenFrameSize.Height,
++                AltWidth = p.AltFrameSize.Width, AltHeight = p.AltFrameSize.Height,
++                Width = p.CurrentFrameSize.Width, Height = p.CurrentFrameSize.Height,
++                KeyFrame = p.Flags.HasFlag(FrameFlags.IsKeyFrame),
++                IntraOnly = p.Flags.HasFlag(FrameFlags.IntraOnly),
++                SignBias1 = p.RefFrameSignBias[1], SignBias2 = p.RefFrameSignBias[2], SignBias3 = p.RefFrameSignBias[3],
++                FilterLevel = p.FirstLevel, Sharpness = p.SharpnessLevel, BaseQIndex = p.BaseQIndex,
++                YDcDeltaQ = p.YDcDeltaQ, UvDcDeltaQ = p.UvDcDeltaQ, UvAcDeltaQ = p.UvAcDeltaQ,
++                Lossless = p.Lossless != 0, TxMode = p.TxMode, ReferenceMode = p.ReferenceMode, InterpFilter = p.InterpFilter,
++                AllowHighPrecisionMv = p.AllowHighPrecisionMv != 0,
++                Log2TileCols = p.Log2TileCols, Log2TileRows = p.Log2TileRows,
++                SegmentationEnabled = p.Seg.Enabled != 0,
++                ModeRefDeltaEnabled = p.Lf.ModeRefDeltaEnabled != 0,
++                RefDelta0 = p.Lf.RefDeltas[0], RefDelta1 = p.Lf.RefDeltas[1], RefDelta2 = p.Lf.RefDeltas[2], RefDelta3 = p.Lf.RefDeltas[3],
++                ModeDelta0 = p.Lf.ModeDeltas[0], ModeDelta1 = p.Lf.ModeDeltas[1],
++                BitDepth = (int)p.BitDepth,
++                LastLuma = state.SetPictureLumaOffset[0], LastChroma = state.SetPictureChromaOffset[0],
++                GoldenLuma = state.SetPictureLumaOffset[1], GoldenChroma = state.SetPictureChromaOffset[1],
++                AltLuma = state.SetPictureLumaOffset[2], AltChroma = state.SetPictureChromaOffset[2],
++                OutLuma = state.SetPictureLumaOffset[3], OutChroma = state.SetPictureChromaOffset[3],
++            };
++        }
++
++        // Returns true when this job was decoded natively: the picture is in guest memory, the MVs are in the guest's MV
++        // write buffer and the counts are in info.BackwardUpdateCounts (the caller writes them back as for the managed path).
++        public unsafe bool TryDecode(ResourceManager rm, ref NvdecRegisters state, ref PictureInfo pictureInfo, ref Vp9PictureInfo info, ReadOnlySpan<byte> tiles)
++        {
++            if (Disabled)
++            {
++                return false;
++            }
++
++            Vp9NativeInput input = Input(ref pictureInfo, ref state);
++
++            if (!_active)
++            {
++                if (!input.KeyFrame)
++                {
++                    return false;
++                }
++
++                _active = true;
++                _slots.Reset();
++            }
++
++            string reason = Vp9NativeHeader.Check(input);
++            Span<int> refIdx = stackalloc int[3];
++            int target = -1;
++            reason ??= _slots.Resolve(input, refIdx, out target);
++
++            if (reason != null)
++            {
++                Fallback(reason);
++                return false;
++            }
++
++            if (_frame.Length < tiles.Length + Vp9NativeHeader.MaxHeaderBytes)
++            {
++                _frame = new byte[(tiles.Length + Vp9NativeHeader.MaxHeaderBytes) * 2];
++            }
++
++            int frameLength = Vp9NativeHeader.Write(input, refIdx, target, tiles, _frame);
++
++            int miCols = (input.Width + 7) >> 3;
++            int miRows = (input.Height + 7) >> 3;
++            int mvBytes = miRows * miCols * VpxVp9Backend.MvRefSize;
++
++            Vp9NativeParams p = new()
++            {
++                IntraFrame = input.KeyFrame || input.IntraOnly ? 1 : 0,
++                TxMode = input.TxMode,
++                ReferenceMode = input.ReferenceMode,
++                CompFixedRef = pictureInfo.CompFixedRef,
++                CompVarRef0 = pictureInfo.CompVarRef[0],
++                CompVarRef1 = pictureInfo.CompVarRef[1],
++                UsePrevFrameMvs = info.UsePrevInFindMvRefs ? 1 : 0,
++            };
++
++            ReadOnlySpan<byte> prevMvs = info.UsePrevInFindMvRefs
++                ? rm.MemoryManager.DeviceGetSpan(state.Vp9SetColMvReadBufOffset, mvBytes)
++                : ReadOnlySpan<byte>.Empty;
++            ReadOnlySpan<byte> probs = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info.Entropy, 1));
++
++            Vp9NativeResult result;
++            Vp9NativePicture picture;
++            string error;
++
++            using (WritableRegion mvsRegion = rm.MemoryManager.GetWritableRegion(ExtendOffset(state.Vp9SetColMvWriteBufOffset), mvBytes))
++            {
++                result = _backend.Decode(_frame.AsSpan(0, frameLength), probs, p, prevMvs, mvsRegion.Memory.Span, _counts, out picture, out error);
++            }
++
++            if (result != Vp9NativeResult.Decoded)
++            {
++                if (result == Vp9NativeResult.Error)
++                {
++                    _errors++;
++                    Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码失败（第 {_errors} 次，{input.Width}x{input.Height}，关键帧 {input.KeyFrame}）：{error ?? "libvpx 未给原因"}；本作业改走托管解码器");
++
++                    if (_errors >= MaxErrors)
++                    {
++                        Logger.Error?.Print(LogClass.Nvdec, $"【红】VP9 原生解码连续出错 {MaxErrors} 次，本解码上下文改用托管解码器");
++                        Disabled = true;
++                    }
++                }
++
++                Fallback(result == Vp9NativeResult.Error ? "libvpx decode error" : $"libvpx: {result}{(error != null ? " (" + error + ")" : "")}");
++                return false;
++            }
++
++            _slots.Commit(input, input.KeyFrame ? -1 : target);
++            _surface.Attach((byte*)picture.Y, (byte*)picture.U, (byte*)picture.V, picture.YStride, picture.UvStride, picture.Width, picture.Height);
++            SurfaceWriter.Write(rm.MemoryManager, _surface, input.OutLuma, input.OutChroma);
++            rm.Cache.Invalidate(input.OutLuma, input.OutChroma);
++            info.BackwardUpdateCounts = MemoryMarshal.Read<Vp9BackwardUpdates>(_counts);
++
++            if (!_loggedFirst)
++            {
++                _loggedFirst = true;
++                Logger.Info?.Print(LogClass.Nvdec, $"VP9（libvpx 原生，{VpxVp9Backend.Threads} 线程）首帧解出：{input.Width}x{input.Height}");
++            }
++
++            return true;
++        }
++
++        public void Dispose()
++        {
++            _backend.Dispose();
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb480f5a071ffc95a1e49b4392c4c16b28f6597f
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Nvdec/Vpx/VpxVp9Backend.cs
+@@ -0,0 +1,130 @@
++using Ryujinx.Graphics.Video;
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Graphics.Nvdec.Vpx
++{
++    // S2Arm: NVDEC VP9 jobs through libvpx (static in the host, services/vpx: libvpx + S2Arm patch + shim s2a_vp9.c,
++    // entry s2a_vp9_nvdec; interface vpx/s2a_vp9_nvdec.h). One instance per decoder context; not thread-safe.
++    public sealed unsafe partial class VpxVp9Backend : IVp9NativeBackend
++    {
++        private const string Lib = "s2a_vpx";
++
++        // libvpx decode threads (row-MT on when > 1). design_phase2_B.md §5: the one place this lives.
++        public static int Threads = 2;
++
++        [StructLayout(LayoutKind.Sequential)]
++        private struct Io
++        {
++            public byte* Probs;
++            public int IntraFrame, TxMode, ReferenceMode, CompFixedRef, CompVarRef0, CompVarRef1, UsePrevFrameMvs, MiCount;
++            public byte* PrevMvs;
++            public byte* Mvs;
++            public byte* Counts;
++        }
++
++        [StructLayout(LayoutKind.Sequential)]
++        private struct Picture
++        {
++            public byte* Y, U, V;
++            public int YStride, UStride, VStride, Width, Height;
++        }
++
++        [LibraryImport(Lib)] private static partial nint s2a_vp9_open(int threads);
++        [LibraryImport(Lib)] private static partial void s2a_vp9_close(nint h);
++        [LibraryImport(Lib)] private static partial int s2a_vp9_nvdec(nint h, byte* frame, uint size, Io* io, Picture* pic, byte** error);
++
++        public const int ProbsSize = 3087;
++        public const int CountsSize = 13208;
++        public const int MvRefSize = 16;
++
++        private nint _handle;
++
++        public Vp9NativeResult Decode(
++            ReadOnlySpan<byte> frame,
++            ReadOnlySpan<byte> probs,
++            in Vp9NativeParams p,
++            ReadOnlySpan<byte> prevMvs,
++            Span<byte> mvsOut,
++            Span<byte> countsOut,
++            out Vp9NativePicture picture,
++            out string error)
++        {
++            picture = default;
++            error = null;
++
++            if (probs.Length != ProbsSize || countsOut.Length != CountsSize || mvsOut.Length == 0 || mvsOut.Length % MvRefSize != 0 ||
++                (p.UsePrevFrameMvs != 0 && prevMvs.Length != mvsOut.Length))
++            {
++                return Vp9NativeResult.NotRepresentable;
++            }
++
++            if (_handle == 0)
++            {
++                _handle = s2a_vp9_open(Threads);
++
++                if (_handle == 0)
++                {
++                    error = "s2a_vp9_open failed";
++                    return Vp9NativeResult.Error;
++                }
++            }
++
++            Picture pic;
++            byte* err = null;
++            int rc;
++
++            fixed (byte* f = frame)
++            fixed (byte* pr = probs)
++            fixed (byte* prev = prevMvs)
++            fixed (byte* mvs = mvsOut)
++            fixed (byte* counts = countsOut)
++            {
++                Io io = new()
++                {
++                    Probs = pr,
++                    IntraFrame = p.IntraFrame,
++                    TxMode = p.TxMode,
++                    ReferenceMode = p.ReferenceMode,
++                    CompFixedRef = p.CompFixedRef,
++                    CompVarRef0 = p.CompVarRef0,
++                    CompVarRef1 = p.CompVarRef1,
++                    UsePrevFrameMvs = p.UsePrevFrameMvs,
++                    MiCount = mvsOut.Length / MvRefSize,
++                    PrevMvs = p.UsePrevFrameMvs != 0 ? prev : null,
++                    Mvs = mvs,
++                    Counts = counts,
++                };
++
++                rc = s2a_vp9_nvdec(_handle, f, (uint)frame.Length, &io, &pic, &err);
++            }
++
++            if (rc == 0)
++            {
++                picture = new Vp9NativePicture((nint)pic.Y, (nint)pic.U, (nint)pic.V, pic.YStride, pic.UStride, pic.Width, pic.Height);
++                return Vp9NativeResult.Decoded;
++            }
++
++            if (err != null)
++            {
++                error = Marshal.PtrToStringUTF8((nint)err);
++            }
++
++            return rc switch
++            {
++                1 => Vp9NativeResult.NotRepresentable,
++                2 => Vp9NativeResult.NeedsKeyFrame,
++                _ => Vp9NativeResult.Error,
++            };
++        }
++
++        public void Dispose()
++        {
++            if (_handle != 0)
++            {
++                s2a_vp9_close(_handle);
++                _handle = 0;
++            }
++        }
++    }
++}
+diff --git a/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs b/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5183fdca98a3957d08b786384cf8dbfa1695e6e9
+--- /dev/null
++++ b/src/Ryujinx.Graphics.Video/IVp9NativeBackend.cs
+@@ -0,0 +1,61 @@
++using System;
++using System.Runtime.InteropServices;
++
++namespace Ryujinx.Graphics.Video
++{
++    // S2Arm: native decode of one NVDEC VP9 job (libvpx with S2Arm's hook, services/vpx/patches; design
++    // docs/设计_原生VP9/design_phase2_B.md). Registered by the platform through S2AVideoDecoders.Vp9.
++    public enum Vp9NativeResult
++    {
++        Decoded = 0,
++        NotRepresentable = 1, // nothing changed; decode this job with the managed decoder
++        NeedsKeyFrame = 2,    // not representable after the header was read; native needs a key frame
++        Error = -1,           // decode error; native needs a key frame
++    }
++
++    [StructLayout(LayoutKind.Sequential)]
++    public struct Vp9NativeParams
++    {
++        public int IntraFrame;
++        public int TxMode;
++        public int ReferenceMode;
++        public int CompFixedRef;
++        public int CompVarRef0;
++        public int CompVarRef1;
++        public int UsePrevFrameMvs;
++    }
++
++    public readonly struct Vp9NativePicture
++    {
++        public readonly nint Y, U, V;
++        public readonly int YStride, UvStride, Width, Height;
++
++        public Vp9NativePicture(nint y, nint u, nint v, int yStride, int uvStride, int width, int height)
++        {
++            Y = y;
++            U = u;
++            V = v;
++            YStride = yStride;
++            UvStride = uvStride;
++            Width = width;
++            Height = height;
++        }
++    }
++
++    public interface IVp9NativeBackend : IDisposable
++    {
++        // frame: uncompressed header + 1 byte + tile data. probs: Vp9EntropyProbs bytes (3087). prevMvs: the guest's MV
++        // read buffer (empty when UsePrevFrameMvs is 0). mvsOut: the guest's MV write buffer (16 bytes per 8x8), written
++        // on Decoded. countsOut: Vp9BackwardUpdates bytes (13208), written on Decoded. The picture stays valid until the
++        // next call.
++        Vp9NativeResult Decode(
++            ReadOnlySpan<byte> frame,
++            ReadOnlySpan<byte> probs,
++            in Vp9NativeParams p,
++            ReadOnlySpan<byte> prevMvs,
++            Span<byte> mvsOut,
++            Span<byte> countsOut,
++            out Vp9NativePicture picture,
++            out string error);
++    }
++}

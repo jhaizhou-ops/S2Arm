@@ -69,6 +69,32 @@ final class SpaceServiceTests: XCTestCase {
             XCTAssertEqual(failure.errorDescription, "另一个任务正在使用游戏库，请稍后重试。")
         }
     }
+
+    func testOverviewReadsLocationsSharedAndGameSizes() async throws {
+        let box = try Sandbox(); defer { box.remove() }
+        let runner = FakeRunner()
+        runner.script = { _ in ([result(#"{"locations":[{"id":"L1","path":"/ext/a/lib","volume":"A","connected":true,"default":true,"totalBytes":5000000000,"freeBytes":2000000000,"usedBytes":3000000000},{"id":"L2","path":"/ext/b/lib","volume":"B","connected":false,"default":false},{"path":"no id"}],"shared":[{"id":"hosts","bytes":10},{"id":"ipa","bytes":20},{"id":"toolCache","bytes":0},{"id":"temp","bytes":0},{"id":"logs","bytes":5}],"games":[{"gameId":"0100A","name":"Alpha","state":"ok","sizes":{"imageMac":1,"imageIos":2,"saves":3,"cache":4,"sources":4000000000,"measured":true}},{"gameId":"0100B","state":"offline","sizes":{"sources":7,"measured":false}}]}"#)], 0, false) }
+        let o = try await SpaceService(client: client(box, runner)).overview()
+        XCTAssertEqual(runner.starts.first?.request["operation"] as? String, "storageOverview")
+        XCTAssertEqual(o.locations.map(\.id), ["L1", "L2"])   // 没 id 的不要
+        XCTAssertEqual(o.locations[0].isDefault, true)
+        XCTAssertEqual(o.locations[0].usedBytes, 3_000_000_000)   // 超过 Int32 不截断
+        XCTAssertEqual(o.locations[1].connected, false)
+        XCTAssertNil(o.locations[1].freeBytes)   // 没连上：不给假的 0
+        XCTAssertEqual(o.shared.map(\.id), ["hosts", "ipa", "toolCache", "temp", "logs"])
+        XCTAssertEqual(o.shared.map(\.bytes), [10, 20, 0, 0, 5])
+        XCTAssertEqual(o.games[0].sizes, GameSizes(imageMac: 1, imageIos: 2, saves: 3, cache: 4, sources: 4_000_000_000, measured: true))
+        XCTAssertEqual(o.games[1].name, "0100B")   // 没名字退回游戏号
+        XCTAssertEqual(o.games[1].sizes, GameSizes(imageMac: 0, imageIos: 0, saves: 0, cache: 0, sources: 7, measured: false))
+    }
+
+    func testOverviewWithoutLibraryStartsNothing() async throws {
+        let box = try Sandbox(); defer { box.remove() }
+        let bare = FakeRunner()
+        do { _ = try await SpaceService(client: client(box, bare, env: box.environment(library: ""))).overview(); XCTFail() }
+        catch { XCTAssertEqual((error as? JobClientError)?.message, LibraryProvider.noLibraryMessage) }
+        XCTAssertTrue(bare.starts.isEmpty)
+    }
 }
 
 final class LibraryChangeTests: XCTestCase {

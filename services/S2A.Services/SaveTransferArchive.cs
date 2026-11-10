@@ -23,25 +23,25 @@ public static partial class SaveTransfer
             Source = ReadFile(path);
             try
             {
-                Require(Source.Length <= MaxBytes + (64 << 20), "备份文件过大。");
+                Require(Source.Length <= MaxBytes + (64 << 20), T("备份文件过大。", "The backup file is too large."));
                 var directory = ZipBounds(Source);
                 Sha = Hash(Source);
                 Source.Position = 0;
                 Zip = new ZipArchive(Source, ZipArchiveMode.Read, leaveOpen: true, entryNameEncoding: Encoding.UTF8);
                 try
                 {
-                    Require(Zip.Entries.Count == directory.Count, "ZIP 目录数量发生变化。");
+                    Require(Zip.Entries.Count == directory.Count, T("ZIP 目录数量发生变化。", "The number of ZIP entries changed."));
                     for (int i = 0; i < directory.Count; i++)
                     {
                         var expected = directory[i];
                         var entry = Zip.Entries[i];
                         Require(entry.FullName == expected.Name && entry.Length == (long)expected.Size &&
                             entry.CompressedLength == (long)expected.Compressed && entry.Crc32 == expected.Crc &&
-                            (uint)entry.ExternalAttributes == expected.Attributes, "ZIP 公开目录解析与预校验不一致。");
+                            (uint)entry.ExternalAttributes == expected.Attributes, T("ZIP 公开目录解析与预校验不一致。", "The ZIP directory doesn’t match the pre-check."));
                     }
                     Manifest = Validate(this);
                     Source.Position = 0;
-                    Require(Hash(Source) == Sha, "检查期间备份发生变化。", "save_changed");
+                    Require(Hash(Source) == Sha, T("检查期间备份发生变化。", "The backup changed while it was being checked."), "save_changed");
                 }
                 catch { Zip.Dispose(); throw; }
             }
@@ -52,7 +52,7 @@ public static partial class SaveTransfer
     private static byte[] EntryBytes(Archive archive, string name)
     {
         var entry = archive.Zip.GetEntry(name);
-        Require(entry != null && entry.Length <= MaxMetadata, "备份元数据缺失或过大。");
+        Require(entry != null && entry.Length <= MaxMetadata, T("备份元数据缺失或过大。", "Backup metadata is missing or too large."));
         using var stream = entry.Open();
         using var memory = new MemoryStream();
         CopyEntry(stream, memory, entry.Length, null, entry.Crc32);
@@ -68,13 +68,13 @@ public static partial class SaveTransfer
         while ((size = source.Read(buffer)) != 0)
         {
             count = checked(count + size);
-            Require(count <= length, "备份内容超过声明大小。");
+            Require(count <= length, T("备份内容超过声明大小。", "The backup content exceeds its declared size."));
             hash.AppendData(buffer, 0, size);
             crc.Append(buffer.AsSpan(0, size));
             destination.Write(buffer, 0, size);
         }
         Require(count == length && crc.GetCurrentHashAsUInt32() == expectedCrc &&
-            (expectedHash == null || Convert.ToHexStringLower(hash.GetHashAndReset()) == expectedHash), "备份文件 CRC 或 SHA-256 校验失败。");
+            (expectedHash == null || Convert.ToHexStringLower(hash.GetHashAndReset()) == expectedHash), T("备份文件 CRC 或 SHA-256 校验失败。", "The backup file failed the CRC or SHA-256 check."));
     }
     private static JsonObject Validate(Archive archive)
     {
@@ -84,15 +84,15 @@ public static partial class SaveTransfer
             Name(entry.FullName);
             int type = (entry.ExternalAttributes >> 16) & 0xf000;
             Require(names.Add(entry.FullName) && !entry.IsEncrypted && type is 0 or 0x8000 &&
-                (entry.ExternalAttributes & (int)FileAttributes.Directory) == 0 && entry.Length >= 0, "ZIP 含重复路径、链接、目录、加密或特殊条目。");
+                (entry.ExternalAttributes & (int)FileAttributes.Directory) == 0 && entry.Length >= 0, T("ZIP 含重复路径、链接、目录、加密或特殊条目。", "The ZIP contains duplicate paths, links, folders, encrypted or special entries."));
         }
         var node = Parse(EntryBytes(archive, "manifest.json"));
         Require(node is JsonObject && Str(node, "format") == "S2ArmSave" && node["schema"].GetValue<int>() == 1 &&
-            Str(node, "layout") == "ryujinx-data-v1", "不支持此存档格式或版本。");
-        Require(node["files"] is JsonArray && node["directories"] is JsonArray, "备份清单无效。");
+            Str(node, "layout") == "ryujinx-data-v1", T("不支持此存档格式或版本。", "This save format or version isn’t supported."));
+        Require(node["files"] is JsonArray && node["directories"] is JsonArray, T("备份清单无效。", "Invalid backup manifest."));
         var files = node["files"].AsArray();
         var dirs = node["directories"].AsArray();
-        Require(files.Count is > 0 and <= MaxFiles && dirs.Count <= MaxFiles, "备份文件或目录数量无效。");
+        Require(files.Count is > 0 and <= MaxFiles && dirs.Count <= MaxFiles, T("备份文件或目录数量无效。", "Invalid number of backup files or folders."));
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var fileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var expected = new HashSet<string>(StringComparer.Ordinal) { "manifest.json" };
@@ -101,7 +101,7 @@ public static partial class SaveTransfer
         {
             string name = item.GetValue<string>();
             Name(name);
-            Require(Allowed(name, true) && paths.Add(name), "备份目录清单无效。");
+            Require(Allowed(name, true) && paths.Add(name), T("备份目录清单无效。", "Invalid backup folder list."));
         }
         foreach (var item in files)
         {
@@ -109,12 +109,12 @@ public static partial class SaveTransfer
             Name(name);
             long size = item["size"].GetValue<long>();
             string sha = Str(item, "sha256");
-            Require(Allowed(name) && paths.Add(name) && size >= 0 && Hex(sha, 64), "备份文件清单无效。");
+            Require(Allowed(name) && paths.Add(name) && size >= 0 && Hex(sha, 64), T("备份文件清单无效。", "Invalid backup file list."));
             fileNames.Add(name);
             expected.Add("payload/" + name);
             total = checked(total + size);
             var entry = archive.Zip.GetEntry("payload/" + name);
-            Require(total <= MaxBytes && entry != null && entry.Length == size, "备份大小或文件清单不符。");
+            Require(total <= MaxBytes && entry != null && entry.Length == size, T("备份大小或文件清单不符。", "The backup size or file list doesn’t match."));
         }
         foreach (string name in paths)
         {
@@ -122,11 +122,11 @@ public static partial class SaveTransfer
             while (parent.Contains('/'))
             {
                 parent = parent[..parent.LastIndexOf('/')];
-                Require(!fileNames.Contains(parent), "备份文件与目录冲突。");
+                Require(!fileNames.Contains(parent), T("备份文件与目录冲突。", "A backup file conflicts with a folder."));
             }
         }
         Require(expected.SetEquals(archive.Zip.Entries.Select(e => e.FullName)) && fileNames.Contains(Profile) &&
-            fileNames.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), "备份缺少必要文件或含额外条目。");
+            fileNames.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), T("备份缺少必要文件或含额外条目。", "The backup is missing required files or has extra entries."));
         foreach (var item in files)
         {
             var entry = archive.Zip.GetEntry("payload/" + Str(item, "path"));
@@ -136,18 +136,18 @@ public static partial class SaveTransfer
         Profiles(EntryBytes(archive, "payload/" + Profile));
         var entries = Entries(name => EntryBytes(archive, "payload/" + name), files.Select(f => Str(f, "path")), dirs.Select(d => d.GetValue<string>()));
         if (node.AsObject().ContainsKey("saveEntries"))
-            Require(JsonNode.DeepEquals(node["saveEntries"], entries) && JsonNode.DeepEquals(node["users"], Users(entries)), "备份账号归属与 LibHac 索引不符。");
+            Require(JsonNode.DeepEquals(node["saveEntries"], entries) && JsonNode.DeepEquals(node["users"], Users(entries)), T("备份账号归属与 LibHac 索引不符。", "The backup’s account ownership doesn’t match the LibHac index."));
         node["saveEntries"] = entries;
         node["users"] = Users(entries);
-        if (node.AsObject().ContainsKey("deviceSettings")) Require(node["deviceSettings"] is JsonObject, "设备设置元信息无效。");
+        if (node.AsObject().ContainsKey("deviceSettings")) Require(node["deviceSettings"] is JsonObject, T("设备设置元信息无效。", "Invalid device settings metadata."));
         node["deviceSettings"] = Settings(node["deviceSettings"]);
         return (JsonObject)node;
     }
     private static void Identity(Context c, JsonNode manifest)
     {
-        Require(string.Equals(Str(manifest["game"], "id"), Str(c.Game, "id"), StringComparison.OrdinalIgnoreCase), "备份属于另一款游戏。", "save_wrong_game");
+        Require(string.Equals(Str(manifest["game"], "id"), Str(c.Game, "id"), StringComparison.OrdinalIgnoreCase), T("备份属于另一款游戏。", "The backup belongs to a different game."), "save_wrong_game");
         Require(manifest["game"]["version"].GetValue<long>() == c.Game["version"].GetValue<long>() &&
-            Str(manifest["game"], "contentIdentity") == Str(c.Game, "contentIdentity"), "备份的游戏版本或 DLC 组合不符。", "save_version");
+            Str(manifest["game"], "contentIdentity") == Str(c.Game, "contentIdentity"), T("备份的游戏版本或 DLC 组合不符。", "The backup’s game version or DLC combination doesn’t match."), "save_version");
         var scan = Scan(c.Root);
         if (!scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal))) return;
         var target = Entries(name => SmallFile(Path.Combine(c.Root, name)), scan.Files.Keys, scan.Directories);
@@ -156,12 +156,12 @@ public static partial class SaveTransfer
             .ToDictionary(g => g.Key, g => g.Select(e => Str(e, "userId")).ToHashSet(StringComparer.Ordinal));
         var a = Owners(target); var b = Owners(incoming);
         foreach (string group in a.Keys.Intersect(b.Keys))
-            Require(a[group].SetEquals(b[group]), "备份与目标存档账号归属不同。", "save_wrong_user");
+            Require(a[group].SetEquals(b[group]), T("备份与目标存档账号归属不同。", "The backup and the target save belong to different accounts."), "save_wrong_user");
     }
     private static string Source(Context c)
     {
         string path = Absolute(Str(c.Request, "path"));
-        Require(!Within(path, c.Root) && (Str(c.Request, "operation") != "export" || !Within(path, c.Work)), "请从数据与事务目录以外选择备份。");
+        Require(!Within(path, c.Root) && (Str(c.Request, "operation") != "export" || !Within(path, c.Work)), T("请从数据与事务目录以外选择备份。", "Choose a backup outside the data and transaction folders."));
         return path;
     }
     private static JsonObject Inspect(Context c)
@@ -175,7 +175,7 @@ public static partial class SaveTransfer
     private static JsonObject MakeManifest(Context c, string root, out Snapshot scan)
     {
         scan = Scan(root);
-        Require(scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), "此游戏尚无可备份存档。", "save_empty");
+        Require(scan.Files.Keys.Any(n => n.StartsWith("bis/user/save/", StringComparison.Ordinal)), T("此游戏尚无可备份存档。", "This game has no save to back up yet."), "save_empty");
         Profiles(SmallFile(Path.Combine(root, Profile)));
         var entries = Entries(name => SmallFile(Path.Combine(root, name)), scan.Files.Keys, scan.Directories);
         return new() { ["format"] = "S2ArmSave", ["schema"] = 1, ["layout"] = "ryujinx-data-v1", ["platform"] = "ios",
@@ -186,7 +186,7 @@ public static partial class SaveTransfer
     private static JsonObject WriteArchive(Context c, string root, string path)
     {
         CheckLinks(path);
-        Require(!File.Exists(path) && !Directory.Exists(path), "同名备份已存在。", "save_exists");
+        Require(!File.Exists(path) && !Directory.Exists(path), T("同名备份已存在。", "A backup with the same name already exists."), "save_exists");
         var manifest = MakeManifest(c, root, out var scan);
         long total = scan.Files.Where(p => Allowed(p.Key)).Sum(p => p.Value);
         Space(Path.GetDirectoryName(path), total + (64 << 20));
@@ -203,7 +203,7 @@ public static partial class SaveTransfer
                         var entry = zip.CreateEntry("payload/" + file.Key, CompressionLevel.Fastest);
                         entry.ExternalAttributes = 0x180 << 16;
                         using var source = ReadFile(Path.Combine(root, file.Key));
-                        Require(source.Length == file.Value, "备份期间存档变化。", "save_changed");
+                        Require(source.Length == file.Value, T("备份期间存档变化。", "The save changed during the backup."), "save_changed");
                         using var target = entry.Open();
                         using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                         byte[] buffer = new byte[1 << 20];
@@ -211,10 +211,10 @@ public static partial class SaveTransfer
                         while ((size = source.Read(buffer)) != 0)
                         {
                             copied += size;
-                            Require(copied <= file.Value, "备份期间存档变化。", "save_changed");
+                            Require(copied <= file.Value, T("备份期间存档变化。", "The save changed during the backup."), "save_changed");
                             sha.AppendData(buffer, 0, size); target.Write(buffer, 0, size);
                         }
-                        Require(copied == file.Value, "备份期间存档变化。", "save_changed");
+                        Require(copied == file.Value, T("备份期间存档变化。", "The save changed during the backup."), "save_changed");
                         manifest["files"].AsArray().Add((JsonNode)new JsonObject { ["path"] = file.Key, ["size"] = copied, ["sha256"] = Convert.ToHexStringLower(sha.GetHashAndReset()) });
                     }
                     using var metadata = zip.CreateEntry("manifest.json").Open();
@@ -222,8 +222,8 @@ public static partial class SaveTransfer
                 }
                 output.Flush(flushToDisk: true);
             }
-            Require(Fingerprint(root) == before, "备份期间存档变化。", "save_changed");
-            using (var verified = new Archive(temporary)) Require(JsonNode.DeepEquals(manifest, verified.Manifest), "导出后校验失败。");
+            Require(Fingerprint(root) == before, T("备份期间存档变化。", "The save changed during the backup."), "save_changed");
+            using (var verified = new Archive(temporary)) Require(JsonNode.DeepEquals(manifest, verified.Manifest), T("导出后校验失败。", "Verification failed after export."));
             File.Move(temporary, path, overwrite: false);
             SyncDirectory(Path.GetDirectoryName(path));
             return manifest;
@@ -233,7 +233,7 @@ public static partial class SaveTransfer
     private static JsonObject Export(Context c)
     {
         string path = Source(c);
-        Require(Directory.Exists(Path.GetDirectoryName(path)), "备份目标目录不存在。");
+        Require(Directory.Exists(Path.GetDirectoryName(path)), T("备份目标目录不存在。", "The backup destination folder doesn’t exist."));
         var manifest = WriteArchive(c, c.Root, path);
         return new() { ["outputPath"] = path, ["fileCount"] = manifest["files"].AsArray().Count };
     }
@@ -243,6 +243,6 @@ public static partial class SaveTransfer
     {
         var drive = DriveInfo.GetDrives().Where(d => Within(path, d.RootDirectory.FullName.TrimEnd('/')) || d.RootDirectory.FullName == "/")
             .OrderByDescending(d => d.RootDirectory.FullName.Length).First();
-        Require(drive.AvailableFreeSpace >= bytes, "磁盘空间不足，无法保留旧存档。", "save_space");
+        Require(drive.AvailableFreeSpace >= bytes, T("磁盘空间不足，无法保留旧存档。", "Not enough disk space to keep the old save."), "save_space");
     }
 }

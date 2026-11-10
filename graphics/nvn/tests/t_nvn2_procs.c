@@ -339,6 +339,26 @@ static void red_stub(void) {
     CHECK(FN(uint64_t (*)(const void *), "nvnProgramGetScratchBytesPerWarp")(&cmd) == 0);
 }
 
+// NVN2 带索引绘制的命令内存读数按入口取驱动真值（sdk 的 DrawElements* 推进 cmd[0] 的立即数，SDK 20.5 / 21.4 / 22 与 Sports Resort 一致）；间接绘制不在表内，仍按原估算
+static void draw_device_bytes(void) {
+    phase = "绘制设备字节";
+    NVNcommandBuffer cmd; memset(&cmd, 0, sizeof cmd); CHECK(API(nvnCommandBufferInitialize)(&cmd, &device));
+    API(nvnCommandBufferAddCommandMemory)(&cmd, &pool, 0, 4096); API(nvnCommandBufferBeginRecording)(&cmd);
+#define USED_BY(call, want) do { size_t u_ = API(nvnCommandBufferGetCommandMemoryUsed)(&cmd); call; CHECK(API(nvnCommandBufferGetCommandMemoryUsed)(&cmd) - u_ == (want)); } while (0)
+    const NVNdrawPrimitive tri = NVN_DRAW_PRIMITIVE_TRIANGLES; const NVNindexType u16 = NVN_INDEX_TYPE_UNSIGNED_SHORT; const uint64_t ib = 0x123456780ull;
+    USED_BY(API(nvnCommandBufferDrawElements)(&cmd, tri, u16, 6, ib), 24);
+    USED_BY(API(nvnCommandBufferDrawElementsBaseVertex)(&cmd, tri, u16, 6, ib, 0), 48);
+    USED_BY(API(nvnCommandBufferDrawElementsBaseVertex)(&cmd, tri, u16, 6, ib, 5), 72);
+    USED_BY(API(nvnCommandBufferDrawElementsInstanced)(&cmd, tri, u16, 6, ib, 0, 0, 1), 44);
+    USED_BY(API(nvnCommandBufferDrawElementsInstanced)(&cmd, tri, u16, 6, ib, 3, 0, 2), 48);
+    USED_BY(API(nvnCommandBufferDrawElementsInstanced)(&cmd, tri, u16, 6, ib, 0, 7, 2), 48);
+    USED_BY(API(nvnCommandBufferDrawElementsIndirect)(&cmd, tri, u16, ib, 0x234567890ull), 48);   // 入口的字节数不外溢到后面的记录
+    NVNcommandHandle h = 0; USED_BY(h = API(nvnCommandBufferEndRecording)(&cmd), 0); CHECK(h);   // NVN2 的 END 不推进命令游标
+    API(nvnCommandBufferBeginRecording)(&cmd); USED_BY(h = API(nvnCommandBufferEndRecording)(&cmd), 0); CHECK(h);   // 空录制：0 字节，句柄照给
+#undef USED_BY
+    API(nvnCommandBufferFinalize)(&cmd);
+}
+
 static void ounce_on(void) {   // 写一份 Switch 2 布局的 NPDM（ACID 魔数在 ACID +0x300），经原生层读一遍置平台位：nvn2_on() 起
     char path[1024]; const char *td = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/t_nvn2_procs_npdm_XXXXXX", td && *td ? td : "/tmp");
     int fd = mkstemp(path); CHECK(fd >= 0);
@@ -360,7 +380,7 @@ int main(void) {
     API(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
     API(nvnMemoryPoolBuilderSetStorage)(&pb, memory, 65536);
     CHECK(API(nvnMemoryPoolInitialize)(&pool, &pb));
-    drv_names(); program_builder(); dirty_tile_map(); window(); multisample(); queue_builder(); device_objects(); dlss(); recording(); mesh_recording(); red_stub();
+    drv_names(); program_builder(); dirty_tile_map(); window(); multisample(); queue_builder(); device_objects(); dlss(); recording(); draw_device_bytes(); mesh_recording(); red_stub();
     unlink(map);
     printf("✓ t_nvn2_procs：NVN2 驱动按名可取的 767 个入口全部取得到，未实现桩正好是写明原因的 %d 个；程序构建器 / 脏块图 / 窗口 / 多重采样 / 队列构建器 / 设备命令与消息缓冲 / DLSS / 快速清除 / NVX 地址按驱动布局与公式；"
            "HDR 元数据栈上参数；延后推常量录成指针记录 → 通过（%u 项检查）\n", NRED, checks);

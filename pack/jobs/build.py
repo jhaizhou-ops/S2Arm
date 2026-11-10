@@ -12,8 +12,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import community
+import host_update
+import layout
 from core import Failure, atomic, clone, contained, digest, read, tree_hash
 from library import input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
 import milestones as ms
@@ -66,22 +69,29 @@ def validate_files(c, root, files, full=True):
             raise Failure("准备产物校验失败，请重新准备：" + name, code="runtime_invalid")
 
 
-def validate_runtime(c, runtime, full=True):
+QUICK_FILES = ("main", "main.npdm")   # 游戏库列表快判也核的几个文件（主程序与程序描述）：在、是普通文件、大小同清单
+
+
+def validate_runtime(c, runtime, full=True, files=True):
+    """files=False：只看清单和入口（游戏库列表用），不逐文件读状态，只核主程序 / main.npdm 在且大小对（QUICK_FILES，审计 P2-212：
+    原先清单没变、主程序被删也报就绪，点开始才报错）；真正启动时还会完整校验"""
     root = runtime.resolve()
-    contained(c.library / "games", root)
+    layout.require_in_location(c, root)
     manifest = read(root / "manifest.json", {})
     if manifest.get("schema") != 1 or manifest.get("engine") != "S2Arm" or manifest.get("target") != "macos-arm64":
         raise Failure("当前游戏没有完整的 S2Arm Mac 运行版本。", code="runtime_invalid")
     if not (root / "romfs").is_dir() or (root / "romfs").is_symlink():
         raise Failure("运行包缺少独立的 RomFS 游戏资源目录，请重新准备。", code="runtime_invalid")
-    validate_files(c, root, manifest.get("files"), full)
+    if files:
+        validate_files(c, root, manifest.get("files"), full)
+    elif isinstance(manifest.get("files"), dict):
+        quick = {k: manifest["files"][k] for k in QUICK_FILES if k in manifest["files"]}
+        if quick:
+            validate_files(c, root, quick, full=False)
     if manifest.get("memoryRequirementsVersion") == 2:
         table = root / "addr_need.tsv"
         if not table.is_file() or manifest.get("memoryRequirementsSha256") != digest(table):
             raise Failure("这款游戏的内存配置已损坏，请重新打包后再启动。", code="runtime_invalid")
-    executable = root / "S2ArmGame.app/Contents/MacOS/s2arm-host"
-    if not os.access(executable, os.X_OK):
-        raise Failure("S2Arm Mac 宿主不可执行。", code="permission_denied")
     return manifest
 
 
@@ -101,13 +111,13 @@ def runtime_env(c, game, runtime):
     env["S2A_IPHONE_VA"] = "0"   # 玩家起局不用 iPhone 地址模拟；开发 / 普查保留原生缺省（#1530）。
     env.pop("S2A_VAMM_LAYOUT", None)
     env.pop("S2A_PATCH_DIR", None)   # 补丁只在出包时读（随包 patch.tsv 在游戏数据目录里，宿主自己找）；玩家导入的在 <S2A_DOCS>/S2A/patches
-    save = contained(c.library, c.library / "saves" / game["id"])
-    cache = contained(c.library, c.library / "runtime-cache" / game["id"])
+    save = contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "saves"))
+    cache = contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "shader-cache"))
     docs = contained(c.library, c.library / "temp" / game["id"])
     for p in (save, cache, docs):
         p.mkdir(parents=True, exist_ok=True)
-    # S2A_SAVE_DIR is a test/import seed that clears saves at boot; never set it
-    # for normal play. Persist the Ryujinx data root instead.
+    # S2A_SAVE_DIR is a test/import seed that clears saves at boot; launch() sets it
+    # only for a save the player just imported, never for normal play. Persist the Ryujinx data root instead.
     env.update(S2A_GAME_DATA=str(runtime), S2A_RYU_DATA=str(save), S2A_DOCS=str(docs),
                NXGAL_SHADER_CACHE_DIR=str(cache / "shaders"), NXGAL_PSO_DEV_DIR=str(cache / "pso"),
                S2A_MACRO_DUMP=str(cache / "macros"),
@@ -125,7 +135,7 @@ def runtime_env(c, game, runtime):
     # Freeze exactly what the pre-launch card showed. Never rewrite another run's snapshot.
     config = c.r.get("launchInputConfig")
     if config is None:
-        config = read(c.library / "mappings" / (game["id"] + ".json")) or read(c.private / "default-input.json")
+        config = read(layout.path(c, game["id"], "input.json", create=False)) or read(c.private / "default-input.json")
     if config is not None:
         validate_input(config)
         path = c.private / "runtime-input" / game["id"] / (c.task + ".json")
@@ -144,25 +154,42 @@ def launch(c):
         game = c.game()
         from saves import recover
         recover(c, game, override=c.r.get("overrideRecovery") is True)   # 回退失败：玩家单独确认「仍要启动」才放行（同 iPhone，审计 18:00 P0-3）
-        runtime = (c.library / "games" / game["id"] / "current").resolve()
+        runtime = layout.image_mac(c, game["id"], create=False)
         c.begin("验证运行文件")
         manifest = validate_runtime(c, runtime)
         if manifest.get("gameId") != game["id"]:
             raise Failure("运行资源与所选游戏不匹配。", code="runtime_invalid")
         if manifest.get("memoryRequirementsVersion") != 2:
             raise Failure("这款游戏需要重新打包，完成后即可启动。", code="runtime_invalid")
+        host, trial = host_update.choose(c, game["id"], runtime, manifest)   # 公共宿主：兼容就换上本版的（这局是试玩），否则用原来的
+        executable = host_update.host_exe(c, host)
+        if not os.access(executable, os.X_OK):
+            raise Failure("S2Arm Mac 宿主不可执行。", code="permission_denied")
         if c.r.get("launchInputConfig") is not None:
-            supported, _ = toolchain.input_interface(c, runtime / "S2ArmGame.app/Contents/MacOS/s2arm-host")
+            supported, _ = toolchain.input_interface(c, executable)
             if not supported:
                 raise Failure("此运行包的宿主未确认支持映射，请重新打包游戏后再使用键位引导。", code="runtime_invalid")
         env = runtime_env(c, game, runtime)
+        from saves import claim_seed, finish_seed
+        seed = claim_seed(c, game["id"])
+        if seed:
+            env["S2A_SAVE_DIR"] = str(seed)   # 玩家导入过存档、这是第一次启动：运行时建好存档再灌入
         env.update(community.launch_env(c, game["id"]))   # 宽屏 / 60 帧宿主开关（社区资源面板，10-27）：关掉的才设，下次启动生效
         try:
             c.begin("游戏运行中")
-            log = c.private / "logs" / (c.task + "-game.log")
-            c.run([runtime / "S2ArmGame.app/Contents/MacOS/s2arm-host", runtime], log, env,
-                  cwd=c.library / "temp" / game["id"])
+            log = c.logs / (c.task + "-game.log")
+            started = time.monotonic()
+            try:
+                c.run([executable, runtime], log, env, cwd=c.library / "temp" / game["id"])
+            except Failure:
+                if trial:   # 新宿主试玩：TRIAL_OK_SECONDS 内异常退出 = 不认这款，下次退回原来的；玩过这么久才崩不怪宿主
+                    host_update.settle(c, game["id"], host, ok=time.monotonic() - started >= host_update.TRIAL_OK_SECONDS)
+                raise
+            if trial:
+                host_update.settle(c, game["id"], host, ok=True)
         finally:
+            if seed:
+                finish_seed(c, game["id"], log)
             # Context.run waits for the host, including failure/cancellation.
             # Do not accumulate per-run snapshots after the process exits.
             if env.get("S2A_INPUT_CONFIG"):
@@ -295,48 +322,11 @@ def clone_tree(c, source, destination, *, materialize_romfs=False):
         clone_tree(c, romfs, destination / "romfs")
 
 
-def retain_releases(game_root, keep=2):
-    """What "current + the previous successful release" means on disk (J10): after a release is switched in, everything older than that pair goes,
-    and so does any `<release>.partial` a crash left behind. Nothing outside `<game>/releases/` is ever touched, symlinks are left alone, and the
-    directory `current` points at is never a candidate."""
-    game_root = Path(game_root).resolve()
-    releases = game_root / "releases"
-    if not releases.is_dir():
-        return dict(kept=[], removed=[], stale=[])
-    contained(game_root, releases)
-    current = None
-    link = game_root / "current"
-    if link.exists():
-        current = link.resolve()
-        if current.parent != releases.resolve():
-            current = None
-    stale, live = [], []
-    for p in sorted(releases.iterdir()):
-        if p.is_symlink() or not p.is_dir():
-            continue
-        (stale if p.name.endswith(".partial") else live).append(p)
-    kept = []
-    if current is not None:
-        kept.append(current)
-    for p in sorted(live, key=lambda q: q.stat().st_mtime, reverse=True):
-        if len(kept) >= keep:
-            break
-        if p.resolve() not in kept:
-            kept.append(p.resolve())
-    removed = []
-    for p in live:
-        if p.resolve() in kept:
-            continue
-        shutil.rmtree(p)
-        removed.append(p.name)
-    for p in stale:
-        shutil.rmtree(p)
-    return dict(kept=[p.name for p in kept], removed=removed, stale=[p.name for p in stale])
 
 
 def shared_dir(c, game):
-    """一款游戏各平台共用的准备目录 游戏库/cache/<程序号>/：解包（extract/ + extract-checkpoint.json）只此一份，Mac / iPhone 都从这里取（11-02 维护者：多平台导出平台无关阶段只做一次）"""
-    return contained(c.library, c.library / "cache" / game["id"])
+    """一款游戏各平台共用的准备目录 games/<英文名>/build/：解包（extract/ + extract-checkpoint.json）只此一份，Mac / iPhone 都从这里取（11-02 维护者：多平台导出平台无关阶段只做一次）"""
+    return contained(layout.root_of(c, game["id"]), layout.build_dir(c, game["id"]))
 
 
 def extract_valid(c, game):
@@ -453,9 +443,9 @@ def oneclick_kuan(c, gid):
 
 
 def sibling_roots(c, game):
-    """同一款在别的平台已有的现行产物根（新的在前）：iPhone 游戏库/iPhone/<程序号>/roots/*@现行、Mac 游戏库/cache/<程序号>/<键>/roots/<程序号>@现行"""
+    """同一款在别的平台已有的现行产物根（新的在前）：iPhone games/<英文名>/build/ios/roots/*@现行、Mac games/<英文名>/build/<键>/roots/<程序号>@现行"""
     found = []
-    for link in [*(c.library / "iPhone" / game["id"] / "roots").glob("*@现行"), *(c.library / "cache" / game["id"]).glob("*/roots/*@现行")]:
+    for link in [*layout.ios_work(c, game["id"], create=False).glob("roots/*@现行"), *(p for p in layout.build_dir(c, game["id"], create=False).glob("*/roots/*@现行") if p.parent.parent.name != "ios")]:
         try:
             cur = contained(c.library, link.resolve())
         except (Failure, OSError):
@@ -477,7 +467,7 @@ def seed_from_sibling(c, game, roots, kuan):
         dst = roots / (kuan + "@sib-" + cur.name.split("@", 1)[-1])
         if dst.exists():
             shutil.rmtree(dst)
-        log = c.private / "logs" / (c.task + "-sibling.log")
+        log = c.logs / (c.task + "-sibling.log")
         log.parent.mkdir(parents=True, exist_ok=True)
         try:
             c.run([sys.executable, c.engine / "tools/clonedir.py", "--report", cur, dst], log, c.env())
@@ -505,7 +495,8 @@ def prepare(c):
         if not __import__("re").fullmatch(r"[0-9A-F]{16}", game["id"]):
             raise Failure("无效的游戏标识。")
         require_game(c, game)
-        from library import check_pack_space
+        from library import apply_location, check_pack_space
+        apply_location(c, game)   # 出包页选的存放位置（游戏库结构 v3）：在别处就先搬过去
         check_pack_space(c, game)
         packages = selected_packages(game)
         size_gb = sum(p.get("size", 0) for p in {p["sha256"]: p for p in packages}.values()) / 1e9
@@ -533,15 +524,14 @@ def prepare(c):
                         inputIdentity=input_identity(game), fonts=tree_hash(fonts, ["."]),
                         engineBundleId=read(c.engine / "engine.json", {}).get("id"))
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
-        root = contained(c.library, c.library / "cache" / game["id"] / key)
+        root = contained(layout.root_of(c, game["id"]), layout.build_dir(c, game["id"]) / key)
         root.mkdir(parents=True, exist_ok=True)
-        # 会复用缓存的步：共用解包快照对得上 → 解包；现行运行版本就是从这一份产物根（同样的代码、工具、输入）出的（releases/<键>-…）→ 改写与准备资源、
+        # 会复用缓存的步：共用解包快照对得上 → 解包；现行镜像就是从这一份产物根（同样的代码、工具、输入）出的（game.json imageKey）→ 改写与准备资源、
         #   直连库（各阶段按键跳过）。直连库若其实要重出（跑局知识等变了，DirectWatcher 看到直连临时版本），当场改回冷步
         unpack_ok = extract_valid(c, game)
-        current_release = (c.library / "games" / game["id"] / "current").resolve().name
-        warm = current_release.startswith(key + "-") and (root / "roots" / (game["id"] + "@现行")).exists()
+        warm = layout.game_info(c, game["id"]).get("imageKey") == key and (root / "roots" / (game["id"] + "@现行")).exists()
         ms.plan(c, size_gb, "build_dual", reused=(["unpack"] if unpack_ok else []) + (["refresh", "analyze", "direct"] if warm else []))
-        logs = c.private / "logs" / c.task
+        logs = c.logs / c.task
         logs.mkdir(parents=True, exist_ok=True)
         env.update(S2A_ROOTS=str(root / "roots"), S2A_ROOTS_SHARED=str(root / "never-shared"),
                    S2A_ROOTS_PRIV=str(root / "roots-private"), S2A_FONTS=str(fonts))
@@ -581,11 +571,12 @@ def prepare(c):
         ms.enter(c, "host")
         host = compile_host(c, fingerprint, env, logs)
         ms.enter(c, "install")
-        game_root = contained(c.library, c.library / "games" / game["id"])
-        releases = game_root / "releases"
-        releases.mkdir(parents=True, exist_ok=True)
-        target = releases / (key + "-" + uuid.uuid4().hex[:8])
-        temporary = target.with_suffix(".partial")
+        # 镜像只留一份（游戏库结构双端统一）：新镜像先出到 image/mac.partial，校验过再换进来；出成功前旧镜像不动。宿主进 hosts/mac 多款共用
+        image = contained(layout.root_of(c, game["id"]), layout.image_mac(c, game["id"]))
+        temporary = image.with_name("mac.partial")
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.mkdir()
         try:
             clone_tree(c, current, temporary, materialize_romfs=True)
@@ -594,7 +585,6 @@ def prepare(c):
                 p.unlink()
             for name in ("seed.txt", ".root_src", ".root_base"):
                 (temporary / name).unlink(missing_ok=True)
-            clone_tree(c, host, temporary / "S2ArmGame.app")
             if fingerprint != tree_hash(c.engine, ["runtime", "ios", "graphics", "translator", "services", "compat", "pack", "Makefile",
                                                    "platform/build.mk", "macos", "launchers/macos/build.mk",
                                                    "tools/toolchain.env", "tools/toolchain.sh", "tools/addr_need.py"]):
@@ -602,27 +592,32 @@ def prepare(c):
             manifest = dict(identity, memoryRequirementsVersion=2,
                             memoryRequirementsSha256=digest(current / "addr_need.tsv"),
                             engine="S2Arm", gameId=game["id"], gameName=game["name"], compatibility="unverified",
-                            files=snapshot(c, temporary))
+                            files=snapshot(c, temporary), **(host_update.engine_compat(c) or {}))   # 只换宿主的判据（host_update.py）
             atomic(temporary / "manifest.json", manifest)
             validate_runtime(c, temporary)
+            sha = host_update.install_host(c, host)
             c.check()
-            os.replace(temporary, target)
-            link = game_root / (".current-" + c.task)
-            try:
-                link.symlink_to(target.relative_to(game_root))
-                os.replace(link, game_root / "current")
-            finally:
-                link.unlink(missing_ok=True)
-            # 出包实测账（library.record_pack_usage）：在清旧版本之前量，新旧版本同在盘上才是这一单真占到的峰值
+            old = image.with_name("mac.old")
+            if old.exists():
+                shutil.rmtree(old)
+            if image.exists():
+                os.replace(image, old)
+            os.replace(temporary, image)
+            layout.update_info(c, game["id"], hostMac=sha, hostFailed=[], imageKey=key)
+            # 出包实测账（library.record_pack_usage）：在清旧镜像之前量，新旧同在盘上才是这一单真占到的峰值
             from library import record_pack_usage
             record_pack_usage(c, game)
-            retained = retain_releases(game_root)
-            if retained["removed"] or retained["stale"]:
-                c.emit("cache", f"保留现行与上一次成功版本，清掉 {len(retained['removed'])} 个旧版本"
-                                + (f"、{len(retained['stale'])} 个半成品" if retained["stale"] else ""), releases=retained)
+            if old.exists():
+                shutil.rmtree(old)
+            host_update.prune(c)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
         ms.record(c, size_gb)
-        from library import _part_bytes
-        return dict(gameId=game["id"], outputPath=str(target), outputBytes=_part_bytes([target]), target="macos-arm64", compatibility="unverified")
+        from library import _part_bytes, _rm
+        unpacked = layout.build_dir(c, game["id"], create=False)   # 运行版本已是独立副本（clone_tree 含 RomFS）：解包和中间目录不再保留
+        if unpacked.exists():
+            _rm(c, layout.root_of(c, game["id"]), unpacked)
+        import sizes
+        sizes.refresh(c, game["id"])   # 每款各部分大小写回 game.json（游戏库只读不量）
+        return dict(gameId=game["id"], outputPath=str(image), outputBytes=_part_bytes([image]), target="macos-arm64", compatibility="unverified")

@@ -8,10 +8,11 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from jobcase import JobCase, ROOT
+from jobcase import JobCase, ROOT, as_windows
 from core import Context, Failure
 import filelock
 import libloc
+import layout
 import library
 
 sys.path.insert(0, str(ROOT))
@@ -101,7 +102,7 @@ class LibraryGate(JobCase):
         self.assertFalse(lib.exists())   # 拦在建目录之前
 
     def test_require_apfs_windows_wants_ntfs(self):
-        with patch.object(library.os, "name", "nt"):
+        with as_windows(library):
             for fmt in ("exfat", "fat32"):
                 with self.subTest(fmt=fmt), patch.object(library, "volume_format", return_value=fmt), self.assertRaises(Failure) as e:
                     library.require_apfs("E:\\库")
@@ -136,19 +137,19 @@ class FreeSpace(JobCase):
         games = [dict(id=g, name=n, packages=[]) for g, n in ((GID, "异度神剑3"), (OTHER, "别款"))]
         library.atomic(self.c.library / "catalog.json", dict(schema=1, games=games))
         L, P, W = self.c.library, self.c.private, self.c.work_root
+        ios = layout.ios_work(self.c, GID)   # iPhone 出包工作目录 build/ios
         self.files = {
-            "unpack": [write(L / "cache" / GID / "extract" / "romfs.bin", 1 * MIB)],
-            "intermediate": [write(L / "iPhone" / GID / "roots" / "r@1" / "a.bin", 2 * MIB), write(L / "iPhone" / GID / "build.tmp", 1 * MIB)],
+            "legacy": [write(layout.build_dir(self.c, GID) / "extract" / "romfs.bin", 1 * MIB), write(ios / "roots" / "r@1" / "a.bin", 2 * MIB), write(ios / "build.tmp", 1 * MIB)],
             "shaders": [write(W / "run" / "s2arm" / "cache" / "direct" / GID / "lib.bin", 2 * MIB),
                         write(W / "run" / "s2arm" / "cache" / "bake" / f"{GID.lower()}-x" / "b.bin", 1 * MIB)],
-            "mac": [write(L / "games" / GID / "app.bin", 1 * MIB)],
-            "ipa": [write(L / "iPhone" / GID / "异度神剑3 S2Arm.ipa", 3 * MIB), write(L / "iPhone" / GID / "异度神剑3 资源包" / "r.bin", 1 * MIB)],
-            "saves": [write(L / "saves" / GID / "slot0.bin", 1 * MIB)],
-            "logs": [write(L / "iPhone" / GID / "logs" / "build.log", 1 * MIB)],
+            "mac": [write(layout.image_mac(self.c, GID) / "app.bin", 1 * MIB)],
+            "ipa": [write(layout.image_ios(self.c, GID) / "kit" / "main.patched.bin", 3 * MIB), write(layout.image_ios(self.c, GID) / "pack" / "r.bin", 1 * MIB)],
+            "saves": [write(layout.path(self.c, GID, "saves") / "slot0.bin", 1 * MIB)],
+            "logs": [write(ios / "logs" / "build.log", 1 * MIB)],   # 在 build/ 里，但不算「旧版残留」，只报不删
         }
-        self.mib = {"unpack": 1, "intermediate": 3, "shaders": 3, "mac": 1, "ipa": 4, "saves": 1, "logs": 1}
+        self.mib = {"legacy": 4, "shaders": 3, "mac": 1, "ipa": 4, "saves": 1, "logs": 1}
         self.shared = [write(W / "cache" / "air" / "shared.bin", 1 * MIB)]   # 各款共用的编库缓存：不归任何一款
-        self.other = [write(L / "cache" / OTHER / "x.bin", 1 * MIB), write(L / "iPhone" / OTHER / "o.ipa", 1 * MIB)]
+        self.other = [write(layout.build_dir(self.c, OTHER) / "x.bin", 1 * MIB), write(layout.image_ios(self.c, OTHER) / "pack" / "o.bin", 1 * MIB)]
 
     def context(self, operation, **extra):
         self.sequence += 1
@@ -162,7 +163,7 @@ class FreeSpace(JobCase):
         self.assertEqual(len(out["games"]), 1)
         g = out["games"][0]
         self.assertEqual((g["gameId"], g["name"]), (GID, "异度神剑3"))
-        self.assertEqual([p["id"] for p in g["parts"]], ["unpack", "intermediate", "shaders", "mac", "ipa"])
+        self.assertEqual([p["id"] for p in g["parts"]], ["legacy", "shaders", "mac", "ipa"])
         self.assertEqual([k["id"] for k in g["kept"]], ["saves", "logs"])
         for row in g["parts"] + g["kept"]:
             with self.subTest(part=row["id"]):
@@ -171,7 +172,7 @@ class FreeSpace(JobCase):
         everyone = library.space_survey(self.context("spaceSurvey"))
         self.assertEqual([g["gameId"] for g in everyone["games"]], [GID, OTHER])
         other = everyone["games"][1]
-        self.assert_mib(sum(p["bytes"] for p in other["parts"] if p["id"] == "unpack"), 1)
+        self.assert_mib(sum(p["bytes"] for p in other["parts"] if p["id"] == "legacy"), 1)
         self.assert_mib(sum(p["bytes"] for p in other["parts"] if p["id"] == "ipa"), 1)
         with self.assertRaises(Failure):
             library.space_survey(self.context("spaceSurvey", gameId="0100000000000FFF"))
@@ -188,7 +189,7 @@ class FreeSpace(JobCase):
                     self.assertEqual(p.exists(), k not in ("ipa", "shaders"))
         for p in self.shared + self.other:
             self.assertTrue(p.exists(), p)   # 共用缓存、别款都不动
-        self.assertTrue((self.c.library / "iPhone" / GID / "logs" / "build.log").exists())
+        self.assertTrue(self.files["logs"][0].exists())
 
     def test_free_everything_keeps_saves_and_logs(self):
         ids = [k for k, _, _ in library.SPACE_PARTS]
@@ -225,10 +226,10 @@ class FreeSpace(JobCase):
         result, event = self.worker("spaceSurvey", gameId=GID)
         self.assertEqual((result.returncode, event["state"]), (0, "succeeded"), result.stderr)
         self.assertEqual(event["result"]["games"][0]["gameId"], GID)
-        result, event = self.worker("spaceFree", gameId=GID, parts=["unpack"])
+        result, event = self.worker("spaceFree", gameId=GID, parts=["legacy"])
         self.assertEqual((result.returncode, event["state"]), (0, "succeeded"), result.stderr)
-        self.assert_mib(event["result"]["freedBytes"], 1)
-        self.assertFalse(self.files["unpack"][0].exists()); self.assertTrue(self.files["ipa"][0].exists())
+        self.assert_mib(event["result"]["freedBytes"], 4)
+        self.assertFalse(self.files["legacy"][0].exists()); self.assertTrue(self.files["ipa"][0].exists())
 
 
 if __name__ == "__main__":

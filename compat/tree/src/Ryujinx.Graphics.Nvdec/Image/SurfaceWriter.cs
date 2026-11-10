@@ -4,7 +4,9 @@ using Ryujinx.Graphics.Texture;
 using Ryujinx.Graphics.Video;
 using Ryujinx.Memory;
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using static Ryujinx.Graphics.Nvdec.Image.SurfaceCommon;
 using static Ryujinx.Graphics.Nvdec.MemoryExtensions;
@@ -13,6 +15,19 @@ namespace Ryujinx.Graphics.Nvdec.Image
 {
     static class SurfaceWriter
     {
+        // S2Arm: the SSE2 fast path below also serves ARM64 (AdvSimd ZIP1 / ZIP2 interleave exactly like
+        // punpcklbw / punpckhbw). Upstream ran the per-pixel block-linear offset loop on ARM64; on Android
+        // that loop was ~23% of the Nvdec thread's CPU in P4G's 1080p VP9 cutscenes.
+        private static bool FastPath => Sse2.IsSupported || AdvSimd.Arm64.IsSupported;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<byte> UnpackLow(Vector128<byte> a, Vector128<byte> b)
+            => Sse2.IsSupported ? Sse2.UnpackLow(a, b) : AdvSimd.Arm64.ZipLow(a, b);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<byte> UnpackHigh(Vector128<byte> a, Vector128<byte> b)
+            => Sse2.IsSupported ? Sse2.UnpackHigh(a, b) : AdvSimd.Arm64.ZipHigh(a, b);
+
         public static void Write(DeviceMemoryManager mm, ISurface surface, uint lumaOffset, uint chromaOffset)
         {
             int lumaSize = GetBlockLinearSize(surface.Width, surface.Height, 1);
@@ -103,7 +118,7 @@ namespace Ryujinx.Graphics.Nvdec.Image
         {
             OffsetCalculator calc = new(width, height, 0, false, 2, 2);
 
-            if (Sse2.IsSupported)
+            if (FastPath)
             {
                 int strideTrunc64 = BitUtils.AlignDown(width * 2, 64);
 
@@ -130,10 +145,10 @@ namespace Ryujinx.Graphics.Nvdec.Image
                             Vector128<byte> value3 = *(Vector128<byte>*)(inUPtr + 16);
                             Vector128<byte> value4 = *(Vector128<byte>*)(inVPtr + 16);
 
-                            Vector128<byte> uv0 = Sse2.UnpackLow(value, value2);
-                            Vector128<byte> uv1 = Sse2.UnpackHigh(value, value2);
-                            Vector128<byte> uv2 = Sse2.UnpackLow(value3, value4);
-                            Vector128<byte> uv3 = Sse2.UnpackHigh(value3, value4);
+                            Vector128<byte> uv0 = UnpackLow(value, value2);
+                            Vector128<byte> uv1 = UnpackHigh(value, value2);
+                            Vector128<byte> uv2 = UnpackLow(value3, value4);
+                            Vector128<byte> uv3 = UnpackHigh(value3, value4);
 
                             *(Vector128<byte>*)offset = uv0;
                             *(Vector128<byte>*)offset2 = uv1;

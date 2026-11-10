@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 S2Arm contributors
+using System.Diagnostics;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
@@ -7,6 +8,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
 using S2Arm.Launcher.Protocol;
 
 namespace S2Arm.Launcher;
@@ -15,6 +17,7 @@ public sealed partial class EnvironmentWindow
 {
     private string page = "library";
     private string libraryFolder = "";
+    private string? libraryMoveFrom;
     private string? connectedFolder, libraryId, selectedGame;
     private LibraryCatalog? catalog;
     private string librarySummary = "library.disconnected", libraryDiagnostics = "";
@@ -32,10 +35,30 @@ public sealed partial class EnvironmentWindow
         page = destination; Render();
     }
 
+    /// <summary>
+    /// 换库 / 刷新时丢掉封面缓存。不能当场 Dispose：这时窗口里还挂着上一次 Render 建的界面，封面 Image 引用着这些位图；
+    /// 一让出界面线程（await 作业）排版就去量已释放的位图，Avalonia 渲染循环里抛 ObjectDisposedException，0.1.7 上整个窗口空掉
+    /// （玩家反馈「点连接或创建游戏库闪退」，Windows 实机按原样复现：库里有一款带封面就必崩，事件 1026 堆栈 Bitmap.get_Size ← Image.MeasureOverride）。
+    /// 先记下它们和当时的窗口内容，等窗口内容换成新界面（旧界面脱离窗口、不再排版）再释放；窗口关掉时一并释放。
+    /// </summary>
     private void ClearCovers()
     {
-        foreach (var cover in covers.Values) cover.Dispose();
+        if (covers.Count == 0) return;
+        retiredCovers.Add((Content, covers.Values.ToList()));
         covers.Clear();
+    }
+
+    private readonly List<(object? Content, List<Bitmap> Covers)> retiredCovers = [];
+
+    /// <summary>窗口内容已经不是退役时那份的封面才释放（Render 末尾、窗口关闭时调）</summary>
+    private void DisposeRetiredCovers(bool all = false)
+    {
+        for (var i = retiredCovers.Count - 1; i >= 0; i--)
+        {
+            if (!all && ReferenceEquals(retiredCovers[i].Content, Content)) continue;
+            foreach (var cover in retiredCovers[i].Covers) cover.Dispose();
+            retiredCovers.RemoveAt(i);
+        }
     }
 
     private async void CloseLibraryAsync(object? sender, WindowClosingEventArgs args)
@@ -59,24 +82,16 @@ public sealed partial class EnvironmentWindow
         // Only a backend-provided local cover in this library is considered; never load a remote URL.
         try
         {
-            if (connectedFolder is not null && game.Cover.Length > 0)
+            // 只认这款自己文件夹里的封面（LibraryGame.CoverFile：按 catalog 给的文件夹认，英文名文件夹也行，#330）
+            if (connectedFolder is not null && game.CoverFile() is { } path && new FileInfo(path).Length <= 16 * 1024 * 1024)
             {
-                var root = Path.GetFullPath(Path.Combine(connectedFolder, "games")) + Path.DirectorySeparatorChar;
-                var folder = Path.GetFullPath(Path.Combine(root, game.Id)) + Path.DirectorySeparatorChar;
-                var path = Path.GetFullPath(game.Cover);
-                // 只认这款游戏目录下的 cover.jpg 或玩家换的 cover.custom.<8 位十六进制>.jpg（后端 _CUSTOM_COVER）
-                if (folder.StartsWith(root, StringComparison.OrdinalIgnoreCase) && path.StartsWith(folder, StringComparison.OrdinalIgnoreCase) &&
-                    System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path), @"^cover(\.custom\.[0-9a-f]{8})?\.jpg$") &&
-                    Path.GetDirectoryName(path) + Path.DirectorySeparatorChar == folder && new FileInfo(path).Length <= 16 * 1024 * 1024)
+                if (!covers.TryGetValue(path, out var image))
                 {
-                    if (!covers.TryGetValue(path, out var image))
-                    {
-                        using var file = File.OpenRead(path);
-                        image = Bitmap.DecodeToWidth(file, 240);
-                        covers.Add(path, image);
-                    }
-                    return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
+                    using var file = File.OpenRead(path);
+                    image = Bitmap.DecodeToWidth(file, 240);
+                    covers.Add(path, image);
                 }
+                return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
@@ -136,6 +151,7 @@ public sealed partial class EnvironmentWindow
         var connection = new StackPanel { Spacing = 10 };
         connection.Children.Add(Label(T("library.folder")));
         libraryFolderBox = new TextBox { Text = libraryFolder, IsEnabled = !libraryBusy };
+        Avalonia.Automation.AutomationProperties.SetAutomationId(libraryFolderBox, "library.folder");
         connection.Children.Add(libraryFolderBox);
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
         void AddButton(string key, Action action, bool enabled = true)
@@ -144,7 +160,7 @@ public sealed partial class EnvironmentWindow
             buttons.Children.Add(button);
         }
         AddButton("library.choose_folder", () => BeginPicker(ChooseLibraryAsync));
-        AddButton("library.connect", () => BeginLibrary("setup"));
+        AddButton("library.connect", () => ConnectTypedFolder(libraryFolderBox.Text));
         AddButton("library.refresh", () => BeginLibrary("catalog"), libraryId is not null);
         connection.Children.Add(buttons);
         connection.Children.Add(Label(T("library.source_hint")));
@@ -154,6 +170,9 @@ public sealed partial class EnvironmentWindow
 
         var status = new StackPanel { Spacing = 8 };
         status.Children.Add(Label(T(librarySummary), 18));
+        // 失败时原因直接写在这里（第一行就是作业 / 输入校验给的人话），不用再展开「本次操作与处理建议」才看得到
+        if (librarySummary is "library.failed" or "library.invalid_result" && libraryDiagnostics.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() is { Length: > 0 } why)
+            status.Children.Add(Muted(why, 14));
         if (libraryBusy) status.Children.Add(new ProgressBar { IsIndeterminate = true, Height = 4 });
         if (catalog is not null)
         {
@@ -167,6 +186,8 @@ public sealed partial class EnvironmentWindow
                 var button = Action(key, () => BeginPicker(handler), !libraryBusy);
                 button.Margin = new Thickness(0, 0, 10, 8); imports.Children.Add(button);
             }
+            var storage = Action("storage.open", OpenStorage, !libraryBusy && libraryId is not null);
+            storage.Margin = new Thickness(0, 0, 10, 8); AutomationId(storage, "library.storage"); imports.Children.Add(storage);
             status.Children.Add(imports);
         }
         body.Children.Add(Card(status));
@@ -182,13 +203,16 @@ public sealed partial class EnvironmentWindow
                 detail.Children.Add(Label(T("library.requirements") + " · " + string.Join(" / ", game.Missing)));
             // iPhone / Mac dual status line
             detail.Children.Add(GameStatusLine(game));
+            detail.Children.Add(GameSizesLine(game.Sizes));   // 这款各部分大小（游戏库结构 v3「查」，StoragePage.cs）
             Grid.SetColumn(detail, 1); line.Children.Add(detail);
-            // Primary button: if iPhone pack is ready → install; otherwise export
+            // Primary button: if iPhone pack is ready → install; otherwise export (storage not connected → disabled, game files missing → relink / remove)
             var primaryKey = game.IphoneReady ? "library.hero.install" : "library.select";
             var primaryAction = game.IphoneReady
                 ? (Action)(() => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; readinessFor = null; Navigate("install"); })
+                : game.LocationState == "missing" ? () => _ = MissingAsync(game)
                 : () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; OpenBuild(); };
-            var select = Action(primaryKey, primaryAction, !libraryBusy && !PackBusy);
+            // 装机在跑时别的游戏照常能选、看详情、出包（只锁正在装的那款；同时只装一款：点别的「装到 iPhone」进装机页提示「另一款正在装 · 查看那一款」）
+            var select = Action(primaryKey, primaryAction, !BusyFor(game) && (game.IphoneReady || game.LocationState != "offline"));
             select.VerticalAlignment = VerticalAlignment.Center;
             // secondary: show past result if one exists and game is not currently running
             if (finishedPacks.TryGetValue(game.Id, out _) && !(packRunning && packGame?.Id == game.Id))
@@ -196,7 +220,7 @@ public sealed partial class EnvironmentWindow
                 var actionCol = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
                 actionCol.Children.Add(select);
                 var results = Action("library.hero.results", () =>
-                { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; Navigate("progress"); }, !libraryBusy && !PackBusy);
+                { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; Navigate("progress"); }, !BusyFor(game));
                 actionCol.Children.Add(results);
                 Grid.SetColumn(actionCol, 2); line.Children.Add(actionCol);
             }
@@ -204,7 +228,12 @@ public sealed partial class EnvironmentWindow
             {
                 Grid.SetColumn(select, 2); line.Children.Add(select);
             }
-            body.Children.Add(Card(line, 12));
+            var card = Card(line, 12);
+            card.ContextMenu = CardMenu(game);
+            // 找不到游戏文件：点卡片（按钮以外）弹「重新指定文件夹 / 从游戏库移除」
+            if (game.LocationState == "missing")
+                card.Tapped += (_, e) => { if ((e.Source as Visual)?.FindAncestorOfType<Button>(includeSelf: true) is null) _ = MissingAsync(game); };
+            body.Children.Add(card);
         }
         if (catalog is not null && games.Length == 0) body.Children.Add(Label(T("library.empty"), 18));
         if (libraryDiagnostics.Length > 0)
@@ -226,6 +255,15 @@ public sealed partial class EnvironmentWindow
         else if (finishedPacks.ContainsKey(game.Id) && packRunning && packGame?.Id == game.Id)
         {
             text = T("export.status.queued"); color = "#FFC857";
+        }
+        // 存放位置（游戏库结构 v3）：移动硬盘没插 → 灰色「未连接」，插回来重读游戏库就恢复；文件夹没了 → 红字，点卡片重新指定或移除
+        else if (game.LocationState == "offline")
+        {
+            text = T("library.location.offline").Replace("{0}", game.Location!.Volume.Length > 0 ? game.Location.Volume : game.Location.Path); color = "#4A4A50";
+        }
+        else if (game.LocationState == "missing")
+        {
+            text = T("library.location.missing"); color = "#E05C5C";
         }
         else
         {
@@ -270,6 +308,183 @@ public sealed partial class EnvironmentWindow
     }
 
 
+    /// <summary>游戏卡片右键菜单（游戏库结构 v3，照 Mac cardMenu；Windows 只出 iPhone 包，没有开始游戏 / 启动设置）：
+    /// 出包、在资源管理器中显示、移动到其他位置、清除缓存、从 iPhone 删除这款、删除这款游戏（delete 作业：删游戏文件夹与出包产物，存档和原件保留，同 Mac）。
+    /// 位置未连接 / 找不到时出包、移动、清缓存不可用。</summary>
+    private ContextMenu CardMenu(LibraryGame game)
+    {
+        var idle = !BusyFor(game);
+        var menu = new ContextMenu();
+        void Add(string text, string id, Action action, bool enabled)
+        {
+            var item = new MenuItem { Header = text, IsEnabled = enabled };
+            item.Click += (_, _) => action();
+            AutomationId(item, "library.card." + id);
+            menu.Items.Add(item);
+        }
+        Add(T("nav.build"), "export", () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; OpenBuild(); }, idle && game.Reachable);
+        menu.Items.Add(new Separator());
+        Add(T("library.menu.revealWindows"), "reveal", () => RevealGame(game), (game.Location?.Path ?? "").Length > 0 && game.LocationState != "offline");
+        Add(T("library.menu.move"), "move", () => BeginPicker(() => MoveGameAsync(game)), idle && game.Reachable && game.LocationState != "none");
+        Add(T("library.menu.clearCache"), "clearCache", () => BeginGameJob("clean", game, new() { ["kind"] = "cache" }), idle && game.Reachable);
+        menu.Items.Add(new Separator());
+        Add(T("install.remove_game"), "remove", () => { libraryFolder = libraryFolderBox.Text ?? ""; selectedGame = game.Id; Navigate("install"); _ = ConfirmRemoveAsync(game); },
+            !libraryBusy && !installBusy && !packRunning);
+        Add(T("game.delete"), "delete", () => _ = ConfirmDeleteAsync(game), idle);
+        return menu;
+    }
+
+    /// <summary>在资源管理器中显示这款的文件夹（选中它）；还没有文件夹（找不到 / 没出过包）就打开所在的存放位置。</summary>
+    private void RevealGame(LibraryGame game)
+    {
+        var folder = game.Location?.Folder ?? "";
+        var select = folder.Length > 0 && Directory.Exists(folder);
+        var target = select ? folder : game.Location?.Path ?? "";
+        // 路径来自后端目录：只认存在的绝对路径；Windows 路径不会带引号，带了就不拼进命令行
+        if (!Path.IsPathFullyQualified(target) || target.Contains('"') || !Directory.Exists(target)) return;
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("explorer.exe", select ? "/select,\"" + target + "\"" : "\"" + target + "\"") { UseShellExecute = false });
+        }
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        { librarySummary = "library.failed"; libraryDiagnostics = T("process.start_failed") + " " + error.Message; Render(); }
+    }
+
+    private async Task MoveGameAsync(LibraryGame game)
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = T("library.menu.move") });
+        if (folders.Count == 0) return;
+        await RunGameJobAsync("moveGame", game, new() { ["location"] = LocalPath(folders[0]) });
+    }
+
+    private async Task RelinkGameAsync(LibraryGame game)
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = T("library.missing.pick") });
+        if (folders.Count == 0) return;
+        await RunGameJobAsync("relinkGame", game, new() { ["folder"] = LocalPath(folders[0]) });
+    }
+
+    private bool deleteOpen;
+
+    /// <summary>「删除这款游戏」确认（同 Mac 的 game.delete 弹窗）：确认后跑 delete 作业。</summary>
+    private async Task ConfirmDeleteAsync(LibraryGame game)
+    {
+        if (deleteOpen || BusyFor(game)) return;
+        deleteOpen = true;
+        var confirmed = false;
+        try
+        {
+            var dialog = new Window
+            {
+                Title = T("game.delete.title").Replace("{0}", game.Name), Width = 460, SizeToContent = SizeToContent.Height,
+                CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = Canvas, Foreground = Ink,
+                FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
+            };
+            var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
+            body.Children.Add(Label(T("game.delete.title").Replace("{0}", game.Name), 20));
+            body.Children.Add(Muted(T("game.delete.body"), 14));
+            var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9), CornerRadius = new CornerRadius(8), Margin = new Thickness(12, 0, 0, 0),
+                Background = Brush.Parse("#29292D"), Foreground = Ink };
+            cancel.Click += (_, _) => dialog.Close();
+            AutomationId(cancel, "library.delete.cancel");
+            var delete = new Button { Content = T("game.delete.confirm"), Padding = new Thickness(16, 9), CornerRadius = new CornerRadius(8), Margin = new Thickness(12, 0, 0, 0),
+                Background = Brush.Parse("#C0392B"), Foreground = Ink };
+            delete.Click += (_, _) => { confirmed = true; dialog.Close(); };
+            AutomationId(delete, "library.delete.confirm");
+            buttons.Children.Add(cancel); buttons.Children.Add(delete);
+            body.Children.Add(buttons);
+            dialog.Content = body;
+            await dialog.ShowDialog(this);
+        }
+        finally { deleteOpen = false; }
+        if (confirmed) BeginGameJob("delete", game);
+    }
+
+    private bool missingOpen;
+
+    /// <summary>「找不到游戏文件」（照 Mac missingFor 弹窗）：重新指定文件夹… / 从游戏库移除（磁盘上的文件不动）/ 取消。</summary>
+    private async Task MissingAsync(LibraryGame game)
+    {
+        if (missingOpen || BusyFor(game)) return;
+        missingOpen = true;
+        string? answer = null;
+        try
+        {
+            var dialog = new Window
+            {
+                Title = T("library.missing.title").Replace("{0}", game.Name), Width = 460, SizeToContent = SizeToContent.Height,
+                CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = Canvas, Foreground = Ink,
+                FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
+            };
+            var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
+            body.Children.Add(Label(T("library.missing.title").Replace("{0}", game.Name), 20));
+            body.Children.Add(Muted(T("library.missing.body"), 14));
+            var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            void Add(string text, string? result, bool primary, string id)
+            {
+                var button = new Button { Content = text, Padding = new Thickness(16, 9), CornerRadius = new CornerRadius(8), Margin = new Thickness(12, 0, 0, 0),
+                    Background = primary ? Accent : Brush.Parse("#29292D"), Foreground = primary ? Canvas : Ink };
+                button.Click += (_, _) => { answer = result; dialog.Close(); };
+                AutomationId(button, "library.missing." + id);
+                buttons.Children.Add(button);
+            }
+            Add(T("action.cancel"), null, false, "cancel");
+            Add(T("library.missing.forget"), "forget", false, "forget");
+            Add(T("library.missing.relink"), "relink", true, "relink");
+            body.Children.Add(buttons);
+            dialog.Content = body;
+            await dialog.ShowDialog(this);
+        }
+        finally { missingOpen = false; }
+        if (answer == "relink") BeginPicker(() => RelinkGameAsync(game));
+        else if (answer == "forget") BeginGameJob("forgetGame", game);
+    }
+
+    private void BeginGameJob(string operation, LibraryGame game, Dictionary<string, object?>? extra = null)
+    {
+        if (libraryBusy) return;
+        libraryFolder = libraryFolderBox.Text ?? "";
+        libraryOperation = RunGameJobAsync(operation, game, extra);
+    }
+
+    /// <summary>一款游戏的游戏库作业（游戏库结构 v3：moveGame / relinkGame / forgetGame / clean kind=cache / delete）：忙碌、结果与诊断同 RunLibraryAsync，成功后重读游戏库。</summary>
+    private async Task RunGameJobAsync(string operation, LibraryGame game, Dictionary<string, object?>? extra = null)
+    {
+        if (BusyFor(game) || connectedFolder is null || libraryId is null) return;
+        libraryBusy = true; librarySummary = "library.working"; libraryDiagnostics = ""; Render();
+        using var cancellation = new CancellationTokenSource();
+        libraryCancellation = cancellation;
+        var succeeded = false;
+        try
+        {
+            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id, extra), null, cancellation.Token);
+            DisplayJob(job);
+            succeeded = job.Report.Succeeded;
+            librarySummary = succeeded ? "library.completed" : "library.failed";
+        }
+        catch (LibraryProtocolException error)
+        { librarySummary = "library.invalid_result"; libraryDiagnostics += "\n" + error.Message; }
+        catch (OperationCanceledException)
+        { librarySummary = "library.interrupted"; }
+        catch (Exception error)
+        {
+            // 游戏库作业由玩家输入驱动（目录填什么都有可能：末尾反斜杠、不存在、不可写、非法字符、在启动器自己的目录里）：
+            //   任何异常都报成「操作未完成」并带原因，不让它逃出去（玩家反馈：点「连接或创建游戏库」闪退）
+            librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.GetType().Name + ": " + error.Message;
+            LauncherCrash.Log(error, "library job");
+        }
+        finally
+        { libraryCancellation = null; libraryBusy = false; Render(); }
+        if (!succeeded || closingLibrary) return;
+        if ((operation == "forgetGame" || operation == "delete") && selectedGame == game.Id) selectedGame = null;
+        locationsFor = null;   // 位置表的剩余空间 / 这款的位置变了：出包页下次重读
+        await RunLibraryAsync("catalog", null);
+    }
+
+
     private void BeginPicker(Func<Task> picker)
     {
         if (libraryBusy) return;
@@ -294,25 +509,79 @@ public sealed partial class EnvironmentWindow
         libraryFolder = LocalPath(folders[0]); Render();
     }
 
-    private string LibraryPreference => Path.Combine(privateRoot, "library-location.txt");
+    private string LibraryPreference => LibraryPaths.PreferenceFile(privateRoot);
 
-    private string SavedLibrary()
-    {
-        try { var saved = File.ReadAllText(LibraryPreference).Trim(); return saved.Length > 0 ? saved : DefaultLibrary; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return DefaultLibrary; }
-    }
-
-    private string DefaultLibrary => Path.Combine(privateRoot, "DefaultLibrary");
+    // 旧默认库（私有目录下的 DefaultLibrary）被作业层同盘改名到 %USERPROFILE%\S2Arm 后，设置里的旧路径按搬库标记换成新位置（游戏库结构 P3）
+    private string SavedLibrary() => LibraryPaths.SavedLibrary(privateRoot);
 
     private async Task ChangeLibraryAsync()
     {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = T("library.choose_folder") });
-        if (folders.Count > 0) ConnectLibrary(LocalPath(folders[0]));
+        if (folders.Count == 0) return;
+        var folder = LocalPath(folders[0]);
+        // 有游戏、选的是空文件夹才问；已有游戏库或含旧产物的文件夹由作业层直接打开 / 认领
+        libraryMoveFrom = null;
+        if (connectedFolder is not null && catalog is { Games.Count: > 0 } && !Directory.EnumerateFileSystemEntries(folder).Any())
+        {
+            var choice = await AskMoveLibraryAsync();
+            if (choice is null) return;
+            if (choice.Value) libraryMoveFrom = connectedFolder;
+        }
+        ConnectLibrary(folder);
     }
 
-    /// <summary>换到新位置：连上后记下来，下次启动还用它。</summary>
+    /// <summary>true = 搬过去，false = 新建空游戏库，null = 取消。</summary>
+    private async Task<bool?> AskMoveLibraryAsync()
+    {
+        var dialog = new Window
+        {
+            Title = T("library.move_title"), Width = 460, SizeToContent = SizeToContent.Height,
+            CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Canvas, Foreground = Ink,
+            FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
+        };
+        bool? answer = null;
+        var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
+        body.Children.Add(Label(T("library.move_title"), 20));
+        body.Children.Add(Muted(T("library.move_body"), 14));
+        var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        void Add(string text, bool? result, bool primary)
+        {
+            var button = new Button { Content = text, Padding = new Thickness(16, 9), CornerRadius = new CornerRadius(8), Margin = new Thickness(12, 0, 0, 0),
+                Background = primary ? Accent : Brush.Parse("#29292D"), Foreground = primary ? Canvas : Ink };
+            button.Click += (_, _) => { answer = result; dialog.Close(); };
+            buttons.Children.Add(button);
+        }
+        Add(T("action.cancel"), null, false);
+        Add(T("library.move_empty"), false, false);
+        Add(T("library.move_confirm"), true, true);
+        body.Children.Add(buttons);
+        dialog.Content = body;
+        await dialog.ShowDialog(this);
+        return answer;
+    }
+
+    /// <summary>「连接或创建游戏库」：输入框里的路径先规范（LibraryFolderInput），再走和「选择游戏库目录」同一条会记住位置的路径。
+    /// 原先这个按钮走 BeginLibrary("setup")，连上了却不写设置，重开启动器又回到缺省库（玩家反馈「游戏库位置改不了」）。</summary>
+    private void ConnectTypedFolder(string? input)
+    {
+        if (libraryBusy) return;
+        var r = LibraryFolderInput.Normalize(input, AppContext.BaseDirectory);
+        if (r.Folder is null)
+        {
+            libraryFolder = input ?? ""; librarySummary = "library.failed"; libraryDiagnostics = T(r.ErrorKey!); Render();
+            return;
+        }
+        libraryMoveFrom = null;
+        ConnectLibrary(r.Folder);
+    }
+
+    /// <summary>换到新位置：连上后记下来，下次启动还用它。路径同样过一遍规范（选目录 / 控制口来的也一样）。</summary>
     private void ConnectLibrary(string folder)
     {
+        var r = LibraryFolderInput.Normalize(folder, AppContext.BaseDirectory);
+        if (r.Folder is null) { librarySummary = "library.failed"; libraryDiagnostics = T(r.ErrorKey!); Render(); return; }
+        folder = r.Folder;
         connectedFolder = null; libraryId = null;
         libraryFolder = folder;
         libraryOperation = SwitchLibraryAsync(folder);
@@ -399,9 +668,13 @@ public sealed partial class EnvironmentWindow
         { librarySummary = "library.invalid_result"; libraryDiagnostics += "\n" + error.Message; }
         catch (OperationCanceledException)
         { librarySummary = "library.interrupted"; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
-            InvalidOperationException or System.ComponentModel.Win32Exception or KeyNotFoundException)
-        { librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.Message; }
+        catch (Exception error)
+        {
+            // 游戏库作业由玩家输入驱动（目录填什么都有可能：末尾反斜杠、不存在、不可写、非法字符、在启动器自己的目录里）：
+            //   任何异常都报成「操作未完成」并带原因，不让它逃出去（玩家反馈：点「连接或创建游戏库」闪退）
+            librarySummary = "library.failed"; libraryDiagnostics += "\n" + error.GetType().Name + ": " + error.Message;
+            LauncherCrash.Log(error, "library job");
+        }
         finally
         { libraryCancellation = null; libraryBusy = false; Render(); }
     }

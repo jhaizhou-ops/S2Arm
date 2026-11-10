@@ -117,6 +117,11 @@ bdd "$T/b/hgood" 300 0; for f in ap_mark ap_end; do bimg "$T/b/hgood/$f.png" gra
 ck "B ③c 边际：本局左带空洞约 0.7 < 对照局纯黑（1.0） → 过（实 $(vd "$T/b/hgood" ③c)）" '[ "$(vd "$T/b/hgood" ③c)" = 过 ]'
 bdd "$T/b/hbad" 300 0; for f in ap_mark ap_end; do bimg "$T/b/hbad/$f.png" gray; bimg "$T/b/hbad/base/$f.png" 0; done; CL "$T/b/hbad" > /dev/null
 ck "B ③c 边际负对照：本局左带空洞约 0.7 > 对照局约 0 → 不过（实 $(vd "$T/b/hbad" ③c)）" '[ "$(vd "$T/b/hbad" ③c)" = 不过 ]'
+# B ③c 截图不是加宽图（11-09 哈迪斯 II：Mac 窗口 16:9、2.17:1 画面上下加黑边塞进截图，band_checks 不量，原先记「过」）。期望：两张都是 1280×720 → ③c 未验
+bdd "$T/b/h169" 300 0; for f in ap_mark ap_end; do python3 -c "
+import sys, numpy as np; from PIL import Image
+Image.fromarray(np.random.default_rng(3).integers(40, 220, (720, 1280, 3), dtype=np.uint8)).save(sys.argv[1])" "$T/b/h169/$f.png"; done; CL "$T/b/h169" > /dev/null
+ck "B ③c 截图都是 16:9（不是加宽图）→ 未验，不记过（实 $(vd "$T/b/h169" ③c)）" '[ "$(vd "$T/b/h169" ③c)" = 未验 ]'
 # ── C auto_table.sh（闭环桩）──
 cat > "$T/stub.sh" <<'EOF'
 #!/bin/bash

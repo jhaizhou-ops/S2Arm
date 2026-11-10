@@ -28,6 +28,8 @@ scan() {  # scan <content> -> matching lines
 }
 
 HITS=()
+# 预筛（11-09 负载下 2 分钟超时根修）：五个形态都要出现 curl / wget / urlopen / urllib，先一遍 grep 只挑含这些词的文件再逐个细判；
+#   原先列全部同类文件（还把 . 写了两遍，每个文件扫两次）再每个文件起 awk + 5 次 grep，约 3000 个文件 × 6 个进程
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   # ② 反斜杠续行先接起来再判（这样 `\` 换行 + `| bash` 也命中）；报行号用拼接后的首行
@@ -37,7 +39,7 @@ while IFS= read -r f; do
       while IFS= read -r line; do HITS+=("$f:$line"); done <<< "$hits"
     fi
   done
-done < <(grep -rlI --include=*.sh --include=*.py --include=*.md \
+done < <(grep -rlIE 'curl|wget|urlopen|urllib' --include=*.sh --include=*.py --include=*.md \
              --include=*.cs --include=*.swift --include=*.m . 2>/dev/null \
          | grep -v '^\./compat/tree/' | grep -v '^\./\.git/' | grep -vF "./$SELF_REL")
 

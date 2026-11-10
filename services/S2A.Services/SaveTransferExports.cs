@@ -15,26 +15,28 @@ public static unsafe class SaveTransferExports
         {
             lock (SaveTransfer.HostGate)
             {
-            string response;
-            if (SaveTransfer.HostStarted || Host.Device != null) response = SaveTransfer.Error("save_running", "请在启动游戏前管理存档。");
-            else
+            // 先解出请求（取不到时为 null）读宿主语言，「游戏已在运行」这类拒绝也按它出中 / 英文（#316）；空请求 / 超长请求读不到语言，按中文
+            string request = null;
+            int length = 0;
+            if (json != null)
             {
-                if (json == null) response = SaveTransfer.Error("save_invalid", "存档请求为空。");
-                else
-                {
-                    int length = 0;
-                    while (length <= (8 << 20) && json[length] != 0) length++;
-                    response = length > (8 << 20) ? SaveTransfer.Error("save_invalid", "存档请求过大。") :
-                        SaveTransfer.Execute(new UTF8Encoding(false, true).GetString(new ReadOnlySpan<byte>(json, length)));
-                }
+                while (length <= (8 << 20) && json[length] != 0) length++;
+                if (length <= (8 << 20)) request = new UTF8Encoding(false, true).GetString(new ReadOnlySpan<byte>(json, length));
             }
+            SaveTransfer.UseLanguage(request ?? "");
+            string response;
+            if (SaveTransfer.HostStarted || Host.Device != null) response = SaveTransfer.Error("save_running", SaveTransfer.T("请在启动游戏前管理存档。", "Manage saves before starting the game."));
+            else if (json == null) response = SaveTransfer.Error("save_invalid", SaveTransfer.T("存档请求为空。", "The save request is empty."));
+            else if (request == null) response = SaveTransfer.Error("save_invalid", SaveTransfer.T("存档请求过大。", "The save request is too large."));
+            else response = SaveTransfer.Execute(request);
             return Allocate(response);
             }
         }
         catch (Exception)
         {
             // No managed exception may unwind through the C ABI.
-            return Allocate("{\"ok\":false,\"error\":{\"code\":\"save_internal\",\"message\":\"存档桥接失败。\"}}");
+            return Allocate(SaveTransfer.English ? "{\"ok\":false,\"error\":{\"code\":\"save_internal\",\"message\":\"The save bridge failed.\"}}"
+                                                 : "{\"ok\":false,\"error\":{\"code\":\"save_internal\",\"message\":\"存档桥接失败。\"}}");
         }
     }
     private static nint Allocate(string response)

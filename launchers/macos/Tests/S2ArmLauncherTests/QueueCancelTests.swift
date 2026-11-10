@@ -7,7 +7,7 @@ import XCTest
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at:temp) }
         let store = Store(privateRoot:temp)
-        let jobs = temp.appendingPathComponent("jobs"); try FileManager.default.createDirectory(at:jobs, withIntermediateDirectories:true)
+        let jobs = temp.appendingPathComponent("logs/jobs"); try FileManager.default.createDirectory(at:jobs, withIntermediateDirectories:true)
         let gid = "0100E95004038000"
         let rec = TaskRecord(id:"queued-"+gid, operation:"build", state:"queued", gameId:gid, started:Date().timeIntervalSince1970)
         try JSONEncoder().encode(rec).write(to:jobs.appendingPathComponent("queued-\(gid).json"))

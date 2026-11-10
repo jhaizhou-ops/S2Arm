@@ -14,6 +14,7 @@ public sealed partial class EnvironmentWindow
     private string updateProgress = "";
     private JsonElement? updateReady;
     private string updateFailure = "";   // 错误码
+    private static readonly Uri DownloadPage = new("https://jhaizhou-ops.github.io/S2Arm/");   // 自动更新失败时「打开下载页」，系统浏览器打开
     private static string InstallDir => Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
     // The release version lives in version.txt (written by bundle_win.py); the assembly version is always 1.0.0.0.
     private static string AppVersion => UpdateClient.CurrentVersion(InstallDir) is { Length: > 0 } version ? version : "-";
@@ -96,9 +97,13 @@ public sealed partial class EnvironmentWindow
             bar.Children.Add(Action(UpdateBlocked ? "update.restart.busy" : "update.restart", RestartToUpdate, !UpdateBlocked));
         else if (updateFailure.Length > 0)
         {
-            var retry = Action("update.retry", () => _ = DownloadUpdateAsync());
-            ToolTip.SetTip(retry, T("update.error." + updateFailure));
-            bar.Children.Add(retry);
+            // 失败原因直接写在按钮旁（人话 + 错误码），并给「打开下载页」：自动更新连不上 GitHub 时玩家能自己下（不再只藏在悬停提示里）
+            bar.Children.Add(Action("update.retry", () => _ = DownloadUpdateAsync()));
+            var why = new TextBlock { Text = T("update.error." + updateFailure) + " · " + T("update.code").Replace("{0}", updateFailure), FontSize = 12,
+                Foreground = Brush.Parse("#A8A6A1"), MaxWidth = 360, TextWrapping = Avalonia.Media.TextWrapping.Wrap, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+            Avalonia.Automation.AutomationProperties.SetAutomationId(why, "update.failure");
+            bar.Children.Add(why);
+            bar.Children.Add(Action("update.download_page", () => _ = OpenOfficialAsync(DownloadPage)));
         }
     }
 }

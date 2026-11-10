@@ -276,8 +276,8 @@ raise SystemExit(main.main())
         value = "89abcdef" * 4
         rights_id = "01234567" * 4
         nca_id = "fedcba98" * 4
-        log = self.c.private / "logs/switch-key-fixture.log"
-        log.parent.mkdir(parents=True)
+        log = self.c.logs / "switch-key-fixture.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(f"master_kek_00 = {value}\nmaster_seed_00 = {value}\n{rights_id} = {value}\nMissing NCA {nca_id}.nca\n")
         self.c.last_log = log
         diagnostic = self.c.report_failure(Failure("synthetic failure"))
@@ -290,6 +290,19 @@ raise SystemExit(main.main())
             text = "\n".join(archive.read(name).decode() for name in archive.namelist())
         self.assertNotIn(value, text)
         self.assertIn(nca_id, text)
+
+    def test_rewrite_failure_saves_gap_digest_into_diagnostics(self):   # #108：明细在产物根 .failed/，诊断包要带上摘要
+        import zipfile
+        log = self.root / "failed_main.log"
+        log.write_text("main 自旋区 105 个\n" + "GAP\tmain\t0x100\tsys: 异常类指令 d46f9025（hvc / smc / dcps）苹果用户态不可用\n" * 3
+                       + "GAP\tmain\t0x200\tsys: mrs 系统寄存器 S3_6_C9_C13_6：不在白名单\n", encoding="utf-8")
+        self.c.report_failure(Failure(f"【红】t0100 改写 main 失败（rc=3：PFRW mod=main need=9 gaps=4 fatal=0；日志 {log}）", code="rewrite_gap"))
+        destination = self.root / "diag.zip"
+        self.c.finish("failed", "x"); self.c.r["path"] = str(destination); library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            member = next(n for n in archive.namelist() if n.endswith("-rewrite-gaps.log"))
+            text = archive.read(member).decode()
+        self.assertIn("改写缺口共 4 条", text); self.assertIn("3\tsys: 异常类指令", text); self.assertIn("main 自旋区 105 个", text)
 
     def test_target_failures_keep_specific_codes_through_ipa_adapter(self):
         for arch, osv, sdk, code in (("applegpu_g12p", 26, 27, "target_unsupported"),

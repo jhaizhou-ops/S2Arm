@@ -54,7 +54,7 @@ def duplicate_headings(text):
 def train_source(repo):
     """Merge-train script is maintainer-side; S2A_PRIVATE_TOOLS points at it. None = public checkout."""
     if os.environ.get('S2A_PRIVATE_TOOLS'):
-        return Path(os.environ['S2A_PRIVATE_TOOLS']) / 'train.sh'
+        return Path(os.environ['S2A_PRIVATE_TOOLS']) / 'train' / 'train.sh'   # 11-09 列车脚本收进 private-tools 库后的唯一真值（原根目录 train.sh 是旧副本，已删）
     local = repo / 'tools/train.sh'
     return local if local.exists() else None
 
