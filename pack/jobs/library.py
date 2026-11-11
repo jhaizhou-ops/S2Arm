@@ -991,13 +991,16 @@ PACK_SMALL_BYTES, DIRECT_SMALL_BYTES, DIRECT_LARGE_BYTES = int(3e9), int(5e9), i
 
 
 def _pack_input_bytes(packages):
-    # 同一 sha 的原件只计一次：取原件大小与所选各项内容字节之和的大值（NSZ/XCZ 解开比原件大）。
-    # 合集 / NUP 一个原件装多项，每项各记自己那份 contentBytes，要相加；原先按 sha 去重只留最后一项，压缩合集解开后的量少算（#444）
+    # 同一 sha 的原件只计一次：取原件大小与所选各项内容字节的大值（NSZ/XCZ 解开比原件大）。
+    # 压缩合集（XCZ 等）一个原件装多项，各项内容互不重叠，contentBytes 相加（#444：原先按 sha 去重只留最后一项，解开后的量少算）。
+    # NUP 容器不同：不压缩、容器内按块去重，更新是整份打过补丁的文件系统、和本体共用数据块，各项 contentBytes 重叠——
+    #   0400486024DEC000：文件 25.62 GB，本体、更新各 26.27 GB，相加成 52.5 GB 多估一倍——取各项最大值，不相加
     by_sha = {}
     for p in packages:
-        size, content = by_sha.get(p["sha256"], (0, 0))
-        by_sha[p["sha256"]] = (max(size, p.get("size", 0)), content + p.get("contentBytes", 0))
-    return sum(max(size, content) for size, content in by_sha.values())
+        size, summed, largest, nup = by_sha.get(p["sha256"], (0, 0, 0, False))
+        content = p.get("contentBytes", 0)
+        by_sha[p["sha256"]] = (max(size, p.get("size", 0)), summed + content, max(largest, content), nup or p.get("format") == "nup")
+    return sum(max(size, largest if nup else summed) for size, summed, largest, nup in by_sha.values())
 
 
 def _pack_direct_bytes(size):

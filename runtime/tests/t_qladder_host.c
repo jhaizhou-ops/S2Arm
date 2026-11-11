@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 int s2a_fps_real_source(void) { return 0; } int s2a_fps_enabled(void) { return 0; } void s2a_fps_hold(int hold) { (void)hold; }
 int s2a_widen_game(void) { return 1; } void s2a_console_mode_set(int docked) { (void)docked; } int s2a_console_mode(void) { return -1; }
+void s2a_ios_fps_capped(int reason) { (void)reason; }
 void s2a_ql_boot(void); void s2a_ql_host_frame(uint64_t now, int game, uint64_t dt, int game_itv);
 static int bad;
 // 一种情况一个子进程（梯子开关、记下的档都是进程内静态）：env 里 S2A_DOCKED（NULL = 没设）、ladder.txt 内容（NULL = 没有）→ 起局后的 S2A_DOCKED 与第一帧的档

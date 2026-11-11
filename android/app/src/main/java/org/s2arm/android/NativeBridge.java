@@ -215,6 +215,8 @@ final class NativeBridge {
     }
     /** 直连安全网：onTrimMemory/onLowMemory 前台内存告警，记一次失败证据（未武装时空转）。 */
     static native void memoryWarning();
+    /** #48 P8：热状态（PowerManager.THERMAL_STATUS_*，读不到 -1）与省电模式，进共用 dm_thermal_now / dm_low_power_now。 */
+    static native void setPowerState(int thermalStatus, boolean powerSave);
     /** 直连安全网：宿主版本号（BuildConfig.VERSION_NAME），起局前传一次，dguard 用它区分「另一个包」。 */
     static native void setHostBuild(String build);
     /** 存档原子提交判定（共用 direct_prompt.c）：每秒轮询，非 0 = 服务层报出原因位（只报一次）。 */

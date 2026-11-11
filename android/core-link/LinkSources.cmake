@@ -16,6 +16,8 @@ function(s2a_android_host_sources output)
         native/bridge.cpp native/lan_discovery.cpp ../runtime/src/lan_elect.c native/capture_jpeg.cpp native/touch_jni.cpp native/game_touch.c native/window.cpp native/presenter.cpp
         native/wsi_lease.c native/input.c native/tsd.c native/module.c native/selftest.c native/selftest_gate.S
         native/guest_signal.c native/redlog.c native/redzone.S native/pcm_ring.c native/aaudio_sink.c native/hostapi.c native/screen_metrics.c
+        # #48 P8：dm_thermal_now / dm_low_power_now 的安卓强定义（盖过 fps.c / hle_nvn.c 的弱缺省）
+        native/power_state.c
         native/host_android.c native/host_ui.c native/host_ui_android.c native/host_ui_jni.cpp native/plat_android.c
         # 直连安全网安卓接线（共用 runtime/src/dguard.c 的武装 / 生命周期出口；游戏目标由
         # Runtime.cmake 提供 dguard.c，诊断目标见 s2a_android_diagnostic_sources）
@@ -78,6 +80,9 @@ function(s2a_android_direct_sources output)
         # 逐帧上屏间隔 + 每帧 fence 等待（诊断默认关）：direct/generic 同一份环形缓冲与
         # 转储格式（t-direct-frametimes），generic 经 DllImport 调 s2a_frame_log_present/dump，必须随直连核心编入。
         native/nvn/nvn_vk_frame_log.c
+        # 逐帧 TSV（iOS frames.tsv 同义；诊断默认关）：present 成功点取各累计源差分写行，
+        # 拿不到的列整列不进表头。
+        native/nvn/nvn_vk_frame_tsv.c
         native/nvn/nvn_vk_compile_events.c
         native/direct/vk_clear.c
         native/nvn/nvn_vk_swapchain.c native/nvn/nvn_vk_surface.c native/nvn/nvn_vk_session.c

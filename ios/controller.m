@@ -258,8 +258,18 @@ static void phone_submit_locked(const s2a_pad_vibration pair[2], BOOL stop) {
         if (valid) { if (stop_now) s2a_phone_rumble_stop(); else s2a_phone_rumble_pair(copy); }
     });
 }
+// 震动被丢掉时各打一行（每种原因本局只打一次，#466）：原先送到原生层后会话号对不上、手柄没选中、切换中都静默返回，
+//   玩家「iOS 上外接手柄一律不震」时日志里看不出断在哪一步。位：1 手机马达代次过期、2 系统手柄不收、4 会话不是任何一路
+static _Atomic unsigned g_rumble_drop_logged;
+static BOOL rumble_drop_first(unsigned bit) { return !(atomic_fetch_or(&g_rumble_drop_logged, bit) & bit); }
 static void system_submit_locked(uint64_t session, const s2a_pad_vibration pair[2]) {
-    if (!session || session != (SYSTEM_SESSION_BASE | g_system_epoch) || !g_system_selected || !g_system_supported || g_system_transition || !s2a_pad_has_controller()) return;
+    if (!session || session != (SYSTEM_SESSION_BASE | g_system_epoch) || !g_system_selected || !g_system_supported || g_system_transition || !s2a_pad_has_controller()) {
+        if (rumble_drop_first(2))
+            LOG("游戏震动：系统手柄这一路不收，丢弃（会话 %#llx / 当前 %#llx，选中 %d，手柄支持震动 %d，切换中 %d，生效来源是实体手柄 %d；本局只报一次）",
+                (unsigned long long)session, (unsigned long long)(SYSTEM_SESSION_BASE | g_system_epoch), (int)g_system_selected, (int)g_system_supported,
+                (int)g_system_transition, s2a_pad_has_controller());
+        return;
+    }
     memcpy(g_system_pair, pair, sizeof g_system_pair);
     if (g_system_pending) return;
     g_system_pending = YES;
@@ -790,6 +800,7 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64
     if ((session & 0xffff000000000000ull) == PHONE_SESSION_BASE) {
         pthread_mutex_lock(&g_feedback_mu);
         if (session == (PHONE_SESSION_BASE | g_phone_epoch)) phone_submit_locked(values, NO);
+        else if (rumble_drop_first(1)) LOG("游戏震动：手机马达会话 %#llx 已过期（当前代次 %llu），丢弃；本局只报一次", (unsigned long long)session, (unsigned long long)g_phone_epoch);
         pthread_mutex_unlock(&g_feedback_mu); return;
     }
     pthread_mutex_lock(&g_feedback_mu);
@@ -801,6 +812,10 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble_pair(uint64
             { values[1].low_amp, values[1].low_hz, values[1].high_amp, values[1].high_hz }
         };
         atomic_load(&g_ns2)->send_pair_lease(pair, 1000);
+    } else if (rumble_drop_first(4)) {
+        LOG("游戏震动：会话 %#llx 不是手机马达 / 系统手柄 / NS2 Pro 任何一路（%s；有系统手柄 %d，生效来源是实体手柄 %d），丢弃；本局只报一次",
+            (unsigned long long)session, session == MOTION_ONLY_SESSION ? "只给体感的会话：没有能震的设备" : session ? "会话号对不上" : "会话 0",
+            (int)g_system_present, s2a_pad_has_controller());
     }
     pthread_mutex_unlock(&g_feedback_mu);
 }
@@ -824,6 +839,9 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_rumble(uint64_t se
         }
     } else if (!g_system_present && s2a_pad_has_controller() && atomic_load(&g_adapter_enabled) && session && session == atomic_load(&g_feedback_session) && atomic_load(&g_ble_ready))
         atomic_load(&g_ns2)->send_lease(side, low_amp, low_hz, high_amp, high_hz, 1000);
+    else if (rumble_drop_first(4))
+        LOG("游戏震动：会话 %#llx 不是手机马达 / 系统手柄 / NS2 Pro 任何一路（单侧提交；有系统手柄 %d，生效来源是实体手柄 %d），丢弃；本局只报一次",
+            (unsigned long long)session, (int)g_system_present, s2a_pad_has_controller());
     pthread_mutex_unlock(&g_feedback_mu);
 }
 // 设置页改了开关或强度：立即生效。关掉时三路马上停，不等游戏下一次提交

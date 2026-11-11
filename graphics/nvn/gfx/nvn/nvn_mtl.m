@@ -3088,6 +3088,11 @@ static uint64_t span_hash(const uint8_t *m, size_t n) {   // 8 bytes at a time (
     for (; i < n; i++) h = (h ^ m[i]) * 0x100000001b3ull;
     return h;
 }
+// Guest storage bytes as the host can read them (P1-160): a texture's storage address is the guest's (pool->mem + off), and in a far-alias pool (runtime/src/far.c) that address is
+//   unmapped — reading it directly faults once per load into the far-fault emulation, or stops the game where an access cannot be emulated. Read the shadow instead (s2a_far_g2h, the
+//   one address map). Valid for a span inside one host page (a GOB, a page_span piece): the shadow's 2 MiB blocks are page-aligned. Outside the far region the guest address is the host's
+static const uint8_t *host_rd(const uint8_t *g) { const uint8_t *h = s2a_far_g2h((uint64_t)(uintptr_t)g); return h ? h : g; }
+static uint64_t gob_hash(uint64_t g) { return span_hash(host_rd((const uint8_t *)(uintptr_t)(g << 9)), 512); }
 static void page_span(const tex_t *t, size_t k, const uint8_t **lo, size_t *n) {   // the texture's bytes in host page k of its storage (pages counted from the one holding t->mem)
     uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
     uintptr_t b = MAX(a, p0 + k * pg), c = MIN(e, p0 + (k + 1) * pg); *lo = (const uint8_t *)b; *n = c > b ? c - b : 0;
@@ -3208,7 +3213,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         *stamp = nvn_dirty_now();
         if (ph && !sparse) {   // after the stamp, before the read: a write in between is after the stamp too, so the next check sees its page (and the hash may hold it, the upload does)
             uint32_t n = page_count(t); uint64_t *h = realloc(*ph, (size_t)MAX(n, 1u) * sizeof *h);
-            if (h) { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(lo, m); } *ph = h; *nph = n; } else { free(*ph); *ph = NULL; *nph = 0; } } }
+            if (h) { for (uint32_t k = 0; k < n; k++) { const uint8_t *lo; size_t m; page_span(t, k, &lo, &m); h[k] = span_hash(host_rd(lo), m); } *ph = h; *nph = n; } else { free(*ph); *ph = NULL; *nph = 0; } } }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
     uint32_t upf; int ubpp = 0, unp = fmt_unpack(t->d.format, &upf, &ubpp);   // stored in another format (fmt_unpack: BC on a GPU without BC, or expanded): deswizzle, then convert on the CPU; the staging area is sized for the converted data
@@ -3430,7 +3435,7 @@ static void gpw_add(void *u, uint64_t lo, uint64_t hi) {   // under g_gpw_mu; u 
     for (uint64_t g = (base + lo) >> 9, ge = (base + hi + 511) >> 9; g < ge; g++) {
         uint64_t k = g >> 9; gpw_blk *b = nvn_hm_get(&g_gpw, &k);
         if (!b) { if (!(b = calloc(1, sizeof *b))) MDIE("stale-byte table allocation failed"); nvn_hm_put(&g_gpw, &k, b); atomic_fetch_add(&g_gpw_nblk, 1); }
-        unsigned i = (unsigned)(g & 511); b->bits[i >> 6] |= 1ull << (i & 63); b->h[i] = span_hash((const uint8_t *)(uintptr_t)(g << 9), 512);
+        unsigned i = (unsigned)(g & 511); b->bits[i >> 6] |= 1ull << (i & 63); b->h[i] = gob_hash(g);
     }
 }
 static void gpw_unmark(uint64_t g) {   // under g_gpw_mu: GOB g is current again
@@ -3625,7 +3630,7 @@ static int gpw_stale(const uint8_t *mem, uint64_t size, uint64_t **runs, uint64_
     for (uint64_t g = a >> 9, ge = (e + 511) >> 9; g < ge; g++) {
         uint64_t k = g >> 9; gpw_blk *b = nvn_hm_get(&g_gpw, &k); if (!b) { g = (k << 9) + 511; continue; }
         unsigned i = (unsigned)(g & 511); if (!(b->bits[i >> 6] >> (i & 63) & 1)) continue;
-        if (span_hash((const uint8_t *)(uintptr_t)(g << 9), 512) != b->h[i]) { gpw_unmark(g); continue; }   // rewritten since (by the CPU or anything else that writes guest memory)
+        if (gob_hash(g) != b->h[i]) { gpw_unmark(g); continue; }   // rewritten since (by the CPU or anything else that writes guest memory)
         uint64_t lo = MAX(g << 9, a) - a, hi = MIN((g + 1) << 9, e) - a;
         if (n && r[2 * n - 1] == lo) r[2 * n - 1] = hi;
         else { if (n == cap) { cap = cap ? cap * 2 : 16; if (!(r = realloc(r, (size_t)cap * 2 * sizeof *r))) MDIE("stale run list allocation failed"); } r[2 * n] = lo; r[2 * n + 1] = hi; n++; }
@@ -4162,7 +4167,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                     if (pk->nph > ncap) { uint64_t *a = realloc(nh, pk->nph * sizeof *a), *b = a ? realloc(gens, pk->nph * sizeof *b) : NULL; if (a) nh = a; if (b) { gens = b; ncap = pk->nph; } }
                     int changed = 0, gpu = pk->pgpu != NULL;   // the texture holds GPU-written content (pgpu goes with a whole re-upload)
                     for (long k = 0; k < np && ncap >= pk->nph; k++) if (bits[k >> 6] >> (k & 63) & 1) {
-                        const uint8_t *lo; size_t m; page_span(t, (size_t)k, &lo, &m); nh[k] = span_hash(lo, m);
+                        const uint8_t *lo; size_t m; page_span(t, (size_t)k, &lo, &m); nh[k] = span_hash(host_rd(lo), m);
                         if (nh[k] != pk->ph[k]) changed = 1; else bits[k >> 6] &= ~(1ull << (k & 63));   // bits now: pages whose bytes changed
                     }
                     if (!changed) { pk->stamp = st; pk->seen = nvn_dirty_now(); clean = 1; g_pkg_same++; }
