@@ -19,6 +19,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t relayWriteLock = PTHREAD_MUTEX_INITIALIZER;
 static ns2_state input;
 static ns2_motion relayMotion;
+static ns2_kind relayKind;   // 通道 v2 带来的对外输出型号（持 lock）
 static ns2_status status;
 static int directStarted, ready, foreground, motion_requested;
 static int relayFD = -1;
@@ -82,6 +83,7 @@ static int connect_relay(const char *path) {
     status = NS2_STATUS_CONNECTING;
     memset(&input, 0, sizeof input);
     memset(&relayMotion, 0, sizeof relayMotion);
+    relayKind = NS2_KIND_NONE;
     pthread_mutex_unlock(&lock);
     return 1;
 }
@@ -104,8 +106,11 @@ static void *relay_read_main(void *context) {
     int fd = (int)(intptr_t)context;
     ns2_relay_packet packet;
     while (receive_all(fd, &packet, sizeof packet)) {
-        if (packet.magic != NS2_RELAY_MAGIC || packet.version != NS2_RELAY_VERSION ||
-            packet.type != NS2_RELAY_INPUT) break;
+        if (packet.magic != NS2_RELAY_MAGIC || packet.version != NS2_RELAY_VERSION || packet.type != NS2_RELAY_INPUT) {
+            if (packet.magic == NS2_RELAY_MAGIC && packet.version != NS2_RELAY_VERSION)
+                fprintf(stderr, "[Mac NS2] 启动器通道版本 %u，本端 %u：断开（启动器与游戏宿主版本不一致）\n", packet.version, NS2_RELAY_VERSION);
+            break;
+        }
         pthread_mutex_lock(&lock);
         if (relayFD != fd) {
             pthread_mutex_unlock(&lock);
@@ -119,6 +124,7 @@ static void *relay_read_main(void *context) {
         ready = connected;
         status = (ns2_status)packet.status;
         if (connected) input = packet.state;
+        relayKind = connected ? (ns2_kind)packet.kind : NS2_KIND_NONE;
         if (packet.motion_known) relayMotion = packet.motion;
         else memset(&relayMotion, 0, sizeof relayMotion);
         pthread_mutex_unlock(&lock);
@@ -132,6 +138,7 @@ static void *relay_read_main(void *context) {
         epoch++;
         memset(&input, 0, sizeof input);
         memset(&relayMotion, 0, sizeof relayMotion);
+        relayKind = NS2_KIND_NONE;
     }
     pthread_mutex_unlock(&lock);
     close(fd);
@@ -225,6 +232,7 @@ void s2a_mac_ns2_detach(void) {
     epoch++;
     memset(&input, 0, sizeof input);
     memset(&relayMotion, 0, sizeof relayMotion);
+    relayKind = NS2_KIND_NONE;
     pthread_mutex_unlock(&lock);
     if (fd >= 0) shutdown(fd, SHUT_RDWR);
     if (threadStarted) pthread_join(relayThread, NULL);
@@ -275,6 +283,23 @@ void s2a_mac_ns2_set_back_buttons(uint16_t left, uint16_t right) {
     back_buttons[0] = left;
     back_buttons[1] = right;
     pthread_mutex_unlock(&lock);
+}
+
+ns2_kind s2a_mac_ns2_kind(void) {
+    pthread_mutex_lock(&lock);
+    ns2_kind kind = !ready ? NS2_KIND_NONE : relayFD >= 0 ? relayKind : ns2_get_output_kind();
+    pthread_mutex_unlock(&lock);
+    return kind;
+}
+
+const char *s2a_mac_ns2_kind_name(ns2_kind kind) {
+    switch (kind) {
+        case NS2_KIND_JOYCON_L: return "Joy-Con 2 (L)";
+        case NS2_KIND_JOYCON_R: return "Joy-Con 2 (R)";
+        case NS2_KIND_JOYCON_PAIR: return "Joy-Con 2 (L + R)";
+        case NS2_KIND_PRO: return "Switch 2 Pro";
+        default: return "Switch 手柄";   // 没连 / 还不知道型号（不分代）
+    }
 }
 
 ns2_status s2a_mac_ns2_status(void) {

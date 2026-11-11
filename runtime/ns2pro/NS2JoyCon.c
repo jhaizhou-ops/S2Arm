@@ -75,3 +75,11 @@ void ns2_encode_rumble_for(ns2_kind kind, const ns2_vibration values[2], uint8_t
     ns2_encode_rumble(one, sequence, gain, out);
     for (unsigned i = 17; i < 42; i++) out[i] = 0;
 }
+
+ns2_kind ns2_output_kind(ns2_kind a, int a_present, ns2_kind b, int b_present) {
+    int a_jc = a == NS2_KIND_JOYCON_L || a == NS2_KIND_JOYCON_R, b_jc = b == NS2_KIND_JOYCON_L || b == NS2_KIND_JOYCON_R;
+    if (a_present && b_present && a_jc && b_jc && a != b) return NS2_KIND_JOYCON_PAIR;
+    if (a_present) return a;
+    if (b_present) return b;
+    return NS2_KIND_NONE;
+}

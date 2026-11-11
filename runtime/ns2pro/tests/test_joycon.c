@@ -53,6 +53,14 @@ int main(void) {
     ns2_raw_input raw; ns2_decode_input_report(5, left05, sizeof left05, &raw);
     CK(raw.buttons == BIT(UP) && ns2_decode_side_buttons(left05, sizeof left05) == NS2_SIDE_SL_L,
        "⑫ SL / SR 不进按键位：左只按住上 + SL，按键只有上，SL 只在横握专用的 side 位里（实 %llx）", (unsigned long long)raw.buttons);
+    // 对外输出型号（#520）：期望按「两只都在出输入且一左一右才算一对」手算
+    CK(ns2_output_kind(NS2_KIND_JOYCON_L, 1, NS2_KIND_JOYCON_R, 1) == NS2_KIND_JOYCON_PAIR && ns2_output_kind(NS2_KIND_JOYCON_R, 1, NS2_KIND_JOYCON_L, 1) == NS2_KIND_JOYCON_PAIR,
+       "⑯ 左右都在出输入：一对（槽位顺序无关）");
+    CK(ns2_output_kind(NS2_KIND_JOYCON_L, 1, NS2_KIND_JOYCON_R, 0) == NS2_KIND_JOYCON_L && ns2_output_kind(NS2_KIND_JOYCON_L, 0, NS2_KIND_JOYCON_R, 1) == NS2_KIND_JOYCON_R,
+       "⑰ 另一只还在连 / 已失败：只报在出输入的那只");
+    CK(ns2_output_kind(NS2_KIND_PRO, 1, NS2_KIND_NONE, 0) == NS2_KIND_PRO && ns2_output_kind(NS2_KIND_NONE, 0, NS2_KIND_NONE, 0) == NS2_KIND_NONE &&
+       ns2_output_kind(NS2_KIND_JOYCON_L, 1, NS2_KIND_JOYCON_L, 1) == NS2_KIND_JOYCON_L,
+       "⑱ Pro 照报 Pro；都没有报 NONE；两只同侧不算一对");
     printf("%s test_joycon：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad ? 1 : 0;
 }
