@@ -70,7 +70,7 @@ namespace S2A.Services
             {
                 _readMotion = (delegate* unmanaged<MotionSample*, int>)motion;
                 _setMotionEnabled = (delegate* unmanaged<int, void>)NativeLibrary.GetExport(program, "s2a_pad_set_motion_enabled");
-                if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))   // 平台例外：Mac 宿主（macos/front_mac.m，Joy-Con HID 左右两路体感）专有的可选导出，同 s2a_pad_read_motion；iOS / 安卓宿主没有
+                if (NativeLibrary.TryGetExport(program, "s2a_pad_read_motion_pair", out nint pair))
                     _readMotionPair = (delegate* unmanaged<MotionSample*, int>)pair;
             }
             Console.Error.WriteLine($"[输入反馈] hooks rumble_pair={_setRumblePair != null} stop={_stopRumble != null} session={_rumbleSession != null} motion={_readMotion != null} motion_pair={_readMotionPair != null} motion_enable={_setMotionEnabled != null} player={(int)player} session={_session} permit={_rumblePermitted}");
@@ -224,10 +224,20 @@ namespace S2A.Services
                 _motionLogged = true;
                 Console.Error.WriteLine($"[输入反馈] first motion known={known} pair={nPair} player={(int)player} timestamp_us={sample.TimestampUs} accel_g=({sample.AccelerationX},{sample.AccelerationY},{sample.AccelerationZ}) gyro_deg_s=({sample.GyroX},{sample.GyroY},{sample.GyroZ})");
             }
-            AddMotionState(player, sample, ref _motion, _orientation, pushImu: true);
-            // 左右 Joy-Con 各一路：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴
-            if (nPair >= 2)
-                AddMotionState(player, sampleR, ref _motionRight, _orientationRight, pushImu: false);
+            PlayerIndex second = InputPump.SecondPlayer;
+            // 双人各一只 Joy-Con：R→P1、L→P2 各写自己的六轴（pair 缓冲 [0]=L [1]=R）；勿塞进同一玩家（同款样式下第二份会盖掉第一份）
+            if (InputPump.Pads >= 2 && second != PlayerIndex.Unknown && nPair >= 2)
+            {
+                AddMotionState(player, sampleR, ref _motion, _orientation, pushImu: true);
+                AddMotionState(second, sample, ref _motionRight, _orientationRight, pushImu: true);
+            }
+            else
+            {
+                AddMotionState(player, sample, ref _motion, _orientation, pushImu: true);
+                // 单人一对：同一 PlayerId 连续两份，UpdateSixAxis 把第二份写入右手六轴
+                if (nPair >= 2)
+                    AddMotionState(player, sampleR, ref _motionRight, _orientationRight, pushImu: false);
+            }
             _npads.UpdateSixAxis(_motionStates);
             _motionPublished = true;
         }

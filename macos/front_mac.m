@@ -1,6 +1,5 @@
 // Opt-in Mac game shell. Game/library management lives in the separate launcher.
-// Input ABI is the legacy s2a_vpad_read plus the event-driven s2a_vpad_read_ex
-// (A2) used by services/InputPump.cs when the host exports it.
+// Input ABI is the existing s2a_vpad_read used by services/InputPump.cs.
 #include <dlfcn.h>
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -57,8 +56,10 @@ static void display_focus_publish_ex(BOOL active, BOOL may_freeze) {
     else if ((active || !may_freeze) && focus_frozen) { focus_frozen = NO; s2a_guest_freeze(0); guest_clock_freeze_for(3, 0); fprintf(stderr, "[s2a] Mac 回到焦点 / 收尾：放开客机\n"); }
 }
 static void display_focus_publish(BOOL active) { display_focus_publish_ex(active, YES); }
-static _Atomic uint32_t input_seq, input_buttons;
-static _Atomic int32_t input_sticks[4];
+static _Atomic uint32_t input_seq, input_buttons, input_buttons2;
+static _Atomic int32_t input_sticks[4], input_sticks2[4];
+static _Atomic int g_vpad_pads;   // 1 或 2：连着几只要各自进游戏的真手柄（含 NS2 BLE 占一槽）
+static __weak GCController *g_pad_slot[2];   // 槽位粘性：不断开就不换号，避免两人互抢
 static NSMutableSet<NSNumber *> *keys, *mouse;
 static NSDictionary *config;
 static BOOL focused;
@@ -122,29 +123,20 @@ static int mac_input_config_read(const char *path, s2a_input_config *out) {
         return data ? s2a_input_config_parse(data.bytes, data.length, out) : S2A_INPUT_CONFIG_IO;
     } @catch (NSException *exception) { (void)exception; return S2A_INPUT_CONFIG_IO; }
 }
+static void publish_pads(uint32_t b0, const int32_t s0[4], uint32_t b1, const int32_t s1[4], int pads) {
+    atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
+    atomic_store_explicit(&input_buttons, b0, memory_order_seq_cst);
+    atomic_store_explicit(&input_buttons2, b1, memory_order_seq_cst);
+    for (int i = 0; i < 4; i++) {
+        atomic_store_explicit(&input_sticks[i], s0[i], memory_order_seq_cst);
+        atomic_store_explicit(&input_sticks2[i], s1[i], memory_order_seq_cst);
+    }
+    atomic_store_explicit(&g_vpad_pads, pads < 1 ? 1 : (pads > 2 ? 2 : pads), memory_order_seq_cst);
+    atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
+}
 static void publish(uint32_t buttons, const int32_t sticks[4]) {
-    atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
-    atomic_store_explicit(&input_buttons, buttons, memory_order_seq_cst);
-    for (int i = 0; i < 4; i++) atomic_store_explicit(&input_sticks[i], sticks[i], memory_order_seq_cst);
-    atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
-}
-static GCExtendedGamepad *active_pad(NSArray *controllers);
-// 事件驱动输入（A2）：同一份前端状态同时写进 runtime/src/pad.c，InputPump 找到 s2a_vpad_read_ex 后就等
-//   s2a_pad_wait 的序号通知，不再 Thread.Sleep(16)。有扩展手柄时按系统手柄源发布（键盘 / 鼠标仍并进同一份状态），
-//   没有手柄时按触屏源发布；两个源互斥的语义由 pad.c 管，Mac 不另造第三份选源状态。
-static void publish_pad_state(int has_pad, uint32_t buttons, const int32_t sticks[4]) {
-    if (has_pad) { s2a_pad_update(S2A_PAD_SYSTEM, focused ? 1 : 0, buttons, sticks); return; }
-    // 没手柄时必须先补一次 SYSTEM 断开：pad.c 的 selected() 只看 connected，不发就仍选 SYSTEM 并丢掉 TOUCH 更新，
-    //   手柄断开瞬间按住的键会卡住、键盘也失灵（维护方 11-09 用 pad.c 最小程序复现：0x1，期望 0x2）。
-    s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, sticks);
-    s2a_pad_update(S2A_PAD_TOUCH, focused ? 1 : 0, buttons, sticks);
-}
-static void publish_pad(uint32_t buttons, const int32_t sticks[4]) {
-    publish_pad_state(active_pad(GCController.controllers) != nil, buttons, sticks);
-}
-static void publish_input(uint32_t buttons, const int32_t sticks[4]) {
-    publish(buttons, sticks);
-    publish_pad(buttons, sticks);
+    int32_t zero[4] = {0};
+    publish_pads(buttons, sticks, 0, zero, 1);
 }
 // 鼠标不回中（审计 P2-62：赛车预设写了 mouseOptions.recenter = false，原生读取从不看它，停手照样回中）：
 //   回中（缺省）= 每次读把这一拍的位移加进右摇杆后清零；不回中 = 位移累进一个保持量，停手后右摇杆停在原处，失焦 / 复位清零
@@ -152,17 +144,6 @@ static _Atomic int mouse_hold;   // 1 = 不回中；配置装好时由 apply_mou
 static _Atomic int64_t hold_x, hold_y;
 static void apply_mouse_options(void) { atomic_store(&mouse_hold, [config[@"mouseOptions"][@"recenter"] isEqual:@NO]); }
 static int64_t clamp_stick(int64_t v) { return MAX(-32767, MIN(32767, v)); }
-// 鼠标位移由 HID 读取线程消费一次；s2a_vpad_read（旧 ABI）与 s2a_vpad_read_ex（事件驱动 ABI）共用这一份。
-static void take_mouse_delta(int32_t sticks[4]) {
-    int64_t dx = atomic_exchange_explicit(&mouse_dx, 0, memory_order_relaxed);
-    int64_t dy = atomic_exchange_explicit(&mouse_dy, 0, memory_order_relaxed);
-    if (atomic_load(&mouse_hold)) {
-        int64_t x = clamp_stick(atomic_load(&hold_x) + dx), y = clamp_stick(atomic_load(&hold_y) + dy);   // 只有 HID 读线程写保持量；复位在主线程清零
-        atomic_store(&hold_x, x); atomic_store(&hold_y, y); dx = x; dy = y;
-    }
-    sticks[2] = (int32_t)clamp_stick((int64_t)sticks[2] + dx);
-    sticks[3] = (int32_t)clamp_stick((int64_t)sticks[3] + dy);
-}
 __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read(int32_t *sticks) {
     uint32_t a, b, buttons;
     do {
@@ -172,14 +153,31 @@ __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read(int32_t *sti
         for (int i = 0; i < 4; i++) sticks[i] = atomic_load_explicit(&input_sticks[i], memory_order_seq_cst);
         b = atomic_load_explicit(&input_seq, memory_order_seq_cst);
     } while ((a & 1) || a != b);
-    take_mouse_delta(sticks);
+    int64_t dx = atomic_exchange_explicit(&mouse_dx, 0, memory_order_relaxed);
+    int64_t dy = atomic_exchange_explicit(&mouse_dy, 0, memory_order_relaxed);
+    if (atomic_load(&mouse_hold)) {
+        int64_t x = clamp_stick(atomic_load(&hold_x) + dx), y = clamp_stick(atomic_load(&hold_y) + dy);   // 只有 HID 读线程写保持量；复位在主线程清零
+        atomic_store(&hold_x, x); atomic_store(&hold_y, y); dx = x; dy = y;
+    }
+    sticks[2] = (int32_t)clamp_stick((int64_t)sticks[2] + dx);
+    sticks[3] = (int32_t)clamp_stick((int64_t)sticks[3] + dy);
     return buttons;
 }
-// InputPump 按符号查这个导出（services/S2A.Services/InputPump.cs）：有它就走 pad.c 的序号 / 条件变量，
-//   按键和摇杆从快照读，鼠标位移仍在这里消费一次。没有它的宿主继续用 s2a_vpad_read + Sleep(16)。
-__attribute__((visibility("default"), used)) void s2a_vpad_read_ex(s2a_pad_snapshot *out) {
-    s2a_pad_read_ex(out);
-    take_mouse_delta(out->axes);
+// 第二位玩家：只读第二槽真手柄（不含键鼠）。没有第二只时返回 0。
+__attribute__((visibility("default"), used)) uint32_t s2a_vpad_read2(int32_t *sticks) {
+    uint32_t a, b, buttons;
+    do {
+        a = atomic_load_explicit(&input_seq, memory_order_seq_cst);
+        if (a & 1) continue;
+        buttons = atomic_load_explicit(&input_buttons2, memory_order_seq_cst);
+        for (int i = 0; i < 4; i++) sticks[i] = atomic_load_explicit(&input_sticks2[i], memory_order_seq_cst);
+        b = atomic_load_explicit(&input_seq, memory_order_seq_cst);
+    } while ((a & 1) || a != b);
+    return buttons;
+}
+__attribute__((visibility("default"), used)) int s2a_vpad_pads(void) {
+    int n = atomic_load_explicit(&g_vpad_pads, memory_order_seq_cst);
+    return n < 1 ? 1 : n;
 }
 static NSMutableDictionary<NSNumber *, NSNumber *> *key_up_polls;   // 系统报「已松开」连续采样次数（见 release_stale_keys）
 // 被采样判成松开、没收到 keyUp 的键：其后系统报按下或自动重复证明还按着，可恢复
@@ -194,7 +192,7 @@ static void reset_input(void) {
     atomic_store_explicit(&mouse_dx, 0, memory_order_relaxed);
     atomic_store_explicit(&mouse_dy, 0, memory_order_relaxed);
     atomic_store(&hold_x, 0); atomic_store(&hold_y, 0);
-    int32_t sticks[4] = {0}; publish_input(0, sticks);
+    int32_t sticks[4] = {0}; publish(0, sticks);
     touch_end();   // 失焦 / 关窗：按着的触点补一帧 End（定义在下面鼠标触屏段）
 }
 static void sample_input(void);
@@ -608,20 +606,114 @@ __attribute__((visibility("default"), used)) void s2a_pad_stop_rumble(uint64_t s
     s2a_pad_vibration zero[2] = {{0}};
     rumble_submit(session, zero);
 }
+// 把一只 GCExtendedGamepad 的按键 / 摇杆按当前映射并进 buttons / sticks（本地双人：每只手柄各调一次，互不覆盖）
+static void apply_gc_pad(GCExtendedGamepad *pad, uint32_t *buttons, int32_t sticks[4]) {
+    if (!pad) return;
+    GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
+    int order[4];
+    s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
+        [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_face_by_letter(), order);
+    NSDictionary *pad_buttons = @{@"east": face[order[0]], @"south": face[order[1]], @"north": face[order[2]], @"west": face[order[3]],
+        @"leftShoulder": pad.leftShoulder, @"rightShoulder": pad.rightShoulder,
+        @"leftTrigger": pad.leftTrigger, @"rightTrigger": pad.rightTrigger, @"menu": pad.buttonMenu,
+        @"dpadLeft": pad.dpad.left, @"dpadRight": pad.dpad.right, @"dpadUp": pad.dpad.up, @"dpadDown": pad.dpad.down};
+    NSMutableDictionary *inputs = [pad_buttons mutableCopy];
+    if (pad.buttonOptions) inputs[@"options"] = pad.buttonOptions;
+    if (pad.leftThumbstickButton) inputs[@"leftStick"] = pad.leftThumbstickButton;
+    if (pad.rightThumbstickButton) inputs[@"rightStick"] = pad.rightThumbstickButton;
+    NSMutableDictionary *all = [NSMutableDictionary new];
+    for (NSString *code in inputs) all[code] = @([inputs[code] isPressed]);
+    NSDictionary *axes = @{@"leftX": @(pad.leftThumbstick.xAxis.value), @"leftY": @(pad.leftThumbstick.yAxis.value),
+                           @"rightX": @(pad.rightThumbstick.xAxis.value), @"rightY": @(pad.rightThumbstick.yAxis.value)};
+    for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] boolValue]) action(name, buttons, sticks);
+    NSArray *names = @[@"LX", @"LY", @"RX", @"RY"];
+    float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15f;
+    for (int i = 0; i < 4; i++) {
+        NSDictionary *binding = config[@"axes"][names[i]];
+        float v = [axes[binding[@"source"] ?: @""] floatValue];
+        if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+    }
+}
+// microGamepad（横握单 Joy-Con 等）：A/X + 方向键 → 面键 / 十字键，不够的肩键由 HID 回退补
+static void apply_gc_micro(GCMicroGamepad *pad, uint32_t *buttons, int32_t sticks[4]) {
+    if (!pad) return;
+    pad.reportsAbsoluteDpadValues = YES;
+    NSDictionary *all = @{
+        @"east": @(pad.buttonA.isPressed), @"south": @(pad.buttonX.isPressed),
+        @"north": @NO, @"west": @NO,
+        @"dpadLeft": @(pad.dpad.left.isPressed), @"dpadRight": @(pad.dpad.right.isPressed),
+        @"dpadUp": @(pad.dpad.up.isPressed), @"dpadDown": @(pad.dpad.down.isPressed),
+        @"menu": @(pad.buttonMenu.isPressed),
+    };
+    for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] boolValue]) action(name, buttons, sticks);
+    float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15f;
+    float x = pad.dpad.xAxis.value, y = pad.dpad.yAxis.value;
+    // 无独立摇杆时：方向键模拟量也写进左摇杆，方便只读 stick 的小游戏
+    if (fabsf(x) > dz) sticks[0] += (int32_t)(x * 32767);
+    if (fabsf(y) > dz) sticks[1] += (int32_t)(y * 32767);
+}
+static void apply_ns2_bits(uint32_t bits, int32_t lx, int32_t ly, int32_t rx, int32_t ry, uint32_t *buttons, int32_t sticks[4]) {
+    NSArray *codes = @[@"east", @"south", @"north", @"west", @"leftStick", @"rightStick",
+        @"leftShoulder", @"rightShoulder", @"leftTrigger", @"rightTrigger", @"menu", @"options",
+        @"dpadLeft", @"dpadUp", @"dpadRight", @"dpadDown"];
+    NSMutableDictionary *all = [NSMutableDictionary new];
+    for (int i = 0; i < 16; i++) all[codes[i]] = @((bits & (1u << i)) != 0);
+    NSDictionary *axes = @{@"leftX": @(lx / 32767.0f), @"leftY": @(ly / 32767.0f),
+                           @"rightX": @(rx / 32767.0f), @"rightY": @(ry / 32767.0f)};
+    for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] boolValue]) action(name, buttons, sticks);
+    NSArray *names = @[@"LX", @"LY", @"RX", @"RY"];
+    float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15f;
+    for (int i = 0; i < 4; i++) {
+        NSDictionary *binding = config[@"axes"][names[i]];
+        float v = [axes[binding[@"source"] ?: @""] floatValue];
+        if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+    }
+}
+static void apply_ble_pad(const ns2_state *ble, uint32_t *buttons, int32_t sticks[4]) {
+    apply_ns2_bits(ble->buttons, ble->lx, ble->ly, ble->rx, ble->ry, buttons, sticks);
+}
+static BOOL controller_is_playable(GCController *c) {
+    return c && (c.extendedGamepad != nil || c.microGamepad != nil);
+}
+// 最多两只可玩手柄进槽：已占槽的不断开就保留号；空槽按列表顺序补新人（真实双人：槽 0 = 玩家 1，槽 1 = 玩家 2）
+static void assign_pad_slots(NSArray *controllers) {
+    NSMutableSet *seen = [NSMutableSet new];
+    for (int i = 0; i < 2; i++) {
+        GCController *c = g_pad_slot[i];
+        if (!controller_is_playable(c) || ![controllers containsObject:c]) g_pad_slot[i] = nil;
+        else [seen addObject:c];
+    }
+    for (GCController *c in controllers) {
+        if (!controller_is_playable(c) || [seen containsObject:c]) continue;
+        for (int i = 0; i < 2; i++) if (!g_pad_slot[i]) { g_pad_slot[i] = c; [seen addObject:c]; break; }
+    }
+}
+static void apply_slot_controller(GCController *c, uint32_t *buttons, int32_t sticks[4]) {
+    if (!c) return;
+    if (c.extendedGamepad) apply_gc_pad(c.extendedGamepad, buttons, sticks);
+    else if (c.microGamepad) apply_gc_micro(c.microGamepad, buttons, sticks);
+}
 static void sample_input(void) {
-    int32_t sticks[4] = {0}; uint32_t buttons = 0;
-    GCExtendedGamepad *active = focused ? active_pad(GCController.controllers) : nil;
-    sample_motion(active);
-    if (active) rumble_select(active.controller);   // 失焦不换会话：切回来同一个手柄接着震
-    if (!focused) { publish_input(0, sticks); return; }
-    sample_home_quit(active);
-    if (g_hq.open) { publish_input(0, sticks); return; }
+    int32_t sticks0[4] = {0}, sticks1[4] = {0};
+    uint32_t buttons0 = 0, buttons1 = 0;
+    s2a_joycon_pad_ensure();   // L/R HID 双人回退：始终备着，不抢已有的两只 GC
+    NSArray *controllers = GCController.controllers;
+    assign_pad_slots(controllers);
+    GCController *slot0 = g_pad_slot[0];
+    GCController *slot1 = g_pad_slot[1];
+    GCExtendedGamepad *pad0 = slot0.extendedGamepad;
+    GCExtendedGamepad *motionPad = focused ? (pad0 ?: active_pad(controllers)) : nil;
+    sample_motion(motionPad);
+    if (motionPad) rumble_select(motionPad.controller);   // 失焦不换会话：切回来同一个手柄接着震
+    if (!focused) { publish_pads(0, sticks0, 0, sticks1, 1); return; }
+    sample_home_quit(pad0 ?: active_pad(controllers));
+    if (g_hq.open) { publish_pads(0, sticks0, 0, sticks1, 1); return; }
     NSDictionary *keyboard = config[@"keyboard"];
     NSUInteger consumed = 0;
     for (NSString *name in keyboard) {
         NSDictionary *binding = keyboard[name]; NSUInteger mods = [binding[@"modifiers"] unsignedIntegerValue];
         if (mods && (modifiers & mods) == mods && [keys containsObject:binding[@"code"]]) {
-            action(name, &buttons, sticks); consumed |= mods;
+            action(name, &buttons0, sticks0); consumed |= mods;
         }
     }
     for (NSString *name in keyboard) {
@@ -629,51 +721,44 @@ static void sample_input(void) {
         if ([binding[@"modifiers"] unsignedIntegerValue]) continue;
         unsigned k = code.unsignedIntValue;
         NSUInteger own_mod = (k == 56 || k == 60) ? 1 : (k == 59 || k == 62) ? 2 : (k == 58 || k == 61) ? 4 : 0;
-        if (!(consumed & own_mod) && [keys containsObject:code]) action(name, &buttons, sticks);
+        if (!(consumed & own_mod) && [keys containsObject:code]) action(name, &buttons0, sticks0);
     }
-    for (NSString *name in config[@"mouse"]) if ([mouse containsObject:config[@"mouse"][name]]) action(name, &buttons, sticks);
+    for (NSString *name in config[@"mouse"]) if ([mouse containsObject:config[@"mouse"][name]]) action(name, &buttons0, sticks0);
     ns2_state ble;
     BOOL hasBLE = s2a_mac_ns2_read(&ble);
-    GCExtendedGamepad *pad = hasBLE ? nil : active_pad(GCController.controllers);
-    if (hasBLE || pad) {
-        NSMutableDictionary *all = [NSMutableDictionary new];
-        NSDictionary *axes;
-        if (hasBLE) {
-            NSArray *codes = @[@"east", @"south", @"north", @"west", @"leftStick", @"rightStick",
-                @"leftShoulder", @"rightShoulder", @"leftTrigger", @"rightTrigger", @"menu", @"options",
-                @"dpadLeft", @"dpadUp", @"dpadRight", @"dpadDown"];
-            for (int i = 0; i < 16; i++) all[codes[i]] = @((ble.buttons & (1u << i)) != 0);
-            axes = @{@"leftX": @(ble.lx / 32767.0f), @"leftY": @(ble.ly / 32767.0f),
-                     @"rightX": @(ble.rx / 32767.0f), @"rightY": @(ble.ry / 32767.0f)};
-        } else {
-            // GameController 通常按物理方位上报（buttonA 在南侧）；Switch Pro 手柄在 macOS 上按键面字母上报（A 在东侧、X 在北侧）
-            //   位序调共用的 s2a_pad_abxy_order（同 iOS controller.m publishSystem；审计 P2-213：两端各写一套，以后只改一处就会一端错）。order 按任天堂 A / B / X / Y = 东 / 南 / 北 / 西
-            GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
-            int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
-                [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_face_by_letter(), order);   // 按字母 / 按位置（pad.c，同 iOS）
-            NSDictionary *pad_buttons = @{@"east": face[order[0]], @"south": face[order[1]], @"north": face[order[2]], @"west": face[order[3]],
-                @"leftShoulder": pad.leftShoulder, @"rightShoulder": pad.rightShoulder,
-                @"leftTrigger": pad.leftTrigger, @"rightTrigger": pad.rightTrigger, @"menu": pad.buttonMenu,
-                @"dpadLeft": pad.dpad.left, @"dpadRight": pad.dpad.right, @"dpadUp": pad.dpad.up, @"dpadDown": pad.dpad.down};
-            NSMutableDictionary *inputs = [pad_buttons mutableCopy];
-            if (pad.buttonOptions) inputs[@"options"] = pad.buttonOptions;
-            if (pad.leftThumbstickButton) inputs[@"leftStick"] = pad.leftThumbstickButton;
-            if (pad.rightThumbstickButton) inputs[@"rightStick"] = pad.rightThumbstickButton;
-            for (NSString *code in inputs) all[code] = @([inputs[code] isPressed]);
-            axes = @{@"leftX": @(pad.leftThumbstick.xAxis.value), @"leftY": @(pad.leftThumbstick.yAxis.value),
-                     @"rightX": @(pad.rightThumbstick.xAxis.value), @"rightY": @(pad.rightThumbstick.yAxis.value)};
+    int jc = s2a_joycon_pad_count();
+    BOOL gcDual = (slot0 != nil && slot1 != nil);
+    if (hasBLE) {
+        apply_ble_pad(&ble, &buttons0, sticks0);
+        if (slot0) apply_slot_controller(slot0, &buttons1, sticks1);   // BLE 占玩家 1，第一只系统手柄改给玩家 2
+        else if (slot1) apply_slot_controller(slot1, &buttons1, sticks1);
+        else if (jc >= 1) {
+            uint32_t jb = 0; int32_t js[4] = {0};
+            if (s2a_joycon_pad_read(0, &jb, js)) apply_ns2_bits(jb, js[0], js[1], js[2], js[3], &buttons1, sticks1);
         }
-        for (NSString *name in config[@"gamepad"]) if ([all[config[@"gamepad"][name]] boolValue]) action(name, &buttons, sticks);
-        NSArray *names = @[@"LX", @"LY", @"RX", @"RY"];
-        float dz = config[@"deadzone"] ? [config[@"deadzone"] floatValue] : .15;
-        for (int i = 0; i < 4; i++) {
-            NSDictionary *binding = config[@"axes"][names[i]];
-            float v = [axes[binding[@"source"] ?: @""] floatValue];
-            if (fabsf(v) > dz) sticks[i] += (int32_t)(v * ([binding[@"invert"] boolValue] ? -32767 : 32767));
+    } else if (gcDual) {
+        apply_slot_controller(slot0, &buttons0, sticks0);
+        apply_slot_controller(slot1, &buttons1, sticks1);
+    } else if (jc >= 2) {
+        // 真实双人：P1=右 Joy-Con、P2=左 Joy-Con（HID slot0=L / slot1=R，发布时对调）
+        uint32_t jb0 = 0, jb1 = 0; int32_t js0[4] = {0}, js1[4] = {0};
+        if (s2a_joycon_pad_read(1, &jb0, js0)) apply_ns2_bits(jb0, js0[0], js0[1], js0[2], js0[3], &buttons0, sticks0);
+        if (s2a_joycon_pad_read(0, &jb1, js1)) apply_ns2_bits(jb1, js1[0], js1[1], js1[2], js1[3], &buttons1, sticks1);
+    } else {
+        apply_slot_controller(slot0, &buttons0, sticks0);
+        if (!slot0 && jc >= 1) {
+            uint32_t jb = 0; int32_t js[4] = {0};
+            if (s2a_joycon_pad_read(0, &jb, js)) apply_ns2_bits(jb, js[0], js[1], js[2], js[3], &buttons0, sticks0);
         }
     }
-    for (int i = 0; i < 4; i++) sticks[i] = MAX(-32767, MIN(32767, sticks[i]));
-    publish_input(buttons, sticks);
+    for (int i = 0; i < 4; i++) {
+        sticks0[i] = MAX(-32767, MIN(32767, sticks0[i]));
+        sticks1[i] = MAX(-32767, MIN(32767, sticks1[i]));
+    }
+    int pads = 1;
+    if (hasBLE) pads = (slot0 || slot1 || jc >= 1) ? 2 : 1;
+    else if (gcDual || jc >= 2) pads = 2;
+    publish_pads(buttons0, sticks0, buttons1, sticks1, pads);
 }
 
 // keyUp 可能在菜单或其他响应者处被消费。定时采样只核对本窗口已经接收的键，
@@ -915,12 +1000,9 @@ static __weak S2AMacDelegate *g_delegate;
         self.ns2ReconnectPending = YES;
         self.ns2RelayDisconnectNoticeShown = NO;
     }
-    const char *relay = getenv("S2A_NS2_SOCKET");
-    BOOL relayMode = relay && *relay;
-    // 开局时 S2Arm 可能还没开连接程序（玩家开局后才连手柄）：通道文件出现才去连，接上前不提示（ns2_controller.c s2a_mac_ns2_relay_due）
-    if (self.ns2ReconnectPending && s2a_mac_ns2_relay_due(controller, relay)) s2a_mac_ns2_connect();
     if (self.ns2ReconnectPending && (controller == NS2_STATUS_ERROR || controller == NS2_STATUS_DISCONNECTED)) {
-        if (relayMode) {
+        const char *relay = getenv("S2A_NS2_SOCKET");
+        if (relay && *relay) {
             if (!self.ns2RelayDisconnectNoticeShown) {
                 [self.banner showTitle:@"Switch 2 Pro" body:@"S2Arm 手柄连接已中断；重新连接后游戏会自动接回。" accept:nil decline:nil seconds:12];
                 self.ns2RelayDisconnectNoticeShown = YES;
@@ -948,7 +1030,7 @@ static __weak S2AMacDelegate *g_delegate;
 }
 - (void)shutdown {
     display_focus_publish_ex(NO, NO);
-    set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input();
+    set_mouse_capture(NO); focused = NO; reset_input();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_mac_ns2_detach(); s2a_host_shutdown("Mac 窗口关闭"); });
 }
 // 菜单栏「切换游戏」：先留标记（S2A_RETURN_MARKER，开局作业给的路径），再走关窗同一条收尾（等存档写完）；作业见到标记，启动器回到游戏库并切到前台。
@@ -962,9 +1044,9 @@ static __weak S2AMacDelegate *g_delegate;
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; [self shutdown]; return NO; }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender { (void)sender; [self shutdown]; return NSTerminateCancel; }
-- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; s2a_pad_set_active(1); reset_input(); }
-- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
-- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; s2a_pad_set_active(0); reset_input(); }
+- (void)windowDidBecomeKey:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); if (mouse_release_pending) set_mouse_capture(NO); focused = YES; reset_input(); }
+- (void)windowDidResignKey:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; reset_input(); }
+- (void)applicationDidResignActive:(NSNotification *)note { (void)note; display_focus_publish(NO); set_mouse_capture(NO); focused = NO; reset_input(); }
 - (void)applicationDidBecomeActive:(NSNotification *)note { (void)note; display_focus_publish(NSApp.isActive && self.window.isKeyWindow); focused = self.window.isKeyWindow; }
 @end
 
@@ -1093,7 +1175,6 @@ void s2a_front_run(void (*guest_main)(void)) {
         }
         [view setNeedsLayout:YES]; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view];
         [app activateIgnoringOtherApps:YES]; focused = YES;
-        s2a_pad_set_active(1);
         install_pad_handlers();
         display_focus_publish(app.isActive && window.isKeyWindow);
         delegate.inputGuide = [[S2AMacInputGuide alloc] initWithName:window.title gameID:gameIdentity[@"gameId"] mapping:config gameWindow:window];
@@ -1110,7 +1191,6 @@ void s2a_front_run(void (*guest_main)(void)) {
             s2a_mac_ns2_connect();
         }
         [app run];
-        s2a_pad_set_active(0);
         display_focus_publish_ex(NO, NO);
         set_mouse_capture(NO); focused = NO; reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
     }
