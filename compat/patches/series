@@ -188,6 +188,7 @@
 0195-gc-interval-alloc-trace.patch
 0196-zerocopy-buffers.patch
 0197-audio-dsp-arm-fast.patch
+20261111-2123-audio-dsp-arm-fast-on.patch
 0198-dma-dst-own-buffer.patch
 0199-audio-cushion-zero-alloc.patch
 0200-gs-passthrough-vac.patch
