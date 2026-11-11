@@ -769,42 +769,62 @@ class Stages:
                         if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or is_link(overlay) or not overlay.is_dir():
                             raise
         files = self._layout_paths(overlay / 'romfs')
-        previous = [self._layout_name(p) for p in read(current / 'ui_overlay.tsv').splitlines() if p]
-        if not files and not previous:
-            return self._result('uilayout', start, current, None, skipped=True)
-        hash_rows = ''.join(hashlib.sha256((overlay / 'romfs' / name).read_bytes()).hexdigest() + '  ' + name + '\n' for name in files)
-        overlay_hash = digest(hash_rows) if files else ''
-        key = digest(f'w{width} {tv} {overlay_hash}')
-        if read(current / '.stage_uilayout') == key:
-            return self._result('uilayout', start, current, key, skipped=True)
-        # 覆盖层（11-06 出包速度线，维护者批）：现行 RomFS 不动（仍联到存储里那份不可变的身份），改动的布局文件只写进
-        #   <版本>/ui_overlay/romfs/<路径>，读方（RomFS 索引、资源包 pack/pkg_srcs.py）按「覆盖层优先」叠上去。
-        #   原先为改几十个文件独占克隆整份 RomFS、提交时整份封存、修剪时再整份解封删除（0100F2C0115B6000 30.5 万个文件，Windows 出包机 uilayout 1283 秒）。
-        tx = self.roots.begin(game, self.roots.tag(game, 'ui-w' + str(width) + '-' + key[:8]))
+        sources = {name: overlay / 'romfs' / name for name in files}
+        # 逐游戏静态覆盖（仓库 graphics/widen/tables/<款>_<构建号>/romfs_patch.tsv，逐游戏数据补丁）：
+        #   规则由 graphics/widen/scan/romfs_patch.py 打到原版文件上产出，与生成覆盖合并成同一份清单（同路径静态优先）；
+        #   计数对不上 = 手上的数据不是规则那一版，romfs_patch.py 退非零、run 报红停。目录名里的构建号与本款 main
+        #   对不上 = 没有这份规则（构建号一换自然失效，同宽屏表）。仓库只存规则、不存游戏文件本体。
+        spec = REPO / 'graphics/widen/tables' / (game + '_' + bid) / 'romfs_patch.tsv'
+        static_tmp = None
         try:
-            base = tx.path / 'romfs'
-            previous = [self._layout_name(p) for p in read(tx.path / 'ui_overlay.tsv').splitlines() if p]
-            missing = {p for p in set(files + previous) if not (original / p).is_file() or not (base / p).is_file()}
-            if missing:
-                print(f'【黄】布局原版/现行没有{len(missing)}项，只许替换、跳过', file=sys.stderr)
-            files = [p for p in files if p not in missing]
-            # 上一版覆盖过、这一版不覆盖的：底下 RomFS 若不是原版（旧格式版本就地改过 RomFS）就把原版放进覆盖层；清单记覆盖层里的全部文件，下一版照样核
-            restore = [p for p in sorted(set(previous) - set(files) - missing) if (base / p).read_bytes() != (original / p).read_bytes()]
-            layer = tx.path / 'ui_overlay'
-            remove_owned(layer)
-            for name, source in [(p, overlay / 'romfs' / p) for p in files] + [(p, original / p) for p in restore]:
-                target = layer / 'romfs' / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                copy_file(source, target)
-            text(tx.path / 'ui_overlay.tsv', ''.join(p + '\n' for p in sorted(set(files) | set(restore), key=lambda p: p.encode('utf-8'))))
-            text(tx.path / '.stage_uilayout', key + '\n')
-            (tx.path / '.stage_romfsidx').unlink(missing_ok=True)
-            (tx.path / 'romfs.s2aidx').unlink(missing_ok=True)
-            return self._light_commit(tx, 'uilayout', start, key,
-                ('ui_overlay', 'ui_overlay.tsv', '.stage_uilayout', '.stage_romfsidx', 'romfs.s2aidx'))
-        except BaseException:
-            tx.abort()
-            raise
+            if spec.is_file():
+                overlay.parent.mkdir(parents=True, exist_ok=True)
+                static_tmp = tempfile.TemporaryDirectory(prefix='uilayout-static.', dir=overlay.parent)
+                static_out = Path(static_tmp.name) / 'romfs'
+                run([sys.executable, '-X', 'utf8', REPO / 'graphics/widen/scan/romfs_patch.py', spec, original, static_out],
+                    log=overlay.parent / 'romfs_patch.log')
+                for name in self._layout_paths(static_out):
+                    sources[name] = static_out / name
+                files = sorted(sources, key=lambda p: p.encode('utf-8'))
+            previous = [self._layout_name(p) for p in read(current / 'ui_overlay.tsv').splitlines() if p]
+            if not files and not previous:
+                return self._result('uilayout', start, current, None, skipped=True)
+            hash_rows = ''.join(hashlib.sha256(sources[name].read_bytes()).hexdigest() + '  ' + name + '\n' for name in files)
+            overlay_hash = digest(hash_rows) if files else ''
+            key = digest(f'w{width} {tv} {overlay_hash}')
+            if read(current / '.stage_uilayout') == key:
+                return self._result('uilayout', start, current, key, skipped=True)
+            # 覆盖层（11-06 出包速度线，维护者批）：现行 RomFS 不动（仍联到存储里那份不可变的身份），改动的布局文件只写进
+            #   <版本>/ui_overlay/romfs/<路径>，读方（RomFS 索引、资源包 pack/pkg_srcs.py）按「覆盖层优先」叠上去。
+            #   原先为改几十个文件独占克隆整份 RomFS、提交时整份封存、修剪时再整份解封删除（0100F2C0115B6000 30.5 万个文件，Windows 出包机 uilayout 1283 秒）。
+            tx = self.roots.begin(game, self.roots.tag(game, 'ui-w' + str(width) + '-' + key[:8]))
+            try:
+                base = tx.path / 'romfs'
+                previous = [self._layout_name(p) for p in read(tx.path / 'ui_overlay.tsv').splitlines() if p]
+                missing = {p for p in set(files + previous) if not (original / p).is_file() or not (base / p).is_file()}
+                if missing:
+                    print(f'【黄】布局原版/现行没有{len(missing)}项，只许替换、跳过', file=sys.stderr)
+                files = [p for p in files if p not in missing]
+                # 上一版覆盖过、这一版不覆盖的：底下 RomFS 若不是原版（旧格式版本就地改过 RomFS）就把原版放进覆盖层；清单记覆盖层里的全部文件，下一版照样核
+                restore = [p for p in sorted(set(previous) - set(files) - missing) if (base / p).read_bytes() != (original / p).read_bytes()]
+                layer = tx.path / 'ui_overlay'
+                remove_owned(layer)
+                for name, source in [(p, sources[p]) for p in files] + [(p, original / p) for p in restore]:
+                    target = layer / 'romfs' / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    copy_file(source, target)
+                text(tx.path / 'ui_overlay.tsv', ''.join(p + '\n' for p in sorted(set(files) | set(restore), key=lambda p: p.encode('utf-8'))))
+                text(tx.path / '.stage_uilayout', key + '\n')
+                (tx.path / '.stage_romfsidx').unlink(missing_ok=True)
+                (tx.path / 'romfs.s2aidx').unlink(missing_ok=True)
+                return self._light_commit(tx, 'uilayout', start, key,
+                    ('ui_overlay', 'ui_overlay.tsv', '.stage_uilayout', '.stage_romfsidx', 'romfs.s2aidx'))
+            except BaseException:
+                tx.abort()
+                raise
+        finally:
+            if static_tmp is not None:
+                static_tmp.cleanup()
 
     @staticmethod
     def _fonts():

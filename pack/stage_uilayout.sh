@@ -7,6 +7,10 @@
 # 上一版改过、这一版不改了的文件（现行 ui_overlay.tsv 有、新覆盖包没有）在新产物根里恢复成原版文件。
 # 覆盖前先删目标再克隆：产物根 romfs 是从原版克隆来的，直接写可能顺着克隆源 / 软链写坏原版。只许替换原版 romfs 里已有的文件，多出来的打黄跳过（宽屏不挡出包）。
 # 阶段键 = W + 工具版本 + 覆盖文件内容哈希；与现行 .stage_uilayout 相同就跳过。
+# 静态覆盖一路（逐游戏数据补丁）：仓库 graphics/widen/tables/<款>_<构建号>/romfs_patch.tsv 有规则时，用
+#   graphics/widen/scan/romfs_patch.py 把规则打到原版文件上（计数对不上报红停——规则只对它写的那一版数据），
+#   产物与生成覆盖包合并成同一份覆盖清单（同路径时静态产物优先），同走「只许替换 / 上一版恢复 / 删索引」一套；
+#   目录名里的构建号与本款 main 对不上 = 没这个目录 = 没有静态覆盖（构建号一换自然失效，同宽屏表）。仓库只存规则、不存游戏文件本体。
 set -u
 G=${1:?款}; WD=${2:-2346}; H=$(cd "$(dirname "$0")" && pwd); R=$(cd "$H/.." && pwd); source "$H/roots.sh"
 CUR=$(root_cur "$G"); [ -n "$CUR" ] && [ -f "$CUR/exefs/main" ] || { echo "【红】$G 没有现行产物根"; exit 1; }
@@ -42,10 +46,20 @@ if [ ! -d "$OV" ] && [ $has = 1 ] && [ -f "$GEN" ]; then
     mv "$T" "$OV" 2> /dev/null || rm -rf "$T"
   fi
 fi
+# 逐游戏静态覆盖：规则（<款>_<构建号> 目录名即构建号门控）打到原版文件上产出到临时目录，退出时删
+SPEC="$R/graphics/widen/tables/${G}_${BID}/romfs_patch.tsv"; SD=
+if [ -f "$SPEC" ]; then
+  SD=$(mktemp -d "${TMPDIR:-/tmp}/s2a-uilayout-static.XXXXXX") || { echo "【红】$G 建不了静态覆盖临时目录"; exit 1; }
+  trap 'rm -rf "$SD"' EXIT
+  /usr/bin/python3 "$R/graphics/widen/scan/romfs_patch.py" "$SPEC" "$ORIG" "$SD/romfs" > "$SD/patch.log" 2>&1 || { cat "$SD/patch.log"; echo "【红】$G 逐游戏数据补丁（${SPEC}）打不上：规则与原版文件对不上（版本不符），停"; exit 1; }
+  SFL=$(grep -v '^#' "$SPEC" | grep -v '^$' | cut -f1 | LC_ALL=C sort -u)
+fi
 FL=; [ -d "$OV/romfs" ] && FL=$(cd "$OV/romfs" && find . -type f ! -name '.DS_Store' | sed 's#^\./##' | LC_ALL=C sort)
+[ -n "$SD" ] && FL=$(printf '%s\n%s\n' "$FL" "$SFL" | grep -v '^$' | LC_ALL=C sort -u)
 PREV=$(grep -v '^$' "$CUR/ui_overlay.tsv" 2>/dev/null)
 [ -n "$FL" ] || [ -n "$PREV" ] || { echo "🟢 $G 没有要加宽的布局（覆盖包 ${OV}），现行也没有旧覆盖，跳过"; exit 0; }
-K=$(printf 'w%s %s %s' "$WD" "$TV" "$([ -n "$FL" ] && cd "$OV/romfs" && printf '%s\n' "$FL" | while read -r f; do shasum -a 256 "$f"; done | shasum -a 256 | cut -c1-16)" | shasum -a 256 | cut -c1-16)
+KH=; if [ -n "$FL" ]; then KH=$(printf '%s\n' "$FL" | while read -r f; do if [ -n "$SD" ] && [ -f "$SD/romfs/$f" ]; then s="$SD/romfs/$f"; else s="$OV/romfs/$f"; fi; printf '%s  %s\n' "$(shasum -a 256 < "$s" | cut -d' ' -f1)" "$f"; done | shasum -a 256 | cut -c1-16); fi
+K=$(printf 'w%s %s %s' "$WD" "$TV" "$KH" | shasum -a 256 | cut -c1-16)
 root_stage_done "$CUR" uilayout "$K" && { echo "🟢 $G 现行已是布局覆盖 ${K}，跳过"; exit 0; }
 # 本阶段要改 RomFS：现行的 romfs 是指向共享存储的只读软链（pack/roots.sh），ROOT_OWN_ROMFS=1 开工拿一份自己的真目录（APFS 克隆），提交时收成新身份
 TAG=$(root_tag "$G" "ui-w$WD-${K:0:8}"); W=$(ROOT_OWN_ROMFS=1 root_begin "$G" "$TAG") || exit 1
@@ -63,7 +77,7 @@ fi
 RST=$(printf '%s\n' "$PREV" | grep -v '^$' | while read -r f; do printf '%s\n' "$FL" | grep -qxF -- "$f" || echo "$f"; done)
 n=0; m=0
 while read -r f; do [ -n "$f" ] || continue; rm -f "$W/romfs/$f" && _root_cp "$ORIG/$f" "$W/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】恢复原版 $f 失败"; exit 1; }; m=$((m + 1)); done <<< "$RST"
-while read -r f; do [ -n "$f" ] || continue; rm -f "$W/romfs/$f" && _root_cp "$OV/romfs/$f" "$W/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】覆盖 $f 失败"; exit 1; }; n=$((n + 1)); done < <(printf '%s\n' "$FL")
+while read -r f; do [ -n "$f" ] || continue; src="$OV/romfs/$f"; [ -n "$SD" ] && [ -f "$SD/romfs/$f" ] && src="$SD/romfs/$f"; rm -f "$W/romfs/$f" && _root_cp "$src" "$W/romfs/$f" || { root_abort "$G" "$TAG"; echo "【红】覆盖 $f 失败"; exit 1; }; n=$((n + 1)); done < <(printf '%s\n' "$FL")
 # romfs 变了，RomFS 索引要重出
 # 旧索引 romfs.s2aidx 同一次提交里删掉（10-21 帧率能耗线实证：只删 .stage_romfsidx 时，本阶段提交到索引阶段重出之间的几分钟里现行根「索引记 868 字节、文件已是 871 字节」，
 #   这期间起的 Mac 局读该文件空指针崩）。没有索引时宿主按目录现建（慢但对），索引阶段随后重出
