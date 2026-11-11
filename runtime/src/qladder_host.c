@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 int s2a_fps_real_source(void); int s2a_fps_enabled(void); void s2a_fps_hold(int hold); int s2a_widen_game(void);
+void s2a_ios_fps_capped(int reason);   // runtime/src/fps.c 弱定义（Mac / 单测不说），ios/app.m 强定义：横幅
 void s2a_console_mode_set(int docked); int s2a_console_mode(void);
 __attribute__((weak)) double s2a_gpu_busy_ms(void) { return -1; }   // 直连层 graphics/nvn hle_nvn.c 强定义
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }        // iOS ios/app.m、Mac runtime/src/host_main.c 强定义
@@ -54,9 +55,13 @@ static const char *tier_name(int kind, int t) {
     static const char *f[] = {"主机 60 帧", "主机 30 帧", "掌机 30 帧"}, *m[] = {"主机", "掌机"};
     return kind == S2A_QL_FPS ? f[t < 0 ? 0 : t > 2 ? 2 : t] : m[t < 0 ? 0 : t > 1 ? 1 : t];
 }
-static int g_kind, g_ready, g_pend_docked = -1;
+static int g_kind, g_ready, g_pend_docked = -1, g_hold_last = -1;
 static void apply(int t, int boot) {
-    if (g_kind == S2A_QL_FPS) s2a_fps_hold(!s2a_ql_fps60(t));
+    if (g_kind == S2A_QL_FPS) {
+        int hold = !s2a_ql_fps60(t), note = s2a_ql_fps_note(boot, g_hold_last, hold, s2a_fps_enabled(), s2a_unattended());
+        g_hold_last = hold; s2a_fps_hold(hold);
+        if (note >= 0) s2a_ios_fps_capped(note);
+    }
     int want = s2a_ql_docked(t), cur = s2a_console_mode(); if (cur < 0) { const char *d = getenv("S2A_DOCKED"); cur = d && !strcmp(d, "1"); }
     if (want == cur) { g_pend_docked = -1; return; }
     if (boot) return;   // 起局档位已在构造期设好；对不上（启动环境显式给了）就按启动环境，不改

@@ -91,6 +91,8 @@ s2a_gate_step bash "$android_dir/tools/nvn_vk_frame_log_test.sh"
 # B2 VK_GOOGLE_display_timing（宿主，确定性）：挂 id/回读、乱序对号、丢帧 UNKNOWN、
 # 迟到补账、门关闭、ring 环覆、detach 复位、last_gap 最新确认对。
 s2a_gate_step bash "$android_dir/tools/nvn_vk_dt_test.sh"
+# 直连逐帧 TSV（宿主，确定性）：列掩码/差分/gpuq 账/开关与目录门。
+s2a_gate_step bash "$android_dir/tools/nvn_vk_frame_tsv_test.sh"
 s2a_gate_step bash "$android_dir/tools/generic_frame_trace_test.sh"
 # #48 A5（宿主，确定性）：BatteryManager 净放电换算与不可用状态、采样器停采/迟到回调/读数开关。
 s2a_gate_step bash "$android_dir/tools/system_power_test.sh"
@@ -98,6 +100,8 @@ s2a_gate_step bash "$android_dir/tools/system_power_test.sh"
 # 轮询接线（周期→票、省电档→cap、开关、停后迟到回调不采）、生产 present_period 的封顶与登记。
 s2a_gate_step bash "$android_dir/tools/frame_rate_vote_test.sh"
 s2a_gate_step bash "$android_dir/tools/system_tuning_test.sh"
+# #48 P8（宿主，确定性）：热状态映射与 dm_thermal_now / dm_low_power_now 强定义、采样器起停 / 只在变化时推。
+s2a_gate_step bash "$android_dir/tools/power_state_test.sh"
 # 转储解析器（宿主，确定性）：分片拼回/完整性拒绝、全窗统计、与 16 帧聚合行对拍、C→python 对拍。
 s2a_gate_step "$PY" "$android_dir/tests/direct_framelog_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/direct_game_mode_test.py"

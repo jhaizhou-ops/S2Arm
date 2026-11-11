@@ -427,7 +427,7 @@ static void qp_fps_restart_ask(void) {
 void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
 // 60 帧降档 / 恢复（runtime/src/fps.c s2a_fps_cap_tick，审计 P1-80）：降档时设置里的 60 帧开关仍显示玩家选的「开」，画面已回到原生帧率——横幅说清楚，原因去掉自动恢复
 void s2a_ios_fps_capped(int reason) {
-    NSString *body = reason == 1 ? S2AL(@"app.fpsCap.thermal") : reason == 2 ? S2AL(@"app.fpsCap.lowPower") : S2AL(@"app.fpsCap.restored");
+    NSString *body = reason == 1 ? S2AL(@"app.fpsCap.thermal") : reason == 2 ? S2AL(@"app.fpsCap.lowPower") : reason == 4 ? S2AL(@"app.fpsCap.ladder") : S2AL(@"app.fpsCap.restored");
     dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), body, 0, 6); });
 }
 // 档位梯子要下次启动才生效的换档（runtime/src/qladder_host.c：宽屏第二层按起局档位装表的款切主机 / 掌机）：一行横幅，不打断游戏

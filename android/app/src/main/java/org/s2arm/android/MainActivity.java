@@ -94,6 +94,7 @@ public class MainActivity extends Activity
         }
     };
     private SystemPowerSampler powerSampler;   // #48 A5：应用内电池净放电读数（仅游戏局）
+    private PowerStateSampler powerState;      // #48 P8：热状态 / 省电模式进共用降档接缝（仅游戏局）
     private android.window.OnBackInvokedCallback gameBackCallback;
     /** #48 A3+A4：直连刷新率投票 + 省电档限帧；只有 :game 会话（gameMode）才起轮询。 */
     private SystemTuning systemTuning;
@@ -168,6 +169,8 @@ public class MainActivity extends Activity
                 @Override public void event(String line) { Log.i("S2Arm", line); }
             });
             systemTuning = new SystemTuning(this, lifecycleProbe);
+            // P8：共用层（fps.c 60 帧降档、hle_nvn.c 帧步门）读到的热状态 / 省电在这里进来；变化时落一行 logcat 供对账
+            powerState = new PowerStateSampler(this, lifecycleProbe, this::reportPowerState);
         }
         if (!gameMode) {
             String packageTitle;
@@ -634,6 +637,7 @@ public class MainActivity extends Activity
         if (host != 0) NativeBridge.setForeground(host, true);   // the window, if any, is still the render thread's
         if (powerSampler != null) powerSampler.start();
         if (systemTuning != null) systemTuning.start();
+        if (powerState != null) powerState.start();
         tryStartGame();
         if (gameMode) lifecycleProbe.postDelayed(geometrySample, 500);   // B3 输出尺寸轮询（开关关时全部回落 MATCH_PARENT）
         if (gameMode && host != 0 && !gameStopping && getIntent().getBooleanExtra(GameActivity.LIFECYCLE_TEST_EXTRA, false)
@@ -694,7 +698,14 @@ public class MainActivity extends Activity
         }
         if (powerSampler != null) powerSampler.stop();
         if (systemTuning != null) systemTuning.stop();
+        if (powerState != null) powerState.stop();
         super.onPause();
+    }
+    // #48 P8：PowerStateSampler 的出口（只在 onResume 之后跑，库被拒时 powerState 不会启动；这里再守一次）
+    private void reportPowerState(int thermal, boolean save) {
+        if (!runtimeLoaded) return;
+        Log.i("S2Arm", "power-state thermal=" + thermal + " power-save=" + save);
+        NativeBridge.setPowerState(thermal, save);
     }
     // 直连安全网（共用 dguard.c）：游戏前台跑时收到内存告警记一次失败证据（后台被杀不算崩；
     // 进后台停表在 setForeground 那侧）。RUNNING_LOW/CRITICAL = 前台可见压力，MODERATE 太常见不计。

@@ -224,6 +224,7 @@
 "about.unknown" = "Unknown";
 
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
+"app.fpsCap.ladder" = "This device can't hold 60 FPS steadily right now, so the game is back at its native frame rate. It will try 60 FPS again automatically once things are stable.";
 "app.fpsCap.lowPower" = "Low Power Mode is on, so the game is temporarily back at its native frame rate. 60 FPS resumes automatically when you turn off Low Power Mode.";
 "app.fpsCap.restored" = "60 FPS is back.";
 "app.fpsCap.thermal" = "The phone is too hot (critical), so the game is temporarily back at its native frame rate. 60 FPS resumes automatically once it cools down.";

@@ -1502,28 +1502,41 @@ class JobsTests(unittest.TestCase):
         self.assertEqual((event["done"], event["total"]), (0, 2))
         self.assertEqual([c["name"] for c in event["counters"]], ["直连库·整份出库与收尾"])
 
-    def test_direct_batch_space_recheck(self):
-        # 11-10（0400A3A01EE4C000 预检 22.3 GB、实际编到 11491 / 64529 MB 时 73 GB 写满系统盘）：编批库计数器一出现就按剩余量复核。
-        #   期望手算：剩 64529 − 11491 = 53038 MB × 3（每 MB 批库占盘倍数）× 1.1 = 175025 MiB ≈ 184 GB
+    def test_direct_space_recheck_extrapolates_this_run(self):
+        # 11-10（0400A3A01EE4C000 预检 22.3 GB，翻译 99084 个着色器期间直连缓存涨到约 44 GB 写满盘）：按本局实际消耗外推，不用常数。
+        #   期望手算：开始时本款占用 10.5 GB；10 秒后完成 20000、占用 19.5 GB、卷剩 36 GB → 还需 9 GB ÷ 20000 × 79084 × 1.1 = 39.15 GB > 36 GB → 停
         import core
         from errors import Failure
-        progress = self.root / "progress.tsv"
-        progress.write_text("1\t直连库·编批库（MB）\t11491\t64529\n", encoding="utf-8")
         self.c.operation = "build"
+        name = "直连库·翻译与收尾"
         DU = collections.namedtuple("DU", "total used free")
-        with patch.object(self.c, "emit"), patch.object(core.shutil, "disk_usage", return_value=DU(0, 0, 48 * 10**9)), \
-                self.assertRaises(Failure) as stop:
-            self.c.stage_progress(progress, 0)
+        def step(done, used_gb, free_gb, now):
+            with patch.object(core, "job_footprint", return_value=int(used_gb * 10**9)), \
+                    patch.object(core.shutil, "disk_usage", return_value=DU(0, 0, int(free_gb * 10**9))):
+                core.direct_space_recheck(self.c, {name: dict(done=done, total=99084)}, now=now)
+        step(0, 10.5, 45, 100.0)                         # 记起点
+        step(3000, 11.5, 44, 111.0)                      # 不到 5%：不判
+        with self.assertRaises(Failure) as stop:
+            step(20000, 19.5, 36, 122.0)
         self.assertEqual(stop.exception.code, "disk_full")
-        self.assertIn("要编出约 63 GB", str(stop.exception)); self.assertIn("再占约 184 GB", str(stop.exception)); self.assertIn("只剩 48 GB", str(stop.exception))
-        with patch.object(self.c, "emit"), patch.object(core.shutil, "disk_usage", return_value=DU(0, 0, 200 * 10**9)):
-            self.c.stage_progress(progress, 0)   # 盘够：照常
+        self.assertIn("还要再占约 39 GB", str(stop.exception)); self.assertIn("只剩 36 GB", str(stop.exception))
+        # 同卷别的作业写盘：卷从 45 GB 掉到 30 GB，但本款只多占 1 GB → 还需 1 ÷ 20000 × 79084 × 1.1 ≈ 4.3 GB < 30 GB，不误判
+        self.c._direct_space_marks = {}
+        step(0, 10.5, 45, 200.0); step(20000, 11.5, 30, 211.0)
+        self.c._direct_space_marks = {}
         self.c.r["spaceOverride"] = True
-        with patch.object(self.c, "emit"), patch.object(self.c, "diagnostic") as diag, \
-                patch.object(core.shutil, "disk_usage", return_value=DU(0, 0, 48 * 10**9)):
-            self.c.stage_progress(progress, 0)
-            self.c.stage_progress(progress, 0)   # 点过「仍然继续」：不停，只打一次黄
+        with patch.object(self.c, "diagnostic") as diag:
+            step(0, 10.5, 45, 300.0); step(20000, 19.5, 36, 311.0); step(30000, 24, 31, 322.0)   # 点过「仍然继续」：不停，只打一次黄
         self.assertEqual([call.kwargs.get("severity") for call in diag.call_args_list], ["warning"])
+
+    def test_stage_progress_feeds_direct_space_recheck(self):
+        import core
+        progress = self.root / "progress.tsv"
+        progress.write_text("1\t直连库·翻译与收尾\t20000\t99084\n", encoding="utf-8")
+        with patch.object(self.c, "emit"), patch.object(core, "direct_space_recheck") as recheck:
+            self.c.stage_progress(progress, 0)
+        counters = recheck.call_args.args[1]
+        self.assertEqual((counters["直连库·翻译与收尾"]["done"], counters["直连库·翻译与收尾"]["total"]), (20000, 99084))
 
     def test_protocol_has_ordered_events_and_measured_counters(self):
         self.c.begin("phase", 2, 5)

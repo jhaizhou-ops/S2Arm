@@ -6,6 +6,9 @@
 //   ② 视图与影子是同一份内存：往两块影子写的字节从视图对应偏移读得到；从视图写的字节在影子里看得到
 //   ③ GPU 读的也是同一份：经池的缓冲把第 2 块开头 16 字节拷出来，读到的是写进第 2 块影子的字节
 //   ④ 一次映射的池照旧直接用影子（宿主地址 = H 的影子），不另建视图
+//   ⑤ GPU 写记账（gpw_add，块线性渲染目标被画时）对远端池的客人地址取指纹不碰客人地址（P1-160：客人地址没有映射，原先直接读它；单测里没有远端缺页代执行，读了就崩）：
+//      记下的指纹 = 按语义从影子字节算的同一个 512 字节指纹
+//   ⑥ 过期判定（gpw_stale，#357 无人引用扫描与贴图上传前都走它）同样读影子：没改的那块仍算 GPU 写的（1 段 512 字节）；经影子改了 1 字节的那块判为已改写（不再算）
 #include "../gfx/nvn/nvn_mtl.m"
 
 static unsigned checks, failures;
@@ -42,6 +45,17 @@ int main(void) { @autoreleasepool {
     CHECK(src && gpu_ok, "③ GPU 经池的缓冲读第 2 块开头，读到写进 B 的字节");
     nvn_be_pool_add((const void *)(uintptr_t)H, 2 * MB2);
     CHECK(host_of(H) == (uintptr_t)C, "④ 影子连续的池照旧直接用影子（%#lx）", (unsigned long)host_of(H));
+    {   // ⑤ ⑥：池 [G, G+4M) 里第 2 块开头附近两个 GOB（512 字节一块）
+        uint64_t g0 = (G + MB2 + 4096) >> 9; const uint8_t *s0 = B + 4096;
+        for (int i = 0; i < 1024; i++) B[4096 + i] = (uint8_t)(i * 7 + 3);
+        pthread_mutex_lock(&g_gpw_mu); gpw_add((void *)(uintptr_t)(G + MB2 + 4096), 0, 1024); pthread_mutex_unlock(&g_gpw_mu);
+        uint64_t k = g0 >> 9; gpw_blk *bk = nvn_hm_get(&g_gpw, &k); unsigned i0 = (unsigned)(g0 & 511), i1 = (unsigned)((g0 + 1) & 511);
+        CHECK(bk && bk->h[i0] == span_hash(s0, 512) && bk->h[i1] == span_hash(s0 + 512, 512), "⑤ 远端池的 GPU 写记账按影子取指纹（两块都对上）");
+        B[4096 + 512 + 9] ^= 0xff;   // 只改第二块
+        uint64_t *runs = NULL, bytes = 0; int n = gpw_stale((const uint8_t *)(uintptr_t)(G + MB2 + 4096), 1024, &runs, &bytes);
+        CHECK(n == 1 && runs && runs[0] == 0 && runs[1] == 512 && bytes == 512, "⑥ 过期判定读影子：没改的块仍算 GPU 写的、改过的块不算（%d 段 %llu 字节）", n, (unsigned long long)bytes);
+        free(runs);
+    }
     printf("%s t_nvn_far_pool: %u checks %u failures; backend %s\n", failures ? "✗" : "✓", checks, failures, g_m3 ? "Metal3" : "Metal4");
     return failures != 0;
 } }

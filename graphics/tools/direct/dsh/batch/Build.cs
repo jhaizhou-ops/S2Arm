@@ -87,7 +87,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
             if (g != null && g != Game) return Fail($"[RED] {d} holds the shader libraries of game {g}, not {Game}: give each game its own output directory");
         }
         Work = Path.Combine(Path.GetTempPath(), $"dshb_{Environment.ProcessId}_{Guid.NewGuid():N}"); Directory.CreateDirectory(Work);
-        Spill = new BlobFile(Path.Combine(Work, "spill.dat")); MAC = new Side(Work); IOS = IosLib ? new Side(Work) : null;
+        Spill = new BlobFile(Path.Combine(Work, "spill.dat"), compress: true); MAC = new Side(Work); IOS = IosLib ? new Side(Work) : null;
         Store.Open(Path.Combine(Cas, "dshb"));
         try { return Run(); }
         finally { try { Directory.Delete(Work, true); } catch { } }
@@ -531,7 +531,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var failed = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
         void Put(List<string> ks, string name)
         {
-            foreach (var (_, sd) in tg) { var lib = sd.Get(name + ".metallib"); foreach (var k in ks) foreach (var m in Group(k)) sd.Put(m + "_b.metallib", lib); }
+            foreach (var (_, sd) in tg) foreach (var k in ks) foreach (var m in Group(k)) sd.Alias(name + ".metallib", m + "_b.metallib");   // 指向批库那份字节，不另写
             foreach (var sd in dirs) foreach (var k in ks) foreach (var m in Group(k))
             {
                 bool wl = Text(k).Contains("render_target_array_index", StringComparison.Ordinal);   // 宿主原先读库字节判它；批库里还有别的键（nvn_mtl.m shader_load）
@@ -705,8 +705,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     static string WorkUsage()
     {
         static string M(long b) => $"{b / 1048576.0:F0} MB";
-        string S(string n, Side sd) { if (sd == null) return ""; var (b, t) = sd.Usage(); return $"；{n} 侧 库与反射 {M(b)}、源码 {M(t)}"; }
-        return $"临时数据：待编源码 {M(Spill.Length)}" + S("Mac", MAC) + S("iOS", IOS);
+        string S(string n, Side sd) { if (sd == null) return ""; var (b, t, tr) = sd.Usage(); return $"；{n} 侧 库与反射 {M(b)}、源码 {M(t)}（原 {M(tr)}）"; }
+        return $"临时数据：（盘上，压缩后）待编源码 {M(Spill.Length)}（原 {M(Spill.RawLength)}）" + S("Mac", MAC) + S("iOS", IOS);
     }
 
     static int PublishAll(Action sourcesDone)   // 发布那一侧核验、打包成 lib.NNN.pak + lib.idx、ps_inputs / keys.tsv（LibPack.Publish）；没给发布侧（手工出库、单测）就两侧按键导出到各自输出目录
@@ -789,15 +789,38 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
 /// 出库的全部产物与待编源码只在这里存一份、内存只留索引（11-02：8 万键款原先全留内存，16 GB 机器换页卡死；也不按键写小文件——10-31 马车8 一遍开 74.6 万次文件）</summary>
 sealed class BlobFile
 {
-    readonly Microsoft.Win32.SafeHandles.SafeFileHandle h; long tail;
-    public BlobFile(string path) { h = File.OpenHandle(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, FileOptions.DeleteOnClose); }
-    public long Length => Interlocked.Read(ref tail);
+    // 每段先压缩再落盘（v0.2.6：0400A3A01EE4C000 冷出，9.9 万支的 MSL 源码原样堆在这里 23 GB，峰值随支数线性涨；同类文本 zlib 约 3.5 倍）。
+    //   段 = 1 字节标记（0 原样 / 1 zlib）+ 4 字节原长 + 数据；不到 MinZ 字节的小段（反射 json 等）原样存，省压缩开销
+    const int MinZ = 512;
+    //   只压文本（compress = true：MSL 源码、待编源码）。库与反射不压：发布打包单线程逐个读库，解压让它从 10 秒变 32 秒（怪猎崛起两局同负载对比），省下的不值
+    readonly Microsoft.Win32.SafeHandles.SafeFileHandle h; readonly bool z; long tail, raw;
+    public BlobFile(string path, bool compress) { z = compress; h = File.OpenHandle(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, FileOptions.DeleteOnClose); }
+    public long Length => Interlocked.Read(ref tail);   // 盘上字节（压缩后）
+    public long RawLength => Interlocked.Read(ref raw);   // 写进来的原始字节
     public void Close() => h.Dispose();   // DeleteOnClose：文件随之删掉，之后再读抛 ObjectDisposedException
-    public (long Off, int Len) Write(ReadOnlySpan<byte> b) { long off = Interlocked.Add(ref tail, b.Length) - b.Length; RandomAccess.Write(h, b, off); return (off, b.Length); }
+    public (long Off, int Len) Write(ReadOnlySpan<byte> b)
+    {
+        byte[] rec;
+        if (!z || b.Length < MinZ) { rec = new byte[5 + b.Length]; b.CopyTo(rec.AsSpan(5)); }
+        else
+        {
+            var ms = new MemoryStream(b.Length / 3 + 64); ms.Write(new byte[5]);
+            using (var z = new ZLibStream(ms, CompressionLevel.Fastest, leaveOpen: true)) z.Write(b);
+            rec = ms.ToArray(); rec[0] = 1;
+        }
+        BitConverter.TryWriteBytes(rec.AsSpan(1, 4), b.Length);
+        Interlocked.Add(ref raw, b.Length);
+        long off = Interlocked.Add(ref tail, rec.Length) - rec.Length; RandomAccess.Write(h, rec, off); return (off, rec.Length);
+    }
     public byte[] Read((long Off, int Len) e)
     {
-        var b = new byte[e.Len];
-        for (int got = 0; got < e.Len;) { int n = RandomAccess.Read(h, b.AsSpan(got), e.Off + got); if (n <= 0) throw new IOException("出库数据文件读不全"); got += n; }
+        var rec = new byte[e.Len];
+        for (int got = 0; got < e.Len;) { int n = RandomAccess.Read(h, rec.AsSpan(got), e.Off + got); if (n <= 0) throw new IOException("出库数据文件读不全"); got += n; }
+        int len = BitConverter.ToInt32(rec, 1);
+        if (rec[0] == 0) return rec.AsSpan(5, len).ToArray();
+        var b = new byte[len];
+        using (var z = new ZLibStream(new MemoryStream(rec, 5, rec.Length - 5), CompressionMode.Decompress))
+            for (int got = 0; got < len;) { int n = z.Read(b, got, len - got); if (n <= 0) throw new IOException("出库数据文件解压不全"); got += n; }
         return b;
     }
 }
@@ -809,7 +832,7 @@ sealed class Side
 {
     readonly BlobFile bf, tx; volatile bool txGone; readonly ConcurrentDictionary<string, (long, int)> f = new(StringComparer.Ordinal);
     readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], System.Runtime.CompilerServices.StrongBox<(long, int)>> seen = new(), seenTx = new();
-    public Side(string dir) { bf = new BlobFile(Path.Combine(dir, $"side_{Guid.NewGuid():N}.dat")); tx = new BlobFile(Path.Combine(dir, $"side_{Guid.NewGuid():N}.src.dat")); }
+    public Side(string dir) { bf = new BlobFile(Path.Combine(dir, $"side_{Guid.NewGuid():N}.dat"), compress: false); tx = new BlobFile(Path.Combine(dir, $"side_{Guid.NewGuid():N}.src.dat"), compress: true); }
     static bool IsText(string n) => n.EndsWith(".metal", StringComparison.Ordinal);
     BlobFile Of(string n) { if (!IsText(n)) return bf; if (txGone) throw new InvalidOperationException($"源码已放（DropText 之后）还在取 {n}"); return tx; }
     public byte[] Get(string n) => f.TryGetValue(n, out var e) ? Of(n).Read(e) : null;
@@ -822,8 +845,11 @@ sealed class Side
         f[n] = box.Value;
     }
     public void Drop(string n) => f.TryRemove(n, out _);
+    /// <summary>to 指向 from 已有的那份字节（不再写一遍）；from 不在 → false。批库给同批各键（Build.UnityFlush Put）：原先 Get 出新数组再 Put，
+    /// 同一份批库在数据文件里多写一遍（v0.2.6：0400A3A01EE4C000 冷出到编批库 11.5 GB 时盘涨约 3 倍于批库量，这是其中一倍）</summary>
+    public bool Alias(string from, string to) { if (!f.TryGetValue(from, out var e) || IsText(from) != IsText(to)) return false; f[to] = e; return true; }
     public void DropText() { txGone = true; tx.Close(); }
-    public (long Bin, long Text) Usage() => (bf.Length, tx.Length);
+    public (long Bin, long Text, long TextRaw) Usage() => (bf.Length, tx.Length, tx.RawLength);
     public List<string> Names() => f.Keys.ToList();
     public IReadOnlyDictionary<string, byte[]> All => new View(this);
     public void Export(string dir)

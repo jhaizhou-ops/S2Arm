@@ -45,42 +45,73 @@ def shared_redact():
     return redact
 
 
-# 直连编批库时每 MB 批库在盘上要的字节倍数（中间产物 + 批库本身，直连缓存清理前一直攒着）：11-10 两局采样（0400A3A01EE4C000，
-#   编批库总量 64529 MB）：编到 11491 MB 时库所在目录 73 GB = 解包产物约 21 GB + 翻译中间产物约 16 GB（翻译 2.5 分钟、直连缓存每秒涨约 100 MB）
-#   + 约 35 GB → 每编 1 MB 批库约占 3 MB。翻译那一份是按速率推的，不是逐目录实测；见 direct_space_recheck
-DIRECT_BATCH_DISK_RATIO = 3.0
-
-# 直连编批库时的空间复核（11-10）：出包预检与 space_rule.py 按原件大小记直连段上限 15 GB，着色器多的大游戏远不止——
-#   0400A3A01EE4C000 预检 22.3 GB，编批库计数器总量 64529 MB，编到 11491 MB 时临时库已 73 GB、把系统盘写满。
-#   编批库计数器一出现就知道这次要编出多少 MB 的批库；中间产物按 DIRECT_BATCH_DISK_RATIO 倍占盘（同款采样实测），
-#   剩余量 × 倍数 × 1.1 大于库所在卷的余量就停下说清楚，不编到一半写满。玩家点过「仍然继续」（spaceOverride）只打一次黄。
+# 直连段的空间复核（11-10）：出包预检与 space_rule.py 按原件大小记直连段上限 15 GB，着色器多的大游戏远不止——
+#   0400A3A01EE4C000 预检 22.3 GB，直连缓存在「翻译与收尾」（99084 个着色器）期间涨到约 44 GB、编批库开始后反而涨得慢，把系统盘写满。
+#   每个着色器 / 每 MB 批库占多少盘因游戏差很多（同一口径下另一款 8734 个着色器整局峰值约 1 GB），不能用常数：
+#   按这一局自己的实际消耗外推——计数器开始时记下（已完成量、这一款出包的真实占用 library.pack_footprint：克隆共享块只算一次），
+#   之后每 10 秒按「占用增量 ÷ 已完成 × 剩余 × 1.1」估还要多少，大于库所在卷当前可用就停下说清楚。只量自己的目录、不用卷余量差：
+#   同卷别的作业写盘不算进本局消耗（11-10 第四次采样卷余量被别的作业带偏、作废）。完成量到总量 5%、增量超过 256 MB 才判。
+#   玩家点过「仍然继续」只打一次黄。
+#   先前按编批库总量 × 3 估（790efd9ec）：3 是拿 du 推的，du 把 APFS 克隆的解包内容重复算，且占盘大头在翻译阶段、编批库前就已发生。
 #   模块级函数、按 getattr 读上下文：stage_progress 也被只带进度字段的替身对象调用（tests/progress_test.sh 启动器读端）
-DIRECT_BATCH_COUNTER = "直连库·编批库（MB）"
+DIRECT_SPACE_COUNTERS = ("直连库·翻译与收尾", "直连库·编批库（MB）")
+DIRECT_SPACE_EVERY_S = 10
+DIRECT_SPACE_MIN_FRACTION = 0.05
+DIRECT_SPACE_MIN_SPENT = 256 << 20
 
 
-def direct_space_recheck(context, counters):
-    c = counters.get(DIRECT_BATCH_COUNTER)
+def job_footprint(context):
+    """这一款出包在所在卷上的真实占用（产物根、解包、镜像、本款直连 / 翻译缓存；APFS 克隆共享块只算一次）"""
+    import library   # library 导入 core：用到时再取
+    return library.pack_footprint(context, context.r.get("gameId"))
+
+
+def direct_space_recheck(context, counters, now=None):
     library = getattr(context, "library", None)
-    if getattr(context, "operation", None) not in ("build", "ipa") or c is None or library is None or c["done"] >= c["total"]:
+    if getattr(context, "operation", None) not in ("build", "ipa") or library is None:
         return
-    need = int((c["total"] - c["done"]) * DIRECT_BATCH_DISK_RATIO * 1.1 * (1 << 20))
-    try:
-        free = shutil.disk_usage(library).free
-    except OSError:
-        return
-    if free >= need:
-        return
-    gb = lambda n: f"{n / 1e9:.0f} GB"
-    head = (f"磁盘空间不够：这款游戏的着色器库要编出约 {c['total'] / 1024:.0f} GB，编译中还要再占约 {gb(need)}，"
-            f"游戏库所在的盘只剩 {gb(free)}。")
-    if getattr(context, "r", {}).get("spaceOverride") is True:
-        if not getattr(context, "_direct_space_warned", False):
-            context._direct_space_warned = True
-            context.diagnostic(head + "已按你的选择仍然继续；中途真写满会停下报错，游戏原件和存档不受影响。", "disk_full", severity="warning")
-        return
-    message = head + "请腾出空间或把游戏库换到空间更大的盘后再试；也可以点「仍然继续」。"
-    context.diagnostic(message, "disk_full")
-    raise Failure(message, code="disk_full")
+    now = time.monotonic() if now is None else now
+    marks = getattr(context, "_direct_space_marks", None)
+    if marks is None:
+        marks = context._direct_space_marks = {}
+    for name in DIRECT_SPACE_COUNTERS:
+        c = counters.get(name)
+        if c is None or c["done"] >= c["total"]:
+            continue
+        m = marks.get(name)
+        if m is not None and (m["total"] != c["total"] or c["done"] < m["done"]):
+            m = None   # 同名计数器重新开始
+        if m is not None and now - m["at"] < DIRECT_SPACE_EVERY_S:
+            continue
+        try:
+            used = job_footprint(context)
+        except OSError:
+            return
+        if m is None:
+            marks[name] = dict(total=c["total"], done=c["done"], used=used, at=now)
+            continue
+        m["at"] = now
+        done, spent = c["done"] - m["done"], used - m["used"]
+        if done < c["total"] * DIRECT_SPACE_MIN_FRACTION or spent < DIRECT_SPACE_MIN_SPENT:
+            continue
+        need = int(spent / done * (c["total"] - c["done"]) * 1.1)
+        try:
+            free = shutil.disk_usage(library).free
+        except OSError:
+            return
+        if free >= need:
+            continue
+        gb = lambda n: f"{n / 1e9:.0f} GB"
+        head = (f"磁盘空间不够：编译着色器这一步（{name.split('·')[-1]}）照现在的进度还要再占约 {gb(need)}，"
+                f"游戏库所在的盘只剩 {gb(free)}（已完成 {c['done']} / {c['total']}，这段已用掉 {gb(spent)}）。")
+        if getattr(context, "r", {}).get("spaceOverride") is True:
+            if not getattr(context, "_direct_space_warned", False):
+                context._direct_space_warned = True
+                context.diagnostic(head + "已按你的选择仍然继续；中途真写满会停下报错，游戏原件和存档不受影响。", "disk_full", severity="warning")
+            return
+        message = head + "请腾出空间或把游戏库换到空间更大的盘后再试；也可以点「仍然继续」。"
+        context.diagnostic(message, "disk_full")
+        raise Failure(message, code="disk_full")
 
 
 class Cancelled(Exception):
@@ -542,7 +573,7 @@ class Context:
         if last is not None:
             main = fine or last
             self.emit_stage_counter(main)
-            direct_space_recheck(self, seen)   # 编批库剩余量复核盘（main 上 fix/direct-space-recheck），#498 重构发进度后挪到这里
+            direct_space_recheck(self, seen)   # 直连段按本局实际消耗外推复核盘（#498 重构发进度后挪到这里）
         else:
             if previous and activity.data is None:
                 self.clear_stage_activity(previous)
