@@ -386,19 +386,22 @@ namespace S2A.Services
             if (s[2] != 0 || s[3] != 0) { input.RStick.Dx = s[2]; input.RStick.Dy = s[3]; }
         }
 
-        // 左右 Joy-Con 合成一对 Pro：按键并上；右柄摇杆（横握时写在左摇杆槽）填到右摇杆，真机握一对时的 L+R / 双摇杆
+        // 左右 Joy-Con 合成一对 Pro：按键并上；P1=右柄摇杆在 RX/RY、P2=左柄在 LX/LY → Pro 左右摇杆各归其位
         private static void MergePhysicalPair(ref GamepadInput input)
         {
             if (_vpadRead2 == null) return;
             int* s = stackalloc int[4];
             input.Buttons |= (ControllerKeys)_vpadRead2(s);
             bool hasL = s[0] != 0 || s[1] != 0, hasR = s[2] != 0 || s[3] != 0;
-            if (input.RStick.Dx == 0 && input.RStick.Dy == 0)
-            {
-                if (hasR) { input.RStick.Dx = s[2]; input.RStick.Dy = s[3]; }
-                else if (hasL) { input.RStick.Dx = s[0]; input.RStick.Dy = s[1]; }   // 右 Joy-Con 横握：摇杆在 LX/LY
-            }
-            else if (hasR) { input.RStick.Dx = s[2]; input.RStick.Dy = s[3]; }
+            // 二号（左 Joy-Con）补 Pro 左摇杆；一号（右 Joy-Con）已在 input.RStick
+            if (hasL && input.LStick.Dx == 0 && input.LStick.Dy == 0)
+            { input.LStick.Dx = s[0]; input.LStick.Dy = s[1]; }
+            if (hasR && input.RStick.Dx == 0 && input.RStick.Dy == 0)
+            { input.RStick.Dx = s[2]; input.RStick.Dy = s[3]; }
+            // 兼容旧 HID：右柄曾把摇杆写在 LX/LY
+            else if (!hasR && hasL && input.RStick.Dx == 0 && input.RStick.Dy == 0
+                     && (input.LStick.Dx != 0 || input.LStick.Dy != 0))
+            { /* 一号已占左摇杆 = 右柄旧映射，二号左柄再补右摇杆 */ input.RStick.Dx = s[0]; input.RStick.Dy = s[1]; }
         }
 
         // 触屏直通 → 触摸屏共享内存。每次 HID 提交都写一遍（没有触点也要写一条空状态，跟桌面版鼠标路径一致），
@@ -491,15 +494,97 @@ namespace S2A.Services
             if ((b & ControllerKeys.Y) != 0) f |= right ? ControllerKeys.B : ControllerKeys.DpadUp;
             input.Buttons = (b & ~Face) | f;
             // 横握后的摇杆方向 (x, y) → 物理：右只顺时针转了 90°，物理 = (−y, x)；左只逆时针，物理 = (y, −x)
-            var s = input.LStick; int x = s.Dx, y = s.Dy;
-            (s.Dx, s.Dy) = right ? (-y, x) : (y, -x);
-            input.LStick = s;
+            // JoyRight 真机摇杆在右摇杆槽（触屏/自动玩家仍可能写在左摇杆，这里迁过去再转）
+            if (right)
+            {
+                if (input.RStick.Dx == 0 && input.RStick.Dy == 0 && (input.LStick.Dx != 0 || input.LStick.Dy != 0))
+                {
+                    input.RStick = input.LStick;
+                    input.LStick = default;
+                }
+                var s = input.RStick; int x = s.Dx, y = s.Dy;
+                (s.Dx, s.Dy) = (-y, x);
+                input.RStick = s;
+            }
+            else
+            {
+                var s = input.LStick; int x = s.Dx, y = s.Dy;
+                (s.Dx, s.Dy) = (y, -x);
+                input.LStick = s;
+            }
+        }
+
+        // 单只 Joy-Con：摇杆方向键位同时置十字键，只读 D-pad 的菜单（派对暂停等）才能跟摇杆走
+        private static void StickDirsToDpad(ref GamepadInput input)
+        {
+            ControllerKeys b = input.Buttons;
+            if ((b & (ControllerKeys.LStickLeft | ControllerKeys.RStickLeft)) != 0) b |= ControllerKeys.DpadLeft;
+            if ((b & (ControllerKeys.LStickRight | ControllerKeys.RStickRight)) != 0) b |= ControllerKeys.DpadRight;
+            if ((b & (ControllerKeys.LStickUp | ControllerKeys.RStickUp)) != 0) b |= ControllerKeys.DpadUp;
+            if ((b & (ControllerKeys.LStickDown | ControllerKeys.RStickDown)) != 0) b |= ControllerKeys.DpadDown;
+            input.Buttons = b;
+        }
+
+        // 右柄摇杆在 R、左柄在 L；Pro/菜单常读左摇杆 → 单只时镜像到另一边
+        private static void MirrorSoloStick(ref GamepadInput input, bool rightJoy)
+        {
+            if (rightJoy)
+            {
+                if (input.LStick.Dx == 0 && input.LStick.Dy == 0 && (input.RStick.Dx != 0 || input.RStick.Dy != 0))
+                    input.LStick = input.RStick;
+            }
+            else if (input.RStick.Dx == 0 && input.RStick.Dy == 0 && (input.LStick.Dx != 0 || input.LStick.Dy != 0))
+                input.RStick = input.LStick;
+        }
+
+        // 派对横握：左柄物理十字必须变成 ABXY（选角色确认=A）；右柄在 HoldType 仍为 Vertical 时把物理面键转到屏上逻辑。
+        private static void AdaptSidewaysJoy(ref GamepadInput input, ControllerType joySide,
+            Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType hold)
+        {
+            MirrorSoloStick(ref input, joySide == ControllerType.JoyconRight);
+            const ControllerKeys Face = ControllerKeys.A | ControllerKeys.B | ControllerKeys.X | ControllerKeys.Y;
+            const ControllerKeys Dpad = ControllerKeys.DpadLeft | ControllerKeys.DpadUp | ControllerKeys.DpadRight | ControllerKeys.DpadDown;
+            ControllerKeys b = input.Buttons, f = 0;
+            bool right = joySide == ControllerType.JoyconRight;
+            if (right)
+            {
+                if (hold == Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal) return;
+                // 物理 → 屏上（右只横握）：X→A、A→B、Y→X、B→Y
+                if ((b & ControllerKeys.X) != 0) f |= ControllerKeys.A;
+                if ((b & ControllerKeys.A) != 0) f |= ControllerKeys.B;
+                if ((b & ControllerKeys.Y) != 0) f |= ControllerKeys.X;
+                if ((b & ControllerKeys.B) != 0) f |= ControllerKeys.Y;
+                input.Buttons = (b & ~Face) | f;
+                var s = input.RStick.Dx != 0 || input.RStick.Dy != 0 ? input.RStick : input.LStick;
+                int x = s.Dx, y = s.Dy;
+                (s.Dx, s.Dy) = (y, -x);
+                input.RStick = s; input.LStick = s;
+            }
+            else
+            {
+                // 左只：无论 HoldType，十字键都映射为 ABXY（下=A）。若留 D-pad，选角色会当成方向、确认不了。
+                if ((b & (Dpad | Face)) == 0) return;
+                if ((b & ControllerKeys.DpadDown) != 0 || (b & ControllerKeys.A) != 0) f |= ControllerKeys.A;
+                if ((b & ControllerKeys.DpadLeft) != 0 || (b & ControllerKeys.B) != 0) f |= ControllerKeys.B;
+                if ((b & ControllerKeys.DpadRight) != 0 || (b & ControllerKeys.X) != 0) f |= ControllerKeys.X;
+                if ((b & ControllerKeys.DpadUp) != 0 || (b & ControllerKeys.Y) != 0) f |= ControllerKeys.Y;
+                input.Buttons = (b & ~(Dpad | Face)) | f;
+                if (hold != Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal)
+                {
+                    var s = input.LStick; int x = s.Dx, y = s.Dy;
+                    (s.Dx, s.Dy) = (-y, x);
+                    input.LStick = s; input.RStick = s;
+                }
+            }
         }
 
         // 摇杆诊断（S2A_TRACE_STICKS=1）：给入的摇杆一变就打一行，并从共享内存（游戏读的就是这块）回读当前样式与掌机 / 全键两路最新一条，两头对一下。
         // 缺省关：真玩时摇杆几乎每帧都变，每次一行长日志（分配 + 控制台写）
         private static readonly bool TraceSticksOn = Environment.GetEnvironmentVariable("S2A_TRACE_STICKS") == "1";
+        // 按键诊断：S2A_TRACE_BUTTONS=1 时按键变化打一行
+        private static readonly bool TraceButtonsOn = Environment.GetEnvironmentVariable("S2A_TRACE_BUTTONS") == "1";
         private static (int, int, int, int) _lastSticks;
+        private static ControllerKeys _lastButtons;
 
         private static void TraceSticks(Switch device, in GamepadInput input)
         {
@@ -640,16 +725,35 @@ namespace S2A.Services
                 // 先选定真实外接手柄槽，再安装反馈 hook；游戏看到新样式时即可同步提交震动，
                 // 首次 READY 时保留手柄自己的固件连接反馈。
                 RefreshFeedback(device);
+                // Mac VPad（GC / Joy-Con HID）与 iOS BLE 实体手柄一样报物理键：横握只转触屏/自动玩家，避免确认键被转两次
+                bool physicalHuman = (eventInput && snapshot.Source is 1 or 2)
+                    || ((nint)InputHook == (nint)_vpadHook && InputHook != null);
                 // 摇杆四向按键位（StickL/R 左右上下，位 16–23）按摇杆位置每帧置，同 Ryujinx 输入层（NpadManager → Hid.UpdateStickButtons，半偏阈值）：
                 //   真机 HID 也是这样报，只读这几个位的游戏（菜单、2D 移动）推模拟摇杆才有反应。触屏 / 外接手柄 / 摇杆探测都只给模拟量
-                ComposeAutoplay(ref input, eventInput && snapshot.Source is 1 or 2, apKeys, apSticks, st[0], st[1], st[2], st[3], _type, device.Hid.Npads.JoyHold);
+                var hold = device.Hid.Npads.JoyHold;
+                // 双人 Joy-Con HID：不论配置成 Joy* 还是 Pro，P1=右柄 / P2=左柄都按横握实体键适配（人数选择等仍 Vertical 时也能按 X 确认）
+                bool dualJoyHid = physicalSecond && physicalHuman && (nint)InputHook == (nint)_vpadHook;
+                if (dualJoyHid)
+                    AdaptSidewaysJoy(ref input, ControllerType.JoyconRight, hold);
+                else if (_type == ControllerType.JoyconRight || _type == ControllerType.JoyconLeft)
+                    AdaptSidewaysJoy(ref input, _type, hold);
+                ComposeAutoplay(ref input, physicalHuman, apKeys, apSticks, st[0], st[1], st[2], st[3], _type, hold);
                 input.Buttons |= device.Hid.UpdateStickButtons(input.LStick, input.RStick);
+                StickDirsToDpad(ref input);
+                if (TraceButtonsOn && input.Buttons != _lastButtons)
+                {
+                    _lastButtons = input.Buttons;
+                    Console.Error.WriteLine($"HID：P1 buttons={input.Buttons} type={_type} hold={hold} pads={_pads} L=({input.LStick.Dx},{input.LStick.Dy}) R=({input.RStick.Dx},{input.RStick.Dy})");
+                }
                 states[0] = input;
                 PlayerIndex second = _second;
                 if (second != PlayerIndex.Unknown)
                 {
                     bool driverOwnsSecond = AutoplayPads != null && AutoplayPads() >= 2;
                     GamepadInput pad2;
+                    ControllerType type2 = _type;
+                    if (_pads > 1 && (_type == ControllerType.JoyconLeft || _type == ControllerType.JoyconRight))
+                        type2 = _type == ControllerType.JoyconRight ? ControllerType.JoyconLeft : ControllerType.JoyconRight;
                     if (driverOwnsSecond)
                     {
                         pad2 = human;
@@ -665,7 +769,12 @@ namespace S2A.Services
                     {
                         pad2 = new GamepadInput { PlayerId = second };
                         VPad2(ref pad2);
+                        if (dualJoyHid)
+                            AdaptSidewaysJoy(ref pad2, ControllerType.JoyconLeft, hold);
+                        else if (type2 == ControllerType.JoyconLeft || type2 == ControllerType.JoyconRight)
+                            AdaptSidewaysJoy(ref pad2, type2, hold);
                         pad2.Buttons |= device.Hid.UpdateStickButtons(pad2.LStick, pad2.RStick);
+                        StickDirsToDpad(ref pad2);
                     }
                     else
                     {

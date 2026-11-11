@@ -89,7 +89,7 @@ enum {
     B_DL = 1u << 12, B_DU = 1u << 13, B_DR = 1u << 14, B_DD = 1u << 15,
 };
 
-// 每只 Joy-Con 映射成一只完整玩家手柄（横握派对友好：SL/SR=肩键，方向键/面键 → ABXY）
+// 每只 Joy-Con → 一只玩家手柄：报物理键/摇杆；SL/SR 并进 L/R。横握由游戏 HoldType 解释（勿在 HID 里预转面键）。
 static void decode_pad(int product_id, const uint8_t *b, const uint8_t *lstick, const uint8_t *rstick,
                        uint32_t *buttons, int32_t sticks[4]) {
     uint32_t out = 0;
@@ -118,35 +118,37 @@ static void decode_pad(int product_id, const uint8_t *b, const uint8_t *lstick, 
         // Joy-Con/Pro HID Y 轴与常见 GC 相反
         ly = -ly; ry = -ry;
     } else if (product_id == JC_PID_L) {
-        // 左柄横握：方向键当 ABXY，SL/SR 当 L/R，摇杆旋转 90°
-        if (b2 & 0x01) out |= B_EAST;    // Down → A
-        if (b2 & 0x04) out |= B_SOUTH;   // Right → B
-        if (b2 & 0x02) out |= B_NORTH;   // Up → X
-        if (b2 & 0x08) out |= B_WEST;    // Left → Y
-        if (b2 & 0x20) out |= B_L;       // SL
-        if (b2 & 0x10) out |= B_R;       // SR
-        if (b2 & 0x40) out |= B_ZL;      // L
-        if (b2 & 0x80) out |= B_ZR;      // ZL
+        // 左柄横握：物理十字键落在屏上 ABXY 位置（下=A 确认、左=B、右=X、上=Y）。
+        // 若仍报 D-pad，选角色等 UI 会当成方向键、无法确认。SL/SR → L/R。
+        if (b2 & 0x01) out |= B_EAST;   // Down → A
+        if (b2 & 0x04) out |= B_SOUTH;  // Right → B
+        if (b2 & 0x02) out |= B_NORTH;  // Up → X
+        if (b2 & 0x08) out |= B_WEST;   // Left → Y
+        if (b2 & 0x40) out |= B_L;       // L
+        if (b2 & 0x80) out |= B_ZL;      // ZL
+        if (b2 & 0x20) out |= B_L;       // SL → L
+        if (b2 & 0x10) out |= B_R;       // SR → R
         if (b1 & 0x01) out |= B_OPT;     // Minus
         if (b1 & 0x08) out |= B_LS;
-        if (b1 & 0x20) out |= B_MENU;    // Capture
-        int32_t sx = axis12(stick_x(lstick)), sy = axis12(stick_y(lstick));
-        lx = -sy; ly = -sx;              // 横握旋转
+        if (b1 & 0x20) out |= B_MENU;    // Capture → Plus 位（无独立 Capture 目标）
+        int32_t sx = axis12(stick_x(lstick)), sy = -axis12(stick_y(lstick));
+        lx = sx; ly = sy;                // JoyLeft → AnalogStickL
     } else {
-        // 右柄横握：面键 + SL/SR，摇杆旋转
+        // 右柄：报物理面键 / R / ZR / Plus；JoyRight 摇杆在 AnalogStickR。
+        // 横握时玩家按「屏上确认」= 物理 X，游戏 HoldType=Horizontal 自己把 X 当 A。
         if (b0 & 0x08) out |= B_EAST;    // A
         if (b0 & 0x04) out |= B_SOUTH;   // B
         if (b0 & 0x02) out |= B_NORTH;   // X
         if (b0 & 0x01) out |= B_WEST;    // Y
-        if (b0 & 0x20) out |= B_L;       // SL
-        if (b0 & 0x10) out |= B_R;       // SR
-        if (b0 & 0x40) out |= B_R;       // R（竖握肩键，与 SR 同属右肩）
+        if (b0 & 0x40) out |= B_R;       // R
         if (b0 & 0x80) out |= B_ZR;      // ZR
+        if (b0 & 0x20) out |= B_L;       // SL → L
+        if (b0 & 0x10) out |= B_R;       // SR → R
         if (b1 & 0x02) out |= B_MENU;    // Plus
         if (b1 & 0x04) out |= B_RS;
-        if (b1 & 0x10) out |= B_OPT;     // Home
-        int32_t sx = axis12(stick_x(rstick)), sy = axis12(stick_y(rstick));
-        lx = sy; ly = -sx;
+        if (b1 & 0x10) out |= B_OPT;     // Home → Minus 位（无独立 Home 目标）
+        int32_t sx = axis12(stick_x(rstick)), sy = -axis12(stick_y(rstick));
+        rx = sx; ry = sy;                // JoyRight → AnalogStickR
     }
     *buttons = out;
     sticks[0] = lx; sticks[1] = ly; sticks[2] = rx; sticks[3] = ry;
