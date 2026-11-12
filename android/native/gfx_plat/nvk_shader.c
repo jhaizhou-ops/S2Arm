@@ -123,7 +123,16 @@ static int layout_ent(const struct fd_binding *b, nvn_gpu_layout_ent *e) {
     // 贴图数组：着色器按运行时下标取句柄，数组第 k 项 = 驱动句柄表的第 (src_reg + k) 个 8 字节项（核心按项逐个绑）
     if (b->kind == 2 && b->count > 1 && b->slot == 0) { e->cls = NVN_GPU_RES_TEX_SAMP; e->src_kind = NVN_RB_TEX; e->src_reg = 0; e->count = b->count; return 1; }
     if (b->kind == 2 && b->tex_slot >= 0) { e->cls = NVN_GPU_RES_TEX_SAMP; e->src_kind = NVN_RB_TEX; e->src_reg = (uint16_t)b->tex_slot; return 1; }
-    return 0;   // 存储缓冲、图像：随对应命令接
+    // 存储缓冲：只认「NVN 存储槽」这一种来源（反射里的 nvnSlot）。地址来自 UBO 内 SbDescriptor / c1 段的要逐笔读
+    // 常量缓冲内容，首版还没接，准确报红而不是猜槽位。
+    if (b->kind == 1 && b->storage_kind == 1 && b->storage_slot >= 0 && b->storage_slot < 16) {
+        e->cls = NVN_GPU_RES_SSBO;
+        e->src_kind = NVN_RB_SBUFP;
+        e->src_reg = (uint16_t)b->storage_slot;
+        if (b->storage_writable) e->access = NVN_GPU_ACC_R | NVN_GPU_ACC_W;
+        return 1;
+    }
+    return 0;   // 图像、存储缓冲的其它地址来源：随对应命令接
 }
 
 // 驱动的贴图句柄表：贴图槽 s 的句柄在第 8 + 2s 个 32 位字，即第 4 + s 个 8 字节项；32 个槽 → 36 项
