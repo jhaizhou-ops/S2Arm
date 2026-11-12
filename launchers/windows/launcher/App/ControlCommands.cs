@@ -323,7 +323,7 @@ public sealed partial class EnvironmentWindow
         ("POST /installCheck {gameId}", "装机前清单：几秒后看 GET /state 的 installReadiness"),
         ("POST /install {gameId, acceptDropped?}", "用 Impactor 装到 iPhone（清单全齐才能装；Apple ID 由玩家本人在 Impactor 里登录）；失败码 container_would_drop = 手机上有别的电脑装的游戏这次带不上，先问玩家，同意了带 acceptDropped = true 再发"),
         ("POST /show {page: environment|library|export, gameId?}", "打开环境检查 / 回游戏库 / 打开这款的出包页（同点对应按钮）"),
-        ("POST /update-phone {ask?, acceptStale?, repack?}", "更新 iPhone 上的 S2Arm（同游戏库右上角按钮；GET /state 的 phoneUpdates 不空才有）：本版壳 + 手机上已有的程序模块，只装 App；有要按新版重新出包的款时没带 acceptStale 回 409 并列出 stale，repack = true 时更新完把它们排进批量出包、出完自动装"),
+        ("POST /update-phone {ask?, acceptStale?, repack?, acceptDropped?}", "更新 iPhone 上的 S2Arm（同游戏库右上角按钮；GET /state 的 phoneUpdates 不空才有）：本版壳 + 手机上已有的程序模块，只装 App；有要按新版重新出包的款时没带 acceptStale 回 409 并列出 stale，repack = true 时更新完把它们排进批量出包、出完自动装；会让手机上别的电脑装的款暂时不能玩时作业报 container_would_drop，玩家同意后带 acceptDropped 再发（同 /install）"),
         ("POST /uninstall {gameId, acceptDropped?}", "从 iPhone 上的 S2Arm 删一款；acceptDropped 同 /install"),
         ("POST /cancel {taskId} | /retry {taskId}", "停掉在跑的作业 / 重试出包、装机任务"),
         ("POST /diagnostics {action:export, path}", "导出诊断包（已脱敏的 zip）"),

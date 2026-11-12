@@ -785,7 +785,9 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     /// 装机 / 删除会让手机上别的电脑装的游戏暂时不能玩（作业层 container_would_drop）：界面弹确认，确认了带 acceptDropped 重跑。
     /// ask = false（控制口发起）不弹，原样失败，由调用方带 acceptDropped 再发。
-    struct DropConfirm { let kind: JobSession.Kind; let game: GameSummary; let message: String }
+    /// 更新手机上的 S2Arm 也会撞上（v0.3.0 只换壳验收：原先这条路没接确认，界面说「确认继续再点一次」却永远过不去）：update 记着当时的参数，确认后原样带 acceptDropped 重跑
+    struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String? }
+    struct DropConfirm { let kind: JobSession.Kind; var game: GameSummary? = nil; let message: String; var update: UpdateArgs? = nil }
     @Published var dropConfirm: DropConfirm?
 
     /// 环境检查「装到 iPhone 的方式」里手填的 Xcode 团队号（10 位）：一键装、不用证书时每次装机都带上（原先只在装机页点「用这个团队」那一次带）
@@ -817,7 +819,9 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 确认框点了「仍然继续」
     func confirmDrop(_ d: DropConfirm) {
         dropConfirm = nil; clearInlineFailure()
-        if d.kind == .installRemove { removeFromPhone(d.game, acceptDropped: true) } else { install(d.game, acceptDropped: true) }
+        if let u = d.update { updatePhone(acceptStale: u.acceptStale, repack: u.repack, language: u.language, device: u.device, acceptDropped: true); return }
+        guard let game = d.game else { return }
+        if d.kind == .installRemove { removeFromPhone(game, acceptDropped: true) } else { install(game, acceptDropped: true) }
     }
 
     /// 装回上一版手机 S2Arm（只换宿主后新宿主不好用时）。

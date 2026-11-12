@@ -143,7 +143,8 @@ import S2ArmAppleAdapter
                 return ControlReply(code: 409, body: ControlReply.json(["ok": false, "error": "这几款要按新版重新出包，重新出包前暂时打不开：带 acceptStale 确认（repack 为真时更新完把它们排进批量出包、出完自动装）", "stale": stale]))
             }
             model.updatePhone(acceptStale: accept, repack: a["repack"] as? Bool == true ? u.stale.map(\.id) : [], language: "zh-Hans",
-                              device: (a["device"] as? String).flatMap { $0.isEmpty ? nil : $0 })   // 同 /install：连着多台时指定哪台
+                              device: (a["device"] as? String).flatMap { $0.isEmpty ? nil : $0 },   // 同 /install：连着多台时指定哪台
+                              acceptDropped: a["acceptDropped"] as? Bool ?? false, ask: false)   // 同 /install：会挤掉别的电脑装的款时原样失败，带 acceptDropped 再发
             return .object(["ok": true, "stale": stale])
         case ("POST", "/restore-iphone"):
             guard let g = game() else { return .bad("没有这个 gameId") }

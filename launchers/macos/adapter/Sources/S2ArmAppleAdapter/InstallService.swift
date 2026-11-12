@@ -180,8 +180,10 @@ public final class InstallService {
     /// 更新 iPhone 上的 S2Arm（installUpdate 作业，install.update_phone）：本版壳 + 已有程序模块，只装 App；
     ///   有要重新出包的款且没 acceptStale → 作业以 container_stale 失败（界面先问玩家）
     ///   device：连着多台时装到哪台（同 install；不给 = 只连着一台）
-    public func updatePhone(acceptStale: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
+    /// acceptDropped：同 install——玩家已确认手机上只在别的电脑装过的游戏这次带不上（作业层 container_would_drop）
+    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
         var extra: [String: Any] = acceptStale ? ["acceptStale": true] : [:]
+        if acceptDropped { extra["acceptDropped"] = true }
         if let device { extra["device"] = device }
         return try await client.perform("installUpdate", extra: extra, events: events).result
     }

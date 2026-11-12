@@ -193,21 +193,26 @@ public sealed partial class EnvironmentWindow
     /// 这里不属于哪一款，进度和结果画在顶栏；同样占着 installBusy，别的手机作业 / 出包在它跑时不开始。
     /// 结束后重读游戏库（按钮随检测结果消失）；repack 非空且更新成功 → 把这几款排进批量出包、只出 iPhone，整批出完逐款装上。
     /// </summary>
-    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack)
+    /// acceptDropped / ask 同 InstallAsync：会让手机上别的电脑装的游戏暂时不能玩（container_would_drop）时，界面发起的弹同一个确认框、确认后带 acceptDropped 重跑；
+    /// 控制口发起的不弹、原样失败，由调用方带 acceptDropped 再发（v0.3.0 只换壳验收：原先这条路没接确认，提示「确认继续再点一次」却永远过不去）
+    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, bool acceptDropped = false, bool ask = true)
     {
         if (installBusy || packRunning || connectedFolder is null || libraryId is null) return;
         var front = BeginJob(JobKind.Phone); phoneUpdating = true; updateOutcome = null; updateDiagnostics = ""; updateDone = updateTotal = null;
         Render();
         var succeeded = false;
+        string? dropAsk = null;
         try
         {
             // 更新哪台：壳旧了的那台（phoneUpdates 的设备记录键），作业层不自己挑
             var extra = new Dictionary<string, object?>();
             if (acceptStale) extra["acceptStale"] = true;
+            if (acceptDropped) extra["acceptDropped"] = true;
             if (PhoneUpdateTarget is { Device.Length: > 0 } target) extra["device"] = target.Device;
             var job = await PackJobClient.RunAsync(PackRequest("installUpdate", "", extra.Count > 0 ? extra : null),
                 e => Dispatcher.UIThread.Post(() => IngestUpdateEvent(e)), front.Token, front.Next());
             succeeded = job.Report.Succeeded;
+            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
             updateOutcome = succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
             updateDiagnostics = succeeded ? "" : JobDiagnostics(job);
         }
@@ -215,6 +220,7 @@ public sealed partial class EnvironmentWindow
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { updateOutcome = error.Message.Length > 0 ? error.Message : error.GetType().Name; }
         finally { EndJob(front); phoneUpdating = false; Render(); }
+        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) { await UpdatePhoneAsync(acceptStale, repack, acceptDropped: true); return; }
         await RefreshLibraryAsync();   // 游戏库作业在跑就记一笔、那一轮完了补刷（剃刀 W8），不再跳过
         if (!succeeded || repack.Count == 0 || batchRunning || PackBusy) return;
         OpenBatch(repack, []);
@@ -258,7 +264,7 @@ public sealed partial class EnvironmentWindow
         ["device"] = u.Device, ["games"] = u.Games.Select(g => g.Id).ToList(), ["stale"] = u.Stale.Select(g => g.Id).ToList()
     }).ToList();
 
-    /// <summary>POST /update-phone {acceptStale?, repack?}（同 Mac 控制口）：同顶栏按钮；有要重新出包的款没给 acceptStale → 409 列出它们</summary>
+    /// <summary>POST /update-phone {acceptStale?, repack?, acceptDropped?}（同 Mac 控制口）：同顶栏按钮；有要重新出包的款没给 acceptStale → 409 列出它们</summary>
     private ControlReply ControlUpdatePhone(ControlRequest r)
     {
         if (ControlBusy || batchRunning) return Busy();
@@ -277,7 +283,7 @@ public sealed partial class EnvironmentWindow
                 ["ok"] = false, ["error"] = "这几款要按新版重新出包，重新出包前暂时打不开：带 acceptStale 确认（repack 为真时更新完把它们排进批量出包、出完自动装）",
                 ["stale"] = stale
             }, 409);
-        _ = UpdatePhoneAsync(accept, r.Flag("repack") ? u.Stale.Select(g => g.Id).ToList() : []);
+        _ = UpdatePhoneAsync(accept, r.Flag("repack") ? u.Stale.Select(g => g.Id).ToList() : [], r.Flag("acceptDropped"), ask: false);   // 同 /install
         return ControlReply.Json(new Dictionary<string, object?> { ["ok"] = true, ["stale"] = stale });
     }
 }

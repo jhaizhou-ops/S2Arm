@@ -1044,6 +1044,23 @@ class AssembleTests(unittest.TestCase):
         rec = layout.load_device(self.c, "dev1")
         self.assertEqual((rec["shellId"], rec["games"]), ("SID2", {A: dict(pack="pa")}))
 
+    def test_update_phone_asks_then_drops_games_from_another_computer(self):
+        """手机上还有一款只在别的电脑装过（不在本库、不在本机记录）：没确认 → 报 container_would_drop 点名它，不签不装；
+        带 acceptDropped → 照常只换壳（甲），外来那款不带（v0.3.0 只换壳验收：原先这条路没有确认入口，永远过不去）"""
+        A = self.A
+        X = "0100FFFF00000000"
+        _, pushed, signed = self._update(acceptStale=True)
+        with um.patch.object(install, "phone_games", lambda c, ph: {A, X}), \
+             um.patch.object(install, "phone_game_name", lambda c, ph, g, names: "外来款"):
+            with self.assertRaises(Failure) as e:
+                install.update_phone(self.c)
+            self.assertEqual((e.exception.code, signed, pushed), ("container_would_drop", [], []))
+            self.assertIn("外来款", str(e.exception))
+            self.c.r["acceptDropped"] = True
+            r = install.update_phone(self.c)
+        self.assertTrue(r["updated"])
+        self.assertEqual((signed, pushed), ([([A], ([A], "SID2"))], []))
+
     def test_update_phone_same_shell_does_nothing(self):
         _, pushed, signed = self._update(sid="SID1")
         r = install.update_phone(self.c)
