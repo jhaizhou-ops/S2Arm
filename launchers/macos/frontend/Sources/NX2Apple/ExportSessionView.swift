@@ -180,10 +180,17 @@ struct ExportSessionView: View {
         return measured.contains(-1) || measured.reduce(0, +) <= 0 ? plan.map { _ in 1 } : measured.map { max($0, 1) }
     }
 
-    /// 整单完成比例（多平台时算上前面做完的平台）。
+    /// 第 k 步的填充：作业层给了整单进度（overall）就按同一套权重从它切出这一段，各段和大百分比永远一致、只增不减；没有时照旧按估计
+    private func fill(_ k: Int, _ e: MilestoneEstimate, weights w: [Double]) -> Double {
+        guard let o = session.progress.overall, k < w.count else { return e.fill(k) }
+        let total = w.reduce(0, +), before = w[..<k].reduce(0, +)
+        return w[k] > 0 && total > 0 ? min(1, max(0, (o * total - before) / w[k])) : 0
+    }
+
+    /// 整单完成比例（多平台时算上前面做完的平台）。本平台这部分 = 作业层的 overall（没有时按各步估计）
     private func overallFraction(_ e: MilestoneEstimate, plan: [Milestone]) -> Double {
         let w = weights(plan), total = w.reduce(0, +)
-        let thisPlatform = total > 0 ? zip(plan.indices, w).reduce(0) { $0 + e.fill($1.0) * $1.1 } / total : 0
+        let thisPlatform = session.progress.overall ?? (total > 0 ? zip(plan.indices, w).reduce(0) { $0 + e.fill($1.0) * $1.1 } / total : 0)
         return min(1, (Double(run.index) + thisPlatform) / Double(max(1, run.platforms.count)))
     }
 
@@ -226,8 +233,8 @@ struct ExportSessionView: View {
                     let width = max(10, (g.size.width - 3 * Double(plan.count - 1)) * w[k] / total)
                     ZStack(alignment: .leading) {
                         Rectangle().fill(Color.white.opacity(0.10))
-                        Rectangle().fill(LauncherPalette.cream).frame(width: width * e.fill(k))
-                            .animation(.easeOut(duration: 0.9), value: e.fill(k))
+                        Rectangle().fill(LauncherPalette.cream).frame(width: width * fill(k, e, weights: w))
+                            .animation(.easeOut(duration: 0.9), value: fill(k, e, weights: w))
                         if k == e.index { ProgressSweep() }
                     }
                     .frame(width: width)

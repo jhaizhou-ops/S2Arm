@@ -754,7 +754,7 @@ public sealed partial class EnvironmentWindow
     private Control OverallSection(MilestoneEstimate estimate, double elapsed)
     {
         var plan = packTrack.Plan;
-        var fraction = OverallFraction(estimate, plan);
+        var fraction = OverallFraction(estimate, plan, packTrack.Overall);
         var section = new StackPanel { Spacing = 12 };
 
         // Big %
@@ -806,8 +806,10 @@ public sealed partial class EnvironmentWindow
         return section;
     }
 
-    private static double OverallFraction(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan)
+    /// <summary>作业层给了整单进度就用它（只增不减）；没有时照旧按各步估计</summary>
+    private static double OverallFraction(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan, double? overall)
     {
+        if (overall is { } o) return o;
         if (plan.Count == 0) return 0;
         var weights = Weights(plan); var total = weights.Sum();
         var thisPlatform = total > 0 ? plan.Select((m, k) => estimate.Fill(k) * weights[k]).Sum() / total : 0;
@@ -824,6 +826,14 @@ public sealed partial class EnvironmentWindow
 
     // ---- segmented bar with sweep — 铺满父容器宽度 ----
 
+    /// <summary>第 k 段的填充：有整单进度就按同一套权重从它切出这一段（各段与大百分比一致、只增不减），否则照旧按估计</summary>
+    private double SegmentFill(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan, int k)
+    {
+        if (packTrack.Overall is not { } o) return estimate.Fill(k);
+        var w = Weights(plan); var total = w.Sum(); var before = w.Take(k).Sum();
+        return k < w.Length && w[k] > 0 && total > 0 ? Math.Clamp((o * total - before) / w[k], 0, 1) : 0;
+    }
+
     private Control SegmentedBar(MilestoneEstimate estimate, IReadOnlyList<Milestone> plan)
     {
         var weights = Weights(plan); var total = Math.Max(weights.Sum(), 1);
@@ -832,7 +842,7 @@ public sealed partial class EnvironmentWindow
         var bar = new Grid { ColumnDefinitions = new ColumnDefinitions(colDefs), Height = 10, ColumnSpacing = 3 };
         for (var k = 0; k < plan.Count; k++)
         {
-            var fill = estimate.Fill(k);
+            var fill = SegmentFill(estimate, plan, k);
             var active = k == estimate.Index && packRunning;
             var seg = new Grid();
             seg.ColumnDefinitions = new ColumnDefinitions($"{fill}*,{Math.Max(0, 1 - fill)}*");

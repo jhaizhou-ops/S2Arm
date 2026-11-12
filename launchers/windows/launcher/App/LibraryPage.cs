@@ -133,7 +133,7 @@ public sealed partial class EnvironmentWindow
         {
             var elapsed = (DateTime.UtcNow - packStarted).TotalSeconds;
             var estimate = packTrack.Estimate(Clock);
-            var fraction = OverallFraction(estimate, packTrack.Plan);
+            var fraction = OverallFraction(estimate, packTrack.Plan, packTrack.Overall);
             var capsuleBar = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 16 };
             var left = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
             left.Children.Add(Muted(T("progress.running") + " · " + (packGame?.Name ?? ""), 13));

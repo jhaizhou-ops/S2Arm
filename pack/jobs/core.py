@@ -10,6 +10,7 @@ import datetime
 import errno
 import filelock
 import winproc
+import overall as overall_progress
 import hashlib
 import json
 import os
@@ -550,6 +551,7 @@ class Context:
         self.children = set()
         self.guard = threading.RLock()
         self.last_progress = 0
+        self.overall = overall_progress.Overall()   # 整单进度（每条事件的 overall，只增不减；pack/jobs/overall.py）
         self.last_log = None
         self.frontend_gone = False
         self.recorded = self.operation not in PROBES
@@ -668,6 +670,12 @@ class Context:
                     extra.setdefault("unit", self.job["unit"])
             self.seq += 1
             state = extra.pop("state", self.job["state"])
+            if kind == "plan":
+                self.overall.plan(extra.get("milestones"))
+            overall = self.overall.feed(kind, now - self.t0, getattr(self, "milestone", None), state)
+            if overall is not None:
+                extra["overall"] = overall
+                self.job["overall"] = overall
             event = dict(schema=1, jobId=self.task, taskId=self.task, seq=self.seq,
                          timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(), type=kind,
                          operation=self.operation, gameId=self.r.get("gameId"), stage=self.stage,
