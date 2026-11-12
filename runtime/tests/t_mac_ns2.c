@@ -39,6 +39,8 @@ ns2_kind ns2_get_output_kind(void) { return output_kind; }
 void ns2_send_pair_lease(const ns2_vibration pair[2], unsigned duration) {
     assert(duration == 1000); memcpy(sent, pair, sizeof sent); sends++;
 }
+static int kicks;   // 输入变化通知的次数（实现在 front_mac.m：踢主队列跑一次采样；这里只计数，核「变化才通知」）
+void s2a_mac_ns2_input_changed(void) { kicks++; }
 static int receive_all(int fd, void *buffer, size_t length) {
     char *cursor = buffer;
     while (length) {
@@ -80,6 +82,8 @@ int main(void) {
     ns2_state physical = {.buttons=1, .lx=-32767, .ly=32767, .rx=12345, .ry=-23456};
     input_callback(&physical, NULL);
     assert(s2a_mac_ns2_read(&input) && !memcmp(&input, &physical, sizeof input));
+    input_callback(&physical, NULL);   // 整包空闲重发：内容没变，不再通知
+    assert(kicks == 2);   // 连上（ready 翻转）与第一次存到变化各通知一次
     s2a_mac_ns2_set_back_buttons(1u << 6, 1u << 7); // GL -> L; GR -> R.
     physical.buttons = (1ull << NS2_TEST_BUTTON_GL) | (1ull << NS2_TEST_BUTTON_GR) | 1;
     input_callback(&physical, NULL);
@@ -112,8 +116,10 @@ int main(void) {
     assert(imu);
     assert(s2a_mac_ns2_rumble_session() != session);
     s2a_mac_ns2_set_rumble_pair(session, pair); assert(sends == 1);
+    int kicks_before = kicks;
     status_callback(NS2_STATUS_DISCONNECTED, "test disconnect", NULL);
     assert(!s2a_mac_ns2_read(&input) && !s2a_mac_ns2_rumble_session());
+    assert(kicks == kicks_before + 1);   // 断开也通知：手柄槽位即时摘掉
     assert(s2a_mac_ns2_connect() && scans == 1 && starts == 1);
     status_callback(NS2_STATUS_READY, "test reconnect", NULL);
     assert(s2a_mac_ns2_rumble_session() != session);
@@ -142,6 +148,13 @@ int main(void) {
     for (int i = 0; i < 100 && !s2a_mac_ns2_read(&input); i++) usleep(1000);
     assert(input.buttons == 1 && input.lx == -123 && input.ly == 456);
     assert(s2a_mac_ns2_status() == NS2_STATUS_READY);
+    int kicks_relay = kicks;
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);   // 同包重发：不通知
+    packet.state.buttons = 4;   // 这一包变了
+    assert(send(relay, &packet, sizeof packet, 0) == sizeof packet);
+    for (int i = 0; i < 100 && !(s2a_mac_ns2_read(&input) && input.buttons == 4); i++) usleep(1000);
+    assert(input.buttons == 4);
+    assert(kicks == kicks_relay + 1);   // 重发的不通知，变了的那包通知一次（ready 没变）
 
     s2a_mac_ns2_set_motion_enabled(1);
     memset(&packet, 0, sizeof packet);
