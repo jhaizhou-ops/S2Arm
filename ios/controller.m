@@ -794,6 +794,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     [self updateVisibility];
 }
 - (void)setForeground:(BOOL)foreground {
+    S2A_MAIN_ONLY("-[S2AController setForeground:]");
     if (_foreground == foreground) { if (foreground) [self settingsChanged:nil]; return; }
     _foreground = foreground;
     pthread_mutex_lock(&g_feedback_mu);

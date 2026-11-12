@@ -596,6 +596,26 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
         // 回前台时可能停在失焦（浮层还在），等不到「获得焦点」：主线程下一拍状态已离开后台就放开
         dispatch_async(dispatch_get_main_queue(), ^{ if (UIApplication.sharedApplication.applicationState != UIApplicationStateBackground) s2a_ios_suspend_enqueue(0, "回前台"); }); }];
     [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; display_focus_publish(UIApplication.sharedApplication.applicationState == UIApplicationStateActive); { void s2a_diag_session_fg(int); s2a_diag_session_fg(1); } s2a_ios_suspend_enqueue(0, "获得焦点"); s2a_guest_run_mark(1); }];
+    // 测试开关 S2A_TEST_LIFECYCLE=<秒>（宿主生命周期自测，11-11 v0.3.0 局中失焦崩溃之后加；环境变量只有 devicectl / Xcode 起 App 能给，玩家碰不到）：
+    //   启动后这么多秒（起局、虚拟手柄已显示），在主线程上按真机顺序发系统的前后台通知——失去焦点 → 获得焦点（短暂失焦，如下拉横幅）→
+    //   进后台 → 回前台 → 获得焦点，走的是上面同一套处理函数与生命周期队列（s2a_ios_suspend_enqueue）。同时设 S2A_STRICT_MAIN=1：
+    //   任何只许主线程的 UIKit 入口（S2A_MAIN_ONLY）在后台线程被调就当场中止。每步打「生命周期自测：…」，走完打「生命周期自测：完成」
+    {
+        const char *e = getenv("S2A_TEST_LIFECYCLE"); double after = e ? atof(e) : 0;
+        if (after > 0) {
+            setenv("S2A_STRICT_MAIN", "1", 1);
+            NSArray<NSArray *> *steps = @[@[UIApplicationWillResignActiveNotification, @"失去焦点"], @[UIApplicationDidBecomeActiveNotification, @"获得焦点"],
+                                         @[UIApplicationDidEnterBackgroundNotification, @"进后台"], @[UIApplicationWillEnterForegroundNotification, @"回前台"],
+                                         @[UIApplicationDidBecomeActiveNotification, @"获得焦点"]];
+            LOG("生命周期自测：%.0f 秒后开始，共 %d 步（S2A_STRICT_MAIN=1）", after, (int)steps.count);
+            for (NSUInteger k = 0; k <= steps.count; k++)
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((after + 3.0 * k) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    if (k == steps.count) { LOG("生命周期自测：完成（%d 步都走完，进程还在）", (int)steps.count); return; }
+                    LOG("生命周期自测：第 %d 步 %s", (int)k + 1, [steps[k][1] UTF8String]);
+                    [nc postNotificationName:steps[k][0] object:UIApplication.sharedApplication];
+                });
+        }
+    }
     // 心跳：每 10 秒一行，被系统直接杀（SIGKILL 不进崩溃处理）时也能看到死前最后的帧号 / 热状态 / 内存（10-20 维护者 一款第一方动作冒险游戏闪退，日志 12 秒后无一行）
     // 低区余量（10-21 巫师3 玩约 2 分钟低区耗尽、Metal 申请失败崩溃）：每行带上，局中能看到往下掉的过程
     [NSTimer scheduledTimerWithTimeInterval:10 repeats:YES block:^(NSTimer *t) { (void)t;
