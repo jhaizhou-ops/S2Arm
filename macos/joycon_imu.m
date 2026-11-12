@@ -60,12 +60,14 @@ static void decode_imu(int slot, int product_id, const uint8_t *s, s2a_pad_motio
     float gx = rd16(s + 6) * 0.06103f;
     float gy = rd16(s + 8) * 0.06103f;
     float gz = rd16(s + 10) * 0.06103f;
+    // L/R 传感器安装镜像：同一物理朝向上 raw Z 符号相反。若不翻转 R 的 Z，
+    // 校准 UI（摇杆面朝上/朝下）会一只对、一只反——与是否第三方手柄无关。
     if (product_id == JC_PID_L) {
         out->acceleration_x = ay; out->acceleration_y = -ax; out->acceleration_z = az;
         out->gyro_x = gy; out->gyro_y = -gx; out->gyro_z = gz;
     } else {
-        out->acceleration_x = -ay; out->acceleration_y = ax; out->acceleration_z = az;
-        out->gyro_x = -gy; out->gyro_y = gx; out->gyro_z = gz;
+        out->acceleration_x = -ay; out->acceleration_y = ax; out->acceleration_z = -az;
+        out->gyro_x = -gy; out->gyro_y = gx; out->gyro_z = -gz;
     }
     (void)slot;
     out->host_timestamp_us = now_us();
