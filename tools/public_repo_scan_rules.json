@@ -568,6 +568,7 @@
       "android/codecs/tests/vectors/*.json",
       "android/codecs/tests/vectors/*.hex",
       "android/tests/fixtures/storage-stages/*.hex",
+      "pack/jobs/tests/fixtures/progress_*.jsonl",
       "compat/tree/src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard/Resources/*.svg",
       "launchers/macos/adapter/Sources/S2ArmAppleAdapter/Resources/*.json",
       "launchers/windows/launcher/App/Assets/Fonts/*.txt",
