@@ -167,11 +167,18 @@ static struct entry *build(const uint8_t *bytes, size_t len, const struct s2a_so
 // 一张小的直映射表而不是只记上一次：相邻两笔常在两三种材质之间来回换，只记一项时每次都落空。
 enum { LAST_N = 1024 };
 static struct last_ent { int ok; uint64_t key; uint64_t session, generation; const struct rp_prog *prog; } g_lasts[LAST_N];
+// 阶段键一律经核心导出接口取（rp_shader_stage_key）：没绑定 / 键缺失给全 0，不读可能过期的核心内部分量。
+static const uint8_t *stage_key(unsigned st) {
+    static uint8_t k[2][8];
+    unsigned i = st ? 1u : 0u;
+    if (!rp_shader_stage_key(st, k[i])) memset(k[i], 0, 8);
+    return k[i];
+}
 static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, uint32_t stages) {
     uint64_t h = 1469598103934665603ull;
     #define MIX(v) do { h ^= (uint64_t)(v); h *= 1099511628211ull; } while (0)
     MIX(stages); MIX(q->prim); MIX(q->rt_count); for (int i = 0; i < 8; i++) MIX(q->rt_format[i]);
-    for (int st = 0; st < 2; st++) { uint64_t k; memcpy(&k, rp_S.skey[st], 8); MIX(k); }
+    for (int st = 0; st < 2; st++) { uint64_t k; memcpy(&k, stage_key((unsigned)st), 8); MIX(k); }
     MIX(rp_S.color.alpha_func); { uint32_t ar; float r = rp_S.color.alpha_func >= 1 && rp_S.color.alpha_func <= 7 ? rp_S.alpha_ref : 0.0f; memcpy(&ar, &r, 4); MIX(ar); }
     MIX(rp_S.ms.a2c ? 1 : 0); MIX(rp_S.ms.a2c_dither ? 1 : 0);
     { int dual = 0; for (int i = 0; i < 8; i++) if (src1(rp_S.blend[i].src_rgb) || src1(rp_S.blend[i].dst_rgb) || src1(rp_S.blend[i].src_a) || src1(rp_S.blend[i].dst_a)) dual = 1; MIX(dual); }
@@ -192,7 +199,7 @@ int rp_shader_resolve(const struct rp_shader_req *q, const struct rp_prog **out)
     // 认两种：顶点 + 片元；只有顶点（只写深度的绘制：深度预通道、阴影图）。几何 / 细分阶段还没接
     if (stages != 3u && stages != 1u) { char nm[32]; snprintf(nm, sizeof nm, "stages_%#x_not_vs_fs", stages); nvn_unimpl("shader", nm, NULL); return -1; }
     const int nst = stages == 3u ? 2 : 1;
-    if ((rp_S.skey_ok & stages) != stages) { nvn_unimpl("shader", "stage_key_missing", NULL); return -1; }
+    for (uint32_t st2 = 0; st2 < 5; st2++) if ((stages >> st2 & 1) && !rp_shader_stage_key(st2, NULL)) { nvn_unimpl("shader", "stage_key_missing", NULL); return -1; }
     struct s2a_direct_compile_context pc; memset(&pc, 0, sizeof pc);
     if (s2a_direct_provider_compile_context(&pc) || !pc.profile_json || !pc.profile_bytes) { nvn_unimpl("shader", "no_compile_context", NULL); return -1; }
     uint64_t key = input_sig(q, &pc, stages);
@@ -219,8 +226,8 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     id.direct_abi = (int)pc.direct_abi; id.translator_closure = pc.translator_closure; memcpy(id.profile_sha, g_profile.sha, 32);
     id.stage_mask = stages;
     for (int st = 0; st < nst; st++) {
-        memcpy(id.keys[st], rp_S.skey[st], 8);
-        if (s2a_source_identity(rp_S.skey[st], id.source_sha[st], &id.source_code_bytes[st], &id.source_control_bytes[st])) { nvn_unimpl("shader", "source_snapshot_missing", NULL); return -1; }
+        memcpy(id.keys[st], stage_key((unsigned)st), 8);
+        if (s2a_source_identity(stage_key((unsigned)st), id.source_sha[st], &id.source_code_bytes[st], &id.source_control_bytes[st])) { nvn_unimpl("shader", "source_snapshot_missing", NULL); return -1; }
         id.source_present |= (uint8_t)(1u << st);
     }
     memcpy(id.ubo_use, f.ubo_use, sizeof id.ubo_use);
@@ -232,7 +239,7 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     struct entry *e = nvn_hm_get(&g_progs, sha);
     if (!e) {
         struct s2a_source_entry_view views[2]; memset(views, 0, sizeof views);
-        for (int st = 0; st < nst; st++) if (!s2a_source_get_key(rp_S.skey[st], &views[st]) || !views[st].complete)   /* get_key：1 = 命中 */ { nvn_unimpl("shader", "source_snapshot_incomplete", NULL); return -1; }
+        for (int st = 0; st < nst; st++) if (!s2a_source_get_key(stage_key((unsigned)st), &views[st]) || !views[st].complete)   /* get_key：1 = 命中 */ { nvn_unimpl("shader", "source_snapshot_incomplete", NULL); return -1; }
         uint8_t *bytes = NULL; size_t len = 0; char why[256] = "";
         const char *root = getenv("S2A_SHADER_REVISION_ROOT"), *cdir = getenv("S2A_DIRECT_CACHE_DIR");
         if (root && pc.profile_hash && pc.profile_hash[0] && !nvn_plat_flag("no_offline", 0)) {
@@ -256,7 +263,7 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
                 d->stage = st ? "fs" : "vs"; d->code = code; d->code_bytes = nb; d->control = views[st].control; d->control_bytes = views[st].control_bytes;
                 d->c1 = views[st].c1; d->c1_bytes = views[st].c1_bytes; d->constant_buffer_use = f.ubo_use[st];
                 if (!in.gfx.has_tess_mode && views[st].control_bytes >= 0x748) { memcpy(&in.gfx.tess_mode, views[st].control + 0x744, 4); in.gfx.has_tess_mode = 1; }
-                for (int b = 0; b < 8; b++) o += snprintf(ident + o, sizeof ident - (size_t)o, "%02x", rp_S.skey[st][b]);
+                for (int b = 0; b < 8; b++) o += snprintf(ident + o, sizeof ident - (size_t)o, "%02x", stage_key((unsigned)st)[b]);
             }
             in.request_id = ident;
             char *json = NULL; size_t jl = 0; char gaps[1024] = "";
