@@ -33,8 +33,11 @@ struct PhoneJobPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
+            // 这是什么操作（维护者：原先只看得到「更新中 · …」一小行）
+            Text(t("phone.title." + session.kind.rawValue)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
             switch session.phase {
             case .running, .stopping: running
+            case .finished(.failed) where session.failureCode == "container_would_drop" && model.dropConfirm?.update != nil && session.kind == .installUpdate: dropAsk
             case .finished(.completed): success
             case .finished(.cancelled): headline(seal: AnyView(StatusSeal(symbol: "xmark", color: LauncherPalette.unbuilt)), title: t("phone.cancelled", "已取消"), subtitle: "")
             case .finished: failure
@@ -60,10 +63,18 @@ struct PhoneJobPanel: View {
                 Text(t("export.overall")).font(.manrope(14, .semibold)).foregroundStyle(.secondary)
             }
             LauncherProgressBar(value: value, height: 10)
-            steps
-            if session.kind == .install, p.keychainPrompt {
-                Text(t("install.keychain")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // 要玩家动手（钥匙串授权：作业事件 keychainPrompt）：步骤上方一块醒目的提示，不只埋在步骤列表里
+            if p.keychainPrompt {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(t("phone.action")).font(.manrope(15, .bold)).foregroundStyle(LauncherPalette.building)
+                    Text(t("install.keychain")).font(.manrope(14)).fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(LauncherPalette.building.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(LauncherPalette.building.opacity(0.8)))
+                .accessibilityIdentifier("phone.action")
             }
+            steps
         }
         .accessibilityIdentifier("phone.running")
     }
@@ -141,9 +152,29 @@ struct PhoneJobPanel: View {
             if !session.suggestion.isEmpty {
                 PhoneJobFact(label: t("phone.next"), text: loc.backend(session.suggestion))
             }
-            CopyReportButton(model: model, gameID: session.gameID, operations: [session.kind.rawValue], fallback: session.message)
+            HStack(spacing: 12) {
+                if session.kind == .installUpdate {
+                    Button { model.retryPhoneUpdate() } label: { LauncherHeroActionLabel(title: t("phone.retry"), symbol: "arrow.clockwise") }
+                        .buttonStyle(.plain).disabled(model.busy).accessibilityIdentifier("phone.retry")
+                }
+                CopyReportButton(model: model, gameID: session.gameID, operations: [session.kind.rawValue], fallback: session.message)
+            }
         }
         .accessibilityIdentifier("phone.failed")
+    }
+
+    // ---- 会挤掉别处装的游戏：就在这页里问（「仍然继续」/「先不」），不弹散的对话框 ----
+    private var dropAsk: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.building)), title: t("install.drop_title"), subtitle: loc.backend(session.message))
+            HStack(spacing: 12) {
+                Button { if let d = model.dropConfirm { model.confirmDrop(d) } } label: { LauncherHeroActionLabel(title: t("install.drop_confirm"), symbol: "arrow.right") }
+                    .buttonStyle(.plain).accessibilityIdentifier("phone.drop.confirm")
+                Button(t("phone.drop.cancel")) { model.dropConfirm = nil; model.backToLibrary() }
+                    .buttonStyle(LauncherSecondaryButtonStyle()).accessibilityIdentifier("phone.drop.cancel")
+            }
+        }
+        .accessibilityIdentifier("phone.drop")
     }
 
     private func headline(seal: AnyView, title: String, subtitle: String) -> some View {

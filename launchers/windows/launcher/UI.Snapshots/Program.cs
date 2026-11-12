@@ -173,6 +173,9 @@ TrackField("Suggestion", "把 iPhone 解锁，插上数据线或和这台电脑�
 SetW(pack, "updateMessage", "读不出 iPhone「我的 iPhone」上已经装了哪些游戏，为免把别的游戏挤掉，这次没装。");
 SetW(pack, "updateState", "failed");
 SaveP("win_22_phone_update_failed", () => Navigate(pack, "phoneupdate"));
+SetW(pack, "updateMessage", "这次会让手机上的 1 款游戏暂时不能玩：示例游戏。它们不是在这台电脑上装的，存档和资源包都还在手机上，到原来那台电脑上再点一次「装到 iPhone」就能回来。");
+SetW(pack, "updateState", "drop");
+SaveP("win_23_phone_update_drop", () => Navigate(pack, "phoneupdate"));
 
 // 封面兜底：游戏包没带图标时用商店横图（banner.jpg），在方形卡片里铺满裁切；没有横图才是 S2Arm 标志
 var bannerSrc = Environment.GetEnvironmentVariable("S2A_SNAPSHOT_BANNER") ?? "";

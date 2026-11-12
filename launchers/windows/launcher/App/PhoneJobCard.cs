@@ -71,12 +71,31 @@ public sealed partial class EnvironmentWindow
 {
     private readonly PhoneJobTrack installTrack = new(), updateTrack = new();
 
-    /// <summary>手机作业卡片。state：running / succeeded / needsPlayer / failed / invalid / interrupted / cancelled</summary>
-    private Control PhoneJobCard(PhoneJobTrack tr, string state, string message, string diagnostics, string? gameId, IReadOnlyList<string>? notes = null)
+    /// <summary>手机作业卡片。state：running / succeeded / needsPlayer / failed / invalid / interrupted / cancelled / drop（会挤掉别处装的游戏，页内确认）。
+    /// retry：失败时的「重试」；confirmDrop / cancelDrop：drop 态的「仍然继续」/「先不」（在这页里问，不弹散的对话框）</summary>
+    private Control PhoneJobCard(PhoneJobTrack tr, string state, string message, string diagnostics, string? gameId, IReadOnlyList<string>? notes = null,
+        Action? retry = null, Action? confirmDrop = null, Action? cancelDrop = null)
     {
         var device = tr.Device.Length > 0 ? tr.Device : T("phone.device.unknown");
         var panel = new StackPanel { Spacing = 22, HorizontalAlignment = HorizontalAlignment.Stretch };   // 撑满卡片、贴左（同别的卡片对齐）：进度条、详细过程不被压窄
         AutomationId(panel, "phone." + state);
+        var title = Label(T("phone.title." + tr.Kind), 18); title.FontWeight = FontWeight.Bold;   // 这是什么操作（维护者：只看得到「更新中 · …」一小行）
+        AutomationId(title, "phone.operation");
+        panel.Children.Add(title);
+        if (state == "drop")
+        {
+            panel.Children.Add(Seal("!", "#FFC857"));
+            panel.Children.Add(Headline(T("install.drop_title")));
+            if (message.Length > 0) panel.Children.Add(WrappedMuted(B(message), 16));
+            var choose = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+            var go = Primary(T("install.drop_confirm"), () => confirmDrop?.Invoke(), confirmDrop is not null);
+            AutomationId(go, "phone.drop.confirm");
+            var notNow = Action("phone.drop.cancel", () => cancelDrop?.Invoke(), cancelDrop is not null);
+            AutomationId(notNow, "phone.drop.cancel");
+            choose.Children.Add(go); choose.Children.Add(notNow);
+            panel.Children.Add(choose);
+            return panel;
+        }
         if (state == "running")
         {
             var status = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -92,6 +111,8 @@ public sealed partial class EnvironmentWindow
             pct.Children.Add(label);
             panel.Children.Add(pct);
             panel.Children.Add(new ProgressBar { Minimum = 0, Maximum = 1, Value = value, Height = 10, Foreground = Brush.Parse("#F3E7D3"), CornerRadius = new CornerRadius(5) });
+            // 「需要你动手」的醒目提示只在 Mac（钥匙串授权，作业事件 keychainPrompt）：Windows 装机走 Impactor 命令行，过程中不停下来等玩家
+            //   （Apple ID 登录过期直接以 apple_session_expired 失败、失败页给「打开 Impactor 重新登录」），没有要提示的时刻
             var steps = new StackPanel { Spacing = 10 };
             for (var k = 0; k < tr.Stages.Count; k++)
             {
@@ -165,17 +186,36 @@ public sealed partial class EnvironmentWindow
                 next.Children.Add(text);
                 panel.Children.Add(next);
             }
-            panel.Children.Add(CopyReportButton(gameId, [tr.Kind], () => message + "\n" + diagnostics));
+            var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+            if (retry is not null)
+            {
+                var again = Primary(T("phone.retry"), retry);
+                AutomationId(again, "phone.retry");
+                actions.Children.Add(again);
+            }
+            actions.Children.Add(CopyReportButton(gameId, [tr.Kind], () => message + "\n" + diagnostics));
+            panel.Children.Add(actions);
         }
         var log = string.Join("\n", tr.Log.Select(B)) + (diagnostics.Length > 0 && state is not ("running" or "succeeded") ? "\n\n" + diagnostics : "");
-        if (log.Trim().Length > 0)
-        {
-            var details = new Expander { Header = T("phone.details"), IsExpanded = false, HorizontalAlignment = HorizontalAlignment.Stretch,
-                Content = new TextBox { Text = log.Trim(), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260 } };
-            AutomationId(details, "phone.details");
-            panel.Children.Add(details);
-        }
+        if (log.Trim().Length > 0) panel.Children.Add(DetailsToggle(T("phone.details"), log.Trim()));
         return panel;
+    }
+
+    /// <summary>「详细过程」：自己画的折叠头，箭头是矢量路径（Expander 的箭头是字体字形，部分 Windows 字体里没有，显示成一个「厂」字）</summary>
+    private Control DetailsToggle(string header, string text)
+    {
+        var body = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260, IsVisible = false };
+        var chevron = new Avalonia.Controls.Shapes.Path { Data = Geometry.Parse("M 0,0 L 5,5 L 0,10"), Stroke = Brush.Parse("#A8A6A1"), StrokeThickness = 1.6,
+            Width = 7, Height = 11, VerticalAlignment = VerticalAlignment.Center, RenderTransformOrigin = RelativePoint.Center };
+        var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        head.Children.Add(chevron);
+        head.Children.Add(Muted(header, 14));
+        var toggle = new Button { Content = head, Background = Brushes.Transparent, Padding = new Thickness(0, 4), BorderThickness = new Thickness(0) };
+        AutomationId(toggle, "phone.details");
+        toggle.Click += (_, _) => { body.IsVisible = !body.IsVisible; chevron.RenderTransform = body.IsVisible ? new RotateTransform(90) : null; };
+        var stack = new StackPanel { Spacing = 8 };
+        stack.Children.Add(toggle); stack.Children.Add(body);
+        return stack;
     }
 
     private static Border Seal(string glyph, string color) => new()

@@ -137,14 +137,7 @@ struct PhoneUpdateButton: View {
                 Text(t("update.confirm.body").replacingOccurrences(of: "{0}", with: u.stale.map(\.name).joined(separator: "」「"))
                         .replacingOccurrences(of: "{1}", with: "\(u.games.count - u.stale.count)"))
             }
-            // 更新会让手机上别的电脑装的游戏暂时不能玩：同装机页的确认框（作业层原话列出是哪几款）
-            .alert(t("install.drop_title"), isPresented: Binding(get: { model.dropConfirm?.update != nil }, set: { if !$0 { model.dropConfirm = nil } }),
-                   presenting: model.dropConfirm) { d in
-                Button(t("install.drop_confirm"), role: .destructive) { model.confirmDrop(d) }
-                Button(t("update.confirm.cancel"), role: .cancel) {}
-            } message: { d in
-                Text(d.message)
-            }
+            // 更新会让手机上别的电脑装的游戏暂时不能玩：在更新页里问（PhoneJobPanel.dropAsk），不在这里弹框
         }
     }
 }

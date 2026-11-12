@@ -26,6 +26,13 @@ public sealed partial class EnvironmentWindow
     private string? updateOutcome;
     /// <summary>更新手机上的 S2Arm 这一单的状态（running / succeeded / failed / cancelled）：更新页的结局卡（PhoneJobCard）按它画</summary>
     private string updateState = "", updateMessage = "";
+    private (bool AcceptStale, IReadOnlyList<string> Repack) lastUpdate = (false, []);
+
+    /// <summary>更新页（page = "phoneupdate"）：结局卡 + 失败重试 + 挤掉确认（页内）</summary>
+    private Control PhoneUpdateCard() => PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null,
+        retry: updateState is "failed" or "invalid" or "interrupted" ? () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack) : null,
+        confirmDrop: () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, acceptDropped: true),
+        cancelDrop: () => { updateState = ""; updateOutcome = null; Navigate("library"); });
     private string updateDiagnostics = "";
     /// <summary>这一批是「更新并重新出这几款」排的：整批出完（没暂停、没取消）逐款装到 iPhone（BatchFinishedAsync）</summary>
     private bool batchInstallAfter;
@@ -201,6 +208,7 @@ public sealed partial class EnvironmentWindow
     private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, bool acceptDropped = false, bool ask = true)
     {
         if (installBusy || packRunning || connectedFolder is null || libraryId is null) return;
+        lastUpdate = (acceptStale, repack);   // 失败页「重试」/ 挤掉确认的「仍然继续」按同样的参数再来
         var front = BeginJob(JobKind.Phone); phoneUpdating = true; updateOutcome = null; updateDiagnostics = ""; updateDone = updateTotal = null;
         updateState = "running";
         updateTrack.Begin("installUpdate", InstallTargetLabel); updateMessage = "";   // 实际装上的那台作业结束后按结果改（PhoneJobTrack.Finish）
@@ -229,7 +237,8 @@ public sealed partial class EnvironmentWindow
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { updateOutcome = error.Message.Length > 0 ? error.Message : error.GetType().Name; updateMessage = updateOutcome; updateState = error is OperationCanceledException ? "cancelled" : "failed"; updateTrack.Ended = DateTime.UtcNow; }
         finally { EndJob(front); phoneUpdating = false; Render(); }
-        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) { await UpdatePhoneAsync(acceptStale, repack, acceptDropped: true); return; }
+        // 会挤掉别处装的游戏：就在更新页里问（「仍然继续」/「先不」），不弹散的对话框（维护者 11-11：更新要有一页引导整个流程）
+        if (dropAsk is not null) { updateState = "drop"; updateMessage = dropAsk; Render(); return; }
         await RefreshLibraryAsync();   // 游戏库作业在跑就记一笔、那一轮完了补刷（剃刀 W8），不再跳过
         if (!succeeded || repack.Count == 0 || batchRunning || PackBusy) return;
         OpenBatch(repack, []);

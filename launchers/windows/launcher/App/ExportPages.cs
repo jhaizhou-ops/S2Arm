@@ -193,7 +193,7 @@ public sealed partial class EnvironmentWindow
 
         if (page == "build") RenderExport(contentBody);
         else if (page == "progress") RenderProgress(contentBody);
-        else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null)));   // 更新手机上的 S2Arm（InstallModePage.cs）
+        else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneUpdateCard()));   // 更新手机上的 S2Arm（InstallModePage.cs）
         else RenderInstall(contentBody);
 
         // 底部操作栏

@@ -809,6 +809,12 @@ public final class S2ArmLauncherModel: ObservableObject {
     struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String? }
     struct DropConfirm { let kind: JobSession.Kind; var game: GameSummary? = nil; let message: String; var update: UpdateArgs? = nil }
     @Published var dropConfirm: DropConfirm?
+    /// 上一次「更新手机上的 S2Arm」的参数：失败页「重试」按它再来
+    var lastUpdateArgs: UpdateArgs?
+    func retryPhoneUpdate() {
+        guard let a = lastUpdateArgs else { return }
+        updatePhone(acceptStale: a.acceptStale, repack: a.repack, language: a.language, device: a.device)
+    }
 
     /// 环境检查「装到 iPhone 的方式」里手填的 Xcode 团队号（10 位）：一键装、不用证书时每次装机都带上（原先只在装机页点「用这个团队」那一次带）
     static let teamCodeKey = "s2arm.enteredTeamCodeId"
