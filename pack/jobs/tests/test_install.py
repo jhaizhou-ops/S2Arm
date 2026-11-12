@@ -1462,7 +1462,7 @@ class PhoneGamesTruthTests(unittest.TestCase):
             self.assertEqual(install.phone_games(self.c, self.ph(missing=False)), set())
 
     def test_windows_real_device_socket_text(self):
-        """jhz 11-11 天眼实测原文：删了手机上的 S2Arm 再装，Windows 上 s2a-devpush 进不了容器只回「device socket io failed」。
+        """11-11 Windows 实机原文：删了手机上的 S2Arm 再装，Windows 上 s2a-devpush 进不了容器只回「device socket io failed」。
         走真的 WinPhone.app_missing：旧工具只有这句原文 → 判不了 → 照装（空集）；新工具查过 installation_proxy 打 S2A_APP_MISSING → None（确实没装）"""
         win = install.WinPhone.__new__(install.WinPhone); win.c = self.c; win.udid = "U1"; win.bid = "io.s2arm.games.d9g8my5fb5"; win.info = {}
         raw = "取不到 io.s2arm.games.d9g8my5fb5 的容器（App 没装或不是开发签名）：device socket io failed"
