@@ -74,7 +74,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>手机作业卡片。state：running / succeeded / needsPlayer / failed / invalid / interrupted / cancelled / drop（会挤掉别处装的游戏，页内确认）。
     /// retry：失败时的「重试」；confirmDrop / cancelDrop：drop 态的「仍然继续」/「先不」（在这页里问，不弹散的对话框）</summary>
     private Control PhoneJobCard(PhoneJobTrack tr, string state, string message, string diagnostics, string? gameId, IReadOnlyList<string>? notes = null,
-        Action? retry = null, Action? confirmDrop = null, Action? cancelDrop = null)
+        Action? retry = null, Action? confirmDrop = null, Action? cancelDrop = null, string? dropTitle = null)
     {
         var device = tr.Device.Length > 0 ? tr.Device : T("phone.device.unknown");
         var panel = new StackPanel { Spacing = 22, HorizontalAlignment = HorizontalAlignment.Stretch };   // 撑满卡片、贴左（同别的卡片对齐）：进度条、详细过程不被压窄
@@ -85,7 +85,7 @@ public sealed partial class EnvironmentWindow
         if (state == "drop")
         {
             panel.Children.Add(Seal("!", "#FFC857"));
-            panel.Children.Add(Headline(T("install.drop_title")));
+            panel.Children.Add(Headline(dropTitle ?? T("install.drop_title")));
             if (message.Length > 0) panel.Children.Add(WrappedMuted(B(message), 16));
             var choose = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
             var go = Primary(T("install.drop_confirm"), () => confirmDrop?.Invoke(), confirmDrop is not null);

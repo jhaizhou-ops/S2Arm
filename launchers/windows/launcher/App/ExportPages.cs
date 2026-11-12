@@ -1248,17 +1248,33 @@ public sealed partial class EnvironmentWindow
         }
     }
 
-    /// <summary>acceptDropped: the player confirmed games installed from another computer can't come along this time
-    /// (job code container_would_drop). ask = false (control port) fails as-is instead of popping the dialog.</summary>
-    private async Task InstallAsync(LibraryGame game, bool acceptDropped = false, bool ask = true)
+    /// <summary>
+    /// 作业层认得出、玩家同意就能继续的停装码 → 续跑时带的参数（同 Mac S2ArmLauncherModel.confirmCodes）。
+    /// 维护者 11-11：「玩家都主动点装机了……能认出的问题让用户确认，用户确认可以继续装，认不出的直接装」。
+    /// container_would_drop：手机上别的电脑装的游戏这次带不上；save_backup_failed：覆盖前没能备份手机上的存档；container_stale：旧资源包要按新版重出。
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, string> ConfirmCodes = new Dictionary<string, string>
+    {
+        ["container_would_drop"] = "acceptDropped", ["save_backup_failed"] = "acceptNoBackup", ["container_stale"] = "acceptStale",
+    };
+
+    /// <summary>可确认的停装码要问的那句标题：文案表有 errors.&lt;码&gt;.title 就用它，没有用通用的 install.drop_title</summary>
+    private string ConfirmTitle(string? code) => code is { Length: > 0 } && text.Has("errors." + code + ".title") ? T("errors." + code + ".title") : T("install.drop_title");
+
+    /// <summary>控制口请求里带的确认参数（acceptDropped / acceptNoBackup / acceptStale）</summary>
+    private static HashSet<string> AcceptFlags(ControlRequest r) => ConfirmCodes.Values.Where(r.Flag).ToHashSet();
+
+    /// <summary>accept：玩家已同意的确认参数（ConfirmCodes 的值，逐次累积）。ask = false（控制口）原样失败、不弹确认，由调用方带参数再发。</summary>
+    private async Task InstallAsync(LibraryGame game, IReadOnlySet<string>? accept = null, bool ask = true)
     {
         if (installBusy || !InstallAllowed) return;
+        accept ??= new HashSet<string>();
         var front = BeginPhoneJob(game, "");
-        string? dropAsk = null;
+        string? dropAsk = null, askCode = null;
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, DropExtra(acceptDropped, InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
-            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            var job = await PackJobClient.RunAsync(PackRequest("install", game.Id, AcceptExtra(accept, InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
+            if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; askCode = c; }
             installedTo = job.Report.Succeeded ? InstalledLabel(job.Report.Result) : "";
             installCode = job.Report.Succeeded ? null : JobCode(job);
             installState = job.Report.State;
@@ -1276,7 +1292,8 @@ public sealed partial class EnvironmentWindow
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { installState = "failed"; installDiagnostics = error.Message; }
         finally { EndJob(front); readinessFor = null; Render(); }
-        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) await InstallAsync(game, acceptDropped: true);
+        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk, ConfirmTitle(askCode)))
+            await InstallAsync(game, new HashSet<string>(accept) { ConfirmCodes[askCode!] });
     }
 
     /// 装到哪台：清单报回来的那台（续签时就是当初那台，在线才有），没有就是装机记录里的那台（不在线时作业层如实说「它不在线」）。
@@ -1296,10 +1313,10 @@ public sealed partial class EnvironmentWindow
 
     private static Dictionary<string, object?>? DeviceExtra(string device) => device.Length > 0 ? new() { ["device"] = device } : null;
 
-    private static Dictionary<string, object?>? DropExtra(bool acceptDropped, string device = "")
+    private static Dictionary<string, object?>? AcceptExtra(IReadOnlySet<string> accept, string device = "")
     {
         var extra = new Dictionary<string, object?>();
-        if (acceptDropped) extra["acceptDropped"] = true;
+        foreach (var key in accept) extra[key] = true;
         if (device.Length > 0) extra["device"] = device;
         return extra.Count > 0 ? extra : null;
     }
@@ -1387,19 +1404,19 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>Confirm dialog for a phone-side action; texts are &lt;prefix&gt;_title / _body / _confirm.</summary>
-    private async Task<bool> ConfirmInstallActionAsync(string prefix, string? bodyText = null)
+    private async Task<bool> ConfirmInstallActionAsync(string prefix, string? bodyText = null, string? titleText = null)
     {
         if (installBusy || packRunning) return false;
         var dialog = new Window
         {
-            Title = T(prefix + "_title"), Width = 420, SizeToContent = SizeToContent.Height,
+            Title = titleText ?? T(prefix + "_title"), Width = 420, SizeToContent = SizeToContent.Height,
             CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = Canvas, Foreground = Ink,
             FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope")
         };
         var confirmed = false;
         var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
-        body.Children.Add(Label(T(prefix + "_title"), 20));
+        body.Children.Add(Label(titleText ?? T(prefix + "_title"), 20));
         body.Children.Add(Muted(bodyText ?? T(prefix + "_body"), 14));
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
         var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9),
@@ -1419,15 +1436,16 @@ public sealed partial class EnvironmentWindow
     }
 
     /// <summary>installRemove / installRestore; texts are &lt;prefix&gt;_running / _done / _failed.</summary>
-    private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix, bool acceptDropped = false, bool ask = true)
+    private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix, IReadOnlySet<string>? accept = null, bool ask = true)
     {
         if (installBusy || packRunning) return;
+        accept ??= new HashSet<string>();
         var front = BeginPhoneJob(game, T(prefix + "_running"), operation);
-        string? dropAsk = null;
+        string? dropAsk = null, askCode = null;
         try
         {
-            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id, DropExtra(acceptDropped, game.IphoneInstallDevice is { Length: > 0 } d ? d : InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
-            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            var job = await PackJobClient.RunAsync(PackRequest(operation, game.Id, AcceptExtra(accept, game.IphoneInstallDevice is { Length: > 0 } d ? d : InstallDevice(game))), e => Dispatcher.UIThread.Post(() => IngestPhoneEvent(e)), front.Token, front.Next());
+            if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; askCode = c; }
             installState = job.Report.State;
             installMessage = job.Report.Succeeded ? T(prefix + "_done") : job.Report.Message;
             installDiagnostics = JobDiagnostics(job);
@@ -1438,7 +1456,8 @@ public sealed partial class EnvironmentWindow
             OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
         { installState = "failed"; installMessage = T(prefix + "_failed"); installDiagnostics = error.Message; }
         finally { EndJob(front); Render(); }
-        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) await RunPhoneJobAsync(game, operation, prefix, acceptDropped: true);
+        if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk, ConfirmTitle(askCode)))
+            await RunPhoneJobAsync(game, operation, prefix, new HashSet<string>(accept) { ConfirmCodes[askCode!] });
     }
 
     /// <summary>Closing while a pack runs: cancel through the job control plane first, then close.</summary>

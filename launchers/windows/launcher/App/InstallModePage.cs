@@ -26,12 +26,16 @@ public sealed partial class EnvironmentWindow
     private string? updateOutcome;
     /// <summary>更新手机上的 S2Arm 这一单的状态（running / succeeded / failed / cancelled）：更新页的结局卡（PhoneJobCard）按它画</summary>
     private string updateState = "", updateMessage = "";
-    private (bool AcceptStale, IReadOnlyList<string> Repack) lastUpdate = (false, []);
+    private (bool AcceptStale, IReadOnlyList<string> Repack, IReadOnlySet<string> Accept) lastUpdate = (false, [], new HashSet<string>());
+    /// <summary>更新页 drop 态问的是哪个码（ConfirmCodes 的键）：「仍然继续」带上它对应的参数</summary>
+    private string updateAskCode = "";
 
     /// <summary>更新页（page = "phoneupdate"）：结局卡 + 失败重试 + 挤掉确认（页内）</summary>
     private Control PhoneUpdateCard() => PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null,
-        retry: updateState is "failed" or "invalid" or "interrupted" ? () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack) : null,
-        confirmDrop: () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, acceptDropped: true),
+        retry: updateState is "failed" or "invalid" or "interrupted" ? () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack, lastUpdate.Accept) : null,
+        confirmDrop: () => _ = UpdatePhoneAsync(lastUpdate.AcceptStale, lastUpdate.Repack,
+            new HashSet<string>(lastUpdate.Accept) { ConfirmCodes.GetValueOrDefault(updateAskCode, "acceptDropped") }),
+        dropTitle: ConfirmTitle(updateAskCode),
         cancelDrop: () => { updateState = ""; updateOutcome = null; Navigate("library"); });
     private string updateDiagnostics = "";
     /// <summary>这一批是「更新并重新出这几款」排的：整批出完（没暂停、没取消）逐款装到 iPhone（BatchFinishedAsync）</summary>
@@ -205,10 +209,11 @@ public sealed partial class EnvironmentWindow
     /// </summary>
     /// acceptDropped / ask 同 InstallAsync：会让手机上别的电脑装的游戏暂时不能玩（container_would_drop）时，界面发起的弹同一个确认框、确认后带 acceptDropped 重跑；
     /// 控制口发起的不弹、原样失败，由调用方带 acceptDropped 再发（v0.3.0 只换壳验收：原先这条路没接确认，提示「确认继续再点一次」却永远过不去）
-    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, bool acceptDropped = false, bool ask = true)
+    private async Task UpdatePhoneAsync(bool acceptStale, IReadOnlyList<string> repack, IReadOnlySet<string>? accept = null, bool ask = true)
     {
         if (installBusy || packRunning || connectedFolder is null || libraryId is null) return;
-        lastUpdate = (acceptStale, repack);   // 失败页「重试」/ 挤掉确认的「仍然继续」按同样的参数再来
+        accept ??= new HashSet<string>();
+        lastUpdate = (acceptStale, repack, accept);   // 失败页「重试」/ 挤掉确认的「仍然继续」按同样的参数再来
         var front = BeginJob(JobKind.Phone); phoneUpdating = true; updateOutcome = null; updateDiagnostics = ""; updateDone = updateTotal = null;
         updateState = "running";
         updateTrack.Begin("installUpdate", InstallTargetLabel); updateMessage = "";   // 实际装上的那台作业结束后按结果改（PhoneJobTrack.Finish）
@@ -221,14 +226,14 @@ public sealed partial class EnvironmentWindow
             // 更新哪台：壳旧了的那台（phoneUpdates 的设备记录键），作业层不自己挑
             var extra = new Dictionary<string, object?>();
             if (acceptStale) extra["acceptStale"] = true;
-            if (acceptDropped) extra["acceptDropped"] = true;
+            foreach (var key in accept) extra[key] = true;
             if (PhoneUpdateTarget is { Device.Length: > 0 } target) extra["device"] = target.Device;
             var job = await PackJobClient.RunAsync(PackRequest("installUpdate", "", extra.Count > 0 ? extra : null),
                 e => Dispatcher.UIThread.Post(() => IngestUpdateEvent(e)), front.Token, front.Next());
             succeeded = job.Report.Succeeded;
             updateTrack.Finish(job, GameName);
             updateState = job.Report.State;
-            if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
+            if (ask && JobCode(job) is { } c && ConfirmCodes.ContainsKey(c)) { dropAsk = job.Report.Message; updateAskCode = c; }
             updateOutcome = succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
             updateMessage = succeeded ? "" : updateOutcome;
             updateDiagnostics = succeeded ? "" : JobDiagnostics(job);
@@ -302,7 +307,7 @@ public sealed partial class EnvironmentWindow
                 ["ok"] = false, ["error"] = "这几款要按新版重新出包，重新出包前暂时打不开：带 acceptStale 确认（repack 为真时更新完把它们排进批量出包、出完自动装）",
                 ["stale"] = stale
             }, 409);
-        _ = UpdatePhoneAsync(accept, r.Flag("repack") ? u.Stale.Select(g => g.Id).ToList() : [], r.Flag("acceptDropped"), ask: false);   // 同 /install
+        _ = UpdatePhoneAsync(accept, r.Flag("repack") ? u.Stale.Select(g => g.Id).ToList() : [], AcceptFlags(r), ask: false);   // 同 /install
         return ControlReply.Json(new Dictionary<string, object?> { ["ok"] = true, ["stale"] = stale });
     }
 }
