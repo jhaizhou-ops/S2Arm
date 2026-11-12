@@ -417,7 +417,20 @@ static void t_program_bind_stages(void) {
     stream f = {0}; id = put(&f, OP_BIND_PROGRAM, sizeof *id); id->prog = NULL; id->serial = 0; id->stages = 0x4;
     end(&f); nvn_be_exec(f.b);
     CHECK(rp_S.bser[2] == 0 && rp_S.bser[0] == 51 && rp_S.bser[1] == 51);
-    // 6) 阶段认不出（快照有项但 stage_of = 0xff）：旧规则，掩码照单全收，留给绘制时按名字报。
+    // 6) 只有 VS 的程序用 0x1f 绑：片元阶段保留上一次（FS 不能被顶掉）。
+    g_snap_prog = &pc; memset(g_snap_stage, 0xff, sizeof g_snap_stage); g_snap_stage[0] = 0; g_snap_stage[1] = 1; g_snap_stage[2] = 2; g_snap_ok = 0x7;
+    { stream r = {0}; id = put(&r, OP_BIND_PROGRAM, sizeof *id); id->prog = &pc; id->serial = 51; id->stages = 0x1f; end(&r); nvn_be_exec(r.b); }
+    prog_t pd; memset(&pd, 0, sizeof pd); pd.magic = MAGIC('P', 'R', 'O', 'G'); pd.serial = 61; pd.nstage = 1;
+    memset(g_snap_stage, 0xff, sizeof g_snap_stage); g_snap_stage[0] = 0;
+    { uint8_t k[6][8]; memset(k, 0, sizeof k); k[0][0] = 4; memcpy(g_snap_keys, k, sizeof k); }
+    g_snap_ok = 0x1; g_snap_prog = &pd;
+    { stream s = {0}; id = put(&s, OP_BIND_PROGRAM, sizeof *id); id->prog = &pd; id->serial = 61; id->stages = 0x1f; end(&s); nvn_be_exec(s.b); }
+    CHECK(rp_S.bser[0] == 61 && rp_S.bser[1] == 51);   // VS 换新，FS 保留
+    CHECK(rp_shader_graphics_stages() == 3u);
+    // 7) 显式解绑 FS：空程序只覆盖 FS 位 → FS 解绑，VS 不动。
+    { stream v = {0}; id = put(&v, OP_BIND_PROGRAM, sizeof *id); id->prog = NULL; id->serial = 0; id->stages = 0x2; end(&v); nvn_be_exec(v.b); }
+    CHECK(rp_S.bser[1] == 0 && rp_S.bser[0] == 61 && rp_shader_graphics_stages() == 1u);
+    // 8) 阶段认不出（快照有项但 stage_of = 0xff）：旧规则，掩码照单全收，留给绘制时按名字报。
     memset(g_snap_stage, 0xff, sizeof g_snap_stage); g_snap_ok = 0x1; g_snap_prog = &pa;
     stream g = {0}; id = put(&g, OP_BIND_PROGRAM, sizeof *id); id->prog = &pa; id->serial = 31; id->stages = 0x1f;
     end(&g); nvn_be_exec(g.b);
