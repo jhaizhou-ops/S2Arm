@@ -93,9 +93,10 @@ public sealed partial class EnvironmentWindow
     private bool installSeen = true;
 
     /// 开始一个手机作业：登记（只锁这一款）、记下是哪一款、清掉上次的计数
-    private FrontJob BeginPhoneJob(LibraryGame game, string message)
+    private FrontJob BeginPhoneJob(LibraryGame game, string message, string kind = "install")
     {
         var job = BeginJob(JobKind.Phone, game.Id);
+        installTrack.Begin(kind, InstallTargetLabel);   // 手机作业结局卡（PhoneJobCard.cs）的过程与事实
         installState = "running"; installMessage = message; installDiagnostics = "";
         installGameId = game.Id; installGameName = game.Name; installSeen = false;
         installDone = installTotal = null; installUnit = ""; installRate = null;
@@ -106,6 +107,7 @@ public sealed partial class EnvironmentWindow
     /// 作业事件 → 安装页文字与计数（推资源包：已传 / 本次待传字节；机上解包：k / n 包）。单位变了（传完进解包）计数与速度重新算
     private void IngestPhoneEvent(JsonElement e)
     {
+        installTrack.Ingest(e);
         if (e.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String && m.GetString() is { Length: > 0 } text) installMessage = text;
         if (e.TryGetProperty("done", out var d) && d.ValueKind == JsonValueKind.Number && e.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number && t.GetInt64() > 0)
         {
@@ -182,7 +184,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>Pages owned by this file; false = not one of them.</summary>
     private bool RenderPackPages(StackPanel body)
     {
-        if (page is not ("build" or "progress" or "install")) return false;
+        if (page is not ("build" or "progress" or "install" or "phoneupdate")) return false;
         EnsureTicker();
         if (page == "progress" && packGame is null) page = "build";
 
@@ -191,6 +193,7 @@ public sealed partial class EnvironmentWindow
 
         if (page == "build") RenderExport(contentBody);
         else if (page == "progress") RenderProgress(contentBody);
+        else if (page == "phoneupdate") contentBody.Children.Add(Card(PhoneJobCard(updateTrack, updateState, updateMessage, updateDiagnostics, null)));   // 更新手机上的 S2Arm（InstallModePage.cs）
         else RenderInstall(contentBody);
 
         // 底部操作栏
@@ -1197,40 +1200,24 @@ public sealed partial class EnvironmentWindow
             if (!installBusy) installSeen = true;   // 回到这款的安装页看过结果，顶栏胶囊收起
             body.Children.Add(LiveSlot(() => InstallStateCard(game)));   // 装机进度事件只刷新这一格（IngestPhoneEvent）
         }
-        if (installDiagnostics.Length > 0)
-            body.Children.Add(new Expander { Header = T("library.job_diagnostics"), IsExpanded = installState is "failed" or "invalid",
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                Content = new TextBox { Text = installDiagnostics, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 260 } });
+        // 作业诊断并进结局卡的「详细过程」（PhoneJobCard），不再另挂一个展开框
     }
 
     /// 安装页的状态卡：标题、进度条、已推 / 剩余、作业说明、复制错误摘要
     private Control InstallStateCard(LibraryGame game)
     {
-        var state = new StackPanel { Spacing = 8 };
-        state.Children.Add(Label(T(installState switch
-        {
-            "running" => "install.running", "succeeded" => "install.done", "needsPlayer" => "install.needs_player", "cancelled" => "progress.cancelled",
-            "invalid" => "library.invalid_result", _ => "install.failed"
-        }).Replace("{0}", InstallTargetLabel), 18));
-        if (installBusy)
-        {
-            var counted = installDone is { } d && installTotal is { } t && t > 0;
-            state.Children.Add(counted
-                ? new ProgressBar { Minimum = 0, Maximum = 1, Value = (double)installDone!.Value / installTotal!.Value, Height = 6 }
-                : new ProgressBar { IsIndeterminate = true, Height = 4 });
-            if (PhoneProgressText() is { Length: > 0 } progress) state.Children.Add(Muted(progress));
-        }
-        if (installState == "succeeded" && installOpenToFinish) state.Children.Add(Label(T("install.done.open"), 15));
-        if (installMessage.Length > 0) state.Children.Add(Muted(installMessage));
+        // 装机 / 续签 / 删除 / 装回：同一张结局卡（PhoneJobCard.cs，同 Mac PhoneJobPanel）；Apple ID 登录过期另给「打开 Impactor 重新登录」
+        var notes = new List<string>();
+        if (installState == "succeeded" && installTrack.Kind == "install" && installOpenToFinish) notes.Add(T("install.done.open"));
+        var state = new StackPanel { Spacing = 16 };
+        state.Children.Add(PhoneJobCard(installTrack, installState, installMessage, installDiagnostics, game.Id, notes));
         if (installState is "failed" && installCode == "apple_session_expired")
         {
-            // Apple ID 登录过期（Apple 1100）：打开 Impactor 让玩家自己重新登录（密码不经手），登录好再点一次「装到 iPhone」（上面的说明写了步骤）
+            // Apple ID 登录过期（Apple 1100）：打开 Impactor 让玩家自己重新登录（密码不经手），登录好再点一次「装到 iPhone」
             var relogin = Action("install.relogin", OpenBundledImpactor, File.Exists(BundledImpactor) && !installBusy);
             AutomationId(relogin, "install.relogin");
             state.Children.Add(relogin);
         }
-        if (installState is "failed" or "invalid")
-            state.Children.Add(CopyReportButton(game.Id, ["install", "installRemove", "installRestore"], () => installMessage + "\n" + installDiagnostics));
         return Card(state);
     }
 
@@ -1282,6 +1269,7 @@ public sealed partial class EnvironmentWindow
             { installState = "needsPlayer"; installMessage = pending.GetString() ?? ""; }
             installOpenToFinish = job.Report.Succeeded && job.Report.Result.TryGetProperty("openToFinish", out var open) && open.ValueKind == JsonValueKind.True;
             installDiagnostics = JobDiagnostics(job);
+            installTrack.Finish(job, GameName);
         }
         catch (LibraryProtocolException error) { installState = "invalid"; installDiagnostics = error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
@@ -1295,6 +1283,8 @@ public sealed partial class EnvironmentWindow
     /// 作业层收不到设备号就拒绝、不自己挑（11-11：续签时同网的 iPad 被装上）
     private string InstallDevice(LibraryGame game) =>
         readiness is { Device.Length: > 0 } r && readinessFor == game.Id ? r.Device : game.IphoneInstallDevice;
+
+    private string GameName(string id) => catalog?.Games.FirstOrDefault(g => string.Equals(g.Id, id, StringComparison.OrdinalIgnoreCase))?.Name ?? id;
 
     private static string InstalledLabel(JsonElement result)
     {
@@ -1432,7 +1422,7 @@ public sealed partial class EnvironmentWindow
     private async Task RunPhoneJobAsync(LibraryGame game, string operation, string prefix, bool acceptDropped = false, bool ask = true)
     {
         if (installBusy || packRunning) return;
-        var front = BeginPhoneJob(game, T(prefix + "_running"));
+        var front = BeginPhoneJob(game, T(prefix + "_running"), operation);
         string? dropAsk = null;
         try
         {
@@ -1441,6 +1431,7 @@ public sealed partial class EnvironmentWindow
             installState = job.Report.State;
             installMessage = job.Report.Succeeded ? T(prefix + "_done") : job.Report.Message;
             installDiagnostics = JobDiagnostics(job);
+            installTrack.Finish(job, GameName);
         }
         catch (LibraryProtocolException error) { installState = "invalid"; installDiagnostics = error.Message; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or

@@ -67,6 +67,18 @@ class Replay(unittest.TestCase):
             old.append((sum(w[x] for x in order[:order.index(m)]) + w[m] * fill) / total)
         self.assertTrue(any(b < a for a, b in zip(old, old[1:])), "旧算法在这份事件流上确有回退")
 
+    def test_jobs_without_plan_move_by_steps(self):
+        # 装到手机 / 更新手机上的 S2Arm 等没有 plan 的作业：按「第几步 / 共几步」+ 本步计数推，只增不减，成功才 1。期望手算
+        o = overall.Overall()
+        self.assertEqual(o.feed("stage", 0.1, None, "running", 1, 6), 0.0)
+        self.assertEqual(o.feed("stage", 2.0, None, "running", 2, 6), round(1 / 6, 4))
+        self.assertEqual(o.feed("progress", 9.0, None, "running", 5, 6, 50, 100), round((4 + 0.5) / 6, 4))
+        self.assertEqual(o.feed("stage", 9.5, None, "running", 1, 1), round((4 + 0.5) / 6, 4), "收尾的 1/1 阶段不让进度回退")
+        self.assertEqual(o.feed("result", 10.0, None, "succeeded"), 1.0)
+        f = overall.Overall()
+        f.feed("stage", 0.1, None, "running", 2, 4)
+        self.assertEqual(f.feed("result", 1.0, None, "failed"), 0.25, "失败停在原处")
+
     def test_no_plan_no_overall(self):
         o = overall.Overall()
         self.assertIsNone(o.feed("progress", 1.0, None))

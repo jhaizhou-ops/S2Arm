@@ -15,7 +15,10 @@
   计数器不参与：同一步里几个计数器先后出现、互不嵌套，任何一个都不代表整步。
 - overall = (前面各步权重和 + 本步权重 × 本步完成度) ÷ 权重总和，最多 RUN_CAP；只增不减（取历史最大）。
 - 成功的结果事件（state succeeded / completed）才到 1。失败、取消停在原处。
-- 没有 plan、或当前里程碑不在 plan 里（导入、准备等别的作业）：不给 overall（None），前端按原来的计数显示。
+- 没有 plan 的作业（装到手机、续签、删除、装回、更新手机上的 S2Arm…）：按「第几步 / 共几步」（core.begin 的 number / count）推，
+  本步内按本步计数 done / total 插进去：(第几步 − 1 + 本步完成度) ÷ 共几步；同样只增不减、成功才到 1（11-11 维护者：更新页做完还写「正在更新」）。
+  plan 先到、或作业中途才到 plan：从那以后按 plan 算（按步算出的值只用在 plan 到之前，plan 一到从 0 重新按 plan 推）。
+- 既没有 plan、也没有「共几步」：不给 overall（None），前端按原来的计数显示。
 """
 
 STEP_CAP = 0.95
@@ -41,13 +44,13 @@ class Overall:
             return
         self.timed = all(e is not None for _, e in rows) and sum(e for _, e in rows) > 0
         self.weights = [(mid, max(float(e), 1.0) if self.timed else 1.0) for mid, e in rows]   # 每步至少按 1 秒（同前端分段条 weights）
-        if self.value is None:
-            self.value = 0.0
+        if self.value is None or getattr(self, "stepped", False):   # plan 到之前按步算的值作废，从 0 按 plan 推（出包的 plan 在第一条 1/1 阶段之后马上到，那时还是 0）
+            self.value, self.stepped = 0.0, False
 
-    def feed(self, kind, elapsed, milestone, state=None):
+    def feed(self, kind, elapsed, milestone, state=None, step=None, steps=None, done=None, total=None):
         """一条事件 → 这条事件该带的 overall（None = 本作业没有整单进度）"""
         if self.weights is None:
-            return None
+            return self._by_steps(kind, state, step, steps, done, total)
         if kind == "result":
             if state in ("succeeded", "completed"):
                 self.value = 1.0
@@ -63,4 +66,19 @@ class Overall:
             total = sum(w for _, w in self.weights)
             raw = min(RUN_CAP, (before + w * inside) / total) if total > 0 else 0.0
             self.value = max(self.value, raw)
+        return round(self.value, 4)
+
+    def _by_steps(self, kind, state, step, steps, done, total):
+        if kind == "result":
+            if self.value is None:
+                return None
+            if state in ("succeeded", "completed"):
+                self.value = 1.0
+            return round(self.value, 4)
+        if not steps or not step:
+            return None if self.value is None else round(self.value, 4)
+        inside = min(1.0, max(0.0, done / total)) if kind == "progress" and isinstance(done, (int, float)) and isinstance(total, (int, float)) and total > 0 else 0.0
+        raw = min(RUN_CAP, (min(step, steps) - 1 + inside) / steps)
+        self.value = max(self.value or 0.0, raw)
+        self.stepped = True
         return round(self.value, 4)

@@ -56,7 +56,7 @@ enum ExportBlocker: Equatable {
 
 /// 正在跑 / 刚结束的一个作业（一局、出包、准备运行、装到 iPhone、导入、一键处理环境、换游戏库）。同一时刻只有一个（同旧启动器「执行位」互斥）。
 struct JobSession: Equatable {
-    enum Kind: String { case play, export, prepare, install, installRemove, installRestore, installUpdate, importGames = "import", downloadMetal, downloadIosPlatform, installDotnet, setupLibrary = "setup",
+    enum Kind: String, CaseIterable { case play, export, prepare, install, installRemove, installRestore, installUpdate, importGames = "import", downloadMetal, downloadIosPlatform, installDotnet, setupLibrary = "setup",
                         keys, delete, diagnostics, moveGame, clearCache }
     enum Phase: Equatable { case running, stopping, finished(JobOutcome.State) }
     let kind: Kind
@@ -80,6 +80,22 @@ struct JobSession: Equatable {
     var suggestion = ""
     /// 正在跑的那个作业层任务号（最近一个事件的 taskId；出包一个平台一个任务）。控制口 GET /state 的 executionTask 报它（原先恒为空，s2armctl next 判不出「本游戏正在运行」）
     var taskID: String?
+    /// 开工 / 结束的时刻：手机作业结局页的「用时」
+    var started = Date()
+    var ended: Date?
+    /// 走过的阶段（阶段事件的作业层原句，按出现顺序、不重复）：手机作业进行中页的步骤列表
+    var stages: [String] = []
+    /// 手机作业（装到手机 / 续签、删除、装回、更新手机上的 S2Arm）：结局页统一用 PhoneJobPanel
+    var isPhoneJob: Bool { [.install, .installRemove, .installRestore, .installUpdate].contains(kind) }
+}
+
+/// 手机作业做完后结局页要说的事实（从作业结果读，不猜）：装到哪台、这次推了多少、哪几款被跳过
+struct PhoneOutcome: Equatable {
+    var device = ""
+    var packFiles: Int? = nil
+    var packBytes: Int64? = nil
+    var skipped: [String] = []
+    var version = ""
 }
 
 /// 排队的一次出包。
@@ -159,7 +175,11 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 选好了但缺密钥（作业层 keys_missing）：等放入密钥后接着导入。解包好的游戏不要密钥，不经过这里。
     @Published private(set) var pendingImport: [URL] = []
     /// 留在原页显示的作业没成的原因（换作业、关弹窗时清掉）。
-    @Published private(set) var inlineFailure: (kind: JobSession.Kind, message: String)?
+    @Published private(set) var inlineFailure: (kind: JobSession.Kind, message: String, suggestion: String)?
+    /// 最近一次手机作业的结局事实（PhoneJobPanel 成功页用）；每个手机作业开工时清空
+    @Published var phoneOutcome: PhoneOutcome?
+    /// 最近一次结束的手机作业（装机页的结局区读它：作业结束后 session 可能已被别的作业替换）
+    @Published private(set) var lastPhoneSession: JobSession?
     /// 欢迎页上排着队的一键下载（作业同一时刻只有一个）。
     @Published private(set) var repairQueue: [ToolCheck] = []
     /// 新手流程刚导入的那款：欢迎页留着，右下角「一键出包」（点了就回到正常的游戏库）。
@@ -805,10 +825,14 @@ public final class S2ArmLauncherModel: ObservableObject {
         // 装到玩家选的那台（控制口明说了 device 的照它；s2armctl 不带就是空，作业层拒绝）。界面发起的一律带上，不靠作业层挑
         let device = device ?? installDeviceID
         installedTo = ""
+        phoneOutcome = nil
         start(.install, game: game, name: game.name) { [weak self] sink in
             do {
                 let r = try await self?.provider.install(gameId: game.id, teamId: teamId, device: device, acceptDropped: acceptDropped, events: sink)
-                if let r { self?.installedTo = Self.deviceLabel(kind: r.deviceKind, name: r.deviceName) }
+                if let r {
+                    self?.installedTo = Self.deviceLabel(kind: r.deviceKind, name: r.deviceName)
+                    self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r.deviceKind, name: r.deviceName), packFiles: r.packFiles, packBytes: r.packBytes)
+                }
                 self?.installOpenToFinish = r?.openToFinish ?? false
             }
             catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .install, game: game, message: f.errorDescription ?? ""); throw f }
@@ -829,6 +853,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         guard !busy else { return }
         failAction(nil, game: nil)
         let device = device ?? game.iphoneInstallDevice ?? installDeviceID   // 装回当初那台
+        phoneOutcome = PhoneOutcome(device: installTargetLabel)
         start(.installRestore, game: game, name: game.name) { [weak self] sink in
             try await self?.provider.restorePhone(device: device, events: sink)
             return nil
@@ -839,6 +864,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         guard !busy else { return }
         failAction(nil, game: nil)
         let device = device ?? game.iphoneInstallDevice ?? installDeviceID   // 从装着它的那台删
+        phoneOutcome = PhoneOutcome(device: installTargetLabel)
         start(.installRemove, game: game, name: game.name) { [weak self] sink in
             do { _ = try await self?.provider.removeFromPhone(gameId: game.id, acceptDropped: acceptDropped, device: device, events: sink) }
             catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .installRemove, game: game, message: f.errorDescription ?? ""); throw f }
@@ -1171,6 +1197,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         if event.ev == "space", let space = PackSpace(event.fields["space"]) { session.space = space; self.session = session; return }
         if let stage = event.stage, !stage.isEmpty {
             session.stage = stage
+            if event.ev == "stage", session.stages.last != stage { session.stages.append(stage) }
             if session.kind == .play, event.fields["stageKey"] as? String == "game_running" {   // 后端固定机读名（build.py begin key），不认中文阶段名
                 controllerGameStarted = true
                 controller.gameDidStart()
@@ -1208,7 +1235,9 @@ public final class S2ArmLauncherModel: ObservableObject {
         }
         session.reveal = reveal
         session.progress.finish()
+        session.ended = Date()
         self.session = session
+        if session.isPhoneJob { lastPhoneSession = session }
         running = nil; work = nil
         if session.kind == .play, controllerGameStarted {
             controllerGameStarted = false
@@ -1217,7 +1246,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         // 放密钥、添加游戏、欢迎页上的下载：结果留在原页（弹窗 / 欢迎页那一行），不换到日志页（11-08 维护者）；环境页发起的下载成了也直接回来
         if isInline(session) || (state == .completed && Self.repairKinds.contains(session.kind)) {
             self.session = nil
-            inlineFailure = (state == .failed || state == .interrupted) ? (session.kind, session.message) : nil
+            inlineFailure = (state == .failed || state == .interrupted) ? (session.kind, session.message, session.suggestion) : nil
         }
         if state == .completed && session.kind == .install { installDone = session.gameID }
         if session.kind == .installUpdate { phoneUpdateEnded(completed: state == .completed) }

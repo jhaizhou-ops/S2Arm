@@ -88,6 +88,8 @@ public struct InstallResult: Equatable {
     /// 推到手机上的资源包文件数（没推为 nil）。
     public let packFiles: Int?
     public let outputPath: String?
+    /// 这次实际推到手机上的资源包字节数（作业结果 packBytes；0 = 一个都没推）
+    public var packBytes: Int64? = nil
     /// 这次推的全是单一 IMG：已传到手机、打开 S2Arm 会自动完成安装（作业结果 openToFinish）
     public var openToFinish: Bool = false
 }
@@ -138,7 +140,8 @@ public final class InstallService {
         if let device, !device.isEmpty { extra["device"] = device }
         let r = try await client.perform("install", extra: extra, events: events).result
         return InstallResult(device: r["device"] as? String ?? "", deviceKind: r["deviceKind"] as? String ?? "", deviceName: r["deviceName"] as? String ?? "",
-                             packFiles: (r["packFiles"] as? NSNumber)?.intValue, outputPath: r["outputPath"] as? String, openToFinish: r["openToFinish"] as? Bool ?? false)
+                             packFiles: (r["packFiles"] as? NSNumber)?.intValue, outputPath: r["outputPath"] as? String, packBytes: (r["packBytes"] as? NSNumber)?.int64Value,
+                             openToFinish: r["openToFinish"] as? Bool ?? false)
     }
 
     // ---- 开发者证书（v0.2.4，pack/jobs/devcert.py）----

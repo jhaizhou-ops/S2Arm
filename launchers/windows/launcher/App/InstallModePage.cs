@@ -24,6 +24,8 @@ public sealed partial class EnvironmentWindow
     private bool phoneUpdating;
     private long? updateDone, updateTotal;
     private string? updateOutcome;
+    /// <summary>更新手机上的 S2Arm 这一单的状态（running / succeeded / failed / cancelled）：更新页的结局卡（PhoneJobCard）按它画</summary>
+    private string updateState = "", updateMessage = "";
     private string updateDiagnostics = "";
     /// <summary>这一批是「更新并重新出这几款」排的：整批出完（没暂停、没取消）逐款装到 iPhone（BatchFinishedAsync）</summary>
     private bool batchInstallAfter;
@@ -126,9 +128,10 @@ public sealed partial class EnvironmentWindow
         if (phoneUpdating)
         {
             var text = T("update.running") + (updateDone is { } d && updateTotal is { } t && t > 0 ? " · " + (100 * d / t) + "%" : "");
-            var running = new Button { Content = text, IsEnabled = false, Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(16),
+            var running = new Button { Content = text, Padding = new Thickness(14, 8), CornerRadius = new CornerRadius(16),
                 Background = Brush.Parse("#29292D"), Foreground = Ink };
             AutomationId(running, "top.phoneUpdate");
+            running.Click += (_, _) => Navigate("phoneupdate");   // 回到更新页看进度
             return running;
         }
         if (updateOutcome is { } outcome)
@@ -140,7 +143,7 @@ public sealed partial class EnvironmentWindow
                 Background = Brush.Parse("#29292D"), Foreground = Ink };
             ToolTip.SetTip(result, updateDiagnostics.Length > 0 ? full + "\n\n" + updateDiagnostics : full);
             AutomationId(result, "top.phoneUpdate.result");
-            result.Click += (_, _) => { updateOutcome = null; updateDiagnostics = ""; Render(); };
+            result.Click += (_, _) => { updateOutcome = null; Navigate("phoneupdate"); };   // 打开更新页看结局（胶囊随之收起）
             return result;
         }
         if (PhoneUpdateTarget is null) return null;
@@ -199,7 +202,10 @@ public sealed partial class EnvironmentWindow
     {
         if (installBusy || packRunning || connectedFolder is null || libraryId is null) return;
         var front = BeginJob(JobKind.Phone); phoneUpdating = true; updateOutcome = null; updateDiagnostics = ""; updateDone = updateTotal = null;
-        Render();
+        updateState = "running";
+        updateTrack.Begin("installUpdate", InstallTargetLabel); updateMessage = "";   // 实际装上的那台作业结束后按结果改（PhoneJobTrack.Finish）
+        updateTrack.Version = UpdateClient.CurrentVersion(InstallDir);
+        Navigate("phoneupdate");   // 自己的一页：进行中 → 成功 / 失败（原先只有顶栏一个胶囊，失败原因被截断）
         var succeeded = false;
         string? dropAsk = null;
         try
@@ -212,13 +218,16 @@ public sealed partial class EnvironmentWindow
             var job = await PackJobClient.RunAsync(PackRequest("installUpdate", "", extra.Count > 0 ? extra : null),
                 e => Dispatcher.UIThread.Post(() => IngestUpdateEvent(e)), front.Token, front.Next());
             succeeded = job.Report.Succeeded;
+            updateTrack.Finish(job, GameName);
+            updateState = job.Report.State;
             if (ask && JobCode(job) == "container_would_drop") dropAsk = job.Report.Message;
             updateOutcome = succeeded ? "" : job.Report.Message.Length > 0 ? job.Report.Message : job.Report.State;
+            updateMessage = succeeded ? "" : updateOutcome;
             updateDiagnostics = succeeded ? "" : JobDiagnostics(job);
         }
         catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
             InvalidOperationException or OperationCanceledException or PlatformNotSupportedException or System.ComponentModel.Win32Exception)
-        { updateOutcome = error.Message.Length > 0 ? error.Message : error.GetType().Name; }
+        { updateOutcome = error.Message.Length > 0 ? error.Message : error.GetType().Name; updateMessage = updateOutcome; updateState = error is OperationCanceledException ? "cancelled" : "failed"; updateTrack.Ended = DateTime.UtcNow; }
         finally { EndJob(front); phoneUpdating = false; Render(); }
         if (dropAsk is not null && await ConfirmInstallActionAsync("install.drop", dropAsk)) { await UpdatePhoneAsync(acceptStale, repack, acceptDropped: true); return; }
         await RefreshLibraryAsync();   // 游戏库作业在跑就记一笔、那一轮完了补刷（剃刀 W8），不再跳过
@@ -230,6 +239,7 @@ public sealed partial class EnvironmentWindow
 
     private void IngestUpdateEvent(System.Text.Json.JsonElement e)
     {
+        updateTrack.Ingest(e);
         if (e.TryGetProperty("done", out var d) && d.ValueKind == System.Text.Json.JsonValueKind.Number &&
             e.TryGetProperty("total", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Number && t.GetInt64() > 0)
         { updateDone = d.GetInt64(); updateTotal = t.GetInt64(); RefreshLive(); }   // 只刷新顶栏「更新中 · N%」那一格

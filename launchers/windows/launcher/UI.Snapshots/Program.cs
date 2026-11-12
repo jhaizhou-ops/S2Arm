@@ -149,6 +149,31 @@ SetW(pack, "revealProblem", "找不到这款游戏的文件夹：所在的磁盘
 SaveP("win_08_export_success_folder_missing", () => Navigate(pack, "progress"));
 SetW(pack, "revealProblem", "");
 
+// 更新手机上的 S2Arm（v0.3.1 重做：进行中 / 成功 / 失败三态同一张结局卡，PhoneJobCard.cs；11-11 维护者「成功了也看不出成功」）
+//   updateTrack 用作业层真实事件喂（调它的 Begin / Ingest），状态与结局事实按作业结果设
+void PhoneTrackEvents(params string[] events)
+{
+    var track = GetW(pack, "updateTrack")!;
+    track.GetType().GetMethod("Begin")!.Invoke(track, ["installUpdate", "iPhone「我的 iPhone」"]);
+    foreach (var e in events) track.GetType().GetMethod("Ingest")!.Invoke(track, [JsonDocument.Parse(e).RootElement.Clone()]);
+}
+void TrackField(string field, object? value) { var track = GetW(pack, "updateTrack")!; track.GetType().GetField(field)!.SetValue(track, value); }
+PhoneTrackEvents(
+    """{"type":"stage","stage":"找签名账号与 iPhone","message":"找签名账号与 iPhone","stageIndex":1,"stageCount":6,"overall":0.0}""",
+    """{"type":"stage","stage":"把这款放进手机上的 S2Arm","message":"把这款放进手机上的 S2Arm","stageIndex":2,"stageCount":6,"overall":0.17}""",
+    """{"type":"stage","stage":"用你的 Apple ID 签名","message":"用你的 Apple ID 签名","stageIndex":4,"stageCount":6,"overall":0.5}""",
+    """{"type":"stage","stage":"装到 iPhone","message":"装到 iPhone","stageIndex":5,"stageCount":6,"overall":0.62}""");
+SetW(pack, "updateState", "running");
+SaveP("win_20_phone_update_running", () => Navigate(pack, "phoneupdate"));
+TrackField("Started", DateTime.UtcNow.AddSeconds(-47)); TrackField("Ended", (DateTime?)DateTime.UtcNow);
+TrackField("PackBytes", (long?)0L); TrackField("PackFiles", (int?)0); TrackField("Version", "0.3.0");
+SetW(pack, "updateState", "succeeded");
+SaveP("win_21_phone_update_done", () => Navigate(pack, "phoneupdate"));
+TrackField("Suggestion", "把 iPhone 解锁，插上数据线或和这台电脑连同一个 Wi-Fi，再点一次。");
+SetW(pack, "updateMessage", "读不出 iPhone「我的 iPhone」上已经装了哪些游戏，为免把别的游戏挤掉，这次没装。");
+SetW(pack, "updateState", "failed");
+SaveP("win_22_phone_update_failed", () => Navigate(pack, "phoneupdate"));
+
 // 封面兜底：游戏包没带图标时用商店横图（banner.jpg），在方形卡片里铺满裁切；没有横图才是 S2Arm 标志
 var bannerSrc = Environment.GetEnvironmentVariable("S2A_SNAPSHOT_BANNER") ?? "";
 if (File.Exists(bannerSrc))

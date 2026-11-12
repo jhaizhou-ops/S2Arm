@@ -672,7 +672,7 @@ class Context:
             state = extra.pop("state", self.job["state"])
             if kind == "plan":
                 self.overall.plan(extra.get("milestones"))
-            overall = self.overall.feed(kind, now - self.t0, getattr(self, "milestone", None), state)
+            overall = self.overall.feed(kind, now - self.t0, getattr(self, "milestone", None), state, self.number, self.count, done, total)
             if overall is not None:
                 extra["overall"] = overall
                 self.job["overall"] = overall

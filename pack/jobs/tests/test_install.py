@@ -695,6 +695,14 @@ class FlowTests(unittest.TestCase):
             self._install(gid, pushed=0, applied_before="")
         self.assertEqual(e.exception.code, "pack_missing"); self.assertIn("资源包", str(e.exception))
 
+    def test_usb2_link_no_hint_when_nothing_to_push(self):
+        # 11-11 维护者截图：只换壳更新一个资源包都不推，也报「资源包 0.0 GB 第一次全拷约 1 分钟，换 USB 3 能快约 10 倍」→ 不推就不报
+        from unittest import mock as um2
+        ph = install.MacPhone.__new__(install.MacPhone); ph.c = self.c; ph.udid = "U"
+        with um2.patch.object(install, "usb_mbps", return_value=480):
+            ph.before_push({})
+        self.assertEqual([x for x in self.c.job.get("diagnostics", []) if x["code"] == "usb_slow"], [])
+
     def test_reinstall_nothing_changed_skips_apply(self):
         # 免费账号 7 天到期重装：资源包没变（推 0 个文件）且机上 .applied 已是本包 → 不起 App 解包
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
