@@ -1565,6 +1565,17 @@ static void brrel(const Jump* j) {
     for (size_t k = 0; k < j->mids.n; k++) {
       uint32_t w = j->mids.v[k].w, r;
       int off;
+      if ((w & 0x1f000000u) == 0x10000000u) {   /* adr / adrp（#716：取表与 br 之间夹着 adrp x0, …）：与位置有关，按原目标在补丁区重算；adr 换成 adrp + add */
+        int d = w & 31;
+        int64_t im = (int64_t)((((w >> 5) & 0x7ffff) << 2) | ((w >> 29) & 3));
+        if (im & (1 << 20))
+          im -= 1 << 21;   /* 21 位有符号 */
+        A at = j->mids.v[k].at, t = (w >> 31) ? (at & ~4095LL) + im * 4096 : at + im;
+        emit(adrp(d, here(), t));
+        if (!(w >> 31))
+          emit(ADDI(d, d, t & 4095, 0));
+        continue;
+      }
       emit(noredzone() && j->mids.v[k].sp && sp_rebase(w, 32, &r, &off) ? r : w);   /* 安卓 / 鸿蒙块已 sub sp,#32：sp 访存偏移补回（general 里 sp_mid_ok 已核过编得出） */
     }
     emit(noredzone() ? STR(tmp1, 31, 0) : STUR(tmp1, 31, -16));
@@ -2608,7 +2619,7 @@ static int general(const IV* l, int j, Pair f, Jump* out, char* why, size_t n) {
   for (int q = k0 + 1; q < j; q++)
     if (q != ka) {
       Ins* x = l->v + q;
-      if (!midok(x) || (!strchr(operand_text(x), '[') && (pre(x->m, "ld") || pre(x->m, "st"))))
+      if ((!midok(x) && !in(x->m, "adr|adrp")) || (!strchr(operand_text(x), '[') && (pre(x->m, "ld") || pre(x->m, "st"))))   /* adr / adrp 搬过去按原目标重算（brrel） */
         BAD("中间指令不可搬移 %" PRIx64 " %s %s", (uint64_t)x->at, x->m, operand_text(x));
       /* x16 / x17 可以搬：brrel 先还原 x16 / x17 原值再执行搬来的指令，之后把它们的新值存回槽、每个落点还原后再跳（10-26 普查
        * 010095300B6A4000 / 0100C1F0051B6000：编译器把 mov/movk w16、mov w17 排在取表与 br 之间，跳转目标要读）。
