@@ -2401,7 +2401,7 @@ void nvn_be_drain(void) { if (mtl_gpu_halted()) { MLOG("GPU 安全停中：后�
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[186];   // RED_ONCE keys 0..185 (183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: unused since 11-07 (a not-loaded color attachment written: g_noload_wrong, first 8 lines); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133
+static int g_red_once[191];   // RED_ONCE keys 0..190 (186–190: internal resolution — 186 a draw / dispatch still held scaled image-slot storages after the retry limit, rs_pre_draw / rs_pre_images; 187 a storage past the device texture limit, rs_rescale / tex_widen; 188 a CPU readback of an enlarged storage not scaled back linearly, nvn_be_read_texels; 189 an image-slot storage that could not be scaled back, its image reads / writes land on the scaled storage; 190 a screenshot of an enlarged window texture not scaled back; 183 / 184 / 185: an incompatible Metal texture format view fell back to the base format in rt_view_fmt / attach / clear_tex; 182: a block-compressed texture whose GPU writer resolved to its own Metal format, bcal_copy; 181: a texture view whose target and layer range Metal cannot express (#199), tex_by_id; 179 / 180: a pass's own depth attachment sampled in it could not be copied / viewed (#387); 178: a slot read on-chip by the first draw of a pass was not opened loaded; 177: a compute dispatch's binding ended the shared encoder again on the retry; 175 / 176: a block-compressed texture's GPU-written bytes not taken: no host texture of the uncompressed writer / no staging buffer, bcal_sync; 174: a converted vertex attribute stream address in no memory pool, vconv_bind; 172 / 173: a pool table for handles traced to no slot could not be allocated / grown, pool_tab_new / pool_tab_put_n; 171: a first-invocation store skipped, dispatch; 170: an sRGB / linear view not made again on its upgraded parent, tex_upgrade; 169: unused since 11-07 (a not-loaded color attachment written: g_noload_wrong, first 8 lines); 167 / 168: a storage buffer address the pools do not hold, slot / handle in a uniform buffer; 166: a texture turning packaged whose old host texture has another shape, its GPU-written texels not carried over, carry_gpu) (162: a vertex buffer address the pools do not hold, bind_vbufs) (160 / 161 / 163–165: tensor-core network stand-in, nvn_tensor.inc; 147–159 left for the NVN2 task / mesh branch) (143–146: NVN2 DLSS → MetalFX, nvn_dlss.inc) (139–142: folded linear textures: tex_linear, se_want, se_bind, copies / clears into one) (137 / 138: a GL texture an NVN texture is built from has no usable storage / no matching NVN format) (136: a draw's binding ended its pass twice) (134 / 135: alpha test / multisampling off the fragment shader cannot take); same-pass feedback snapshot too large 127, native image atomics use 128/129, same-pass feedback view narrowing 133
 // The key must be a constant inside the table: a key past the end wrote into the statics next to it (11-05: nvn_tensor.inc used 160 / 161 with 147 slots)
 #define RED_ONCE(k, ...) do { _Static_assert((k) >= 0 && (k) < (int)(sizeof g_red_once / sizeof g_red_once[0]), "RED_ONCE key outside g_red_once"); if (!g_red_once[k]++) MLOG("【红】 " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
@@ -4235,7 +4235,8 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                         if (nh[k] != pk->ph[k]) changed = 1; else bits[k >> 6] &= ~(1ull << (k & 63));   // bits now: pages whose bytes changed
                     }
                     if (!changed) { pk->stamp = st; pk->seen = nvn_dirty_now(); clean = 1; g_pkg_same++; }
-                    else if (gpu && pk->tex.width >= t->d.width && pk->tex.height >= t->d.height && ncap >= pk->nph && nvn_dirty_page_gens(pk->span, t->mem, t->L.size, gens, pk->nph) == np) {
+                    // internal resolution above 1: an enlarged storage passes the size test below, but the rectangles are game coordinates: it takes the whole upload, as a reduced one does
+                    else if (gpu && !(rs_up_on() && rs_state(pk->tex) == RS_SCALED) && pk->tex.width >= t->d.width && pk->tex.height >= t->d.height && ncap >= pk->nph && nvn_dirty_page_gens(pk->span, t->mem, t->L.size, gens, pk->nph) == np) {
                         // The GPU wrote the texture since this upload: a whole re-upload from guest memory would undo it. Pages the CPU wrote after the GPU go up as their rectangles; the rest stay as the GPU made them
                         // Rectangles use game coordinates. A reduced storage needs the whole upload below, which rebuilds it at game size before the next pass scales it again.
                         rect_list L = {0}; int up = 0;
@@ -4423,6 +4424,7 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     alias_orphan_pass();   // #357: before the line cap below, which only limits the readout
     nvn_mem_detail(frame);   // before the line cap below: the detailed accounting has its own interval and must not be starved by the 400-line budget
     fb_report(frame); samp_report(frame); audit_probe_report(frame);
+    rs_report(frame);   // internal resolution coverage line (nvn_rscale_ops.inc; nothing when the scale is 1)
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
@@ -4926,6 +4928,12 @@ static int tex_widen(const tex_t *t, NSUInteger r, NSUInteger rh) {   // 1 = the
     tex_extent cur = tex_extent_at(t, base, 0, 0);
     if (cur.canvas.width >= r && cur.canvas.height >= rh) return 1;
     tex_extent extent = tex_extent_grow(t, base, r, rh);
+    // internal resolution above 1: the widened canvas × s would pass the device's texture limit (Metal asserts on such a descriptor) → the storage goes back to 1 first and is widened unscaled
+    if (rs_up_on() && rs_state(base) == RS_SCALED && (extent.physical.width > rs_tex_max() || extent.physical.height > rs_tex_max())) {
+        rs_rescale(base, 0, "放宽后放大超过贴图上限"); base = tex_mtl(t);
+        if (!base || rs_state(base) == RS_SCALED) { RED_ONCE(187, "widen: scaled render target ser=%llu not widened: %lux%lu is past the texture limit and it could not go back to 1", (unsigned long long)t->serial, (unsigned long)extent.physical.width, (unsigned long)extent.physical.height); return 0; }
+        extent = tex_extent_grow(t, base, r, rh);
+    }
     int scaled = rs_state(base) == RS_SCALED; NSUInteger cw = extent.canvas.width, ch = extent.canvas.height;
     r = extent.physical.width; rh = extent.physical.height;
     const char *why = tex_widen_why(t);
@@ -13236,6 +13244,9 @@ static int gmem_uses(NvShader *s) {
 static void gmem_count_draw(NvProg *pr) { g_gmem_draws_all++; for (int i = 0; i < 5; i++) if (gmem_uses(pr->sh[i])) { g_gmem_draws++; break; } }
 
 static void draw(const p_draw *dw, const p_draw_idx *di) {
+    // internal resolution: textures this draw's program holds in image slots go back to 1 before the draw (nvn_rscale_ops.inc rs_pre_draw; may end the open pass). Not on the
+    //   re-entered calls (geometry / mesh inner draws, deferred replays, the on-chip double render): the outer call or the capture already did it, and their pass must stay open
+    if (rs_on() && S.prog && !g_geo_program && !g_mtk.on && !g_defer_replaying && !g_fbc.forcing) rs_pre_draw(prog_get(S.prog));
     if (dw && dw->prim == DM_PRIM_MESH_TASKS && !g_mtk.on) { mesh_tasks_draw(dw); return; }   // NVN2 task / mesh draw: binds its stages and comes back with its pixel stage (nvn_geometry.inc)
     g_udc_precise = 0;   // only this draw's own udc_note_draw may cover its encode (a draw that returned without encoding leaves no stale cover)
     g_udc_lmap = NULL; g_udc_fsfn = 0;   // the output map is this draw's own too: the one a previous (on-chip read / merged) draw used must not judge the next pass's lookahead (pass_color_unwritten) or a geometry / tessellation draw's writes (11-06 TotK: tiled lights black outside the lit tiles)
@@ -13639,6 +13650,9 @@ static void dispatch(const p_dispatch *dp) {
     if (dp->ind) { static int once; if (!once++) MLOG("indirect dispatch: first time (the GPU reads the threadgroup counts from %#llx)", (unsigned long long)dp->ind); }
     NvShader *cs = prog_get(S.cprog)->sh[5];
     if (!cs) { RED_ONCE(28, "the dispatched program has no compute shader (or it is not mapped)"); return; }
+    rs_pre_images(cs);   // internal resolution: scaled textures in this dispatch's image slots go back to 1 before the atomic upgrade and the tensor stand-in below (nvn_rscale_ops.inc)
+    // internal resolution above 1: the stand-in picks its input by storage size (output ÷ input within 1–4) and feeds MetalFX storage sizes: enlarged textures it reads go back to 1 first, as for a real dispatch
+    if (cs->tensor == 1 && rs_up_on()) rs_pre_compute(cs);
     if (cs->tensor == 1) { tensor_standin(cs); return; }   // S2Arm 11-05: the game's own tensor-core upscaling network: not dispatched (nvn_tensor.inc)
     g_gmem_disp_all++; if (gmem_uses(cs)) g_gmem_disp++;   // 原始内存池表动态占比（gmem_count_draw）
     const void *k = (__bridge const void *)cs;
@@ -13802,6 +13816,59 @@ static void copy_t2b(const p_copy_b2t *c) {
         for (int z = 0; z < nz; z++)
             enc_b_copy_texture_buffer(b, t, layer0 + c->r.zoffset + z, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, 0), MTLSizeMake(c->r.width, c->r.height, 1), (__bridge id<MTLBuffer>)mb, mo + z * img, row, img);
 }
+// internal resolution above 1 (nvn_rscale.inc): a CPU readback of an enlarged storage is scaled back to the game's size with a bilinear filter, as Ryujinx's flush does
+//   (Texture.GetScaledHostTexture(1f, copy) → CopyTo(linear)): each game texel samples at (x + 0.5) × s, at 2 that is the mean of its 2x2 storage texels. scx / scy = the read level's own storage ÷ canvas size (a whole-level copy, as Ryujinx's and rs_rescale's): below level 0 it is not
+//   the setting (65 wide at 1.5: level 1 is 49 storage texels for 32 game texels; by 1.5 the last game texel sampled at 47.25 instead of 48.23 and the last column was missed).
+//   Taking one storage texel would return one of s² samples. ReadTexels runs on the caller's thread, so the copy draw of the submit thread (copy_t2t_draw) cannot be used: a small pass on the old
+//   queue's command buffer, into a scratch texture of the region's size, then a blit into a shared buffer (returned, tightly packed, one image per layer). nil = not done
+//   (the caller falls back to the nearest texel and reports it). Colour formats a render pass can write only (rs_eligible admits no integer formats; depth is read nearest)
+static id<MTLBuffer> rs_read_down(id<MTLTexture> mt, unsigned level, unsigned layer0, const NVNcopyRegion *r, int nz, double scx, double scy, size_t bpb) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static id<MTLFunction> vf, ff; static id<MTLSamplerState> samp; static NSMutableDictionary<NSNumber *, id> *pso; static int failed;
+    MTLPixelFormat pf = mt.pixelFormat;
+    if (fmt_int_or_ds(pf) || mtl_fmt_block(pf) || !(mt.usage & MTLTextureUsageShaderRead) || r->width <= 0 || r->height <= 0) return nil;
+    id<MTLRenderPipelineState> ps = nil;
+    pthread_mutex_lock(&mu);
+    if (!pso && !failed) {
+        static const char *src = "#include <metal_stdlib>\nusing namespace metal;\n"
+            "vertex float4 vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); }\n"
+            // p = the region's origin in storage texels, storage texels per game texel
+            "fragment float4 fs(float4 pos [[position]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 &p [[buffer(0)]]) {\n"
+            "  float2 st = p.xy + pos.xy * p.zw; return t.sample(s, st / float2(t.get_width(), t.get_height()), level(0)); }\n";
+        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&e];
+        vf = [lib newFunctionWithName:@"vs"]; ff = [lib newFunctionWithName:@"fs"];
+        MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear; sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        samp = [g_dev newSamplerStateWithDescriptor:sd];
+        if (!vf || !ff || !samp) failed = 1; else pso = [NSMutableDictionary dictionary];
+    }
+    if (pso) { id o = pso[@(pf)];
+        if (!o) { MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = ff; pd.colorAttachments[0].pixelFormat = pf;
+            NSError *e = nil; o = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e]; pso[@(pf)] = o ? o : (id)NSNull.null; }   // a failure is remembered too
+        if (o != (id)NSNull.null) ps = o; }
+    pthread_mutex_unlock(&mu);
+    if (!ps) return nil;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:(NSUInteger)r->width height:(NSUInteger)r->height mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModePrivate;
+    size_t wb = (size_t)r->width * bpb, ib = wb * (size_t)r->height;
+    id<MTLTexture> tmp = [g_dev newTextureWithDescriptor:td]; id<MTLBuffer> out = [g_dev newBufferWithLength:ib * (size_t)nz options:MTLResourceStorageModeShared];
+    if (!tmp || !out) return nil;
+    id<MTLCommandBuffer> cb = q_cb();
+    for (int z = 0; z < nz; z++) {
+        id<MTLTexture> sv = [mt newTextureViewWithPixelFormat:pf textureType:MTLTextureType2D levels:NSMakeRange(level, 1) slices:NSMakeRange(layer0 + (unsigned)r->zoffset + (unsigned)z, 1)];
+        if (!sv) return nil;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
+        rp.colorAttachments[0].texture = tmp; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+        float p[4] = {(float)(r->xoffset * scx), (float)(r->yoffset * scy), (float)scx, (float)scy};
+        [en setRenderPipelineState:ps]; [en setFragmentTexture:sv atIndex:0]; [en setFragmentSamplerState:samp atIndex:0]; [en setFragmentBytes:p length:sizeof p atIndex:0];
+        [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding];
+        id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
+        [b copyFromTexture:tmp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake((NSUInteger)r->width, (NSUInteger)r->height, 1)
+                  toBuffer:out destinationOffset:(NSUInteger)z * ib destinationBytesPerRow:wb destinationBytesPerImage:ib];
+        [b endEncoding];
+    }
+    DM_BLOCK_BEGIN(); int ok = cb_run(cb); DM_BLOCK_END();
+    return ok ? out : nil;
+}
 // CPU texture read (ReadTexels): for packaged textures the pool memory is the ground truth, de-layout and read directly; the rest are read back from the MTLTexture by blit (the caller has already waited for the GPU per NVN rules)
 void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNcopyRegion *r, uint8_t *dst, size_t row, size_t img) {
     xv_check(t->serial, level, layer0, "CPU readback");
@@ -13833,7 +13900,14 @@ void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const N
     mtl_finish_gpu();
     if (!is3d && bw == 1 && bh == 1 && rs_state(mt) == RS_SCALED) {   // S2Arm internal resolution: read the storage rectangle, then take each game texel's nearest storage texel on the CPU
         double sc = g_rs; long sx = r->xoffset, sy = r->yoffset, sw = r->width, sh = r->height; rs_rect(sc, &sx, &sy, &sw, &sh);   // (this runs on the caller's thread: no copy draw)
-        long lw = (long)MAX(mt.width >> level, 1u), lh = (long)MAX(mt.height >> level, 1u); if (sx + sw > lw) sw = lw - sx; if (sy + sh > lh) sh = lh - sy;
+        long lw = (long)MAX(mt.width >> level, 1u), lh = (long)MAX(mt.height >> level, 1u);
+        if (sc > 1.0 && !mtl_fmt_depth(mt.pixelFormat)) {   // an enlarged storage is scaled back linearly (rs_read_down); depth keeps the nearest texel below, as the depth copies do
+            NSUInteger cw = 0, ch = 0; rs_canvas(mt, level, &cw, &ch);   // this level's own ratio (see rs_read_down)
+            id<MTLBuffer> lb = cw && ch ? rs_read_down(mt, level, layer0, r, nz, (double)lw / (double)cw, (double)lh / (double)ch, (size_t)bpb) : nil;
+            if (lb) { for (int z = 0; z < nz; z++) for (int y = 0; y < r->height; y++) memcpy(dst + z * img + (size_t)y * row, (uint8_t *)lb.contents + ((size_t)z * (size_t)r->height + (size_t)y) * (size_t)r->width * (size_t)bpb, (size_t)r->width * (size_t)bpb); return; }
+            RED_ONCE(188, "internal resolution: ReadTexels of enlarged storage ser=%llu (format %lu) not scaled back linearly: each game texel takes its nearest storage texel", (unsigned long long)t->serial, (unsigned long)mt.pixelFormat);
+        }
+        if (sx + sw > lw) sw = lw - sx; if (sy + sh > lh) sh = lh - sy;
         if (sw <= 0 || sh <= 0) { memset(dst, 0, img * nz); return; }
         size_t swb = (size_t)sw * bpb;
         id<MTLBuffer> sb = [g_dev newBufferWithLength:swb * (size_t)sh * nz options:MTLResourceStorageModeShared];
@@ -14032,6 +14106,7 @@ static void copy_t2t(const p_copy_t2t *c) {
     // S2Arm widen: the same copied the same way between two textures of one game size (11-02 Mario & Sonic Tokyo 2020: each frame copies its widened 1920x1080 canvas, drawn in the
     //   handheld 1280x720 corner, into the unwidened swap-chain image; each side mapped by its own storage turned that into a squeezing copy and the presented image stayed 16:9)
     else if (c->src && c->dst && c->src->d.width == c->dst->d.width && c->src->d.height == c->dst->d.height && !memcmp(&c->sr, &c->dr, sizeof c->sr)) wd_widen_resolve_dst(c->src, c->dst);
+    if (rs_up_on() && !(c->flags & DM_COPY_RESOLVE)) rs_copy_up(c->src, c->dst);   // internal resolution above 1: an enlarged source copied into a window texture not scaled yet enlarges it first (nvn_rscale_ops.inc)
     if ((g_wd_widened || rs_on()) && c->src && c->dst) {
         id<MTLTexture> s = tex_mtl(c->src), d = tex_mtl(c->dst);
         unsigned sl = c->has_sv && c->sv.set_levels ? c->sv.base_level : 0, dl = c->has_dv && c->dv.set_levels ? c->dv.base_level : 0;
@@ -15144,6 +15219,7 @@ void dm_gfx_shot_at(long k, const char *path) {
     pthread_mutex_unlock(&g_shotq_mu);
 }
 // DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by present_encode", i.e. the picture the player sees on screen; screen=0 (texture dump) is unaffected
+static id<MTLTexture> present_raw_src(id<MTLTexture> src);   // shot reads an enlarged sRGB window texture through it
 static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
@@ -15164,12 +15240,25 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
     if (read.pixelFormat != MTLPixelFormatRGBA8Unorm && read.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
         read.pixelFormat != MTLPixelFormatBGRA8Unorm && read.pixelFormat != MTLPixelFormatBGRA8Unorm_sRGB) { MLOG("【红】 screenshot does not support format %lu", (unsigned long)read.pixelFormat); return; }
     size_t w = read.width, h = read.height, row = w * 4;
-    id<MTLBuffer> buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf = nil;
+    // internal resolution above 1 (nvn_rscale.inc): an enlarged window texture is saved at the game's size, not the storage's (frame scoring and page matching compare shots of one size):
+    //   the whole storage scaled back linearly (rs_read_down, as ReadTexels of an enlarged storage; the lower-left flip below still applies). Not done = red, no file
+    //   (a storage-sized picture under the same name would be compared as if it were the game's). An sRGB storage is read through its non-sRGB view (present_raw_src): the
+    //   stored bytes are what the unscaled path below writes and what the present and the grab sample, so they are what gets mixed (decoded first, a red / green pair gave 188 for 128)
+    if (screen && read == src && rs_up_on() && rs_state(src) == RS_SCALED) {
+        NSUInteger cw = rs_cw(src), ch = rs_ch(src); NVNcopyRegion r = {0, 0, 0, (int)cw, (int)ch, 1};
+        buf = cw && ch ? rs_read_down(present_raw_src(src), 0, 0, &r, 1, (double)src.width / (double)cw, (double)src.height / (double)ch, 4) : nil;
+        if (!buf) { RED_ONCE(190, "internal resolution: screenshot of the enlarged window texture %lux%lu (format %lu) could not be scaled back to the game's %lux%lu: %s not written", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat, (unsigned long)cw, (unsigned long)ch, path); return; }
+        w = cw; h = ch; row = w * 4;
+    }
+    if (!buf) {
+    buf = [g_dev newBufferWithLength:row * h options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb();
     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
     [b copyFromTexture:read sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1)
               toBuffer:buf destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row * h];
     [b endEncoding]; if (!cb_run(cb)) return;
+    }
     if (screen && read == src && atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) {   // lower-left origin: the window image is stored bottom-up (see g_origin_ll)
         uint8_t *p = buf.contents, *tmp = malloc(row);
         if (tmp) { for (size_t y = 0; y < h / 2; y++) { memcpy(tmp, p + y * row, row); memcpy(p + y * row, p + (h - 1 - y) * row, row); memcpy(p + (h - 1 - y) * row, tmp, row); } free(tmp); } }
@@ -15498,6 +15587,19 @@ static int present_blit_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLT
 #include "nvn_present_fx.inc"
 #include "nvn_dlss.inc"   // NVN2 EvaluateDlss → MetalFX temporal upscale
 #include "nvn_tensor.inc"   // Switch 2 tensor-core upscaling networks (HMMA compute) → MetalFX spatial upscale stand-in
+// internal resolution above 1 (nvn_rscale.inc): the anti-aliasing textures of an enlarged window texture. present_aa_prepare sizes its four textures by the crop it is given
+//   (the storage's: s² times the game's, 4 slots; 5120x2880 at 4 is about 200 MB a slot). When the storage is not smaller than the picture's viewport on the target (not an
+//   enlargement: no MetalFX either, fx == nil), it is given a crop of the viewport's size instead: the input copy scales the storage down into it (the same copy, the real crop) and
+//   the anti-aliasing runs at the resolution shown. A storage smaller than the viewport keeps its own size (anti-aliasing before the enlargement, as at 1, and MetalFX's input size).
+//   Sources that are not enlarged get their crop back unchanged
+static const int *rs_aa_crop(id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], NvPresentFX *fx, int tmp[4]) {
+    if (fx || !rs_up_on() || rs_state(src) != RS_SCALED) return crop;
+    NSUInteger w = crop && (crop[2] || crop[3]) ? (crop[2] > 0 ? (NSUInteger)crop[2] : 0) : src.width, h = crop && (crop[2] || crop[3]) ? (crop[3] > 0 ? (NSUInteger)crop[3] : 0) : src.height;
+    if (!w || !h) return crop;   // an invalid crop is reported where it always was
+    pf_vp pv = pf_viewport(dst.width, dst.height, w, h); NSUInteger vw = (NSUInteger)pv.w, vh = (NSUInteger)pv.h;
+    if (!vw || !vh || vw > w || vh > h || (vw == w && vh == h)) return crop;
+    tmp[0] = tmp[1] = 0; tmp[2] = (int)vw; tmp[3] = (int)vh; return tmp;
+}
 static int present_encode_slot(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int slot) {
     present_options();
     BOOL flip = atomic_load_explicit(&g_origin_ll, memory_order_relaxed) != 0;
@@ -15505,7 +15607,7 @@ static int present_encode_slot(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<M
     if (!g_present_aa && !fx) return present_blit(cb, src, dst, crop, flip);
     id<MTLTexture> out;
     if (g_present_aa) {
-        NvPresentAA *s = present_aa_prepare(slot, src, crop);
+        int ac[4]; NvPresentAA *s = present_aa_prepare(slot, src, rs_aa_crop(src, dst, crop, fx, ac));   // rs_aa_crop
         if (!s || !present_blit(cb, src, s->input, crop, flip) || !present_aa_encode(cb, s, NO)) return 0;
         out = s->output;
     } else {
@@ -15533,7 +15635,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     if (!g_present_aa && !fx) return present_blit_m4(cb, src, dst, crop, g_present_uv[slot], g_present_args, flip);
     id<MTLTexture> out;
     if (g_present_aa) {
-        NvPresentAA *s = present_aa_prepare(slot, src, crop);
+        int ac[4]; NvPresentAA *s = present_aa_prepare(slot, src, rs_aa_crop(src, dst, crop, fx, ac));   // rs_aa_crop
         if (!s || !present_blit_m4(cb, src, s->input, crop, s->cropUV, s->cropTable, flip) || !present_aa_encode(cb, s, YES)) return 0;
         out = s->output;
     } else {
@@ -15601,16 +15703,24 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     // S2Arm: a crop reaching past the source (10-28 Splatoon 3 direct full screen: the game sets a 2346x1080 crop for a few frames while the swap chain texture is still
     //   1920x1080) is shown as the part inside the source, 16:9 with black bars (pf_crop_fit), instead of dropping the frame with "present crop out of bounds";
     //   once the source covers the crop it is used as given again. Everything below (present, grab, screenshots, fit check, AA) takes the fitted crop
-    int rsc[4]; if (crop && rs_state(src) == RS_SCALED) {   // S2Arm internal resolution: a scaled present source (none expected: display textures are never scaled) takes the crop in storage texels
-        long x = crop[0], y = crop[1], w = crop[2], h = crop[3]; if (!w && !h) { w = (long)rs_cw(src); h = (long)rs_ch(src); }
-        rs_rect(g_rs, &x, &y, &w, &h); rsc[0] = (int)x; rsc[1] = (int)y; rsc[2] = (int)w; rsc[3] = (int)h; crop = rsc; }
-    int fitted[4]; int fit_rc = pf_crop_fit(crop, src.width, src.height, fitted);
+    // internal resolution above 1 (nvn_rscale.inc): window textures are enlarged too, so the present source's storage can be s times the game's size. Everything in game units
+    //   (the game's crop and its fitting, the picture size the full-screen check judges, the windowless grab's size) is taken on the canvas cvw x cvh (= the storage when not scaled:
+    //   nothing changes at 1 or below, where display textures are never scaled); the crop goes to storage texels only after that, for the present encoding, the grab and the
+    //   screenshot's present_encode (as Ryujinx Window.Present: crop × ScaleFactor, left / top down, right / bottom up). It was converted before the fitting, and the sizes below read the storage
+    int rs_src = rs_state(src) == RS_SCALED; NSUInteger cvw = rs_src ? rs_cw(src) : src.width, cvh = rs_src ? rs_ch(src) : src.height;
+    int fitted[4]; int fit_rc = pf_crop_fit(crop, cvw, cvh, fitted);
     { static int last; static uint64_t n;
       if (fit_rc == 1 && (last != 1 || ++n % 600 == 0)) MLOG("present crop %d,%d %dx%d is larger than the source texture %lux%lu: showing %d,%d %dx%d at 16:9 with black bars until the source covers it",
-                              crop[0], crop[1], crop[2], crop[3], (unsigned long)src.width, (unsigned long)src.height, fitted[0], fitted[1], fitted[2], fitted[3]);
-      if (fit_rc != 1 && last == 1) { MLOG("present crop covered by the source texture %lux%lu again: crop used as given", (unsigned long)src.width, (unsigned long)src.height); n = 0; }
+                              crop[0], crop[1], crop[2], crop[3], (unsigned long)cvw, (unsigned long)cvh, fitted[0], fitted[1], fitted[2], fitted[3]);
+      if (fit_rc != 1 && last == 1) { MLOG("present crop covered by the source texture %lux%lu again: crop used as given", (unsigned long)cvw, (unsigned long)cvh); n = 0; }
       last = fit_rc; }
     if (crop && fit_rc >= 0) crop = fitted;
+    // the picture in game units (the crop, else the whole canvas) and the windowless grab's size (the canvas's height, the crop's aspect), before the crop becomes storage texels
+    NSUInteger pcw = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[2] : cvw, pch = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[3] : cvh;
+    CGSize nolayer_sz = crop && crop[2] > 0 && crop[3] > 0 ? CGSizeMake(round((double)crop[2] * cvh / crop[3]), cvh) : CGSizeMake(cvw, cvh);
+    int rsc[4]; if (crop && rs_src) {   // S2Arm internal resolution: a scaled present source takes the crop in storage texels
+        long x = crop[0], y = crop[1], w = crop[2], h = crop[3]; if (!w && !h) { w = (long)cvw; h = (long)cvh; }
+        rs_rect(g_rs, &x, &y, &w, &h); rsc[0] = (int)x; rsc[1] = (int)y; rsc[2] = (int)w; rsc[3] = (int)h; crop = rsc; }
     // DM_NVN_REGLUM=x0,y0,x1,y1:file (normalized coordinates): read back this region on every present and record "present sequence number, present time ns, region mean luminance, subsampled grayscale thumbnail (hex)" (diagnostic: verify that animation speed is independent of frame rate).
     // Does not wait for the GPU and does not disturb frame pacing. Metal 4 with a window: the copy goes into this present's own command buffer, after the present blit and behind the same
     //   queue barrier, so the row is exactly the picture this present showed. A classic-queue command buffer (the only way before 11-06, still used without a window or on Metal 3) is not
@@ -15667,15 +15777,15 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     //   16:9 pages no longer matched (10-26 Mario Kart 8 Deluxe direct widen: main menu mean difference 13.2 against 10). An unwidened 1280x720 crop still gives 1920x1080
     // 无窗口（Mac 局）也判几何：按真机屏的宽高比（16:9 × k ÷ ky，宽屏核心的屏）摆一块虚拟画布交 fit_geom，与真机出图层（host_adapt.m out_aspect）同一口径。
     //   11-02 饥荒：游戏往没放宽的 1920 目标上画，真机 2.17 屏左右留黑边，Mac 普查无窗口局从不判几何、截图又按画面自己的比例出，满屏判「过」（假绿）
-    if (!layer) { NSUInteger icw = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[2] : src.width, ich = crop && (crop[2] || crop[3]) ? (NSUInteger)crop[3] : src.height;
+    if (!layer) { NSUInteger icw = pcw, ich = pch;   // game units (pcw x pch above; was the crop / source size read here)
         float ky = s2a_widen_ky(); fit_geom(16.0 / 9.0 * s2a_widen_k() / (ky > 0 ? ky : 1) * ich, ich, icw, ich); }
-    if (!layer) { if (g_grab_cb) grab_present(src, crop, crop && crop[2] > 0 && crop[3] > 0 ? CGSizeMake(round((double)crop[2] * src.height / crop[3]), src.height) : CGSizeMake(src.width, src.height), ticket); return 0; }
+    if (!layer) { if (g_grab_cb) grab_present(src, crop, nolayer_sz, ticket); return 0; }   // nolayer_sz (above; the same expression on the canvas)
     if (!g_m3 && g_present_layer_resident != layer) { [g_q4 addResidencySet:layer.residencySet]; g_present_layer_resident = layer; }   // the layer's residency set is macOS / iOS 26 on; Metal 3 presents through the command buffer
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif
     present_pipeline(layer.pixelFormat);   // Same as the original path: the first frame compiles the pipeline before taking the drawable
-    fit_geom(layer.drawableSize.width, layer.drawableSize.height, crop && (crop[2] || crop[3]) ? (NSUInteger)crop[2] : src.width, crop && (crop[2] || crop[3]) ? (NSUInteger)crop[3] : src.height);
+    fit_geom(layer.drawableSize.width, layer.drawableSize.height, pcw, pch);   // game units (was the crop / source size read here)
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize, ticket);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
