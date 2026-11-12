@@ -539,8 +539,8 @@ namespace S2A.Services
                 input.RStick = input.LStick;
         }
 
-        // 派对横握：右柄屏上确认=物理 X→A（HoldType=Horizontal 时游戏未必自转，必须始终映射）；左柄十字→ABXY。
-        // 摇杆：HID 已是竖握坐标且 Y 已取反；横握再转 90° 时输出 Y 相对 RotateSideways 再翻一次，否则上下反。
+        // 右柄横握时，游戏自己把物理 X 当确认。这里再把 X→A、Y→X，确认就会落到 Y 上。
+        // 面键和摇杆都只在仍是 Vertical 时补转。左柄十字键在 HID 里已经换成 ABXY。
         private static void AdaptSidewaysJoy(ref GamepadInput input, ControllerType joySide,
             Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType hold)
         {
@@ -552,21 +552,23 @@ namespace S2A.Services
             bool horizontal = hold == Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal;
             if (right)
             {
-                // 物理 → 屏上（右只横握）：X→A、A→B、Y→X、B→Y（单人小游戏确认键）
-                if ((b & ControllerKeys.X) != 0) f |= ControllerKeys.A;
-                if ((b & ControllerKeys.A) != 0) f |= ControllerKeys.B;
-                if ((b & ControllerKeys.Y) != 0) f |= ControllerKeys.X;
-                if ((b & ControllerKeys.B) != 0) f |= ControllerKeys.Y;
-                input.Buttons = (b & ~Face) | f;
-                var s = input.RStick.Dx != 0 || input.RStick.Dy != 0 ? input.RStick : input.LStick;
-                int x = s.Dx, y = s.Dy;
-                // Horizontal：(-y,-x) = RotateSideways 右只再翻 Y；Vertical 强转 (y,-x)
-                (s.Dx, s.Dy) = horizontal ? (-y, -x) : (y, -x);
-                input.RStick = s; input.LStick = s;
+                if (!horizontal)
+                {
+                    // 竖握：游戏不转面键。物理 X 在确认位，送给游戏当 A。
+                    if ((b & ControllerKeys.X) != 0) f |= ControllerKeys.A;
+                    if ((b & ControllerKeys.A) != 0) f |= ControllerKeys.B;
+                    if ((b & ControllerKeys.Y) != 0) f |= ControllerKeys.X;
+                    if ((b & ControllerKeys.B) != 0) f |= ControllerKeys.Y;
+                    input.Buttons = (b & ~Face) | f;
+                    var s = input.RStick.Dx != 0 || input.RStick.Dy != 0 ? input.RStick : input.LStick;
+                    int x = s.Dx, y = s.Dy;
+                    (s.Dx, s.Dy) = (y, -x);
+                    input.RStick = s; input.LStick = s;
+                }
             }
             else
             {
-                // 左只：十字键映射为 ABXY（下=A）。无面键时仍要转摇杆，否则只推摇杆时左右反着。
+                // 左只：十字键映射为 ABXY（下=A）。横握摇杆交给游戏，勿再转。
                 if ((b & (Dpad | Face)) != 0)
                 {
                     if ((b & ControllerKeys.DpadDown) != 0 || (b & ControllerKeys.A) != 0) f |= ControllerKeys.A;
@@ -575,10 +577,12 @@ namespace S2A.Services
                     if ((b & ControllerKeys.DpadUp) != 0 || (b & ControllerKeys.Y) != 0) f |= ControllerKeys.Y;
                     input.Buttons = (b & ~(Dpad | Face)) | f;
                 }
-                var s = input.LStick; int x = s.Dx, y = s.Dy;
-                // Horizontal：(y,x) = RotateSideways 左只再翻 Y；Vertical 强转 (-y,x)
-                (s.Dx, s.Dy) = horizontal ? (y, x) : (-y, x);
-                input.LStick = s; input.RStick = s;
+                if (!horizontal)
+                {
+                    var s = input.LStick; int x = s.Dx, y = s.Dy;
+                    (s.Dx, s.Dy) = (-y, x);
+                    input.LStick = s; input.RStick = s;
+                }
             }
         }
 

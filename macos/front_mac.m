@@ -742,6 +742,10 @@ static void sample_input(void) {
         uint32_t jb0 = 0, jb1 = 0; int32_t js0[4] = {0}, js1[4] = {0};
         if (s2a_joycon_pad_read(1, &jb0, js0)) apply_ns2_bits(jb0, js0[0], js0[1], js0[2], js0[3], &buttons0, sticks0);
         if (s2a_joycon_pad_read(0, &jb1, js1)) apply_ns2_bits(jb1, js1[0], js1[1], js1[2], js1[3], &buttons1, sticks1);
+        // 热气球用一号玩家的 L/R 切模式。左柄 L 落在二号身上时，游戏把它当成表情。
+        // 并到一号的 L，二号不再带这个键。
+        const uint32_t kL = 1u << 6;
+        if (buttons1 & kL) { buttons0 |= kL; buttons1 &= ~kL; }
     } else if (gcDual) {
         apply_slot_controller(slot0, &buttons0, sticks0);
         apply_slot_controller(slot1, &buttons1, sticks1);

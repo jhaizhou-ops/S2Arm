@@ -17,7 +17,9 @@ let package = Package(
         .target(name: "NX2AppleUI",
                 dependencies: ["NXLauncher", "NXModel", "NXCore", .product(name: "S2ArmAppleAdapter", package: "adapter"),
                                .product(name: "SaveSync", package: "SaveSync")],
-                path: "Sources/NX2Apple"),
+                path: "Sources/NX2Apple",
+                // 顶栏「手柄」要读系统已连的 Joy-Con / Pro（含澳加狮等冒充 057e 的第三方），走 IOBluetooth。
+                linkerSettings: [.linkedFramework("IOBluetooth")]),
     ],
     swiftLanguageModes: [.v5]
 )

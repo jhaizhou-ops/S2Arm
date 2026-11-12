@@ -6,6 +6,8 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
+#include <stdio.h>
 #include <mach/mach_time.h>
 
 enum { JC_L = 0, JC_R = 1, JC_N = 2 };
@@ -53,6 +55,38 @@ static void send_sub(jc_dev *d, uint8_t cmd, uint8_t arg) {
     IOHIDDeviceSetReport(d->device, kIOHIDReportTypeOutput, 0x01, report, sizeof report);
 }
 
+// 实测摇杆朝下：重力在 Z（≈0.8~1g），上挥已经能煽翅 → 游戏认的是重力轴上的「变重」尖峰。
+// 下挥会变轻（读数朝 0），过不了阈值；在重力主导轴上把明显变轻镜成变重。不动轴向，以免搞坏已能用的上挥/左右。
+static float g_grav_lp[JC_N][3];
+static int g_grav_lp_ok[JC_N];
+
+static void fold_downstroke_on_gravity(int slot, s2a_pad_motion *out) {
+    if (slot < 0 || slot >= JC_N) return;
+    float *a[3] = { &out->acceleration_x, &out->acceleration_y, &out->acceleration_z };
+    if (!g_grav_lp_ok[slot]) {
+        for (int i = 0; i < 3; i++) g_grav_lp[slot][i] = *a[i];
+        g_grav_lp_ok[slot] = 1;
+    } else {
+        for (int i = 0; i < 3; i++) g_grav_lp[slot][i] = g_grav_lp[slot][i] * 0.92f + *a[i] * 0.08f;
+    }
+    int dom = 0;
+    float best = fabsf(g_grav_lp[slot][0]);
+    for (int i = 1; i < 3; i++) {
+        float v = fabsf(g_grav_lp[slot][i]);
+        if (v > best) { best = v; dom = i; }
+    }
+    // 横滚为主（左右倾斜）时 X 会变大，不要误折叠转向轴
+    if (dom == 0 || best < 0.55f) return;
+    float lp = g_grav_lp[slot][dom];
+    float cur = *a[dom];
+    float alp = fabsf(lp), ac = fabsf(cur);
+    // 明显比近期重力更轻 = 下挥；镜到对称更重一侧
+    if (ac < alp - 0.12f) {
+        float s = (lp >= 0.f) ? 1.f : -1.f;
+        *a[dom] = s * (2.f * alp - ac);
+    }
+}
+
 static void decode_imu(int slot, int product_id, const uint8_t *s, s2a_pad_motion *out) {
     float ax = rd16(s + 0) * 0.000244f;
     float ay = rd16(s + 2) * 0.000244f;
@@ -60,17 +94,17 @@ static void decode_imu(int slot, int product_id, const uint8_t *s, s2a_pad_motio
     float gx = rd16(s + 6) * 0.06103f;
     float gy = rd16(s + 8) * 0.06103f;
     float gz = rd16(s + 10) * 0.06103f;
-    // L/R 传感器安装镜像：同一物理朝向上 raw Z 符号相反。若不翻转 R 的 Z，
-    // 校准 UI（摇杆面朝上/朝下）会一只对、一只反——与是否第三方手柄无关。
+    // L/R 传感器安装镜像：同一物理朝向上 raw Z 符号相反。R 翻 Z → 朝上/朝下校准与 L 一致。
+    // 左右=accel_x（已反）。摇杆朝下拍翅在重力轴（常为 Z），见 fold_downstroke_on_gravity。
     if (product_id == JC_PID_L) {
-        out->acceleration_x = ay; out->acceleration_y = -ax; out->acceleration_z = az;
+        out->acceleration_x = -ay; out->acceleration_y = -ax; out->acceleration_z = az;
         out->gyro_x = gy; out->gyro_y = -gx; out->gyro_z = gz;
     } else {
-        out->acceleration_x = -ay; out->acceleration_y = ax; out->acceleration_z = -az;
+        out->acceleration_x = ay; out->acceleration_y = ax; out->acceleration_z = -az;
         out->gyro_x = -gy; out->gyro_y = gx; out->gyro_z = -gz;
     }
-    (void)slot;
     out->host_timestamp_us = now_us();
+    fold_downstroke_on_gravity(slot, out);
 }
 
 // 12-bit 摇杆 → ±32767（中位约 2048）
@@ -149,7 +183,8 @@ static void decode_pad(int product_id, const uint8_t *b, const uint8_t *lstick, 
         if (b1 & 0x02) out |= B_MENU;    // Plus
         if (b1 & 0x04) out |= B_RS;
         if (b1 & 0x10) out |= B_OPT;     // Home → Minus 位（无独立 Home 目标）
-        int32_t sx = axis12(stick_x(rstick)), sy = -axis12(stick_y(rstick));
+        // 右柄竖握：HID 的 Y 与左柄相反，再取反会让广场上下走反。左柄仍取反。
+        int32_t sx = axis12(stick_x(rstick)), sy = axis12(stick_y(rstick));
         rx = sx; ry = sy;                // JoyRight → AnalogStickR
     }
     *buttons = out;

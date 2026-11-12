@@ -357,8 +357,8 @@ private struct ControllerToolbarButton: View {
             }
         }
         .buttonStyle(LauncherSecondaryButtonStyle())
-        .help("Switch 2 Pro：" + controller.buttonStatus)
-        .accessibilityLabel("Switch 2 Pro：" + controller.buttonStatus)
+        .help(controller.displayDeviceName + "：" + controller.buttonStatus)
+        .accessibilityLabel(controller.displayDeviceName + "：" + controller.buttonStatus)
         .accessibilityIdentifier("top.controller")
         .popover(isPresented: $show, arrowEdge: .bottom) {
             Switch2ProConnectionPopover(controller: controller, simplifiedChinese: simplifiedChinese)
