@@ -699,10 +699,17 @@ def main(argv=None):
         return 75 if bad else 0
     if not (a.source or a.from_extract) or not a.out: ap.error('要 <原件>（或 --from-extract <解包目录>）与 --out')
     if WIN:   # 工作区走短根：之后的路径（工具参数、bash、dotnet、TEMP）都短；深路径的玩家数据目录不再踩 MAX_PATH
-        mapped = shortroot.enter(a.out, *([a.from_extract] if a.from_extract else []))
+        # 作业层的工具缓存根（<库>/tool-cache，游戏库结构 P3 起在游戏库里）也走短根：直连 / 翻译缓存（S2A_RUN_ROOT）、cache/* 都经环境变量传下去，
+        #   库在深目录时原先只有工作区短、缓存仍是长路径（v0.3.0 win_cases deep 直连库抽取失败）
+        tool = os.path.dirname(os.path.abspath(os.environ['S2A_RUN_ROOT'])) if os.environ.get('S2A_RUN_ROOT') else None
+        mapped = shortroot.enter(a.out, *([a.from_extract] if a.from_extract else []), *([tool] if tool else []))
         if mapped:
             a.out = mapped[os.path.abspath(a.out)]
             if a.from_extract: a.from_extract = mapped[os.path.abspath(a.from_extract)]
+            # 作业层经环境变量传下来的缓存路径（S2A_RUN_ROOT、cache/*、跟着存放位置走的 S2A_DIRECT_CACHE…）落在哪个入口下就换成经它访问
+            for row in os.environ.get(shortroot.ENV, '').splitlines():
+                long_root, _, short_root = row.partition('\t')
+                if long_root and short_root: shortroot.remap_env(os.environ, long_root, short_root)
     run = Run(a.out, a.events); t0 = time.time(); cur = None
     work_temp(run.out)
     share_walk_dir(a.out)
