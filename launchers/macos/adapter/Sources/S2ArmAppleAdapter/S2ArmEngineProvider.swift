@@ -261,7 +261,7 @@ public final class S2ArmEngineProvider: EngineProvider {
         try await installer.restorePrevious(device: device, events: events)
     }
 
-    public func removeFromPhone(gameId: String, acceptDropped: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> RemoveResult {
-        try await installer.remove(gameId: gameId, acceptDropped: acceptDropped, device: device, events: events)
+    public func removeFromPhone(gameId: String, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> RemoveResult {
+        try await installer.remove(gameId: gameId, acceptDropped: acceptDropped, accept: accept, device: device, events: events)
     }
 }

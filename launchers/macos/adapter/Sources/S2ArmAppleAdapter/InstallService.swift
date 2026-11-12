@@ -199,10 +199,12 @@ public final class InstallService {
     }
 
     /// 从手机容器删一款（installRemove 作业）。
-    public func remove(gameId: String, acceptDropped: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> RemoveResult {
+    /// accept：同 install——玩家在结局页确认过的参数（删前没能备份存档 save_backup_failed → acceptNoBackup 等）
+    public func remove(gameId: String, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> RemoveResult {
         var extra: [String: Any] = ["gameId": gameId]
         if let device, !device.isEmpty { extra["device"] = device }
         if acceptDropped { extra["acceptDropped"] = true }
+        for key in accept { extra[key] = true }
         let r = try await client.perform("installRemove", extra: extra, events: events).result
         return RemoveResult(result: r)
     }

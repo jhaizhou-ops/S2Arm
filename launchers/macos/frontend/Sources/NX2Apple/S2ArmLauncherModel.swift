@@ -857,7 +857,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         dropConfirm = nil; clearInlineFailure()
         if let u = d.update { updatePhone(acceptStale: u.acceptStale || d.accept.contains("acceptStale"), repack: u.repack, language: u.language, device: u.device, accept: d.accept); return }
         guard let game = d.game else { return }
-        if d.kind == .installRemove { removeFromPhone(game, acceptDropped: true, device: d.device) } else { install(game, device: d.device, accept: d.accept) }
+        if d.kind == .installRemove { removeFromPhone(game, device: d.device, accept: d.accept) } else { install(game, device: d.device, accept: d.accept) }
     }
 
     /// 装回上一版手机 S2Arm（只换宿主后新宿主不好用时）。
@@ -872,14 +872,20 @@ public final class S2ArmLauncherModel: ObservableObject {
         }
     }
 
-    func removeFromPhone(_ game: GameSummary, acceptDropped: Bool = false, ask: Bool = true, device: String? = nil) {
+    /// accept：玩家确认过的参数（同 install：container_would_drop → acceptDropped、删前没能备份存档 save_backup_failed → acceptNoBackup），逐次累积
+    func removeFromPhone(_ game: GameSummary, acceptDropped: Bool = false, ask: Bool = true, device: String? = nil, accept: Set<String> = []) {
+        let accept = acceptDropped ? accept.union(["acceptDropped"]) : accept
         guard !busy else { return }
         failAction(nil, game: nil)
         let device = device ?? game.iphoneInstallDevice ?? installDeviceID   // 从装着它的那台删
         phoneOutcome = PhoneOutcome(device: installTargetLabel)
         start(.installRemove, game: game, name: game.name) { [weak self] sink in
-            do { _ = try await self?.provider.removeFromPhone(gameId: game.id, acceptDropped: acceptDropped, device: device, events: sink) }
-            catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .installRemove, game: game, message: f.errorDescription ?? "", device: device); throw f }
+            do { _ = try await self?.provider.removeFromPhone(gameId: game.id, accept: accept, device: device, events: sink) }
+            catch let f as JobFailure where ask && Self.confirmCodes[f.code ?? ""] != nil {
+                self?.dropConfirm = DropConfirm(kind: .installRemove, game: game, message: f.errorDescription ?? "", code: f.code ?? "",
+                                                accept: accept.union([Self.confirmCodes[f.code ?? ""]!]), device: device)
+                throw f
+            }
             return nil
         }
     }
