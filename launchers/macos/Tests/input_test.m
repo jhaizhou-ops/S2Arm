@@ -55,6 +55,13 @@ static NSEvent *key_event(NSEventType type, unsigned short code, BOOL repeat) {
 }
 static BOOL physical_keys[128];
 static void poll_stale(void) { for (int n = 0; n < KEY_UP_POLLS; n++) release_stale_keys(); sample_input(); }   // 采样连续报松开满 KEY_UP_POLLS 次才删键
+// 排空主队列（NS2 输入事件化验证）：主队列块由主线程 runloop 跑，尾部再排一个标记块，标记跑到 = 之前入队的全跑完
+static void drain_main_queue(void) {
+    __block int drained = 0;
+    dispatch_async(dispatch_get_main_queue(), ^{ drained = 1; });
+    for (int i = 0; i < 200 && !drained; i++) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
+    expect(drained, "main queue drains on the main runloop");
+}
 static bool key_state(CGEventSourceStateID state, CGKeyCode code) {
     expect(state == kCGEventSourceStateCombinedSessionState, "query current login session");
     return code < 128 && physical_keys[code];
@@ -892,6 +899,21 @@ int main(int argc, const char **argv) {
     expect(send(relayClient, &proPacket, sizeof proPacket, 0) == sizeof proPacket, "Pro relay packet sent");
     for (int attempt = 0; attempt < 100 && s2a_pad_read_mouse_pair(jcMouse); attempt++) usleep(1000);
     expect(!s2a_pad_read_mouse_pair(jcMouse) && !jcMouse[0].known && !jcMouse[1].known, "Pro controller: no Joy-Con 2 mouse");
+    // Switch 2 Pro 输入事件化（11-12 延迟管线调研）：通道读线程对变化踢主队列采样（s2a_mac_ns2_input_changed → front_mac.m），
+    //   不再等 120Hz 定时器拉取。这里全程没有定时器在跑：排空主队列后，槽位也应已被采样
+    config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
+    ns2_relay_packet buttonPacket = motionPacket;
+    buttonPacket.state = (ns2_state){.buttons = 1, .lx = -32767};   // 实体 A + 左摇杆满左
+    expect(send(relayClient, &buttonPacket, sizeof buttonPacket, 0) == sizeof buttonPacket, "relay button packet sent");
+    uint32_t padButtons = 0; int32_t padSticks[4] = {0};
+    for (int attempt = 0; attempt < 100; attempt++) {
+        drain_main_queue();   // 通道线程已入队的踢在这跑：没有定时器在跑，槽位也应已被采样
+        padButtons = s2a_vpad_read_pad(0, padSticks);
+        if (padButtons == 1 && padSticks[0] == -32767) break;
+        usleep(1000);   // 通道线程还没读到这一包：下一轮再试
+    }
+    expect(padButtons == 1 && padSticks[0] == -32767, "NS2 button/stick change reaches the pad slot via the main-queue kick, without polling");
+    focused = NO;   // 还原：后面的键鼠用例自带 focused / config 初始化
     // 旧版启动器（通道 v1）：游戏端断开、不猜字段，型号回到 NONE
     ns2_relay_packet oldPacket = motionPacket; oldPacket.version = 1;
     expect(send(relayClient, &oldPacket, sizeof oldPacket, 0) == sizeof oldPacket, "relay v1 packet sent");

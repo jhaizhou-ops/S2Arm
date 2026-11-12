@@ -19,6 +19,7 @@
 #include "../graphics/metal/gal_abi.h"
 #include "../graphics/nvn/gfx/nvn/nvn_present_fit.h"   // pf_viewport / pf_out_aspect：直连上屏摆放（鼠标当触屏的画面矩形）
 #include <pthread.h>
+#include <dispatch/dispatch.h>   // 主队列踢采样（s2a_mac_ns2_input_changed）用
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
@@ -352,7 +353,8 @@ static GCExtendedGamepad *active_pad(NSArray *controllers) {
     return best;
 }
 // 手柄事件驱动（A2）：valueChangedHandler 走 GameController 的回调队列，切到主队列后与 AppKit 键盘 / 鼠标事件串行，
-//   sample_input 可以直接读 keys / mouse / config。120Hz 定时器仍保留给键盘 / 鼠标的粘键核对，并顺手补装新连接的手柄。
+//   sample_input 可以直接读 keys / mouse / config。120Hz 定时器只留给键盘 / 鼠标的粘键核对，并顺手补装新连接的手柄；
+//   Switch 2 Pro 输入不靠它拉取——报文线程对变化经 s2a_mac_ns2_input_changed 踢主队列采样（见下），到手即采样。
 // 没有扩展手柄描述、但通用物理描述里有按键的手柄（部分第三方手柄的某些模式、只给简易描述的手柄）：原先整只被忽略、游戏里没反应也没有提示。
 //   按标准键名从 physicalInputProfile 读（参照维护者提供的前端实现 Gamepad.swift 的读法）。六轴 / 震动 / Home 退出仍只认扩展手柄
 static BOOL pad_has_profile_buttons(GCController *c) { return !c.extendedGamepad && c.physicalInputProfile.buttons.count > 0; }
@@ -782,6 +784,21 @@ static void sample_input(void) {
         for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[s][i], slot_sticks[s][i]);
     }
     publish_input(slot_buttons[0], slot_sticks[0]);   // 玩家 1：旧 ABI + 事件驱动 ABI（含鼠标视角）
+}
+// Switch 2 Pro 输入事件化（11-12 延迟管线调研，同 A2 的事件直达）：ns2_controller.c 的报文线程
+//   （直连传输回调 / 通道读线程）发现快照变化就调这里。此前 NS2 输入靠 120Hz 主线程定时器拉取快照，
+//   每次按键 / 摇杆变化平均多等半个采样周期（~4.2ms）、最坏一整个（~8.3ms），主线程忙于菜单动画时还要排队。
+//   sample_input 必须主线程跑（上面的键鼠 / 槽位表规则），所以这里踢到主队列，与键鼠 / GCController 事件串行；
+//   在途合并：已有一踢未跑就不再排——sample_input 读的永远是最新快照，合并不丢事件，整包心跳重发也不会排队风暴。
+static _Atomic int ns2_sample_pending;
+static void ns2_sample_kick_main(void *unused) {
+    (void)unused;
+    atomic_store(&ns2_sample_pending, 0);   // 先清再采样：采样进行中来的新变化会再排一踢，不会被吞
+    sample_input();
+}
+void s2a_mac_ns2_input_changed(void) {
+    if (atomic_exchange(&ns2_sample_pending, 1)) return;
+    dispatch_async_f(dispatch_get_main_queue(), NULL, ns2_sample_kick_main);
 }
 // 多手柄槽位（服务层 InputPump 按符号查；没导出时退回旧的单手柄 ABI）
 __attribute__((visibility("default"), used)) int s2a_vpad_pad_count(void) { return atomic_load(&pad_live); }
