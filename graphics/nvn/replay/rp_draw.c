@@ -158,6 +158,29 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
                 if (!rp_buf_resolve(c, sb->addr, sb->size, &gb, &go)) return skip("storage_buffer_unresolved", rec);
                 if (e->access & NVN_GPU_ACC_W) rp_post_gpu_write(sb->addr, sb->size);
                 o->u.b.buf = gb; o->u.b.off = go; o->u.b.len = sb->size; break; }
+            case NVN_RB_UBOA: {   // 计算存储缓冲来自「用户 UBO 槽 r 内 src_off 处的 8 字节 guest 裸指针」（map 3，NVK_STORAGE_UBO_ADDRESS）：
+                // 指针字节必须当前：先按写的来源解析那 8 字节（池镜像里 GPU 写过的部分不会被旧 guest 字节盖掉），
+                // 再从镜像的 CPU 映射读数；目标长度按所在池的余量，并夹到 SSBO 描述符范围上限。
+                const p_bind_buf *ub = e->src_reg < 16 ? &rp_S.ubo[st][e->src_reg] : NULL;
+                if (!ub || !ub->addr || !ub->size) return skip("uniform_buffer_unbound", rec);
+                if ((uint64_t)e->src_off + 8 > ub->size) return skip("uniform_buffer_indirect_offset_outside", rec);
+                if (e->access & NVN_GPU_ACC_W) return skip("compute_storage_indirect_writable_unknown", rec);   // 长度未知的可写绑定会把回写扩到相邻分配：准确拒绝
+                uint64_t paddr = ub->addr + e->src_off;
+                nvn_gpu_buf gb; uint64_t go;
+                if (!rp_buf_resolve(c, paddr, 8, &gb, &go)) return skip("uniform_buffer_unresolved", rec);
+                uint8_t *cpu = nvn_gpu_buf_cpu(gb);
+                if (!cpu) return skip("uniform_buffer_not_host_readable", rec);
+                uint64_t target = 0; memcpy(&target, cpu + go, 8);
+                target = nvn_ga2ca(target);
+                if (!target) return skip("compute_storage_indirect_null", rec);
+                const uint8_t *pmem = NULL; uint64_t psz = 0;
+                if (!rp_pool_find(target, 1, &pmem, &psz)) return skip("storage_buffer_outside_pools", rec);
+                uint64_t extent = psz - (target - (uint64_t)(uintptr_t)pmem);
+                { nvn_gpu_caps cp; nvn_gpu_caps_get(&cp);   // 本函数作用域里没有外层 caps：这里自己取一次
+                  if (cp.max_ssbo_range && extent > cp.max_ssbo_range) extent = cp.max_ssbo_range; }
+                if (!extent) return skip("storage_buffer_indirect_empty", rec);
+                if (!rp_buf_resolve(c, target, extent, &gb, &go)) return skip("storage_buffer_unresolved", rec);
+                o->u.b.buf = gb; o->u.b.off = go; o->u.b.len = extent; break; }
             case NVN_RB_SUPPORT: {
                 uint32_t flags = (rp_depth_zero() ? 0u : 1u) | 2u;   // 位 0：深度 −1..1；位 1：base vertex / instance 取内建（后端基线要求 shaderDrawParameters）
                 // 这块内容只取决于长度与这两位：同一次提交的同一段里填过一份就接着用（每笔每阶段新建一份 2.6 KB 是回放里的固定开销）

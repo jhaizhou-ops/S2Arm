@@ -295,8 +295,8 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
 
 // ---------- 计算程序 ----------
 // 输入的构造与身份用旧层留下的零件（nvn_vk_compute_request.c：只做输入，不碰设备），结果解析用 nvn_vk_program_parse_compute。
-// 首版只认：常量缓冲（含驱动段 c0、着色器自带段 c1）、存储缓冲（地址在 NVN 槽表，或在计算阶段的用户 UBO 槽表）、组合贴图。
-// 图像、地址藏在某个 UBO 内容里的存储缓冲（NVK_STORAGE_UBO_ADDRESS）：记账、取不到。
+// 存储缓冲三种来源：NVN 存储槽（SBUFP）、别名某个用户 UBO 槽的本体（map 2 / UBOP）、
+// 用户 UBO 里 8 字节裸指针（map 3 / UBOA，带字节偏移）。图像、间接派发：记账、取不到。
 static struct entry *build_compute(const uint8_t *bytes, size_t len, const struct s2a_source_entry_view *src) {
     struct entry *e = calloc(1, sizeof *e); e->prog.is_compute = 1;
     static struct nvn_vk_compute_program cp; char why[192] = "";
@@ -309,13 +309,19 @@ static struct entry *build_compute(const uint8_t *bytes, size_t len, const struc
         nvn_gpu_layout_ent *le = &e->prog.ent[0][e->prog.nent[0]]; int ok = 0;
         if (b->kind == 1) {
             const struct nvn_vk_compute_storage *sg = &cp.storage[i];
-            // 两种来源绑出来的都是「池镜像里的一段」，只差在哪张表给地址：NVK_STORAGE_NVN 取 NVN 存储缓冲槽（NVN_RB_SBUFP）、
-            // NVK_STORAGE_UBO_PTR 取计算阶段的用户 UBO 槽（NVN_RB_UBOP，驱动段 c0 的 0x210 表）。access 一律取反射的 writable（翻译器见到写 / 原子操作才置位，
-            // 没置位的缓冲在 SPIR-V 里带 NonWritable）；核心据此决定登记不登记 GPU 写。NVK_STORAGE_UBO_ADDRESS 要先读 UBO 内容才拿得到地址，这里不接。
-            if ((sg->mapping == NVK_STORAGE_NVN || sg->mapping == NVK_STORAGE_UBO_PTR) && sg->index < 16 && !sg->offset) {
+            if (sg->index < 16) {
                 memset(le, 0, sizeof *le); le->set = (uint8_t)b->set; le->binding = (uint16_t)b->binding; le->count = 1;
                 le->cls = NVN_GPU_RES_SSBO; le->access = sg->writable ? NVN_GPU_ACC_RW : NVN_GPU_ACC_R;
-                le->src_kind = sg->mapping == NVK_STORAGE_UBO_PTR ? NVN_RB_UBOP : NVN_RB_SBUFP; le->src_reg = (uint16_t)sg->index; ok = 1;
+                if (sg->mapping == NVK_STORAGE_NVN && !sg->offset) {
+                    // NVN 存储槽：按槽取地址（核心按 NVN 阶段 5 的存储槽绑定解析）
+                    le->src_kind = NVN_RB_SBUFP; le->src_reg = (uint16_t)sg->index; ok = 1;
+                } else if (sg->mapping == NVK_STORAGE_UBO_PTR && !sg->offset) {
+                    // map 2：这条存储绑定别名「用户 UBO 槽 r 的缓冲本体」，核心按 UBO 槽的地址与长度当 SSBO 绑
+                    le->src_kind = NVN_RB_UBOP; le->src_reg = (uint16_t)sg->index; ok = 1;
+                } else if (sg->mapping == NVK_STORAGE_UBO_ADDRESS) {
+                    // map 3：UBO 槽 r 内偏移 off 处只放一个 8 字节 guest 裸指针；偏移的合法性在绑定侧按 UBO 实际长度核
+                    le->src_kind = NVN_RB_UBOA; le->src_reg = (uint16_t)sg->index; le->src_off = sg->offset; ok = 1;
+                }
             }
         } else ok = layout_ent(b, le);
         if (!ok) { char nm[56]; snprintf(nm, sizeof nm, "compute_binding_kind_%d_slot_%d_map_%d", b->kind, b->slot, b->kind == 1 ? (int)cp.storage[i].mapping : 0); red1(nm, "cs"); e->failed = 1; break; }

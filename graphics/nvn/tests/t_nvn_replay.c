@@ -1353,48 +1353,46 @@ static void t_dispatch_ubop_ro_skip(void) {
 static p_copy_t2t *put_t2t(stream *s, const tex_t *src, const tex_t *dst) {
     p_copy_t2t *o = put(s, OP_COPY_T2T, sizeof *o + 2 * sizeof(tex_t)); tex_t *sn = (tex_t *)(o + 1); sn[0] = *src; sn[1] = *dst; o->src = &sn[0]; o->dst = &sn[1]; return o;
 }
-// #659：计算阶段独立图像槽，读写属性决定 GPU 所有权；不涉及间接参数同步。
-static void t_compute_image(void) {
-    pass_fresh(); res_fresh(); g_arena_used = 0;
-    tex_t t = mk_tex(659, 0, NVN_FORMAT_RGBA8, 8, 8, 1, NVN_TEXTURE_FLAGS_IMAGE);
-    nvn_be_reg_tex(3, &t, NULL); nvn_be_set_tex_pool_n(8);
+// P2：计算存储缓冲的两种非 NVN 槽来源——map 2 别名「用户 UBO 槽的本体」，map 3 读「UBO 内 8 字节 guest 裸指针」。
+// 两条都要能在同一提交里绑成 SSBO；指针字节按镜像（不是可能过时的 guest 内存）取，目标长度按池余量。
+static void t_compute_sources(void) {
+    pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; g_arena_used = 0; g_nbw = 0;
+    g_cresolves = g_cresolve_rc = g_cpipe_gets = g_ndisp = g_cbinds = 0; g_ncb = 0;
+    for (unsigned i = 0; i < sizeof g_pmem; i++) g_pmem[i] = 0x33;
+    uint64_t base = (uint64_t)(uintptr_t)g_pmem;
+    nvn_be_pool_add(g_pmem, sizeof g_pmem);
+    static uint8_t mirror[sizeof g_pmem]; memset(mirror, 0x33, sizeof mirror);
+    uint64_t target = base + PG + 64, ptr = target - 0x1000;   // nvn_ga2ca 替身 +0x1000
+    memcpy(g_pmem + 3 * PG + 8, &ptr, 8); memcpy(mirror + 3 * PG + 8, &ptr, 8);
+    g_buf_cpu_fake = mirror;
     memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0];
-    g_cprog.nent[0] = 1;
-    nvn_gpu_layout_ent *e = &g_cprog.ent[0][0];
-    e->cls = NVN_GPU_RES_IMAGE; e->src_kind = NVN_RB_IMG; e->src_reg = 2; e->count = 1; e->access = NVN_GPU_ACC_R;
-    rp_S.img[5][2] = 3; rp_S.tex[5][2] = 7; // 不得误用采样贴图槽，也不需要采样器。
-    p_dispatch dp = {.x = 2, .y = 1, .z = 1};
-    int n = g_ndisp;
-    nvn_be_sub_begin(); rp_dispatch(&g_fake_cmd, &dp, NULL);
-    CHECK(g_ndisp == n + 1 && g_ncb == 1 && g_cb[0].cls == NVN_GPU_RES_IMAGE && g_cb[0].u.view);
-    CHECK(!(rp_tex_debug_state(t.serial) & 4));
-    e->access = NVN_GPU_ACC_RW; rp_dispatch(&g_fake_cmd, &dp, NULL);
-    CHECK(g_ndisp == n + 2 && (rp_tex_debug_state(t.serial) & 4));
-    e->src_reg = 32; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2);
-    e->src_reg = 2; e->count = 2; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2);
-    e->count = 1; rp_S.img[5][2] = 7; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2);
-    rp_S.img[5][2] = 3; e->cls = NVN_GPU_RES_TEX; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2);
-    e->cls = NVN_GPU_RES_IMAGE;
-    tex_t bad = mk_tex(660, 0x4000, NVN_FORMAT_RGBA8, 8, 8, 1, 0);
-    nvn_be_reg_tex(4, &bad, NULL); rp_S.img[5][2] = 4;
-    rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2 && !(rp_tex_debug_state(bad.serial) & 4));
-    // 图像已解析但后续绑定失败：不能把没派发的写登记为 GPU 所有。
-    g_cprog.nent[0] = 2; g_cprog.ent[0][1].src_kind = NVN_RB_CBUF; g_cprog.ent[0][1].src_reg = 15;
-    tex_t fresh = mk_tex(661, 0x8000, NVN_FORMAT_RGBA8, 8, 8, 1, NVN_TEXTURE_FLAGS_IMAGE);
-    nvn_be_reg_tex(5, &fresh, NULL); rp_S.img[5][2] = 5; rp_S.ubo[5][15].addr = 0;
-    rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2 && !(rp_tex_debug_state(fresh.serial) & 4));
-    g_cprog.nent[0] = 1; e->access = NVN_GPU_ACC_W;
-    dp.x = 0; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2 && !(rp_tex_debug_state(fresh.serial) & 4));
-    dp.x = 2; dp.ind = 1; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 2 && !(rp_tex_debug_state(fresh.serial) & 4));
-    dp.ind = 0; rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 3 && (rp_tex_debug_state(fresh.serial) & 4));
-    view_t v; memset(&v, 0, sizeof v); v.set_format = 1; v.format = NVN_FORMAT_R16;
-    nvn_be_reg_tex(6, &fresh, &v); rp_S.img[5][2] = 6;
-    rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 3); // 原图支持storage，重解释视图不支持。
-    v.set_format = 0; v.set_swizzle = 1; v.swz[0] = 4; v.swz[1] = 3; v.swz[2] = 2; v.swz[3] = 5;
-    nvn_be_reg_tex(6, &fresh, &v); rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 3);
-    fresh.serial = 662; fresh.d.levels = 2; nvn_tex_layout(&fresh.d, &fresh.L);
-    nvn_be_reg_tex(6, &fresh, NULL); rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 3);
-    nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); pass_fresh();
+    g_cprog.nent[0] = 2;
+    g_cprog.ent[0][0].cls = NVN_GPU_RES_SSBO; g_cprog.ent[0][0].src_kind = NVN_RB_UBOP; g_cprog.ent[0][0].src_reg = 0; g_cprog.ent[0][0].access = NVN_GPU_ACC_RW;
+    g_cprog.ent[0][1].cls = NVN_GPU_RES_SSBO; g_cprog.ent[0][1].src_kind = NVN_RB_UBOA; g_cprog.ent[0][1].src_reg = 0; g_cprog.ent[0][1].src_off = 8; g_cprog.ent[0][1].access = NVN_GPU_ACC_R;
+    stream s = {0};
+    p_bind_buf *ub = put(&s, OP_BIND_UBO, sizeof *ub); ub->stage = 5; ub->index = 0; ub->addr = base + 3 * PG; ub->size = 32;
+    p_dispatch *dp = put(&s, OP_DISPATCH, sizeof *dp); dp->x = 1; dp->y = 1; dp->z = 1;
+    end(&s); submit1(&s);
+    CHECK(g_cbinds == 1 && g_ncb == 2 && g_ndisp == 1);
+    CHECK(g_cb[0].cls == NVN_GPU_RES_SSBO && g_cb[0].u.b.off == 3 * PG && g_cb[0].u.b.len == 32);   // map 2：绑 UBO 槽的地址与长度
+    CHECK(g_cb[1].cls == NVN_GPU_RES_SSBO && g_cb[1].u.b.off == PG + 64 && g_cb[1].u.b.len == sizeof g_pmem - (PG + 64));   // map 3：读指针后按池余量绑
+    // 负例 1：UBO 内偏移越界 → 准确跳过，不绑错内容
+    g_cprog.ent[0][1].src_off = 32;
+    { stream t = {0}; p_bind_buf *u2 = put(&t, OP_BIND_UBO, sizeof *u2); *u2 = *ub;
+      p_dispatch *d2 = put(&t, OP_DISPATCH, sizeof *d2); d2->x = 1; d2->y = 1; d2->z = 1; end(&t); submit1(&t); }
+    CHECK(g_ndisp == 1 && nvn_unimpl_count("draw", "uniform_buffer_indirect_offset_outside") == 1);
+    // 负例 2：长度未知的可写间接来源 → 准确拒绝（回写不能扩到相邻分配）
+    g_cprog.ent[0][1].src_off = 8; g_cprog.ent[0][1].access = NVN_GPU_ACC_RW;
+    { stream t = {0}; p_bind_buf *u3 = put(&t, OP_BIND_UBO, sizeof *u3); *u3 = *ub;
+      p_dispatch *d3 = put(&t, OP_DISPATCH, sizeof *d3); d3->x = 1; d3->y = 1; d3->z = 1; end(&t); submit1(&t); }
+    CHECK(g_cresolves == 3 && g_cpipe_gets == 1);
+    CHECK(nvn_unimpl_count("draw", "uniform_buffer_unbound") == 0);
+    CHECK(nvn_unimpl_count("draw", "uniform_buffer_unresolved") == 0);
+    CHECK(nvn_unimpl_count("draw", "uniform_buffer_not_host_readable") == 0);
+    CHECK(nvn_unimpl_count("draw", "storage_buffer_outside_pools") == 0);
+    CHECK(nvn_unimpl_count("draw", "storage_buffer_indirect_empty") == 0);
+    CHECK(g_ndisp == 1 && nvn_unimpl_count("draw", "compute_storage_indirect_writable_unknown") == 1);
+    g_buf_cpu_fake = NULL; nvn_be_pool_del(g_pmem);
 }
 
 static void t_copy_t2t(void) {
@@ -1752,7 +1750,7 @@ int main(int argc, char **argv) {
     t_dispatch();
     t_dispatch_ubop_rw();
     t_dispatch_ubop_ro_skip();
-    t_compute_image();
+    t_compute_sources();
     t_copy_t2t();
     t_draw();
     t_present();

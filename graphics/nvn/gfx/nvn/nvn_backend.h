@@ -236,6 +236,7 @@ typedef struct {
     uint8_t src_kind;     // 来源：nvn_refl.h 的 NVN_RB_*（哪类 NVN 槽：CBUF / TEX / IMG / SAMP / SUPPORT / C1 / DRV0 …）
     uint16_t binding;     // 描述符号（Metal 忽略）
     uint16_t src_reg;     // 来源槽号（NVN 常量缓冲号 / 贴图槽号 …）
+    uint32_t src_off;     // 来源内的字节偏移；目前只有 NVN_RB_UBOA（UBO 里存 8 字节裸指针的位置）用
     uint16_t count;       // 数组长度（非数组为 1）
     uint16_t aid;         // Metal 参数号（Vulkan 忽略）
     uint32_t stages;      // 可见阶段位（1 << nvn_gpu_stage）
