@@ -119,12 +119,13 @@ class MacDisplayTests(unittest.TestCase):
         self.assertEqual((m["enhance"]["available"], m["enhance"]["value"]), (True, False))
         self.assertEqual((m["docked"]["value"], m["rumble"]["value"], m["rumbleLevel"]["value"], m["motion"]["value"], m["hud"]["value"]),
                          ("docked", True, "2", True, False))   # 定义表缺省：Mac 主机模式、震动开标准档、体感开、浮层关
+        self.assertEqual((m["padSets"]["value"], m["playPlayers"]["value"]), ("1", "1"))
         self.assertEqual(community.launch_env(self.c, GID), {})
 
     def test_every_mac_item_of_the_table_is_on_the_page(self):
-        # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen widenForce docked rumble rumbleLevel motion hud
+        # 定义表里 platforms 含 mac 的 bool / choice 项 = enhance fps60 widescreen widenForce docked padSets playPlayers rumble rumbleLevel motion hud …
         self.caps()
-        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "rumble", "rumbleLevel", "motion", "padFace", "hud", "diagRun"]))
+        self.assertEqual(sorted(self.mac()), sorted(["enhance", "fps60", "widescreen", "widenForce", "docked", "padSets", "playPlayers", "rumble", "rumbleLevel", "motion", "padFace", "hud", "diagRun"]))
 
     def test_game_without_a_mac_build_says_why(self):
         m = self.mac()
@@ -177,6 +178,18 @@ class MacDisplayTests(unittest.TestCase):
         self.caps()
         self.save(docked="handheld", hud=True, rumble=False, rumbleLevel="4", motion=False)
         self.assertEqual(community.launch_env(self.c, GID), {"S2A_DOCKED": "0", "S2A_HUD": "1", "S2A_RUMBLE": "0", "S2A_RUMBLE_SCALE": "1.8", "S2A_MOTION": "0"})
+
+    def test_pad_sets_and_players_reach_the_host(self):
+        # 2 人 → S2A_AP_PADS=2；2 组 → S2A_PAD_SETS=2；缺省 1/1 不写环境变量
+        self.caps()
+        self.save(playPlayers="2", padSets="1")
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_AP_PADS": "2"})
+        self.save(playPlayers="2", padSets="2")
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_AP_PADS": "2", "S2A_PAD_SETS": "2"})
+        self.save(playPlayers="1", padSets="2")
+        self.assertEqual(community.launch_env(self.c, GID), {"S2A_PAD_SETS": "2"})
+        self.save(playPlayers=None, padSets=None)
+        self.assertEqual(community.launch_env(self.c, GID), {})
 
     def test_max_blast_rumble_level(self):
         # 「震爆我」(5) → 倍率 5.0；iOS ios/controller.m 的六档倍率表与定义表一致

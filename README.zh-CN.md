@@ -95,6 +95,8 @@ Mac 和 Windows 启动器都开放了控制接口 `s2armctl`：AI 助手可以�
 
 S2Arm 运行 64 位（AArch64）游戏。Apple 芯片不能执行 32 位 ARM 代码，所以 32 位游戏不在支持范围内；需要 36 位地址空间的游戏同样不在支持范围内。
 
+Mac 启动设置可预先选择「有几组手柄」与「游玩人数」：只有一组 Joy-Con 又要两人玩时，下一局开局即拆开左右手柄，不必进游戏后再调。
+
 ## 参与开发
 
 [贡献指南](CONTRIBUTING.md) · [AI 协作规范](LLM_POLICY.md) · [给 AI 的诊断与根修 skills](skills/) · [问题回报](https://github.com/jhaizhou-ops/S2Arm/issues) · [第三方许可](THIRD_PARTY_LICENSES.md)

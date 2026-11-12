@@ -311,6 +311,10 @@ def launch_env(c, gid):
         env["S2A_PAD_FACE"] = "position"  # 手柄按键对应：按 Switch 的按键位置（缺省按字母；宿主口径见主线线 fix/pad-xbox-1109）
     if s.get("motion") is False:
         env["S2A_MOTION"] = "0"           # 体感关：不开手柄六轴（macos/front_mac.m）
+    if s.get("playPlayers") == "2":
+        env["S2A_AP_PADS"] = "2"          # 游玩人数 2：起局即开第二虚拟手柄（InputPump EnvPads）
+    if s.get("padSets") == "2":
+        env["S2A_PAD_SETS"] = "2"         # 两组手柄：单人时不把第二组并进同一玩家（InputPump 禁 MergePhysicalPair）
     if s.get("diagRun") is True:
         env.update(diag_run_env(c, gid))  # 诊断局（#438）：只管这一局，用掉就关
     return env

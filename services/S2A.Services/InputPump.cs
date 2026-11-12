@@ -43,12 +43,14 @@ namespace S2A.Services
         private static int _configurationGeneration;
 
         // 虚拟手柄个数：1，或 2（本机双手柄：强制本地合作的款，如双人成行，要两个已连接的手柄才进得了游戏）。
-        //   S2A_AP_PADS=2 起局即开；游戏经手柄设置小程序声明至少 2 人时，运行中由 Host.DisplayMessageDialog 开到 2（SetPads）；
+        //   S2A_AP_PADS=2 起局即开（Mac 启动设置「游玩人数=2」经 launch_env 写入）；游戏经手柄设置小程序声明至少 2 人时，运行中由 Host.DisplayMessageDialog 开到 2（SetPads）；
         //   自动玩家要二号手柄时（s2a_autoplay_pads = 2），采样泵下一拍开到 2。
-        //   Mac 连着两只 Joy-Con：单人阶段（_pads=1）把左右合成一对 Pro（标题屏 L+R 才能过）；等游戏真要 2 人再 SetPads(2) 拆开，各控各的。
+        //   Mac 一组 Joy-Con + 单人（_pads=1、S2A_PAD_SETS≠2）：左右合成一对 Pro（标题屏 L+R）；一组+两人靠启动设置预拆（S2A_AP_PADS=2），不必等游戏再 SetPads。
+        //   S2A_PAD_SETS=2（启动设置「有几组手柄=2」）：单人时不合并第二组，只吃槽 0。
         //   第二槽：有独立真手柄（s2a_vpad_read2）则各控各的；否则仍镜像第一槽（单手柄被迫开 2 人 / 旧路径）；
         //   自动玩家接管二号后只收「2:键」，不镜像一号（双人成行选角色）。
         private static readonly int EnvPads = Environment.GetEnvironmentVariable("S2A_AP_PADS") == "2" ? 2 : 1;
+        private static readonly bool EnvMergePair = Environment.GetEnvironmentVariable("S2A_PAD_SETS") != "2";
         private static volatile int _pads = EnvPads;
         private static volatile PlayerIndex _second = PlayerIndex.Unknown;
 
@@ -537,7 +539,8 @@ namespace S2A.Services
                 input.RStick = input.LStick;
         }
 
-        // 派对横握：左柄物理十字必须变成 ABXY（选角色确认=A）；右柄在 HoldType 仍为 Vertical 时把物理面键转到屏上逻辑。
+        // 派对横握：右柄屏上确认=物理 X→A（HoldType=Horizontal 时游戏未必自转，必须始终映射）；左柄十字→ABXY。
+        // 摇杆：HID 已是竖握坐标且 Y 已取反；横握再转 90° 时输出 Y 相对 RotateSideways 再翻一次，否则上下反。
         private static void AdaptSidewaysJoy(ref GamepadInput input, ControllerType joySide,
             Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType hold)
         {
@@ -546,10 +549,10 @@ namespace S2A.Services
             const ControllerKeys Dpad = ControllerKeys.DpadLeft | ControllerKeys.DpadUp | ControllerKeys.DpadRight | ControllerKeys.DpadDown;
             ControllerKeys b = input.Buttons, f = 0;
             bool right = joySide == ControllerType.JoyconRight;
+            bool horizontal = hold == Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal;
             if (right)
             {
-                if (hold == Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal) return;
-                // 物理 → 屏上（右只横握）：X→A、A→B、Y→X、B→Y
+                // 物理 → 屏上（右只横握）：X→A、A→B、Y→X、B→Y（单人小游戏确认键）
                 if ((b & ControllerKeys.X) != 0) f |= ControllerKeys.A;
                 if ((b & ControllerKeys.A) != 0) f |= ControllerKeys.B;
                 if ((b & ControllerKeys.Y) != 0) f |= ControllerKeys.X;
@@ -557,24 +560,25 @@ namespace S2A.Services
                 input.Buttons = (b & ~Face) | f;
                 var s = input.RStick.Dx != 0 || input.RStick.Dy != 0 ? input.RStick : input.LStick;
                 int x = s.Dx, y = s.Dy;
-                (s.Dx, s.Dy) = (y, -x);
+                // Horizontal：(-y,-x) = RotateSideways 右只再翻 Y；Vertical 强转 (y,-x)
+                (s.Dx, s.Dy) = horizontal ? (-y, -x) : (y, -x);
                 input.RStick = s; input.LStick = s;
             }
             else
             {
-                // 左只：无论 HoldType，十字键都映射为 ABXY（下=A）。若留 D-pad，选角色会当成方向、确认不了。
-                if ((b & (Dpad | Face)) == 0) return;
-                if ((b & ControllerKeys.DpadDown) != 0 || (b & ControllerKeys.A) != 0) f |= ControllerKeys.A;
-                if ((b & ControllerKeys.DpadLeft) != 0 || (b & ControllerKeys.B) != 0) f |= ControllerKeys.B;
-                if ((b & ControllerKeys.DpadRight) != 0 || (b & ControllerKeys.X) != 0) f |= ControllerKeys.X;
-                if ((b & ControllerKeys.DpadUp) != 0 || (b & ControllerKeys.Y) != 0) f |= ControllerKeys.Y;
-                input.Buttons = (b & ~(Dpad | Face)) | f;
-                if (hold != Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal)
+                // 左只：十字键映射为 ABXY（下=A）。无面键时仍要转摇杆，否则只推摇杆时左右反着。
+                if ((b & (Dpad | Face)) != 0)
                 {
-                    var s = input.LStick; int x = s.Dx, y = s.Dy;
-                    (s.Dx, s.Dy) = (-y, x);
-                    input.LStick = s; input.RStick = s;
+                    if ((b & ControllerKeys.DpadDown) != 0 || (b & ControllerKeys.A) != 0) f |= ControllerKeys.A;
+                    if ((b & ControllerKeys.DpadLeft) != 0 || (b & ControllerKeys.B) != 0) f |= ControllerKeys.B;
+                    if ((b & ControllerKeys.DpadRight) != 0 || (b & ControllerKeys.X) != 0) f |= ControllerKeys.X;
+                    if ((b & ControllerKeys.DpadUp) != 0 || (b & ControllerKeys.Y) != 0) f |= ControllerKeys.Y;
+                    input.Buttons = (b & ~(Dpad | Face)) | f;
                 }
+                var s = input.LStick; int x = s.Dx, y = s.Dy;
+                // Horizontal：(y,x) = RotateSideways 左只再翻 Y；Vertical 强转 (-y,x)
+                (s.Dx, s.Dy) = horizontal ? (y, x) : (-y, x);
+                input.LStick = s; input.RStick = s;
             }
         }
 
@@ -670,7 +674,7 @@ namespace S2A.Services
                 Ryujinx.Common.S2AThreadAlloc.Tick("输入");
                 Lifecycle.Tick(Host.Device?.System);   // 焦点 / 底座变化转给游戏（接口 v2.15）
                 if (AutoplayPads != null && AutoplayPads() > _pads) SetPads(device, AutoplayPads());   // 先改配再取主手柄号：两人时主手柄离开掌机格
-                // 不因「连着两只真手柄」就提前 SetPads(2)：标题屏 / 单人菜单要同一玩家的 L+R（左右 Joy-Con 合成一对）
+                // 不因「连着两只真手柄」就提前 SetPads(2)：标题屏 / 单人菜单要同一玩家的 L+R（左右 Joy-Con 合成一对）；一组双人靠启动设置 S2A_AP_PADS=2 预开
                 if (Environment.TickCount64 >= nextFollow) { FollowSupportedPlayers(device); FollowSupportedStyles(device); nextFollow = Environment.TickCount64 + 250; }
 
                 GamepadInput input = new() { PlayerId = _player };
@@ -712,8 +716,8 @@ namespace S2A.Services
                     InputHook(ref input);
                 }
 
-                // 单人 + 两只真手柄：左右合成一对（左摇杆/键 ∪ 右摇杆/键），标题屏 L+R、菜单才有反应
-                if (_pads == 1 && physicalSecond && (nint)InputHook == (nint)_vpadHook)
+                // 单人 + 一组两只真手柄：左右合成一对（左摇杆/键 ∪ 右摇杆/键），标题屏 L+R、菜单才有反应；两组手柄时不合并
+                if (_pads == 1 && physicalSecond && EnvMergePair && (nint)InputHook == (nint)_vpadHook)
                     MergePhysicalPair(ref input);
 
                 // 自动玩家接管了二号手柄（s2a_autoplay_pads ≥ 2）：二号只听自动玩家的「2:键」，自动玩家给一号的键不镜像过去

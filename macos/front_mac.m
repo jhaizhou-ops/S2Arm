@@ -736,14 +736,15 @@ static void sample_input(void) {
             uint32_t jb = 0; int32_t js[4] = {0};
             if (s2a_joycon_pad_read(0, &jb, js)) apply_ns2_bits(jb, js[0], js[1], js[2], js[3], &buttons1, sticks1);
         }
-    } else if (gcDual) {
-        apply_slot_controller(slot0, &buttons0, sticks0);
-        apply_slot_controller(slot1, &buttons1, sticks1);
     } else if (jc >= 2) {
+        // 优先 HID：GC microGamepad 没有 L/R/肩键，双 Joy-Con 时若先走 GC 会导致切岛 L/R 全无、摇杆朝向也不对
         // 真实双人：P1=右 Joy-Con、P2=左 Joy-Con（HID slot0=L / slot1=R，发布时对调）
         uint32_t jb0 = 0, jb1 = 0; int32_t js0[4] = {0}, js1[4] = {0};
         if (s2a_joycon_pad_read(1, &jb0, js0)) apply_ns2_bits(jb0, js0[0], js0[1], js0[2], js0[3], &buttons0, sticks0);
         if (s2a_joycon_pad_read(0, &jb1, js1)) apply_ns2_bits(jb1, js1[0], js1[1], js1[2], js1[3], &buttons1, sticks1);
+    } else if (gcDual) {
+        apply_slot_controller(slot0, &buttons0, sticks0);
+        apply_slot_controller(slot1, &buttons1, sticks1);
     } else {
         apply_slot_controller(slot0, &buttons0, sticks0);
         if (!slot0 && jc >= 1) {
