@@ -574,8 +574,13 @@ static void fill_caps(struct nvn_gpu_vk *vk, const nvn_gpu_open_desc *d) {
     c->min_ubo_align = (uint32_t)l->minUniformBufferOffsetAlignment;
     c->min_ssbo_align = (uint32_t)l->minStorageBufferOffsetAlignment;
     c->max_ubo_range = l->maxUniformBufferRange;
-    c->max_ssbo_range = l->maxStorageBufferRange;
-    c->max_buf_bytes = l->maxStorageBufferRange;
+    c->max_ssbo_range = l->maxStorageBufferRange;   // 描述符「范围」上限（不等于单次分配上限）
+    // 单次分配上限来自 VkPhysicalDeviceMaintenance3Properties.maxMemoryAllocationSize（Vulkan 1.1）；
+    // 以前这里错用了 maxStorageBufferRange，于是任何大于 128 MiB 的池镜像都建不出来。
+    { VkPhysicalDeviceMaintenance3Properties m3; memset(&m3, 0, sizeof m3); m3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+      VkPhysicalDeviceProperties2 p2; memset(&p2, 0, sizeof p2); p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; p2.pNext = &m3;
+      vkGetPhysicalDeviceProperties2(vk->phys, &p2);
+      c->max_buf_bytes = m3.maxMemoryAllocationSize ? m3.maxMemoryAllocationSize : (uint64_t)l->maxStorageBufferRange; }
     c->max_stage_res[NVN_GPU_RES_UBO] = l->maxPerStageDescriptorUniformBuffers;
     c->max_stage_res[NVN_GPU_RES_SSBO] = l->maxPerStageDescriptorStorageBuffers;
     c->max_stage_res[NVN_GPU_RES_TEX] = l->maxPerStageDescriptorSampledImages;
@@ -1074,7 +1079,9 @@ nvn_gpu_rc nvn_gpu_buf_create(uint64_t bytes, int mem, const void *init, nvn_gpu
     int closing = g.closing;
     pthread_mutex_unlock(&g_mu);
     if (closing) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭");
-    if (bytes == 0 || bytes > g.caps.max_buf_bytes) return fail(err, NVN_GPU_E_ARG, "bytes 非法：%llu", (unsigned long long)bytes);
+    if (bytes == 0 || bytes > g.caps.max_buf_bytes)
+        return fail(err, NVN_GPU_E_ARG, "申请 %llu 字节：超出单次分配上限 %llu（maxMemoryAllocationSize；SSBO 描述符范围上限 %llu 是另一项）",
+                    (unsigned long long)bytes, (unsigned long long)g.caps.max_buf_bytes, (unsigned long long)g.caps.max_ssbo_range);
     if (mem != NVN_GPU_MEM_SHARED && mem != NVN_GPU_MEM_DEVICE) return fail(err, NVN_GPU_E_ARG, "mem 非法");
     if (mem == NVN_GPU_MEM_DEVICE && init) return fail(err, NVN_GPU_E_ARG, "DEVICE 内存不能带 init");
 
@@ -2745,6 +2752,17 @@ static int write_binds(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, 
             bf->buffer = b->u.b.buf ? b->u.b.buf->buffer : VK_NULL_HANDLE;
             bf->offset = b->u.b.off;
             bf->range = b->u.b.len;
+            if (e->cls == NVN_GPU_RES_UBO && b->u.b.len > g.caps.max_ubo_range) {   // UBO 没有 WHOLE_SIZE 例外：超过范围上限只能准确拒绝
+                set_sticky(c, NVN_GPU_E_ARG, "常量缓冲范围 %llu 超过 maxUniformBufferRange %llu", (unsigned long long)b->u.b.len, (unsigned long long)g.caps.max_ubo_range);
+                return -1; }
+            if (e->cls == NVN_GPU_RES_SSBO && b->u.b.len > g.caps.max_ssbo_range) {
+                // Vulkan 的存储缓冲范围上限管的是「范围」而不是缓冲大小：超过上限的绑定用 VK_WHOLE_SIZE
+                // （规范只约束非 WHOLE_SIZE 的 range），有效范围变成 offset 到缓冲尾。这是平台分叉，报一次红行。
+                static int said; if (!said++) {
+                    char m[160]; snprintf(m, sizeof m, "存储缓冲范围 %llu 超过 maxStorageBufferRange %llu：按 VK_WHOLE_SIZE 绑定（Vulkan 无更大范围）",
+                                          (unsigned long long)b->u.b.len, (unsigned long long)g.caps.max_ssbo_range);
+                    nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", m); }
+                bf->range = VK_WHOLE_SIZE; }
             w->pBufferInfo = bf;
             break;
         case NVN_GPU_RES_TBUF:

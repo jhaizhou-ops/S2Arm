@@ -1315,6 +1315,41 @@ static void t22_clear_view_fmt(void) {
 }
 
 
+// C76：单次分配上限必须来自 maxMemoryAllocationSize，不能与 maxStorageBufferRange 共用同一个值。
+// 以前两者相等（都是 128 MiB）：回放核心把内存池整池镜像成一块 CPU 可见缓冲，任何大于 SSBO 范围上限的池
+// 都建不出镜像，池里的顶点 / 索引取不到，真机大地图进游戏后几何大面积不画（只剩 UI 与少数小池物件）。
+// 这里用一个「超过 SSBO 范围上限、仍在分配上限内」的缓冲做判据：修前 E_ARG，修后成功。
+static void t76_buf_create_alloc_cap(void) {
+    nvn_gpu_caps cp;
+    nvn_gpu_caps_get(&cp);
+    // 直接对设备真值：单次分配上限必须是 maxMemoryAllocationSize（没有该项时才退回 SSBO 范围上限）。
+    // 这一条不依赖设备上两个上限是否相等，能直接抓住「拿 maxStorageBufferRange 当分配上限」的回归。
+    VkPhysicalDeviceMaintenance3Properties m3; memset(&m3, 0, sizeof m3);
+    m3.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+    VkPhysicalDeviceProperties2 p2; memset(&p2, 0, sizeof p2);
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; p2.pNext = &m3;
+    vkGetPhysicalDeviceProperties2(g_dev.physical, &p2);
+    uint64_t expect = m3.maxMemoryAllocationSize ? (uint64_t)m3.maxMemoryAllocationSize
+                                                 : (uint64_t)g_dev.properties.limits.maxStorageBufferRange;
+    CHECK(cp.max_buf_bytes == expect, "C76: caps.max_buf_bytes=%llu 应等于设备 maxMemoryAllocationSize %llu（SSBO 范围上限 %llu 是另一项）",
+          (unsigned long long)cp.max_buf_bytes, (unsigned long long)expect, (unsigned long long)cp.max_ssbo_range);
+    if (cp.max_buf_bytes <= cp.max_ssbo_range) {
+        printf("C76 跳过：本设备 max_buf_bytes(%llu) <= max_ssbo_range(%llu)，没有可判别的区间\n",
+               (unsigned long long)cp.max_buf_bytes, (unsigned long long)cp.max_ssbo_range);
+        return;
+    }
+    uint64_t n = cp.max_ssbo_range + (1u << 20);
+    if (n > cp.max_buf_bytes) n = cp.max_buf_bytes;
+    nvn_gpu_err e; memset(&e, 0, sizeof e);
+    nvn_gpu_buf b = NULL;
+    nvn_gpu_rc r = nvn_gpu_buf_create(n, NVN_GPU_MEM_SHARED, NULL, &b, &e);
+    CHECK(nvn_gpu_ok(r) && b, "C76: 建 %llu 字节缓冲（> max_ssbo_range %llu，<= 分配上限 %llu）失败：%d %s",
+          (unsigned long long)n, (unsigned long long)cp.max_ssbo_range, (unsigned long long)cp.max_buf_bytes, r.code, e.why);
+    if (nvn_gpu_ok(r)) printf("C76: 分配上限 %llu > SSBO 范围上限 %llu，建 %llu 字节缓冲成功\n",
+                              (unsigned long long)cp.max_buf_bytes, (unsigned long long)cp.max_ssbo_range, (unsigned long long)n);
+    if (b) nvn_gpu_buf_release(b, NULL, NULL);
+}
+
 // C29：Vulkan 映射按中立表重定向：展开格式必须映射到目标格式的 VkFormat（纯格式检查，不用 GPU）。
 static void t29_format_expand(void) {
     for (uint32_t f = 0; f <= 0xFF; f++) {
@@ -4637,6 +4672,7 @@ int main(int argc, char **argv) {
     CHECK(caps.max_sets > 0 && caps.max_buf_bytes > 0, "caps 限值没有填");
     CHECK(caps.caps_id[0] | caps.caps_id[1] | caps.caps_id[15], "caps_id 全 0");
     CHECK(nvn_gpu_format_caps(0x1) != 0, "format_caps 对 R8 无能力位");   // NVN_FORMAT_R8
+    t76_buf_create_alloc_cap();
 
     t01_fill32();
     t02_write_copy();
