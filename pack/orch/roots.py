@@ -363,8 +363,32 @@ def plain_entries(path):
     return paths
 
 
+def repair_git_skeleton(git_dir):
+    """Git 认一个目录是仓库要 HEAD、objects/、refs/ 都在。发出去的引擎快照里 refs/ 下只有空目录（引用都在 packed-refs），
+    安装 / 拷贝时空目录可能丢（11-11 维护者 Windows 覆盖安装后 Engine\\.git 只剩 info / logs / objects）→ Git 不认这个仓库。
+    HEAD 与 objects/ 都在、只缺这几个空目录时补上（不改任何内容）；→ 补了哪些"""
+    git_dir = Path(git_dir)
+    if not (git_dir / 'HEAD').is_file() or not (git_dir / 'objects').is_dir():
+        return []
+    made = []
+    for d in ('refs', 'refs/heads', 'refs/tags'):
+        if not (git_dir / d).is_dir():
+            (git_dir / d).mkdir(parents=True, exist_ok=True)
+            made.append(d)
+    return made
+
+
 def git(*args, repo=REPO, check=True):
-    result = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, check=check)
+    # 钉死仓库：有自己的 .git 目录（发出去的引擎快照、普通检出）就显式 --git-dir / --work-tree，并设 GIT_CEILING_DIRECTORIES，
+    #   绝不往上认到玩家自己的仓库（11-11：Engine\\.git 缺 refs 时 git 一路往上，认到玩家主目录下的空仓库，报 HEAD 不存在）。
+    #   .git 是文件（工作树）照旧 -C
+    repo = Path(repo)
+    pin = []
+    if (repo / '.git').is_dir():
+        repair_git_skeleton(repo / '.git')
+        pin = ['--git-dir', str((repo / '.git').resolve()), '--work-tree', str(repo.resolve())]
+    env = dict(os.environ, GIT_CEILING_DIRECTORIES=str(repo.resolve().parent))
+    result = subprocess.run(['git', '-C', str(repo), *pin, *args], capture_output=True, check=check, env=env)
     return result.stdout.decode('utf-8').strip() if check else result.returncode == 0
 
 
