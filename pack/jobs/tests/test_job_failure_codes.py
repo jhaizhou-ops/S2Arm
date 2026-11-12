@@ -518,6 +518,20 @@ class LogCauses(JobCase):
         self.assertEqual(d["summary"], "存放位置所在磁盘格式不支持：这块盘不支持出包需要的文件操作（常见于 exFAT / FAT 格式的外接盘）。")
         self.assertEqual(d["suggestion"], RECOVERY["volume_ops_unsupported"])
 
+    def test_memory_error_says_out_of_memory(self):
+        # #711（11-11 Windows 16 GB）：抽取进程池按逻辑核数开满，Python 子进程打 MemoryError。原先落成笼统的阶段失败；
+        #   现在说「电脑内存不够」、下一步关掉占内存的程序 / 调大页面文件
+        from errors import RECOVERY
+        error, d = self.mac_refresh(["Traceback (most recent call last):", '  File "nxsh_extract.py", line 88, in <module>', "MemoryError", self.STOP])
+        self.assertEqual(error.code, "out_of_memory")
+        self.assertEqual(d["summary"], "电脑内存不够：出包时内存用完了。")
+        self.assertEqual(d["suggestion"], RECOVERY["out_of_memory"])
+
+    def test_memory_error_mentioned_in_prose_is_not_out_of_memory(self):
+        # 反例（同一用例里作业日志会累积，单拆一个）：句中提到 MemoryError 不算，只认独占一行的异常名
+        error, _ = self.mac_refresh(["说明：遇到 MemoryError 时请调小并行度", self.STOP])
+        self.assertNotEqual(error.code, "out_of_memory")
+
     def test_windows_precheck_missing_metal_says_metal_unavailable(self):
         # 11-09 Windows 出包机：S2A_METAL_BIN 指到不存在的目录，预检打「环境缺件 metal」、退 75。原先落成笼统的 package_failed（出包未完成）
         error, d = self.mac_refresh(["【红】环境缺件 metal：Metal Developer Tools（D:\\no_such_metal\\bin；S2A_METAL_BIN 可指定，否则查 PATH / 官方安装目录）",
