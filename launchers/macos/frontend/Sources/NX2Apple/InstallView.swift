@@ -133,8 +133,10 @@ struct InstallView: View {
                         .background(LauncherPalette.cream, in: Capsule())
                 }
                 .buttonStyle(.plain).keyboardShortcut(.defaultAction)
-                .disabled(!model.installAllowed(gameID) || model.busy)
-                .opacity(model.installAllowed(gameID) && !model.busy ? 1 : 0.45)
+                // 不按清单置灰（维护者 11-11：玩家主动点装机不许前端挡）：清单可能是旧的（在外面登录好、插好线回来仍灰），
+                // 真做不下去的（没出 iPhone 版、没连设备、签名失败）作业层开头自己判、回真实原因；只在有作业在跑时置灰
+                .disabled(model.busy)
+                .opacity(model.busy ? 0.45 : 1)
                 .busyHint(model)
             }
             .padding(.horizontal, 30).padding(.vertical, 16)

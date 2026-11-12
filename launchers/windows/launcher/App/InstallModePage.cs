@@ -273,8 +273,7 @@ public sealed partial class EnvironmentWindow
             if (installBusy || packRunning || batchRunning || BatchGame(id) is not { } game) return;
             selectedGame = game.Id; readinessFor = game.Id; readiness = null; installCheckFailed = false;
             Navigate("install");
-            await CheckInstallAsync();
-            if (!InstallAllowed) return;
+            await CheckInstallAsync();   // 只为拿到装到哪台（InstallDevice）；清单没全勾也照装，作业层报真实原因
             await InstallAsync(game);
             if (installState is not ("succeeded" or "needsPlayer")) return;
         }

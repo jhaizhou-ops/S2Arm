@@ -790,11 +790,6 @@ public final class S2ArmLauncherModel: ObservableObject {
         }
     }
 
-    /// 能不能开始装：清单说可以，或这次清单读失败（不因探测失败把玩家关在外面，install 作业会给真实原因）。
-    func installAllowed(_ gameID: String) -> Bool {
-        installGameID == gameID && (installReadiness?.ready == true || (installReadiness == nil && installError != nil))
-    }
-
     /// 在 Xcode 打开引导项目；玩家运行一次后，装机页每 5 秒的重查会自动打勾。
     func openSigningProject() {
         Task {

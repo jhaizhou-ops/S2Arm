@@ -78,7 +78,6 @@ public sealed partial class EnvironmentWindow
     private bool customizing;
     private string customizeError = "";
     // A checklist that could not be read must not lock the player out: start and let the install job give the real reason.
-    private bool InstallAllowed => readiness?.Ready == true || (readiness is null && installCheckFailed);
     private string installState = "", installMessage = "", installDiagnostics = "";
     /// <summary>上一次装机失败的错误码（apple_session_expired 时失败页给「打开 Impactor 重新登录」，重新登录完自动再装）</summary>
     private string? installCode;
@@ -1149,7 +1148,7 @@ public sealed partial class EnvironmentWindow
         var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
         var recheck = Action("action.recheck", () => _ = CheckInstallAsync(), !installChecking && !installBusy);
         recheck.Margin = new Thickness(0, 0, 12, 0); buttons.Children.Add(recheck);
-        var start = Primary(T("install.start"), () => _ = InstallAsync(game), InstallAllowed && !installBusy && !packRunning);
+        var start = Primary(T("install.start"), () => _ = InstallAsync(game), !installBusy && !packRunning);   // 不按清单置灰（同 Mac InstallView）：真做不下去的作业层开头判、回真实原因
         AutomationId(start, "install.start");
         buttons.Children.Add(start);
         var remove = new Button { Content = T("install.remove_game"), IsEnabled = !installBusy && !packRunning,
@@ -1267,7 +1266,7 @@ public sealed partial class EnvironmentWindow
     /// <summary>accept：玩家已同意的确认参数（ConfirmCodes 的值，逐次累积）。ask = false（控制口）原样失败、不弹确认，由调用方带参数再发。</summary>
     private async Task InstallAsync(LibraryGame game, IReadOnlySet<string>? accept = null, bool ask = true)
     {
-        if (installBusy || !InstallAllowed) return;
+        if (installBusy) return;
         accept ??= new HashSet<string>();
         var front = BeginPhoneJob(game, "");
         string? dropAsk = null, askCode = null;
