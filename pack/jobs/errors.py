@@ -18,7 +18,7 @@ RECOVERY = {
     "ios_install_write_failed": "重新打开 S2Arm 后点「重试」；还不行就导出诊断包发给我们。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_import_img_failed": "检查文件是否拷完整，再打开 S2Arm。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_unknown": "导出诊断包发给我们。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
-    "rewrite_gap": "这款游戏有一处程序代码暂不支持，建议反馈让我们补上：点「复制错误摘要」并发给我们。",
+    "rewrite_gap": "之前已经装到 iPhone 上的这款可以照常接着玩。点「复制错误摘要」发给我们，修好后更新 S2Arm 再出一次包。",
     "update_failed": "检查网络后重试；还是不行就到下载页下载新版覆盖安装，当前版本和存档不受影响。",
     "glslc_windows_unavailable": "这款游戏的着色器编译目前只能在 Mac 上完成，Windows 版暂不支持；请改用 Mac 版 S2Arm 出包。",
     "win_host_unsupported": "请改用64位Windows主机运行S2Arm，确认后点「重新检查」。",
@@ -230,7 +230,7 @@ STAGE_CODES = {
 #   否则「title：detail」（单测 test_job_failure_codes.PlayerSummary 逐条对照；英文在 Mac 启动器 Localizable.json）。
 PLAYER_REASON = {
     "disk_full": "磁盘空间不够：准备这个游戏需要更多空余空间。",
-    "rewrite_gap": "改写失败：这款游戏有一处程序代码暂不支持。",
+    "rewrite_gap": "暂时出不了包：这款游戏里有程序代码我们的改写器还不支持，我们正在修。",
     "glslc_windows_unavailable": "着色器编译暂不支持：这款游戏的着色器编译目前只能在 Mac 上完成。",
     "metal_unavailable": "缺少 Metal 组件：编着色器要用的 Metal 组件没装上。",
     "ios_platform_missing": "缺少 iOS 平台组件：Xcode 的 iOS 平台还没装，打不了 iPhone 包。",

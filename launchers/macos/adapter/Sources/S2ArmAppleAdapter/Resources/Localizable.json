@@ -4956,8 +4956,8 @@
   "en": "Not enough disk space. Preparing this game needs more free space."
  },
  {
-  "source": "改写失败：这款游戏有一处程序代码暂不支持。",
-  "en": "Rewriting failed. This game has a code pattern that is not yet supported."
+  "source": "暂时出不了包：这款游戏里有程序代码我们的改写器还不支持，我们正在修。",
+  "en": "Can't build this game yet. This game uses code our rewriter doesn't support yet. We're working on a fix."
  },
  {
   "source": "着色器编译暂不支持：这款游戏的着色器编译目前只能在 Mac 上完成。",
@@ -5908,8 +5908,8 @@
   "en": "Check your network and try again. If it still fails, download the new version from the download page and install it over this one. Your current version and saves are not affected."
  },
  {
-  "source": "这款游戏有一处程序代码暂不支持，建议反馈让我们补上：点「复制错误摘要」并发给我们。",
-  "en": "This game has a code pattern that is not yet supported. We recommend reporting this: click Copy error summary and send it to us."
+  "source": "之前已经装到 iPhone 上的这款可以照常接着玩。点「复制错误摘要」发给我们，修好后更新 S2Arm 再出一次包。",
+  "en": "If this game is already on your iPhone, you can keep playing that copy. Click Copy error summary and send it to us; after the fix, update S2Arm and build again."
  },
  {
   "source": "这款游戏的着色器编译目前只能在 Mac 上完成，Windows 版暂不支持；请改用 Mac 版 S2Arm 出包。",
