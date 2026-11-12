@@ -699,7 +699,7 @@ def save_dir_absent(c, ident, bid, save_dir):
     return False
 
 def note(c, text):
-    """装机原则（jhz 11-11：「玩家都主动点装机了……认不出的直接装」）：拿不准、照样继续的判断只记进本任务的日志 <任务号>-decisions.log，界面不拦"""
+    """装机原则（11-11：玩家主动点了装机就别替他拒——认得出的风险让他确认，认不出的直接装）：拿不准、照样继续的判断只记进本任务的日志 <任务号>-decisions.log，界面不拦"""
     line = time.strftime("%H:%M:%S ") + text
     try:
         c.logs.mkdir(parents=True, exist_ok=True)
@@ -1135,7 +1135,7 @@ class WinPhone:
 
     def app_missing(self, bid, why):
         """Windows 上没有 devicectl：手机明确答「没有这个 App」时 s2a-devpush 的原文含 ApplicationLookupFailed（Windows 实机核过）；
-        进不了容器时 s2a-devpush 再用 installation_proxy 按包名查一次，确实没装就打结构化标记 S2A_APP_MISSING（11-11 jhz 测试机2 实测：
+        进不了容器时 s2a-devpush 再用 installation_proxy 按包名查一次，确实没装就打结构化标记 S2A_APP_MISSING（11-11 实机实测：
         删了 S2Arm 再装，原文只有「device socket io failed」，原先被当成锁屏挡住）。两样都没有 = 判不了，交给调用方按装机原则继续"""
         return "ApplicationLookupFailed" in why or "S2A_APP_MISSING" in why
 
@@ -1270,7 +1270,7 @@ def phone_games(c, ph):
     各自的记录只有自己装的）。列这个包名的资源包新旧两处游戏目录（PACK_GAMES、Documents/games）：只认目录名是 16 位游戏号、
     pack_listing 选出的那处资源包已解开（.applied）的，别的跳过。
     进不了容器时问平台这个包名装没装（ph.app_missing）：确实没装 → None（和「装着、一款都没有」的空集分开：没装时本机记录的各款也不在手机上了，
-    container_others 据此不再带）。装着却列不出、或连装没装都判不了（锁屏 / 断开 / 工具原文认不出）：照装机原则（jhz 11-11「认不出的直接装」）
+    container_others 据此不再带）。装着却列不出、或连装没装都判不了（锁屏 / 断开 / 工具原文认不出）：照装机原则（11-11「认不出的直接装」）
     按「这处没有别的游戏」继续，只记进日志——最坏是这台电脑不知道的别的款这次没带进容器，它们的资源包和存档还在手机上，回原电脑再装就回来"""
     bid = phone_bid(ph)
     if not bid or not ph.udid:

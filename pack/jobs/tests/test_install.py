@@ -1451,7 +1451,7 @@ class PhoneGamesTruthTests(unittest.TestCase):
             self.assertEqual(install.phone_games(self.c, self.ph()), {self.A, self.C})   # B 没解开、别的名字跳过
 
     def test_app_not_installed_is_none_unreadable_continues(self):
-        # 装机原则（jhz 11-11「认不出的直接装」）：平台确认没装 → None；装着却进不去 / 判不了 → 按「手机上没有别的游戏」照装，只记进日志
+        # 装机原则（11-11「认不出的直接装」）：平台确认没装 → None；装着却进不去 / 判不了 → 按「手机上没有别的游戏」照装，只记进日志
         err = self.client([], set(), ls_error="取不到 x 的容器（App 没装或不是开发签名）：device socket io failed")
         with um.patch.object(install, "devpush_client", err):
             self.assertIsNone(install.phone_games(self.c, self.ph(missing=True)))            # 平台确认没装：None，不是「装着、一款都没有」的空集
