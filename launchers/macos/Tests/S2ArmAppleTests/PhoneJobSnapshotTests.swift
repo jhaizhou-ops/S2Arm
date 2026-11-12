@@ -102,7 +102,7 @@ import XCTest
     func testTextMatrixEveryKindEveryState() {
         let l10n = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("frontend/l10n")
-        let states: [JobSession.Phase] = [.running, .stopping, .finished(.completed), .finished(.cancelled), .finished(.failed), .finished(.interrupted), .finished(.paused)]
+        let states: [JobSession.Phase] = [.running, .stopping, .finished(.completed), .finished(.cancelled), .finished(.failed), .finished(.interrupted)]
         var missing: [String] = []
         for lang in ["zh", "en"] {
             let table = (try? JSONSerialization.jsonObject(with: Data(contentsOf: l10n.appendingPathComponent(lang + ".json")))) as? [String: Any] ?? [:]
@@ -134,7 +134,7 @@ import XCTest
         case .stopping: return ["s2arm.job.stopping", title]
         case .finished(.completed): return ["s2arm.job.done." + k.rawValue, title]
         case .finished(.cancelled): return ["s2arm.job.cancelled", title]
-        case .finished(.failed), .finished(.paused): return ["s2arm.job.failed", title]
+        case .finished(.failed): return ["s2arm.job.failed", title]
         case .finished(.interrupted): return ["s2arm.job.interrupted", title]
         }
     }
@@ -146,7 +146,7 @@ import XCTest
         case .finished(.completed): return ["phone.title." + k.rawValue, "phone.headline." + k.rawValue, "phone.done." + k.rawValue, "phone.stat.time", "phone.stat.device",
                                             "phone.stat.games", "phone.stat.no_push", "phone.fact.no_push", "phone.fact.pushed", "phone.fact.skipped", "phone.details"]
         case .finished(.cancelled): return ["phone.title." + k.rawValue, "phone.cancelled", "phone.details"]
-        case .finished(.failed), .finished(.interrupted), .finished(.paused): return ["phone.title." + k.rawValue, "phone.failed." + k.rawValue, "phone.next", "phone.retry",
+        case .finished(.failed), .finished(.interrupted): return ["phone.title." + k.rawValue, "phone.failed." + k.rawValue, "phone.next", "phone.retry",
                                                                   "install.drop_title", "install.drop_confirm", "phone.drop.cancel", "phone.details"]
         }
     }
