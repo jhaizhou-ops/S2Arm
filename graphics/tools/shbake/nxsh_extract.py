@@ -544,7 +544,8 @@ def _scan_blob(path, data, rows, blobs, stat):
     if b'HCPS' in data: owned |= scan_spch(path, data, rows, blobs, stat)
     if RAW and (b'BNSH\0\0\0\0' not in data or path.startswith('nso:')): scan_raw(path, data, rows, blobs, stat)
     for k, m in enumerate(re.finditer(b'BNSH\0\0\0\0', data)):
-        b = data[m.start():]; size = struct.unpack_from('<I', b, 0x1c)[0]; b = b[:size] if 0 < size <= len(b) else b
+        # 按头里的长度只切这一支（#711：原先先切到文件尾再截短，几 GB 的容器 mmap 每遇一处 BNSH 就拷一份到文件尾，Windows 提交上限下 MemoryError）
+        o = m.start(); size = struct.unpack_from('<I', data, o + 0x1c)[0]; b = data[o:o + size] if 0 < size <= len(data) - o else data[o:]
         try: codes = bnsh_codes(b)
         except Exception: stat['BNSH 解析失败'] += 1; continue
         if codes is None: stat['BNSH 无 grsc'] += 1; continue

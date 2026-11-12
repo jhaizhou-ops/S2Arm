@@ -439,6 +439,7 @@ timeout 30 python3 graphics/tools/shbake/tests/t_psowarm.py > "$LOG/psowarm.log"
 # 分块共享窗口的连续 deflate 续解（10-23 暗黑3 漏抽）：续解解出原文、整份三块全解开、跨块魔数看得到、不在块链上不报红、块链上坏块报红
 timeout 60 "$PYV" graphics/tools/shbake/tests/t_zchain.py > "$LOG/zchain.log" 2>&1; zc=$?; zcc=$(tail -1 "$LOG/zchain.log")
 timeout 60 "$PYV" graphics/tools/shbake/tests/t_adj_ghost.py > "$LOG/adj_ghost.log" 2>&1; ag=$?; reg $ag "相邻扫描错位幽灵：$(tail -1 "$LOG/adj_ghost.log")（退出 ${ag}）" "$LOG/adj_ghost.log"   # nxsh_extract scan_adj：无头且线程组为 0 丢弃
+timeout 60 "$PYV" graphics/tools/shbake/tests/t_bnsh_slice.py > "$LOG/bnsh_slice.log" 2>&1; bs=$?; reg $bs "BNSH 按头长切片不拷到文件尾：$(tail -1 "$LOG/bnsh_slice.log")（退出 ${bs}）" "$LOG/bnsh_slice.log"   # nxsh_extract _scan_blob（#711 Windows 抽取 MemoryError）
 timeout 60 "$PYV" -B graphics/tools/shbake/tests/t_container_b.py > "$LOG/container_b.log" 2>&1; r=$?; reg $r "着色器容器 B 组：$(tail -1 "$LOG/container_b.log")（退出 ${r}）" "$LOG/container_b.log"   # kitpak.py / hgpak.py + nxsh_extract work_members、scan_adj 背靠背机器码在前（11-02 Unravel Two / No Man's Sky）
 timeout 120 "$PYV" graphics/tools/shbake/tests/t_wwise_skip.py > "$LOG/wwise_skip.log" 2>&1; ww=$?; reg $ww "Wwise 音频包跳过边界：$(tail -1 "$LOG/wwise_skip.log")（退出 ${ww}）" "$LOG/wwise_skip.log"   # nxsh_extract top_wwise：确证 Wwise 包不扫、核查模式数反例
 # 旧版 UE4 pak（v1–v9 经典索引，10-23 Blade II v4 一支没抽到；11-02 BRAVELY DEFAULT Ⅱ v8）：v4 / v5 / v1 / v8 / v9 逐字节解出、加密与非 Zlib 拒绝、v9 冻结索引拒绝、条目内 zlib 着色器抽得出
