@@ -5385,6 +5385,7 @@ static void shmap_load_once(void) {
     // NVN2 task / mesh shader (json msl_entry_kind object / mesh, at stage 3 / 4; nvn_geometry.inc mesh_tasks_draw): mesh_kind 1 object 2 mesh (0 = neither); its workgroup's threads,
     //   the payload's bytes (task), a task shader feeds it (mesh), the most vertices / primitives a mesh workgroup emits (Switch2 line's interface contract, item 6)
     uint8_t mesh_kind, mesh_task; uint16_t mesh_threads, mesh_payload, mesh_maxv, mesh_maxp;
+    uint8_t mesh_relay; uint32_t mesh_relay_pw, mesh_relay_sw;   // payload past Metal's 16 KB relayed through device memory (S2A.Dsh MeshStage.Relay): relay slot, words per payload / per mesh slice
     uint32_t geo_tf_stride[4], geo_tf_n[4], geo_tf_off[4][32], geo_tf_comp[4][32];   // S2Arm: the geometry shader's transform feedback (json geometry.tf, dmsh_build.py geo_tf): bytes per vertex, entries, record word offset and components per entry
     uint8_t geo_pt;   // json geometry.passthrough: a passthrough geometry shader whose library has the fast path's _bgs<i> / _bgc (Dsh.cs GeometryFinish; nvn_geometry.inc geo_draw)
     id<MTLComputePipelineState> geo_pso; uint8_t geo_pso_bad;   // geo_pso_bad：建几何计算管线失败过，之后这支的几何绘制直接跳过、不重建（11-01 异度3 Spare-host：编译器内部错误每笔重建 13337 次）
@@ -5882,11 +5883,13 @@ static NvShader *shader_build(NSString *pc, int stage, int layer, int depth_zero
         if (kind != stage - 2) { MLOG("【红】 shader %s at stage %d has msl_entry_kind %s (task shaders are object functions at stage 3, mesh shaders mesh functions at stage 4)", pc.UTF8String, stage, [j[@"msl_entry_kind"] UTF8String]); return nil; }
         o->mesh_kind = (uint8_t)kind; o->mesh_task = [j[@"mesh_task"] boolValue];
         o->mesh_threads = (uint16_t)[j[@"mesh_threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[j[@"mesh_payload"] unsignedIntValue];
+        if (j[@"mesh_relay"]) { o->mesh_relay = (uint8_t)[j[@"mesh_relay"] unsignedIntValue]; o->mesh_relay_pw = [j[@"mesh_relay_payload_words"] unsignedIntValue];
+                                o->mesh_relay_sw = [j[@"mesh_relay_slice_words"] unsignedIntValue]; }
         o->mesh_maxv = (uint16_t)[j[@"max_vertices"] unsignedIntValue]; o->mesh_maxp = (uint16_t)[j[@"max_primitives"] unsignedIntValue];
         // What Metal cannot run is red here, at the load (interface contract item 9): a workgroup of no thread or past Metal's 1024, a mesh workgroup past Metal's 256 vertices /
         //   512 primitives, a payload past Metal's 16 KB, shared memory of its own (the build spills it for compute shaders only: json spill)
         const char *why = !o->mesh_threads || o->mesh_threads > 1024 ? "workgroup threads outside 1-1024" : kind == 2 && (o->mesh_maxv > 256 || o->mesh_maxp > 512) ? "more than Metal's 256 vertices / 512 primitives a mesh workgroup" :
-                          o->mesh_payload > 16384 ? "a payload past Metal's 16 KB" : [j[@"spill"] unsignedIntValue] ? "shared memory of its own" : NULL;
+                          o->mesh_payload > 16384 && (!o->mesh_relay || !o->mesh_relay_pw || (kind == 2 && !o->mesh_relay_sw)) ? "a payload past Metal's 16 KB" : [j[@"spill"] unsignedIntValue] ? "shared memory of its own" : NULL;
         if (why) { MLOG("【红】 %s shader %s: %s (threads %u, payload %u, vertices %u, primitives %u): not usable, its draws are skipped", kind == 1 ? "task" : "mesh", pc.UTF8String, why,
                         o->mesh_threads, o->mesh_payload, o->mesh_maxv, o->mesh_maxp); return nil; }
         if (kind == 2 && depth_zero) {   // the depth convention, as a vertex shader's main0 / main0_z (contract item 2)

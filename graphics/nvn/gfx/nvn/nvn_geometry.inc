@@ -135,7 +135,7 @@ static id<MTLRenderPipelineState> mtk_pso(NvProg *raster) {
     MTLRenderPipelineDescriptor *d = pso_desc(k, nil, fs, g_pso_fsfn, merged);   // the fragment function variant and the attachments, as a vertex draw's (no vertex stage)
     MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
     m.meshFunction = pf ?: ms->fn; m.fragmentFunction = d.fragmentFunction; m.maxTotalThreadsPerMeshThreadgroup = ms->mesh_threads;
-    if (ts) { m.objectFunction = ts->fn; m.payloadMemoryLength = ((NSUInteger)ts->mesh_payload + 15) & ~(NSUInteger)15; m.maxTotalThreadsPerObjectThreadgroup = ts->mesh_threads; }
+    if (ts) { m.objectFunction = ts->fn; m.payloadMemoryLength = ts->mesh_relay ? 16 : ((NSUInteger)ts->mesh_payload + 15) & ~(NSUInteger)15; m.maxTotalThreadsPerObjectThreadgroup = ts->mesh_threads; }   // relayed: object_data carries the task workgroup alone
     m.rasterSampleCount = d.rasterSampleCount; m.alphaToCoverageEnabled = d.alphaToCoverageEnabled;
     for (int i = 0; i < 8; i++) m.colorAttachments[i] = d.colorAttachments[i];
     m.depthAttachmentPixelFormat = d.depthAttachmentPixelFormat; m.stencilAttachmentPixelFormat = d.stencilAttachmentPixelFormat;
@@ -157,6 +157,15 @@ static void mtk_encode(id en_) {
     enc_r_table(en, g_vt, MTLRenderStageMesh);
     if (ts) { enc_r_table(en, g_ot, MTLRenderStageObject); g_args_object = 1; encode_args(en, ts, 3, 0); g_args_object = 0; enc_o_args(first, MESH_FIRST_SLOT); }
     encode_args(en, ms, 4, 1); enc_r_vbuf(en, MESH_FIRST_SLOT, first);
+    // Payload relay (S2A.Dsh MeshStage.Relay: a payload past Metal's 16 KB): one buffer, head {mesh slice start (words), task workgroups, slices per task workgroup}, then one payload per
+    //   task workgroup, then one mesh stage-memory slice per (task workgroup, mesh workgroup < the task's thread count, which the task clamps its grid to). Bound at the relay slot of the
+    //   object table and of the mesh stage (vertex stream 11's slot, through enc_r_vbuf)
+    if (ts && ts->mesh_relay) {
+        uint64_t n = g_mtk.count, pw = ts->mesh_relay_pw, sw = ms->mesh_relay_sw, head = 8, base = (head + n * pw + 3) & ~3ull, grid = ts->mesh_threads, bytes = (base + n * grid * sw) * 4;
+        id<MTLBuffer> rb; size_t ro = arena_alloc((size_t)bytes, &rb); uint32_t *h = (uint32_t *)((uint8_t *)rb.contents + ro); h[0] = (uint32_t)base; h[1] = (uint32_t)n; h[2] = (uint32_t)grid;
+        enc_o_args(rb.gpuAddress + ro, ts->mesh_relay); enc_r_vbuf(en, ms->mesh_relay, rb.gpuAddress + ro);
+        static int once; if (!once++) MLOG("task / mesh payload relay: first draw (task %s mesh %s), %llu task workgroups, %.1f MB", ts->key, ms->key, (unsigned long long)n, bytes / 1048576.0);
+    }
     NSUInteger ot = ts ? ts->mesh_threads : 1, mt = ms->mesh_threads;
     if (g_mtk.ind) enc_r_mesh_indirect(en, g_mtk.ind, ot, mt); else enc_r_mesh(en, g_mtk.count, ot, mt);
 }
@@ -166,6 +175,8 @@ static void mesh_tasks_draw(const p_draw *dw) {
     __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
     NvShader *ms = pr ? pr->sh[4] : nil, *ts = pr ? pr->sh[3] : nil;
     if (!ms || ms->mesh_kind != 2 || !ms->mesh_task || (ts && ts->mesh_kind != 1)) ts = nil;   // a task shader only for a mesh shader that takes one (a hull shader of an earlier bind is not)
+    if (ts && ts->mesh_relay && (dw->ind || !ms || !ms->mesh_relay || (uint64_t)dw->count * ts->mesh_threads * ms->mesh_relay_sw * 4 > (512ull << 20))) {   // relayed payload: the buffer is sized on the CPU from the workgroup count
+        g_mtk_skip++; RED_ONCE(152, "task / mesh draw with a relayed payload (task %s): %s, skipped", ts->key, dw->ind ? "indirect (workgroup count not known on the CPU)" : !ms || !ms->mesh_relay ? "the mesh shader does not take a relayed payload" : "relay buffer past 512 MiB"); return; }
     if (!ms || ms->mesh_kind != 2 || !ms->fn || (ms->mesh_task && !ts)) {
         g_mtk_skip++; BAD_ERR(); RED_ONCE(147, "task / mesh draw without its shaders (task %s, mesh %s%s): skipped", pr && pr->sh[3] ? pr->sh[3]->key : "-", ms ? ms->key : "-",
                                        ms && ms->mesh_kind == 2 && ms->mesh_task && !ts ? ", which takes a task shader" : ms && ms->mesh_kind != 2 ? ", not a mesh shader" : ""); return; }
