@@ -258,6 +258,8 @@ See 'devicectl device process launch --help' for more information.
         old = {f"{RP}/.applied": self.WANT, "Documents/unpack.log": f"10-01 解开 3 个包 9 个文件 1 MB，.applied = {self.WANT}（0.2 秒）\n"}
         with self.assertRaises(push.Fail) as e: self.ap(old, 1, False)
         self.assertIn("起 App 后 180 秒机上解包没有开始", str(e.exception)); self.assertEqual(len(self.dev.launches), 1)
+        # 装机原则（11-11）：解包停住 = 资源已全在手机上，报 NeedsPlayer（装机按「传输成功 + 提醒打开 App 接着装」收尾），不是装机失败
+        self.assertIsInstance(e.exception, push.NeedsPlayer); self.assertIn("资源包已传完，还差最后一步", str(e.exception))
 
     def test_device_failure_reported_at_once_with_its_reason(self):
         # App 起来解开、第一包前就失败（#569：目录 App 写不进）：解包日志新增「解包失败：…」→ 当场按原因报，不再等 180 秒后说「没有开始」。期望手写

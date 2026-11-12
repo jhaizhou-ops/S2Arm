@@ -256,11 +256,14 @@ class FlowTests(unittest.TestCase):
             r = install.install(self.c)
         return r, runs, seen, launches
 
-    def test_repush_same_pack_unpack_timeout_maps_to_player_message(self):   # 推包工具报解包超时 → 玩家看到「打开游戏保持前台」、job_failed（不是推送失败）
+    def test_repush_same_pack_unpack_timeout_maps_to_player_message(self):
+        # 推包工具报解包停住（装机原则 11-11）：资源已全在手机上 → 装机成功 + 提醒打开 App 接着装（manual_unpack_required 警告），不报失败
         gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
-        with self.assertRaises(install.Failure) as cm:
-            self._install(gid, pushed=2, applied_before="cafe01", unpack_ok=False)
-        self.assertIn("机上解包 180 秒没有新进展（停在第 13 包）", str(cm.exception)); self.assertEqual(cm.exception.code, "job_failed")
+        self._install(gid, pushed=2, applied_before="cafe01", unpack_ok=False)
+        warn = [d for d in self.c.job["diagnostics"] if d["code"] == "manual_unpack_required"]
+        self.assertTrue(warn and warn[-1]["severity"] == "warning", self.c.job["diagnostics"])
+        self.assertIn("机上解包 180 秒没有新进展（停在第 13 包）", warn[-1]["summary"])
+        self.assertIn("打开这款游戏", warn[-1]["summary"])
         r, runs, seen, launches = self._install(gid, pushed=2, applied_before="cafe01", unpack_ok=True)
         self.assertEqual(len(launches), 1)
         ev = [json.loads(l) for l in self.c.events.read_text(encoding="utf-8").splitlines() if l.strip()]   # 推包工具的「机上解包 k/n」→ 作业进度事件（启动器显示）
@@ -814,18 +817,32 @@ class SaveBackupTests(unittest.TestCase):
     def test_nothing_on_device(self):
         self.assertEqual(self._run([])[0], None)                       # 第一次装：机上没有存档，不备份不报错
 
+    def _accept(self, on=True):   # 玩家在确认页点了「仍然继续」：同一请求带 acceptNoBackup 重发
+        if on: self.c.r["acceptNoBackup"] = True
+        else: self.c.r.pop("acceptNoBackup", None)
+
+    def _decisions(self):
+        f = self.c.logs / f"{self.c.task}-decisions.log"
+        return f.read_text(encoding="utf-8") if f.is_file() else ""
+
     def test_list_failure(self):
         self.assertEqual(self._run([], list_rc=1, installed=False)[0], None)   # App 不在机上：第一次装，照装
         with self.assertRaises(Failure) as e:
-            self._run([], list_rc=1, installed=True)                           # App 在却列不出：停装
-        self.assertEqual(e.exception.code, "device_locked")
+            self._run([], list_rc=1, installed=True)                           # App 在却列不出：停在确认（装机原则 11-11：认得出的风险让用户确认）
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        self.assertIn("可能丢档", str(e.exception))
+        self._accept()
+        self.assertEqual(self._run([], list_rc=1, installed=True)[0], None)    # 确认后带 acceptNoBackup：照装、不备份
+        self.assertIn("玩家已确认继续", self._decisions())
 
-    def test_unknown_install_state_stops_instead_of_skipping_backup(self):
-        # #333：列存档超时（124）后连「装没装过」都问不出：不能当成第一次装（会跳过备份直接覆盖丢档），停装并报 device_locked
+    def test_unknown_install_state_asks_instead_of_skipping_backup(self):
+        # #333：列存档超时（124）后连「装没装过」都问不出：不能悄悄当成第一次装（跳过备份直接覆盖），停在确认；玩家确认后才照装
         with self.assertRaises(Failure) as e:
             self._run([], list_rc=124, apps_rc=124)
-        self.assertEqual(e.exception.code, "device_locked")
-        self.assertIn("解锁", str(e.exception))
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        self.assertIn("确认不了 iPhone 上有没有装过这款", e.exception.internal)
+        self._accept()
+        self.assertEqual(self._run([], list_rc=124, apps_rc=124)[0], None)
 
     def _tree(self, tree, docs, locked=()):
         # 假设备文件系统（11-07 满屏线 Duo 实测）：列不存在的目录 devicectl 也报「failed to get a list of files」——和锁屏同一个错，只能靠父目录分辨
@@ -849,16 +866,23 @@ class SaveBackupTests(unittest.TestCase):
         self.assertIsNone(self._tree({"Documents", "Documents/games", g, g + "/资源包"}, g))       # 本款目录在、S2A 不在
         self.assertIsNone(self._tree({"Documents", "Documents/logs"}, "Documents"))                # 单款：Documents 在、S2A 不在
 
-    def test_unlistable_parent_or_existing_save_dir_stops(self):
+    def test_unlistable_parent_or_existing_save_dir_asks(self):
         g = "Documents/games/0100C2500FC20000"
-        with self.assertRaises(Failure):   # Documents 也列不出（锁屏 / 隧道断）：分不清有没有存档，停装
+        with self.assertRaises(Failure) as e:   # Documents 也列不出（锁屏 / 隧道断）：分不清有没有存档，停在确认
             self._tree({"Documents", "Documents/games"}, g, locked={"Documents", "Documents/games", g, g + "/" + install.SAVE_REL})
-        with self.assertRaises(Failure):   # 父目录里看得到存档目录、它本身却列不出：有档读不到，停装
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        with self.assertRaises(Failure) as e:   # 父目录里看得到存档目录、它本身却列不出：有档读不到，停在确认
             self._tree({"Documents", g + "/" + install.SAVE_REL + "/0000000000000001"}, g, locked={g + "/" + install.SAVE_REL})
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        self._accept()
+        self.assertIsNone(self._tree({"Documents", g + "/" + install.SAVE_REL + "/0000000000000001"}, g, locked={g + "/" + install.SAVE_REL}))
 
-    def test_copy_failure_stops_install(self):
-        with self.assertRaises(Failure):
+    def test_copy_failure_asks_then_continues(self):
+        with self.assertRaises(Failure) as e:
             self._run([("0000000000000001/0/save.dat", False)], fail="save.dat")
+        self.assertEqual(e.exception.code, "save_backup_failed")
+        self._accept()
+        self.assertIsNone(self._run([("0000000000000001/0/save.dat", False)], fail="save.dat")[0])
 
 
 
@@ -1416,26 +1440,37 @@ class PhoneGamesTruthTests(unittest.TestCase):
         return self.fs(dirs, ls_error)
 
     def ph(self, missing=False):
-        return types.SimpleNamespace(udid="U1", bid="io.s2arm.games.abcde12345", app_missing=lambda bid, why: missing)
+        return types.SimpleNamespace(udid="U1", bid="io.s2arm.games.abcde12345", app_missing=lambda bid, why: missing, c=self.c)
+
+    def decisions(self):
+        f = self.c.logs / f"{self.c.task}-decisions.log"
+        return f.read_text(encoding="utf-8") if f.is_file() else ""
 
     def test_only_game_ids_with_applied_pack_count(self):
         with um.patch.object(install, "devpush_client", self.client([self.A + "/", "notes", self.B, "0100000000099999x", self.C], {self.A, self.C})):
             self.assertEqual(install.phone_games(self.c, self.ph()), {self.A, self.C})   # B 没解开、别的名字跳过
 
-    def test_app_not_installed_is_none_other_errors_stop(self):
+    def test_app_not_installed_is_none_unreadable_continues(self):
+        # 装机原则（jhz 11-11「认不出的直接装」）：平台确认没装 → None；装着却进不去 / 判不了 → 按「手机上没有别的游戏」照装，只记进日志
         err = self.client([], set(), ls_error="取不到 x 的容器（App 没装或不是开发签名）：device socket io failed")
         with um.patch.object(install, "devpush_client", err):
             self.assertIsNone(install.phone_games(self.c, self.ph(missing=True)))            # 平台确认没装：None，不是「装着、一款都没有」的空集
-            with self.assertRaises(Failure) as e:
-                install.phone_games(self.c, self.ph(missing=False))                    # 装着却进不去 = 锁屏 / 断开
-        self.assertEqual(e.exception.code, "device_locked")
-        # 上屏说人话：说是哪台、插线或同一 Wi-Fi；工具原文（含设备号，脱敏后是「[DEVICE_ID]」占位符）只进诊断（11-11 玩家实报）
-        ph = self.ph(missing=False); ph.info = dict(deviceKind="iPhone", deviceName="我的手机")
+            self.assertEqual(install.phone_games(self.c, self.ph(missing=False)), set())   # 判不了：空集照装，不再报 device_locked
+        self.assertIn("device socket io failed", self.decisions())
         err2 = self.client([], set(), ls_error="找不到设备 00008150-FAKEDEVICE：device not found")
-        with um.patch.object(install, "devpush_client", err2), self.assertRaises(Failure) as e:
-            install.phone_games(self.c, ph)
-        self.assertIn("iPhone「我的手机」", str(e.exception)); self.assertIn("Wi-Fi", str(e.exception))
-        self.assertNotIn("00008150", str(e.exception)); self.assertIn("device not found", e.exception.internal)
+        with um.patch.object(install, "devpush_client", err2):
+            self.assertEqual(install.phone_games(self.c, self.ph(missing=False)), set())
+
+    def test_windows_real_device_socket_text(self):
+        """jhz 11-11 天眼实测原文：删了手机上的 S2Arm 再装，Windows 上 s2a-devpush 进不了容器只回「device socket io failed」。
+        走真的 WinPhone.app_missing：旧工具只有这句原文 → 判不了 → 照装（空集）；新工具查过 installation_proxy 打 S2A_APP_MISSING → None（确实没装）"""
+        win = install.WinPhone.__new__(install.WinPhone); win.c = self.c; win.udid = "U1"; win.bid = "io.s2arm.games.d9g8my5fb5"; win.info = {}
+        raw = "取不到 io.s2arm.games.d9g8my5fb5 的容器（App 没装或不是开发签名）：device socket io failed"
+        with um.patch.object(install, "devpush_client", self.fs({}, ls_error=raw)):
+            self.assertEqual(install.phone_games(self.c, win), set())
+        new = "S2A_APP_MISSING：手机上没装 io.s2arm.games.d9g8my5fb5（installation_proxy 查过；进容器原文：device socket io failed）"
+        with um.patch.object(install, "devpush_client", self.fs({}, ls_error=new)):
+            self.assertIsNone(install.phone_games(self.c, win))
 
     def test_games_folder_not_created_yet_is_zero_games(self):
         """首次装机：App 在、还没有 Documents/games——当 0 款照常装（v0.2.8 热修，玩家实机原文「afc error: Object not found」带空格，原先被当读不出设备挡住）。
@@ -1443,11 +1478,9 @@ class PhoneGamesTruthTests(unittest.TestCase):
         for out in ("S2A_AFC_ERR 8 Object not found", "afc error: Object not found", "ObjectNotFound", "No such file or directory", "OBJECT NOT FOUND"):
             with self.subTest(out=out), um.patch.object(install, "devpush_client", self.client([], set(), ls_error=out)):
                 self.assertEqual(install.phone_games(self.c, self.ph()), set())
-        for out in ("S2A_AFC_ERR 4 Read error", "device socket io failed"):
+        for out in ("S2A_AFC_ERR 4 Read error", "device socket io failed"):   # 别的读错误 / 断连：判不了，照装原则继续（空集），不再挡
             with self.subTest(out=out), um.patch.object(install, "devpush_client", self.client([], set(), ls_error=out)):
-                with self.assertRaises(Failure) as e:
-                    install.phone_games(self.c, self.ph())
-                self.assertEqual(e.exception.code, "device_locked")
+                self.assertEqual(install.phone_games(self.c, self.ph()), set())
 
     def test_new_and_old_pack_locations_both_count(self):
         """11-11 资源包挪到 Library：过渡期新旧两处都认。A 在新位置已解开；B 只在旧位置已解开；C 新位置在但没解开（旧位置的 .applied 不算：按选出的那一处）；
@@ -1463,7 +1496,7 @@ class PhoneGamesTruthTests(unittest.TestCase):
             self.assertEqual(install.phone_games(self.c, self.ph()), {A})
 
     def test_pick_pack_root_new_old_or_first_install(self):
-        """推到哪：新位置在 → 新；新不在、旧在 → 旧（App 下次启动整个挪过去，增量照旧算）；都不在 → 新；列不出 → device_locked 停"""
+        """推到哪：新位置在 → 新；新不在、旧在 → 旧（App 下次启动整个挪过去，增量照旧算）；都不在 → 新；列不出 → 按第一次装推到新位置、记一笔"""
         A = self.A
         new, old = f"Library/Application Support/S2Arm/games/{A}/资源包", f"Documents/games/{A}/资源包"
         for dirs, want in (({new: ["index.tsv"], old: [".applied"]}, new),
@@ -1471,9 +1504,9 @@ class PhoneGamesTruthTests(unittest.TestCase):
                            ({}, new)):
             with self.subTest(have=sorted(dirs)), um.patch.object(install, "devpush_client", self.fs(dirs)):
                 self.assertEqual(install.pick_pack_root(self.c, self.ph(), A), want)
-        with um.patch.object(install, "devpush_client", self.fs({}, ls_error="device socket io failed")), self.assertRaises(Failure) as e:
-            install.pick_pack_root(self.c, self.ph(), A)
-        self.assertEqual(e.exception.code, "device_locked")
+        with um.patch.object(install, "devpush_client", self.fs({}, ls_error="device socket io failed")):
+            self.assertEqual(install.pick_pack_root(self.c, self.ph(), A), new)
+        self.assertIn("按第一次装推到新位置", self.decisions())
 
     def test_purge_removes_docs_root_and_new_pack_location(self):
         """删手机上这款：文档根（含旧位置资源包）和新位置本款目录都删；新位置删不掉 → 报没删干净"""
@@ -1502,11 +1535,13 @@ class PhoneGamesTruthTests(unittest.TestCase):
             self.assertTrue(mac.app_missing(bid, "device socket io failed"))
         with um.patch("diag.devicectl", return_value=(0, {"result": {"apps": [{"bundleIdentifier": bid}]}}, "")):
             self.assertFalse(mac.app_missing(bid, "device socket io failed"))
-        with um.patch("diag.devicectl", return_value=(1, {}, "The device is locked")), self.assertRaises(Failure) as e:
-            mac.app_missing(bid, "device socket io failed")
-        self.assertEqual(e.exception.code, "device_locked")
+        with um.patch("diag.devicectl", return_value=(1, {}, "The device is locked")):   # 问不出：按装着、读不到，交 phone_games 照装（不再停）
+            self.assertFalse(mac.app_missing(bid, "device socket io failed"))
+        self.assertIn("问不出 iPhone 上有没有装过 S2Arm", self.decisions())
         win = install.WinPhone.__new__(install.WinPhone)
         self.assertTrue(win.app_missing(bid, "unknown error `ApplicationLookupFailed` returned from device"))
+        self.assertTrue(win.app_missing(bid, "S2A_APP_MISSING：手机上没装 x"))
+        self.assertFalse(win.app_missing(bid, "取不到 x 的容器（App 没装或不是开发签名）：device socket io failed"))
         self.assertFalse(win.app_missing(bid, "connection reset"))
 
     def test_include_what_we_can_ask_before_dropping_the_rest(self):

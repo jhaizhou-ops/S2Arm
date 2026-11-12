@@ -637,8 +637,9 @@ def push_pack(c, ident, bid, pack, udid=None, docs=None, ctx=None, pack_root=Non
         if m:
             raise Failure(f"资源包已传到 iPhone，但手机上解开失败：{m.group(1)}", code="job_failed") from e
         m = re.search(r"资源包推进去了，但(机上解包 \d+ 秒没有新进展[^：\n]*|起 App 后 \d+ 秒机上解包没有开始)", text)   # tools/push_pack.py apply：按进度判停住（11-07）
-        if m:
-            raise Failure(f"资源包推进去了，但{m.group(1)}：请打开这款游戏，保持在前台等它导入完，会自动进入游戏。", code="job_failed") from e
+        if m:   # 旧口径的「停住」（推包工具现在报成下面的「还差最后一步」）：同样按传输成功 + 提醒（装机原则 11-11）
+            c.diagnostic(f"资源包已传完，但{m.group(1)}：请打开这款游戏，保持在前台等它导入完，会自动进入游戏。", code="manual_unpack_required", severity="warning")
+            return got.get("files", 0), got.get("mb", 0) << 20
         m = re.search(r"资源包已传完，还差最后一步：[^\n]*", text)   # tools/push_pack.py NeedsPlayer：电脑拉不起 App，传输本身成功（#192）
         if m:
             c.diagnostic(m.group(0), code="manual_unpack_required", severity="warning")
@@ -697,6 +698,28 @@ def save_dir_absent(c, ident, bid, save_dir):
         return not any(r == rest or r.startswith(rest + "/") or rest.startswith(r + "/") and r == rest.split("/")[0] for r in seen)
     return False
 
+def note(c, text):
+    """装机原则（jhz 11-11：「玩家都主动点装机了……认不出的直接装」）：拿不准、照样继续的判断只记进本任务的日志 <任务号>-decisions.log，界面不拦"""
+    line = time.strftime("%H:%M:%S ") + text
+    try:
+        c.logs.mkdir(parents=True, exist_ok=True)
+        with open(c.logs / f"{c.task}-decisions.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except (OSError, AttributeError, TypeError):
+        pass
+    print("[装机] " + text, file=sys.stderr, flush=True)
+
+
+def backup_failed(c, why):
+    """覆盖装前存档备份不了（装机原则「认得出的风险让用户确认」）：没带 acceptNoBackup → 停下报 save_backup_failed，界面问「仍然继续 / 先不」；
+    玩家确认后带 acceptNoBackup 重发 → 记一笔「未备份」照装（返回 None = 没有备份目录）"""
+    if c.r.get("acceptNoBackup") is True:
+        note(c, "覆盖装前没能备份手机上的存档，玩家已确认继续：" + why)
+        return None
+    raise Failure("这次装机前没能备份手机上的存档（" + why + "）。存档没备份，万一覆盖出问题可能丢档；确认仍然继续再点一次。",
+                  code="save_backup_failed", internal=why)
+
+
 def backup_saves(c, ident, bid, gid, docs="Documents"):
     """覆盖装前把机上这款的整个存档目录（bis/user/save）逐文件拉回游戏库 games/<程序号>/save_backup/<时刻>/（10-27 运维线：
     斯普拉遁3 体感包覆盖装后进了选形象页，原档没有备份、无从比对）。第一次装 / 机上没有存档 = 不备份；拉失败报红停装，宁可不装也不冒丢档的险"""
@@ -712,10 +735,10 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
         #   往上逐级列父目录，第一个列得出的父目录定：里面看不到存档目录 = 没有存档，照装；看得到却列不出 / 父目录一个都列不出 = 停装
         arc, apps, aerr = devicectl(c, "device", "info", "apps", "--device", ident, "--bundle-id", bid, timeout=60)
         if arc:   # 连「装没装过」都问不出（锁屏 / 超时 / 断开）：不能当成第一次装，否则跳过备份直接覆盖（#333）
-            raise Failure("覆盖装前确认不了 iPhone 上有没有装过这款：" + (aerr.splitlines()[-1] if aerr else f"devicectl 退出 {arc}") + "。为免丢档，这次没装；手机解锁、数据线插稳后再点一次。", code="device_locked")
+            return backup_failed(c, "确认不了 iPhone 上有没有装过这款：" + (aerr.splitlines()[-1] if aerr else f"devicectl 退出 {arc}"))
         if any(a.get("bundleIdentifier") == bid for a in (apps.get("result") or {}).get("apps") or []):
             if not save_dir_absent(c, ident, bid, save_dir):
-                raise Failure("覆盖装前读不到 iPhone 上这款的存档目录：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}") + "。为免丢档，这次没装；手机解锁、数据线插稳后再点一次。", code="device_locked")
+                return backup_failed(c, "读不到 iPhone 上这款的存档目录：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))
         return None
     if not files:
         return None
@@ -725,7 +748,7 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
         rc, _, err = devicectl(c, "device", "copy", "from", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
                                "--source", f"{save_dir}/{rel}", "--destination", str(dest / rel), timeout=120)
         if rc or not (dest / rel).is_file():
-            raise Failure(f"覆盖装前备份 iPhone 上的存档失败（{rel}）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}") + "。为免丢档，这次没装；手机解锁、数据线插稳后再点一次。", code="device_locked")
+            return backup_failed(c, f"拉存档失败（{rel}）：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}"))
     return dest
 
 
@@ -1051,7 +1074,8 @@ class MacPhone:
         from diag import devicectl
         rc, apps, err = devicectl(self.c, "device", "info", "apps", "--device", self.dev["id"], "--bundle-id", bid, timeout=60)
         if rc:
-            raise Failure("确认不了 iPhone 上有没有装过 S2Arm：" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}") + "。为免把别的游戏挤掉，这次没装；手机解锁、数据线插稳后再点一次。", code="device_locked")
+            note(self.c, "问不出 iPhone 上有没有装过 S2Arm（" + (err.splitlines()[-1] if err else f"devicectl 退出 {rc}") + "），按装着、读不到继续")
+            return False
         return not any(a.get("bundleIdentifier") == bid for a in (apps.get("result") or {}).get("apps") or [])
 
     def install(self, ipa, games, steps=True):
@@ -1110,8 +1134,10 @@ class WinPhone:
         return devpush_client(self.c, self.udid, self.bid, work)
 
     def app_missing(self, bid, why):
-        """Windows 上没有 devicectl：手机明确答「没有这个 App」时 s2a-devpush 的原文含 ApplicationLookupFailed（Windows 实机核过），只认它"""
-        return "ApplicationLookupFailed" in why
+        """Windows 上没有 devicectl：手机明确答「没有这个 App」时 s2a-devpush 的原文含 ApplicationLookupFailed（Windows 实机核过）；
+        进不了容器时 s2a-devpush 再用 installation_proxy 按包名查一次，确实没装就打结构化标记 S2A_APP_MISSING（11-11 jhz 测试机2 实测：
+        删了 S2Arm 再装，原文只有「device socket io failed」，原先被当成锁屏挡住）。两样都没有 = 判不了，交给调用方按装机原则继续"""
+        return "ApplicationLookupFailed" in why or "S2A_APP_MISSING" in why
 
     def backup(self, g):
         """覆盖装前备份本款存档（同 Mac backup_saves 口径：拉失败就停装）。按这次要装的包名查（这台没记录也可能有 Mac 装的同包名 App 和存档）；
@@ -1121,14 +1147,14 @@ class WinPhone:
         if not bid:
             # 这台没记过包名、又读不到 Impactor 当前账号的团队号：定不了包名就查不了手机上有没有这款的存档。原先直接放行、交给 plumesign 自己定包名
             #   装上去，等于不备份就覆盖（审计 P2-253）。真实 accounts.json 每个账号都带十位 team_id（Windows 实机核过），读不到 = 存档坏了或没选账号，停装
-            raise Failure("读不到 Impactor 当前账号的团队号，定不了要装的包名，也就没法先备份 iPhone 上的存档。为免覆盖丢档，这次没装：打开 Impactor 确认已登录并选中账号后再试一次。", code="signing_failed")
+            return backup_failed(self.c, "读不到 Impactor 当前账号的团队号，定不了要装的包名，查不了手机上这款的存档")
         dest = layout.path(self.c, g, "save_backup", time.strftime("%Y%m%d-%H%M%S"))
         with tempfile.TemporaryDirectory(dir=self.c.private) as w:
             ok, out = devpush_client(self.c, self.udid, bid, w).get_tree(f"{game_docs(g)}/{SAVE_REL}", dest)
         if not ok:
-            if "ApplicationLookupFailed" in out:   # s2a-devpush vend_container：机上确实没装这个包名（Windows 实机核过的原文）
+            if "ApplicationLookupFailed" in out or "S2A_APP_MISSING" in out:   # 机上确实没装这个包名（Windows 实机核过的原文 / s2a-devpush 查 installation_proxy 的标记）
                 return None
-            raise Failure("覆盖装前备份 iPhone 上的存档失败：" + out[-200:] + "。为免丢档，这次没装；手机解锁、数据线插稳后再点一次。", code="device_locked")
+            return backup_failed(self.c, "拉存档失败：" + out[-200:])
         return dest if dest.is_dir() else None
 
     def install(self, ipa, games, steps=True):
@@ -1244,7 +1270,8 @@ def phone_games(c, ph):
     各自的记录只有自己装的）。列这个包名的资源包新旧两处游戏目录（PACK_GAMES、Documents/games）：只认目录名是 16 位游戏号、
     pack_listing 选出的那处资源包已解开（.applied）的，别的跳过。
     进不了容器时问平台这个包名装没装（ph.app_missing）：确实没装 → None（和「装着、一款都没有」的空集分开：没装时本机记录的各款也不在手机上了，
-    container_others 据此不再带）；装着却列不出（锁屏 / 断开）→ 停，不当成「手机上没有别的游戏」"""
+    container_others 据此不再带）。装着却列不出、或连装没装都判不了（锁屏 / 断开 / 工具原文认不出）：照装机原则（jhz 11-11「认不出的直接装」）
+    按「这处没有别的游戏」继续，只记进日志——最坏是这台电脑不知道的别的款这次没带进容器，它们的资源包和存档还在手机上，回原电脑再装就回来"""
     bid = phone_bid(ph)
     if not bid or not ph.udid:
         return set()
@@ -1258,8 +1285,8 @@ def phone_games(c, ph):
                     continue
                 if ph.app_missing(bid, out):
                     return None
-                raise Failure(f"读不出{_who(ph)}上已经装了哪些游戏，为免把别的游戏挤掉，这次没装：把它解锁，插上数据线或和这台电脑连同一个 Wi-Fi，再点一次。",
-                              code="device_locked", internal="s2a-devpush ls：" + out[-500:])
+                note(c, f"读不出{_who(ph)}上 {root} 里装了哪些游戏，按这处没有别的游戏继续装（s2a-devpush ls：{out[-300:].strip()}）")
+                continue
             names |= {n.strip().rstrip("/").upper() for n in out.splitlines()}
         return {g for g in names if GID_RE.fullmatch(g) and ".applied" in (pack_listing(cl, g, ph)[1] or [])}
 
@@ -1272,14 +1299,16 @@ def _who(ph):
 def pack_listing(cl, gid, ph=None):
     """本款资源包在手机上的哪一处 → (资源包根, 根下列表或 None)：新位置在 → 新位置；新位置不在、旧位置在 → 旧位置（App 下次启动整个同盘挪到新位置，
     含推进 .incoming 的包；增量仍按旧位置的 index.applied.tsv 算，不因新位置是空的整份重推几 GB）；两处都不在（第一次装这款）→ (新位置, None)。
-    列不出（锁屏 / 断开等，不是「目录不在」）→ 停，不猜"""
+    列不出（锁屏 / 断开等，不是「目录不在」）：照装机原则按「两处都不在」推到新位置继续，只记进日志（最多整份重推一次）。
+    老位置真有一份旧的也不会两份长期并存：App 下次打开游戏库时 s2a_pack_migrate_one 见新旧都在、新的已应用，就删掉老的（runtime/src/pack_apply.c）"""
     for root in (game_pack(gid), game_pack_old(gid)):
         rc, out = cl.call("ls", root)
         if not rc:
             return root, out.splitlines()
         if not dir_missing(out):
-            raise Failure(f"读不出{_who(ph)}上这款游戏的资源放在哪，这次没装：把它解锁，插上数据线或和这台电脑连同一个 Wi-Fi，再点一次。",
-                          code="device_locked", internal=f"s2a-devpush ls {root}：" + out[-500:])
+            if getattr(ph, "c", None) is not None:
+                note(ph.c, f"读不出{_who(ph)}上 {gid} 的资源放在哪（{root}），按第一次装推到新位置（s2a-devpush ls：{out[-300:].strip()}）")
+            return game_pack(gid), None
     return game_pack(gid), None
 
 
@@ -1346,7 +1375,7 @@ def put_game(c, gid, ph, steps=True, others=None):
     rec = layout.load_device(c, ph.key)
     if others is None:
         others = container_others(c, ph, rec, leave=gid)   # 手机上实际有的款也带上（另一台电脑装的），带不了的先问玩家
-    if steps: c.begin("把这款放进手机上的 S2Arm", 2, 6)
+    if steps: c.begin("把这款放进手机上的 S2Arm" if gid else "核对手机上的游戏要不要跟着更新", 2, 6)   # gid 为 None = 更新手机上的 S2Arm（update_phone），不说装机的话
     # 改写器修过的话：容器里各款按本引擎改写器核一遍，受影响的只换改写产物（不重出资源包、不推 game.img），再组进新壳（rewrite_refresh.py）
     from rewrite_refresh import refresh_ios
     refresh_ios(c, [g for g in ([gid] if gid else []) + list(others) if g])
@@ -1358,7 +1387,8 @@ def put_game(c, gid, ph, steps=True, others=None):
     stale = [g for g in games if moved or g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack")]
     ph.before_push({g: packs[g] for g in stale})
     img = bool(stale) and all(img_pack(packs[g]) for g in stale)   # 这次推的全是单一 IMG：传完并核过长度即装好，不等机上解开
-    if steps: c.begin("把游戏推进 iPhone（只推变了的文件；第一次大游戏要几分钟）" if img else "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）", 6, 6)
+    if steps: c.begin("核对手机上游戏的资源（有变化的才推，通常一个都不用推）" if not gid else
+                      "把游戏推进 iPhone（只推变了的文件；第一次大游戏要几分钟）" if img else "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）", 6, 6)
     files = size = 0
     pushed = dict((g, (rec["games"].get(g) or {}).get("pack", "")) for g in games)
     try:
@@ -1427,7 +1457,7 @@ def update_phone(c):
         raise Failure("这几款要按新版重新出包，更新后在重新出包之前暂时打不开：" + "、".join(s["name"] for s in st["stale"]) + "。确认更新再点一次。",
                       code="container_stale", internal=" ".join(stale))
     keep = [g for g in others if g not in stale]
-    if not keep:
+    if not keep:   # 每一款都要重出：换壳后容器里一款都没有——宿主 0 款的启动路径没在真机验过（同 remove_from_phone 不装空容器），物理上做不了，照旧停
         raise Failure("手机上的游戏都要按新版重新出包：先给它们各「打 iPhone 包」，再装到 iPhone。", code="container_stale", internal=" ".join(stale))
     r = put_game(c, None, ph, others=keep)
     return dict(r, updated=True, fromShell=st["fromShell"], toShell=sid, skipped=stale)

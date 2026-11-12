@@ -6512,6 +6512,10 @@
   "en": "The game was removed from the app, but its data on iPhone could not be deleted: "
  },
  {
+  "source": "确认后再点一次就照装：存档没备份，万一覆盖出问题可能丢档；想先备份就把手机解锁、数据线插稳后再点一次。",
+  "en": "Click again to install anyway: your saves are not backed up, so a problem during the overwrite could lose them. To back them up first, unlock the phone, plug the cable in firmly, and click again."
+ },
+ {
   "source": "确认后再点一次：点名的游戏会暂时不能玩（存档和资源包留在手机上），到装它们的那台电脑上再「装到 iPhone」一次就回来；不想这样就先别装。",
   "en": "Click again to confirm: the games named will stop working for now (their saves and resources stay on the phone). Install them on iPhone again from the computer they came from to bring them back. If you don't want that, don't install now."
  },
