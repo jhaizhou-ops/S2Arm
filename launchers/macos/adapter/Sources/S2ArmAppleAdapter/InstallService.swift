@@ -133,9 +133,10 @@ public final class InstallService {
     /// 装。
     /// device：要装的那台（UDID / 设备名），必须给：作业层不替玩家挑，不给即报 device_required（pack/jobs/install.py phone）
     /// acceptDropped：玩家已确认「手机上只在别的电脑装过的游戏这次带不上」（作业层 container_would_drop 之后再点）
-    public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, events: EventSink = .discard) async throws -> InstallResult {
+    public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, accept: Set<String> = [], events: EventSink = .discard) async throws -> InstallResult {
         var extra: [String: Any] = ["gameId": gameId]
         if acceptDropped { extra["acceptDropped"] = true }
+        for key in accept { extra[key] = true }   // 玩家在结局页确认过的（acceptDropped / acceptNoBackup / acceptStale，作业层按码认）
         if let teamId, !teamId.isEmpty { extra["teamId"] = teamId }
         if let device, !device.isEmpty { extra["device"] = device }
         let r = try await client.perform("install", extra: extra, events: events).result
@@ -184,9 +185,10 @@ public final class InstallService {
     ///   有要重新出包的款且没 acceptStale → 作业以 container_stale 失败（界面先问玩家）
     ///   device：连着多台时装到哪台（同 install；不给 = 只连着一台）
     /// acceptDropped：同 install——玩家已确认手机上只在别的电脑装过的游戏这次带不上（作业层 container_would_drop）
-    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
+    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
         var extra: [String: Any] = acceptStale ? ["acceptStale": true] : [:]
         if acceptDropped { extra["acceptDropped"] = true }
+        for key in accept { extra[key] = true }
         if let device { extra["device"] = device }
         return try await client.perform("installUpdate", extra: extra, events: events).result
     }

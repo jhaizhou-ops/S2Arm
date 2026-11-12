@@ -806,14 +806,20 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 装机 / 删除会让手机上别的电脑装的游戏暂时不能玩（作业层 container_would_drop）：界面弹确认，确认了带 acceptDropped 重跑。
     /// ask = false（控制口发起）不弹，原样失败，由调用方带 acceptDropped 再发。
     /// 更新手机上的 S2Arm 也会撞上（v0.3.0 只换壳验收：原先这条路没接确认，界面说「确认继续再点一次」却永远过不去）：update 记着当时的参数，确认后原样带 acceptDropped 重跑
-    struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String? }
-    struct DropConfirm { let kind: JobSession.Kind; var game: GameSummary? = nil; let message: String; var update: UpdateArgs? = nil }
+    struct UpdateArgs { let acceptStale: Bool; let repack: [String]; let language: String; let device: String?; var accept: Set<String> = [] }
+    /// 作业层可确认继续的停装码 → 玩家点「仍然继续」后重发时带的参数（维护者 11-11 装机原则：认得出的风险让玩家确认，确认了就装）。
+    ///   结局页（PhoneJobPanel）按码在页内问「仍然继续 / 先不」，不弹散的对话框；参数累积（先确认挤掉、再撞上备份失败，第二次重发两个都带）
+    static let confirmCodes: [String: String] = ["container_would_drop": "acceptDropped", "save_backup_failed": "acceptNoBackup", "container_stale": "acceptStale"]
+    struct DropConfirm { let kind: JobSession.Kind; var game: GameSummary? = nil; let message: String; var update: UpdateArgs? = nil
+                         var code = "container_would_drop"; var accept: Set<String> = []
+                         /// 当初装到哪台：确认后原样带回（不能退回「界面选中的那台」，控制口指定的设备会被换掉）
+                         var device: String? = nil }
     @Published var dropConfirm: DropConfirm?
     /// 上一次「更新手机上的 S2Arm」的参数：失败页「重试」按它再来
     var lastUpdateArgs: UpdateArgs?
     func retryPhoneUpdate() {
         guard let a = lastUpdateArgs else { return }
-        updatePhone(acceptStale: a.acceptStale, repack: a.repack, language: a.language, device: a.device)
+        updatePhone(acceptStale: a.acceptStale, repack: a.repack, language: a.language, device: a.device, accept: a.accept)   // 已确认过的照带
     }
 
     /// 环境检查「装到 iPhone 的方式」里手填的 Xcode 团队号（10 位）：一键装、不用证书时每次装机都带上（原先只在装机页点「用这个团队」那一次带）
@@ -823,7 +829,8 @@ public final class S2ArmLauncherModel: ObservableObject {
         return t.count == 10 ? t : nil
     }
 
-    func install(_ game: GameSummary, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, ask: Bool = true) {
+    func install(_ game: GameSummary, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, accept: Set<String> = [], ask: Bool = true) {
+        let accept = acceptDropped ? accept.union(["acceptDropped"]) : accept
         // 不在这里再核装机页清单（启动器剃刀 M1）：装机页按钮和控制口调用前各自核过；批量出完自动装的款从没打开过装机页，原先在这里被悄悄挡掉、队列停住
         guard !busy else { return }
         let teamId = teamId ?? Self.enteredTeam
@@ -834,14 +841,18 @@ public final class S2ArmLauncherModel: ObservableObject {
         phoneOutcome = nil
         start(.install, game: game, name: game.name) { [weak self] sink in
             do {
-                let r = try await self?.provider.install(gameId: game.id, teamId: teamId, device: device, acceptDropped: acceptDropped, events: sink)
+                let r = try await self?.provider.install(gameId: game.id, teamId: teamId, device: device, accept: accept, events: sink)
                 if let r {
                     self?.installedTo = Self.deviceLabel(kind: r.deviceKind, name: r.deviceName)
                     self?.phoneOutcome = PhoneOutcome(device: Self.deviceLabel(kind: r.deviceKind, name: r.deviceName), packFiles: r.packFiles, packBytes: r.packBytes)
                 }
                 self?.installOpenToFinish = r?.openToFinish ?? false
             }
-            catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .install, game: game, message: f.errorDescription ?? ""); throw f }
+            catch let f as JobFailure where ask && Self.confirmCodes[f.code ?? ""] != nil {
+                self?.dropConfirm = DropConfirm(kind: .install, game: game, message: f.errorDescription ?? "", code: f.code ?? "",
+                                                accept: accept.union([Self.confirmCodes[f.code ?? ""]!]), device: device)
+                throw f
+            }
             return nil
         }
     }
@@ -849,9 +860,9 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 确认框点了「仍然继续」
     func confirmDrop(_ d: DropConfirm) {
         dropConfirm = nil; clearInlineFailure()
-        if let u = d.update { updatePhone(acceptStale: u.acceptStale, repack: u.repack, language: u.language, device: u.device, acceptDropped: true); return }
+        if let u = d.update { updatePhone(acceptStale: u.acceptStale || d.accept.contains("acceptStale"), repack: u.repack, language: u.language, device: u.device, accept: d.accept); return }
         guard let game = d.game else { return }
-        if d.kind == .installRemove { removeFromPhone(game, acceptDropped: true) } else { install(game, acceptDropped: true) }
+        if d.kind == .installRemove { removeFromPhone(game, acceptDropped: true, device: d.device) } else { install(game, device: d.device, accept: d.accept) }
     }
 
     /// 装回上一版手机 S2Arm（只换宿主后新宿主不好用时）。
@@ -873,7 +884,7 @@ public final class S2ArmLauncherModel: ObservableObject {
         phoneOutcome = PhoneOutcome(device: installTargetLabel)
         start(.installRemove, game: game, name: game.name) { [weak self] sink in
             do { _ = try await self?.provider.removeFromPhone(gameId: game.id, acceptDropped: acceptDropped, device: device, events: sink) }
-            catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .installRemove, game: game, message: f.errorDescription ?? ""); throw f }
+            catch let f as JobFailure where ask && f.code == "container_would_drop" { self?.dropConfirm = DropConfirm(kind: .installRemove, game: game, message: f.errorDescription ?? "", device: device); throw f }
             return nil
         }
     }

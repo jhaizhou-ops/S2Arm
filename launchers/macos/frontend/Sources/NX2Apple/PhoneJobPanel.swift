@@ -37,7 +37,7 @@ struct PhoneJobPanel: View {
             Text(t("phone.title." + session.kind.rawValue)).font(.manrope(18, .bold)).accessibilityIdentifier("phone.operation")
             switch session.phase {
             case .running, .stopping: running
-            case .finished(.failed) where session.failureCode == "container_would_drop" && model.dropConfirm?.update != nil && session.kind == .installUpdate: dropAsk
+            case .finished(.failed) where pendingConfirm != nil: dropAsk
             case .finished(.completed): success
             case .finished(.cancelled): headline(seal: AnyView(StatusSeal(symbol: "xmark", color: LauncherPalette.unbuilt)), title: t("phone.cancelled", "已取消"), subtitle: "")
             case .finished: failure
@@ -163,10 +163,19 @@ struct PhoneJobPanel: View {
         .accessibilityIdentifier("phone.failed")
     }
 
-    // ---- 会挤掉别处装的游戏：就在这页里问（「仍然继续」/「先不」），不弹散的对话框 ----
+    /// 这次失败是作业层可确认继续的停装（会挤掉别处装的游戏 / 存档没能备份 / 都要按新版重出……，S2ArmLauncherModel.confirmCodes），且待确认的就是这一单
+    private var pendingConfirm: S2ArmLauncherModel.DropConfirm? {
+        guard let d = model.dropConfirm, d.kind == session.kind, session.failureCode == d.code else { return nil }
+        return d
+    }
+
+    // ---- 认得出的风险：就在这页里问（「仍然继续」/「先不」），不弹散的对话框（维护者 11-11：玩家主动点了装机，认得出的让他确认，确认了就装）----
+    //   标题取这个码在体验规格表里的 title（作业层那边写），正文是作业层的原句（说清是哪几款 / 为什么）
     private var dropAsk: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.building)), title: t("install.drop_title"), subtitle: loc.backend(session.message))
+        let code = pendingConfirm?.code ?? "container_would_drop"
+        let title = BackendText.errorTitle(code, language: language) ?? t("install.drop_title")
+        return VStack(alignment: .leading, spacing: 24) {
+            headline(seal: AnyView(StatusSeal(symbol: "exclamationmark", color: LauncherPalette.building)), title: title, subtitle: loc.backend(session.message))
             HStack(spacing: 12) {
                 Button { if let d = model.dropConfirm { model.confirmDrop(d) } } label: { LauncherHeroActionLabel(title: t("install.drop_confirm"), symbol: "arrow.right") }
                     .buttonStyle(.plain).accessibilityIdentifier("phone.drop.confirm")

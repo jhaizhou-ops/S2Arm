@@ -73,11 +73,12 @@ import XCTest
         try snapshot("phone_done")
 
         // 失败：原因 + 下一步落到会话上
-        let next = "把 iPhone 解锁，插上数据线或和这台电脑连同一个 Wi-Fi，再点一次。"
+        // 失败的例子用真正做不下去的情况（签名失败）：读不出手机上有哪些游戏这类，维护者 11-11 定了不阻断、作业层直接继续
+        let next = "在 Xcode 的「设置 › 账户」里重新登录这个 Apple ID，再点一次。"
         model.start(session()) { sink in
             self.emit(sink, "stage", ["stage": "找签名账号与 iPhone", "message": "找签名账号与 iPhone", "stageIndex": 1, "stageCount": 6])
-            throw JobFailure(JobOutcome(taskId: "t", state: .failed, exitCode: 1, message: "读不出 iPhone「我的 iPhone」上已经装了哪些游戏，为免把别的游戏挤掉，这次没装。", result: [:],
-                                        diagnostics: [["code": "device_locked", "suggestion": next, "summary": "device_locked"]], stderr: ""))
+            throw JobFailure(JobOutcome(taskId: "t", state: .failed, exitCode: 1, message: "签名没成功：Xcode 里的 Apple ID 登录已过期。", result: [:],
+                                        diagnostics: [["code": "apple_session_expired", "suggestion": next, "summary": "apple_session_expired"]], stderr: ""))
         }
         for _ in 0..<300 where model.busy { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.session?.suggestion, next)
@@ -101,7 +102,7 @@ import XCTest
     func testTextMatrixEveryKindEveryState() {
         let l10n = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("frontend/l10n")
-        let states: [JobSession.Phase] = [.running, .stopping, .finished(.completed), .finished(.cancelled), .finished(.failed), .finished(.interrupted)]
+        let states: [JobSession.Phase] = [.running, .stopping, .finished(.completed), .finished(.cancelled), .finished(.failed), .finished(.interrupted), .finished(.paused)]
         var missing: [String] = []
         for lang in ["zh", "en"] {
             let table = (try? JSONSerialization.jsonObject(with: Data(contentsOf: l10n.appendingPathComponent(lang + ".json")))) as? [String: Any] ?? [:]
@@ -133,7 +134,7 @@ import XCTest
         case .stopping: return ["s2arm.job.stopping", title]
         case .finished(.completed): return ["s2arm.job.done." + k.rawValue, title]
         case .finished(.cancelled): return ["s2arm.job.cancelled", title]
-        case .finished(.failed): return ["s2arm.job.failed", title]
+        case .finished(.failed), .finished(.paused): return ["s2arm.job.failed", title]
         case .finished(.interrupted): return ["s2arm.job.interrupted", title]
         }
     }
@@ -145,7 +146,7 @@ import XCTest
         case .finished(.completed): return ["phone.title." + k.rawValue, "phone.headline." + k.rawValue, "phone.done." + k.rawValue, "phone.stat.time", "phone.stat.device",
                                             "phone.stat.games", "phone.stat.no_push", "phone.fact.no_push", "phone.fact.pushed", "phone.fact.skipped", "phone.details"]
         case .finished(.cancelled): return ["phone.title." + k.rawValue, "phone.cancelled", "phone.details"]
-        case .finished(.failed), .finished(.interrupted): return ["phone.title." + k.rawValue, "phone.failed." + k.rawValue, "phone.next", "phone.retry",
+        case .finished(.failed), .finished(.interrupted), .finished(.paused): return ["phone.title." + k.rawValue, "phone.failed." + k.rawValue, "phone.next", "phone.retry",
                                                                   "install.drop_title", "install.drop_confirm", "phone.drop.cancel", "phone.details"]
         }
     }

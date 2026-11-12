@@ -248,13 +248,13 @@ public final class S2ArmEngineProvider: EngineProvider {
     public func devCertUse(_ active: Bool) async throws { try await installer.devCertUse(active) }
     public func devCertDelete() async throws { try await installer.devCertDelete() }
 
-    public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, events: EventSink = .discard) async throws -> InstallResult {
-        try await installer.install(gameId: gameId, teamId: teamId, device: device, acceptDropped: acceptDropped, events: events)
+    public func install(gameId: String, teamId: String? = nil, device: String? = nil, acceptDropped: Bool = false, accept: Set<String> = [], events: EventSink = .discard) async throws -> InstallResult {
+        try await installer.install(gameId: gameId, teamId: teamId, device: device, acceptDropped: acceptDropped, accept: accept, events: events)
     }
 
     public func installMode(set mode: String? = nil) async throws -> InstallModeInfo { try await installer.installMode(set: mode) }
-    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
-        try await installer.updatePhone(acceptStale: acceptStale, acceptDropped: acceptDropped, device: device, events: events)
+    public func updatePhone(acceptStale: Bool = false, acceptDropped: Bool = false, accept: Set<String> = [], device: String? = nil, events: EventSink = .discard) async throws -> [String: Any] {
+        try await installer.updatePhone(acceptStale: acceptStale, acceptDropped: acceptDropped, accept: accept, device: device, events: events)
     }
 
     public func restorePhone(device: String? = nil, events: EventSink = .discard) async throws {

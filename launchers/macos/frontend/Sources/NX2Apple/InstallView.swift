@@ -107,12 +107,7 @@ struct InstallView: View {
                 }
                 .padding(.horizontal, 30).padding(.bottom, 24)
             }
-            .alert(text("install.drop_title"), isPresented: Binding(get: { model.dropConfirm != nil && model.dropConfirm?.update == nil }, set: { if !$0 { model.dropConfirm = nil } }), presenting: model.dropConfirm) { d in
-                Button(text("install.drop_confirm"), role: .destructive) { model.confirmDrop(d) }
-                Button(loc.t("launch.done"), role: .cancel) {}
-            } message: { d in
-                Text(loc.backend(d.message))
-            }
+            // 认得出的风险（会挤掉别处装的游戏 / 存档没能备份……）在结局页里问（PhoneJobPanel），不弹框
             }
             Divider().opacity(0.3)
             if model.installDone == gameID {
