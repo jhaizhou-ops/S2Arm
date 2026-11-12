@@ -60,8 +60,10 @@ int main(int argc, char **argv) {
 
     // ④ 真机宿主自测开关在：三种事件、严格模式
     check(has(app, "S2A_TEST_LIFECYCLE") && has(app, "setenv(\"S2A_STRICT_MAIN\", \"1\", 1)"), "app.m 有生命周期自测开关且开严格主线程模式");
-    check(has(app, "@[UIApplicationWillResignActiveNotification, @\"失去焦点\"]") && has(app, "@[UIApplicationDidEnterBackgroundNotification, @\"进后台\"]")
-          && has(app, "@[UIApplicationWillEnterForegroundNotification, @\"回前台\"]"), "自测覆盖失去焦点 / 进后台 / 回前台");
+    char *selftest = strstr(app, "S2A_TEST_LIFECYCLE");
+    check(has(selftest, "UIApplicationWillResignActiveNotification") && has(selftest, "UIApplicationDidEnterBackgroundNotification")
+          && has(selftest, "UIApplicationWillEnterForegroundNotification") && has(selftest, "UIApplicationDidBecomeActiveNotification"),
+          "自测覆盖失去焦点 / 获得焦点 / 进后台 / 回前台");
 
     printf("%s t_ios_main_thread：%d / %d\n", failures ? "✗" : "✓", checks - failures, checks);
     return failures ? 1 : 0;

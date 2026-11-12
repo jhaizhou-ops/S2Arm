@@ -604,15 +604,15 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
         const char *e = getenv("S2A_TEST_LIFECYCLE"); double after = e ? atof(e) : 0;
         if (after > 0) {
             setenv("S2A_STRICT_MAIN", "1", 1);
-            NSArray<NSArray *> *steps = @[@[UIApplicationWillResignActiveNotification, @"失去焦点"], @[UIApplicationDidBecomeActiveNotification, @"获得焦点"],
-                                         @[UIApplicationDidEnterBackgroundNotification, @"进后台"], @[UIApplicationWillEnterForegroundNotification, @"回前台"],
-                                         @[UIApplicationDidBecomeActiveNotification, @"获得焦点"]];
+            NSArray<NSNotificationName> *steps = @[UIApplicationWillResignActiveNotification, UIApplicationDidBecomeActiveNotification,
+                                                  UIApplicationDidEnterBackgroundNotification, UIApplicationWillEnterForegroundNotification,
+                                                  UIApplicationDidBecomeActiveNotification];
             LOG("生命周期自测：%.0f 秒后开始，共 %d 步（S2A_STRICT_MAIN=1）", after, (int)steps.count);
             for (NSUInteger k = 0; k <= steps.count; k++)
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((after + 3.0 * k) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (k == steps.count) { LOG("生命周期自测：完成（%d 步都走完，进程还在）", (int)steps.count); return; }
-                    LOG("生命周期自测：第 %d 步 %s", (int)k + 1, [steps[k][1] UTF8String]);
-                    [nc postNotificationName:steps[k][0] object:UIApplication.sharedApplication];
+                    LOG("生命周期自测：第 %d 步 %s", (int)k + 1, k == 0 ? "失去焦点" : k == 2 ? "进后台" : k == 3 ? "回前台" : "获得焦点");
+                    [nc postNotificationName:steps[k] object:UIApplication.sharedApplication];
                 });
         }
     }
