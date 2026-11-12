@@ -991,6 +991,22 @@ class AssembleTests(unittest.TestCase):
                 self._assemble(self.A, [self.B], sid="SID2")
             self.assertEqual(e.exception.code, "container_stale", compat); self.assertIn("乙款", str(e.exception))
 
+    def test_assemble_stale_others_ask_then_leave_out_on_accept(self):
+        """v0.3.1 装机原则：别的款（乙）新宿主认不得 → 没确认时停下报 container_stale、点名乙、说清确认后会怎样；
+        玩家确认（acceptStale）→ 这次不带乙照装甲，黄字说明乙的存档和资源还在、重新出包再装就回来"""
+        self._library((self.A, "甲"), (self.B, "乙款"))
+        ios_fixture(self.c, self.A, shell="SID2"); ios_fixture(self.c, self.B, shell="SID1", compat=dict(hostAbi=1, dmshChain="bbbb"))
+        with self.assertRaises(Failure) as e:
+            self._assemble(self.A, [self.B], sid="SID2")
+        self.assertEqual(e.exception.code, "container_stale"); self.assertIn("乙款", str(e.exception)); self.assertIn("确认继续", str(e.exception))
+        self.assertEqual(e.exception.internal, self.B)
+        self.c.r["acceptStale"] = True
+        notes, runs = [], []
+        with um.patch.object(self.c, "diagnostic", lambda m, **k: notes.append((m, k.get("severity")))):
+            _, games, _ = self._assemble(self.A, [self.B], sid="SID2", runs=runs)
+        self.assertEqual(games, [self.A]); self.assertEqual(self._games_arg(runs)[0], [self.A])
+        self.assertEqual(len(notes), 1); self.assertIn("乙款", notes[0][0]); self.assertEqual(notes[0][1], "warning")
+
     def test_assemble_skips_games_deleted_from_library(self):
         """#194：手机上的某款已从游戏库删除：不点名、不挡，新容器不带它，黄字说明"""
         self._library((self.A, "甲")); ios_fixture(self.c, self.A)

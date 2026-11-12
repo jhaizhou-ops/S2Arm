@@ -64,7 +64,7 @@ USAGE = """s2armctl —— 让 AI 助手操作 S2Arm（每条命令 = 玩家点�
   next [游戏号] [--target mac|ios] [--json]   AI 代操作入口（缺省 ios）：现在走到哪一步、下一步做什么、由谁做（ai 自己做 / ask 问玩家要输入 /
                                     human 只能玩家本人做 / confirm 先征得玩家同意）、为什么；出错时带错误码、原因和处理办法
   logs <任务号|游戏号> [--lines N]    读这条任务（或这款游戏最近一条任务）的日志末尾（缺省 40 行）
-  install <游戏号> --device UDID或设备名 [--team 团队号] [--accept-dropped] [--accept-no-backup] [--timeout 秒] [--no-wait]   装到 iPhone（签名 + 装 App + 推资源包），等到装完：成功退 0，失败打错误码与建议、退 1（--no-wait 只发起不等）；连着多台时用 --device 指定（同网配对的也行）；--accept-dropped 见错误码 container_would_drop
+  install <游戏号> --device UDID或设备名 [--team 团队号] [--accept-dropped] [--accept-no-backup] [--accept-stale] [--timeout 秒] [--no-wait]   装到 iPhone（签名 + 装 App + 推资源包），等到装完：成功退 0，失败打错误码与建议、退 1（--no-wait 只发起不等）；连着多台时用 --device 指定（同网配对的也行）；--accept-dropped 见错误码 container_would_drop
   device <游戏号>                    iPhone 连没连、这款游戏的 App 装没装（装机要玩家用 AltStore 登录 Apple ID，AI 不代做）
   push-pack <游戏号>                 App 装好后把资源包拷进 iPhone（同在访达里把「资源包」文件夹拖到 App 上），拷完逐文件核对
 
@@ -776,7 +776,7 @@ def main():
         wait(rest[0], op, lim); return
     simple = {
               'fonts': ('/fonts', lambda r: {'path': os.path.abspath(r[0]) if r and r[0] else ''}),
-              'prepare': ('/prepare', lambda r: {'gameId': r[0], **space_flag(r)}), 'ipa': ('/ipa', lambda r: {'gameId': r[0], **space_flag(r)}), 'install': ('/install', lambda r: simple_body('install', r)), 'uninstall': ('/uninstall', lambda r: {'gameId': r[0], **({'acceptDropped': True} if '--accept-dropped' in r else {}), **({'acceptNoBackup': True} if '--accept-no-backup' in r else {})}), 'restore-iphone': ('/restore-iphone', lambda r: {'gameId': r[0]}), 'launch': ('/launch', lambda r: {'gameId': r[0]}),
+              'prepare': ('/prepare', lambda r: {'gameId': r[0], **space_flag(r)}), 'ipa': ('/ipa', lambda r: {'gameId': r[0], **space_flag(r)}), 'install': ('/install', lambda r: simple_body('install', r)), 'uninstall': ('/uninstall', lambda r: {'gameId': r[0], **({'acceptDropped': True} if '--accept-dropped' in r else {}), **({'acceptNoBackup': True} if '--accept-no-backup' in r else {}), **({'acceptStale': True} if '--accept-stale' in r else {})}), 'restore-iphone': ('/restore-iphone', lambda r: {'gameId': r[0]}), 'launch': ('/launch', lambda r: {'gameId': r[0]}),
               'cancel': ('/cancel', lambda r: {'taskId': r[0]}), 'retry': ('/retry', lambda r: {'taskId': r[0]}),
               'select': ('/select', lambda r: {'selection': r[0], **({'gameId': r[1]} if len(r) > 1 else {})}),
               'onboarding': ('/onboarding', lambda r: {'action': r[0], **({'step': int(r[1])} if len(r) > 1 else {})}),

@@ -6528,8 +6528,8 @@
   "en": "Click again to confirm: the games named will stop working for now (their saves and resources stay on the phone). Install them on iPhone again from the computer they came from to bring them back. If you don't want that, don't install now."
  },
  {
-  "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；手机上现有的游戏不受影响。",
-  "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone; the games already on your phone are not affected."
+  "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。",
+  "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone. Or confirm to install without them this time: their saves and resources stay on the phone, and they come back once you rebuild and install them."
  },
  {
   "source": "这款没法和手机上已有的游戏放进同一个 App：先从 iPhone 删掉不兼容的那款。",

@@ -508,8 +508,15 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         roots[g] = usable_kit(c, g, sid, failed)
         if roots[g] is None:
             stale.append(names.get(g, g))
+    stale_ids = [g for g in roots if roots[g] is None]
+    if stale and c.r.get("acceptStale") is not True:   # 认得出的风险（v0.3.1 装机原则）：问玩家，确认后这次先不带它们照装，不替他拒
+        raise Failure("S2Arm 更新过，手机上的「" + "」「".join(stale) + "」要按新版重新出包才能放进同一个 App。确认继续的话，这次先不带它们照装这款："
+                      "它们的存档和资源都留在手机上，之后给它们各「打 iPhone 包」再装一次就回来。不想这样就先给它们重新出包。", code="container_stale",
+                      internal=" ".join(stale_ids))
     if stale:
-        raise Failure("S2Arm 更新过，手机上的「" + "」「".join(stale) + "」新版运行层认不得：同一个 App 里的游戏要能用同一版，先给它们各「打 iPhone 包」一次，再装这款（手机上现有的不受影响）。", code="container_stale")
+        for g in stale_ids: roots.pop(g)
+        c.diagnostic("「" + "」「".join(stale) + "」这次没放进新版 S2Arm（要按新版重新出包）；手机上的存档和资源都还在，给它们各「打 iPhone 包」再装一次就回来。",
+                      code="container_stale", severity="warning")
     if deleted:
         c.diagnostic("「" + "」「".join(deleted) + "」已从游戏库删除，新版 S2Arm 里不再包含它们；手机上的存档还在。", code="job_failed", severity="warning")
     if not roots:
