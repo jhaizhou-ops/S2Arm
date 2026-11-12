@@ -139,4 +139,42 @@ with tempfile.TemporaryDirectory(prefix='img test ') as t:
         except img.Red: ck(True, '④ 有 programs/ → 报红（这一版不出 IMG）')
         before = sorted(p.name for p in pk.rglob('*'))
         ck(img.convert(str(root), str(pk), romfs_index=cmd) is None and sorted(p.name for p in pk.rglob('*')) == before, '⑤ 多程序合集 → None、目录不动')
+# ⑧ #711（Windows 大游戏写 game.img 失败）：Windows 的 os.stat 没有 st_blocks，RomFS 段写满 1 秒时进度轮询原先抛 AttributeError、img.py 半路退出、
+#   留下还在写的 romfs_index 进程。用不依赖 dotnet 的假 romfs_index（睡 2.5 秒再写段、打长度）+ 没有 st_blocks 的 stat 模拟：期望照常写成、RomFS 长度等于假工具报的；
+#   等的时候本进程出错 → 假工具进程被收掉（不留在后台）
+import types, time
+T = Path(tempfile.mkdtemp(prefix='img test 8 '))
+fake = T / 'fake_romfs_index.py'
+fake.write_text("import sys,time\nromfs,_,part,off=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])\n"
+                "open(sys.argv[0]+'.pid','w').write(str(__import__('os').getpid()))\ntime.sleep(2.5)\n"
+                "f=open(part,'r+b'); f.seek(off); f.write(b'R'*4096); f.close(); print(4096)\n", encoding='utf-8')
+fcmd = f'{shlex.quote(sys.executable)} {shlex.quote(str(fake))}'
+class NoBlocks:   # 只给 img 模块看的 os：stat 结果去掉 st_blocks（同 Windows），其余转给真 os
+    def __getattr__(self, k): return getattr(os, k)
+    def stat(self, p, *a, **kw):
+        st = os.stat(p, *a, **kw); return types.SimpleNamespace(st_size=st.st_size, st_mode=st.st_mode, st_mtime=st.st_mtime)
+rd = T / 'r8'; (rd / 'a').mkdir(parents=True); (rd / 'a' / 'x.bin').write_bytes(b'x' * 100)
+real_os = img.os; img.os = NoBlocks()
+try:
+    out8 = str(T / 'w8.img')
+    try:
+        img.build(str(rd), [], out8, '0100F43008C44000', 'pk', fcmd, say=lambda *_: None)
+        h8 = img.header(out8); ck(h8['romfs'][1] == 4096, f'⑧ 没有 st_blocks（Windows）、写段超过 1 秒：照常写成，RomFS 长度 {h8["romfs"][1]}（期望 4096）')
+    except Exception as e:
+        ck(False, f'⑧ 没有 st_blocks 时写 IMG 不该失败：{type(e).__name__}: {e}')
+    def boom(_): raise RuntimeError('等的时候出错')
+    real_written = img.written; img.written = boom
+    try:
+        img.build(str(rd), [], str(T / 'w9.img'), '0100F43008C44000', 'pk', fcmd, say=lambda *_: None); ck(False, '⑧b 等的时候出错应往上抛')
+    except RuntimeError:
+        pid = int(open(str(fake) + '.pid').read()); time.sleep(0.2)
+        try: os.kill(pid, 0); alive = True
+        except OSError: alive = False
+        ck(not alive, f'⑧b 等的时候本进程出错：假 romfs_index（pid {pid}）已收掉、不留在后台')
+    finally:
+        img.written = real_written
+finally:
+    img.os = real_os
+    shutil.rmtree(T, ignore_errors=True)
+
 print(f'img 单测：{"全通" if not bad else f"{bad} 项不通"}'); sys.exit(1 if bad else 0)

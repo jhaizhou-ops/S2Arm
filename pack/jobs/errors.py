@@ -470,7 +470,8 @@ def tool_reason(log):
                 stream.seek(0, 2)
                 stream.seek(max(0, stream.tell() - 16000))
                 lines = stream.read().decode("utf-8", errors="replace").splitlines()
-            nonempty = [line.strip() for line in lines if line.strip()]
+            # 作业层自己往工具日志里追加的记录（[s2a] 开头，如收掉残留进程）不是工具的报错，不当失败原因（#711：真报错被它盖住）
+            nonempty = [line.strip() for line in lines if line.strip() and not line.strip().startswith("[s2a] ")]
             red = [line for line in nonempty if "【红】" in line]
             if nonempty:
                 return (red or nonempty)[-1][-1500:]

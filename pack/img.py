@@ -59,6 +59,14 @@ def toc_bytes(entries):
     return bytes(out + paths)
 
 
+def written(path):
+    """.part 已写的字节（进度用）：POSIX 取实际分配的块（st_blocks，与写入顺序无关）；Windows 没有 st_blocks（#711：大游戏 RomFS 写满 1 秒就
+    AttributeError，img.py 半路退出、game.img 写失败），取文件长度（romfs_index 顺序写，长度就是写到哪）"""
+    st = os.stat(path)
+    blocks = getattr(st, 'st_blocks', None)
+    return blocks * 512 if blocks is not None else st.st_size
+
+
 def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print):
     """romfs_dir：RomFS 目录（None = 没有 RomFS）；others：[(相对路径, 源文件)]；→ 输出路径"""
     if len(gid) != 16 or any(c not in '0123456789ABCDEFabcdef' for c in gid): raise Red(f'游戏号不对：{gid!r}')
@@ -78,10 +86,13 @@ def build(romfs_dir, others, out, gid, pack_id='', romfs_index=None, say=print):
             romfs_off = PAGE
             # romfs_index 是另一个进程：每秒看 .part 实际分配的字节（st_blocks，与写入顺序无关）当已写量
             p = subprocess.Popen([*shlex.split(romfs_index), '--std', romfs_dir, '-', part, str(romfs_off)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            while True:
-                try: p.wait(timeout=1); break
-                except subprocess.TimeoutExpired: pass
-                tk.step(max(0, min(os.stat(part).st_blocks * 512 - PAGE, rom_bytes - 1) - tk.done))
+            try:
+                while True:
+                    try: p.wait(timeout=1); break
+                    except subprocess.TimeoutExpired: pass
+                    tk.step(max(0, min(written(part) - PAGE, rom_bytes - 1) - tk.done))
+            finally:   # 等它的时候本进程出了任何错：先把它收掉再往上抛，不留在后台接着写（#711：原先 Windows 上留下 dotnet.exe）
+                if p.poll() is None: p.kill(); p.wait()
             so, se = p.communicate()
             if p.returncode: raise Red(f'写标准 RomFS 段失败：{(se or so).strip()[-300:]}')
             romfs_len = int(so.strip().splitlines()[-1])
@@ -321,6 +332,8 @@ def main(argv=None):
             for e in entries(a.img): print(*e, sep='\t')
     except (Red, OSError) as e:
         print(f'【红】{e}'); return 1
+    except Exception as e:   # 意料之外的错也打一行红（带类型）：作业层摘失败原因只认红行 / 末行（#711：原先只剩调用栈，摘要里成了别的日志行）
+        print(f'【红】写 IMG 时出了没料到的错：{type(e).__name__}: {e}', flush=True); raise
     return 0
 
 
