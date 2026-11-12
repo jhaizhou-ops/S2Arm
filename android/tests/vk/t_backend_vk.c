@@ -15,6 +15,7 @@
 
 #include "nvn_backend.h"
 #include "nvn_vk_format.h"
+#include "nvn_vk_bcdec.h"
 #include "nvn_fmt_info.h"
 #include "vk_device.h"
 #include "nvn_plat_vk.h"
@@ -137,6 +138,58 @@ static uint8_t *buf_cpu(nvn_gpu_buf b) { return nvn_gpu_buf_cpu(b); }
 
 static struct s2a_vk_device g_dev;
 static nvn_gpu_open_desc g_desc;
+
+// 保守故障注入：不等 fence 就返回 TIMEOUT，记录完成证明前的视图销毁；其余调用走真实 Vulkan。
+static int g_bc_inject_wait, g_bc_unproven, g_bc_early_destroy;
+static VkFence g_bc_injected_fence;
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice d, uint32_t n, const VkFence *f, VkBool32 all, uint64_t timeout) {
+    PFN_vkWaitForFences real = (PFN_vkWaitForFences)vkGetDeviceProcAddr(d, "vkWaitForFences");
+    if (g_bc_inject_wait && n == 1) {
+        g_bc_inject_wait = 0; g_bc_unproven = 1; g_bc_injected_fence = f[0]; return VK_TIMEOUT;
+    }
+    return real(d, n, f, all, timeout);
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice d, VkImageView view, const VkAllocationCallbacks *a) {
+    PFN_vkDestroyImageView real = (PFN_vkDestroyImageView)vkGetDeviceProcAddr(d, "vkDestroyImageView");
+    if (g_bc_unproven && view) g_bc_early_destroy++;
+    real(d, view, a);
+}
+
+static void bc_timeout_lifetime(void) {
+    VkDevice d = g_dev.device; VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE;
+    struct nvn_vk_bcdec *bc = NULL; char why[192] = {0};
+    VkImageCreateInfo ii = {0}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM; ii.extent = (VkExtent3D){4,4,1};
+    ii.mipLevels = ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ii.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    VkResult vr = vkCreateImage(d, &ii, NULL, &image); CHECK(vr == VK_SUCCESS, "BC timeout 建图：%d", vr); if (vr != VK_SUCCESS) goto done;
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(d, image, &mr);
+    VkMemoryAllocateInfo ma = {0}; ma.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ma.allocationSize = mr.size;
+    ma.memoryTypeIndex = s2a_vk_memory_type(&g_dev, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, NULL);
+    if (ma.memoryTypeIndex == UINT32_MAX) { CHECK(0, "BC timeout 无显存类型"); goto done; }
+    vr = vkAllocateMemory(d, &ma, NULL, &memory); CHECK(vr == VK_SUCCESS, "BC timeout 分配：%d", vr); if (vr != VK_SUCCESS) goto done;
+    vr = vkBindImageMemory(d, image, memory, 0); CHECK(vr == VK_SUCCESS, "BC timeout 绑定：%d", vr); if (vr != VK_SUCCESS) goto done;
+    int br = nvn_vk_bcdec_create(&g_dev, &bc, why, sizeof why); CHECK(br == 0, "BC timeout 解码器：%s", why); if (br) goto done;
+    { static const uint8_t block[8] = {0,0xf8,0,0xf8,0,0,0,0};
+      g_bc_inject_wait = 1; g_bc_unproven = g_bc_early_destroy = 0; g_bc_injected_fence = VK_NULL_HANDLE;
+      br = nvn_vk_bcdec_decode(bc, &g_dev, image, NVN_FORMAT_RGBA_DXT1, 4, 4, 0, 0, block, sizeof block, why, sizeof why);
+      CHECK(br == -2 && g_bc_injected_fence, "BC timeout 应报告未证明完成，实得 %d %s", br, why);
+      CHECK(g_bc_early_destroy == 0, "BC timeout 完成证明前销毁视图：%d", g_bc_early_destroy);
+      g_bc_inject_wait = 1;
+      nvn_vk_bcdec_destroy(&g_dev, bc);  // 第二次等待仍失败：解码器和视图也必须继续保活
+      CHECK(g_bc_early_destroy == 0, "BC destroy 等待失败时提前销毁视图：%d", g_bc_early_destroy);
+      if (g_bc_injected_fence) {
+          vr = vkWaitForFences(d, 1, &g_bc_injected_fence, VK_TRUE, 5000000000ull);
+          CHECK(vr == VK_SUCCESS, "BC timeout 后真实 fence 完成：%d", vr);
+      }
+      g_bc_unproven = 0;
+      printf("BC timeout 注入用例已执行：rc=%d，提前销毁=%d\n", br, g_bc_early_destroy); }
+done:
+    g_bc_inject_wait = g_bc_unproven = 0;
+    if (bc) nvn_vk_bcdec_destroy(&g_dev, bc);
+    if (image) vkDestroyImage(d, image, NULL);
+    if (memory) vkFreeMemory(d, memory, NULL);
+}
 
 static int open_backend(void) {
     nvn_gpu_err e;
@@ -527,6 +580,8 @@ static void *read_file(const char *path, size_t *n) {
 // 通道映射用例的旋钮（缺省全 0 = 不设）：存储自带映射、视图映射（NVN 取值 0 零 / 1 一 / 2 R / 3 G / 4 B / 5 A）
 static uint16_t g_tri_swz; static int g_tri_vsw_on; static uint8_t g_tri_vsw[4];
 static const uint8_t *g_tri_expect;   // 非空：整张图期望都是这 4 个字节（压缩格式用，纹素不是按像素摆的）
+static int g_tri_tol;
+static uint64_t g_tri_signal = 5;
 static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *texels, int tbpp, int trow, int want_a) {
     char path[512];
     size_t vsz = 0, fsz = 0;
@@ -646,9 +701,9 @@ static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *te
     nvn_gpu_view_release(tview);
     nvn_gpu_tex_release(tex);
     nvn_gpu_samp_release(samp);
-    r = nvn_gpu_cmd_commit(c, 5, on_done, NULL, &e);
+    r = nvn_gpu_cmd_commit(c, g_tri_signal, on_done, NULL, &e);
     CHECK(OK(r), "commit 5：%d %s", r.code, e.why);
-    r = nvn_gpu_fence_wait(5, 5000000000ull, &e);
+    r = nvn_gpu_fence_wait(g_tri_signal, 5000000000ull, &e);
     CHECK(OK(r), "wait 5：%d %s", r.code, e.why);
 
     for (int y = 0; y < 64; y++) {
@@ -665,7 +720,7 @@ static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *te
             for (int ch = 0; ch < 4; ch++) mapped[ch] = sw[ch] == 0 ? 0 : sw[ch] == 1 ? 255 : px[sw[ch] - 2];
             const uint8_t *want = mapped;
             const uint8_t *got = buf_cpu(rb) + (y * 64 + x) * 4;
-            if (got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != (g_tri_vsw_on || g_tri_swz ? want[3] : want_a)) {
+            if (abs(got[0] - want[0]) > g_tri_tol || abs(got[1] - want[1]) > g_tri_tol || abs(got[2] - want[2]) > g_tri_tol || abs(got[3] - (g_tri_vsw_on || g_tri_swz ? want[3] : want_a)) > g_tri_tol) {
                 g_fail++;
                 printf("FAIL %s:%d: 三角像素 (%d,%d) = %02x%02x%02x%02x，期望 %02x%02x%02x%02x\n",
                        __FILE__, __LINE__, x, y, got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
@@ -784,13 +839,130 @@ static void c73_origin_upper_left(const char *dir) {
 
 // C72：块压缩贴图上传（一行是一排块）。BC1 一个 4x4 块：两个端点色都是纯红（565 的 0xF800）、索引全 0 → 解出来每个纹素都是不透明纯红。
 // 2x2 的贴图只占这一个块的左上角。设备不支持 BC 直接采样时这条由 compute 解码路线负责，本用例只在原生支持时跑。
-static void c72_bc1_upload(const char *dir) {
-    if (!(nvn_gpu_format_caps(NVN_FORMAT_RGBA_DXT1) & NVN_GPU_FMT_SAMPLE)) { printf("C72 跳过：本设备档 BC1 不可直接采样\n"); return; }
+static void c72_bc1_upload(const char *dir, int required) {
+    if (required) {
+        nvn_gpu_tex_desc td = {0}; nvn_gpu_tex probe = NULL; nvn_gpu_err e = {0};
+        td.d.target = NVN_TEXTURE_TARGET_2D; td.d.format = NVN_FORMAT_RGBA_DXT1;
+        td.d.width = td.d.height = 4; td.d.depth = td.d.levels = 1;
+        td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD;
+        nvn_gpu_rc r = nvn_gpu_tex_create(&td, &probe, &e);
+        CHECK(OK(r) && probe, "C72 compute：BC1 建图应成功，得到 %d %s", r.code, e.why);
+        if (probe) nvn_gpu_tex_release(probe);
+    }
+    if (!(nvn_gpu_format_caps(NVN_FORMAT_RGBA_DXT1) & NVN_GPU_FMT_SAMPLE)) {
+        CHECK(!required, "C72 compute：BC1 解码路线应可采样，实际未报告能力");
+        if (!required) printf("C72 跳过：本设备档 BC1 不可采样\n");
+        return;
+    }
+    printf("C72 执行：%s\n", required ? "compute" : "native");
     static const uint8_t block[8] = {0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0};
     static const uint8_t red[4] = {255, 0, 0, 255};
     g_tri_expect = red;
     tri_impl(dir, NVN_FORMAT_RGBA_DXT1, block, 4, 8, 255);
     g_tri_expect = NULL;
+}
+
+// C192：压缩块行带 8 字节填充；两次上传之间抓一次快照，再检查 abort 不改变结果。
+static void c192_bc_order(void) {
+    static const uint8_t blocks[48] = {
+        0x00,0xf8,0x00,0xf8,0,0,0,0, 0xe0,0x07,0xe0,0x07,0,0,0,0, 0,0,0,0,0,0,0,0,
+        0x1f,0x00,0x1f,0x00,0,0,0,0, 0xff,0xff,0xff,0xff,0,0,0,0, 0,0,0,0,0,0,0,0
+    };
+    static const uint8_t blue[8] = {0x1f,0,0x1f,0,0,0,0,0};
+    static const uint8_t colors[4][4] = {{255,0,0,255},{0,255,0,255},{0,0,255,255},{255,255,255,255}};
+    nvn_gpu_tex bc = make_tex(8, 8, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    nvn_gpu_tex a = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex b = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_buf rb = make_buf(8 * 8 * 4 * 3, NVN_GPU_MEM_SHARED, NULL);
+    if (!bc || !a || !b || !rb) return;
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_tex_upload(c, bc, 0, 0, NULL, blocks, 24, sizeof blocks);
+    nvn_gpu_copy_tex(c, bc, 0, 0, NULL, a, 0, 0, NULL);
+    NVNcopyRegion region = {4,0,0,4,4,1};
+    nvn_gpu_tex_upload(c, bc, 0, 0, &region, blue, 8, sizeof blue);
+    nvn_gpu_copy_tex(c, bc, 0, 0, NULL, b, 0, 0, NULL);
+    nvn_gpu_copy_tex_buf(c, a, 0, 0, NULL, rb, 0, 32, 256);
+    nvn_gpu_copy_tex_buf(c, b, 0, 0, NULL, rb, 256, 32, 256);
+    nvn_gpu_err e; nvn_gpu_rc rc = nvn_gpu_cmd_commit(c, 6, on_done, NULL, &e);
+    CHECK(OK(rc), "C192 commit：%d %s", rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(6, 5000000000ull, &e)), "C192 wait：%s", e.why);
+    c = begin_cmd();
+    nvn_gpu_tex_upload(c, bc, 0, 0, &region, blocks, 8, 8);
+    nvn_gpu_cmd_abort(c);
+    c = begin_cmd();
+    nvn_gpu_copy_tex(c, bc, 0, 0, NULL, b, 0, 0, NULL);
+    nvn_gpu_copy_tex_buf(c, b, 0, 0, NULL, rb, 512, 32, 256);
+    rc = nvn_gpu_cmd_commit(c, 7, on_done, NULL, &e);
+    CHECK(OK(rc), "C192 abort 后 commit：%d %s", rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(7, 5000000000ull, &e)), "C192 abort 后 wait：%s", e.why);
+    for (int image = 0; image < 3; image++) for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+        int k = (y / 4) * 2 + x / 4; if (image && k == 1) k = 2;
+        CHECK(memcmp(buf_cpu(rb) + image * 256 + (y * 8 + x) * 4, colors[k], 4) == 0,
+              "C192 快照 %d 坐标 %d,%d 应为颜色 %d", image, x, y, k);
+    }
+    nvn_gpu_tex_release(bc); nvn_gpu_tex_release(a); nvn_gpu_tex_release(b); nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
+static void c193_bc_readback_rejected(void) {
+    nvn_gpu_tex bc = make_tex(4, 4, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
+    if (!bc || !rb) return;
+    nvn_gpu_cmd c = begin_cmd(); nvn_gpu_err e;
+    nvn_gpu_copy_tex_buf(c, bc, 0, 0, NULL, rb, 0, 8, 8);
+    nvn_gpu_rc r = nvn_gpu_cmd_commit(c, 1, on_done, NULL, &e);
+    CHECK(r.code == NVN_GPU_E_UNSUPPORTED, "C193 解码贴图按压缩块回读应 UNSUPPORTED，实得 %d", r.code);
+    nvn_gpu_tex_release(bc); nvn_gpu_buf_release(rb, NULL, NULL);
+}
+
+// C196：上传中的解码未证明完成时，段失败/abort 和 close 超时都不能释放其资源；完成后 close 可重试。
+static void c196_bc_close_timeout(void) {
+    static const uint8_t red[8] = {0,0xf8,0,0xf8,0,0,0,0};
+    nvn_gpu_tex bc = make_tex(4, 4, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD);
+    if (!bc) return;
+    nvn_gpu_cmd c = begin_cmd();
+    g_bc_inject_wait = 1; g_bc_unproven = g_bc_early_destroy = 0; g_bc_injected_fence = VK_NULL_HANDLE;
+    nvn_gpu_tex_upload(c, bc, 0, 0, NULL, red, 8, 8);
+    CHECK(g_bc_injected_fence && !g_bc_early_destroy, "C196 解码超时应保活，提前销毁=%d", g_bc_early_destroy);
+    nvn_gpu_cmd_abort(c);
+    g_bc_inject_wait = 1;
+    nvn_gpu_err e; nvn_gpu_rc r = nvn_gpu_close(5000000000ull, &e);
+    CHECK(r.code == NVN_GPU_E_TIMEOUT && !g_bc_early_destroy, "C196 close 未证明完成应超时并保活：%d，提前销毁=%d", r.code, g_bc_early_destroy);
+    if (g_bc_injected_fence) {
+        VkResult vr = vkWaitForFences(g_dev.device, 1, &g_bc_injected_fence, VK_TRUE, 5000000000ull);
+        CHECK(vr == VK_SUCCESS, "C196 真实 fence 应完成：%d", vr);
+    }
+    g_bc_unproven = g_bc_inject_wait = 0;
+    r = nvn_gpu_close(5000000000ull, &e);
+    CHECK(OK(r), "C196 完成后 close 重试：%d %s", r.code, e.why);
+    printf("C196 close 超时保活与重试已执行\n");
+}
+
+// C194：8×8 立方体的一级 mip 是 4×4，两个面分别为纯蓝、纯绿。
+static void c194_bc_cube_mips(void) {
+    static const uint8_t blue[8] = {0x1f,0,0x1f,0,0,0,0,0};
+    static const uint8_t green[8] = {0xe0,7,0xe0,7,0,0,0,0};
+    static const uint8_t expected[2][4] = {{0,0,255,255}, {0,255,0,255}};
+    nvn_gpu_tex_desc td = {0}; td.d.target = NVN_TEXTURE_TARGET_CUBEMAP; td.d.format = NVN_FORMAT_RGBA_DXT1;
+    td.d.width = td.d.height = 8; td.d.depth = 1; td.d.levels = 2; td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_CPU_UPLOAD | NVN_GPU_TEX_VIEW_FMT;
+    nvn_gpu_tex bc = NULL; nvn_gpu_err e = {0}; nvn_gpu_rc rc = nvn_gpu_tex_create(&td, &bc, &e);
+    CHECK(OK(rc) && bc, "C194 立方体建图：%d %s", rc.code, e.why); if (!bc) return;
+    view_t same = {0}; same.set_format = 1; same.format = NVN_FORMAT_RGBA_DXT1;
+    nvn_gpu_view v = NULL; rc = nvn_gpu_view_create(bc, &same, &v, &e);
+    CHECK(OK(rc) && v, "C194 同格式显式视图：%d %s", rc.code, e.why);
+    nvn_gpu_tex out = make_tex(4, 4, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_buf rb = make_buf(128, NVN_GPU_MEM_SHARED, NULL);
+    if (!out || !rb) return;
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_tex_upload(c, bc, 1, 2, NULL, blue, 8, 8);
+    nvn_gpu_tex_upload(c, bc, 1, 4, NULL, green, 8, 8);
+    nvn_gpu_copy_tex(c, bc, 1, 2, NULL, out, 0, 0, NULL);
+    nvn_gpu_copy_tex_buf(c, out, 0, 0, NULL, rb, 0, 16, 64);
+    nvn_gpu_copy_tex(c, bc, 1, 4, NULL, out, 0, 0, NULL);
+    nvn_gpu_copy_tex_buf(c, out, 0, 0, NULL, rb, 64, 16, 64);
+    rc = nvn_gpu_cmd_commit(c, 8, on_done, NULL, &e); CHECK(OK(rc), "C194 commit：%d %s", rc.code, e.why);
+    CHECK(OK(nvn_gpu_fence_wait(8, 5000000000ull, &e)), "C194 wait：%s", e.why);
+    for (int i = 0; i < 32; i++) CHECK(!memcmp(buf_cpu(rb) + i * 4, expected[i / 16], 4), "C194 面 %d 像素 %d", i / 16, i % 16);
+    nvn_gpu_view_release(v); nvn_gpu_tex_release(bc); nvn_gpu_tex_release(out); nvn_gpu_buf_release(rb, NULL, NULL);
 }
 
 // C30：RGB8 上传展开成 RGBA8 后经三角形采样读回；期望按 2x2 最近邻 + a=0xFF 手算。
@@ -4001,7 +4173,7 @@ static void c84_validation_classes(void) {
 //   BC1 4x4（一块 8 字节）传进去 → 区域按像素 4x4 拷到缓冲（一行块 8 字节）→ 拷进 1x1 的 RG32UI（一个像素 8 字节）→ 读回。
 //   期望（手算）：读回的 8 个字节就是传进去的那一块。不能直接采样 BC 的设备上建不了这张贴图，跳过。
 static void c84b_bc_block_copy(void) {
-    if (!(nvn_gpu_format_caps(NVN_FORMAT_RGBA_DXT1) & NVN_GPU_FMT_SAMPLE)) { fprintf(stderr, "C84b：本设备不能直接采样 BC1，跳过\n"); return; }
+    if ((g_dev.bc_decode_mask & (1u << (NVN_FORMAT_RGBA_DXT1 - 0x41))) || !(nvn_gpu_format_caps(NVN_FORMAT_RGBA_DXT1) & NVN_GPU_FMT_SAMPLE)) { fprintf(stderr, "C84b：BC1 非原生压缩存储，跳过原块回读\n"); return; }
     nvn_gpu_tex bc = make_tex(4, 4, NVN_FORMAT_RGBA_DXT1, NVN_GPU_TEX_SAMPLED), px = make_tex(1, 1, NVN_FORMAT_RG32UI, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
     nvn_gpu_buf rb = make_buf(64, NVN_GPU_MEM_SHARED, NULL);
     const uint8_t blk[8] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0};
@@ -4445,6 +4617,7 @@ int main(int argc, char **argv) {
         return 2;   // 不静默跳过：run.sh 把 2 当红
     }
     printf("device: %s (%s)\n", g_dev.properties.deviceName, g_dev.driver_name);
+    bc_timeout_lifetime();
     // 机型模拟档（android/tests/vk/sim_tiers.sh）按这行核对模拟层确实藏掉了对应能力。
     printf("sim caps: vertexPipelineStoresAndAtomics=%u dualSrcBlend=%u calibrated_timestamps=%d（0 = 无校准扩展，走完成点兜底）\n",
            (unsigned)g_dev.core_features.vertexPipelineStoresAndAtomics, (unsigned)g_dev.core_features.dualSrcBlend,
@@ -4523,8 +4696,51 @@ int main(int argc, char **argv) {
     c73_origin_upper_left(argv[1]);
     { nvn_gpu_err e73; CHECK(OK(nvn_gpu_close(5000000000ull, &e73)), "C73 close：%d %s", e73.rc.code, e73.why); }
     if (!open_backend()) return 1;
-    c72_bc1_upload(argv[1]);
+    c72_bc1_upload(argv[1], (g_dev.bc_decode_mask & (1u << (NVN_FORMAT_RGBA_DXT1 - 0x41))) != 0);
     { nvn_gpu_err e72; CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C72 close：%d %s", e72.rc.code, e72.why); }
+    { uint32_t saved_mask = g_dev.bc_decode_mask;
+      g_dev.bc_decode_mask |= 1u << (NVN_FORMAT_RGBA_DXT1 - 0x41);
+      if (!open_backend()) return 1;
+      c72_bc1_upload(argv[1], 1);
+      c192_bc_order();
+      c194_bc_cube_mips();
+      nvn_gpu_err e72; CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C72 compute close：%d %s", e72.rc.code, e72.why);
+      if (!open_backend()) return 1;
+      c193_bc_readback_rejected();
+      CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C87 close：%d %s", e72.rc.code, e72.why);
+      if (!open_backend()) return 1;
+      c196_bc_close_timeout();
+      {   // #682 的六个格式：每块按端点直接构造纯红，采样后都是 (255,0,0,255)。
+          static const uint32_t fmt[6] = {0x41,0x44,0x45,0x48,0x49,0x4b};
+          static const uint8_t bc1[8] = {0x00,0xf8,0x00,0xf8,0,0,0,0};
+          static const uint8_t bc3[16] = {255,255,0,0,0,0,0,0, 0x00,0xf8,0x00,0xf8,0,0,0,0};
+          static const uint8_t bc4[8] = {255,255,0,0,0,0,0,0};
+          static const uint8_t bc5[16] = {255,255,0,0,0,0,0,0, 0,0,0,0,0,0,0,0};
+          static const uint8_t red[4] = {255,0,0,255};
+          for (int i = 0; i < 6; i++) g_dev.bc_decode_mask |= 1u << (fmt[i] - 0x41);
+          if (!open_backend()) return 1;
+          g_tri_expect = red;
+          for (int i = 0; i < 6; i++) {
+              const uint8_t *block = i == 1 || i == 3 ? bc3 : i == 4 ? bc4 : i == 5 ? bc5 : bc1;
+              int row = i == 1 || i == 3 || i == 5 ? 16 : 8;
+              g_tri_signal = (uint64_t)i + 1;
+              printf("C195 执行：BC 格式 %#x\n", fmt[i]);
+              tri_impl(argv[1], fmt[i], block, 4, row, 255);
+          }
+          g_tri_expect = NULL; g_tri_signal = 5;
+          CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "C195 close：%d %s", e72.rc.code, e72.why);
+      }
+      g_dev.bc_decode_mask |= 1u << (NVN_FORMAT_RGBA_DXT1_SRGB - 0x41);
+      if (!open_backend()) return 1;
+      {   // 565 红端点 16 → 字节 132，sRGB 采样变线性 ≈ 0.2307 → 59/255。
+          static const uint8_t block[8] = {0x00,0x80,0x00,0x80,0,0,0,0};
+          static const uint8_t linear[4] = {59,0,0,255};
+          g_tri_expect = linear; g_tri_tol = 1;
+          tri_impl(argv[1], NVN_FORMAT_RGBA_DXT1_SRGB, block, 4, 8, 255);
+          g_tri_expect = NULL; g_tri_tol = 0;
+      }
+      CHECK(OK(nvn_gpu_close(5000000000ull, &e72)), "BC SRGB close：%d %s", e72.rc.code, e72.why);
+      g_dev.bc_decode_mask = saved_mask; }
     for (int k = 0; k < 2; k++) {   // tri_impl 的提交序号固定：每个变体一个会话
         if (!open_backend()) return 1;
         c70_swizzle(argv[1], k);
