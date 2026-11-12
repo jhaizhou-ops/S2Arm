@@ -20,6 +20,9 @@ R=$(cd "$(dirname "$0")/../../.." && pwd); NX=$R/graphics/nvn
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ROOT=$(cygpath -m "$ROOT"); X=$(cygpath -m "$X"); R=$(cygpath -m "$R"); NX=$R/graphics/nvn;; esac
 PY=${S2A_PYTHON:-${S2A_PY:-$(bash "$R/tools/machine.sh" get S2A_PY 2> /dev/null)}}; PY=${PY:-$(command -v python3)}
 export J=${J:-${S2A_CPU_BAKE:-${S2A_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}}}
+# 抽取每路吃内存（#711：Windows 16 GB 抽取 MemoryError）：给了 S2A_CPU_BAKE（按内存封顶的重活路数，tools/cores.sh / oneclick_win）就不超过它——
+#   调用方常把 J 设成直连库编译的路数（每路只吃一个 metal 进程，16 GB 可开 23 路），抽取照它开就绕过了内存封顶
+[ -n "${S2A_CPU_BAKE:-}" ] && [ "$S2A_CPU_BAKE" -ge 1 ] 2> /dev/null && [ "$J" -gt "$S2A_CPU_BAKE" ] && export J=$S2A_CPU_BAKE
 source "$R/tools/progress.sh"
 say() { echo "[抽取] $*"; }
 why() { local w; w=$(grep -a '\[RED\]\|【红】' "$1" 2> /dev/null | tail -1); [ -n "$w" ] || w=$(grep -a . "$1" 2> /dev/null | tail -1); echo "$w" | sed 's/^\[RED\] *//' | cut -c1-200; }   # 失败原因：红行优先，没有取末行
