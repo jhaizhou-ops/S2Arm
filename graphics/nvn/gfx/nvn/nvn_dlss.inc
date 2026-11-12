@@ -101,6 +101,12 @@ static void dlss_eval(const p_dlss *d, uint32_t size) {
     PD("L %llu dlss color=%llu depth=%llu motion=%llu output=%llu in=%dx%d jitter=%g,%g mv=%g,%g reset=%d index=%d", g_stat_pass, tc ? (unsigned long long)tc->serial : 0ull,
        td ? (unsigned long long)td->serial : 0ull, tm ? (unsigned long long)tm->serial : 0ull, to ? (unsigned long long)to->serial : 0ull, d->in_w, d->in_h,
        d->jitter[0], d->jitter[1], d->mv_scale[0], d->mv_scale[1], d->reset, d->index);
+    // 内部分辨率放大（S2A_RES_SCALE > 1）：下面按存储尺寸配 MetalFX（输入内容尺寸、输出尺寸），四张图里被放大过的先退回原尺寸（游戏自己做放大的画面不再叠一层倍率）
+    if (rs_up_on()) {
+        #define DLSS_RS_BACK(m, tx) if (m && rs_state(m) == RS_SCALED) { rs_rescale(m, 0, "DLSS 求值读写"); m = tex_mtl(tx); }
+        DLSS_RS_BACK(c, tc) DLSS_RS_BACK(o, to) DLSS_RS_BACK(dp, td) DLSS_RS_BACK(mv, tm)
+        #undef DLSS_RS_BACK
+    }
     if (!c || !o || !dp || !mv) { g_dlss_skips++; RED_ONCE(146, "DLSS：求值缺图（色 %d 出 %d 深 %d 动 %d），这一遍不做", c != nil, o != nil, dp != nil, mv != nil); return; }
     for (int k = 0; k < DLT_N; k++) if (d->has_view[k] && (d->view[k].set_levels || d->view[k].set_layers || d->view[k].set_format)) {
         static int once; if (!once++) MLOG("【红】 DLSS：第 %d 张图带视图（层级 / 层 / 格式），MetalFX 用整张图的第 0 级", k); break; }
