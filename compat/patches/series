@@ -561,3 +561,4 @@
 20261111-1804-audio-perf-entry-double-release.patch
 20261111-1514-audio-renderer-preroll.patch
 20261110-1325-vp9-intra-coded-bounds.patch
+20261111-2225-vp9-native-backend-neutral.patch
