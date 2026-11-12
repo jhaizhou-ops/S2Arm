@@ -1458,7 +1458,8 @@ def update_phone(c):
                       code="container_stale", internal=" ".join(stale))
     keep = [g for g in others if g not in stale]
     if not keep:   # 每一款都要重出：换壳后容器里一款都没有——宿主 0 款的启动路径没在真机验过（同 remove_from_phone 不装空容器），物理上做不了，照旧停
-        raise Failure("手机上的游戏都要按新版重新出包：先给它们各「打 iPhone 包」，再装到 iPhone。", code="container_stale", internal=" ".join(stale))
+        raise Failure("手机上的游戏都要按新版重新出包，这次没法只更新 S2Arm（更新后一款都打不开）。可以先给它们各「打 iPhone 包」，再点「装到 iPhone」，"
+                      "游戏和 S2Arm 会一起换成新版；存档和资源都留在手机上。「只更新 S2Arm、暂不带游戏」下一版开放。", code="container_stale", internal=" ".join(stale))
     r = put_game(c, None, ph, others=keep)
     return dict(r, updated=True, fromShell=st["fromShell"], toShell=sid, skipped=stale)
 
