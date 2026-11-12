@@ -564,6 +564,68 @@ static void t_cpu_rules(void) {   // 首用判定的三条分支
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
 }
 
+// LINEAR 图集（R8 / IMAGE|IMAGE... 字体与 UI 由 CPU 写）：首次按线性行距逐行上传，之后 CPU 更新能到下一次采样，
+// 没变化不重传；换映射代际要重传；同提交里的第二次更新排在主段。iOS 同名语义：nvn_mtl.m tex_linear @3756 / tex_linear_needs_upload @3777。
+static void t_linear_upload(void) {
+    nvn_be_sub_begin();
+    res_fresh();
+    // 3x2 R8、行距 8：每行 3 个有效字节 + 5 字节 padding（毒值）。首用前全是 0（字体引擎可以建图之后才填字形）。
+    tex_t t = mk_tex(41, 0x100, NVN_FORMAT_R8, 3, 2, 1, NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_IMAGE);
+    t.d.stride = 8; nvn_tex_layout(&t.d, &t.L); t.mem = g_tmem + t.off;
+    int n0 = g_nup, p0 = g_protects; uint64_t u0 = rp_res_uploads();
+    CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL);
+    CHECK(g_nup == n0 + 1 && rp_res_uploads() - u0 == 1 && g_protects - p0 == 1 && g_up[n0].pre == 1);
+    CHECK(g_up[n0].level == 0 && g_up[n0].layer == 0 && g_up[n0].pitch == 3 && g_up[n0].img == 6 && g_up[n0].w == 3 && g_up[n0].h == 2);
+    { static const uint8_t zero[6]; CHECK(!memcmp(g_up[n0].first, zero, 6)); }      // 初始全零：也要有一次定义内容的上传
+    CHECK(g_last_usage & NVN_GPU_TEX_CPU_UPLOAD);
+    // 填字形：行距 8、padding 是毒值，上传缓冲只能是 3x2 的紧凑行宽
+    for (int y = 0; y < 2; y++) { t.mem[y * 8 + 0] = (uint8_t)(0x11 + y); t.mem[y * 8 + 1] = 0x22; t.mem[y * 8 + 2] = 0x33; memset(t.mem + y * 8 + 3, 0xEE, 5); }
+    g_dirty_written = g_dirty_now + 1; g_dirty_now += 2;
+    CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL && g_nup == n0 + 2 && g_up[n0 + 1].pitch == 3 && g_up[n0 + 1].img == 6);
+    CHECK(g_up[n0 + 1].first[0] == 0x11 && g_up[n0 + 1].first[1] == 0x22 && g_up[n0 + 1].first[2] == 0x33 &&
+          g_up[n0 + 1].first[3] == 0x12 && g_up[n0 + 1].first[4] == 0x22 && g_up[n0 + 1].first[5] == 0x33);   // 逐行拷：padding 不进缓冲
+    CHECK(g_up[n0 + 1].pre == 0);                                                   // 同一提交里的第二次同步：排在主段
+    CHECK(g_protects - p0 == 2);                                                    // 每次重传前都重新保护
+    { int p1 = g_protects; uint64_t u1 = rp_res_uploads(); int ok = 1;
+      for (int i = 0; i < 100; i++) ok &= rp_tex_resolve(&t, &g_fake_cmd) != NULL;
+      CHECK(ok && g_protects == p1 && rp_res_uploads() == u1); }                    // 稳定内容：不传、不重新保护
+    // 映射换底后的失效判定（全局代际 / 范围句柄）尚未接入：换底时 nvn_dirty_replace_range 会把该范围的页代际抬到旧 stamp 之后，
+    // 常规换底已由 nvn_dirty_since 判脏；remove+add 路径的漏判留作后续（见 docs 对照表）。
+    rp_tex_mark_gpu_written(&t); g_dirty_written = g_dirty_now + 1; g_dirty_now += 2;
+    CHECK(rp_tex_resolve(&t, &g_fake_cmd) != NULL && g_nup == n0 + 2);              // 内容归 GPU：不再从游戏内存传
+    nvn_be_tex_release(&t);
+    nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+}
+
+// 线性族里第一批不收的组合：准确报红（不猜内容），初始化仍按“取不了就清零”走。
+static void t_linear_reject(void) {
+    nvn_be_sub_begin();
+    nvn_unimpl_reset();
+    res_fresh();
+    { tex_t a = mk_tex(51, 0, NVN_FORMAT_R8, 4, 4, 2, NVN_TEXTURE_FLAGS_LINEAR);   // 多级：公共布局只给单级的行距
+      int n0 = g_nup;
+      CHECK(rp_tex_resolve(&a, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_mips_unsupported") == 1);
+      CHECK(g_nup == n0 + 2 && g_up[n0].pitch == 4 && g_up[n0].img == 16);          // 报红之后仍是真的清零初始化（两级各一次），不是静默错内容
+      nvn_be_tex_release(&a); }
+    res_fresh();
+    { tex_t b = mk_tex(52, 0, NVN_FORMAT_R8, 4, 4, 1, NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET);   // 只有 LINEAR_RT：内容归 GPU（可能由 copy_b2t 写入），不按 CPU 内容传、不报红
+      int n0 = g_nup, u0 = g_nup; (void)u0;
+      CHECK(rp_tex_resolve(&b, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_render_target_unsupported") == 0);
+      CHECK(g_nup == n0 + 1 && g_up[n0].img == 4 * 4 * 1 && g_up[n0].first[0] == 0);   // 新建存储清零一次
+      nvn_be_tex_release(&b); }
+    res_fresh();
+    { tex_t c = mk_tex(53, (1 << 20) - 0x10, NVN_FORMAT_R8, 64, 64, 1, NVN_TEXTURE_FLAGS_LINEAR);   // 源范围出池
+      CHECK(rp_tex_resolve(&c, &g_fake_cmd) != NULL && nvn_unimpl_count("tex", "linear_range_outside_pool") == 1);
+      nvn_be_tex_release(&c); }
+    res_fresh();
+    { tex_t d = mk_tex(54, 0, NVN_FORMAT_R8, 2, 2, 1, NVN_TEXTURE_FLAGS_LINEAR); memset(d.mem, 0x5A, 4);
+      nvn_be_tex_cpu_written(&d);   // WriteTexels 写过的线性贴图：以前打 upload_linear_or_sparse 红行，现在能传
+      int n0 = g_nup;
+      CHECK(rp_tex_resolve(&d, &g_fake_cmd) != NULL && g_nup == n0 + 1 && g_up[n0].first[0] == 0x5A);
+      nvn_be_tex_release(&d); }
+    nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
+}
+
 static void t_registry(void) {
     nvn_be_sub_begin();
     res_fresh(); nvn_unimpl_reset(); int v0 = g_view_creates, vr0 = g_view_releases, s0 = g_samp_creates, sr0 = g_samp_releases;
@@ -1671,6 +1733,8 @@ int main(int argc, char **argv) {
     t_alias();
     t_cpu_upload();
     t_cpu_rules();
+    t_linear_upload();
+    t_linear_reject();
     t_registry();
     t_buf_mirror();
     t_buf_ops();

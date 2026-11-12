@@ -111,6 +111,28 @@ static int fmt_compressed(int f) { nvn_fmt_info i; return nvn_fmt_info_of((uint3
 static int fmt_depth(int f) { nvn_fmt_info i; return nvn_fmt_info_of((uint32_t)f, &i) && (i.depth || i.stencil); }
 static int mem_any(const uint8_t *p, uint64_t n) { for (uint64_t i = 0; i < n; i++) if (p[i]) return 1; return 0; }
 
+// LINEAR 贴图（CPU 写入的字体 / UI 图集；iOS 同名语义见 nvn_mtl.m tex_linear @3756 / tex_linear_needs_upload @3777）。
+// 返回 0 = 不是线性族；1 = 第一批准入（走 CPU 内容路径）；-1 = 线性族但第一批不收（*why 是未接名，调用方记账）。
+// 准入只看排布 / 可访问性 / 真实来源，不看“现在有没有非零字节”——字体引擎可以建图之后才填字形。
+static int linear_class(const tex_t *t, const char **why) {
+    *why = NULL;
+    if (!(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))) return 0;
+    if (!(t->d.flags & NVN_TEXTURE_FLAGS_LINEAR)) { *why = "linear_render_target_unsupported"; return -1; }   // 只有 LINEAR_RENDER_TARGET：内容通常归 GPU
+    if (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET) { *why = "linear_render_target_and_linear_unsupported"; return -1; }
+    if (t->d.flags & NVN_TEXTURE_FLAGS_SPARSE) { *why = "linear_sparse_unsupported"; return -1; }
+    if (!t->mem || !t->pool) { *why = "linear_no_cpu_memory"; return -1; }
+    if (t->has_layout) { *why = "linear_packaged_unsupported"; return -1; }
+    if (t->d.target != NVN_TEXTURE_TARGET_2D) { *why = "linear_target_not_2d"; return -1; }
+    if (t->d.levels > 1) { *why = "linear_mips_unsupported"; return -1; }   // 公共布局只给单级的行距
+    if (t->L.layers > 1) { *why = "linear_layers_unsupported"; return -1; }
+    if (t->d.samples > 1) { *why = "linear_multisample_unsupported"; return -1; }
+    { int bw = 1, bh = 1; if (!nvn_fmt_bpb(t->d.format, &bw, &bh) || bw != 1 || bh != 1) { *why = "linear_compressed_format_unsupported"; return -1; } }
+    if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) { *why = "linear_pool_not_cpu_accessible"; return -1; }
+    if (!t->d.width || !t->d.height) { *why = "linear_empty_shape"; return -1; }
+    if ((uint64_t)t->off + t->L.size > (uint64_t)t->pool->size) { *why = "linear_range_outside_pool"; return -1; }
+    return 1;
+}
+
 // 首次使用时判「存储里是 CPU 写的数据」（nvn_mtl.m tex_cpu_content @3900）。持 g_rmu 调。
 static int cpu_content(const tex_t *t) {
     if (!t->mem || !t->pool || t->d.samples > 1 || t->d.target == NVN_TEXTURE_TARGET_BUFFER) return 0;
@@ -119,8 +141,12 @@ static int cpu_content(const tex_t *t) {
     int unc = !fmt_compressed(t->d.format) && t->d.target != NVN_TEXTURE_TARGET_3D;
     if (unc && (fmt_depth(t->d.format) || (t->d.flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) || nvn_hm_get(&g_pool_gpu, &pk))) return 0;
     if (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) return 0;
-    if ((t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE))
-        || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))) return 0;
+    { const char *why = NULL; int lc = linear_class(t, &why);
+        if (lc > 0) return 1;                 // 线性准入：初始全零也进入持续观察（首用之后 CPU 再写也会被脏页跟踪接住）
+        if (lc < 0) {
+            if (!strcmp(why, "linear_render_target_unsupported")) return 0;   // 只有 LINEAR_RENDER_TARGET：内容归 GPU（可能由 copy_b2t 写入），不按 CPU 内容传、不报红
+            nvn_unimpl("tex", why, t); return 0; } }   // 线性族里第一批不收的：准确报红，不猜内容
+    if ((t->d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) || ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !fmt_compressed(t->d.format))) return 0;
     return mem_any(t->mem, t->L.size);
 }
 
@@ -128,7 +154,9 @@ static int cpu_content(const tex_t *t) {
 // track：1 = CPU 贴图（先保护、记代号，之后脏了重传）；0 = 一次性的初始内容，不跟踪写
 static int upload_all(const tex_t *t, struct rp_tex *x, nvn_gpu_cmd c, int track) {
     rp_perf_add(RP_PERF_TEX_UP_N, 1); rp_perf_add(RP_PERF_TEX_UP_KB, t->L.size / 1024);
-    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_SPARSE)) { nvn_unimpl("tex", "upload_linear_or_sparse", t); return -1; }
+    { const char *why = NULL; int lc = linear_class(t, &why);   // 线性：走下面 nvn_deswizzle 的逐行拷贝（源行距由公共布局解释）
+        if (lc < 0) { nvn_unimpl("tex", why, t); return -1; }
+        if (lc > 0 && (!t->pool || (uint64_t)t->off + t->L.size > (uint64_t)t->pool->size)) { nvn_unimpl("tex", "linear_range_outside_pool", t); return -1; } }
     int bw = 1, bh = 1; int bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { nvn_unimpl("fmt", "upload_unknown_format", t); return -1; }
     uint64_t st = 0;
