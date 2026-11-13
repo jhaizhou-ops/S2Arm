@@ -526,9 +526,12 @@ class FlowTests(unittest.TestCase):
 
     def test_readiness_device_filtering(self):
         gid = "0100535012974000"; self._fixture(gid); self.c.r.update(gameId=gid)
-        # 模拟器、Mac、只走无线隧道没通的不算连上
-        r, it = self._ready([self._dev(reality="simulated"), self._dev(platform="macOS"), self._dev(transport=None, tunnel="unavailable")])
+        # 模拟器、手表不算候选（物理上装不了）
+        r, it = self._ready([self._dev(reality="simulated"), self._dev(platform="watchOS")])
         self.assertFalse(it["connected"]["ok"])
+        # 列着、但列表说它离线的那台：算连上（候选不按在不在线筛，11-13），在线与否交给「设备就绪」那一项现查
+        r, it = self._ready([self._dev(transport=None, tunnel="unavailable")])
+        self.assertTrue(it["connected"]["ok"])
         # 两台都连着：只看玩家选的那台（不再要求只留一台）
         r, it = self._ready([self._dev(), self._dev(name="测试设备1")], want="测试设备1")
         self.assertTrue(it["connected"]["ok"]); self.assertEqual(r["device"], "测试设备1")
@@ -546,11 +549,12 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(it["connected"]["title"], "iPhone「测试设备2」已连上（同一 Wi-Fi）")   # 写实际类型、名字和连接方式，不写死「数据线」
         _, it = self._ready([self._dev(transport="localNetwork"), self._dev(name="另一台", transport="localNetwork")])
         self.assertTrue(it["connected"]["ok"])   # 只看选的那台，同网另一台不相干
-        _, it = self._ready([self._dev(transport=None, tunnel="unavailable"), self._dev(name="线连的")])
-        self.assertFalse(it["connected"]["ok"]); self.assertIn("不在线", it["connected"]["detail"])   # 选的那台拔了线：不拿插着的另一台打勾
+        r, it = self._ready([self._dev(transport=None, tunnel="unavailable"), self._dev(name="线连的")])
+        self.assertTrue(it["connected"]["ok"]); self.assertEqual(r["device"], "测试设备2")   # 选的那台列着就是它，不换成插着的另一台
+
         self.assertEqual(self._ready([self._dev()])[1]["connected"]["title"], "iPhone「测试设备2」已连上（数据线）")
 
-    def _link(self, states, want="", polling=False, usb=(), results=None, raises=None, details=None):
+    def _link(self, states, want="", polling=False, usb=(), results=None, raises=None, details=None, install_=False, **kw):
         """states 是列表快照；details 独立给详情回包，缺省沿用下一张快照的同一设备；results 可给错误或异常"""
         import diag, target
         calls, seen, detail_seen = [], [0], [0]
@@ -572,8 +576,15 @@ class FlowTests(unittest.TestCase):
                 detail_seen[0] += 1
                 return rc, {"result": row}, raw
             return rc, {}, raw
-        with um.patch.object(diag, "devicectl", devicectl), um.patch.object(target, "usb_idevices", return_value=list(usb)):
-            return install.device_link(self.c, want, polling=polling), calls
+        with um.patch.object(diag, "devicectl", devicectl), um.patch.object(target, "usb_idevices", return_value=list(usb)), \
+             um.patch.object(install, "LINK_RETRY_WAIT", 0):
+            return install.device_link(self.c, want, polling=polling, install=kw.get("install", install_)), calls
+
+    def _held(self, link, stage, *texts):
+        """真装机：这一环没过也照装（stage 空），诊断轨迹记一条「继续装（不预先拦）」，rc 是那一环、raw 是原来要说的话（11-13 维护者：别预先拦）"""
+        self.assertEqual(link["stage"], "")
+        held = [t for t in link["trace"] if t["step"] == "继续装（不预先拦）" and t["rc"] == stage and all(x in t["raw"] for x in texts)]
+        self.assertTrue(held, link["trace"])
 
     def _p(self, name="甲", transport="wired", pairing="paired", tunnel="disconnected", devmode="enabled", ddi=True, ident="D1", udid="SAMPLE-UDID-00112233"):
         d = self._dev(name=name, transport=transport, pairing=pairing, tunnel=tunnel, devmode=devmode)
@@ -586,6 +597,18 @@ class FlowTests(unittest.TestCase):
         link, _ = self._link([(1, {}, "boom")])
         self.assertIn("读不到设备列表", link["problem"]); self.assertEqual(link["trace"][0]["rc"], 1); self.assertEqual(link["trace"][0]["raw"], "boom")
 
+    def test_link_install_rereads_a_transient_miss(self):
+        # 真装机：第一次列表是空的（瞬时 / 正在从同网切到数据线），第二次就在 → 照常连上，只多读一次；装机前清单轮询不重读；
+        #   一直不在 → 读满 3 次才报，每次都进诊断轨迹（期望手写：读数 = trace 里 list devices 的条数）
+        link, _ = self._link([[], [self._p()]], want="D1")
+        self.assertEqual(link["stage"], ""); self.assertEqual([t["step"] for t in link["trace"]].count("list devices"), 2)
+        link, _ = self._link([[], [self._p()]], want="D1", polling=True)
+        self.assertEqual(link["stage"], "connected"); self.assertEqual([t["step"] for t in link["trace"]].count("list devices"), 1)
+        link, _ = self._link([[]], want="D1")
+        self.assertEqual(link["stage"], "connected"); self.assertEqual([t["step"] for t in link["trace"]].count("list devices"), 3)
+        link, _ = self._link([(1, {}, "boom"), [self._p()]], want="D1")   # 读失败一次也再读
+        self.assertEqual(link["stage"], "")
+
     def test_link_usb_branches(self):
         self.assertIn("USB 上没看到", self._link([[]])[0]["problem"])
         link, _ = self._link([[self._p(transport=None, tunnel="unavailable")]], usb=["iPad"])
@@ -594,8 +617,10 @@ class FlowTests(unittest.TestCase):
     def test_link_pairs_an_untrusted_phone(self):
         link, calls = self._link([[self._p(pairing="unpaired")], [self._p()]])
         self.assertEqual(link["stage"], ""); self.assertIn(("manage", "pair", "--device"), calls)
+        link, _ = self._link([[self._p(pairing="unpaired")]], results={"pair": (1, "user denied")}, polling=True)
+        self.assertEqual(link["stage"], "trusted"); self.assertIn("信任", link["problem"]); self.assertIn("user denied", link["problem"])   # 清单：提示
         link, _ = self._link([[self._p(pairing="unpaired")]], results={"pair": (1, "user denied")})
-        self.assertEqual(link["stage"], "trusted"); self.assertIn("信任", link["problem"]); self.assertIn("user denied", link["problem"])
+        self._held(link, "trusted", "信任", "user denied")   # 真装机：照装，装不上由装的那一步按原文报
 
     def test_link_polling_does_not_repeat_the_trust_prompt(self):
         states = [[self._p(pairing="unpaired")]]
@@ -616,31 +641,37 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(link["devices"], [fresh, other])
 
     def test_link_confirmed_disabled_mode_stops_before_ddi_update(self):
-        link, calls = self._link([[self._p(devmode="disabled", ddi=False)]])
+        link, calls = self._link([[self._p(devmode="disabled", ddi=False)]], polling=True)
         self.assertEqual(link["stage"], "developerMode")
         self.assertEqual(calls, [("device", "info", "details")]); self.assertIn("开发者模式", link["problem"])
+        link, _ = self._link([[self._p(devmode="disabled", ddi=False)]])
+        self._held(link, "developerMode", "开发者模式")
 
     def test_link_detail_query_failure_does_not_claim_mode_disabled(self):
         for result, rc in [((1, "device locked"), 1), (subprocess.TimeoutExpired("devicectl", 20), "timeout"), (OSError("disconnected"), "oserror")]:
             with self.subTest(result=result):
-                link, calls = self._link([[self._p(devmode="disabled")]], results={"info": result})
+                link, calls = self._link([[self._p(devmode="disabled")]], results={"info": result}, polling=True)
                 self.assertEqual(link["stage"], "prepare")
                 self.assertIn("开发连接", link["problem"])
                 self.assertEqual(link["trace"][-1]["rc"], rc)
                 self.assertEqual(calls, [("device", "info", "details")])
+                link, _ = self._link([[self._p(devmode="disabled")]], results={"info": result})
+                self._held(link, "prepare", "开发连接")
 
     def test_link_details_must_identify_same_phone_and_mode(self):
         stale = self._p(devmode="disabled")
         for row in (None, [], {}, {"identifier": "D1", "deviceProperties": None}, self._p(ident="D2"), self._p(devmode=None), self._p(devmode="unknown")):
             with self.subTest(row=row):
-                link, calls = self._link([[stale]], details=[row])
+                link, calls = self._link([[stale]], details=[row], polling=True)
                 self.assertEqual(link["stage"], "prepare")
                 self.assertEqual(calls, [("device", "info", "details")])
+                self._held(self._link([[stale]], details=[row])[0], "prepare")
 
     def test_link_fresh_disabled_mode_overrides_enabled_list(self):
-        link, calls = self._link([[self._p(ddi=False)]], details=[self._p(devmode="disabled", ddi=False)])
+        link, calls = self._link([[self._p(ddi=False)]], details=[self._p(devmode="disabled", ddi=False)], polling=True)
         self.assertEqual(link["stage"], "developerMode")
         self.assertEqual(calls, [("device", "info", "details")])
+        self._held(self._link([[self._p(ddi=False)]], details=[self._p(devmode="disabled", ddi=False)])[0], "developerMode")
 
     def test_link_rechecked_enabled_mode_can_prepare_ddi(self):
         stale = self._p(devmode="disabled", ddi=False)
@@ -655,12 +686,14 @@ class FlowTests(unittest.TestCase):
         down = self._p(tunnel="connected", ddi=False)
         for row, stage in [({}, "prepare"), (self._p(devmode="disabled", ddi=False), "developerMode")]:
             with self.subTest(row=row):
-                link, calls = self._link([[down]], details=[down, row])
+                (self.c.private / "device-prepare.json").unlink(missing_ok=True)   # 清单轮询的冷却按设备记：每个子例从头算
+                link, calls = self._link([[down]], details=[down, row], polling=True)
                 self.assertEqual(link["stage"], stage)
                 self.assertEqual(calls, [("device", "info", "details"), ("manage", "ddis", "update"), ("device", "info", "details")])
+                self._held(self._link([[down]], details=[down, row])[0], stage)
 
     def test_readiness_failed_mode_query_waits_and_shows_connection_error(self):
-        link, _ = self._link([[self._p(devmode="disabled")]], results={"info": (1, "device locked")})
+        link, _ = self._link([[self._p(devmode="disabled")]], results={"info": (1, "device locked")}, polling=True)   # 清单拿的是轮询结果
         with um.patch.object(install, "device_link", return_value=link):
             _, items = self._ready([])
         self.assertFalse(items["developerMode"]["ok"])
@@ -677,63 +710,82 @@ class FlowTests(unittest.TestCase):
         self.assertEqual((link["stage"], calls), ("", []))   # 清单轮询：已经通了不折腾
         link, calls = self._link([[self._p(tunnel="connected")]])
         self.assertEqual((link["stage"], calls), ("", [("device", "info", "details")]))   # 真装机：选中的那台一律现查一次（列表里在不等于此刻连得上）
-        link, _ = self._link([[self._p(transport="localNetwork", ddi=False)]], results={"info": (1, "device locked")})
-        self.assertEqual(link["stage"], "prepare"); self.assertIn("不在线", link["problem"]); self.assertIn("iPhone「甲」", link["problem"])   # 走 Wi-Fi 的那台现查不通 = 不在线，说是哪台
-        link, _ = self._link([[self._p(ddi=False)]], results={"info": (1, "device locked")})
-        self.assertIn("开发连接", link["problem"]); self.assertIn("device locked", link["problem"])   # 插着线却建不起连接：照旧说开发连接失败
+        link, _ = self._link([[self._p(transport="localNetwork", ddi=False)]], results={"info": (1, "device locked")}, polling=True)
+        self.assertEqual(link["stage"], "prepare"); self.assertIn("不在线", link["problem"]); self.assertIn("iPhone「甲」", link["problem"])   # 清单：走 Wi-Fi 的那台现查不通 = 不在线，说是哪台
+        link, _ = self._link([[self._p(ddi=False)]], results={"info": (1, "device locked")}, polling=True)
+        self.assertIn("开发连接", link["problem"]); self.assertIn("device locked", link["problem"])   # 清单：插着线却建不起连接
+        self._held(self._link([[self._p(ddi=False)]], results={"info": (1, "device locked")})[0], "prepare", "device locked")   # 真装机：照装
 
     def test_link_updates_disk_images_when_services_stay_down(self):
         down = [self._p(tunnel="connected", ddi=False)]
         link, calls = self._link([down, down, [self._p(tunnel="connected")]])
         self.assertEqual(link["stage"], ""); self.assertEqual(calls, [("device", "info", "details"), ("manage", "ddis", "update"), ("device", "info", "details")])
-        link, _ = self._link([down], results={"info": (0, "still no ddi")})
+        link, _ = self._link([down], results={"info": (0, "still no ddi")}, polling=True)
         self.assertEqual(link["stage"], "prepare"); self.assertIn("开发者服务", link["problem"])
+        self._held(self._link([down], results={"info": (0, "still no ddi")})[0], "prepare", "开发者服务")
 
     def test_link_only_the_chosen_device(self):
-        """装到哪台由玩家选、作业照办（维护者 11-11 玩家实报：续签时选的 iPhone 拔了线，同网的 iPad 被装上，完成页还写「已装到 iPhone」）：
-        选的那台在线（有线或同网）就用它；配对过但不在线 → 说「iPhone「名字」不在线」；没见过 → 没找到；都不换装别的设备"""
+        """选机（11-13 维护者：插着手机就别说识别不了）：列着的、带 UDID 的都是候选，不看是否在线 / 配对 / 连接方式。期望手写：
+        选的那台列着就用它（哪怕列表说它离线：照装，装不上由装的那一步说）；选的那台没列出、但只有一台候选 → 用那一台；
+        多台候选都对不上 → 不装，列出看得到的让玩家选；一台都没有 → 按 USB 现状说"""
         ipad = self._p(name="小平板", ident="D2", transport="localNetwork", tunnel="connected", udid="PAD-UDID")
         ipad["hardwareProperties"]["platform"] = "iPadOS"
         offline_phone = self._p(name="我的手机", ident="D1", transport=None, tunnel="unavailable", udid="PHONE-UDID")
         link, _ = self._link([[offline_phone, ipad]], want="PHONE-UDID")
+        self.assertEqual(link["device"]["identifier"], "D1")
+        link, _ = self._link([[ipad]], want="旧手机")
+        self.assertEqual(link["device"]["identifier"], "D2")
+        link, _ = self._link([[offline_phone, ipad]], want="0000AAAA-0000-BBBB-0000BB")
         self.assertIsNone(link["device"]); self.assertEqual(link["stage"], "connected")
-        for text in ("iPhone", "我的手机", "不在线", "Wi-Fi"): self.assertIn(text, link["problem"])
-        self.assertNotIn("小平板", link["problem"])
-        link, _ = self._link([[ipad]], want="旧手机")   # 没见过的设备：没找到，不装旁边唯一在线的那台
-        self.assertIsNone(link["device"]); self.assertIn("没找到", link["problem"])
-        self.assertIn("「旧手机」", link["problem"]); self.assertIn("Wi-Fi", link["problem"])
-        link, _ = self._link([[ipad]], want="0000AAAA-0000-BBBB-0000BB")   # 没见过的设备号：上屏只写末尾 6 位（整串会被诊断脱敏成 [DEVICE_ID]，11-11 真机验收测出）
-        self.assertIn("编号末尾 0000BB", link["problem"]); self.assertNotIn("AAAA", link["problem"])   # 前面的部分不上屏
-        link, _ = self._link([[offline_phone, ipad]], want="PAD-UDID")   # 选的是走 Wi-Fi 的 iPad：装它
+        for text in ("编号末尾 0000BB", "iPhone「我的手机」", "iPad「小平板」"): self.assertIn(text, link["problem"])
+        self.assertNotIn("AAAA", link["problem"])   # 设备号前面的部分不上屏
+        link, _ = self._link([[offline_phone, ipad]], want="PAD-UDID")
         self.assertEqual(link["device"]["identifier"], "D2")
         link, _ = self._link([[self._p(name="甲", tunnel="connected"), self._p(name="乙", ident="D2", tunnel="connected")]], want="乙")
         self.assertEqual(link["device"]["identifier"], "D2")
-        offline_ipad = dict(ipad, connectionProperties={"transportType": None, "pairingState": "paired", "tunnelState": "unavailable"})
-        self.assertIn("iPad「小平板」", self._link([[offline_ipad]], want="PAD-UDID")[0]["problem"])
+        watch = self._p(name="表", ident="W1", udid="WATCH-UDID"); watch["hardwareProperties"]["platform"] = "watchOS"
+        sim = self._p(name="模拟", ident="S1", udid="SIM-UDID"); sim["hardwareProperties"]["reality"] = "simulated"
+        link, _ = self._link([[watch, sim, offline_phone]], want="旧手机")   # 手表 / 模拟器不算候选：剩一台手机就用它
+        self.assertEqual(link["device"]["identifier"], "D1")
 
     def test_phone_requires_a_chosen_device(self):
-        """真装机（phone）不带设备号就拒：哪怕只连着一台也不自己挑（s2armctl install 不带 --device 同样被拒）"""
+        """真装机（phone）不带设备号（11-13 改）：只连着一台就装它；多台才拒（device_required，要玩家选）。期望手写"""
         import diag, target
-        data = {"result": {"devices": [self._p(name="唯一一台", tunnel="connected")]}}
         self.c.r.pop("device", None)
-        with um.patch.object(diag, "devicectl", lambda c, *a, timeout=0: (0, data, "")), um.patch.object(target, "usb_idevices", return_value=[]), \
-                self.assertRaises(Failure) as e:
-            install.phone(self.c)
-        self.assertEqual(e.exception.code, "device_required")
+        for devs, ok in (([self._p(name="唯一一台", tunnel="connected")], True), ([self._p(), self._p(name="乙", ident="D2")], False)):
+            data = {"result": {"devices": devs}}
+            with self.subTest(n=len(devs)), um.patch.object(diag, "devicectl", lambda c, *a, timeout=0, data=data: (0, data, "")), \
+                    um.patch.object(target, "usb_idevices", return_value=[]), um.patch.object(install, "LINK_RETRY_WAIT", 0), \
+                    um.patch.object(target, "gpu_arch", return_value="applegpu_g18p"):
+                if ok:
+                    self.assertEqual(install.phone(self.c)["name"], "唯一一台")
+                else:
+                    with self.assertRaises(Failure) as e:
+                        install.phone(self.c)
+                    self.assertEqual(e.exception.code, "device_required")
+
+    def test_link_install_without_chosen_device(self):
+        # 真装机没指定哪台（11-13）：只有一台候选就用它；两台要玩家选（device_required 那句）；期望手写
+        link, _ = self._link([[self._p()]], install=True)
+        self.assertEqual((link["stage"], link["device"]["identifier"]), ("", "D1"))
+        link, _ = self._link([[self._p(), self._p(name="乙", ident="D2")]], install=True)
+        self.assertIsNone(link["device"]); self.assertEqual(link["problem"], install.S_DEVICE_REQUIRED)
 
     def test_phone_failure_writes_a_redacted_report(self):
+        # 真装机失败（选的那台没列出、列着的两台都不是）：报错不带整串设备号；诊断里的设备报告不带设备号、不带设备名（结论里的名字也打码），连接字段都在
         import diag, target
         udid = "00008140-" + "AB" * 8
-        data = {"result": {"devices": [self._p(name="张三的手机", ddi=False, udid=udid)]}}
+        data = {"result": {"devices": [self._p(name="张三的手机", udid="00008140-" + "CD" * 8), self._p(name="李四的平板", ident="D2", udid="00008140-" + "EF" * 8)]}}
         def devicectl(c, *a, timeout=0):
             return (0, data, "") if a[:2] == ("list", "devices") else (1, {}, f"error on {udid}")
         self.c.r["device"] = udid
-        with um.patch.object(diag, "devicectl", devicectl), um.patch.object(target, "usb_idevices", return_value=[]), self.assertRaises(Failure) as e:
+        with um.patch.object(diag, "devicectl", devicectl), um.patch.object(target, "usb_idevices", return_value=[]), \
+             um.patch.object(install, "LINK_RETRY_WAIT", 0), self.assertRaises(Failure) as e:
             install.phone(self.c)
-        self.assertEqual(e.exception.code, "device_not_ready"); self.assertNotIn(udid, str(e.exception))
+        self.assertEqual(e.exception.code, "device_not_connected"); self.assertNotIn(udid, str(e.exception))
         report = (self.c.logs / f"{self.c.task}-device.log").read_text(encoding="utf-8")
-        self.assertNotIn(udid, report); self.assertNotIn("张三", report)
-        for field in ("rc=1", "transport=wired", "pairing=paired", "tunnel=disconnected", "developerMode=enabled", "ddi=False", "boot="): self.assertIn(field, report)
+        for secret in (udid, "张三", "李四", "CDCDCDCD"): self.assertNotIn(secret, report)
+        for field in ("rc=0", "transport=wired", "pairing=paired", "tunnel=disconnected", "developerMode=enabled", "ddi=True", "boot="): self.assertIn(field, report)
 
     def test_no_pack_dir_fails_before_install(self):
         # 审计 18:00 P1-58：没有「…资源包」目录不装、不报成功（原先照装，启动器写死「资源包也拷好了」）

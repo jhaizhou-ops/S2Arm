@@ -52,6 +52,16 @@ def devicectl(c, *args, timeout=120):
     return p.returncode, data, (p.stderr or p.stdout).strip()
 
 
+def is_candidate(d):
+    """装机候选（install._pick_device、target.connected）：devicectl 列出的真设备都算——有硬件 UDID、或标着 physical、或有任何配对 / 连接信息。
+    不看配对状态 / 是否在线 / 开发者服务这些值来筛——装不装得上让装的那一步说（11-13 维护者：别预先判断拦玩家）。
+    只排除物理上装不了的：明确标成模拟器的、Mac / 手表 / 电视（这条装机链装不了 iOS App 上去）；平台没写或没见过的照收"""
+    h, cp = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
+    if h.get("reality") == "simulated" or h.get("platform") in ("macOS", "watchOS", "tvOS"):
+        return False
+    return bool(h.get("udid") or h.get("reality") == "physical" or cp.get("pairingState") or cp.get("transportType"))
+
+
 def is_physical(d):
     """devicectl 的这台是真机：有 reality 字段就照它（physical）；缺了（公开项目反映有 Xcode 测试版不再输出它，本机 26.6 / 27.0 / 27.1 都还有）
     按真机才有的特征认——有硬件 UDID、且有配对状态或连接方式（模拟器两样都没有）。原先缺字段就一台都认不出、整个装机找不到设备"""

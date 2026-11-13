@@ -119,10 +119,11 @@ def os_choices(env):
 
 
 def _keep_device(d):
-    """连着的 iOS / iPadOS 真机：physical + 隧道通或有线已配对（与 connected() 同一判据，10-28 按维护方 A3 第 5 条抽出来共用）"""
-    from diag import is_physical, reachable
-    h = d.get("hardwareProperties", {})
-    return is_physical(d) and h.get("platform") in ("iOS", "iPadOS") and reachable(d)
+    """启动器列给玩家选的设备（connected() 用）"""
+    # 同装机选机（diag.is_candidate）：带硬件 UDID 的就列出来给玩家选，不按 reality / 配对 / 是否在线筛掉（11-13 维护者：插着手机硬说识别不了）。
+    #   在不在线、能不能装由各行的连接状态显示和装的那一步说
+    from diag import is_candidate
+    return is_candidate(d)
 
 
 def _row(d, dev_dir, with_link=False):

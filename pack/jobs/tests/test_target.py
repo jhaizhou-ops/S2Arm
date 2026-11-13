@@ -48,8 +48,9 @@ class TargetTests(JobCase):
              patch.object(target, "gpu_arch", return_value="applegpu_g18p") as arch:
             rows = target.connected(self.c)
         probe.assert_called_once_with(self.c, "list", "devices", timeout=60)
-        self.assertEqual([row["id"] for row in rows], ["synthetic-iOS", "synthetic-iPadOS"])
-        self.assertEqual(arch.call_count, 2)
+        # 11-13：只排除物理上装不了的 Mac / 电视 / 手表；平台没写的照收（不按元数据猜着筛掉，装不装得上让装的那一步说）
+        self.assertEqual([row["id"] for row in rows], ["synthetic-iOS", "synthetic-iPadOS", "synthetic-"])
+        self.assertEqual(arch.call_count, 3)
 
     def test_missing_reality_field_falls_back_to_physical_traits(self):
         """devicectl 缺 reality 字段（据报有 Xcode 测试版不再输出）：有硬件 UDID 且有配对 / 连接方式的照收，模拟器样（无 UDID、无配对）不收；

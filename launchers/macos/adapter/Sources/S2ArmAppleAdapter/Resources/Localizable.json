@@ -7270,5 +7270,17 @@
  {
   "source": "系统不让 S2Arm 往游戏库所在的磁盘写（{0}）",
   "en": "The system did not let S2Arm write to the drive holding the library ({0})"
+ },
+ {
+  "source": "要装的那台设备（编号末尾 {0}）这次没列出来，这台电脑现在连着 {1} 台：在装机页选其中一台再装。",
+  "en": "The chosen device (ID ending {0}) isn't listed right now; this computer is connected to {1} devices. Pick one of them on the install page and install again."
+ },
+ {
+  "source": "这台电脑的设备服务里没看到 iPhone / iPad：插上数据线并解锁手机，在手机上点「信任」，再试一次。",
+  "en": "This computer's device service doesn't see an iPhone or iPad: plug it in with a cable, unlock it, tap Trust on the device, then try again."
+ },
+ {
+  "source": "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。",
+  "en": "The chosen device ({0}) isn't listed right now. This computer can see: {1}. Pick one of them on the install page and install again."
  }
 ]

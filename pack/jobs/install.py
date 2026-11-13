@@ -297,7 +297,7 @@ S_MANY_NETWORK = "同一网络上有多台配对过的 iPhone / iPad：用数据
 # 装到哪台由玩家选、作业照办，不替玩家换一台（维护者 11-11：续签时玩家选的 iPhone 拔了线，旁边同网的 iPad 被装上了）
 S_DEVICE_REQUIRED = "没说要装到哪台设备：在装机页选好 iPhone / iPad 再装。"
 S_OFFLINE = "{0}「{1}」现在不在线：插上数据线，或让它和这台电脑连同一个 Wi-Fi 并解锁，再试一次。"
-S_NOT_PAIRED = "没找到要装的那台设备（{0}）：它还没和这台电脑配对过——插上数据线并解锁，在设备上点「信任」（配对过以后也可以连同一个 Wi-Fi 装）。"
+S_PICK_LISTED = "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。"
 S_TRUST = "在 iPhone 上点「信任」，再输入手机的锁屏密码。"
 S_DEV_MODE = "在 iPhone 上打开「设置 → 隐私与安全性 → 开发者模式」，按提示重启手机；重启后解锁，这里会自动打勾。"
 S_TUNNEL = "和手机建立开发连接失败：解锁手机后再试；走无线的话换成数据线。"
@@ -335,24 +335,30 @@ def device_kind(d):
     return "iPad" if h.get("platform") == "iPadOS" or (h.get("productType") or "").startswith("iPad") else "iPhone"
 
 
-def _pick_device(devices, want):
-    """要装的那台：返回 (设备, 连接环节的问题)。
-    给了 want（玩家选的那台）：只认它——在线（有线或同网）就用它；配对过但不在线 → 如实说「iPhone「名字」不在线」；没见过 → 没找到。
-    不替玩家换一台（原先 want 对不上时「只有一台就用它」：续签时 iPhone 拔了线，同网的 iPad 被装上，完成页还写「已装到 iPhone」）。
-    没给 want：只给装机前清单看（polling），有线优先挑出连着的那台供界面显示；真装机不走这里（phone() 先要求 want）"""
-    from diag import is_physical
-    phones = [d for d in devices if is_physical(d) and d.get("hardwareProperties", {}).get("platform") in ("iOS", "iPadOS")]
-    live = [d for d in phones if _link(d).get("transportType") in ("wired", "localNetwork") or _link(d).get("tunnelState") == "connected"]
+def _pick_device(devices, want, install=False):
+    """要装的那台：返回 (设备, 问题)。候选 = devicectl 列出的每台带硬件 UDID 的设备（diag.is_candidate）：
+    不按 reality / 配对 / 开发者服务 / 连接方式这些元数据筛（11-13 维护者：「明明插着一台手机就是硬说识别不了」）——
+    装得上装不上让 devicectl 装的那一步说了算，真失败报它的原文和下一步。
+    给了 want（玩家选的那台）：列着就用它；没列着但只有一台候选就用那一台（完成页写的是实际装到的那台）；
+    多台候选都对不上 → 列出看得到的让玩家选；一台都没有 → (None, "")，调用方按 USB 现状说。
+    没给 want：只给装机前清单看（polling），有线优先挑出连着的那台供界面显示"""
+    from diag import is_candidate
+    phones = [d for d in devices if is_candidate(d)]
     if want:
         def named(d):
             return want in (d.get("identifier"), d.get("hardwareProperties", {}).get("udid"), (d.get("deviceProperties", {}).get("name") or "").strip())
-        chosen = [d for d in live if named(d)]
+        chosen = [d for d in phones if named(d)]
         if chosen:
             return chosen[0], ""
-        known = [d for d in phones if named(d)]
-        if known:
-            return None, S_OFFLINE.replace("{0}", device_kind(known[0])).replace("{1}", (known[0].get("deviceProperties", {}).get("name") or "").strip())
-        return None, S_NOT_PAIRED.replace("{0}", device_hint(want))
+        if len(phones) == 1:
+            return phones[0], ""
+        if phones:
+            seen = "、".join(f"{device_kind(d)}「{(d.get('deviceProperties', {}).get('name') or '').strip()}」" for d in phones)
+            return None, S_PICK_LISTED.replace("{0}", device_hint(want)).replace("{1}", seen)
+        return None, ""
+    if install:   # 真装机没指定哪台：只有一台候选就用它；多台要玩家选；零台交调用方按 USB 现状说
+        return (phones[0], "") if len(phones) == 1 else (None, S_DEVICE_REQUIRED if phones else "")
+    live = [d for d in phones if _link(d).get("transportType") in ("wired", "localNetwork") or _link(d).get("tunnelState") == "connected"]
     wired = [d for d in live if _link(d).get("transportType") == "wired"]
     if len(wired) > 1:
         return None, S_MANY_WIRED
@@ -380,7 +386,10 @@ def _cooled(c, device, step, polling):
     return True
 
 
-def device_link(c, want="", polling=False):
+LINK_READS, LINK_RETRY_WAIT = 3, 3   # 真装机找设备：最多读 3 次、间隔 3 秒（单测置 0）
+
+
+def device_link(c, want="", polling=False, install=False):
     """读设备并把它准备到能装（玩家不用打开 Xcode）：配对 → 开发者模式 → 拉起隧道和开发者服务 → 必要时更新开发者磁盘映像。
     返回 {device, stage, problem, trace}：stage 是没过的环节（connected / trusted / developerMode / prepare，全过为空）；polling = 装机前清单轮询。"""
     import target
@@ -410,15 +419,30 @@ def device_link(c, want="", polling=False):
         fresh = next((d for d in devices if d.get("identifier") == dev.get("identifier")), None)
         return devices, why, fresh
     devices, why = read()
+    dev, problem = (None, "") if why else _pick_device(devices, want, install)
+    # 真装机时一次没读到 / 没看到要装的那台就再读：devicectl 列表会瞬时空、超时，或手机正从同网切到数据线（诊断#091bcf 同期玩家反馈
+    #   「刚装上一款、下一次就说认不出」）。装机前清单轮询本来就每几秒再读，不在这里等
+    for _ in range(LINK_READS - 1):
+        if polling or not (why or problem or dev is None):
+            break
+        time.sleep(LINK_RETRY_WAIT)
+        devices, why = read()
+        dev, problem = (None, "") if why else _pick_device(devices, want, install)
     if why:
         return out(None, "connected", why)
-    dev, problem = _pick_device(devices, want)
     if problem:
         return out(None, "connected", problem, devices)
     if dev is None:
         usb = target.usb_idevices()
         note("usb", 0, "、".join(usb) or "没有 iPhone / iPad")
         return out(None, "connected", S_NOT_LISTED if usb else S_NO_USB, devices)
+    # 下面每一环（配对 / 现查详情 / 开发者模式 / 开发者服务）真装机时只「去做」、不「拦」：做不成记进诊断轨迹，照样往下装，
+    #   装的那一步失败时按 devicectl 原文归码给下一步（install.classify：未配对、开发者模式、锁屏…）。只有装机前清单轮询把它们当提示返回
+    def hold(stage, problem):
+        if polling:
+            return out(dev, stage, problem, devices)
+        note("继续装（不预先拦）", stage, problem)
+        return None
     if _link(dev).get("pairingState") != "paired":
         raw = ""
         if _cooled(c, dev, "pair", polling):
@@ -426,8 +450,8 @@ def device_link(c, want="", polling=False):
             _, _, raw = step("manage pair", "manage", "pair", "--device", dev["identifier"], timeout=limits[0])
             devices, why, fresh = again(dev)
             dev = fresh or dev
-        if _link(dev).get("pairingState") != "paired":
-            return out(dev, "trusted", _with_raw(S_TRUST, raw), devices)
+        if _link(dev).get("pairingState") != "paired" and (r := hold("trusted", _with_raw(S_TRUST, raw))):
+            return r
     def services_ready(d):
         return d.get("deviceProperties", {}).get("ddiServicesAvailable") is not False
     def refresh_details():
@@ -448,22 +472,22 @@ def device_link(c, want="", polling=False):
     if not polling or dev.get("deviceProperties", {}).get("developerModeStatus") not in ("enabled", None) or _link(dev).get("tunnelState") != "connected" or not services_ready(dev):
         say("正在和设备建立开发连接")
         problem = refresh_details()
-        if problem:
-            return out(dev, "prepare", problem, devices)
-    if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled":
-        return out(dev, "developerMode", S_DEV_MODE, devices)
+        if problem and (r := hold("prepare", problem)):
+            return r
+    if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", S_DEV_MODE)):
+        return r
     if not services_ready(dev):
         raw = ""
         if _cooled(c, dev, "ddi", polling):
             say("正在准备手机的开发者服务")
             _, _, raw = step("manage ddis update", "manage", "ddis", "update", timeout=limits[2])
             problem = refresh_details()
-            if problem:
-                return out(dev, "prepare", problem, devices)
-            if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled":
-                return out(dev, "developerMode", S_DEV_MODE, devices)
-        if not services_ready(dev):
-            return out(dev, "prepare", _with_raw(S_DDI, raw), devices)
+            if problem and (r := hold("prepare", problem)):
+                return r
+            if dev.get("deviceProperties", {}).get("developerModeStatus") == "disabled" and (r := hold("developerMode", S_DEV_MODE)):
+                return r
+        if not services_ready(dev) and (r := hold("prepare", _with_raw(S_DDI, raw))):
+            return r
     return out(dev, "", "", devices)
 
 
@@ -475,7 +499,12 @@ def _write_link_report(c, link):
         h, p, cp = d.get("hardwareProperties", {}), d.get("deviceProperties", {}), _link(d)
         lines.append(f"device {_mask(h.get('udid') or d.get('identifier') or '')} {h.get('productType')} reality={h.get('reality')} transport={cp.get('transportType')} pairing={cp.get('pairingState')} "
                      f"tunnel={cp.get('tunnelState')} boot={p.get('bootState')} developerMode={p.get('developerModeStatus')} ddi={p.get('ddiServicesAvailable')}")
-    lines.append(f"结论: stage={link['stage']} {link['problem']}")
+    problem = link["problem"]
+    for d in link["devices"]:   # 结论里列着「看得到的设备」时带了名字：报告不写设备名（同上）
+        name = (d.get("deviceProperties", {}).get("name") or "").strip()
+        if name:
+            problem = problem.replace(f"「{name}」", "「<设备名>」")
+    lines.append(f"结论: stage={link['stage']} {problem}")
     target = c.logs / f"{c.task}-device.log"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -483,13 +512,12 @@ def _write_link_report(c, link):
 
 def phone(c):
     import target
-    want = (c.r.get("device") or "").strip()
-    if not want:   # 装机一律要玩家选的那台（前端 / s2armctl 都要带 device），作业层不自己挑
-        raise Failure(S_DEVICE_REQUIRED, code="device_required")
-    link = device_link(c, want)
+    want = (c.r.get("device") or "").strip()   # 没给：只连着一台就用它（device_link → _pick_device install=True），多台才要玩家选
+    link = device_link(c, want, install=True)
     if link["problem"]:
         _write_link_report(c, link)
-        raise Failure(link["problem"], code="device_not_connected" if link["stage"] == "connected" else "device_not_ready")
+        code = "device_required" if link["problem"] == S_DEVICE_REQUIRED else "device_not_connected" if link["stage"] == "connected" else "device_not_ready"
+        raise Failure(link["problem"], code=code)
     return target._row(link["device"], c.env()["DEVELOPER_DIR"], with_link=True)
 
 
@@ -1195,20 +1223,30 @@ def win_udids(W):
 
 
 def win_udid(c, W):
-    """要装的那台 = 请求给的 device（UDID，玩家选的那台），不自己挑。这台在任何连接方式上（USB 或同网）在就算在线：有线、无线都可以，
-    只要是玩家选的那台（原先有 USB 连着的就只认 USB 的，玩家选的那台走 Wi-Fi、旁边插着另一台时会被判成不在）"""
+    """要装的那台：请求给的 device（UDID，玩家选的那台）在设备服务里（USB 或同网都算）就用它；没给、或给的那台这次没列出，
+    设备服务里只有一台就用那一台（11-13 维护者：插着一台手机就别说识别不了）；多台对不上才让玩家选。
+    设备服务列表会瞬时空（插拔 / 同网切数据线），最多读 3 次、间隔 3 秒再判"""
     want = (c.r.get("device") or "").strip()
-    if not want:   # 装机一律要玩家选的那台（前端从装机前清单拿到设备号再带上）
-        raise Failure(S_DEVICE_REQUIRED, code="device_required")
-    try:
-        links = W.mux_devices()
-    except OSError as e:
-        raise Failure(f"连不上本机苹果设备服务（{e}）：从 Microsoft Store 装「Apple Devices」后重试。", code="device_pairing_required") from e
-    if want not in {u for u, _, _ in links if u}:
-        # Windows 设备服务分不出「不在线」和「没配对过」、也给不出设备名：按设备号末尾指认那台，不换别的
-        raise Failure(f"要装的那台设备（编号末尾 {want[-6:]}）现在不在线：插上数据线并解锁，或让它和这台电脑连同一个 Wi-Fi，再试一次。",
-                      code="device_not_connected")
-    return want
+    udids = []
+    for k in range(LINK_READS):
+        try:
+            links = W.mux_devices()
+        except OSError as e:
+            raise Failure(f"连不上本机苹果设备服务（{e}）：从 Microsoft Store 装「Apple Devices」后重试。", code="device_pairing_required") from e
+        udids = list(dict.fromkeys(u for u, _, _ in links if u))
+        if (want and want in udids) or (not want and udids):
+            break
+        if k + 1 < LINK_READS:
+            time.sleep(LINK_RETRY_WAIT)
+    if want and want in udids:
+        return want
+    if len(udids) == 1:
+        return udids[0]
+    if not udids:
+        raise Failure("这台电脑的设备服务里没看到 iPhone / iPad：插上数据线并解锁手机，在手机上点「信任」，再试一次。", code="device_not_connected")
+    raise Failure(S_DEVICE_REQUIRED if not want else
+                  f"要装的那台设备（编号末尾 {want[-6:]}）这次没列出来，这台电脑现在连着 {len(udids)} 台：在装机页选其中一台再装。",
+                  code="device_required" if not want else "device_not_connected")
 
 
 def readiness_windows(c, gid):

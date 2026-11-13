@@ -806,7 +806,12 @@ public final class S2ArmLauncherModel: ObservableObject {
         //   并按剃刀 M13 只报一次（5 秒轮询不重复弹）
         let probe: [String: Any]
         do { probe = try await provider.targetDevices(); readOK("s2arm.fail.targets") }
-        catch { connectedDevices = []; deviceProbeError = error.localizedDescription; reportFailure("s2arm.fail.targets", error, passive: true); return }
+        catch {
+            // 探测被取消不是读不到：设备行一消失（装完换到完成页）SwiftUI 就取消这次轮询，原先当成失败清空设备、弹「读不到连接的设备 /
+            //   任务已取消」（玩家截图：顶栏刚写「已装到 iPhone」就弹这框）。列表照旧，不弹
+            if Task.isCancelled || (error as? JobFailure)?.state == .cancelled { return }
+            connectedDevices = []; deviceProbeError = error.localizedDescription; reportFailure("s2arm.fail.targets", error, passive: true); return
+        }
         connectedDevices = probe["connected"] as? [[String: Any]] ?? []
         deviceProbeError = (probe["connectedError"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         targetModels = probe["models"] as? [[String: Any]] ?? []

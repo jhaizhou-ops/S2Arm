@@ -381,23 +381,31 @@ class WinInstall(unittest.TestCase):
         self.assertEqual(res["unpackPending"], "资源包已传完，还差最后一步：打开 App")   # 结果带还差的一步（11-09 #336）
 
     def test_device_choice_errors(self):
-        """装到哪台由玩家选、作业照办（维护者 11-11）：没带设备号 → device_required（哪怕只连着一台也不自己挑）；
-        带了但那台不在 → device_not_connected，说的是那台（编号末尾），不换装旁边连着的另一台"""
-        for devs in ([("U1", "USB", 3), ("U2", "USB", 4)], [("U1", "USB", 3)], []):
-            with self.subTest(devs=devs), self.assertRaises(core.Failure) as e:
-                self.go(FakeW(devs), device=None)
+        """装到哪台（11-13 维护者：插着一台手机就别说识别不了）。期望手写：设备服务里只有一台 → 装它（没带设备号、或带的那台这次没列出都一样）；
+        选的那台列着 → 装它（同网也算，不换插线的另一台）；多台对不上 → 没带号报 device_required、带了号报 device_not_connected 并说连着几台；
+        一台都没有 → device_not_connected；设备服务连不上 → device_pairing_required"""
+        import install
+        with patch.object(install, "LINK_RETRY_WAIT", 0):
+            for devs, want in (([("U1", "USB", 3)], None), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
+                with self.subTest(devs=devs, want=want):
+                    w = FakeW(devs); self.go(w, device=want)
+                    self.assertEqual(w.calls[0].udid, devs[0][0])
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW([("U1", "USB", 3), ("U2", "USB", 4)]), device=None)
             self.assertEqual(e.exception.code, "device_required")
-        for devs, want in (([], "U1"), ([("U2", "USB", 3)], "U1"), ([("U2", "Network", 3)], "U1")):
-            with self.subTest(devs=devs, want=want), self.assertRaises(core.Failure) as e:
-                self.go(FakeW(devs), device=want)
-            self.assertEqual(e.exception.code, "device_not_connected")
-            self.assertIn("U1"[-6:], str(e.exception)); self.assertIn("不在线", str(e.exception))
-        w = FakeW([("U2", "USB", 3), ("U1", "Network", 9)])   # 选的那台走 Wi-Fi、另一台插着线：装选的那台
-        self.go(w, device="U1")
-        self.assertEqual(w.calls[0].udid, "U1")
-        with self.assertRaises(core.Failure) as e:
-            self.go(FakeW(ConnectionRefusedError()))
-        self.assertEqual(e.exception.code, "device_pairing_required")
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW([("U2", "USB", 3), ("U3", "Network", 4)]), device="U1")
+            self.assertEqual(e.exception.code, "device_not_connected"); self.assertIn("连着 2 台", str(e.exception))
+            for want in (None, "U1"):
+                with self.subTest(empty=want), self.assertRaises(core.Failure) as e:
+                    self.go(FakeW([]), device=want)
+                self.assertEqual(e.exception.code, "device_not_connected")
+            w = FakeW([("U2", "USB", 3), ("U1", "Network", 9)])   # 选的那台走 Wi-Fi、另一台插着线：装选的那台
+            self.go(w, device="U1")
+            self.assertEqual(w.calls[0].udid, "U1")
+            with self.assertRaises(core.Failure) as e:
+                self.go(FakeW(ConnectionRefusedError()))
+            self.assertEqual(e.exception.code, "device_pairing_required")
 
     def test_shared_code_passes_through(self):
         with self.assertRaises(core.Failure) as e:
