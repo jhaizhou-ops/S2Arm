@@ -67,6 +67,7 @@ int dm_shader_se(const uint8_t key[8], uint64_t code, const void *control, char 
 int dm_shader_vpad(const uint8_t key[8], uint64_t code, const void *control, uint32_t mask, char *path, size_t n);   // 顶点补齐变体（dsh_miss.inc）
 int dm_shader_se_fresh(const char *key16);
 void *dm_shader_snap(uint64_t code, const void *control, uint64_t *code_out, const void **control_out);
+int dm_shader_mesh_source(const char *key16, uint64_t *code_out, const void **control_out);   // ProgramSetShaders 时自持的网格源，给运行期 user(locn) 补齐
 void mtl_se_stats(uint64_t out[2]);   // S2Arm（#800，nvn_mtl.m se_done）：采样器归约变体 [0] 本局在设备上编好的着色器数、[1] 编不出的（收局汇总行）
 void mtl_vp_stats(uint64_t out[2]);   // S2Arm（nvn_mtl.m vp_done）：顶点补齐变体 [0] 本局在设备上编好的、[1] 编不出的
 void mtl_shmap_rt_add(const char *key, const char *stage); int mtl_shmap_known(const char *key); int mtl_shlib_has(const char *key);

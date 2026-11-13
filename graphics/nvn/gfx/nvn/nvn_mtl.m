@@ -8016,6 +8016,17 @@ static void se_kick(const prog_t *p, NvShader *sh, int sync) {   // sync: made h
 static pthread_mutex_t g_vp_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_vp_made, g_vp_failed;
 void mtl_vp_stats(uint64_t out[2]) { out[0] = atomic_load(&g_vp_made); out[1] = atomic_load(&g_vp_failed); }
+// Resolve source arguments for vp_build. NVN2 mesh is retained by dm_shader_miss while ProgramSetShaders still owns its source; other stages take a temporary live snapshot.
+static int vp_source_args(const prog_t *p, NvShader *vs, uint8_t md[8], uint64_t *code, const void **ctl, void **live) {
+    *code = 0; *ctl = NULL; *live = NULL;
+    if (dm_shader_mesh_source(vs->key, code, ctl)) {
+        for (int i = 0; i < 8; i++) { unsigned v = 0; if (sscanf(vs->key + i * 2, "%2x", &v) != 1) return 0; md[i] = (uint8_t)v; }
+        return 1;
+    }
+    int at = p ? prog_stage_of(p, vs->key, md) : -1;
+    if (at >= 0) *live = dm_shader_snap(p->sd[at].data, p->sd[at].control, code, ctl);
+    return *code != 0;
+}
 static uint32_t pso_pair_miss(NvShader *vs, NvShader *fs) {   // the user(locn) fs reads and vs does not write (0 = none, or positions unknown on either side)
     if (!vs || !fs || !(vs->rf.has_user & 1) || !(fs->rf.has_user & 2)) return 0;
     return fs->rf.user_in & ~vs->rf.user_out;
@@ -8051,9 +8062,9 @@ static int vp_ask(const prog_t *p, NvShader *vs, uint32_t miss) {
     int st = vs->vp_st; uint32_t want = (st == SE_READY ? vs->vp_mask : 0) | miss;
     if (st == SE_BUSY || st == SE_FAIL || (st == SE_READY && (vs->vp_mask & miss) == miss)) { pthread_mutex_unlock(&g_vp_mu); return st != SE_FAIL; }
     vs->vp_st = SE_BUSY; pthread_mutex_unlock(&g_vp_mu);
-    uint8_t md[8] = {0}; int at = p ? prog_stage_of(p, vs->key, md) : -1; uint64_t t0 = bp_now();
-    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, at < 0 ? 0 : p->sd[at].data, at < 0 ? NULL : p->sd[at].control, want, why, sizeof why); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
-    uint64_t code = 0; const void *ctl = NULL; void *snap = at < 0 ? NULL : dm_shader_snap(p->sd[at].data, p->sd[at].control, &code, &ctl); uint64_t key; memcpy(&key, md, 8);
+    uint8_t md[8] = {0}; uint64_t code = 0; const void *ctl = NULL; void *snap = NULL; vp_source_args(p, vs, md, &code, &ctl, &snap); uint64_t t0 = bp_now();
+    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, code, ctl, want, why, sizeof why); free(snap); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
+    uint64_t key; memcpy(&key, md, 8);
     fprintf(stderr, "[s2a] 顶点补齐变体：程序号 %s 顶点 %.16s 首遇缺 user(locn) 掩码 %#x，后台编，编好前这对的绘制照旧跳过\n", s2a_nvn_game_id(), vs->key, want);
     static dispatch_queue_t q; static dispatch_once_t once;
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.vp", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_SHADER_VARIANT)); });

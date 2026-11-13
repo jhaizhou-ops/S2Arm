@@ -85,6 +85,29 @@ typedef struct dsh_pend { struct dsh_pend *next; uint8_t key[8]; int st; uint32_
 enum { DSH_PEND_BUCKETS = 4096 };
 static dsh_pend *g_dsh_pend[DSH_PEND_BUCKETS]; static pthread_mutex_t g_dsh_pend_mu = PTHREAD_MUTEX_INITIALIZER; static _Atomic uint64_t g_dsh_pend_n;
 static unsigned dsh_bucket(const uint8_t key[8]) { uint32_t h; memcpy(&h, key, 4); return h % DSH_PEND_BUCKETS; }
+// NVN 只保证 shader control / code 在 ProgramSetShaders 调用期间有效。mesh 与 fragment 的真正配对可能几百帧后才首次出现，
+// 届时若才发现 mesh 没写 fragment 要读的 user(locn)，补齐变体仍需原始源。只按键保留 NVN2 mesh，不把全部阶段无界留住。
+typedef struct dsh_mesh_src { struct dsh_mesh_src *next; uint8_t key[8]; uint32_t nctl, ncode; uint8_t data[]; } dsh_mesh_src;
+static dsh_mesh_src *g_dsh_mesh[DSH_PEND_BUCKETS]; static pthread_mutex_t g_dsh_mesh_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic uint64_t g_dsh_mesh_n, g_dsh_mesh_bytes;
+static void dsh_mesh_keep(const uint8_t key[8], const uint8_t *code, uint32_t ncode, const uint8_t *ctl, uint32_t nctl) {
+    unsigned b = dsh_bucket(key); pthread_mutex_lock(&g_dsh_mesh_mu);
+    dsh_mesh_src *s = g_dsh_mesh[b]; while (s && memcmp(s->key, key, 8)) s = s->next;
+    if (!s && (s = malloc(sizeof *s + (size_t)nctl + ncode))) {
+        memcpy(s->key, key, 8); s->nctl = nctl; s->ncode = ncode; memcpy(s->data, ctl, nctl); memcpy(s->data + nctl, code, ncode); s->next = g_dsh_mesh[b]; g_dsh_mesh[b] = s;
+        uint64_t n = atomic_fetch_add(&g_dsh_mesh_n, 1) + 1, bytes = atomic_fetch_add(&g_dsh_mesh_bytes, (uint64_t)nctl + ncode) + nctl + ncode;
+        if (!(n & (n - 1))) LOG("mesh source hold: %llu shaders, %.1f MB (ProgramSetShaders snapshots for late user(locn) padding)", (unsigned long long)n, bytes / 1048576.0);
+    }
+    pthread_mutex_unlock(&g_dsh_mesh_mu);
+}
+int dm_shader_mesh_source(const char *key16, uint64_t *code_out, const void **control_out) {
+    uint8_t key[8]; if (!key16 || !code_out || !control_out) return 0;
+    for (int i = 0; i < 8; i++) { unsigned v; if (sscanf(key16 + i * 2, "%2x", &v) != 1) return 0; key[i] = (uint8_t)v; }
+    unsigned b = dsh_bucket(key); pthread_mutex_lock(&g_dsh_mesh_mu);
+    dsh_mesh_src *s = g_dsh_mesh[b]; while (s && memcmp(s->key, key, 8)) s = s->next;
+    if (s) { *control_out = s->data; *code_out = (uint64_t)(uintptr_t)(s->data + s->nctl); }
+    pthread_mutex_unlock(&g_dsh_mesh_mu); return s != NULL;   // entries live for the graphics process, so returned pointers stay valid
+}
 static _Atomic int g_dsh_bad;
 // 后台预编（11-07 卡顿线：时之笛开局 12 支计算着色器在提交线程上同步现编约 6 秒、异度3 场景首帧 20 支 + 后来 3 支各卡 1–5 秒）：缺库的键登记时
 //   （ProgramSetShaders，读档 / 进场景前）就拷下控制段与代码区、丢进一条串行后台队列开编，产物照常写兜底目录；提交线程第一次用到时（dm_shader_miss_late）：
@@ -164,10 +187,11 @@ static dsh_job *dsh_job_take(const uint8_t key[8]) {   // 从表里取走这个�
 void dm_shader_miss(const uint8_t key[8], uint64_t code, const void *control) {
     char k[17]; for (int i = 0; i < 8; i++) snprintf(k + 2 * i, 3, "%02x", key[i]);
     if (!control || !code) { atomic_fetch_add_explicit(&g_dsh_skipped, 1, memory_order_relaxed); return; }
+    const uint8_t *ctl = control, *cd = (const uint8_t *)(uintptr_t)code; uint32_t ncode = 0, nctl = 0;
+    int st = dsh_stage(cd, ctl, &ncode, &nctl);
+    if (st == 5) dsh_mesh_keep(key, cd, ncode, ctl, nctl);   // 必须在「库里已有」的早返前保留：补齐正是给库里的 mesh 出变体
     if (mtl_shmap_known(k) && mtl_shlib_has(k)) { return; }   // 映射表有、库里没有（热键版包的冷键）照样走现编，见 nvn_mtl.m mtl_shlib_has
     dsh_comp_fn comp = dsh_comp();
-    const uint8_t *ctl = control, *cd = (const uint8_t *)(uintptr_t)code; uint32_t ncode, nctl;
-    int st = dsh_stage(cd, ctl, &ncode, &nctl);
     if (st >= 0) dsh_dump(k, ctl, nctl, code, ncode);
     if (st < 0 || !comp) { if (!atomic_fetch_add(&g_dsh_bad, 1)) LOG("【红】直连：着色器 %s 不在映射表，不能现编（阶段 %d、代码 %u 字节、控制段 %u 字节）", k, st, ncode, nctl); atomic_fetch_add_explicit(&g_dsh_skipped, 1, memory_order_relaxed); return; }
     const char *out = getenv("DM_MSL_FALLBACK"); if (!out || !*out) { atomic_fetch_add_explicit(&g_dsh_skipped, 1, memory_order_relaxed); return; }
@@ -236,6 +260,7 @@ int dm_shader_miss_late(const char *k16, uint64_t code, const void *control) {
         int r = dsh_nvn2_pend(key, k, code, control, &e);
         if (r) return r > 0;
     }
+    if (e->st == 5) { uint64_t held_code = 0; const void *held_ctl = NULL; if (dm_shader_mesh_source(k, &held_code, &held_ctl)) code = held_code; }   // 不再读 ProgramSetShaders 后可能已被复用的 code
     const char *out = getenv("DM_MSL_FALLBACK"); uint32_t ncode;
     dsh_job *j = dsh_job_take(key);
     if (j) {   // 登记时已交后台：没开始就取消、当场同步编；在编就等；编好就复用兜底目录（见 dsh_eager_start）

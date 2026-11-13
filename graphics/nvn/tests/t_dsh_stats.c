@@ -77,7 +77,7 @@ static void check(int ok) { if (!ok) _exit(40); }
 static void crash_handler44(int sig) { (void)sig; s2a_dsh_crash_dump(); _exit(0); }   // 照 crash.c：原始现场后调 s2a_dsh_crash_dump
 static void scenario(int n) {
     alarm(10); setvbuf(stdout, NULL, _IONBF, 0);
-    setenv("S2A_DSH_EAGER_MAX", n >= 39 ? "8" : "0", 1);   // 0–38 是登记时不编的旧语义（后台预编关）；39–41 测后台预编
+    setenv("S2A_DSH_EAGER_MAX", n >= 39 && n <= 41 ? "8" : "0", 1);   // 0–38 是登记时不编的旧语义（后台预编关）；39–41 测后台预编
     uint32_t size = sizeof code, csize = sizeof ctl;
     memcpy(ctl + 0x704, &size, 4); memcpy(ctl + 0x20, &csize, 4);
     setenv("DM_MSL_FALLBACK", "/dev/null", 1); // 编译器桩不写文件。
@@ -210,6 +210,27 @@ static void scenario(int n) {
         if (n == 37) check(got == 0 && compiler_calls == 0 && !rt_stage[0]);
         else check(got == 1 && compiled_stage == (n == 35 ? 4 : 5) && !strcmp(rt_stage, n == 35 ? "task" : "mesh"));
     }
+    if (n == 45) {   // ProgramSetShaders 时还有 mesh 源，运行期配对几百帧后才发现缺 user(locn)：原 code / control 已失效也必须能用登记时的副本编译
+        nvn2 = 1; uint8_t c2[0xe0] = {0}; uint32_t m = NVN2_CTL_MAGIC, v = NVN2_CTL_VERSION, own = sizeof c2, nc = sizeof code;
+        memcpy(c2, &m, 4); memcpy(c2 + 4, &v, 4); memcpy(c2 + 0x30, &own, 4); memcpy(c2 + 0x44, &nc, 4); c2[0x56] = 7;
+        for (size_t i = 0; i < sizeof code; i++) code[i] = (uint8_t)(i ^ 0x5a);
+        dm_shader_miss(key, (uint64_t)(uintptr_t)code, c2); memset(code, 0, sizeof code); memset(c2, 0, sizeof c2);
+        int got = dm_shader_miss_late("0000000000000000", 0, NULL);
+        check(got == 1 && compiler_calls == 1 && compiled_stage == 5 && !strcmp(rt_stage, "mesh"));
+    }
+    if (n == 46) {   // 负对照：task 不为 mesh user(locn) 补齐保留代码，原源失效后照旧明确失败
+        nvn2 = 1; uint8_t c2[0xe0] = {0}; uint32_t m = NVN2_CTL_MAGIC, v = NVN2_CTL_VERSION, own = sizeof c2, nc = sizeof code;
+        memcpy(c2, &m, 4); memcpy(c2 + 4, &v, 4); memcpy(c2 + 0x30, &own, 4); memcpy(c2 + 0x44, &nc, 4); c2[0x56] = 6;
+        dm_shader_miss(key, (uint64_t)(uintptr_t)code, c2); memset(code, 0, sizeof code); memset(c2, 0, sizeof c2);
+        int got = dm_shader_miss_late("0000000000000000", 0, NULL); check(got == 0 && compiler_calls == 0);
+    }
+    if (n == 47) {   // 库里已有的 mesh 也要保留：vp 补齐正是给已在库里、但运行期配对缺输出的着色器出变体
+        known = inlib = nvn2 = 1; uint8_t c2[0xe0] = {0}; uint32_t m = NVN2_CTL_MAGIC, v = NVN2_CTL_VERSION, own = sizeof c2, nc = sizeof code;
+        memcpy(c2, &m, 4); memcpy(c2 + 4, &v, 4); memcpy(c2 + 0x30, &own, 4); memcpy(c2 + 0x44, &nc, 4); c2[0x56] = 7; code[0] = 0xa5;
+        dm_shader_miss(key, (uint64_t)(uintptr_t)code, c2); memset(code, 0, sizeof code); memset(c2, 0, sizeof c2);
+        uint64_t held_code = 0; const void *held_ctl = NULL; int got = dm_shader_mesh_source("0000000000000000", &held_code, &held_ctl);
+        check(got == 1 && *(const uint8_t *)(uintptr_t)held_code == 0xa5 && !memcmp(held_ctl, &m, 4) && compiler_calls == 0);
+    }
     if (n == 38) {   // 没登记过的键：兜底目录里上局现编的网格（json stage "ms"）按 mesh 加映射、不调编译器
         char d[] = "/tmp/t_dsh_reuseXXXXXX", p[256]; check(mkdtemp(d) != NULL); setenv("DM_MSL_FALLBACK", d, 1);
         snprintf(p, sizeof p, "%s/0000000000000000_b.metal", d); FILE *f = fopen(p, "w"); check(f != NULL); fclose(f);
@@ -269,10 +290,13 @@ int main(void) {
         "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 41 排在慢键后面的键：首遇取消后台、同步编
         "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 1（正常收局）",   // 42 原注释见下行
         "成功 0、失败 1、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 43 见下行
-        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 44 编的时候输入落盘成 .inflight.*、返回后删掉；43 翻译器报错：输入自动存进兜底目录；42 后台在编同键时来输出类型变体：同锁、不并发、不重编（后台编好、没有首遇来取：不计成功）
+        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 44 编的时候输入落盘成 .inflight.*、返回后删掉；43 翻译器报错：输入自动存进兜底目录；42 后台在编同键时来输出类型变体：同锁、不并发、不重编（后台编好、没有首遇来取：不计成功）
+        "成功 1、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 45 mesh 源在登记后即使来宾内存失效仍可用
+        "成功 0、失败 1、跳过 0、复用上局 0、输出类型变体 0（正常收局）",   // 46 负对照：task 不进 mesh 源表
+        "成功 0、失败 0、跳过 0、复用上局 0、输出类型变体 0（正常收局）"    // 47 已在库里的 mesh 也先自持再早返
     };
     int bad = 0;
-    for (int n = 0; n < 45; n++) {
+    for (int n = 0; n < 48; n++) {
         int fd[2]; pipe(fd); pid_t p = fork();
         if (!p) { close(fd[0]); dup2(fd[1], 1); close(fd[1]); scenario(n); }
         close(fd[1]); char buf[1024]; size_t at = 0; ssize_t got;
@@ -283,5 +307,5 @@ int main(void) {
         printf("%s 现编汇总场景 %d\n", ok ? "✓" : "✗", n);
         if (!ok) { bad++; puts(buf); }
     }
-    printf("%s t_dsh_stats：45 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
+    printf("%s t_dsh_stats：48 场景，%d 处不符\n", bad ? "✗" : "✓", bad); return bad != 0;
 }
