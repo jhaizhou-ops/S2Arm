@@ -1068,25 +1068,37 @@ void s2a_low_files(const char *when) {
 
 // 低区全列（10-20 八方2 / 巫师3 iPhone 地址耗尽）：iPhone 上窗口外能用的只有 4 GB 起到 dyld 共享缓存区（标签 32，0x1_8000_0000 起约 57 GB）之间，
 // 再往上到窗口是内核保护区（标签 31）。把这段逐块列全（同标签同权限的相邻块合并，空洞也列），不截断，按块对上是谁的：GC 保留 / Ryujinx DRAM / 服务堆 / 游戏模块 / Metal / 线程栈
-void s2a_vm_low(const char *when) {
-    uint64_t lo = 0x100000000ull, hi = g_ok ? g_base : 1ull << 39, prev = lo;
-    uint64_t ca = 0, cn = 0; int cp = -1, cmp_ = -1; unsigned ctag = 0; int nb = 0, ns = 0; uint64_t used = 0, hole = 0, small = 0;
-    LOG("低区全列 [%s]：起 %#llx（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数；p 当前/最大权限；空 = 未映射）", when, (unsigned long long)lo);
-    #define FLUSH() do { if (cn >= (1ull << 20)) { LOG("  低区 %#llx %6llu MB p%d/%d 标签 %u", (unsigned long long)ca, (unsigned long long)(cn >> 20), cp, cmp_, ctag); nb++; } else if (cn) { small += cn; ns++; } cn = 0; } while (0)
+// 逐块列 [lo, hi)（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数，空洞也列）；stop_shared：遇到共享缓存区（标签 32）就停。返回已映射 / 空 / 末端
+static void vm_list(const char *name, const char *when, uint64_t lo, uint64_t hi, int stop_shared, uint64_t *used_out, uint64_t *hole_out, uint64_t *end_out, int *nb_out, int *ns_out, uint64_t *small_out) {
+    uint64_t prev = lo, ca = 0, cn = 0; int cp = -1, cmp_ = -1; unsigned ctag = 0; int nb = 0, ns = 0; uint64_t used = 0, hole = 0, small = 0;
+    #define FLUSH() do { if (cn >= (1ull << 20)) { LOG("  %s %#llx %6llu MB p%d/%d 标签 %u", name, (unsigned long long)ca, (unsigned long long)(cn >> 20), cp, cmp_, ctag); nb++; } else if (cn) { small += cn; ns++; } cn = 0; } while (0)
     vm_address_t a = lo;
     for (;;) {
         vm_size_t sz = 0; natural_t depth = 0; vm_region_submap_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
         int ok = vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&info, &cnt) == KERN_SUCCESS;
-        int stop = !ok || a >= hi || info.user_tag == 32;   // 到共享缓存区 / 窗口为止
+        int stop = !ok || a >= hi || (stop_shared && info.user_tag == 32);
         uint64_t ge = stop ? (ok && a < hi ? a : hi) : a;
-        if (ge > prev) { FLUSH(); if (ge - prev >= (1ull << 20)) LOG("  低区 %#llx %6llu MB 空", (unsigned long long)prev, (unsigned long long)((ge - prev) >> 20)); hole += ge - prev; }
+        if (ge > prev) { FLUSH(); if (ge - prev >= (1ull << 20)) LOG("  %s %#llx %6llu MB 空", name, (unsigned long long)prev, (unsigned long long)((ge - prev) >> 20)); hole += ge - prev; }
         if (stop) break;
+        if (a + sz > hi) sz = (vm_size_t)(hi - a);
         if (cn && ca + cn == a && cp == info.protection && cmp_ == info.max_protection && ctag == info.user_tag) cn += sz;
         else { FLUSH(); ca = a; cn = sz; cp = info.protection; cmp_ = info.max_protection; ctag = info.user_tag; }
         used += sz; prev = a + sz; a += sz;
     }
     FLUSH();
     #undef FLUSH
+    *used_out = used; *hole_out = hole; *end_out = prev; *nb_out = nb; *ns_out = ns; *small_out = small;
+}
+void s2a_vm_low(const char *when) {
+    uint64_t lo = 0x100000000ull, hi = g_ok ? g_base : 1ull << 39, prev, used, hole, small; int nb, ns;
+    LOG("低区全列 [%s]：起 %#llx（同标签同权限相邻块合并，≥1 MB 逐块列、更小的只计数；p 当前/最大权限；空 = 未映射）", when, (unsigned long long)lo);
+    vm_list("低区", when, lo, hi, 1, &used, &hole, &prev, &nb, &ns, &small);
+    // 乙布局窗口下方留给宿主的那段（[g_keep_lo, g_base)）：低区满了宿主映射按「从低往高第一个放得下」落到这里。原先上面那段遇到共享缓存区就停、这段从来不列，
+    //   11-13 时之笛（0400486024DEC000）三台设备开局约 2–4 分钟宿主地址耗尽崩溃（低区 + 这段合计从 3380 MB 跌到 74 MB，进程实占只有 1–4 GB），看不到是谁占了这段
+    if (g_ok && g_keep_lo && g_keep_lo < g_base) { uint64_t u2, h2, e2, s2; int nb2, ns2;
+        LOG("窗口下方宿主段全列 [%s]：%#llx +%llu MB", when, (unsigned long long)g_keep_lo, (unsigned long long)((g_base - g_keep_lo) >> 20));
+        vm_list("下方", when, g_keep_lo, g_base, 0, &u2, &h2, &e2, &nb2, &ns2, &s2);
+        LOG("窗口下方宿主段全列 [%s] 完：已映射 %llu MB（逐块列 %d 块；<1 MB 的 %d 块合计 %llu MB 未列）、空 %llu MB", when, (unsigned long long)(u2 >> 20), nb2, ns2, (unsigned long long)(s2 >> 20), (unsigned long long)(h2 >> 20)); }
     { void (*gn)(char *, size_t) = (void (*)(char *, size_t))dlsym(RTLD_DEFAULT, "nxgal_va_note"); if (gn) { char g[1400]; gn(g, sizeof g); LOG("渲染器地址账 [%s]：%s", when, g); } }
     // 窗口尾部（缩尾部后还给系统的那段）：低区满了宿主映射落进去，崩溃现场要看它还剩多少
     uint64_t tlo = g_ok && g_size < g_res ? g_base + g_size : 0, thi = tlo ? g_base + g_res : 0;
@@ -1095,6 +1107,7 @@ void s2a_vm_low(const char *when) {
             (unsigned long long)((thi - tlo - th) >> 20), (unsigned long long)(th >> 20), (unsigned long long)(tl >> 20)); }
     { char tb[900]; s2a_tail_note(tb, sizeof tb); LOG("%s [%s]", tb, when); }
     s2a_vm_low_files(when, lo, hi, tlo, thi);
+    if (g_ok && g_keep_lo && g_keep_lo < g_base) { LOG("（下面一组文件映射是窗口下方宿主段 %#llx 起的 [%s]）", (unsigned long long)g_keep_lo, when); s2a_vm_low_files(when, g_keep_lo, g_base, 0, 0); }
     { void (*mn)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_msample_note"); if (mn) mn(when); }   // malloc 按调用点采样（S2A_MALLOC_SAMPLE=1 才有，见 msample.c）
     LOG("低区全列 [%s] 完：止于 %#llx，已映射 %llu MB（逐块列 %d 块；<1 MB 的 %d 块合计 %llu MB 未列）、空 %llu MB", when, (unsigned long long)prev, (unsigned long long)(used >> 20), nb, ns, (unsigned long long)(small >> 20), (unsigned long long)(hole >> 20));
 }
