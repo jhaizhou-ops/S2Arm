@@ -6192,6 +6192,10 @@
   "en": "Sign with your Apple ID"
  },
  {
+  "source": "把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）",
+  "en": "Sending game resources to iPhone (only changed files; the first time takes a few minutes)"
+ },
+ {
   "source": "把资源包推进 iPhone 并解开（只推变了的文件；第一次大游戏要几分钟）",
   "en": "Push the resource pack to the iPhone and unpack it (only changed files; a big game takes a few minutes the first time)"
  },

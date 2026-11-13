@@ -294,6 +294,30 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(launches, [])                          # 没有为解包起 App
         self.assertTrue(r["openToFinish"]); self.assertNotIn("unpackPending", r)
 
+    def test_single_app_push_never_launches_the_app_to_unpack(self):
+        """11-13 维护者：装上 App、把包传到位就算装好，玩家自己在手机上点信任、打开时 App 自己解开。原先不带上下文的单款 App（下游壳）推完带 --apply
+        拉起 App 解包，免费账号第一次装还没信任开发者时拉不起，作业打了红却报完成。期望：旧形态资源包、不带上下文，同样不带 --apply"""
+        gid = "0100535012974000"; out, pack = self._fixture(gid)
+        runs = []
+        def run(args, log=None, env=None, cwd=None, on_line=None):
+            runs.append([str(a) for a in args]); on_line("[12:00:00] 资源包：推 2 个文件 3 MB，分 1 批 + 索引 + 清单（1 秒）")
+        with um.patch.object(self.c, "run", run):
+            self.assertEqual(install.push_pack(self.c, "dev1", "io.s2arm.ds.x.team1", pack), (2, 3 << 20))
+        push = next(a for a in runs if a[2].endswith("tools/push_pack.py"))
+        self.assertIn("run", push); self.assertNotIn("--apply", push)
+
+    def test_readiness_downstream_package_comes_from_its_own_record(self):
+        """下游深度方案出的是独立 App：install-check 的「iPhone 版已做好」看它自己的出包记录（原先看容器件，下游款一律报没做好，实际装得上）"""
+        import downstream
+        gid = "0100535012974000"; self.c.r.update(gameId=gid)
+        scheme = {"id": "x"}
+        with um.patch.object(downstream, "requested", return_value=scheme), \
+             um.patch.object(downstream, "last_record", return_value={"ipa": "/lib/downstream/x/a.ipa"}):
+            r, it = self._ready([self._dev()])
+        self.assertTrue(it["package"]["ok"]); self.assertEqual(r["ipaPath"], "/lib/downstream/x/a.ipa")
+        with um.patch.object(downstream, "requested", return_value=scheme), um.patch.object(downstream, "last_record", return_value=None):
+            self.assertFalse(self._ready([self._dev()])[1]["package"]["ok"])
+
     def test_install_signs_installs_and_pushes(self):
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
         r, runs, seen, launches = self._install(gid, pushed=2, applied_before="")

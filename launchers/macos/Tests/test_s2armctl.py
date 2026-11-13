@@ -597,6 +597,23 @@ class DeviceBundleTests(unittest.TestCase):
         self.assertNotIn("没装", buf.getvalue())
 
 
+    def test_device_recognises_downstream_app_renamed_at_install(self):
+        """下游深度方案的独立 App：包里是下游自己的包名，装机时改成 io.s2arm.ds.<方案>.<团队>。原先按包里的包名查，免费团队装好了也报「没装」"""
+        dev = {"hardwareProperties": {"udid": "U1"}, "deviceProperties": {"name": "玩家的手机"}}
+        apps = {"result": {"apps": [{"bundleIdentifier": "io.s2arm.ds.d2r-mobile.z6563uvhkk"}, {"bundleIdentifier": "io.s2arm.ds.other.z6563uvhkk"}]}}
+        def fake_dctl(args):
+            Path(args[args.index("--json-output") + 1]).write_text(json.dumps(apps))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        ipa = os.path.join("lib", "games", "a", "downstream", "d2r-mobile", "D2RMobile.ipa")
+        buf = io.StringIO()
+        with mock.patch.object(ctl, "game_bundle", return_value=(ipa, "org.example.downstream")), \
+             mock.patch.object(ctl, "iphone", return_value=[dev]), mock.patch.object(ctl, "dctl", side_effect=fake_dctl), \
+             contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            ctl.device("0100000000000000")
+        self.assertIn("已装 io.s2arm.ds.d2r-mobile.z6563uvhkk", buf.getvalue())
+        self.assertNotIn("other", buf.getvalue()); self.assertNotIn("没装", buf.getvalue())
+
+
 class DeviceChoiceTests(unittest.TestCase):
     """设备号贯穿（11-11 真机验收测出）：install-check 能带 --device；targets 列出设备名、设备号与连接方式（两台同型号时只看机型分不出）"""
     def test_install_check_sends_device(self):

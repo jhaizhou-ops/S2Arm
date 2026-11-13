@@ -405,7 +405,12 @@ def device(gid):
             try: apps = json.load(open(f.name))['result']['apps']
             except Exception: apps = []
         # 包里的 io.s2arm.games 只是组装时的占位名：装机时换成 io.s2arm.games.<团队>（开发用还可再带后缀），按前缀认手机上实际装的（#642）
-        got = sorted(a.get('bundleIdentifier', '') for a in apps if container_match(a.get('bundleIdentifier', ''), bid))
+        #   下游深度方案的独立 App（产物在这款的 downstream/<方案>/ 下）：装机时包名改成 io.s2arm.ds.<方案>.<团队>（downstream.bundle_id），
+        #   包里自带的包名（下游自己的）手机上不会有——按装机后的前缀认（原先按包里的包名查，免费团队装好了也报没装）
+        parts = os.path.normpath(ipa).split(os.sep)
+        ds = parts[parts.index('downstream') + 1] if 'downstream' in parts[:-1] else None
+        got = sorted(a.get('bundleIdentifier', '') for a in apps if container_match(a.get('bundleIdentifier', ''), bid)
+                     or ds and a.get('bundleIdentifier', '').lower().startswith(f'io.s2arm.ds.{ds}.'.lower()))
         print(f'iPhone「{name}」（{u}）：' + (f'已装 {"、".join(got)}' if got else f'没装 {bid}——请玩家用 AltStore 装（要登录 Apple ID，AI 不代做）'))
     sys.exit(0)
 
@@ -416,7 +421,7 @@ def engine_root():   # 引擎目录：App 里是 Contents/Resources/Engine（bun
 
 def push_pack(gid):
     """只推游戏资源（App 已由玩家装好、资源不全时）：调 Mac / Windows 共用的 tools/push_pack.py（同启动器装机、dev_run）——
-    按 sha256 只推机上没有 / 变了的文件、残留批按完整性处理、推完起一次 App 只解包并等解完（--apply）。原先这里整个资源包目录 devicectl 拷进 Documents，
+    按 sha256 只推机上没有 / 变了的文件、残留批按完整性处理；传完即好，不起 App——App 第一次打开时自己解开（同装机作业，11-13）。原先这里整个资源包目录 devicectl 拷进 Documents，
     每次全量、不认机上已有（11-06 第三条推包路径收编）"""
     ipa, bid = game_bundle(gid); pack = next((os.path.join(os.path.dirname(ipa), f) for f in os.listdir(os.path.dirname(ipa)) if f.endswith('资源包')), None)
     if not pack: sys.exit(f'{os.path.dirname(ipa)} 里没有「资源包」文件夹：重新出包 s2armctl ipa {gid}')
@@ -426,11 +431,11 @@ def push_pack(gid):
     if not os.path.isfile(tool): sys.exit(f'找不到推包工具 {tool}：App 不完整，请重新下载 S2Arm')
     env = dict(os.environ, S2A_DEVICECTL=DEVICECTL if os.path.exists(DEVICECTL) else 'xcrun devicectl', S2A_PUSH_UDID=u)
     if '/Contents/Resources/' in os.path.abspath(__file__): env.setdefault('S2A_PREBUILT_TOOLS', os.path.join(engine_root(), 'Binaries', 'Prepare'))   # App 内置 s2a-devpush → 流式写
-    print(f'推 {pack} → iPhone 上 {bid}：只推机上没有 / 变了的文件，推完起一次 App 解开（大包要几分钟）…', flush=True)
-    r = subprocess.run([sys.executable, '-B', tool, 'run', u, bid, pack, '--via', 'devicectl', '--udid', u, '--apply'], env=env)
+    print(f'推 {pack} → iPhone 上 {bid}：只推机上没有 / 变了的文件（大包要几分钟）…', flush=True)
+    r = subprocess.run([sys.executable, '-B', tool, 'run', u, bid, pack, '--via', 'devicectl', '--udid', u], env=env)
     if r.returncode:
         sys.exit('资源包没推完（上面最后一行【红】是原因）：手机要解锁、保持连接；App 还没装的话请玩家先用 AltStore / Impactor 装好再试')
-    print('🟢 资源包已推进 iPhone 并解开。请玩家打开这款游戏：第一次会先导入游戏资源（几分钟），保持前台别锁屏，导入完会自动进入游戏')
+    print('🟢 资源包已推进 iPhone。请玩家打开这款游戏（免费账号第一次打开前，先在「设置 → 通用 → VPN 与设备管理」里信任开发者）：第一次会先导入游戏资源（几分钟），保持前台别锁屏，导入完会自动进入游戏')
 
 # 作业记录（pack/jobs/core.py 写的 <数据目录>/logs/jobs/<任务>.json，固定在数据目录，见 logs_root：state / stage / milestone / done / total / pid / pidStart …）：
 #   控制口不应答或给的快照太旧时，wait 按它判。作业是独立进程，启动器卡住（内存吃紧、主线程忙）不等于作业停了
