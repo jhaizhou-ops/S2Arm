@@ -208,7 +208,7 @@ def _copy_cover(c, tid, game, metadata, icon):
     shutil.copyfile(icon, target)
 
 
-STORE_RETRY = 7 * 86400   # 查过商店（断网 / 404 / 没有横图）的款，7 天内不再查
+STORE_RETRY = 7 * 86400   # 商店给了定论（抓到 / 商品页 404 / 没有合格横图）的款，7 天内不再查；断网 / 超时 / 预算用尽不算查过，下次照查
 STORE_BUDGET = 10.0       # 每次最多花的联网时间（秒）：单页 / 单图各一跳短超时（banner_fetch），超了剩下的下次再查
 
 
@@ -223,7 +223,7 @@ def store_todo(c, ids=None):
         d = layout.find_game(c, gid)
         if g.get("englishName") and d is not None and (d / "banner.jpg").is_file():
             continue
-        if ids is None and now - float(g.get("storeChecked") or 0) < STORE_RETRY:
+        if ids is None and now - float(g.get("storeSettled") or 0) < STORE_RETRY:   # 旧字段 storeChecked（断网也记）不认：11-13 前一次没联上就锁 7 天
             continue
         todo.append(gid)
     return todo
@@ -267,7 +267,8 @@ def store_meta(c, ids=None, budget=STORE_BUDGET):
     """游戏库的商店元数据（与出到哪个平台无关，Mac / iPhone / Windows 都读这一份）：按程序号打开美区商品页一次，
     取横版封面放进这款文件夹（banner.jpg）、英文标题补进 catalog 的 englishName（NACP 没有英文标题时的第二来源：NACP 有的导入时已记，优先）。
     ids 给了（导入刚加的款）就只查这些；不给（作业开始时）查缺横图或英文名、7 天内没查过的款。
-    断网、商品页 404、图不合格都静默跳过，只记 storeChecked；S2A_BANNER_FETCH=0 关掉。不含 ASCII 字母数字的标题不记（文件夹名用英文就是为了避开非 ASCII 路径）。
+    断网、商品页 404、图不合格都静默跳过；只有商店给了定论（banner_fetch.settled）才记 storeSettled——
+    断网 / 超时 / 失败预算用尽不记，下个作业再查（11-13：一次没联上就锁 7 天，维护者本机库 6 款全缺横图）。S2A_BANNER_FETCH=0 关掉。不含 ASCII 字母数字的标题不记（文件夹名用英文就是为了避开非 ASCII 路径）。
     调用方不能拿着目录锁（这里自己拿；拿不到这次跳过）→ 记了几款"""
     if os.environ.get("S2A_BANNER_FETCH", "1") == "0":
         return 0
@@ -290,7 +291,7 @@ def store_meta(c, ids=None, budget=STORE_BUDGET):
                 ok, _why = fetch.fetch_banner(gid, banner)
             except Exception:   # noqa: BLE001
                 ok = False
-            got[gid] = (banner if ok and banner.is_file() else None, fetch.store_name(gid))
+            got[gid] = (banner if ok and banner.is_file() else None, fetch.store_name(gid), fetch.settled(gid))
         if not got:
             return 0
         try:
@@ -300,8 +301,10 @@ def store_meta(c, ids=None, budget=STORE_BUDGET):
                     gid = str(g.get("id", "")).upper()
                     if gid not in got:
                         continue
-                    banner, name = got[gid]
-                    g["storeChecked"] = int(now)
+                    banner, name, settled = got[gid]
+                    g.pop("storeChecked", None)
+                    if settled:
+                        g["storeSettled"] = int(now)
                     if name and layout._ascii_name(name) and not g.get("englishName"):
                         g["englishName"] = name.strip()
                     if banner:
