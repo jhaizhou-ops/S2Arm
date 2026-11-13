@@ -460,6 +460,48 @@ uint64_t s2a_window_host_below(uint64_t fit, uint64_t learned) {
     uint64_t host = fit > win ? (fit - win) & ~(G - 1) : 0;
     return host > HOST_BELOW ? host : HOST_BELOW;
 }
+// 起局当场自愈（v0.3.4）：窗口按学到的跨度收窄后布局放不下（svc_mem.c layout_prepare 判 -2 那一刻）——删掉记录，窗口往下放宽回缺省给法（下方只留 HOST_BELOW 给宿主），
+//   布局重算、本局照常起。原先只删记录、本局照样失败，玩家第二次打开才好（v0.3.3 已记下坏记录的玩家装新版后头一次仍失败）。
+//   放宽的那段 [新起点, 窗口底) 起局后可能已被宿主映射占了一部分（lp_map 带提示往这里放直连库段等）：新起点取「已占映射末端（1 GiB 向上取整）」与「留宿主底 + HOST_BELOW」的大者，
+//   不盖别人；放不宽（新起点到不了窗口底以下）回 0，照旧失败（记录已删，下一局按缺省）。纯函数部分 s2a_window_widen_lo，t_vawin_learned 测；端到端 t_vawin_widen 测
+uint64_t s2a_window_widen_lo(uint64_t keep_lo, uint64_t base, uint64_t used_end) {
+    const uint64_t G = 1ull << 30;
+    uint64_t lo = keep_lo + HOST_BELOW, u = (used_end + G - 1) & ~(G - 1);
+    if (u > lo) lo = u;
+    return lo < base ? lo : 0;
+}
+int s2a_window_span_widen(void) {
+    if (!g_ok || !g_span_learned || !g_keep_lo) return 0;   // 没按学到的跨度收窄：不是这条路径的问题
+    s2a_window_span_forget();
+    uint64_t learned = g_span_learned; g_span_learned = 0;
+    if (g_gextra) { LOG("【红】地址窗口：想当场放宽，但文件后备已往窗口外接长（%llu MB），不放宽", (unsigned long long)(g_gextra >> 20)); return 0; }
+    for (vm_address_t a = (vm_address_t)g_base, end = (vm_address_t)(g_base + g_size); a < end; ) {   // 窗口还原封不动（布局前，整段 PROT_NONE）才放宽：要整段重映射
+        vm_address_t ra = a; vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &ra, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || ra >= end) break;
+        if (bi.protection != VM_PROT_NONE) { LOG("【红】地址窗口：想当场放宽，但窗口里已有放开过的映射（%#llx +%llu MB），不放宽", (unsigned long long)ra, (unsigned long long)(sz >> 20)); return 0; }
+        a = ra + sz;
+    }
+    uint64_t used = g_keep_lo;
+    for (vm_address_t a = (vm_address_t)g_keep_lo;; ) {   // [留宿主底, 窗口底) 里已占映射的最高末端
+        vm_size_t sz = 0; vm_region_basic_info_data_64_t bi; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj = MACH_PORT_NULL;
+        if (vm_region_64(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS || a >= g_base) break;
+        if (a + sz > used) used = a + sz;
+        a += sz;
+    }
+    uint64_t lo = s2a_window_widen_lo(g_keep_lo, g_base, used), end = g_base + g_size;
+    if (!lo) { LOG("【红】地址窗口：想当场放宽，但窗口下方 %#llx 起已被宿主映射占到 %#llx，放不宽", (unsigned long long)g_keep_lo, (unsigned long long)used); return 0; }
+    void *p = mmap((void *)lo, g_base - lo, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);   // 不带 MAP_FIXED：核对落点，不盖别人
+    if (p != (void *)lo) { if (p != MAP_FAILED) munmap(p, g_base - lo);
+        LOG("【红】地址窗口：想当场放宽，[%#llx, %#llx) 占不到（%s），不放宽", (unsigned long long)lo, (unsigned long long)g_base, p == MAP_FAILED ? "失败" : "落在别处"); return 0; }
+    if (g_gfd >= 0) {   // 文件后备：整段（含放宽的那段）重映射成文件，偏移 0 起（窗口还没有内容）
+        void *q = ftruncate(g_gfd, (off_t)(end - lo)) ? MAP_FAILED : mmap((void *)lo, end - lo, PROT_NONE, MAP_FIXED | MAP_SHARED, g_gfd, 0);
+        if (q != (void *)lo) { int er = errno; mmap((void *)lo, end - lo, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0); close(g_gfd); g_gfd = -1;
+            LOG("【红】客体内存文件后备：窗口放宽后重映射成文件失败（errno=%d），照旧用匿名内存", er); } }
+    LOG("【黄】地址窗口：按学到的跨度 %llu MB 收窄后放不下本款布局——当场放宽：%#llx +%llu MB → %#llx +%llu MB（下方留宿主 %llu MB），本局照常起",
+        (unsigned long long)(learned >> 20), (unsigned long long)g_base, (unsigned long long)(g_size >> 20), (unsigned long long)lo, (unsigned long long)((end - lo) >> 20), (unsigned long long)((lo - g_keep_lo) >> 20));
+    g_base = lo; g_size = g_res = end - lo;
+    return 1;
+}
 static uint64_t g_need, g_fit;   // 本款要的跨度；2^39 以下最大能放的一块（1 GB 对齐后）——自检提示「本款需要 N GB，本机最多 M GB」用
 void s2a_window_need(uint64_t *need, uint64_t *fit) { *need = g_need; *fit = g_fit; }
 static char g_npdm[1100];   // 本款 main.npdm 路径（找不到可执行文件目录 / 模块目录时为空）：跨度算不出时按它说清原因
@@ -543,7 +585,8 @@ uint64_t s2a_window_container_need(const char *bundle) {
     return top;
 }
 static uint64_t need_from_npdm(void) {
-    const char *e = getenv("S2A_WIN_NEED_MB"); if (e && atoll(e) > 0) return (uint64_t)atoll(e) << 20;
+    const char *e = getenv("S2A_WIN_NEED_MB");
+    if (e && atoll(e) > 0) { char sp[1024]; if (getenv("S2A_WIN_SPAN_PEAK") && span_path(sp, sizeof sp, 0)) g_span_learned = read_u64(sp); return (uint64_t)atoll(e) << 20; }   // 单测：跨度与学到的跨度都直接给
     char dir[1024] = "";
 #if TARGET_OS_IPHONE
     // iOS：main.npdm 在启动上下文的模块目录（单款兼容 = 可执行文件同目录，同改造前）
