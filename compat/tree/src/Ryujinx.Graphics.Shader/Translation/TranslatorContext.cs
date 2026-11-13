@@ -165,7 +165,21 @@ namespace Ryujinx.Graphics.Shader.Translation
         internal int GetDepthRegister()
         {
             // The depth register is always two registers after the last color output.
-            return BitOperations.PopCount((uint)Definitions.OmapTargets) + 1;
+            // S2A #674：每个启用的颜色目标占满 4 个寄存器（哪怕只写其中一个分量，同 EmitterContext 里颜色输出的 regIndexBase += 4），
+            //   所以按启用的目标数算，不能按启用的分量数：两者只在每个目标都写满 4 个分量时相等。
+            //   时之笛 agl 深度缩小着色器 OmapTargets = 0x10f（目标 0 四个分量 + 目标 2 一个分量）：按分量数取到 6 号（没人写、恒 0），实际在 9 号，
+            //   半分辨率深度被写成 0，粒子（迪萤之火）全被深度测试挡掉
+            int targets = 0;
+
+            for (int rtIndex = 0; rtIndex < 8; rtIndex++)
+            {
+                if ((Definitions.OmapTargets & (0xf << (rtIndex * 4))) != 0)
+                {
+                    targets++;
+                }
+            }
+
+            return targets * 4 + 1;
         }
 
         public void SetLayerOutputAttribute(int attr)
