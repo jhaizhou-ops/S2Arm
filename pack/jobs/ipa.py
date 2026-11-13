@@ -750,7 +750,12 @@ def resolve_target(c):
             if len(devs) != 1:
                 return None
             want = devs[0]
-        return tg.check(want, tg.os_choices(c.env())[0])
+        sdk_top = tg.os_choices(c.env())[0]   # 读不出 SDK = Xcode 本身不可用，照旧报红
+        if not want.get("gpuArch"):
+            # 所用 Xcode 认不出目标的 GPU（新机型比 Xcode 的设备特征库新，诊断 D-6FTP iPhone19,7）：不拦——一包通用、
+            #   目标只用来提示地址窗口（读 os），原先 11 次出包都停在「检查游戏输入」
+            return dict(want)
+        return tg.check(want, sdk_top)
     except tg.TargetError as e:
         if not want or e.code == "xcode_sdk_too_old":   # 没给目标时探测连着的设备出错也不拦
             return dict(want) or None
