@@ -153,7 +153,7 @@ int rp_buf_resolve(nvn_gpu_cmd c, uint64_t addr, uint64_t len, nvn_gpu_buf *buf,
     uint64_t stack[256], *gens = n <= 256 ? stack : malloc((size_t)n * sizeof *gens);
     long got = gens ? nvn_dirty_page_gens(nvn_dirty_span((const void *)(uintptr_t)addr, (size_t)len), (const void *)(uintptr_t)addr, (size_t)len, gens, (size_t)n) : -1;
     int tracked = got == (long)n;   // 没被写跟踪的池：每次使用都整段同步
-    if (tracked) rp_perf_add(RP_PERF_BUF_SLOW_N, 1); else rp_perf_add(RP_PERF_BUF_NOSPAN_N, 1);
+    if (tracked) { rp_perf_add(RP_PERF_BUF_SLOW_N, 1); rp_perf_add(RP_PERF_BUF_PAGES_N, n); } else rp_perf_add(RP_PERF_BUF_NOSPAN_N, 1);
     for (uint64_t i = p; i <= q;) {
         if (m->synced[i] && tracked && gens[i - p] <= m->synced[i]) { i++; continue; }
         uint64_t j = i; while (j + 1 <= q && !(m->synced[j + 1] && tracked && gens[j + 1 - p] <= m->synced[j + 1])) j++;
