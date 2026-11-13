@@ -72,6 +72,8 @@ RECOVERY = {
     "xcode_unavailable": "去 App Store 安装 Xcode，装好打开一次并完成必要组件安装，回来点「重新检查」。",
     "xcode_setup_required": "打开 Xcode，同意许可并完成首次设置，回来点「重新检查」。",
     "metal_unavailable": "在设置中安装 Metal 编译组件，完成后重新检查环境并重试。",
+    "package_verify_mismatch": "直接再出一次包：对不上的文件会重新读、重新算，不用重新导入游戏。还是这样就检查一下游戏库所在的磁盘（Windows：磁盘属性 →「工具」→「检查」），"
+                               "并关掉对游戏库文件夹的杀毒实时扫描或云同步，或把游戏库换到另一块盘。",
     "ios_platform_missing": "在设置里点「iOS 平台组件」的「一键下载」（苹果官方，约 8 GB），下完自动重新检查后重试；也可以打开 Xcode → 设置 → Components 装上与 Xcode 配套的 iOS 平台。",
     "ios_platform_unregistered": "iOS 平台组件已经下载，只是还没注册到模拟器：点「重新检查」再试；不用重复下载（约 8 GB）。还不行就在 Xcode → 设置 → Components 里确认这一项，或重启这台 Mac 后再点「重新检查」。",
     "dotnet_unavailable": "重新安装完整的 S2Arm，恢复内置运行时后点「重新检查」。",
@@ -246,6 +248,7 @@ PLAYER_REASON = {
     "rewrite_gap": "暂时出不了包：这款游戏里有程序代码我们的改写器还不支持，我们正在修。",
     "glslc_windows_unavailable": "着色器编译暂不支持：这款游戏的着色器编译目前只能在 Mac 上完成。",
     "metal_unavailable": "缺少 Metal 组件：编着色器要用的 Metal 组件没装上。",
+    "package_verify_mismatch": "资源包核对没通过：出包最后核对资源包时，有文件前后两次读出的内容对不上。多见于磁盘或内存读写不稳定，或有杀毒、云同步软件在改游戏库里的文件。",
     "ios_platform_missing": "缺少 iOS 平台组件：Xcode 的 iOS 平台还没装，打不了 iPhone 包。",
     "engine_toolchain_newer": "这版 S2Arm 不认识你的 Xcode：你的 Xcode 比这版 S2Arm 新。",
     "graphics_api_unsupported": "这款游戏暂不支持：没找到任天堂官方图形接口（NVN / Vulkan / OpenGL），多见于自制或移植的程序。",
@@ -291,6 +294,9 @@ LOG_CAUSES = (
     (r"配置推导不支持本款", "game_structure_unsupported"),
     # 直连库 Metal 一份都没出（Build.cs Metal.Tally）：这台机器上的 Metal 编译器用不了
     (r"Metal 库一份都没出", "metal_unavailable"),
+    # 资源包核对（pack/verify.py）：包里那份读出的 SHA 和 pack.py 记进 index 的不一样——同一个文件（NTFS 硬链接 / 克隆）两次读出不同，
+    #   多见于读盘不稳定或有程序在改游戏库里的文件；核对已让这几个文件下次重算（11-13 玩家报错原先落成未归类 package_failed）
+    (r"SHA 与 index 不符", "package_verify_mismatch"),
     # 直连库原生库缺导出 / 缺库（Build.cs）：S2Arm 安装不全，不是游戏内容
     (r"原生库缺件（出包机环境", "tool_missing"),
     # 改写停住：v0.3.1 起有缺口照出产物、降级继续（pack/stage_rewrite.sh 记 degrade.rewrite.tsv），日志里留着「PFRW … gaps=N」不再说明失败在改写；

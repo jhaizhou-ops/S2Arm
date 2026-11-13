@@ -7238,5 +7238,13 @@
  {
   "source": "免费个人开发者团队签不了这个 App 申请的某项权限（例如「扩展虚拟寻址」）；更新 S2Arm 后重新安装（新版对免费团队只申请能签的权限），或在 Xcode 改用付费开发者团队。",
   "en": "A free personal development team cannot sign a capability this app requests (such as Extended Virtual Addressing). Update S2Arm and install again (the new version requests only what a free team can sign), or switch to a paid development team in Xcode."
+ },
+ {
+  "source": "直接再出一次包：对不上的文件会重新读、重新算，不用重新导入游戏。还是这样就检查一下游戏库所在的磁盘（Windows：磁盘属性 →「工具」→「检查」），并关掉对游戏库文件夹的杀毒实时扫描或云同步，或把游戏库换到另一块盘。",
+  "en": "Package again: the files that didn't match will be read and computed again, and you don't need to import the game again. If it still happens, check the disk the game library is on (Windows: disk Properties → Tools → Check), turn off antivirus real-time scanning or cloud sync for the game library folder, or move the game library to another disk."
+ },
+ {
+  "source": "资源包核对没通过：出包最后核对资源包时，有文件前后两次读出的内容对不上。多见于磁盘或内存读写不稳定，或有杀毒、云同步软件在改游戏库里的文件。",
+  "en": "Resource pack check failed: When checking the resource pack at the end of packaging, some files read back differently from before. This usually means unstable disk or memory reads, or antivirus or cloud sync software changing files in the game library."
  }
 ]

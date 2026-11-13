@@ -196,6 +196,7 @@ AI_NEXT = {
     'content_invalid': ('ask', '游戏文件损坏或被改过：请玩家换一份完整的原版文件，s2armctl games <文件夹>'),
     'guest_isa_unsupported': ('human', '这款游戏是 32 位程序，S2Arm 暂不支持：告诉玩家换一款游戏'),
     'library_not_apfs': ('confirm', '游戏库（导出时的工作数据）所在磁盘格式不支持（要 APFS 或 exFAT；FAT32 等不行）；游戏原件放哪都行、不用挪：征得玩家同意后请他在 S2Arm「设置 → 游戏库与玩家数据」改用这台 Mac 上的默认位置或一块 APFS / exFAT 外接盘，然后 s2armctl env'),
+    'package_verify_mismatch': ('ai', '资源包核对没通过（文件前后两次读出不一样）：s2armctl retry <任务号> 重试一次（对不上的文件会重算）；再红就请玩家检查磁盘、关掉对游戏库的杀毒实时扫描 / 云同步'),
     'disk_full': ('confirm', '磁盘不够：s2armctl state --json 看各游戏 bytes，征得玩家同意后 s2armctl delete <不要的游戏号> 腾空间，或请玩家清理磁盘，然后 s2armctl retry <任务号>'),
     'permission_denied': ('human', '系统不让读这个位置：请玩家在屏幕上的系统框里点「允许」，或把游戏文件挪到不受保护的文件夹（不要放在「下载」「桌面」「文稿」），然后重试'),
     'architecture_unsupported': ('human', '需要 Apple 芯片的 Mac：告诉玩家这台 Mac 跑不了'),
