@@ -48,6 +48,8 @@ typedef struct {
     int32_t axes[4];
 } s2a_pad_snapshot;
 void s2a_pad_read_ex(s2a_pad_snapshot *out);
+// Pure wake-sequence observation: never consumes short presses, timestamps or mouse input.
+uint64_t s2a_pad_notification_seq(void);
 uint64_t s2a_pad_now_us(void); // CLOCK_MONOTONIC，wait 与延迟测量使用同一时间轴。
 // 锁内重查 observed_seq；绝对单调 deadline 到达返回 0，通知变化返回 1。
 int s2a_pad_wait(uint64_t observed_seq, uint64_t deadline_us);

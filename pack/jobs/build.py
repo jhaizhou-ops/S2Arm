@@ -273,6 +273,7 @@ def launch(c):
 
 
 VAGUARD = "libs2a_vaguard.dylib"
+SDL3 = "libSDL3.dylib"
 
 
 def host_cache_ok(app, stamp):
@@ -284,7 +285,10 @@ def host_cache_ok(app, stamp):
         return False
     if not guard.is_file() or not stamp.get("guard_sha256") or stamp.get("guard_sha256") != digest(guard):
         return False
-    for target in (guard, app):
+    sdl = executable.parent / SDL3
+    if not sdl.is_file() or stamp.get("sdl3_sha256") != digest(sdl):
+        return False
+    for target in (guard, sdl, app):
         if subprocess.run(["codesign", "--verify", "--strict", str(target)], capture_output=True).returncode != 0:
             return False
     return True
@@ -324,6 +328,15 @@ def compile_host(c, fingerprint, env, log_root):
         raise Failure("S2Arm Mac 宿主缺地址窗口护栏库 libs2a_vaguard.dylib。")
     shutil.copy2(guard, executable.parent / guard.name)
     c.run(["codesign", "--force", "--sign", "-", executable.parent / guard.name], log_root / "sign.log", env)
+    sdl = host_root / "build" / SDL3
+    license = host_root / "build/SDL3-LICENSE.txt"
+    if not sdl.is_file() or not license.is_file():
+        raise Failure("S2Arm Mac 宿主缺 Joy-Con 输入组件或其许可文件。")
+    shutil.copy2(sdl, executable.parent / SDL3)
+    notices = app / "Contents/Resources"
+    notices.mkdir(exist_ok=True)
+    shutil.copy2(license, notices / license.name)
+    c.run(["codesign", "--force", "--sign", "-", executable.parent / SDL3], log_root / "sign.log", env)
     plist = dict(CFBundleIdentifier="org.s2arm.macos.game", CFBundleName="S2Arm Game",
                  CFBundleExecutable="s2arm-host", CFBundlePackageType="APPL", LSMinimumSystemVersion="15.0",
                  NSBluetoothAlwaysUsageDescription="连接 Switch 2 Pro 手柄，接收按键与体感并发送游戏震动。",
@@ -331,7 +344,8 @@ def compile_host(c, fingerprint, env, log_root):
                  LSApplicationCategoryType="public.app-category.games")   # 游戏模式要系统靠类别认出是游戏（11-01 调研：Mac 全屏才进游戏模式）
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps(plist))
     c.run(["codesign", "--force", "--sign", "-", app], log_root / "sign.log", env)
-    atomic(host_root / "ready.json", dict(schema=1, sha256=digest(executable), guard_sha256=digest(executable.parent / VAGUARD)))
+    atomic(host_root / "ready.json", dict(schema=1, sha256=digest(executable), guard_sha256=digest(executable.parent / VAGUARD),
+                                         sdl3_sha256=digest(executable.parent / SDL3)))
     return app
 
 

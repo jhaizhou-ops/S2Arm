@@ -3,6 +3,7 @@
 #import "s2a_l10n.h"
 #import <CoreHaptics/CoreHaptics.h>
 #import "controller.h"
+#import "local_controllers.h"
 #import <UIKit/UIGestureRecognizerSubclass.h>   // S2ATouchWatch 要改 state
 #include "native.h"
 #include "s2a_pad.h"
@@ -81,6 +82,12 @@ static float finite_clamp(float x, float lo, float hi);
 static float rumble_scaled(float amp, BOOL feel) {
     amp = finite_clamp(amp, 0, 1);
     return finite_clamp((feel ? s2a_hp_feel(amp) : amp) * atomic_load(&g_rumble_gain), 0, 1);
+}
+float s2a_ios_controller_rumble_gain(void) {
+    const char *off=getenv("S2A_RUMBLE"),*scale=getenv("S2A_RUMBLE_SCALE");
+    if(off&&!strcmp(off,"0"))return 0;
+    float gain=scale?strtof(scale,NULL):1;
+    return atomic_load(&g_rumble_gain)*(isfinite(gain)&&gain>0?gain:1);
 }
 static BOOL rumble_feel(uint64_t session) {
     uint64_t kind = session & 0xffff000000000000ull;
@@ -814,6 +821,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
     if (!foreground) atomic_store(&g_ble_ready, 0);
     pthread_mutex_unlock(&g_feedback_mu);
     s2a_pad_set_active(foreground);
+    s2a_ios_local_set_foreground(foreground);
     atomic_store(&g_slots_active, foreground);   // 槽 1–3：下面 selectSystem 分槽时按它采样或清零
     if (foreground) { phone_refresh_availability(); [self reloadAdapterPreference]; if (_adapterEnabled) [self reloadRecord]; }
     if (!foreground && _bleStarted) {
@@ -872,6 +880,7 @@ static void pad_selection_check(void) {
 void s2a_controller_attach(UIView *root, void (^touchEnabled)(BOOL)) {
     if (g_controller) return;
     g_controller = [[S2AController alloc] initWithRoot:root touchEnabled:touchEnabled];
+    s2a_ios_local_attach(root);
     [g_controller setForeground:YES];
     S2ATouchWatch *watch = [S2ATouchWatch new];   // 不吃游戏 / 虚拟按键的触摸（同 diag.m 四指长按的设法）
     watch.cancelsTouchesInView = NO; watch.delaysTouchesBegan = NO; watch.delaysTouchesEnded = NO;
@@ -1022,7 +1031,8 @@ __attribute__((visibility("default"), used)) void s2a_pad_stop_rumble(uint64_t s
 }
 __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&g_motion_mu);
-    int want = !!enabled;
+    const char *off=getenv("S2A_MOTION");
+    int want = !!enabled && !(off&&!strcmp(off,"0"));
     atomic_store(&g_phone_motion_wanted, want);
     enabled = want && atomic_load(&g_adapter_enabled);
     const ns2_api *api = atomic_load(&g_ns2);

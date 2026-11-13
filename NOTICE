@@ -105,3 +105,7 @@ dmsh_xlate_bin 里的预编译程序集
 
 Gradle Wrapper（android/gradle/wrapper，Gradle 9.8.1）
 Apache-2.0. 只用于安卓构建，不进 .app / IPA。
+
+SDL3（Mac 游戏壳的私有 Joy-Con 后端，源码构建、未修改）
+Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
+zlib License. 许可全文：macos/sdl3/LICENSE.txt；游戏壳随附 SDL3-LICENSE.txt。

@@ -23,12 +23,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 REQS = ["tools/rewriter-requirements.txt", "pack/fonts/requirements.txt", "launchers/macos/requirements-runtime.txt"]
-# 公式 → 谁要：bundle_runtime.py 的 prefixes 全部 + C 改写器（runtime/rewriter，CMake 3.18+）+ services/dav1d/build.sh（meson + ninja）
-# S2A_DAV1D=0：不链 dav1d 软件兜底（仅适合所有目标机都有 AV1 硬件解码的本地构建），meson / ninja 不再是必需项
+# 公式 → 谁要：bundle_runtime.py 的 prefixes 全部 + C 改写器（CMake）+ Mac Joy-Con（CMake / Ninja）+ dav1d（meson / ninja）
+# S2A_DAV1D=0：不链 dav1d 软件兜底（仅适合所有目标机都有 AV1 硬件解码的本地构建），meson 不再必需；ninja 仍用于 Mac Joy-Con
 FORMULAS = {"python@3.12": "构建 venv",
-            "bash": "运行环境（bash 5）", "cmake": "C 改写器"}
+            "bash": "运行环境（bash 5）", "cmake": "C 改写器 / Mac Joy-Con 输入组件",
+            "ninja": "Mac Joy-Con 输入组件"}
 if os.environ.get("S2A_DAV1D", "1") != "0":
-    FORMULAS.update({"meson": "dav1d 静态库", "ninja": "dav1d 静态库"})
+    FORMULAS.update({"meson": "dav1d 静态库"})
 IMPORTS = "import capstone, lz4, numpy, PIL, fontTools, pathops"
 rows = []
 
@@ -160,6 +161,14 @@ def prepare_rewriter_deps(check_only):
         row("C 改写器固定依赖", False, str(e))
 
 
+def prepare_joycon_source(check_only):
+    command = ["bash", ROOT / "macos/sdl3/build.sh", "--check-source" if check_only else "--fetch"]
+    p = run(command)
+    row("Mac Joy-Con 固定源码", p.returncode == 0,
+        p.stdout.strip() if p.returncode == 0 else (p.stderr or p.stdout).strip()[-300:],
+        "bash macos/sdl3/build.sh --fetch")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--venv", type=Path, default=ROOT / "build/venv", help="构建用 Python 虚拟环境目录（缺省本树 build/venv）")
@@ -175,6 +184,7 @@ def main():
     venv = a.venv.expanduser().resolve()
     py = prepare_venv(venv, brew, a.check)
     prepare_rewriter_deps(a.check)
+    prepare_joycon_source(a.check)
     print()
     for name, ok, detail, fix in rows:
         print(f"{'✓' if ok else '✗'} {name}：{detail}")

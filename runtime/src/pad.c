@@ -144,6 +144,10 @@ PAD_EXPORT void s2a_pad_read_ex(s2a_pad_snapshot *out) {
     p->latch = 0; pending_timestamp_us = 0;
     pthread_mutex_unlock(&pad_mu);
 }
+PAD_EXPORT uint64_t s2a_pad_notification_seq(void) {
+    lock(); uint64_t value = notification_seq;
+    pthread_mutex_unlock(&pad_mu); return value;
+}
 PAD_EXPORT int s2a_pad_wait(uint64_t observed_seq, uint64_t deadline_us) {
     lock();
     while (notification_seq == observed_seq) {

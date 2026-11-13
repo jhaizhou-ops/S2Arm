@@ -82,6 +82,7 @@ namespace S2A.Aot
         internal static void Init()
         {
             S2A.Services.Exports.AudioFactory = &S2A.Apple.Audio.AppleAudio.Create;
+            S2A.Apple.Input.AppleLocalControllers.Register();
             // 视频解码（平台 adapter P1，#1069）：Nvdec 只认登记的工厂，苹果实现在 platform/apple/cs/video
             S2A.Apple.Video.AppleVideo.Register();
             // 相册截图 JPEG（游戏 caps:su SaveScreenShotEx*）：ImageIO 编码，苹果宿主不带 Skia

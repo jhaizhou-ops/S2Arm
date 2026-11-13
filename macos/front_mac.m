@@ -11,6 +11,7 @@
 #include "../runtime/include/s2a_qos.h"
 #include "../runtime/include/phone_axes.h"
 #include "joycon_imu.h"
+#include "joycon_local.h"
 #import "input_guide.h"
 #include "ns2_controller.h"
 #include <stdatomic.h>
@@ -171,6 +172,14 @@ static void publish(uint32_t buttons, const int32_t sticks[4]) {
     for (int i = 0; i < 4; i++) atomic_store_explicit(&input_sticks[i], sticks[i], memory_order_seq_cst);
     atomic_fetch_add_explicit(&input_seq, 1, memory_order_seq_cst);
 }
+static _Atomic int local_joycon_active;
+static BOOL is_local_joycon(GCController *c) {
+    NSString *category=c.productCategory ?: @"";
+    if([category rangeOfString:@"Joy-Con 2" options:NSCaseInsensitiveSearch].location!=NSNotFound ||
+       [category rangeOfString:@"JoyCon 2" options:NSCaseInsensitiveSearch].location!=NSNotFound)return NO;
+    return [category rangeOfString:@"Joy-Con" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+           [category rangeOfString:@"JoyCon" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
 static GCExtendedGamepad *active_pad(NSArray *controllers);
 static BOOL ble_raw_source;   // 这一拍的输入来自报原始方向的单只 Joy-Con（sample_input 设，publish_pad_state 读；只在主线程）
 // 事件驱动输入（A2）：同一份前端状态同时写进 runtime/src/pad.c，InputPump 找到 s2a_vpad_read_ex 后就等
@@ -188,7 +197,7 @@ static void publish_pad_state(int has_pad, uint32_t buttons, const int32_t stick
     s2a_pad_update(S2A_PAD_TOUCH, focused ? 1 : 0, buttons, sticks);
 }
 static void publish_pad(uint32_t buttons, const int32_t sticks[4]) {
-    publish_pad_state(active_pad(GCController.controllers) != nil, buttons, sticks);
+    publish_pad_state(atomic_load(&local_joycon_active) || active_pad(GCController.controllers) != nil, buttons, sticks);
 }
 static void publish_input(uint32_t buttons, const int32_t sticks[4]) {
     publish(buttons, sticks);
@@ -256,6 +265,7 @@ static void reset_input(void) {
     publish_input(0, sticks);
     pthread_mutex_unlock(&g_compose_mu);
     uint64_t kb_none[4] = {0}; s2a_kb_update(kb_none, 0);   // R5：键盘区一并复位（失焦 / 关窗，按着的键全清）
+    if (!focused) s2a_local_pads_poll(0);
     touch_end();   // 失焦 / 关窗：按着的触点补一帧 End（定义在下面鼠标触屏段）
 }
 static void sample_input(void);
@@ -412,6 +422,7 @@ __attribute__((visibility("default"), used)) int s2a_vpad_read_touch(int32_t *xy
 static GCExtendedGamepad *active_pad(NSArray *controllers) {
     GCExtendedGamepad *best = nil;
     for (GCController *c in controllers) {
+        if (atomic_load(&local_joycon_active) && is_local_joycon(c)) continue;
         GCExtendedGamepad *p = c.extendedGamepad;
         if (p && (!best || p.lastEventTimestamp > best.lastEventTimestamp)) best = p;
     }
@@ -505,7 +516,7 @@ __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int
     atomic_store(&g_motion_wanted, want);
     s2a_mac_ns2_set_motion_enabled(want);
     // Joy-Con：系统 GCMotion 为 nil，改走 HID 全报告六轴（macos/joycon_imu.m）
-    s2a_joycon_imu_set_enabled(want);
+    s2a_joycon_imu_set_enabled(want && !atomic_load(&local_joycon_active));
 }
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_motion *out) {
     if (s2a_mac_ns2_status() == NS2_STATUS_READY) return s2a_mac_ns2_read_motion(out);
@@ -551,15 +562,16 @@ static s2a_hq_state g_hq;
 static void input_mute_refresh(void) { atomic_store(&input_muted, !focused || g_hq.open); }
 static void home_quit_ui(s2a_hq_action action);
 static void sample_home_quit(GCExtendedGamepad *pad) {
-    if (!pad) return;
+    if (!pad && !atomic_load(&local_joycon_active)) return;
+    uint32_t local=atomic_load(&local_joycon_active)?s2a_local_pads_system_buttons():0;
     static __weak GCController *claimed;   // Home 默认归系统（启动台 / 游戏面板）：每个手柄接管一次
     if (pad.controller != claimed && pad.buttonHome) { pad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled; claimed = pad.controller; }
     // 确认 / 取消按 Switch 的 A / B（与游戏内同一套对应：s2a_pad_abxy_order，按键布局）
     GCControllerButtonInput *face[4] = {pad.buttonA, pad.buttonB, pad.buttonX, pad.buttonY};
     int order[4]; s2a_pad_abxy_order(s2a_pad_kind(pad.controller.productCategory.UTF8String, [pad isKindOfClass:GCXboxGamepad.class],
         [pad isKindOfClass:GCDualShockGamepad.class] || [pad isKindOfClass:GCDualSenseGamepad.class]), s2a_pad_layout(), order);
-    BOOL home = pad.buttonHome.isPressed, a = face[order[0]].isPressed, b = face[order[1]].isPressed;
-    s2a_hq_action act = s2a_hq_step(&g_hq, now_ns(), home || (pad.buttonMenu.isPressed && pad.buttonOptions.isPressed), home, a, b);
+    BOOL home = pad.buttonHome.isPressed || (local&1), a = face[order[0]].isPressed || (local&2), b = face[order[1]].isPressed || (local&4);
+    s2a_hq_action act = s2a_hq_step(&g_hq, now_ns(), home || (local&8) || (pad.buttonMenu.isPressed && pad.buttonOptions.isPressed), home, a, b);
     if (act != S2A_HQ_NONE) home_quit_ui(act);
 }
 // 手柄震动（启动设置「震动」「震动强度」，11-09）：同 iOS ios/controller.m 系统手柄那一支——当前手柄的 GCDeviceHaptics 建一个 CHHapticEngine，
@@ -732,6 +744,8 @@ static const char ns2_slot_id = 0;
 // 槽位镜像（g_compose_mu 下）：主线程整表重建后照 pad_owner 抄一份（含强引用），手柄快速路径按它认「这只手柄占哪个槽」；
 //   NS2 那路没有 GCController 对象，留空。快速路径的其余共享状态（键鼠快照 / 静音标记 / 合成锁）在前面的前置段
 static GCController *pad_slot_owner[S2A_MAX_PADS];
+// Original GC slot -> appended local slot; protected by g_compose_mu.
+static int pad_local_slot[S2A_MAX_PADS];
 // 按配置表把一只手柄的键名 / 轴名映射成 Switch 按键位 + 摇杆（不含键盘 / 鼠标；调用方负责叠加）
 static void map_pad_inputs(NSDictionary *all, NSDictionary *axes, uint32_t *out_buttons, int32_t sticks[4]) {
     uint32_t buttons = 0;
@@ -809,11 +823,29 @@ static void publish_keyboard(BOOL muted) {
     }
     s2a_kb_update(bits, mods);
 }
+// Preserve the original fallback device while local Joy-Con input is active.
+// Recent button activity must not move feedback between players or invalidate
+// every Joy-Con session. A real disconnect selects the next available GC pad.
+static GCExtendedGamepad *local_feedback_pad(NSArray *controllers) {
+    static __weak GCController *owner;
+    if (owner && [controllers containsObject:owner] && owner.extendedGamepad && !is_local_joycon(owner))
+        return owner.extendedGamepad;
+    owner = nil;
+    for (GCController *c in controllers) if (!is_local_joycon(c) && c.extendedGamepad) {
+        owner = c; return c.extendedGamepad;
+    }
+    return nil;
+}
 static void sample_input(void) {
+    s2a_local_pads_poll(focused && !g_hq.open);
+    s2a_local_input_snapshot local_frame;
+    BOOL local = s2a_local_pads_prepare(&local_frame);
+    atomic_store(&local_joycon_active, local);
+    if (local) s2a_joycon_imu_set_enabled(0);   // SDL owns these Joy-Con sensor handles.
     int32_t kbd_sticks[4] = {0}; uint32_t kbd_buttons = 0;
     uint32_t slot_buttons[S2A_MAX_PADS] = {0};
     int32_t slot_sticks[S2A_MAX_PADS][4] = {{0}};
-    GCExtendedGamepad *active = focused ? active_pad(GCController.controllers) : nil;
+    GCExtendedGamepad *active = focused ? (local ? local_feedback_pad(GCController.controllers) : active_pad(GCController.controllers)) : nil;
     sample_motion(active);
     if (active) rumble_select(active.controller);   // 失焦不换会话：切回来同一个手柄接着震
     if (focused) sample_home_quit(active);
@@ -852,11 +884,13 @@ static void sample_input(void) {
     if (hasBLE) { live_ids[n] = &ns2_slot_id; live_pads[n] = nil; n++; }
     // Switch 2 Pro 是输入来源时系统手柄那一路不读（同改前；同一只手柄也可能出现在系统手柄列表里，两路都读会变成两个玩家）
     if (!hasBLE) for (GCController *c in GCController.controllers) {
+        if (local && is_local_joycon(c)) continue;
         GCExtendedGamepad *p = c.extendedGamepad;
         if (!p && !pad_has_profile_buttons(c)) continue;   // 只有通用物理描述的手柄也进槽位（sample_profile_state）
         if (n >= 9) break;
         live_ids[n] = (__bridge const void *)c; live_pads[n] = p; live_ctrls[n] = c; n++;
     }
+    const void *previous_ids[S2A_MAX_PADS]; memcpy(previous_ids, pad_id, sizeof previous_ids);
     int slot_of[9];
     int live = s2a_slot_plan(pad_id, live_ids, n, S2A_MAX_PADS, slot_of);
     // 断开清槽：整表重建，只有本轮还在的才写回（强引用随之释放，不会留悬空指针）
@@ -869,6 +903,31 @@ static void sample_input(void) {
         else if (live_pads[j]) { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_pad_state(live_pads[j], &slot_buttons[s], slot_sticks[s]); }
         else { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_profile_state(live_ctrls[j], &slot_buttons[s], slot_sticks[s]); }
     }
+    static uint32_t external_generation;
+    if (memcmp(previous_ids, pad_id, sizeof previous_ids)) external_generation++;
+    int fallback_slot = -1;
+    for (int i = 0; i < S2A_MAX_PADS; i++) pad_local_slot[i] = -1;
+    if (local) {
+        uint32_t merged_buttons[S2A_MAX_PADS] = {0}; int32_t merged_sticks[S2A_MAX_PADS][4] = {{0}};
+        uint32_t mask = local_frame.connected_mask;
+        for (int i = 0; i < S2A_MAX_PADS; i++) if (mask & (1u << i)) {
+            s2a_local_input_slot p = local_frame.slots[i]; merged_buttons[i] = p.buttons;
+            merged_sticks[i][0]=p.lx; merged_sticks[i][1]=p.ly; merged_sticks[i][2]=p.rx; merged_sticks[i][3]=p.ry;
+        }
+        for (int i = 0; i < S2A_MAX_PADS; i++) if (pad_id[i]) {
+            int dst = 0; while (dst < S2A_MAX_PADS && (mask & (1u << dst))) dst++;
+            if (dst == S2A_MAX_PADS) break;
+            mask |= 1u << dst;
+            pad_local_slot[i] = dst;
+            uint32_t type=hasBLE&&pad_id[i]==&ns2_slot_id&&s2a_mac_ns2_kind()==NS2_KIND_JOYCON_PAIR?4u:1u;
+            local_frame.slots[dst] = (s2a_local_input_slot){type, slot_buttons[i], slot_sticks[i][0], slot_sticks[i][1], slot_sticks[i][2], slot_sticks[i][3]};
+            merged_buttons[dst]=slot_buttons[i]; memcpy(merged_sticks[dst],slot_sticks[i],sizeof merged_sticks[dst]);
+            if ((hasBLE && pad_id[i] == &ns2_slot_id) || (!hasBLE && pad_owner[i] == active.controller)) fallback_slot=dst;
+        }
+        local_frame.connected_mask=mask;
+        memcpy(slot_buttons,merged_buttons,sizeof slot_buttons);memcpy(slot_sticks,merged_sticks,sizeof slot_sticks);
+        live=1;for(int i=0;i<S2A_MAX_PADS;i++)if(mask&(1u<<i))live=i+1;
+    }
     if (muted) {
         memset(slot_buttons, 0, sizeof slot_buttons); memset(slot_sticks, 0, sizeof slot_sticks);
     } else {
@@ -877,6 +936,40 @@ static void sample_input(void) {
     }
     for (int s = 0; s < S2A_MAX_PADS; s++)
         for (int i = 0; i < 4; i++) slot_sticks[s][i] = MAX(-32767, MIN(32767, slot_sticks[s][i]));
+    if (local) {
+        // Physical frame; CommitLocalFrame merges the virtual-only vpad once.
+        if(muted)for(int i=0;i<S2A_MAX_PADS;i++){
+            local_frame.slots[i].buttons=0;local_frame.slots[i].lx=local_frame.slots[i].ly=local_frame.slots[i].rx=local_frame.slots[i].ry=0;
+        }
+        uint32_t fallback_type=fallback_slot>=0?local_frame.slots[fallback_slot].type:1;
+        s2a_local_feedback_slot fb={.type=fallback_type,.connected=fallback_slot>=0};
+        GCMotion *m=active.controller.motion;
+        uint32_t sides=fallback_type==4?3u:1u;
+        if(hasBLE||(m.hasRotationRate&&m.hasGravityAndUserAcceleration))fb.reserved|=sides;
+        uint64_t feedback_session=s2a_pad_rumble_session();
+        local_frame.flags=muted?0:S2A_LOCAL_FOCUSED;
+        if(feedback_session)fb.reserved|=sides<<8;
+        // Invalidate old slot leases before routing anything to the original backend.
+        s2a_local_pads_commit(&local_frame,fallback_slot,&fb,external_generation);
+        int want_motion=0; s2a_local_vibration local_pair[2];
+        s2a_local_pads_fallback_request(fallback_slot,&want_motion,local_pair);
+        s2a_pad_set_motion_enabled(!muted&&want_motion);
+        static uint64_t previous_feedback_session;
+        if(previous_feedback_session&&previous_feedback_session!=feedback_session)s2a_pad_stop_rumble(previous_feedback_session);
+        if(feedback_session){s2a_pad_vibration pair[2];memcpy(pair,local_pair,sizeof pair);s2a_pad_set_rumble_pair(feedback_session,pair);}
+        previous_feedback_session=feedback_session;
+        s2a_pad_motion samples[2]={{0}};int count=0;
+        if(!muted&&want_motion){
+            if(hasBLE)count=s2a_mac_ns2_read_motion_pair(samples);
+            else {sample_motion(active);pthread_mutex_lock(&g_motion_mu);if(g_motion_known){samples[0]=g_motion;count=1;}pthread_mutex_unlock(&g_motion_mu);}
+        }
+        for(int i=0;i<count&&i<2;i++)if(samples[i].host_timestamp_us){
+            uint64_t raw_now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)/1000, mono_now=s2a_pad_now_us();
+            uint64_t age=raw_now>=samples[i].host_timestamp_us?raw_now-samples[i].host_timestamp_us:UINT64_MAX;
+            if(age<=250000&&mono_now>=age){memcpy(&fb.motion[i],&samples[i],sizeof samples[i]);fb.motion[i].timestamp_us=mono_now-age;fb.motion_mask|=1u<<i;}
+        }
+        s2a_local_pads_feedback_update(fallback_slot,&fb);
+    } else s2a_local_pads_commit(&local_frame,-1,NULL,external_generation);
     atomic_store(&pad_live, live);
     static int logged_live;   // 诊断：接上手柄 / 拔掉时打一行
     if (live != logged_live) { logged_live = live; fprintf(stderr, "[s2a] 手柄槽位：%d 个（含键盘 / 鼠标）\n", live); }
@@ -884,8 +977,11 @@ static void sample_input(void) {
         atomic_store(&pad_buttons[s], slot_buttons[s]);
         for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[s][i], slot_sticks[s][i]);
     }
-    publish_input(slot_buttons[0], slot_sticks[0]);   // 玩家 1：旧 ABI + 事件驱动 ABI（含鼠标视角）
-    publish_keyboard(muted);   // R5：键盘区原始键态（先落键态再唤醒，泵醒来读到同一拍）
+    if(local){
+        for(int i=0;i<4;i++)kbd_sticks[i]=muted?0:MAX(-32767,MIN(32767,kbd_sticks[i]));
+        publish_input(muted?0:kbd_buttons,kbd_sticks);   // local ABI adds virtual input once, on HID consumption.
+    }else publish_input(slot_buttons[0], slot_sticks[0]);   // 玩家 1：旧 ABI + 事件驱动 ABI（含鼠标视角）
+    publish_keyboard(muted);   // Raw keyboard state retains the official wake ordering.
     pthread_mutex_unlock(&g_compose_mu);
 }
 // 多手柄槽位（服务层 InputPump 按符号查；没导出时退回旧的单手柄 ABI）
@@ -922,6 +1018,20 @@ static void pad_event_fast(GCController *controller) {
     uint32_t buttons = 0; int32_t sticks[4] = {0};
     if (controller.extendedGamepad) sample_pad_state(controller.extendedGamepad, &buttons, sticks);
     else sample_profile_state(controller, &buttons, sticks);
+    if (atomic_load(&local_joycon_active)) {
+        int local_slot = pad_local_slot[slot];
+        if (local_slot >= 0) {
+            if (atomic_load(&input_muted)) { buttons = 0; memset(sticks, 0, sizeof sticks); }
+            s2a_local_input_slot frame = {1, buttons, sticks[0], sticks[1], sticks[2], sticks[3]};
+            s2a_local_pads_update_external_input(local_slot, &frame);
+            atomic_store(&pad_buttons[local_slot], buttons);
+            for (int i = 0; i < 4; i++) atomic_store(&pad_sticks[local_slot][i], sticks[i]);
+            s2a_pad_wake();
+        }
+        // The legacy primary snapshot stays virtual-only while local input is active.
+        pthread_mutex_unlock(&g_compose_mu);
+        return;
+    }
     if (atomic_load(&input_muted)) {
         buttons = 0; memset(sticks, 0, sizeof sticks);
     } else if (slot == 0) {
@@ -1217,9 +1327,15 @@ static __weak S2AMacDelegate *g_delegate;
     s2a_mac_ns2_disconnect();
 }
 - (void)testNS2Rumble:(id)sender {
+    const s2a_pad_vibration pair[2] = {{.15f, 160, .0f, 320}, {.0f, 160, .15f, 320}};
+    s2a_local_input_snapshot local;
+    if(s2a_local_pads_read_v2(&local)){
+        s2a_local_vibration values[2];memcpy(values,pair,sizeof values);
+        for(int i=0;i<S2A_MAX_PADS;i++)if(local.connected_mask&(1u<<i))s2a_local_rumble_submit(local.session,local.generation,i,values,250);
+        return;
+    }
     uint64_t session = s2a_pad_rumble_session();
     if (!session) return;
-    const s2a_pad_vibration pair[2] = {{.15f, 160, .0f, 320}, {.0f, 160, .15f, 320}};
     s2a_pad_set_rumble_pair(session, pair);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{ s2a_pad_stop_rumble(session); });
@@ -1265,6 +1381,7 @@ static __weak S2AMacDelegate *g_delegate;
 - (void)shutdown {
     display_focus_publish_ex(NO, NO);
     set_mouse_capture(NO); focused = NO; input_mute_refresh(); s2a_pad_set_active(0); reset_input();
+    s2a_local_pads_shutdown();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_mac_ns2_detach(); s2a_host_shutdown("Mac 窗口关闭"); });
 }
 // 菜单栏「切换游戏」：先留标记（S2A_RETURN_MARKER，开局作业给的路径），再走关窗同一条收尾（等存档写完）；作业见到标记，启动器回到游戏库并切到前台。
@@ -1277,8 +1394,11 @@ static __weak S2AMacDelegate *g_delegate;
     [self shutdown];
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender { (void)sender; [self shutdown]; return NO; }
+- (void)setLocalMode:(NSMenuItem *)sender { s2a_local_pads_set_mode(sender.tag != 0); sample_input(); }
+- (void)recenterLocalMotion:(id)sender { (void)sender; s2a_local_pads_recenter(); sample_input(); }
 - (void)toggleFullScreenItem:(id)sender { (void)sender; fullscreen_toggle(self.window); }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(setLocalMode:)) item.state=(item.tag!=0)==(s2a_local_pads_mode()!=0)?NSControlStateValueOn:NSControlStateValueOff;
     if (item.action == @selector(toggleFullScreenItem:))
         item.title = window_fullscreen(self.window) ? (s2a_ui_zh() ? @"退出全屏幕" : @"Exit Full Screen") : (s2a_ui_zh() ? @"进入全屏幕" : @"Enter Full Screen");
     return YES;
@@ -1374,6 +1494,10 @@ void s2a_front_run(void (*guest_main)(void)) {
         disconnect.target = delegate;
         NSMenuItem *rumble = [inputMenu addItemWithTitle:@"测试手柄震动" action:@selector(testNS2Rumble:) keyEquivalent:@""];
         rumble.target = delegate;
+        [inputMenu addItem:NSMenuItem.separatorItem];
+        NSMenuItem *split=[inputMenu addItemWithTitle:@"Joy-Con：分体横握（SL + SR）" action:@selector(setLocalMode:) keyEquivalent:@""];split.target=delegate;split.tag=1;
+        NSMenuItem *joined=[inputMenu addItemWithTitle:@"Joy-Con：合体（左 L + 右 R）" action:@selector(setLocalMode:) keyEquivalent:@""];joined.target=delegate;joined.tag=0;
+        NSMenuItem *center=[inputMenu addItemWithTitle:@"Joy-Con：重新校准体感" action:@selector(recenterLocalMotion:) keyEquivalent:@""];center.target=delegate;
         inputRoot.submenu = inputMenu; [menu addItem:inputRoot];
         // 「显示」菜单的全屏项（原先没有：⌃⌘F 和菜单都退不出全屏）；系统不再自动插一份重复的
         [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"NSFullScreenMenuItemEverywhere"];
@@ -1447,7 +1571,7 @@ void s2a_front_run(void (*guest_main)(void)) {
         [app run];
         s2a_pad_set_active(0);
         display_focus_publish_ex(NO, NO);
-        set_mouse_capture(NO); focused = NO; input_mute_refresh(); reset_input(); s2a_mac_ns2_detach(); front_layer_detach();
+        set_mouse_capture(NO); focused = NO; input_mute_refresh(); reset_input(); s2a_local_pads_shutdown(); s2a_mac_ns2_detach(); front_layer_detach();
     }
 }
 // GPU 卡住暂停（11-13；graphics/nvn/host_adapt.m s2a_gpu_stuck 经 dlsym 调，Metal 完成回调线程）：连续 3 帧各过 3 秒。冻游戏线程（不再往 GPU 送新活，已交的跑完），

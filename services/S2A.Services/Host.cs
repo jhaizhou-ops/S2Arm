@@ -780,6 +780,7 @@ namespace S2A.Services
         // 小程序循环重验通过即回游戏。已配好仍连着 3 次不过 = 游戏要的配置一个手柄给不了（如要 2 人起），报红交回游戏
         public bool DisplayMessageDialog(ControllerAppletUIArgs args)
         {
+            if (InputPump.TryLocalControllerDialog(Host.Device, args, out bool localAccepted)) return localAccepted;
             // 游戏声明至少 2 人（强制本地合作）：真机上要再连一个手柄，这里开出第二个虚拟手柄（InputPump.SetPads，镜像第一个的输入）
             // 先按上限收回多的（#809：要 1 人、连着两个时原先照配两格，重验不过反复重开），再按下限补开
             InputPump.CapPads(Host.Device, args.PlayerCountMax);

@@ -6,7 +6,7 @@
 #undef main
 #include "s2a_t_result.h"
 int main(void) {
-    const char *args[] = {"input-config", "--input-config-only"};
+    const char *args[] = {"input-config", "--input-config-controller-only"};
     int rc = s2a_mac_input_fixture_main(2, args);
     return S2A_T_RESULT("t_input_config_apple", rc);
 }

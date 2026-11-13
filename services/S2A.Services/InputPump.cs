@@ -3,6 +3,7 @@ using Ryujinx.HLE.HOS.Services.Hid;
 using Ryujinx.HLE.HOS.Services.Hid.Types.SharedMemory.TouchScreen;
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -59,6 +60,197 @@ namespace S2A.Services
         public static ControllerType Type => _type;
         public static int Pads => _pads;
         public static bool ExternalController => _externalController;
+
+        // Optional local-controller ABI. Slots are fixed (left = Player1, right = Player2);
+        // the host supplies Nintendo physical buttons/axes, not sideways mini-gamepad coordinates.
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct LocalPadState
+        {
+            public uint Type, Buttons;
+            public int LeftX, LeftY, RightX, RightY;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct LocalPadsSnapshot
+        {
+            public uint Abi, ConnectedMask, Generation, Reserved;
+            public LocalPadState First, Second;
+        }
+        internal static delegate* unmanaged<LocalPadsSnapshot*, int> LocalPadsRead;
+        [InlineArray(8)]
+        internal struct LocalPadSlots { private LocalPadState _first; }
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct LocalInputSnapshot
+        {
+            public uint Abi, Size, Generation, ConnectedMask;
+            public ulong Session;
+            public uint Flags, Reserved;
+            public LocalPadSlots Slots;
+        }
+        internal const uint LocalPrimaryComplete = 1, LocalFocused = 2;
+        internal static delegate* unmanaged<LocalInputSnapshot*, int> LocalPadsReadV2;
+        internal static delegate* unmanaged<ulong> LocalWakeSequence;
+        internal static delegate* unmanaged<ulong, uint, LocalPadState*, void> LocalMergeVirtual;
+        internal static LocalControllerFeedback.NativeApi LocalFeedbackApi;
+        private static LocalControllerFeedback _localFeedback;
+        private static volatile bool _localActive;
+        private static readonly object LocalStateSync = new();
+        private static LocalInputSnapshot _localConfiguration, _localCommitted;
+        private static bool _localCommitReady;
+        private static volatile int _localPadCap = 8;
+
+        internal static bool ValidLocalSnapshot(in LocalPadsSnapshot snapshot)
+        {
+            static bool Type(uint type) => type is (uint)ControllerType.ProController or (uint)ControllerType.JoyconPair
+                                                       or (uint)ControllerType.JoyconLeft or (uint)ControllerType.JoyconRight;
+            return snapshot.Abi == 1 && snapshot.ConnectedMask <= 3 &&
+                ((snapshot.ConnectedMask & 1) == 0 || Type(snapshot.First.Type)) &&
+                ((snapshot.ConnectedMask & 2) == 0 || Type(snapshot.Second.Type));
+        }
+
+        internal static bool ValidLocalInput(in LocalInputSnapshot snapshot)
+        {
+            if (snapshot.Abi != 2 || snapshot.Size != 224 || snapshot.ConnectedMask > 255) return false;
+            for (int i = 0; i < 8; i++)
+            {
+                if ((snapshot.ConnectedMask & (1u << i)) == 0) continue;
+                uint type = snapshot.Slots[i].Type;
+                if (type != 1 && type != 4 && type != 8 && type != 16 && !(i == 0 && type == 2)) return false;
+            }
+            return true;
+        }
+
+        // Keep physical slot identities; a dialog limits only the HID-visible count (#809).
+        internal static uint LimitLocalMask(uint connected, int cap)
+        {
+            uint visible = 0;
+            for (int i = 0; i < 8 && cap > 0; i++)
+                if ((connected & (1u << i)) != 0) { visible |= 1u << i; cap--; }
+            return visible;
+        }
+
+        private static bool ReadLocalSnapshot(out LocalInputSnapshot snapshot)
+        {
+            LocalInputSnapshot extended = default;
+            if (LocalPadsReadV2 != null && LocalPadsReadV2(&extended) == 1 && ValidLocalInput(in extended))
+            {
+                snapshot = extended;
+                snapshot.ConnectedMask = LimitLocalMask(snapshot.ConnectedMask, _localPadCap);
+                return true;
+            }
+            LocalPadsSnapshot value = default;
+            bool available = LocalPadsRead != null && LocalPadsRead(&value) == 1 && ValidLocalSnapshot(in value);
+            snapshot = new() { Abi = 2, Size = 224, Generation = value.Generation, ConnectedMask = value.ConnectedMask,
+                Session = 1, Flags = LocalFocused };
+            snapshot.Slots[0] = value.First; snapshot.Slots[1] = value.Second;
+            snapshot.ConnectedMask = LimitLocalMask(snapshot.ConnectedMask, _localPadCap);
+            return available;
+        }
+
+        internal static bool SameLocalConfiguration(in LocalInputSnapshot a, in LocalInputSnapshot b)
+        {
+            if (a.Generation != b.Generation || a.ConnectedMask != b.ConnectedMask) return false;
+            for (int i = 0; i < 8; i++) if (a.Slots[i].Type != b.Slots[i].Type) return false;
+            return true;
+        }
+        internal static PlayerIndex LocalPlayer(in LocalInputSnapshot snapshot, int slot) =>
+            slot == 0 && snapshot.Slots[0].Type == (uint)ControllerType.Handheld ? PlayerIndex.Handheld : (PlayerIndex)slot;
+
+        // Only the HID owner calls this. A mode/reconnect change gets one neutral commit before held buttons resume.
+        private static bool ConfigureLocal(Switch device, in LocalInputSnapshot snapshot)
+        {
+            if (_localActive && SameLocalConfiguration(in _localConfiguration, in snapshot)) return false;
+            lock (device.Hid.Npads.RumbleSyncRoot)
+            {
+                Span<ControllerConfig> configs = stackalloc ControllerConfig[8];
+                int count = 0;
+                bool sideways = false;
+                for (int i = 0; i < 8; i++)
+                {
+                    if ((snapshot.ConnectedMask & (1u << i)) == 0) continue;
+                    configs[count++] = new() { Player = LocalPlayer(in snapshot, i), Type = (ControllerType)snapshot.Slots[i].Type };
+                    sideways |= snapshot.Slots[i].Type is 8 or 16;
+                }
+                device.Hid.Npads.Configure(configs[..count]);
+                device.Hid.Npads.JoyHold = sideways
+                    ? Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal : Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Vertical;
+                _device = device;
+                _pads = count;
+                _player = count == 0 ? PlayerIndex.Player1 : configs[0].Player;
+                _type = count == 0 ? ControllerType.None : configs[0].Type;
+                _second = count > 1 ? configs[1].Player : PlayerIndex.Unknown;
+                _externalController = count != 0 && !(count == 1 && _type == ControllerType.Handheld);
+                _localConfiguration = snapshot;
+                _localActive = true;
+                lock (LocalStateSync) _localCommitReady = false;
+                Interlocked.Increment(ref _configurationGeneration);
+            }
+            return true;
+        }
+
+        internal static GamepadInput LocalInput(in LocalPadState state, PlayerIndex player) => new()
+        {
+            PlayerId = player, Buttons = (ControllerKeys)state.Buttons,
+            LStick = new() { Dx = state.LeftX, Dy = state.LeftY },
+            RStick = new() { Dx = state.RightX, Dy = state.RightY },
+        };
+
+        // Keyboard/autoplay are logical controls. Convert only this extra P1 input; never rotate an already physical local frame.
+        internal static void LocalVirtualInput(ref GamepadInput input, ControllerType type)
+        {
+            RotateSideways(ref input, type, Ryujinx.HLE.HOS.Services.Hid.Types.NpadJoyHoldType.Horizontal);
+            if (type != ControllerType.JoyconLeft && type != ControllerType.JoyconRight) return;
+            bool right = type == ControllerType.JoyconRight;
+            ControllerKeys buttons = input.Buttons;
+            input.Buttons &= ~(ControllerKeys.L | ControllerKeys.R | ControllerKeys.LStick |
+                               ControllerKeys.LStickLeft | ControllerKeys.LStickUp | ControllerKeys.LStickRight | ControllerKeys.LStickDown);
+            if ((buttons & ControllerKeys.L) != 0) input.Buttons |= right ? ControllerKeys.SlRight : ControllerKeys.SlLeft;
+            if ((buttons & ControllerKeys.R) != 0) input.Buttons |= right ? ControllerKeys.SrRight : ControllerKeys.SrLeft;
+            if ((buttons & ControllerKeys.LStick) != 0) input.Buttons |= right ? ControllerKeys.RStick : ControllerKeys.LStick;
+        }
+
+        // The applet can wait for the HID owner, but never changes its physical slot assignment or fabricates a second pad.
+        internal static bool TryLocalControllerDialog(Switch device, Ryujinx.HLE.HOS.Applets.ControllerAppletUIArgs args, out bool accepted)
+        {
+            accepted = false;
+            if (!ReadLocalSnapshot(out LocalInputSnapshot wanted)) return false;
+            _localPadCap = args.PlayerCountMax <= 0 ? 8 : Math.Min(args.PlayerCountMax, 8);
+            _padCap = Math.Min(_localPadCap, 4); // Preserve the same request if this host falls back to its legacy path.
+            if (!ReadLocalSnapshot(out wanted)) return false;
+            for (int i = 0; i < 20; i++)
+            {
+                bool committed;
+                lock (LocalStateSync) committed = _localCommitReady && SameLocalConfiguration(in _localCommitted, in wanted);
+                if (committed)
+                {
+                    int count = 0;
+                    for (int slot = 0; slot < 8; slot++)
+                    {
+                        if ((wanted.ConnectedMask & (1u << slot)) == 0) continue;
+                        PlayerIndex player = LocalPlayer(in wanted, slot);
+                        ControllerType type = (ControllerType)wanted.Slots[slot].Type;
+                        bool supportedPlayer = false;
+                        foreach (PlayerIndex candidate in args.SupportedPlayers) if (candidate == player) { supportedPlayer = true; break; }
+                        if (!supportedPlayer || !device.Hid.Npads.IsSupportedPlayer(player)) continue;
+                        ControllerType actual = (ControllerType)NpadDevices.Base(device.Hid.SharedMemory.Npads[(int)player].InternalState.StyleSet);
+                        bool pairOrPro = (type == ControllerType.JoyconPair && actual == ControllerType.ProController) ||
+                                         (type == ControllerType.ProController && actual == ControllerType.JoyconPair);
+                        if (!device.Hid.Npads.StyleSupported(actual, args.SupportedStyles) || (actual != type && !pairOrPro)) continue;
+                        count++;
+                    }
+                    if (!ReadLocalSnapshot(out LocalInputSnapshot current)) return false;
+                    if (!SameLocalConfiguration(in current, in wanted)) { wanted = current; continue; }
+                    // The HID-visible mask already honors the requested upper bound.
+                    int selected = Math.Min(count, args.PlayerCountMax);
+                    accepted = selected > 0 && selected >= args.PlayerCountMin;
+                    if (!accepted) Console.Error.WriteLine($"S2A 本地手柄：实际可用 {count} 人，游戏要求 {args.PlayerCountMin}–{args.PlayerCountMax}；保持当前接法，不创建镜像手柄");
+                    return true;
+                }
+                Thread.Sleep(10);
+                if (!ReadLocalSnapshot(out wanted)) return false;
+            }
+            Console.Error.WriteLine("S2A 本地手柄：等待输入线程应用接法超时，保持当前配置");
+            return true;
+        }
 
         public static void Start(Switch device) => SetPrimary(device, Host.Docked ? PlayerIndex.Player1 : PlayerIndex.Handheld, Host.Docked ? ControllerType.ProController : ControllerType.Handheld);
 
@@ -239,6 +431,16 @@ namespace S2A.Services
                 return;
             }
 
+            LocalControllerBackend local = Exports.LocalControllers;
+            if (local != null)
+            {
+                if (LocalPadsRead == null) LocalPadsRead = (delegate* unmanaged<LocalPadsSnapshot*, int>)local.ReadLegacyInput;
+                if (LocalPadsReadV2 == null) LocalPadsReadV2 = (delegate* unmanaged<LocalInputSnapshot*, int>)local.ReadInput;
+                if (LocalWakeSequence == null) LocalWakeSequence = (delegate* unmanaged<ulong>)local.WakeSequence;
+                if (LocalMergeVirtual == null) LocalMergeVirtual = (delegate* unmanaged<ulong, uint, LocalPadState*, void>)local.MergeVirtual;
+                if (LocalFeedbackApi.Read == null) LocalFeedbackApi = LocalControllerFeedback.FromBackend(local);
+            }
+
             // 自动玩家在宿主里是弱链接：运行时查符号，没链就不并
             if (AutoplayKeys1 == null && NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_autoplay_keys", out nint p))   // 平台例外：自动玩家只在开发宿主里弱链接、生产包没有这个导出，进不了 Native.Imports 的 DllImport
             {
@@ -340,11 +542,16 @@ namespace S2A.Services
             {
                 _feedback?.Stop();
                 _feedback = null;
+                _localFeedback?.Stop();
+                _localFeedback = null;
             }
             _thread = null;
             _device = null;
             _externalController = false;
             _configurationGeneration = 0;
+            _localPadCap = 8;
+            _localActive = false;
+            lock (LocalStateSync) { _localCommitReady = false; _localCommitted = default; }
             _player = PlayerIndex.Handheld;
             _type = ControllerType.Handheld;
             _pads = EnvPads;
@@ -465,11 +672,11 @@ namespace S2A.Services
         //   每次 HID 提交写一遍，同触屏口径（没有键也写一条空状态，游戏读到的永远是最新的）；
         //   软键盘开着（TextInput.Open）给全零，同上面手柄清零的口径（玩家在打字，按键不进游戏）
         private static readonly ulong[] _kbState = new ulong[4];
-        private static void PushKeyboard(Switch device)
+        private static void PushKeyboard(Switch device, bool muted = false)
         {
             ulong* bits = stackalloc ulong[4]; uint mods;
             _kbRead(bits, &mods);
-            bool text = TextInput.Open;
+            bool text = TextInput.Open || muted;
             for (int i = 0; i < 4; i++) _kbState[i] = text ? 0 : bits[i];
             device.Hid.Keyboard.Update(new KeyboardInput { Modifier = text ? 0 : (int)mods, Keys = _kbState });
         }
@@ -704,9 +911,67 @@ namespace S2A.Services
             }
         }
 
+        internal static void CommitLocalFrame(Switch device, in LocalInputSnapshot snapshot, List<GamepadInput> states, int* sticks)
+        {
+            if (_feedback != null) { _feedback.Stop(); _feedback = null; }
+            bool focused = (snapshot.Flags & LocalFocused) != 0 && !TextInput.Open;
+            LocalInputSnapshot feedbackInput = snapshot;
+            if (!focused) feedbackInput.Flags &= ~LocalFocused;
+            if (_localFeedback == null && LocalFeedbackApi.Read != null) _localFeedback = new(device, LocalFeedbackApi);
+            _localFeedback?.Prepare(in feedbackInput);
+            bool transition = ConfigureLocal(device, in snapshot);
+            states.Clear();
+            for (int slot = 0; slot < 8; slot++)
+            {
+                if ((snapshot.ConnectedMask & (1u << slot)) == 0) continue;
+                LocalPadState pad = snapshot.Slots[slot];
+                // A platform may consume its touch/BLE latch only when this HID owner commits P1.
+                // Snapshot reads from the controller dialog must remain side-effect free.
+                if (!transition && focused && slot == 0 && LocalMergeVirtual != null)
+                    LocalMergeVirtual(snapshot.Session, snapshot.Generation, &pad);
+                PlayerIndex player = LocalPlayer(in snapshot, slot);
+                GamepadInput input = transition || !focused ? new() { PlayerId = player } : LocalInput(in pad, player);
+                if (!transition && focused && slot == 0)
+                {
+                    GamepadInput extra = new() { PlayerId = player };
+                    if ((snapshot.Flags & LocalPrimaryComplete) == 0 && InputHook != null) InputHook(ref extra);
+                    Merge(ref extra, AutoplayKeys1 != null ? AutoplayKeys1() : 0);
+                    if (_autoplaySticks != null && _autoplaySticks(sticks) != 0)
+                    {
+                        extra.LStick.Dx = sticks[0]; extra.LStick.Dy = sticks[1];
+                        extra.RStick.Dx = sticks[2]; extra.RStick.Dy = sticks[3];
+                    }
+                    LocalVirtualInput(ref extra, (ControllerType)pad.Type);
+                    input.Buttons |= extra.Buttons;
+                    input.LStick.Dx = (int)Math.Clamp((long)input.LStick.Dx + extra.LStick.Dx, -32767, 32767);
+                    input.LStick.Dy = (int)Math.Clamp((long)input.LStick.Dy + extra.LStick.Dy, -32767, 32767);
+                    input.RStick.Dx = (int)Math.Clamp((long)input.RStick.Dx + extra.RStick.Dx, -32767, 32767);
+                    input.RStick.Dy = (int)Math.Clamp((long)input.RStick.Dy + extra.RStick.Dy, -32767, 32767);
+                }
+                input.Buttons |= device.Hid.UpdateStickButtons(input.LStick, input.RStick);
+                states.Add(input);
+            }
+            device.Hid.Npads.Update(states);
+            if (_kbRead != null) PushKeyboard(device, muted: !focused);
+            Cheats.SetKeys(states.Count != 0 ? states[0].Buttons : default);
+            if (TouchHook != null) TouchHook(device); else PushTouch(device);
+            _localFeedback?.Tick(in feedbackInput);
+            lock (LocalStateSync) { _localCommitted = snapshot; _localCommitReady = true; }
+        }
+
+        // The native event sequence also wakes local HID commits. The short timeout
+        // remains necessary for physical topology/sensor changes and lease renewal.
+        internal static bool WaitLocalFrame(ulong observedSequence,
+            delegate* unmanaged<ulong, ulong, int> wait, delegate* unmanaged<ulong> now)
+        {
+            if (wait == null || now == null) return false;
+            wait(observedSequence, now() + 8_000);
+            return true;
+        }
+
         private static void Loop(Switch device)
         {
-            List<GamepadInput> states = new(4) { default };   // 最多 4 格（本地四人分屏），一次分配好，不在每帧扩容
+            List<GamepadInput> states = new(8) { default };   // 本地 ABI 最多八个真实槽；旧宿主仍走当前官方四槽路径
             // 每键在第一次 HID 提交后保持 20 ms，让正常 60 Hz 轮询能看到短按。
             // 同键快速连点仍可能合并；不承诺卡帧或低频采样游戏一定读到。
             ButtonVisibility visibility = new();
@@ -720,6 +985,25 @@ namespace S2A.Services
             {
                 Ryujinx.Common.S2AThreadAlloc.Tick("输入");
                 Lifecycle.Tick(Host.Device?.System);   // 焦点 / 底座变化转给游戏（接口 v2.15）
+                if (ReadLocalSnapshot(out LocalInputSnapshot local))
+                {
+                    // Observe before committing: an event during the commit must wake the
+                    // next iteration. A consuming vpad read here would discard short presses.
+                    bool canWait = LocalWakeSequence != null;
+                    ulong observed = canWait ? LocalWakeSequence() : 0;
+                    CommitLocalFrame(device, in local, states, st);
+                    if (!canWait || !WaitLocalFrame(observed, _padWait, _padNow)) Thread.Sleep(8);
+                    continue;
+                }
+                if (_localActive)
+                {
+                    _localFeedback?.Stop(); _localFeedback = null;
+                    _localActive = false;
+                    lock (LocalStateSync) _localCommitReady = false;
+                    _pads = EnvPads;
+                    SetPrimary(device, Host.Docked ? PlayerIndex.Player1 : PlayerIndex.Handheld, Host.Docked ? ControllerType.ProController : ControllerType.Handheld);
+                }
+                if (states.Count == 0) states.Add(default);
                 if (AutoplayPads != null && AutoplayPads() > _pads) SetPads(device, AutoplayPads());   // 先改配再取主手柄号：两人时主手柄离开掌机格
                 // 本地多手柄：Mac 前端报告接了几只手柄就开到几格（最多 4），接上第二只手柄即成为玩家 2
                 int livePads = _vpadPadCount != null ? _vpadPadCount() : 0;

@@ -8,7 +8,10 @@
 #include <unistd.h>
 #include "../../../macos/ns2_relay.h"
 #include "../../../ios/input_config.h"
-#import "../../../macos/front_mac.m"
+#ifndef S2A_MAC_INPUT_IMPL
+#define S2A_MAC_INPUT_IMPL "../../../macos/front_mac.m"
+#endif
+#import S2A_MAC_INPUT_IMPL
 #import "../../../macos/input_guide.m"
 #import "../../../macos/controller_view.m"
 
@@ -48,7 +51,8 @@ int s2a_widen_game(void) { return fake_widen_game; }
 int s2a_widen_full(void) { return fake_widen_full; }
 int s2a_screen_w(void) { return fake_screen_w; }
 int s2a_screen_h(void) { return fake_screen_h; }
-static void expect(int ok, const char *what) { if (!ok) { fprintf(stderr, "FAIL: %s\n", what); exit(1); } }
+static unsigned expect_checks;
+static void expect(int ok, const char *what) { expect_checks++; if (!ok) { fprintf(stderr, "FAIL: %s\n", what); exit(1); } }
 static NSEvent *key_event(NSEventType type, unsigned short code, BOOL repeat) {
     return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:0 timestamp:0
         windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:repeat keyCode:code];
@@ -500,6 +504,7 @@ static void test_capture_key_order(void) {
 @interface FakeController : NSObject
 @property(strong) FakePad *extendedGamepad;
 @property(strong) dispatch_queue_t handlerQueue;
+@property(copy) NSString *productCategory;
 @end
 @implementation FakeController
 @end
@@ -818,6 +823,69 @@ static void test_pad_fast_path(void) {
     [pad0.extendedGamepad.buttonA setValue:0];
     reset_input();
     puts("Mac pad: dedicated-queue fast path, busy-main publish, player 2 slot and mute passed");
+}
+
+static void test_local_feedback_owner(void) {
+    FakePad *a=[FakePad new],*b=[FakePad new];a.lastEventTimestamp=10;b.lastEventTimestamp=20;
+    FakeController *ca=fake_controller(a),*cb=fake_controller(b);
+    expect(local_feedback_pad(@[])==nil,"empty local feedback has no owner");
+    expect((id)local_feedback_pad(@[ca,cb])==a,"local feedback selects the first available ordinary GC pad");
+    for (int i=0;i<4;i++) {
+        a.lastEventTimestamp=i%2?100+i:10;b.lastEventTimestamp=i%2?20:100+i;
+        expect((id)active_pad(@[ca,cb])==(i%2?a:b),"legacy recent-activity selection still works");
+        expect((id)local_feedback_pad(@[cb,ca])==a,"local feedback owner survives alternating GC activity and list order");
+    }
+    expect((id)local_feedback_pad(@[cb])==b,"local feedback changes only when its owner disconnects");
+    expect(local_feedback_pad(@[])==nil,"all ordinary GC pads disconnected releases feedback owner");
+}
+static void test_notification_mouse_peek(void) {
+    focused=YES;reset_input();s2a_pad_set_active(0);s2a_pad_set_active(1);
+    atomic_store(&mouse_hold,0);atomic_store(&mouse_dx,123);atomic_store(&mouse_dy,-456);
+    int32_t zero[4]={0};s2a_pad_update(S2A_PAD_TOUCH,1,1,zero);s2a_pad_update(S2A_PAD_TOUCH,1,0,zero);
+    uint64_t seq=s2a_pad_notification_seq();
+    expect(s2a_pad_notification_seq()==seq,"wake sequence peek is stable without new events");
+    s2a_pad_snapshot frame;s2a_vpad_read_ex(&frame);
+    expect(frame.buttons==1&&frame.host_timestamp_us!=0,"wake peek preserves the real short-press latch and timestamp");
+    expect(frame.axes[2]==123&&frame.axes[3]==-456,"wake peek preserves the actual Mac mouse delta");
+    s2a_vpad_read_ex(&frame);
+    expect(!frame.buttons&&!frame.axes[2]&&!frame.axes[3],"the HID read consumes latch and mouse delta exactly once");
+}
+
+// SDL Joy-Con P1/P2 + the original GC backend appended at P3. Like the
+// existing virtual-GC fixture, install the topology mirror by hand: no SDL
+// library, Bluetooth or physical controller is opened in this fixture.
+static void test_local_gc_fast_path(void) {
+    config = default_config(); keys = [NSMutableSet set]; mouse = [NSMutableSet set]; focused = YES;
+    read_key_state = key_state; memset(physical_keys, 0, sizeof physical_keys);
+    reset_input();
+    GCController *pad = [GCController controllerWithExtendedGamepad]; install_pad_handler(pad);
+    s2a_local_input_snapshot frame = {.abi=2, .size=224, .connected_mask=7, .flags=S2A_LOCAL_FOCUSED};
+    frame.slots[0] = (s2a_local_input_slot){.type=8, .buttons=1u<<12};
+    frame.slots[1] = (s2a_local_input_slot){.type=16, .buttons=4};
+    frame.slots[2].type = 1;
+    s2a_local_pads_commit(&frame, -1, NULL, 100);
+    pthread_mutex_lock(&g_compose_mu);
+    pad_slot_owner[0] = pad; pad_local_slot[0] = 2;
+    atomic_store(&local_joycon_active, 1); atomic_store(&input_muted, 0);
+    pthread_mutex_unlock(&g_compose_mu);
+    [pad.extendedGamepad.buttonA setValue:1];
+    s2a_pad_snapshot before, after; s2a_vpad_read_ex(&before);
+    dispatch_sync(pad.handlerQueue, ^{ pad.extendedGamepad.valueChangedHandler(pad.extendedGamepad, pad.extendedGamepad.buttonA); });
+    s2a_local_input_snapshot result; s2a_local_pads_read_v2(&result);
+    expect(result.slots[2].buttons == 1, "fast GC event updates its appended local slot");
+    expect(result.slots[0].buttons == (1u<<12) && result.slots[1].buttons == 4, "fast GC event preserves both Joy-Con players");
+    int32_t sticks[4]; expect(s2a_vpad_read_pad(2, sticks) == 1, "fast GC event updates appended slot atomics");
+    s2a_vpad_read_ex(&after);
+    expect(after.buttons == before.buttons && after.buttons == 0, "fast GC event never duplicates physical input into virtual player 1");
+    expect(after.notification_seq != before.notification_seq, "appended local GC event wakes the HID pump");
+    atomic_store(&input_muted, 1);
+    pad.extendedGamepad.valueChangedHandler(pad.extendedGamepad, pad.extendedGamepad.buttonA);
+    s2a_local_pads_read_v2(&result);
+    expect(result.slots[2].buttons == 0 && s2a_vpad_read_pad(2, sticks) == 0, "muted appended GC event publishes neutral input");
+    [pad.extendedGamepad.buttonA setValue:0];
+    atomic_store(&local_joycon_active, 0);
+    sample_input(); reset_input();
+    puts("Mac local GC: appended fast slot, Joy-Con isolation, virtual-only primary and mute passed");
 }
 
 // 延迟读数（--pad-latency-probe 手动跑，不进门禁）：事件投递 → 回调执行 → pad.c 发布的毫秒读数，
@@ -1175,6 +1243,13 @@ int main(int argc, const char **argv) {
     unlink(relayPath);
     unsetenv("S2A_NS2_SOCKET");
     @autoreleasepool {
+        if (argc == 2 && !strcmp(argv[1], "--input-config-controller-only")) {
+            test_shared_input_config();
+            unsigned before=expect_checks;
+            test_pad_fast_path(); test_local_gc_fast_path(); test_local_feedback_owner(); test_notification_mouse_peek();
+            printf("Mac controller production assertions: %u/%u passed (includes repeated state/queue probes)\n",expect_checks-before,expect_checks-before);
+            return 0;
+        }
         if (argc == 2 && !strcmp(argv[1], "--input-config-only")) { test_shared_input_config(); return 0; }
         if (argc == 2 && !strcmp(argv[1], "--pad-latency-probe")) { pad_latency_probe(); return 0; }
         if (argc >= 3 && !strcmp(argv[1], "--guide-render")) {
@@ -1221,6 +1296,9 @@ int main(int argc, const char **argv) {
         test_pad_disconnect();
         test_pad_handler_install();
         test_pad_fast_path();
+        test_local_gc_fast_path();
+        test_local_feedback_owner();
+        test_notification_mouse_peek();
         test_profile_only_pad();
     test_pad_layout();
         test_save_atomic_warning();

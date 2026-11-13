@@ -49,6 +49,24 @@ static void touch_only(void) {
     s2a_pad_set_active(0); s2a_pad_set_active(1);
     puts("touch-only：16 位锁存、和弦、持有/释放、四轴与 read/read_ex 一致（生产接口向量，非触摸硬件实测）");
 }
+// A wait-loop probe cannot consume the only copy of a short touch press or
+// its pending event time. Only the subsequent HID read consumes that latch.
+static void notification_peek(void) {
+    s2a_pad_set_active(0); s2a_pad_set_active(1);
+    uint64_t before = s2a_pad_notification_seq();
+    uint64_t event_start = s2a_pad_now_us();
+    s2a_pad_update(S2A_PAD_TOUCH, 1, 1u << 3, zero);
+    s2a_pad_update(S2A_PAD_TOUCH, 1, 0, zero);
+    uint64_t after = s2a_pad_notification_seq();
+    assert(after != before);
+    for (int i = 0; i < 3; i++) assert(s2a_pad_notification_seq() == after);
+    s2a_pad_snapshot snapshot; s2a_pad_read_ex(&snapshot);
+    assert(snapshot.buttons == (1u << 3));
+    assert(snapshot.notification_seq == after && snapshot.host_timestamp_us >= event_start);
+    assert(snapshot.host_timestamp_us <= snapshot.read_timestamp_us);
+    s2a_pad_read_ex(&snapshot); assert(!snapshot.buttons && !snapshot.host_timestamp_us);
+    puts("notification peek: real short-press latch and pending timestamp survive all read-only wake probes");
+}
 static void expect(uint32_t buttons, int32_t x, int32_t y) {
     int32_t axes[4]; assert(s2a_pad_read(axes, NULL) == buttons);
     assert(axes[0] == x && axes[1] == y && axes[2] == 0 && axes[3] == 0);
@@ -139,6 +157,7 @@ static void face_buttons(void) {
 int main(void) {
     face_buttons();
     touch_only();
+    notification_peek();
     session_reset();
     s2a_pad_set_active(1);
     int32_t tilted[4] = {12345, -23456, 0, 0};

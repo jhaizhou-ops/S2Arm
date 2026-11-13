@@ -142,6 +142,19 @@
   ],
   "allowlist": [
     {
+      "id": "sdl_public_license_credit",
+      "categories": [
+        "email"
+      ],
+      "paths": [
+        "NOTICE",
+        "macos/sdl3/LICENSE.txt"
+      ],
+      "regex": "slouken@libsdl\\.org",
+      "line_regex": "^Copyright \\(C\\) 1997-2026 Sam Lantinga <slouken@libsdl\\.org>$",
+      "reason": "SDL 官方源码随附的 zlib 许可署名；仅允许这两个许可声明路径、这一行原文和这一公开作者邮箱，不改写第三方版权声明。"
+    },
+    {
       "id": "upstream_inkscape_export_path",
       "categories": [
         "home_path"

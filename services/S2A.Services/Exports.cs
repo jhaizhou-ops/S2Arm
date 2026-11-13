@@ -18,6 +18,10 @@ namespace S2A.Services
         // 声音输出由平台装配登记；未登记时使用哑设备并报红。
         public static delegate*<IHardwareDeviceDriver> AudioFactory;
 
+        // Optional local-controller topology and feedback, registered before Boot.
+        // Null retains the existing host's input/feedback path.
+        public static LocalControllerBackend LocalControllers { get; set; }
+
         // 相册截图 JPEG 编码器由平台装配登记（苹果：platform/apple/cs/capture，ImageIO）；HostConfiguration 给了编码器时以它为准（安卓）
         public static Ryujinx.HLE.UI.ScreenshotJpegEncoder ScreenshotEncoder { get; set; }
 

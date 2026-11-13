@@ -47,6 +47,24 @@ namespace Ryujinx.HLE.HOS.Services.Hid
             Imu.Push(player, joyDual, accelerationG, angularVelocityDegrees, timestampUs, sensor);
         }
 
+        // Read the existing game registrations without changing them. JoyDual device indices are L=0/R=1;
+        // FullKey/Handheld use device=2, represented here as a single sensor source (bit 0).
+        public uint GetActiveSixAxisMask(PlayerIndex player)
+        {
+            uint mask = 0;
+            int npadId = player == PlayerIndex.Handheld ? 0x20 : (int)player;
+            lock (_sixAxisSensors)
+                foreach (var sensor in _sixAxisSensors)
+                {
+                    int handle = sensor.Handle;
+                    if (((handle >> 8) & 0xff) != npadId) continue;
+                    int style = handle & 0xff, side = (handle >> 16) & 0xff;
+                    if (style == 5 && side < 2) mask |= 1u << side;
+                    else if (style is 3 or 4 or 6 or 7) mask |= 1;
+                }
+            return mask;
+        }
+
         public void SetSixAxisActive(long userId, int handle, bool active)
         {
             lock (_sixAxisSensors)
