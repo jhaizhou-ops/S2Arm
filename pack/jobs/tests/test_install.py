@@ -766,7 +766,7 @@ class FlowTests(unittest.TestCase):
         def run(args, log=None, env=None, cwd=None, on_line=None):
             Path(log).parent.mkdir(parents=True, exist_ok=True); Path(log).write_text("error: Your maximum App ID limit has been reached.\n")
             raise Failure("S2Arm 工具退出，当前阶段未完成。", code="tool_exit")
-        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None, agreed=()):
             ipa = out / "t.ipa"; self._real_ipa(ipa)
             return ipa, [gid], "SID1"
         with um.patch.object(install, "xcode_teams", return_value=[dict(id="TEAM1", name="我", free=True)]), \
@@ -938,14 +938,14 @@ class AssembleTests(unittest.TestCase):
             z.writestr("Payload/S2Arm.app/s2a_catalogue.json", json.dumps({"schema": 1, "shell_id": sid, "games": [{"title_id": g} for g in games]}))
         return path
 
-    def _assemble(self, gid, others=(), failed=(), sid="SID1", runs=None):
+    def _assemble(self, gid, others=(), failed=(), sid="SID1", runs=None, agreed=None):
         import ipa as packer, host_update
         self.sid = sid
         shell = self.c.private / "shell"; shell.mkdir(exist_ok=True); (shell / "manifest.json").write_text("{}")
         runs = [] if runs is None else runs
         with um.patch.object(packer, "current_shell_id", return_value=sid), um.patch.object(packer, "container_shell", return_value=shell), \
              um.patch.object(host_update, "engine_compat", return_value=dict(self.COMPAT)), um.patch.object(self.c, "run", self._run(runs)):
-            return packer.assemble(self.c, gid, others, failed=failed)
+            return packer.assemble(self.c, gid, others, failed=failed, agreed=agreed or {})
 
     @staticmethod
     def _games_arg(runs):
@@ -1025,6 +1025,24 @@ class AssembleTests(unittest.TestCase):
             _, games, _ = self._assemble(self.A, [self.B], sid="SID2", runs=runs)
         self.assertEqual(games, [self.A]); self.assertEqual(self._games_arg(runs)[0], [self.A])
         self.assertEqual(len(notes), 1); self.assertIn("乙款", notes[0][0]); self.assertEqual(notes[0][1], "warning")
+
+    def test_assemble_stale_two_reasons_and_agreed_not_asked_again(self):
+        """#479：带不进的分两种说——乙有 iPhone 版但是旧壳出的（新版认不得）、丙这台电脑上根本没有 iPhone 版；
+        这台手机在本版壳上已同意过不带乙、丙（agreed）→ 不再问，照不带它们装；agreed 只含乙、丙没同意过 → 照旧问"""
+        C = "0100CCCC00000000"
+        self._library((self.A, "甲"), (self.B, "乙款"), (C, "丙款"))
+        ios_fixture(self.c, self.A, shell="SID2"); ios_fixture(self.c, self.B, shell="SID1", compat=dict(hostAbi=1, dmshChain="bbbb"))
+        with self.assertRaises(Failure) as e:
+            self._assemble(self.A, [self.B, C], sid="SID2")
+        msg = str(e.exception)
+        self.assertEqual(e.exception.code, "container_stale")
+        self.assertIn("这台电脑上没有它们的 iPhone 版：「丙款」", msg); self.assertIn("新版认不得，要重新「打 iPhone 包」：「乙款」", msg)
+        with self.assertRaises(Failure):
+            self._assemble(self.A, [self.B, C], sid="SID2", agreed={"SID2": [self.B]})
+        runs = []
+        with um.patch.object(self.c, "diagnostic", lambda m, **k: None):
+            _, games, _ = self._assemble(self.A, [self.B, C], sid="SID2", runs=runs, agreed={"SID2": [self.B, C.lower()]})
+        self.assertEqual(games, [self.A])
 
     def test_assemble_skips_games_deleted_from_library(self):
         """#194：手机上的某款已从游戏库删除：不点名、不挡，新容器不带它，黄字说明"""
@@ -1110,6 +1128,20 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual((r["updated"], r["fromShell"], r["toShell"], r["skipped"]), (True, "SID1", "SID2", [B]))
         rec = layout.load_device(self.c, "dev1")
         self.assertEqual((rec["shellId"], rec["games"]), ("SID2", {A: dict(pack="pa")}))
+        self.assertEqual(rec["staleAgreed"], {"SID2": [B]})   # #479：同意不带乙记在设备记录（按壳号）
+
+    def test_update_phone_agreed_before_not_asked_again(self):
+        """#479：这台手机在本版壳 SID2 上已同意过不带乙（staleAgreed）→ 不带 acceptStale 也不再问，照只带甲换壳；换了壳号的旧同意不算"""
+        A, B = self.A, self.B
+        _, pushed, signed = self._update()
+        rec = layout.load_device(self.c, "dev1")
+        layout.save_device(self.c, "dev1", dict(rec, staleAgreed={"SID0": [B]}))
+        with self.assertRaises(Failure) as e:
+            install.update_phone(self.c)
+        self.assertEqual(e.exception.code, "container_stale")
+        layout.save_device(self.c, "dev1", dict(rec, staleAgreed={"SID2": [B]}))
+        r = install.update_phone(self.c)
+        self.assertEqual((r["updated"], r["skipped"], [x[0] for x in signed]), (True, [B], [[A]]))
 
     def test_update_phone_asks_then_drops_games_from_another_computer(self):
         """手机上还有一款只在别的电脑装过（不在本库、不在本机记录）：没确认 → 报 container_would_drop 点名它，不签不装；

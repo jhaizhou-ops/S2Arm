@@ -313,7 +313,7 @@ class InstallFailures(JobCase):
             z.writestr("Payload/Test.app/S2Arm", b"bin")
         self.c.r.update(gameId=gid)
         import ipa as packer
-        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None):
+        def fake_assemble(c, g, others=(), failed=(), root=None, dest=None, agreed=()):
             return archive, [gid], "SID1"
         def unpack(args, **kw):
             with zipfile.ZipFile(archive) as z: z.extractall(args[-1])

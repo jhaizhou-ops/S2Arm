@@ -554,11 +554,12 @@ def container_custom(c):
     return out
 
 
-def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
+def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None):
     """现组容器（一个 App 装多款）：本版 iPhone 壳 + 这款和 others（这台手机上已有的各款）的容器件（pack/ship_ext.py container），出 S2Arm.app + S2Arm.ipa 到 dest
     （缺省游戏库同盘临时目录，由调用方装上后再放到默认位置根）。不再在上一次的底包上加款：底包和各款镜像会不一致，且换壳时要整包重出。
     gid 为 None：只组 others（从手机删一款）。哪款放不进本壳（不是本壳出的、新宿主也不认得）就报 container_stale 点名，不装半套；
     游戏库里已删的款不再带（手机上的存档还在）。root / dest：出包重叠早装用（旁路刚完成的产物根，出到临时目录）。
+    agreed：设备记录 staleAgreed（#479，{壳号: [游戏号]}）——这台手机在本版壳上同意过「这次不带」的；带不进的都在里面就不再问，照不带它们装。换了壳号重新问
     → (ipa, 全部款, 壳号)。Windows 不签（--sign none，交给 plumesign）；Mac 自签，装机时再按玩家团队重签"""
     import host_update
     sid = current_shell_id(c)
@@ -569,7 +570,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         if roots[gid] is None:
             raise Failure("这款的 iPhone 版不是这一版 S2Arm 出的（或还没出）：先「打 iPhone 包」，再装到 iPhone。", code="container_stale")
     in_library = {g["id"].upper() for g in c.catalog()["games"]}
-    stale, deleted = [], []
+    stale, deleted, missing = [], [], set()
     names = {g["id"].upper(): g.get("name") or g["id"] for g in c.catalog()["games"]}
     for g in others:
         g = g.upper()
@@ -581,11 +582,19 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None):
         roots[g] = usable_kit(c, g, sid, failed)
         if roots[g] is None:
             stale.append(names.get(g, g))
+            if not (layout.ios_kit(c, g) / "main.npdm").is_file():
+                missing.add(g)
     stale_ids = [g for g in roots if roots[g] is None]
-    if stale and c.r.get("acceptStale") is not True:   # 认得出的风险（v0.3.1 装机原则）：问玩家，确认后这次先不带它们照装，不替他拒
-        raise Failure("S2Arm 更新过，手机上的「" + "」「".join(stale) + "」要按新版重新出包才能放进同一个 App。确认继续的话，这次先不带它们照装这款："
-                      "它们的存档和资源都留在手机上，之后给它们各「打 iPhone 包」再装一次就回来。不想这样就先给它们重新出包。", code="container_stale",
-                      internal=" ".join(stale_ids))
+    agreed = {a.upper() for a in ((agreed or {}).get(sid) or [])}
+    if any(g not in agreed for g in stale_ids) and c.r.get("acceptStale") is not True:   # 认得出的风险（v0.3.1 装机原则）：问玩家，确认后这次先不带它们照装，不替他拒
+        # 两种原因分开说（#479）：这台电脑上根本没有它的 iPhone 版（别的电脑出的 / 删了）、有但是旧版 S2Arm 出的（新版认不得，要重新打 iPhone 包）
+        #   每行一个固定句式（游戏名进 {0} 占位），界面按 Localizable.json 逐行翻
+        lost = "".join("「" + names.get(g, g) + "」" for g in stale_ids if g in missing)
+        old = "".join("「" + names.get(g, g) + "」" for g in stale_ids if g not in missing)
+        lines = ["手机上有几款游戏这次放不进同一个 App。"] + (["这台电脑上没有它们的 iPhone 版：" + lost] if lost else []) \
+            + (["它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：" + old] if old else []) \
+            + ["确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。"]
+        raise Failure("\n".join(lines), code="container_stale", internal=" ".join(stale_ids))
     if stale:
         for g in stale_ids: roots.pop(g)
         c.diagnostic("「" + "」「".join(stale) + "」这次没放进新版 S2Arm（要按新版重新出包）；手机上的存档和资源都还在，给它们各「打 iPhone 包」再装一次就回来。",

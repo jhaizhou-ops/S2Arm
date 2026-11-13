@@ -7132,6 +7132,22 @@
   "en": "The library is on a Mac OS Extended (HFS+) drive. Exporting works, but this drive can't clone files, so exports take an extra copy of the resources' space."
  },
  {
+  "source": "手机上有几款游戏这次放不进同一个 App。",
+  "en": "Some games on the phone can't go into the same app this time."
+ },
+ {
+  "source": "这台电脑上没有它们的 iPhone 版：{0}",
+  "en": "This computer has no iPhone build of: {0}"
+ },
+ {
+  "source": "它们是旧版 S2Arm 出的 iPhone 版，新版认不得，要重新「打 iPhone 包」：{0}",
+  "en": "Built for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: {0}"
+ },
+ {
+  "source": "确认继续的话，这次先不带它们照装，它们的存档和资源都留在手机上，之后给它们「打 iPhone 包」再装一次就回来。同意一次后，这台手机在这一版 S2Arm 上不再为它们问。",
+  "en": "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. After you agree once, this phone won't ask about them again on this S2Arm version."
+ },
+ {
   "source": "先给点名的游戏各「打 iPhone 包」一次，再装到 iPhone；也可以确认后这次先不带它们照装，它们的存档和资源留在手机上，重新出包再装就回来。",
   "en": "Run \"Build for iPhone\" once for each game named, then install on iPhone. Or confirm to install without them this time: their saves and resources stay on the phone, and they come back once you rebuild and install them."
  },
