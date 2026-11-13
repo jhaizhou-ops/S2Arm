@@ -1860,10 +1860,19 @@ def remove_from_phone(c):
     c.begin("找签名账号与 iPhone", 1, 4)
     ph = phone_for(c)
     rec = layout.load_device(c, ph.key)
-    if gid not in rec.get("games", {}):
-        raise Failure("手机上的 S2Arm 里没有这款。", code="job_failed")
+    # 包名：这台记过的；没记过（Windows 第一次在这台电脑上操作）按当前账号算（预检清单 #36：原先没记就不让删）。真算不出才停——不知道动的是哪个 App
+    ph.bid = phone_bid(ph)
     if not ph.bid:
-        raise Failure("这台电脑没记录手机上的 S2Arm：先装一次再删。", code="job_failed")
+        raise Failure("定不出手机上 S2Arm 的包名（这台电脑没装过、也读不到当前签名账号）：在这台电脑上装一次任意游戏后再删。", code="job_failed")
+    if gid not in rec.get("games", {}):
+        # 本机记录里没有这款（别的电脑装的）：真相在手机上（预检清单 #35：原先只看本机记录就说「没有这款」）
+        on_phone = phone_games(c, ph)
+        if on_phone is not None and on_phone and gid not in on_phone:
+            note(c, f"手机上的 S2Arm 里本来就没有 {gid}，不用删")
+            return dict(games=sorted(on_phone), bundleId=ph.bid, removed=gid, saveBackup="", dataRemoved=True, alreadyAbsent=True, **ph.info)
+        if on_phone is None:
+            note(c, f"手机上没装这个 S2Arm，{gid} 不在手机上，不用删")
+            return dict(games=[], bundleId=ph.bid, removed=gid, saveBackup="", dataRemoved=True, alreadyAbsent=True, **ph.info)
     c.begin("备份这款的存档", 2, 4)
     backup = ph.backup(gid)
     c.begin("更新手机上的 S2Arm", 3, 4)

@@ -276,9 +276,7 @@ def build_ios(c, game, scheme):
     t = scheme["targets"].get("ios")
     if not t:
         raise Failure(f"{scheme['name']} 没登记 iPhone / iPad。", code="job_failed")
-    ok, why = eligibility(scheme, game)
-    if not ok:
-        raise Failure(why, code="downstream_ineligible")
+    # 不按导入更新的版本号预先拦（预检清单 #63）：解包后 _check_exefs 按程序字节核是不是那一版，真不对才停（界面上的 eligibility 只当提示）
     from build import ensure_extract
     import milestones as ms
     gid = game["id"].upper()

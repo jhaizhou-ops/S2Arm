@@ -321,6 +321,17 @@ class LocationTests(JobCase):
         os.rename(self.disk, self.disk.with_name("拔掉了"))
         self.assertEqual(layout.state(self.fresh(), B), ("offline", self.disk))
 
+    def test_location_at_home_or_drive_root_goes_into_s2arm_folder(self):
+        # 预检清单 #62（11-13）：选了用户主目录 / 整块盘的根不再拒绝，在里面建 S2Arm 文件夹放（期望手写：<主目录>/S2Arm/games/Alpha）
+        import library
+        from unittest import mock
+        home = self.root / "home"; home.mkdir()
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=A, name="Alpha")]))
+        self.c.r["location"] = str(home)
+        with mock.patch.object(library.Path, "home", return_value=home):
+            library.apply_location(self.c, dict(id=A))
+        self.assertEqual(layout.state(self.fresh(), A), ("ok", home / "S2Arm" / "games" / "Alpha"))
+
     def test_picking_another_location_when_the_old_one_is_offline(self):
         # #453：这款记在一个没连上的位置（文件夹没了），而且在当前库清单里（所以是 offline，#432 那条管不到）；玩家在出包页另选了位置。
         #   期望（手写）：在新选的位置建这款、黄字说明；还是选那个没连上的位置就照旧报「没连上」

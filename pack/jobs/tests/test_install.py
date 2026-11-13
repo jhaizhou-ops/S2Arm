@@ -1499,14 +1499,21 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(e.exception.code, "job_failed")
 
     def test_remove_from_phone_not_in_container(self):
-        """这台手机的记录里没有这款 → 失败，不装"""
+        """预检清单 #35（11-13）：本机记录里没有这款，问手机——手机上也没有 → 不用删、照成功返回（alreadyAbsent），不装；
+        手机上有（别的电脑装的）→ 照删：现组剩下的、装上、删机上它的数据。期望手写"""
         layout.save_device(self.c, "dev1", dict(games={self.A: {}}))
         ph, _, _ = self._phone()
         self.c.r.update(gameId=self.B)
-        with um.patch.object(install, "phone_for", return_value=ph):
-            with self.assertRaises(Failure) as e: install.remove_from_phone(self.c)
-        self.assertEqual(e.exception.code, "job_failed"); self.assertIn("没有这款", str(e.exception))
-        ph.install.assert_not_called()
+        with um.patch.object(install, "phone_for", return_value=ph), um.patch.object(install, "phone_games", return_value={self.A}):
+            r = install.remove_from_phone(self.c)
+        self.assertTrue(r["alreadyAbsent"]); ph.install.assert_not_called(); ph.purge.assert_not_called()
+        ph.backup.return_value = None; ph.purge.return_value = (True, "")
+        import ipa as packer
+        with um.patch.object(install, "phone_for", return_value=ph), um.patch.object(install, "phone_games", return_value={self.A, self.B}), \
+             um.patch.object(install, "container_others", return_value=[self.A]), \
+             um.patch.object(packer, "assemble", return_value=(self.root / "x.ipa", [self.A], "SID1")), um.patch.object(packer, "commit_phone_ipa"):
+            r = install.remove_from_phone(self.c)
+        self.assertNotIn("alreadyAbsent", r); ph.install.assert_called_once(); ph.purge.assert_called_once_with(self.B)
 
     def test_remove_from_phone_last_game(self):
         """最后一款（#227）：备份存档、删手机上它的数据，不装空容器；设备记录摘空"""

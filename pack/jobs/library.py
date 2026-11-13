@@ -2995,7 +2995,8 @@ def apply_location(c, game):
         return
     want = Path(want).expanduser()
     if want == Path(want.anchor) or want == Path.home():
-        raise Failure("请选一个单独的文件夹作存放位置。", code="job_failed")
+        # 选了整块盘的根 / 用户主目录（预检清单 #62：原先拒绝）：玩家的意思是「放这块盘上」——在里面建一个 S2Arm 文件夹放，不往根上撒文件
+        want = want / "S2Arm"
     where, place = layout.state(c, game["id"])
     if where == "offline" and place != want:
         # 原来的位置没连上（盘没插 / 文件夹已删），玩家在出包页另选了位置（#453）：原先照样先查原位置、报「没连上」，玩家的选择不起作用。
