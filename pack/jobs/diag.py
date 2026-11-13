@@ -56,8 +56,8 @@ def is_physical(d):
     """devicectl 的这台是真机：有 reality 字段就照它（physical）；缺了（公开项目反映有 Xcode 测试版不再输出它，本机 26.6 / 27.0 / 27.1 都还有）
     按真机才有的特征认——有硬件 UDID、且有配对状态或连接方式（模拟器两样都没有）。原先缺字段就一台都认不出、整个装机找不到设备"""
     h, cp = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
-    if "reality" in h:
-        return h.get("reality") == "physical"
+    if h.get("reality"):   # 键缺或值为 null / 空都按「没给」走下面的特征（诊断#091bcf：报告里只见 reality=None，分不出是缺键还是 null）
+        return h["reality"] == "physical"
     return bool(h.get("udid")) and bool(cp.get("pairingState") or cp.get("transportType"))
 
 

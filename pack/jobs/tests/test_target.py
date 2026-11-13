@@ -61,13 +61,16 @@ class TargetTests(JobCase):
                  deviceProperties=dict(name="a", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", transportType="wired", tunnelState="connected")),
             dict(identifier="sim-no-reality", hardwareProperties=dict(platform="iOS", productType="iPhone18,2"),
                  deviceProperties=dict(name="b", osVersionNumber="27.1"), connectionProperties=dict(tunnelState="connected")),
+            # 诊断#091bcf：键在、值为 null（报告里只见 reality=None）——同缺键，按真机特征认
+            dict(identifier="real-null-reality", hardwareProperties=dict(reality=None, platform="iOS", productType="iPhone18,2", udid="U4"),
+                 deviceProperties=dict(name="d", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", transportType="wired", tunnelState="disconnected")),
             dict(identifier="sim-with-reality", hardwareProperties=dict(reality="simulated", platform="iOS", productType="iPhone18,2", udid="U3"),
                  deviceProperties=dict(name="c", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", tunnelState="connected")),
         ]
         with patch.object(diag, "devicectl", return_value=(0, {"result": {"devices": devices}}, "")), \
              patch.object(target, "gpu_arch", return_value="applegpu_g18p"):
             rows = target.connected(self.c)
-        self.assertEqual([r["id"] for r in rows], ["real-no-reality"])
+        self.assertEqual([r["id"] for r in rows], ["real-no-reality", "real-null-reality"])
 
     def test_target_probe_preserves_error_code(self):
         with patch.object(target, "device_list", return_value=([], "", None, None)), \
