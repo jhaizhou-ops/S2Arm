@@ -116,7 +116,7 @@ struct LauncherView: View {
         .alert(txt("game.delete.title").replacingOccurrences(of: "{0}", with: deleteFor?.name ?? ""), isPresented: Binding(get: { deleteFor != nil }, set: { if !$0 { deleteFor = nil } })) {
             Button(txt("game.cancel"), role: .cancel) { deleteFor = nil }
             Button(txt("game.delete.confirm"), role: .destructive) { if let g = deleteFor { model.deleteGame(g) }; deleteFor = nil }
-        } message: { Text(txt("game.delete.body")) }
+        } message: { Text(txt("game.delete.body") + (deleteFor?.onPhone == true ? "\n\n" + txt("game.delete.onPhone") : "")) }
         .alert(txt("library.missing.title").replacingOccurrences(of: "{0}", with: missingFor?.name ?? ""), isPresented: Binding(get: { missingFor != nil }, set: { if !$0 { missingFor = nil } })) {
             Button(txt("library.missing.relink")) { if let g = missingFor { relinkGame(g) }; missingFor = nil }
             Button(txt("library.missing.forget"), role: .destructive) { if let g = missingFor { model.forgetGame(g) }; missingFor = nil }

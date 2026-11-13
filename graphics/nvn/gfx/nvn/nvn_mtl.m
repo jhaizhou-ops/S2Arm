@@ -36,6 +36,7 @@
 #include "nvn_refl.h"
 #include "nvn_fmt_info.h"   // #529 lb_fill：客体格式是不是定点深度
 #include "nvn_red.h"   // sampler reduction / LOD bias where the GPU has none: the variant's function constants and table entries (se_need / se_bind)
+#include "vp_prog_pick.h"   // #674: find the guest program that still holds a shader's code / control (vp_ask)
 #include "../../../metal/gal_samp_caps.h"   // whether this GPU reduces / biases natively (#800; the generic path's same test)
 #include "nvn_cover.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
@@ -3343,11 +3344,21 @@ static uint64_t span_hash(const uint8_t *m, size_t n) {
 //   one address map). Valid for a span inside one host page (a GOB, a page_span piece): the shadow's 2 MiB blocks are page-aligned. Outside the far region the guest address is the host's
 static const uint8_t *host_rd(const uint8_t *g) { const uint8_t *h = s2a_far_g2h((uint64_t)(uintptr_t)g); return h ? h : g; }
 static uint64_t gob_hash(uint64_t g) { return span_hash(host_rd((const uint8_t *)(uintptr_t)(g << 9)), 512); }
+// 宿主能读的存储字节数（#819）：普通池里的贴图截到池尾。按稀疏规则排布的贴图（SPARSE 标志、整页对齐）放进比它小的普通池时，算出的存储（64 KB）越过池尾，
+//   越过的那段是补齐、游戏从不放数据，真机 GPU 也只读贴图真用到的地址；按全长读（逐页哈希 / 写保护 / GPU 去混排源）会读进池后没映射的内存，iPad 上 SIGBUS
+//   （贴图 64×64 ASTC 4×4 7 级、存储 +65536、池 8192）。稀疏池（按页表取）与不在池里的照旧
+int nvn_sparse_pool(const void *pool);
+static uint64_t tex_rd_size(const tex_t *t) {
+    if (!t->pool || !t->pool->mem || nvn_sparse_pool(t->pool)) return t->L.size;
+    const uint8_t *end = t->pool->mem + t->pool->size;
+    if ((const uint8_t *)t->mem < t->pool->mem || (const uint8_t *)t->mem >= end) return t->L.size;
+    return MIN(t->L.size, (uint64_t)(end - (const uint8_t *)t->mem));
+}
 static void page_span(const tex_t *t, size_t k, const uint8_t **lo, size_t *n) {   // the texture's bytes in host page k of its storage (pages counted from the one holding t->mem)
-    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + tex_rd_size(t), p0 = a & ~(pg - 1);
     uintptr_t b = MAX(a, p0 + k * pg), c = MIN(e, p0 + (k + 1) * pg); *lo = (const uint8_t *)b; *n = c > b ? c - b : 0;
 }
-static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; return t->L.size ? (uint32_t)(((a + t->L.size - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
+static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; uint64_t n = tex_rd_size(t); return n ? (uint32_t)(((a + n - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
 static unsigned tex_layers(const tex_t *t) { return (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1; }   // as pkg_upload_ (a cube array's depth counts layer-faces)
 // Block-linear storage (Tegra X1): each layer holds its levels one after another; a level is rows of blocks, a block 2^tileH GOBs tall and one GOB (64 bytes x 8 rows of format blocks) wide,
 // laid out GOB column after GOB column. So a byte range of one block row is a run of GOB columns: a texel rectangle. fn gets (level, layer, x, y, w, h) in texels for every rectangle [lo, hi)
@@ -3458,14 +3469,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     int sparse = t->pool && nvn_sparse_pool(t->pool);
-    // #819：iPad 上玩 20–40 分钟后在这里读贴图存储时 SIGBUS，四次地址都落在 2 MB 边界（读进了没映射的一段）。存储越过所属池的末尾时记一行（只记一次），
-    //   分清「贴图存储越过池尾」还是「池已释放、贴图还被引用」；只记、不改行为
+    // #819：存储越过所属池的末尾时记一行（只记一次）。读的长度截到池尾（tex_rd_size），不再读进池后没映射的内存
     if (t->pool && !sparse && t->pool->mem && (const uint8_t *)t->mem + t->L.size > t->pool->mem + t->pool->size)
         RED_ONCE(186, "packaged texture ser=%llu %ux%u format %#x levels %u: its storage %#llx +%llu runs %llu bytes past the end of its memory pool %#llx +%llu (read on upload)",
                  (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, (unsigned long long)(uintptr_t)t->mem, (unsigned long long)t->L.size,
                  (unsigned long long)((const uint8_t *)t->mem + t->L.size - (t->pool->mem + t->pool->size)), (unsigned long long)(uintptr_t)t->pool->mem, (unsigned long long)t->pool->size);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
-        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size);
+        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, tex_rd_size(t));
         *stamp = nvn_dirty_now();
         if (ph && !sparse) {   // after the stamp, before the read: a write in between is after the stamp too, so the next check sees its page (and the hash may hold it, the upload does)
             uint32_t n = page_count(t); uint64_t *h = realloc(*ph, (size_t)MAX(n, 1u) * sizeof *h);
@@ -3482,9 +3492,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo; id<MTLBuffer> upsrc = nil;
-    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
+    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, tex_rd_size(t), &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
     int lin = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认
-    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
+    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, tex_rd_size(t), &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !lin && (!unp || gdec)) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -4408,15 +4418,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             pk->check_epoch = g_pkg_epoch;
             uint64_t now = nvn_dirty_now();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
-            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
+            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, tex_rd_size(t), pk->stamp));
             if (pk->sparse) { uint64_t g = nvn_sparse_gen(); clean = (now == pk->seen && g == pk->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp); pk->vseen = g; }
             pk->seen = now;
             if (!clean && tracked && !pk->sparse && pk->ph) {   // pages written since the upload: the texture's own bytes in them decide (see NvPkg ph)
                 static uint64_t *bits; static size_t cap;   // submit thread only (up_owner_check)
                 size_t need = (pk->nph + 63) / 64; if (need > cap) { uint64_t *nb = realloc(bits, need * sizeof *bits); if (nb) { bits = nb; cap = need; } }
-                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, t->L.size, pk->stamp, bits, cap * 64) : -1;
+                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, tex_rd_size(t), pk->stamp, bits, cap * 64) : -1;   // 页数同 page_count（tex_rd_size）
                 if (np == (long)pk->nph) {
-                    nvn_dirty_protect(t->mem, t->L.size); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
+                    nvn_dirty_protect(t->mem, tex_rd_size(t)); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
                     static uint64_t *nh, *gens; static size_t ncap;   // the new hashes of the written pages, and every page's write generation (submit thread only)
                     if (pk->nph > ncap) { uint64_t *a = realloc(nh, pk->nph * sizeof *a), *b = a ? realloc(gens, pk->nph * sizeof *b) : NULL; if (a) nh = a; if (b) { gens = b; ncap = pk->nph; } }
                     int changed = 0, gpu = pk->pgpu != NULL;   // the texture holds GPU-written content (pgpu goes with a whole re-upload)
@@ -8086,6 +8096,14 @@ static void vp_done(NvShader *vs, id<MTLFunction> f, uint32_t mask, const char *
     fprintf(stderr, "[s2a] 顶点补齐变体：程序号 %s 顶点 %.16s 补 user(locn) 掩码 %#x %s%s %.1f ms%s%s\n", s2a_nvn_game_id(), vs->key, mask, how, f ? "完成" : "失败", (bp_now() - t0) / 1e6, f ? "" : "：", f ? "" : why);
     if (!f) MLOG("【红】 vertex shader %s has no padded variant for user(locn) mask %#x: %s; draws pairing it with such a fragment shader stay skipped", vs->key, mask, why);
 }
+// #674 (11-12): the program a draw passes to vp_ask is not always the one the shader to pad was bound from.
+//   bind_stages makes a host stand-in carrying only a serial (no stages); a mesh draw's S.prog is the fragment
+//   stage's program while its mesh shader was bound at stage 4. prog_stage_of then found nothing, vp_build saw
+//   code = 0 and reported "the game no longer holds its control section" — a misread: the stages were never in
+//   that program. vp_done pinned the variant to SE_FAIL and the caller put the pair on the failed list for the
+//   whole run. Fall back to the per-stage binds (vp_prog_pick.h, tested by t_vp_prog_pick.c).
+static int vp_stage_of_at(const void *prog, const char *key, uint8_t md[8], void *ctx) { (void)ctx; return prog_stage_of((const prog_t *)prog, key, md); }
+static const void *vp_bst_at(unsigned st, void *ctx) { (void)ctx; return st < 5 ? (const void *)S.bst[st] : NULL; }
 // A pair needs outputs the vertex shader does not write (miss): ask for the variant (submit thread). 1 = being made or just made (the caller skips this draw, nothing is recorded as
 //   failed), 0 = it cannot be made (the caller records the pair as failed, as before)
 static int vp_ask(const prog_t *p, NvShader *vs, uint32_t miss) {
@@ -8093,9 +8111,11 @@ static int vp_ask(const prog_t *p, NvShader *vs, uint32_t miss) {
     int st = vs->vp_st; uint32_t want = (st == SE_READY ? vs->vp_mask : 0) | miss;
     if (st == SE_BUSY || st == SE_FAIL || (st == SE_READY && (vs->vp_mask & miss) == miss)) { pthread_mutex_unlock(&g_vp_mu); return st != SE_FAIL; }
     vs->vp_st = SE_BUSY; pthread_mutex_unlock(&g_vp_mu);
-    uint8_t md[8] = {0}; int at = p ? prog_stage_of(p, vs->key, md) : -1; uint64_t t0 = bp_now();
-    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, at < 0 ? 0 : p->sd[at].data, at < 0 ? NULL : p->sd[at].control, want, why, sizeof why); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
-    uint64_t code = 0; const void *ctl = NULL; void *snap = at < 0 ? NULL : dm_shader_snap(p->sd[at].data, p->sd[at].control, &code, &ctl); uint64_t key; memcpy(&key, md, 8);
+    uint8_t md[8] = {0}; int at = -1; uint64_t t0 = bp_now();
+    const prog_t *gp = (const prog_t *)vp_pick_prog(p, vp_bst_at, 5, vs->key, md, vp_stage_of_at, NULL, &at);
+    if (at < 0) { static unsigned n; if (!n++ || !(n & (n - 1))) MLOG("顶点补齐变体：%s 在绘制 program 与 5 个按阶段绑定的 program 里都没有有效控制段（%u 次）", vs->key, n); }
+    if (se_sync()) { char why[300] = ""; id<MTLFunction> f = vp_build(vs, md, at < 0 ? 0 : gp->sd[at].data, at < 0 ? NULL : gp->sd[at].control, want, why, sizeof why); vp_done(vs, f, want, why, t0, "同步现编"); return f != nil; }
+    uint64_t code = 0; const void *ctl = NULL; void *snap = at < 0 ? NULL : dm_shader_snap(gp->sd[at].data, gp->sd[at].control, &code, &ctl); uint64_t key; memcpy(&key, md, 8);
     fprintf(stderr, "[s2a] 顶点补齐变体：程序号 %s 顶点 %.16s 首遇缺 user(locn) 掩码 %#x，后台编，编好前这对的绘制照旧跳过\n", s2a_nvn_game_id(), vs->key, want);
     static dispatch_queue_t q; static dispatch_once_t once;
     dispatch_once(&once, ^{ q = dispatch_queue_create("dm.nvn.vp", s2a_qos_queue_attr(DISPATCH_QUEUE_SERIAL, S2A_QOS_SHADER_VARIANT)); });
@@ -13993,8 +14013,14 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(cps, ck);
     if ((id)ps == (id)NSNull.null) return;   // its pipeline failed before: built once, reported once (see below)
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = par_compute(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e);
+        // #884：Metal 编译服务对一条计算管线现编一直不返回，提交线程跟着卡死（开场剧情固定定格）。至多等 DM_NVN_CPSO_WAIT_MS（缺省 10000，0 = 不限，
+        //   同渲染「不能跳过的绘制」上限 DM_NVN_PSO_UNSAFE_WAIT_MS）：等不到就跳过这一次派发、不记失败，后台编完下一次派发直接用（pso_archive.h par_compute_wait）
+        static int64_t cwait = -2; if (cwait == -2) { const char *v = getenv("DM_NVN_CPSO_WAIT_MS"); long ms = v && *v ? strtol(v, NULL, 10) : 10000; cwait = ms > 0 ? (int64_t)ms * 1000000 : -1; }
+        NSError *e = nil; uint64_t bt = bp_now(); int gave_up = 0;
+        ps = par_compute_wait(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e, cwait, &gave_up);
         { uint64_t d_ = bp_now() - bt; g_bp_pso_n++; g_bp_pso_ns += d_; fe_sync_note(d_); }
+        if (gave_up) { if (!(cs->logged & (1ull << 40))) { cs->logged |= 1ull << 40; MLOG("【红】 compute pipeline %s%s still compiling after %lld ms: this dispatch skipped (not recorded as failed; used once the background build returns)",
+                                                    cs->key, fc ? " (sampler-emulation variant)" : "", (long long)(cwait / 1000000)); } return; }
         // A failure is remembered like a success: it was rebuilt at every dispatch (Monster Hunter Rise's 36,880-byte threadgroup memory, over Apple's 32,768: 2,472–6,450 builds in one
         // Mac run; on the test device the compiles kept the frame from ending for 45 s, 10-26 cold run, frame 1150)
         if (!ps) { MLOG("【红】 failed to create compute pipeline %s%s: %s", cs->key, fc ? " (sampler-emulation variant)" : "", e.localizedDescription.UTF8String); hm_put_id(cps, ck, NSNull.null); return; }

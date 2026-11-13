@@ -437,6 +437,7 @@ public sealed partial class EnvironmentWindow
             var body = new StackPanel { Spacing = 16, Margin = new Thickness(28) };
             body.Children.Add(Label(T("game.delete.title").Replace("{0}", game.Name), 20));
             body.Children.Add(Muted(T("game.delete.body"), 14));
+            if (game.OnPhone) body.Children.Add(Muted(T("game.delete.onPhone"), 14));   // 下次往这台手机装游戏时，手机上的这款会打不开（同 Mac）
             var buttons = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var cancel = new Button { Content = T("action.cancel"), Padding = new Thickness(16, 9), CornerRadius = new CornerRadius(8), Margin = new Thickness(12, 0, 0, 0),
                 Background = Brush.Parse("#29292D"), Foreground = Ink };

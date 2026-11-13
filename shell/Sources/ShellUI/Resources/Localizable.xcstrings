@@ -1,6 +1,54 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Sound": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sound"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "声音"
+          }
+        }
+      }
+    },
+    "Play Sound in Silent Mode": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Sound in Silent Mode"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静音模式下也播放声音"
+          }
+        }
+      }
+    },
+    "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启后，设备处于静音模式时游戏照样出声；关闭时和其他游戏一样跟随静音模式。"
+          }
+        }
+      }
+    },
     "Reorder": {
       "localizations": {
         "en": {

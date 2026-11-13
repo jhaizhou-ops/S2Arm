@@ -578,7 +578,7 @@ class FolderIdentityTests(JobCase):
 class StoreMetaTests(JobCase):
     """游戏库的商店元数据（library.store_meta）：商品页一次请求取横图 + 英文标题，存进游戏库，各平台出包只读这一份。打桩替掉 banner_fetch，零联网。
     期望按规则手写：B「泰拉瑞亚」（NACP 没有英文标题、文件夹是游戏号）拿到 Terraria + 横图 → catalog 记 englishName、横图进文件夹、
-    接着 heal_folder_names 改名为「Terraria」且横图跟着走；C 的商店标题是日文 → 不记；A 已有英文名和横图 → 不查；断网（D）只记 storeChecked；
+    接着 heal_folder_names 改名为「Terraria」且横图跟着走；C 的商店标题是日文 → 不记；A 已有英文名和横图 → 不查；断网（D）不记 storeSettled、下次照查；
     7 天内再跑不再查；S2A_BANNER_FETCH=0 不查"""
     D = "0100000000040000"
 
@@ -606,6 +606,10 @@ class StoreMetaTests(JobCase):
             @staticmethod
             def store_name(gid):
                 return names.get(gid, "")
+
+            @staticmethod
+            def settled(gid):
+                return gid != test.D   # 断网不是定论
         for p in (patch.dict(os.environ, {"S2A_BANNER_FETCH": "1"}), patch("library.engine_tool", lambda c, name: Fake)):
             p.start(); self.addCleanup(p.stop)
 
@@ -623,7 +627,8 @@ class StoreMetaTests(JobCase):
         self.assertEqual(sorted(self.calls), sorted([B, C, self.D]))                 # A 都有了：不查
         cat = self.catalog()
         self.assertEqual({g: cat[g].get("englishName") for g in cat}, {A: "Hollow Knight Silksong", B: "Terraria", C: None, self.D: None})
-        self.assertTrue(all(cat[g].get("storeChecked") for g in (B, C, self.D)))
+        self.assertTrue(all(cat[g].get("storeSettled") for g in (B, C)))
+        self.assertIsNone(cat[self.D].get("storeSettled"))                          # 断网不算查过
         self.assertEqual((L / "games" / B / "banner.jpg").read_bytes(), b"JPG-" + B.encode())
         self.assertFalse((L / "games" / self.D / "banner.jpg").exists())              # 断网：只记查过
         self.assertEqual((L / "games" / A / "banner.jpg").read_bytes(), b"old")
@@ -631,8 +636,19 @@ class StoreMetaTests(JobCase):
         self.assertEqual(layout.find_game(self.fresh(), B), L / "games" / "Terraria")
         self.assertEqual((L / "games" / "Terraria" / "banner.jpg").read_bytes(), b"JPG-" + B.encode())
         self.calls.clear()
-        self.assertEqual(library.store_meta(self.fresh()), 0)                          # 7 天内查过：不再查
-        self.assertEqual(self.calls, [])
+        self.assertEqual(library.store_meta(self.fresh()), 1)                          # 有定论的 7 天内不再查；断网那款下次照查
+        self.assertEqual(self.calls, [self.D])
+
+    def test_old_checked_mark_does_not_block(self):
+        # 11-13 前的 storeChecked 断网也记（维护者本机库 6 款都记了、一张横图都没有）：新字段 storeSettled，旧标记不认、写回时清掉
+        import library, time
+        cat = json.loads((self.c.library / "catalog.json").read_text())
+        for g in cat["games"]:
+            g["storeChecked"] = int(time.time())
+        atomic(self.c.library / "catalog.json", cat)
+        library.store_meta(self.fresh())
+        self.assertEqual(sorted(self.calls), sorted([B, C, self.D]))
+        self.assertFalse(any("storeChecked" in g for g in self.catalog().values() if g["id"] != A))
 
     def test_library_on_other_volume(self):
         # 游戏库在外置盘、临时目录在私有目录：跨卷时 os.replace 报 EXDEV（本机外置盘游戏库实测：五款一张横图都没进库、storeChecked 也没记上）
@@ -648,7 +664,7 @@ class StoreMetaTests(JobCase):
             self.assertEqual(library.store_meta(self.fresh(), {B}), 1)
         self.assertEqual((L / "games" / B / "banner.jpg").read_bytes(), b"JPG-" + B.encode())
         self.assertFalse((L / "games" / B / ".banner.jpg.part").exists())
-        self.assertTrue(self.catalog()[B].get("storeChecked"))
+        self.assertTrue(self.catalog()[B].get("storeSettled"))
 
     def test_import_ids_only_and_switch_off(self):
         import library

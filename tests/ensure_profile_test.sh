@@ -40,4 +40,11 @@ ds() { HOME="$T/home" PATH="$T/bin:$PATH" python3 "$H/pack/dev_sign.py" "$T/app"
 o=$(S2A_PROFILE_NEED_UDIDS='U1 U2' ds); r=$?; o2=$(S2A_PROFILE_NEED_UDIDS='U1' ds); r2=$?
 u=$(S2A_MACHINE_NO_LOCAL=1 S2A_DEVICES_NO_LOCAL=1 python3 -c 'import sys;sys.path.insert(0,sys.argv[1]);import ipa_tail;print(repr(ipa_tail.test_udids()))' "$H/pack")
 ck "⑤ dev_sign 缺 U2 → 退 ${r}、点名 U2；都有 → 不报缺设备（${r2}）；占位名单 → 测试设备空（${u}）" '[ $r = 3 ] && grep -q "不含测试设备 U2" <<< "$o" && ! grep -q "不含测试设备" <<< "$o2" && [ "$u" = "'"''"'" ]'
+# ⑥ 申请时的目标：给了设备号 → platform=iOS,id=<UDID>；Apple Vision Pro（install.py 传 S2A_PROFILE_DEST=id=<UDID>，按 iPad 兼容装、理论支持未真机验证）
+#   → 原样用 id=<UDID>，让 Xcode 自己认平台；两种都带 -allowProvisioningDeviceRegistration 登记这台设备
+printf '#!/bin/bash\nprintf "%%s\\n" "$@" > "$ARGS_OUT"\nexit 0\n' > "$T/bin/xcodebuild"; chmod +x "$T/bin/xcodebuild"
+rv() { ARGS_OUT="$T/args" PATH="$T/bin:$PATH" S2A_ROOTS="$T/roots" S2A_PROFILE_DIRS="$P" bash "$H/pack/ensure_profile.sh" com.example.t1 TEAM123 "$T/ent.plist" U9 > /dev/null 2>&1; }
+rv; a1=$(tr '\n' ' ' < "$T/args"); S2A_PROFILE_DEST=id=U9 rv; a2=$(tr '\n' ' ' < "$T/args")
+ck "⑥ 目标：iPhone「${a1}」含 platform=iOS,id=U9；Vision Pro「${a2}」含 -destination id=U9；都登记设备" \
+  'grep -q -- "-destination platform=iOS,id=U9" <<< "$a1" && grep -q -- "-destination id=U9 " <<< "$a2" && grep -q -- "-allowProvisioningDeviceRegistration" <<< "$a2"'
 [ $bad = 0 ] && echo "✅ 申请描述文件红因全通" || { echo "🔴 申请描述文件红因有不通项"; exit 1; }

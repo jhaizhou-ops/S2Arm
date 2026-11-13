@@ -1361,6 +1361,7 @@
   "s2arm.diagUpload.cancel": "取消",
   "s2arm.diagUpload.send": "上传",
   "s2arm.diagUpload.sending": "正在上传…",
+  "s2arm.diagUpload.cancelled": "上传已取消。可以先导出诊断包，手动发给我们。",
   "s2arm.diagUpload.done": "已上传。把下面这个码贴到 GitHub 帖子或群里，开发者凭它找到你的诊断：",
   "s2arm.diagUpload.copy": "复制",
   "s2arm.diagUpload.close": "完成",

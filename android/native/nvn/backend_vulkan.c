@@ -77,6 +77,7 @@ struct nvn_gpu_tex_s {
     uint32_t w, h, depth, levels, layers, samples, nvn_format, target;
     int array_compatible;
     int view_fmt, released, refs, bc_decoded;
+    VkBuffer bc_sbuf; VkDeviceMemory bc_smem;   // bc_decoded 贴图的压缩原数据影子（GPU 缓冲，按级、按层 / 3D 切片、行紧排；见 bc_shadow_layout）
     uint16_t swz;   // 存储自带的通道映射（tex_builder_t.swz 打包法，0 = 恒等）：视图没自己设映射时用它
     struct nvn_gpu_tex_s *all_next;
 };
@@ -98,6 +99,7 @@ struct nvn_gpu_view_s {
     VkImageAspectFlags aspect;   // 这个视图取的面（深度模板格式的采样视图只取一个面）
     uint32_t att_layer;          // 当附件时取的层 / 3D 深度切片（视图没设层范围 = 0）
     VkImageView att;             // 附件形态（一级一层的 2D 视图），第一次当附件时建（view_attachment）
+    VkImageView img;             // 图像形态（恒等通道映射），第一次当存储图像时建：存储图像视图必须恒等映射（view_image_form）
     struct nvn_gpu_view_s *all_next;
 };
 
@@ -307,12 +309,28 @@ static struct nvn_gpu_pipe_s *g_pipe_ht[PIPE_HT_N];   // 图形管线的散列�
 // （魔数 + 版本 + SHA-256、临时文件 fsync 后原子替换、坏了当没有、64 MiB 封顶）。
 // 缓存只是加速，不是前提：读 / 建 / 取数据 / 写，任何一步失败都只记一行日志，管线照旧能建（不拦用户）。
 // 调试开关 nvk_pipe_cache=0 关掉（缺省开）：不建缓存、不读不写盘，管线照旧不带缓存建。
+// 局中补写（#868，「收尾时写」之外的第二个时机）：被系统杀掉 / 崩掉的局走不到收尾，驱动编出来的结果就白丢了——所以建管线累计够多、隔得够久时，
+// 在局中取一份驱动缓存交给后台线程落盘，每次落盘仍是整份原子替换（见下面 plc_save_midrun）。不是逐帧写盘：缺省最多 30 秒一次，数据没变不写。
 static VkPipelineCache g_plc;                // VK_NULL_HANDLE = 没有（开关关了 / 驱动建不出）：建管线时照传，空句柄就是不带缓存
 static char g_plc_dir[480];                  // 落盘目录副本；空 = 不落盘（只在本局内复用，收尾不写）
 static uint8_t g_plc_uuid[VK_UUID_SIZE];     // 设备 + 驱动的管线缓存标识（文件名里带它，换驱动不互读）
 static size_t g_plc_loaded;                  // 开会话时读到并交给驱动的字节数（0 = 没读到）
 static uint64_t g_plc_rejected;              // 本会话里旧文件读不出 / 驱动不收、被丢掉的次数
 static uint64_t g_plc_made;                  // 本会话经缓存建出的管线条数（图形 + 计算 + 清屏）
+// ---- 局中补写的状态。触发：g_plc_made 比上次保存时多 ≥ N 条（nvk_plc_new，缺省 64），且头一次距开会话 ≥ F 毫秒（nvk_plc_first_ms，10000）、
+// 之后距上次保存 ≥ E 毫秒（nvk_plc_every_ms，30000）；取到的数据大小与上次保存（或开局读入）的一致就不写。
+// 分工：取数据（vkGetPipelineCacheData，真机约 0.5 ms）在触发的那条线程上做；写盘（临时文件 + fsync + 原子替换，真机十几毫秒、慢盘更久）在后台线程做，
+// 后台线程只拿自己的缓冲区和路径，不碰任何 Vulkan 句柄、不碰会话全局。同一时刻最多一次写在飞（进程级、不排队：在飞时新的触发直接跳过）。
+// 收尾：等在飞的写算进 close 的截止时间，到点没写完就放弃——不再写最终份、不再等它，旧文件原样；写失败 / 设备丢失只记日志。
+static uint64_t g_plc_t_open;                // 开会话的时刻（单调时钟 ns）
+static uint64_t g_plc_t_saved;               // 上一次局中保存（含「取了数据发现没变」）的时刻；0 = 本局还没有过。原子读写
+static uint64_t g_plc_made_saved;            // 那一次的 g_plc_made。原子读写
+static size_t g_plc_size_saved;              // 上一次落盘（或开局读入）的数据字节数：取到的数据与它一致就不写。持 g_plc_mu
+static uint64_t g_plc_first_ns, g_plc_every_ns, g_plc_thr_new;   // 触发的三个阈值：开会话时读一次
+static pthread_mutex_t g_plc_mu = PTHREAD_MUTEX_INITIALIZER;     // 护 g_plc 的销毁与 g_plc_size_saved：触发取数据 vs 收尾；触发用 trylock，拿不到就让给别人
+static int g_plcw_busy;                      // 后台写在飞（进程级，跨会话；原子读写）
+static int g_plcw_failed;                    // 最近一次后台写失败了：收尾时即使大小没变也再写一次。原子读写
+static uint64_t g_plcw_started, g_plcw_ok, g_plcw_fail, g_plcw_same;   // 读数（进程累计，不随会话清零）：交给后台写的次数 / 成功 / 失败 / 与上次一致没写
 static pthread_mutex_t g_submit_mu = PTHREAD_MUTEX_INITIALIZER; // 提交串行化：校验 signal、vkQueueSubmit、入队
 static pthread_cond_t g_cv;
 static int g_cv_ready;
@@ -582,6 +600,8 @@ static void destroy_tex_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_tex_s *t) {
     if (t->image) vkDestroyImage(vk->d, t->image, NULL);
     texmem_give(vk->d, t->memory, t->mem_size, t->mem_type);
     LIFE_ADD(7);
+    if (t->bc_sbuf) vkDestroyBuffer(vk->d, t->bc_sbuf, NULL);
+    if (t->bc_smem) vkFreeMemory(vk->d, t->bc_smem, NULL);
     free(t);
 }
 
@@ -590,8 +610,9 @@ static void destroy_view_locked(struct nvn_gpu_vk *vk, struct nvn_gpu_view_s *v)
     while (*pp && *pp != v) pp = &(*pp)->all_next;
     if (*pp) *pp = v->all_next;
     LIFE_T0;
-    pc_drop_view(v->att); pc_drop_view(v->view); LIFE_ADD(6);
+    pc_drop_view(v->att); pc_drop_view(v->img); pc_drop_view(v->view); LIFE_ADD(6);
     if (v->att) vkDestroyImageView(vk->d, v->att, NULL);
+    if (v->img) vkDestroyImageView(vk->d, v->img, NULL);
     if (v->view) vkDestroyImageView(vk->d, v->view, NULL);
     LIFE_ADD(5);
     if (v->buffer_view) vkDestroyBufferView(vk->d, v->buffer_view, NULL);
@@ -642,12 +663,17 @@ static void ref_drop(void *obj, int type) {
     }
 }
 
-static void cmd_ref(struct nvn_gpu_cmd_s *c, void *obj, int type) {
+// 录制点（函数名 + 行号）随报错带出：「release 之后仍在使用」只在真机长局里出现（#937），
+// 光凭一句话分不清是哪类句柄、哪条录制路径，普查报告里这一行就要能定位。
+#define cmd_ref(c, obj, type) cmd_ref_at((c), (obj), (type), __func__, __LINE__)
+static void cmd_ref_at(struct nvn_gpu_cmd_s *c, void *obj, int type, const char *fn, int line) {
     if (!obj) return;
     pthread_mutex_lock(&g_mu);
     if (ref_released(obj, type)) {   // release 之后再录制使用 = 契约违规（粘滞 E_ARG）
         pthread_mutex_unlock(&g_mu);
-        set_sticky(c, NVN_GPU_E_ARG, "release 之后仍在使用句柄");
+        static const char *const names[] = {"?", "buf", "tex", "view", "samp"};
+        set_sticky(c, NVN_GPU_E_ARG, "release 之后仍在使用句柄（%s %p，录制于 %s:%d）",
+                   type >= REF_BUF && type <= REF_SAMP ? names[type - REF_BUF + 1] : names[0], obj, fn, line);
         return;
     }
     ref_bump(obj, type);
@@ -1084,10 +1110,21 @@ static void plc_open(const char *dir) {
     g_plc_loaded = 0;
     g_plc_rejected = 0;
     g_plc_made = 0;
+    g_plc_t_open = now_ns();
+    __atomic_store_n(&g_plc_t_saved, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_plc_made_saved, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_plcw_failed, 0, __ATOMIC_RELAXED);
+    g_plc_size_saved = 0;
     memcpy(g_plc_uuid, g.dev->properties.pipelineCacheUUID, sizeof g_plc_uuid);
     if (!nvn_plat_flag("nvk_pipe_cache", 1)) {
         plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：开关 nvk_pipe_cache=0，管线不带缓存建");
         return;
+    }
+    {   // 局中补写的阈值（缺省值见 g_plc_made 一节；条数至少 1，毫秒不取负）
+        int n = nvn_plat_flag("nvk_plc_new", 64), f = nvn_plat_flag("nvk_plc_first_ms", 10000), e = nvn_plat_flag("nvk_plc_every_ms", 30000);
+        g_plc_thr_new = n < 1 ? 1u : (uint64_t)n;
+        g_plc_first_ns = (uint64_t)(f < 0 ? 0 : f) * 1000000ull;
+        g_plc_every_ns = (uint64_t)(e < 0 ? 0 : e) * 1000000ull;
     }
     void *blob = NULL;
     size_t bytes = 0;
@@ -1133,16 +1170,150 @@ static void plc_open(const char *dir) {
         return;
     }
     g_plc_loaded = bytes;
+    g_plc_size_saved = bytes;   // 盘上现有的、驱动也收下了的数据大小；驱动不收旧数据时 bytes 已清零 → 取到的任何数据都比它「新」，收尾会换掉旧文件
+}
+
+// ---- 局中补写（#868）：后台写盘线程 + 触发 ----
+
+// 交给后台线程的一份活：数据缓冲区、落盘目录、缓存标识都是自己的副本——后台线程不碰任何 Vulkan 句柄，也不碰会话全局。
+struct plcw_job {
+    void *data;
+    size_t size;
+    char dir[sizeof g_plc_dir];
+    uint8_t uuid[VK_UUID_SIZE];
+    unsigned long long made;   // 触发时本局经缓存建管线的条数（只用于日志）
+    double get_ms;             // 触发线程上花的毫秒：查大小 + 取数据 + 拷字节（只用于日志）
+};
+
+// 后台写盘线程（分离线程）：写一份、收尾、清「在飞」标记（最后一步，收尾那边靠它判断写完没有）。写失败只记日志，收尾时会再试一次。
+static void *plcw_main(void *arg) {
+    struct plcw_job *j = (struct plcw_job *)arg;
+    char why[96] = "";
+    uint64_t t0 = now_ns();
+    plc_ensure_dir(j->dir);
+    int w = nvk_driver_cache_write(j->dir, j->uuid, j->data, j->size, why, sizeof why);
+    double ms = plc_ms(t0, now_ns());
+    if (w == 0) {
+        __atomic_store_n(&g_plcw_failed, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_plcw_ok, 1, __ATOMIC_RELAXED);
+        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：局中写出 %zu 字节（本局经缓存建管线 %llu 条；触发线程用时 %.1f ms，后台写盘 %.1f ms）", j->size, j->made, j->get_ms, ms);
+    } else {
+        __atomic_store_n(&g_plcw_failed, 1, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_plcw_fail, 1, __ATOMIC_RELAXED);
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：局中写盘没写成（%s）。收尾时会再试一次，本局不受影响", why);
+    }
+    free(j->data);
+    free(j);
+    __atomic_store_n(&g_plcw_busy, 0, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+// 触发检查已过（条数够了、时间到了）：在这条线程上取一份驱动数据，交给后台线程写。线程：任意建管线的线程（可能还持着清屏管线的锁 g_clr_mu）。
+// 拿不到 g_plc_mu（别的线程正在取数据，或收尾在销毁缓存）/ 上一次写还在飞 → 直接跳过，下次建管线再碰，不排队、不等。
+static void plc_save_midrun(void) {
+    if (__atomic_load_n(&g_plcw_busy, __ATOMIC_ACQUIRE)) return;
+    if (pthread_mutex_trylock(&g_plc_mu) != 0) return;
+    VkPipelineCache pc = g_plc;
+    uint64_t t = now_ns(), made = __atomic_load_n(&g_plc_made, __ATOMIC_RELAXED), ts = __atomic_load_n(&g_plc_t_saved, __ATOMIC_RELAXED);
+    int due = pc && !g.device_lost && made >= __atomic_load_n(&g_plc_made_saved, __ATOMIC_RELAXED) + g_plc_thr_new &&
+              (ts ? t - ts >= g_plc_every_ns : t - g_plc_t_open >= g_plc_first_ns);
+    int claimed = 0;   // 抢到「在飞」标记 = 这一刻没有别的写，也轮到本线程来写
+    if (due) {
+        int expect = 0;
+        claimed = __atomic_compare_exchange_n(&g_plcw_busy, &expect, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+    }
+    if (!claimed) { pthread_mutex_unlock(&g_plc_mu); return; }
+    // 到点了。基线先推进到现在：这次取不到数据 / 数据没变 / 起不了线程，都要等再多 N 条、再隔 E 才重试，别每建一条管线就来一遍。
+    __atomic_store_n(&g_plc_made_saved, made, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_plc_t_saved, t, __ATOMIC_RELAXED);
+    uint64_t tg0 = now_ns();   // 触发线程在这里花的时间从这儿算起：查大小 + 取数据 + 拷字节（带 fsync 的写盘不在这条线程上）
+    size_t size = 0;
+    VkResult vr = vkGetPipelineCacheData(g.d, pc, &size, NULL);
+    void *buf = NULL;
+    int started = 0;   // 后台线程已接手（之后「在飞」标记由它清）；没接手的路径在函数末尾自己清
+    if (vr != VK_SUCCESS || size == 0) {
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：局中取不到驱动数据（VkResult %d，%zu 字节），这次不落盘", (int)vr, size);
+    } else if (size == g_plc_size_saved && !__atomic_load_n(&g_plcw_failed, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&g_plcw_same, 1, __ATOMIC_RELAXED);
+        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：局中检查：本局经缓存建管线 %llu 条，数据 %zu 字节与上次保存一致，不写", (unsigned long long)made, size);
+    } else {
+        size_t cap = size + size / 4 + 4096;   // 留余量：取大小之后别的线程又建了管线，数据可能已经变大（VK_INCOMPLETE 的半份数据不能落盘）
+        buf = malloc(cap);
+        if (!buf) {
+            plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：内存不够取数据（%zu 字节），这次不落盘", cap);
+        } else {
+            size_t got = cap;
+            vr = vkGetPipelineCacheData(g.d, pc, &got, buf);
+            if (vr != VK_SUCCESS || got == 0 || got > cap) {
+                plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：局中取数据失败（VkResult %d），这次不落盘", (int)vr);
+                free(buf);
+                buf = NULL;
+            } else {
+                size = got;
+                struct plcw_job *j = (struct plcw_job *)calloc(1, sizeof *j);
+                if (j) {
+                    j->data = buf; j->size = size; j->made = (unsigned long long)made; j->get_ms = plc_ms(tg0, now_ns());
+                    memcpy(j->dir, g_plc_dir, sizeof j->dir);
+                    memcpy(j->uuid, g_plc_uuid, sizeof j->uuid);
+                    pthread_attr_t at;
+                    pthread_t th;
+                    if (pthread_attr_init(&at) == 0) {
+                        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+                        pthread_attr_setstacksize(&at, 256 * 1024);
+                        __atomic_fetch_add(&g_plcw_started, 1, __ATOMIC_RELAXED);   // 先记再起：后台线程一旦跑完，读数里「成功 + 失败」不会比「次数」多
+                        started = pthread_create(&th, &at, plcw_main, j) == 0;
+                        if (!started) __atomic_fetch_sub(&g_plcw_started, 1, __ATOMIC_RELAXED);
+                        pthread_attr_destroy(&at);
+                    }
+                    if (started) {
+                        g_plc_size_saved = size;
+                        buf = NULL;   // 缓冲区和 j 都归后台线程了
+                    } else {
+                        free(j);
+                    }
+                }
+                if (!started) plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：起不了后台写盘线程，这次不落盘");
+            }
+        }
+    }
+    free(buf);
+    if (!started) __atomic_store_n(&g_plcw_busy, 0, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_plc_mu);
+}
+
+// 一条管线刚经缓存建好：记账；够触发局中补写的条数、时间也到了就试一次。线程：任意建管线的线程（图形 / 计算 / 清屏）。
+static void plc_created(void) {
+    if (!g_plc) return;
+    uint64_t made = __atomic_add_fetch(&g_plc_made, 1, __ATOMIC_RELAXED);
+    if (!g_plc_dir[0] || made < __atomic_load_n(&g_plc_made_saved, __ATOMIC_RELAXED) + g_plc_thr_new) return;
+    uint64_t ts = __atomic_load_n(&g_plc_t_saved, __ATOMIC_RELAXED), t = now_ns();
+    if (ts ? t - ts < g_plc_every_ns : t - g_plc_t_open < g_plc_first_ns) return;
+    plc_save_midrun();
+}
+
+// 等在飞的后台写收尾，最多等到 deadline（now_ns 时钟）。返回 1 = 已经没有在飞的写，0 = 到点了还没写完。
+static int plcw_wait(uint64_t deadline) {
+    while (__atomic_load_n(&g_plcw_busy, __ATOMIC_ACQUIRE)) {
+        if (now_ns() >= deadline) return 0;
+        struct timespec ts = {0, 1000000};   // 1 ms 一查：写盘通常十几毫秒，不值得为它再配一套条件变量
+        nanosleep(&ts, NULL);
+    }
+    return 1;
 }
 
 // 收尾时（所有段都完成之后、销毁管线之前）：把驱动当前的缓存数据写盘，再销毁缓存。线程：与 close 同。
-// 本局没新增（大小与读入时一致）就不重写；设备丢了不取数据；写失败只记日志（下一局照旧慢一次，本局不受影响）。
-static void plc_close(void) {
-    if (!g_plc) return;
+// 先等在飞的局中写（等多久算进 close 的 deadline；到点没写完 = 放弃这次收尾写：两边写同一个临时文件，不能并行，也不拖 close）。
+// 数据大小与上次保存 / 读入时一致就不重写；设备丢了不取数据；写失败只记日志（下一局照旧慢一次，本局不受影响）。
+static void plc_close(uint64_t deadline) {
+    pthread_mutex_lock(&g_plc_mu);   // 与局中触发互斥：拿到之后不会再有线程拿 g_plc 去取数据
     VkPipelineCache pc = g_plc;
     g_plc = VK_NULL_HANDLE;
+    pthread_mutex_unlock(&g_plc_mu);
+    if (!pc) return;
     unsigned long long made = (unsigned long long)__atomic_load_n(&g_plc_made, __ATOMIC_RELAXED);
-    if (g_plc_dir[0] && g.device_lost) {
+    if (!plcw_wait(deadline)) {
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：close 时限内局中写盘还没写完，放弃收尾这次写（旧文件原样，下一局照常读）");
+    } else if (g_plc_dir[0] && g.device_lost) {
         plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：设备已丢失，不取数据、不落盘");
     } else if (g_plc_dir[0]) {
         uint64_t t0 = now_ns();
@@ -1150,8 +1321,8 @@ static void plc_close(void) {
         VkResult vr = vkGetPipelineCacheData(g.d, pc, &size, NULL);
         if (vr != VK_SUCCESS || size == 0) {
             plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：取不到驱动数据（VkResult %d，%zu 字节），不落盘", (int)vr, size);
-        } else if (size == g_plc_loaded) {
-            plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：本局没有新增（%zu 字节，与读入时一致），不重写；本局经缓存建管线 %llu 条", size, made);
+        } else if (size == g_plc_size_saved && !__atomic_load_n(&g_plcw_failed, __ATOMIC_ACQUIRE)) {
+            plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：本局没有新增（%zu 字节，与上次保存 / 读入时一致），不重写；本局经缓存建管线 %llu 条", size, made);
         } else {
             void *buf = malloc(size);
             if (!buf) {
@@ -1335,7 +1506,8 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     g.worker_started = 0;
 
     // 在途段都完成了、不会再有新管线：把驱动管线缓存写盘（失败只记日志）再销毁它。放在销毁管线之前，后面的拆除出事也不丢这一局的编译结果。
-    plc_close();
+    // 在飞的局中写（#868）要先等它收尾，等多久算进这次 close 的截止时间；到点没写完就放弃收尾这次写，不拖 close。
+    plc_close(deadline);
 
     // ⑤ 销毁所有仍活着的后端对象；已 release 的 retired 已由 worker 调完。
     pthread_mutex_lock(&g_mu);
@@ -1397,6 +1569,8 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
         if (tx->view) vkDestroyImageView(g.d, tx->view, NULL);
         if (tx->image) vkDestroyImage(g.d, tx->image, NULL);
         if (tx->memory) vkFreeMemory(g.d, tx->memory, NULL);
+        if (tx->bc_sbuf) vkDestroyBuffer(g.d, tx->bc_sbuf, NULL);   // 现解贴图的压缩影子（同 destroy_tex_locked）
+        if (tx->bc_smem) vkFreeMemory(g.d, tx->bc_smem, NULL);
         free(tx);
         tx = tn;
     }
@@ -2539,7 +2713,7 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
         destroy_pipe_objects(p);
         return bad;
     }
-    if (g_plc) __atomic_fetch_add(&g_plc_made, 1, __ATOMIC_RELAXED);
+    plc_created();
     for (int st = 0; st < 5; st++) {
         struct nvn_gpu_shader_s *sh = d->st[st].sh;
         if (!sh) continue;
@@ -2665,7 +2839,7 @@ nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pip
         destroy_pipe_objects(p);
         return fail(err, NVN_GPU_E_COMPILE, "vkCreateComputePipelines 失败");
     }
-    if (g_plc) __atomic_fetch_add(&g_plc_made, 1, __ATOMIC_RELAXED);
+    plc_created();
     p->stage_nent[NVN_GPU_SH_CS] = sh->nent;
     p->stage_push_off[NVN_GPU_SH_CS] = sh->push_off;
     p->stage_push_bytes[NVN_GPU_SH_CS] = sh->push_bytes;
@@ -2714,6 +2888,27 @@ static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
         { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->att) != VK_SUCCESS) v->att = VK_NULL_HANDLE; LIFE_ADD(4); }
     }
     VkImageView r = v->att;
+    pthread_mutex_unlock(&g_mu);
+    return r;
+}
+
+// 图像形态的视图：存储图像视图必须用恒等通道映射（Vulkan 规定 image 视图不参与通道映射），而采样视图可能带着
+// 通道映射（游戏设的，或没有 alpha 的格式把 a 钉成 ONE）。第一次当存储图像时另建一个，随视图销毁。
+static VkImageView view_image_form(struct nvn_gpu_view_s *v) {
+    if (!v->swizzled) return v->view;
+    pthread_mutex_lock(&g_mu);
+    if (!v->img) {
+        VkImageViewCreateInfo ci;
+        memset(&ci, 0, sizeof ci);
+        ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ci.image = v->tex->image;
+        ci.viewType = v->type;
+        ci.format = v->format;
+        ci.subresourceRange = (VkImageSubresourceRange){v->aspect, v->base_level, v->levels, v->base_layer, v->layers};
+        OC(OC_VIEW);
+        { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->img) != VK_SUCCESS) v->img = VK_NULL_HANDLE; LIFE_ADD(4); }
+    }
+    VkImageView r = v->img;
     pthread_mutex_unlock(&g_mu);
     return r;
 }
@@ -3230,7 +3425,7 @@ static int write_binds(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, 
         case NVN_GPU_RES_IMAGE:
             if (!b->u.view) { set_sticky(c, NVN_GPU_E_LAYOUT, "IMAGE 绑定缺 view"); return -1; }
             memset(im, 0, sizeof *im);
-            im->imageView = b->u.view->view;
+            im->imageView = view_image_form(b->u.view);   // 带通道映射的视图不能当存储图像用：另建恒等形态
             im->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
             w->pImageInfo = im;
             break;
@@ -3895,6 +4090,22 @@ void nvn_gpu_tex_release(nvn_gpu_tex th) {
     pthread_mutex_unlock(&g_mu);
 }
 
+// NVN 里第 4 通道读作 1 的格式（RGBX / BGRX / RGB5 / BGR5 / RGB_DXT1）：这些格式的存储没有 alpha，
+// 分量 a 由硬件供给常数 1。宿主格式是同位宽的 RGBA（Vulkan 没有 RGBX），直接采样会把 X 位当 alpha 读出来
+// （0100F2C0115B6000 的光照合成逐层变暗就是这么来的：片元 alpha 读成 0 附近的垃圾值，目标因子 SRC_ALPHA 把已有光照乘小）。
+// 与 Metal 侧同一张表（graphics/nvn/gfx/tex/nvn_fmt_mtl.c 的 noalpha：nvn_fmt_to_mtl 把 a 解析成 ONE）。
+static int nvn_fmt_alpha_reads_one(uint32_t f) {
+    switch (f) {
+    case NVN_FORMAT_RGBX8_SRGB: case NVN_FORMAT_RGB_DXT1: case NVN_FORMAT_RGB_DXT1_SRGB: case NVN_FORMAT_RGB5:
+    case NVN_FORMAT_RGBX8: case NVN_FORMAT_RGBX8SN: case NVN_FORMAT_RGBX8UI: case NVN_FORMAT_RGBX8I:
+    case NVN_FORMAT_RGBX16F: case NVN_FORMAT_RGBX16: case NVN_FORMAT_RGBX16SN: case NVN_FORMAT_RGBX16UI: case NVN_FORMAT_RGBX16I:
+    case NVN_FORMAT_RGBX32F: case NVN_FORMAT_RGBX32UI: case NVN_FORMAT_RGBX32I:
+    case NVN_FORMAT_BGR5: case NVN_FORMAT_BGRX8: case NVN_FORMAT_BGRX8_SRGB:
+        return 1;
+    default: return 0;
+    }
+}
+
 nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *out, nvn_gpu_err *err) {
     if (!session_accepting()) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭 / 未打开");
     if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
@@ -3947,8 +4158,10 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
         if (v && v->set_swizzle) memcpy(sw, v->swz, 4);
         else if (t->swz) for (int ch = 0; ch < 4; ch++) sw[ch] = (uint8_t)(t->swz >> (3 * ch) & 7);
         VkComponentSwizzle *comp[4] = {&ci.components.r, &ci.components.g, &ci.components.b, &ci.components.a};
+        int a_one = nvn_fmt_alpha_reads_one(o->nvn_format);   // 没有 alpha 的格式：不管映射到哪一档，读到 a 都是 1
         for (int ch = 0; ch < 4; ch++) {
             if (sw[ch] > 5) sw[ch] = (uint8_t)(2 + ch);
+            if (a_one && sw[ch] == 5) sw[ch] = 1;
             *comp[ch] = sw[ch] == 0 ? VK_COMPONENT_SWIZZLE_ZERO : sw[ch] == 1 ? VK_COMPONENT_SWIZZLE_ONE : (VkComponentSwizzle)(VK_COMPONENT_SWIZZLE_R + (sw[ch] - 2));
             if (sw[ch] != 2 + ch) o->swizzled = 1;
         }
@@ -4137,6 +4350,8 @@ void nvn_gpu_samp_release(nvn_gpu_samp sh) {
     pthread_mutex_unlock(&g_mu);
 }
 
+static void bc_readback(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32_t level, uint32_t layer, const NVNcopyRegion *r,
+                        struct nvn_gpu_buf_s *b, uint64_t off, uint64_t row_bytes, uint64_t image_bytes);   // 见 bc_upload 前
 // 线性内容上传 / 缓冲 ↔ 贴图拷贝。全部在通道外，按 GPU 顺序执行。
 // depth_f32：#398 D24 换 D32 存储的贴图，缓冲里已是换算好的 D32 深度面（每纹素 4 字节 float），只拷深度面。
 static void copy_buf_tex_impl(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint64_t row_bytes, uint64_t image_bytes,
@@ -4211,10 +4426,7 @@ void nvn_gpu_copy_tex_buf(nvn_gpu_cmd ch, nvn_gpu_tex th, uint32_t level, uint32
     if (!c || !rc_is(c->sticky, NVN_GPU_OK)) return;
     struct nvn_gpu_tex_s *t = th;
     struct nvn_gpu_buf_s *b = bh;
-    if (t && t->bc_decoded) {
-        set_sticky(c, NVN_GPU_E_UNSUPPORTED, "BC 解码贴图不能按压缩字节回读（0x%x）", t->nvn_format);
-        return;
-    }
+    if (t && t->bc_decoded) { bc_readback(c, t, level, layer, r, b, off, row_bytes, image_bytes); return; }   // 按上传时留下的压缩原字节回读
     nvn_fmt_info fi;
     if (t && nvn_fmt_info_of(t->nvn_format, &fi) && fi.expand) {
         set_sticky(c, NVN_GPU_E_UNSUPPORTED, "展开格式回读未实现（0x%x）", t->nvn_format);
@@ -4371,6 +4583,88 @@ void nvn_gpu_clear_view(nvn_gpu_cmd ch, nvn_gpu_view vh, const float rgba[4], co
 }
 
 // 同步解码只写私有临时图：目标的修改仍由当前段在指定位置执行，abort 不改目标。
+// 现解贴图（bc_decoded）的压缩原数据影子：显存里存的是解码后的格式，游戏按压缩字节回读（贴图 → 缓冲拷贝）时要的是原字节。
+// 这种贴图不能当渲染目标、不能当存储图像，也不接受压缩字节直拷（见 tex_create / copy_buf_tex_impl），内容只来自 bc_upload，
+// 所以在上传时留一份原字节就是准确的回读来源，不用重新压缩。影子是一块 GPU 缓冲，写它和读它都录在同一条命令流里：
+// 和贴图本身一样按 GPU 顺序生效，命令被放弃（abort）时一起作废。布局：逐级相接；每级内按层（3D 按该级的切片）相接，每层按块行紧排。
+static int bc_shadow_layout(const struct nvn_gpu_tex_s *t, uint32_t bb, uint32_t level,
+                            uint64_t *level_off, uint64_t *row_pitch, uint64_t *slice_pitch, uint32_t *slices, uint64_t *total) {
+    uint64_t at = 0;
+    for (uint32_t l = 0; l < t->levels; l++) {
+        uint32_t w = t->w >> l, h = t->h >> l, d = t->target == NVN_TEXTURE_TARGET_3D ? t->depth >> l : t->layers;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (!d) d = 1;
+        uint64_t row = (uint64_t)((w + 3) / 4) * bb, slice = row * ((h + 3) / 4);
+        if (l == level) { *level_off = at; *row_pitch = row; *slice_pitch = slice; *slices = d; }
+        if (slice && d > (UINT64_MAX - at) / slice) return 0;
+        at += slice * d;
+    }
+    *total = at;
+    return level < t->levels;
+}
+
+// 现解贴图的贴图 → 缓冲拷贝：从压缩影子取原字节，按调用方的行距写进目标缓冲（在 GPU 流里按序：暂存区 + 拷贝）。
+// 没上传过的区域回零（原机上是未定义内容）。3D 贴图按 copy_tex_buf 的约定 layer 是切片、区域深度为 1。
+static int bc_shadow_ensure(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint64_t total);
+static void bc_readback(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32_t level, uint32_t layer, const NVNcopyRegion *r,
+                        struct nvn_gpu_buf_s *b, uint64_t off, uint64_t row_bytes, uint64_t image_bytes) {
+    VkOffset3D o; VkExtent3D e; int bb = 0; NVNcopyRegion rr;
+    int is3d = t->target == NVN_TEXTURE_TARGET_3D;
+    if (is3d) { memset(&rr, 0, sizeof rr); if (r) rr = *r; if (rr.depth > 1) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "BC 解码贴图回读一次只读一个切片"); return; }
+                rr.depth = 1; rr.zoffset = (int)layer; r = &rr; }
+    if (!b || level >= t->levels || (!is3d && layer >= t->layers) || copy_region(t, level, r, &o, &e) || !e.width || !e.height ||
+        !nvn_vk_bcdec_route(t->nvn_format, NULL, NULL, NULL, NULL, &bb) || bb <= 0) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 解码贴图回读：子资源或区域非法"); return;
+    }
+    uint32_t mw = t->w >> level, mh = t->h >> level; if (!mw) mw = 1; if (!mh) mh = 1;
+    if ((o.x & 3) || (o.y & 3) || ((e.width & 3) && (uint32_t)o.x + e.width != mw) || ((e.height & 3) && (uint32_t)o.y + e.height != mh)) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 解码贴图回读：区域未按压缩块对齐"); return;
+    }
+    uint64_t bw = ((uint64_t)e.width + 3) / 4, bh = ((uint64_t)e.height + 3) / 4, packed_row = bw * (uint32_t)bb;
+    if (row_bytes < packed_row || (bh > 1 && row_bytes > (UINT64_MAX - packed_row) / (bh - 1)) ||
+        image_bytes < (bh - 1) * row_bytes + packed_row || !buf_range(b, off, (bh - 1) * row_bytes + packed_row)) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 解码贴图回读：目标行距 / 长度非法"); return;
+    }
+    uint64_t loff = 0, rp = 0, sp = 0, total = 0; uint32_t slices = 0;
+    uint32_t slice = is3d ? (uint32_t)o.z : layer;
+    if (!bc_shadow_layout(t, (uint32_t)bb, level, &loff, &rp, &sp, &slices, &total) || slice >= slices) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 解码贴图回读：切片越界"); return;
+    }
+    if (!bc_shadow_ensure(c, t, total)) return;   // 一次都没上传过：影子建出来是全零（原机上是未定义内容）
+    VkBufferCopy *rg = calloc((size_t)bh, sizeof *rg);
+    if (!rg) { set_sticky(c, NVN_GPU_E_OOM, "BC 解码贴图回读：拷贝表分配失败"); return; }
+    uint64_t src = loff + (uint64_t)slice * sp + (uint64_t)(o.y / 4) * rp + (uint64_t)(o.x / 4) * (uint32_t)bb;
+    for (uint64_t y = 0; y < bh; y++) rg[y] = (VkBufferCopy){src + y * rp, off + y * row_bytes, packed_row};
+    full_barrier(c);
+    vkCmdCopyBuffer(c->cb, t->bc_sbuf, b->buffer, (uint32_t)bh, rg);
+    free(rg);
+    cmd_ref(c, b, REF_BUF);
+    cmd_ref(c, t, REF_TEX);
+}
+
+// 第一次上传时建压缩影子缓冲（大小按 bc_shadow_layout 的总长）。失败置粘滞。
+static int bc_shadow_ensure(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint64_t total) {
+    if (t->bc_sbuf) return 1;
+    VkBufferCreateInfo bi = {0}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO; bi.size = total ? total : 4;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkMemoryRequirements req;
+    if (vkCreateBuffer(g.d, &bi, NULL, &buf) != VK_SUCCESS) { set_sticky(c, NVN_GPU_E_OOM, "BC 上传：压缩影子缓冲建不出（%llu 字节）", (unsigned long long)total); return 0; }
+    vkGetBufferMemoryRequirements(g.d, buf, &req);
+    uint32_t type = s2a_vk_memory_type(g.dev, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, NULL);
+    if (type == UINT32_MAX) type = s2a_vk_memory_type(g.dev, req.memoryTypeBits, 0, NULL);
+    VkMemoryAllocateInfo ai = {0}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.allocationSize = req.size; ai.memoryTypeIndex = type;
+    if (type == UINT32_MAX || vkAllocateMemory(g.d, &ai, NULL, &mem) != VK_SUCCESS || vkBindBufferMemory(g.d, buf, mem, 0) != VK_SUCCESS) {
+        if (mem) vkFreeMemory(g.d, mem, NULL);
+        vkDestroyBuffer(g.d, buf, NULL);
+        set_sticky(c, NVN_GPU_E_OOM, "BC 上传：压缩影子显存分配失败（%llu 字节）", (unsigned long long)total); return 0;
+    }
+    t->bc_sbuf = buf; t->bc_smem = mem;
+    full_barrier(c);
+    vkCmdFillBuffer(c->cb, buf, 0, VK_WHOLE_SIZE, 0);   // 没上传过的区域回读为零，不留上一块显存的旧内容
+    return 1;
+}
+
 static void bc_upload(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32_t level, uint32_t layer,
                       const NVNcopyRegion *r, const void *src, uint64_t row_bytes, uint64_t image_bytes) {
     VkOffset3D off; VkExtent3D ext; int bb = 0;
@@ -4400,6 +4694,11 @@ static void bc_upload(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32_t
         image_bytes < (uint64_t)(ext.depth - 1) * slice_stride + last_slice) {
         set_sticky(c, NVN_GPU_E_ARG, "BC 上传源体积长度非法"); return;
     }
+    uint64_t sh_loff = 0, sh_rp = 0, sh_sp = 0, sh_total = 0; uint32_t sh_slices = 0;
+    if (!bc_shadow_layout(t, (uint32_t)bb, level, &sh_loff, &sh_rp, &sh_sp, &sh_slices, &sh_total)) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 上传：压缩影子布局溢出"); return;
+    }
+    if (!bc_shadow_ensure(c, t, sh_total)) return;
     size_t bytes = (size_t)(packed_row * bh); uint8_t *packed = malloc(bytes);
     struct bc_temp *tmp = NULL;
     if (!packed) { set_sticky(c, NVN_GPU_E_OOM, "BC 上传暂存分配失败"); return; }
@@ -4407,6 +4706,21 @@ static void bc_upload(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32_t
         tmp = calloc(1, sizeof *tmp);
         if (!tmp) goto fail;
         for (uint64_t y = 0; y < bh; y++) memcpy(packed + y * packed_row, (const uint8_t *)src + (uint64_t)z * slice_stride + y * row_bytes, (size_t)packed_row);
+        {   // 同一份原字节按序录进压缩影子缓冲（回读用，见 bc_readback）
+            uint32_t s = t->target == NVN_TEXTURE_TARGET_3D ? (uint32_t)off.z + z : layer;
+            nvn_gpu_slice ss; nvn_gpu_err se; VkBufferCopy *rg;
+            if (s >= sh_slices) { set_sticky(c, NVN_GPU_E_ARG, "BC 上传：切片越过压缩影子"); free(packed); free(tmp); return; }
+            if (!rc_is(nvn_gpu_arena_alloc(c, bytes, 4, &ss, &se), NVN_GPU_OK) || !(rg = calloc((size_t)bh, sizeof *rg))) {
+                if (rc_is(c->sticky, NVN_GPU_OK)) set_sticky(c, NVN_GPU_E_OOM, "BC 上传：压缩影子暂存分配失败");
+                free(packed); free(tmp); return;
+            }
+            memcpy(ss.cpu, packed, bytes);
+            uint64_t dst = sh_loff + (uint64_t)s * sh_sp + (uint64_t)(off.y / 4) * sh_rp + (uint64_t)(off.x / 4) * (uint32_t)bb;
+            for (uint64_t y = 0; y < bh; y++) rg[y] = (VkBufferCopy){ss.off + y * packed_row, dst + y * sh_rp, packed_row};
+            full_barrier(c);
+            vkCmdCopyBuffer(c->cb, ss.buf->buffer, t->bc_sbuf, (uint32_t)bh, rg);
+            free(rg);
+        }
         VkImageCreateInfo ci = {0}; ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ci.imageType = VK_IMAGE_TYPE_2D; ci.format = t->format; ci.extent = (VkExtent3D){ext.width, ext.height, 1};
         ci.mipLevels = ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT; ci.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -4553,10 +4867,11 @@ void nvn_gpu_blit(nvn_gpu_cmd ch, nvn_gpu_view sv, const NVNcopyRegion *sr, nvn_
     if (sv->format != s->format || dv->format != d->format) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：视图换了格式（拷贝按存储的格式做）"); return; }
     if (s->samples > 1 && d->samples == 1) {
         nvn_fmt_info f;
-        if (linear || s->w != d->w || s->h != d->h || s->format != d->format || s->nvn_format != d->nvn_format || sv->swizzled || dv->swizzled ||
+        if (linear || s->w != d->w || s->h != d->h || s->format != d->format || s->nvn_format != d->nvn_format ||
             s->aspect != VK_IMAGE_ASPECT_COLOR_BIT || d->aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
             !nvn_fmt_info_of(s->nvn_format, &f) || f.kind == NVN_FMT_UINT || f.kind == NVN_FMT_SINT || f.depth || f.stencil ||
             s->target == NVN_TEXTURE_TARGET_3D || d->target == NVN_TEXTURE_TARGET_3D) {
+            // resolve 直接用 VkImage + 子资源范围画，不用采样视图的通道映射：视图带映射（游戏设的 / 没有 alpha 的格式把 a 钉成 ONE）不影响
             set_sticky(c, NVN_GPU_E_UNSUPPORTED, "resolve：只支持同格式非整数颜色二维贴图"); return;
         }
         VkOffset3D so, dof; VkExtent3D se, de;
@@ -5015,6 +5330,11 @@ void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) {
     fn(user, "pipe_cache_loaded_bytes", g_plc_loaded);                              // 开会话时读到并交给驱动的字节数（0 = 没读到）
     fn(user, "pipe_cache_rejected", g_plc_rejected);                                // 旧文件读不出 / 驱动不收、被丢掉的次数
     fn(user, "pipes_created", __atomic_load_n(&g_plc_made, __ATOMIC_RELAXED));      // 经缓存建出的管线条数（图形 + 计算 + 清屏）
+    // 局中补写（#868）；进程累计，不随会话清零（后台写可能跨过 close 才收尾）
+    fn(user, "pipe_cache_saves", __atomic_load_n(&g_plcw_started, __ATOMIC_RELAXED));         // 交给后台写盘的次数
+    fn(user, "pipe_cache_saves_ok", __atomic_load_n(&g_plcw_ok, __ATOMIC_RELAXED));           // 其中写成功的
+    fn(user, "pipe_cache_saves_failed", __atomic_load_n(&g_plcw_fail, __ATOMIC_RELAXED));     // 其中写失败的（只记日志；收尾时会再试）
+    fn(user, "pipe_cache_saves_same", __atomic_load_n(&g_plcw_same, __ATOMIC_RELAXED));       // 触发了但数据大小与上次保存一致、没写的次数
 }
 
 // 测试钩子：让某个 signal 的段在 fence 等待时报失败（走真实的失败终止路径）。

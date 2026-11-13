@@ -634,7 +634,12 @@ static int img_place(const char *proc_docs, const char *path) {   // 0 = 挪好�
     char ip[2400], tp[2500]; snprintf(ip, sizeof ip, "%s/index.tsv", root); snprintf(tp, sizeof tp, "%s.tmp", ip);
     FILE *o = fopen(tp, "w"), *in = fopen(ip, "r"); if (!o) { if (in) fclose(in); snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); return -4; }
     fprintf(o, "game.img\t%llu\t-\n", (unsigned long long)total);
-    if (in) { char line[4600]; while (fgets(line, sizeof line, in)) if (!strncmp(line, "shaders/", 8) || !strncmp(line, "romfs_overlay/", 14)) fputs(line, o); fclose(in); }
+    int shaders = 0;   // 着色器库从哪来：原有 index.tsv（电脑推过）或 IMG 目录表（导出文件夹里的「<游戏名>.img」带着，pack/img.py export）
+    if (in) { char line[4600]; while (fgets(line, sizeof line, in)) if (!strncmp(line, "shaders/", 8) || !strncmp(line, "romfs_overlay/", 14)) { fputs(line, o); shaders |= !strncmp(line, "shaders/", 8); } fclose(in); }
+    if (!shaders) { img_ent *te; size_t tn; if (!img_toc(root, &te, &tn)) { for (size_t i = 0; i < tn && !shaders; i++) shaders = !strncmp(te[i].rel, "shaders/", 8); img_free(te, tn); } }
+    // 两处都没有：多半是把资源包文件夹里的 game.img 直接放了进来（它按设计不带 shaders/），起局会 direct_lib_missing（诊断 D-9864 / D-F6W7）
+    if (!shaders) LOG("【黄】资源导入：%s 里没有着色器库（shaders/），起局会缺直连库：要放「S2Arm 自签导出」文件夹里这款的 .img，不是资源包文件夹里的 game.img",
+                      strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
     if (fclose(o) || rename(tp, ip)) { snprintf(g_img_err, sizeof g_img_err, "写 index.tsv 失败：%s", strerror(errno)); return -4; }
     char mf[600]; snprintf(mf, sizeof mf, "{\"version\": 3, \"format\": \"img\", \"imgFile\": \"game.img\", \"index_sha256\": \"%s\"}\n", pid);
     snprintf(p, sizeof p, "%s/manifest.json", root); snprintf(tp, sizeof tp, "%s.tmp", p);

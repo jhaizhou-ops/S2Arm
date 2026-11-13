@@ -86,13 +86,19 @@ public sealed partial class EnvironmentWindow
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 body.Children.Add(Muted(T("diag.upload.sending"), 14));
+                // 11-13：卡在这一步（网慢 / 代理半通）原先没有任何出口；「取消」或关窗都停掉作业（RunAsync 取消即结束作业进程树），作业层另有 90 秒总时限
+                using var stop = new CancellationTokenSource();
+                var cancelSending = Action("diag.upload.cancel", "diag.upload.cancelSending"); cancelSending.Click += (_, _) => stop.Cancel();
+                body.Children.Add(Row(cancelSending));
+                EventHandler closed = (_, _) => stop.Cancel();
+                dialog.Closed += closed;
                 var fields = new Dictionary<string, object?> { ["extra"] = ReportExtra() };
                 if (gameId is not null) fields["gameId"] = gameId;
                 if (operations is not null) fields["operations"] = operations; else { var f = fallback(); if (!string.IsNullOrWhiteSpace(f)) fields["summary"] = f; }
                 string? code = null, why = null, issueUrl = null, repo = null;
                 try
                 {
-                    var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder ?? Path.Combine(privateRoot, "unconfigured"), libraryId, "diagnosticsUpload", null, CancellationToken.None, fields: fields);
+                    var job = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder ?? Path.Combine(privateRoot, "unconfigured"), libraryId, "diagnosticsUpload", null, stop.Token, fields: fields);
                     if (job.Report.Succeeded && job.Report.Result.ValueKind == JsonValueKind.Object && job.Report.Result.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String)
                     {
                         code = c.GetString();
@@ -104,7 +110,8 @@ public sealed partial class EnvironmentWindow
                 }
                 catch (Exception error) when (error is LibraryProtocolException or IOException or UnauthorizedAccessException or ArgumentException or
                     InvalidOperationException or OperationCanceledException or System.ComponentModel.Win32Exception)
-                { why = error.Message; }
+                { why = stop.IsCancellationRequested ? T("diag.upload.cancelled") : error.Message; }
+                dialog.Closed -= closed;
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 if (!string.IsNullOrEmpty(code))

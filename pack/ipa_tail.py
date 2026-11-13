@@ -35,7 +35,15 @@ PY = os.environ.get('S2A_PY') or sys.executable
 class Red(Exception): pass
 
 
-PROG = [int(os.environ.get('S2A_PKG_PROG_DONE', '0')), int(os.environ.get('S2A_PKG_PROG_TOTAL', '5'))]   # 出包进度：调用方已走的步数 / 总步数（出壳那步在调用方）
+PROG = [int(os.environ.get('S2A_PKG_PROG_DONE', '0')), 0]   # 出包进度：已走的步数（含调用方出壳那步）/ 总步数（main 里按 plan_steps 定）
+
+
+def plan_steps(sign, app_only):
+    """这次收尾要走的计时步（每步 step() 记一行、进度加 1）：总步数只从这张表推，不手写常数
+    （维护者截图「出包 6/5」：原先总数在 pack/ipa.sh 手写 5，后加「单文件镜像」没跟上，Mac 签名出包实走 6 步）。
+    改 assemble 的 step() 调用必须同改这里，tests/test_ipa_tail.py 按各分支真跑核对"""
+    return (['组装（预编壳）'] + (['签名'] if sign in ('adhoc', 'dev') else []) + ['打ipa']
+            + ([] if app_only else ['资源包', '资源包核对', '单文件镜像']))
 
 
 def dev_facilities():
@@ -230,7 +238,10 @@ def main():
     p.add_argument('--bundle-id', required=True); p.add_argument('--suffix', default=''); p.add_argument('--key', required=True)
     p.add_argument('--title', required=True); p.add_argument('--sign', choices=('none', 'adhoc', 'dev'), required=True)
     p.add_argument('--team', default=''); p.add_argument('--save-identity', default=''); p.add_argument('--app-only', action='store_true')
+    p.add_argument('--count-steps', action='store_true', help='只打印这次要走几步（pack/ipa.sh 算出壳那步的总数用）')
     a = p.parse_args()
+    if a.count_steps: print(len(plan_steps(a.sign, a.app_only))); return 0
+    PROG[1] = PROG[0] + len(plan_steps(a.sign, a.app_only))
     if a.sign == 'dev' and not a.team: print('【红】开发直签要 --team'); return 1
     if a.sign != 'none' and sys.platform != 'darwin': print(f'【红】签名方式 {a.sign} 只能在 Mac 上（Windows 用 none，交给侧载工具签）'); return 1
     try: assemble(a)

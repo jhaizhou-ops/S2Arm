@@ -1059,6 +1059,17 @@ static void test_shared_input_config(void) {
 #undef CONFIG_EXPECT
 }
 int main(int argc, const char **argv) {
+    // 兜底手柄（macos/hid_pad.m，#934）：Switch 简易 HID 键号 1 = B（南）、2 = A（东）、3 = Y（西）、4 = X（北）、9 = −、10 = +；13 Home 不进键位
+    expect(s2a_hid_pad_switch_button_bit(1) == (1u << 1) && s2a_hid_pad_switch_button_bit(2) == (1u << 0) &&
+           s2a_hid_pad_switch_button_bit(3) == (1u << 3) && s2a_hid_pad_switch_button_bit(4) == (1u << 2), "HID pad face buttons follow Switch labels");
+    expect(s2a_hid_pad_switch_button_bit(9) == (1u << 11) && s2a_hid_pad_switch_button_bit(10) == (1u << 10) &&
+           s2a_hid_pad_switch_button_bit(13) == 0 && s2a_hid_pad_switch_button_bit(0) == 0, "HID pad minus / plus, Home and out of range");
+    // 十字键 hat 0..7（0 = 上，顺时针），8 = 松开；位：左 12、上 13、右 14、下 15
+    expect(s2a_hid_pad_hat_bits(0, 0, 7) == (1u << 13) && s2a_hid_pad_hat_bits(3, 0, 7) == ((1u << 15) | (1u << 14)) &&
+           s2a_hid_pad_hat_bits(8, 0, 7) == 0 && s2a_hid_pad_hat_bits(1, 1, 8) == (1u << 13), "HID pad hat switch to d-pad bits");
+    // 轴：0..65535 中点约 0；Y 反向（HID 向下为正）
+    expect(s2a_hid_pad_axis(0, 0, 65535, 0) == -32767 && s2a_hid_pad_axis(65535, 0, 65535, 0) == 32767 &&
+           s2a_hid_pad_axis(0, 0, 65535, 1) == 32767 && abs(s2a_hid_pad_axis(32768, 0, 65535, 0)) <= 1, "HID pad axis normalisation");
     char relayPath[96];
     snprintf(relayPath, sizeof relayPath, "/tmp/s2arm-motion-%d.sock", getpid());
     struct sockaddr_un relayAddress = {.sun_family = AF_UNIX};

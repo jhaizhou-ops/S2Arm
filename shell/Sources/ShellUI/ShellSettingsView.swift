@@ -6,6 +6,7 @@ enum ShellSettingsRows {
     static let gameID = "shell"
     static let hud = "shell.hud"
     static let glass = "shell.glass"
+    static let silent = "shell.silent"
     static let touchSize = "shell.touchSize"
     static let touchStick = "shell.touchStick"
     static let targetPrefix = "shs.row."
@@ -19,6 +20,13 @@ enum ShellSettingsRows {
     static func hudRow(_ store: ShellSettingsStore) -> SettingRow {
         SettingRow(id: hud, label: ShellStrings.text("Performance overlay"), note: ShellStrings.text("Shared by all games; you can also switch it in a game any time."),
                    kind: .toggle(on: "1", off: "0"), value: store.performanceHUD ? "1" : "0")
+    }
+
+    /// Game sound while the device is in Silent Mode, for every game (the same switch as the system Settings app's S2Arm page).
+    static func silentRow(_ store: ShellSettingsStore) -> SettingRow {
+        SettingRow(id: silent, label: ShellStrings.text("Play Sound in Silent Mode"),
+                   note: ShellStrings.text("When on, game sound keeps playing while the device is in Silent Mode. When off, S2Arm follows Silent Mode like other games."),
+                   kind: .toggle(on: "1", off: "0"), value: store.playInSilentMode ? "1" : "0")
     }
 
     /// The touch controls' size for every game. The preview above the row shows it.
@@ -45,6 +53,7 @@ enum ShellSettingsRows {
     static func apply(_ id: String, value: String, to store: ShellSettingsStore) {
         switch id {
         case hud: store.storePerformanceHUD(value == "1")
+        case silent: store.storePlayInSilentMode(value == "1")
         case glass: store.storeLiquidGlass(value == "1")
         case touchSize: store.storeTouchSize(value)
         case touchStick: store.storeTouchStick(value)
@@ -116,6 +125,13 @@ struct ShellSettingsView: View {
                         // per-game layout (each game's settings → button positions), never these shell settings (#372).
                         SettingsGroup(title: ShellStrings.text("Interface")) {
                             ForEach([ShellSettingsRows.glassRow(store), ShellSettingsRows.hudRow(store)]) { row in
+                                SettingControl(gameID: ShellSettingsRows.gameID, row: row, targetPrefix: ShellSettingsRows.targetPrefix) {
+                                    ShellSettingsRows.apply(row.id, value: $0, to: store)
+                                }.equatable()
+                            }
+                        }
+                        SettingsGroup(title: ShellStrings.text("Sound")) {
+                            ForEach([ShellSettingsRows.silentRow(store)]) { row in
                                 SettingControl(gameID: ShellSettingsRows.gameID, row: row, targetPrefix: ShellSettingsRows.targetPrefix) {
                                     ShellSettingsRows.apply(row.id, value: $0, to: store)
                                 }.equatable()

@@ -37,7 +37,7 @@ static const struct { int code; const char *id, *summary, *msg; } k_want[] = {
     {S2A_INIT_FAIL_E_GAME_FILES, "game_files_missing", "服务会话初始化失败：资源包里没有 exefs/main.npdm（游戏文件不在机上 / 没导完）",
      "游戏文件缺失，请重新导入：在 电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」。"},
     {S2A_INIT_FAIL_E_DIRECT_LIB, "direct_lib_missing", "包里没有本宿主口径的直连着色器库（没导完 / 旧版本出的包 / 设备跑不了直连；只有直连，11-07 拆通用模式后不再退通用）",
-     "游戏文件缺失，请重新导入：在 电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」。"},
+     "这款游戏缺着色器库，请重新导入：用电脑装的，在电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」；自己签名安装的，把「S2Arm 自签导出」文件夹里这款游戏的 .img 放进「文件」App（不是资源包文件夹里的 game.img，那个不带着色器库）。"},
     {S2A_INIT_FAIL_E_UNKNOWN, "unknown", "未登记的初启失败", "启动过程中出了问题。"},
     {999, "unknown", "未登记的初启失败", "启动过程中出了问题。"},
     {-1, "unknown", "未登记的初启失败", "启动过程中出了问题。"},

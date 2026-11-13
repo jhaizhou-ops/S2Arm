@@ -13,6 +13,7 @@
 #include "joycon_imu.h"
 #import "input_guide.h"
 #include "ns2_controller.h"
+#include "hid_pad.h"
 #include <stdatomic.h>
 #include <stdint.h>
 #include <math.h>
@@ -462,6 +463,7 @@ static void log_controllers_if_changed(void) {
 }
 static void install_pad_handlers(void) {
     log_controllers_if_changed();
+    s2a_mac_hid_pad_start();   // 兜底手柄监听（只起一次）
     for (GCController *controller in GCController.controllers) install_pad_handler(controller);
 }
 // 手柄六轴（同 iOS 的 s2a_pad_read_motion 约定）：游戏要六轴时才开传感器。主线程跟着输入采样读 GCMotion，游戏线程取最新一份
@@ -746,14 +748,18 @@ static void map_pad_inputs(NSDictionary *all, NSDictionary *axes, uint32_t *out_
     }
     *out_buttons = buttons;
 }
-static void sample_ns2_state(const ns2_state *ble, uint32_t *out_buttons, int32_t sticks[4]) {
+// 按键名位序（同 macos/hid_pad.h）+ 摇杆原值 → 键位配置：Switch 2 Pro（BLE）与兜底 HID 手柄两路共用
+static void sample_coded_state(uint32_t bits, int lx, int ly, int rx, int ry, uint32_t *out_buttons, int32_t sticks[4]) {
     NSArray *codes = @[@"east", @"south", @"north", @"west", @"leftStick", @"rightStick",
         @"leftShoulder", @"rightShoulder", @"leftTrigger", @"rightTrigger", @"menu", @"options",
         @"dpadLeft", @"dpadUp", @"dpadRight", @"dpadDown"];
     NSMutableDictionary *all = [NSMutableDictionary new];
-    for (int i = 0; i < 16; i++) all[codes[i]] = @((ble->buttons & (1u << i)) != 0);
-    map_pad_inputs(all, @{@"leftX": @(ble->lx / 32767.0f), @"leftY": @(ble->ly / 32767.0f),
-                          @"rightX": @(ble->rx / 32767.0f), @"rightY": @(ble->ry / 32767.0f)}, out_buttons, sticks);
+    for (int i = 0; i < 16; i++) all[codes[i]] = @((bits & (1u << i)) != 0);
+    map_pad_inputs(all, @{@"leftX": @(lx / 32767.0f), @"leftY": @(ly / 32767.0f),
+                          @"rightX": @(rx / 32767.0f), @"rightY": @(ry / 32767.0f)}, out_buttons, sticks);
+}
+static void sample_ns2_state(const ns2_state *ble, uint32_t *out_buttons, int32_t sticks[4]) {
+    sample_coded_state(ble->buttons, ble->lx, ble->ly, ble->rx, ble->ry, out_buttons, sticks);
 }
 static void sample_pad_state(GCExtendedGamepad *pad, uint32_t *out_buttons, int32_t sticks[4]) {
     // GameController 通常按物理方位上报（buttonA 在南侧）；Switch Pro 手柄在 macOS 上按键面字母上报（A 在东侧、X 在北侧）
@@ -849,6 +855,7 @@ static void sample_input(void) {
     BOOL hasBLE = s2a_mac_ns2_read(&ble, &bleSide);   // 单只 Joy-Con 已按游戏样式整形；SL / SR 不在键位配置里，直接并进它那一槽（#520 A）
     ble_raw_source = hasBLE && s2a_mac_ns2_raw_now();
     const void *live_ids[9]; GCExtendedGamepad *live_pads[9]; GCController *live_ctrls[9] = {nil}; int n = 0;
+    const s2a_hid_pad *live_hid[9] = {NULL};
     if (hasBLE) { live_ids[n] = &ns2_slot_id; live_pads[n] = nil; n++; }
     // Switch 2 Pro 是输入来源时系统手柄那一路不读（同改前；同一只手柄也可能出现在系统手柄列表里，两路都读会变成两个玩家）
     if (!hasBLE) for (GCController *c in GCController.controllers) {
@@ -856,6 +863,15 @@ static void sample_input(void) {
         if (!p && !pad_has_profile_buttons(c)) continue;   // 只有通用物理描述的手柄也进槽位（sample_profile_state）
         if (n >= 9) break;
         live_ids[n] = (__bridge const void *)c; live_pads[n] = p; live_ctrls[n] = c; n++;
+    }
+    // 兜底手柄（macos/hid_pad.m，#934）：GameController 认不出的 Switch 样式 HID 手柄，排在系统手柄后面；系统已枚举到同名手柄就跳过（不变成两个玩家）
+    static s2a_hid_pad hid[S2A_HID_PAD_MAX];
+    int nh = s2a_mac_hid_pad_read(hid);
+    for (int h = 0; h < nh && n < 9; h++) {
+        BOOL seen = NO;
+        for (GCController *c in GCController.controllers) if ([c.vendorName isEqualToString:@(hid[h].name)]) { seen = YES; break; }
+        if (seen) continue;
+        live_ids[n] = hid[h].id; live_pads[n] = nil; live_hid[n] = &hid[h]; n++;
     }
     int slot_of[9];
     int live = s2a_slot_plan(pad_id, live_ids, n, S2A_MAX_PADS, slot_of);
@@ -866,6 +882,7 @@ static void sample_input(void) {
         if (s < 0) continue;   // 超过 S2A_MAX_PADS 只：多出来的不参与
         pad_id[s] = live_ids[j];
         if (live_ids[j] == &ns2_slot_id) { sample_ns2_state(&ble, &slot_buttons[s], slot_sticks[s]); slot_buttons[s] |= bleSide; }
+        else if (live_hid[j]) { const s2a_hid_pad *h = live_hid[j]; sample_coded_state(h->buttons, h->lx, h->ly, h->rx, h->ry, &slot_buttons[s], slot_sticks[s]); }
         else if (live_pads[j]) { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_pad_state(live_pads[j], &slot_buttons[s], slot_sticks[s]); }
         else { pad_owner[s] = live_ctrls[j]; pad_slot_owner[s] = live_ctrls[j]; sample_profile_state(live_ctrls[j], &slot_buttons[s], slot_sticks[s]); }
     }

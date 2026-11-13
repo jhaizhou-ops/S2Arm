@@ -473,6 +473,19 @@ int main(void) {
         snprintf(c, sizeof c, "cmp -s '%s/src/npdm' '%s/资源包/exefs/main.npdm'", D, g3); CHECK(sh(c) == 0, "⑭ 小文件逐字节解出"); }
       CHECK(s2a_img_scan(D3) == 0, "⑭ 再扫一次：没有新的（拷到一半的仍不动）");
       CHECK(!*s2a_img_scan_code(), "⑭ 认领没失败：码为空（实际 %s）", s2a_img_scan_code());
+      // ⑭b 认领时有没有着色器库（诊断 D-9864 / D-F6W7：自签玩家把资源包里的 game.img 直接放进来，起局 direct_lib_missing）。期望手写：
+      //   只带 exefs / ctl 的 IMG（= 资源包里的 game.img）→ 日志一行【黄】「没有着色器库」；目录表带 shaders/ 的（= 导出文件夹里的 <游戏名>.img）→ 没有这行
+      { char D5[1300], lg[1400]; snprintf(D5, sizeof D5, "%s/img_docs5", T); snprintf(lg, sizeof lg, "%s/scan5.log", T);
+        snprintf(c, sizeof c, "mkdir -p '%s/放这里导入' && printf 'x' > '%s/src/sh.bin' && cp '%s/src/others.tsv' '%s/src/others_sh.tsv' && printf 'shaders/a.metallib\t%s/src/sh.bin\n' >> '%s/src/others_sh.tsv'"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others.tsv' '%s/放这里导入/game.img' --gid 0100abcd00000005 --pack-id img501 > /dev/null"
+                 " && python3 '%s/pack/img.py' build - '%s/src/others_sh.tsv' '%s/放这里导入/某游戏.img' --gid 0100abcd00000006 --pack-id img601 > /dev/null",
+                 D5, D, D, D, D, D, R, D, D5, R, D, D5);
+        CHECK(sh(c) == 0, "⑭b 造夹具（不带 / 带 shaders/ 的 IMG 各一个）");
+        int lfd = open(lg, O_WRONLY | O_CREAT | O_TRUNC, 0644), keep = g_s2a_logfd; g_s2a_logfd = lfd;
+        int placed = s2a_img_scan(D5); g_s2a_logfd = keep; close(lfd);
+        CHECK(placed == 2, "⑭b 两个都认领（实际 %d）", placed);
+        snprintf(c, sizeof c, "grep '没有着色器库' '%s' | grep -q 'game.img 里' && test \"$(grep -c '没有着色器库' '%s')\" = 1", lg, lg);
+        CHECK(sh(c) == 0, "⑭b 只对不带 shaders/ 的 game.img 记一行【黄】"); }
       // 格式号 2（更新版 S2Arm 做的）：不认、原样留着，给码 ios_install_img_format
       char D4[1300], f4[1400]; snprintf(D4, sizeof D4, "%s/img_docs4", T); mkdir(D4, 0755); snprintf(f4, sizeof f4, "%s/Import Here", D4); mkdir(f4, 0755);
       snprintf(f4, sizeof f4, "%s/Import Here/新格式.img", D4);   // 英文界面建的导入文件夹名也认

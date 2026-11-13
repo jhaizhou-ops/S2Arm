@@ -170,8 +170,9 @@ class WinOneclick(unittest.TestCase):
         (self.t / "Shell").mkdir(); (self.t / "Shell/manifest.json").write_text("{}")
         self.out = self.t / "iPhone/0100FD70134FA000"; self.out.mkdir(parents=True)
         self.events = self.t / "ev.jsonl"; self.calls = []
+        self.envs = []
         def run(args, log, env=None, on_line=None, **kw):
-            self.calls.append([str(a) for a in args])
+            self.calls.append([str(a) for a in args]); self.envs.append(env)
             if "--from-extract" in map(str, args):
                 pk = self.out / "work/pkg/product/pkg"; (pk / "pack").mkdir(parents=True)
                 (pk / "t0100fd70134fa000.ipa").write_bytes(b"ipa"); (pk / "pack/a.bin").write_bytes(b"a")
@@ -179,7 +180,7 @@ class WinOneclick(unittest.TestCase):
                                                                       build_id="b1", graphics_mode="direct")) + "\n")
             else:   # deliver_pack.py <源> <目标>
                 __import__("shutil").copytree(args[-2], args[-1])
-        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run)
+        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run, keys=self.t / "keys/prod.keys")
 
     def go(self):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None)
@@ -199,6 +200,8 @@ class WinOneclick(unittest.TestCase):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None,
                               sources=[self.t / "a.xci", self.t / "b.nsp"], gid="0100FD70134FA000")
         self.assertEqual(self.calls[0][-4:], ["--title-id", "0100FD70134FA000", str(self.t / "a.xci"), str(self.t / "b.nsp")])
+        # #943：从原件解其余序号要玩家导入的密钥，作业层交 S2A_KEYS 下去（不给就落回 ~/.switch/prod.keys，玩家机没有）
+        self.assertEqual(self.envs[0]["S2A_KEYS"], str(self.t / "keys/prod.keys"))
 
     def test_failed_pack_not_delivered(self):
         self.ok = False
@@ -224,7 +227,13 @@ class FakeW:
             return st if st else {"verdict": impactor, "code": None if impactor == "ok" else "impactor_missing",
                                   "download": "https://github.com/claration/impactor/releases/tag/v2.7.2"}
         self.team = "ABCDE12345"   # 真实 accounts.json 每个账号都带十位团队号（审计 P2-253 Windows 实机核过）
-        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team)
+        self.unselected, self.picks = [], []   # 账号存档里存着却没选中的 Apple ID（D-ZM37）；picks 记 select_only_account 收到的 plumesign
+        def select_only(exe):
+            self.picks.append(exe)
+            if len(self.unselected) != 1: return None
+            self.unselected = []; return "a@x"
+        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team,
+                                              unselected_accounts=lambda: self.unselected, select_only_account=select_only)
         self.logged = False
         self.plumesign_path = lambda given=None: "C:/plumesign.exe" if plume else None
     def mux_devices(self):
@@ -465,6 +474,23 @@ class WinInstall(unittest.TestCase):
         (d / impactor.PLUMESIGN_EXE).write_bytes(b"x")
         w2 = FakeW([("U1", "USB", 3)]); self.go(w2)
         self.assertEqual(w2.calls[0].plumesign, str(d / impactor.PLUMESIGN_EXE))
+
+    def test_unselected_account(self):
+        # D-ZM37：Impactor 存了 Apple ID 却没选中，plumesign 报「No account selected」。期望手写：
+        #   只存一个 → 装机签名前用 plumesign 选上（交的是装机用的同一份 plumesign），照常装好；
+        #   存多个 → 清单登录项 ✗、说「没有选中」、动作 openImpactor，仍不挡装机（只提示）
+        w = FakeW([("U1", "USB", 3)]); w.unselected = ["a@x"]
+        res = self.go(w)
+        self.assertEqual((w.picks, w.unselected, res["device"]), (["C:/plumesign.exe"], [], "U1"))
+        import impactor   # 登录项只在随包形态（发版启动器）出现
+        d = self.t / "launcher" / impactor.BUNDLE_DIR; d.mkdir(parents=True)
+        for n in impactor.BUNDLED: (d / n).write_bytes(b"x")
+        self.c.r["resources"] = str(self.t / "launcher")
+        w = FakeW([("U1", "USB", 3)]); w.logged = True; w.unselected = ["a@x", "b@x"]
+        with patch.object(self.m, "win_install_mod", return_value=w):
+            r = self.m.readiness_windows(self.c, self.gid)
+        login = next(i for i in r["items"] if i["id"] == "impactor_login")
+        self.assertEqual((login["ok"], login["action"]), (False, "openImpactor")); self.assertIn("没有选中", login["detail"]); self.assertTrue(r["ready"])
 
     def test_logged_in_reads_impactor_account_store(self):
         import json as _j, impactor

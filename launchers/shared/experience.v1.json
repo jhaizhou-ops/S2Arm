@@ -537,6 +537,10 @@
        "title": {"zh-Hans": "包签名丢了提高内存上限权限", "en": "Increased memory limit entitlement missing"},
        "detail": {"zh-Hans": "这台机上装的包签名里没有提高内存上限权限，大游戏容易被系统杀。", "en": "The app installed on this device is signed without the increased memory limit entitlement; large games may be killed by the system."},
        "next_action": {"from": "pack/jobs/errors.py"}},
+      {"code": "export_dir_busy", "severity": "warn", "retryable": false, "recoverable": true,
+       "title": {"zh-Hans": "旧的导出文件夹被占用，这次换了个名字", "en": "The old export folder was in use, so a new name was used"},
+       "detail": {"zh-Hans": "原来的导出文件夹正被别的程序打开着，这次导出放到了带时间的新文件夹里。", "en": "Another program had the old export folder open, so this export went into a new folder with the time in its name."},
+       "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "manual_unpack_required", "severity": "warn", "retryable": false, "recoverable": true,
        "title": {"zh-Hans": "资源包已传完，请在 iPhone 上打开游戏", "en": "Resources copied; open the game on your iPhone"},
        "detail": {"zh-Hans": "电脑这边打不开手机上的 App，资源包本身已完整传到手机。", "en": "This computer could not open the app on the iPhone. The resource pack itself was copied completely."},
@@ -633,7 +637,8 @@
       {"id": "msg_game", "macro": "S2A_INIT_FAIL_MSG_GAME", "zh-Hans": "游戏程序没能开始运行。", "en": "The game program couldn't start running."},
       {"id": "msg_generic", "macro": "S2A_INIT_FAIL_MSG_GENERIC", "zh-Hans": "启动过程中出了问题。", "en": "Something went wrong during startup."},
       {"id": "msg_files", "macro": "S2A_INIT_FAIL_MSG_FILES", "zh-Hans": "游戏文件缺失，请重新导入：在 电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」。", "en": "Game files are missing. Import them again: in S2Arm on your computer, choose \"Install on iPhone\" for this game again."},
-      {"id": "msg_device", "macro": "S2A_INIT_FAIL_MSG_DEVICE", "zh-Hans": "这台设备的内存和地址空间不够运行这款游戏，换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。", "en": "This device doesn't have enough memory and address space to run this game. Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."}
+      {"id": "msg_device", "macro": "S2A_INIT_FAIL_MSG_DEVICE", "zh-Hans": "这台设备的内存和地址空间不够运行这款游戏，换一台内存更大的 iPhone / iPad 再试；诊断里有它要多少、这台设备有多少。", "en": "This device doesn't have enough memory and address space to run this game. Try an iPhone or iPad with more memory; the diagnostics show how much it needs and how much this device has."},
+      {"id": "msg_shaders", "macro": "S2A_INIT_FAIL_MSG_SHADERS", "zh-Hans": "这款游戏缺着色器库，请重新导入：用电脑装的，在电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」；自己签名安装的，把「S2Arm 自签导出」文件夹里这款游戏的 .img 放进「文件」App（不是资源包文件夹里的 game.img，那个不带着色器库）。", "en": "This game's shader library is missing. Import it again: if you install from your computer, choose \"Install on iPhone\" for this game again in S2Arm on your computer; if you sign and install it yourself, put this game's .img from the \"S2Arm Self-Sign Export\" folder into the Files app (not the game.img inside the resource pack folder, which has no shader library)."}
     ],
     "codes": [
       {"id": "unknown", "enum": "S2A_INIT_FAIL_E_UNKNOWN", "message": "msg_generic"},
@@ -643,7 +648,7 @@
       {"id": "service_early", "enum": "S2A_INIT_FAIL_E_SERVICE_EARLY", "message": "msg_service"},
       {"id": "dguard_limit", "enum": "S2A_INIT_FAIL_E_DGUARD_LIMIT", "message": "msg_generic"},
       {"id": "game_files_missing", "enum": "S2A_INIT_FAIL_E_GAME_FILES", "message": "msg_files"},
-      {"id": "direct_lib_missing", "enum": "S2A_INIT_FAIL_E_DIRECT_LIB", "message": "msg_files"},
+      {"id": "direct_lib_missing", "enum": "S2A_INIT_FAIL_E_DIRECT_LIB", "message": "msg_shaders"},
       {"id": "device_address_space", "enum": "S2A_INIT_FAIL_E_DEVICE_ADDRESS", "message": "msg_device"}
     ]
   },
@@ -1310,6 +1315,7 @@
       {"id": "diag.upload.send", "zh-Hans": "上传", "en": "Upload"},
       {"id": "diag.upload.cancel", "zh-Hans": "取消", "en": "Cancel"},
       {"id": "diag.upload.sending", "zh-Hans": "正在上传…", "en": "Uploading…"},
+      {"id": "diag.upload.cancelled", "zh-Hans": "上传已取消。可以先导出诊断包，手动发给我们。", "en": "Upload cancelled. You can export the diagnostics package and send it to us yourself."},
       {"id": "diag.upload.done", "zh-Hans": "已上传。把下面这个码贴到 GitHub 帖子或群里，开发者凭它找到你的诊断：", "en": "Uploaded. Paste this code into the GitHub issue or group so the developers can find your diagnostics:"},
       {"id": "diag.upload.copy", "zh-Hans": "复制", "en": "Copy"},
       {"id": "diag.upload.close", "zh-Hans": "完成", "en": "Done"},
@@ -1415,6 +1421,7 @@
       {"id": "game.delete", "zh-Hans": "删除这款游戏", "en": "Delete this game"},
       {"id": "game.delete.title", "zh-Hans": "删除「{0}」？", "en": "Delete {0}?"},
       {"id": "game.delete.body", "zh-Hans": "会删除这款的安装包、资源包和缓存。存档和你的游戏原文件都会保留。", "en": "Removes this game's app, resources and caches. Your saves and original game files are kept."},
+      {"id": "game.delete.onPhone", "zh-Hans": "这款装在手机上：删掉后，下次往这台手机装游戏时，手机上的这款会打不开（存档和资源包保留）。", "en": "This game is on a phone. After you delete it, the next time you install a game on that phone, this game will no longer open there (its saves and resources are kept)."},
       {"id": "game.delete.confirm", "zh-Hans": "删除", "en": "Delete"},
       {"id": "game.cancel", "zh-Hans": "取消", "en": "Cancel"},
       {"id": "install.done.title", "zh-Hans": "已装到 {0}", "en": "Installed on {0}"},

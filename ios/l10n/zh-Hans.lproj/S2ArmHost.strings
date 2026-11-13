@@ -308,6 +308,8 @@
 "diag.upload" = "上传给开发者";
 "diag.upload.confirm.message" = "会上传最近几次运行的日志、崩溃记录、设备和版本信息，不传存档、密钥和游戏文件。传完给你一个短码，把它贴到 GitHub 帖子或群里，我们就能找到这份诊断。";
 "diag.upload.confirm.title" = "上传给开发者？";
+"diag.upload.cancelSending" = "正在上传…（点按取消）";
+"diag.upload.cancelled" = "上传已取消。可以改用导出诊断包，手动发给我们。";
 "diag.upload.copy" = "复制短码";
 "diag.upload.done.message" = "短码：%@\n点「去 GitHub 发帖」，诊断码会自动填好；也可以复制短码贴到帖子或群里，7 天内有效。\n仓库地址：%@";
 "diag.upload.done.title" = "已上传";
@@ -316,6 +318,7 @@
 "diag.upload.fail.network" = "连不上诊断服务器（%@）。如果刚弹出「允许使用无线数据」，选允许后点「再试一次」；也可以导出诊断包手动发给我们。";
 "diag.upload.fail.rejected" = "诊断包没通过服务器检查（%@）。可以改用导出诊断包，手动发给我们。";
 "diag.upload.fail.server" = "诊断服务器出错（HTTP %d）。可以改用导出诊断包，手动发给我们。";
+"diag.upload.fail.timeout" = "上传超过 %d 秒还没完成（网络太慢或连接卡住），已停止。可以再试一次，或改用导出诊断包。";
 "diag.upload.fail.title" = "上传没成功";
 "diag.upload.go" = "上传";
 "diag.upload.post" = "去 GitHub 发帖";

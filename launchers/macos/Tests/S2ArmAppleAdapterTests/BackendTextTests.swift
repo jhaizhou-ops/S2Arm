@@ -50,6 +50,10 @@ final class BackendTextTests: XCTestCase {
                        "Some games on the phone can't go into the same app this time.\nThis computer has no iPhone build of: 「丙款」\nBuilt for iPhone by an older S2Arm, which this version can't use. Run \"Build for iPhone\" again for: 「乙款」\n"
                        + "Confirm to install without them this time. Their saves and resources stay on the phone, and they come back once you build them for iPhone and install again. "
                        + "After you agree once, this phone won't ask about them again on this S2Arm version.")
+        // 装机遇到库里已删 / 别的电脑装的款（pack/jobs/install.py container_others）：同样按行给固定句式，英文界面逐行翻
+        XCTAssertEqual(BackendText.translate("这次装完，手机上这几款游戏会打不开（存档和资源包都还在手机上）。\n它们已从这台电脑的游戏库删除，重新加回游戏库、「打 iPhone 包」再装一次就回来：「乙款」\n确认继续再点一次。", language: "en"),
+                       "After this install, these games on the phone won't open (their saves and resources stay on the phone).\n"
+                       + "Deleted from this computer's library; they come back once you add them again, \"Build for iPhone\" and install: 「乙款」\nConfirm and try again to continue.")
     }
 
     func testSharedEntriesComeFromTheSpecification() throws {

@@ -1200,6 +1200,14 @@ class JobsTests(unittest.TestCase):
         packages[2]["sha256"] = "b" * 64
         self.assertNotEqual(identity, library.input_identity(game))
 
+    def test_catalog_marks_games_recorded_on_a_phone(self):
+        # 删除确认框据 onPhone 多写一句「下次往这台手机装游戏时，手机上的这款会打不开」：哪台设备记录里有这款就是 True，没有的 False
+        on, off = self.game(tid="0100000000AA0000", packages=[self.package(tid="0100000000AA0000")]), self.game(tid="0100000000BB0000", packages=[self.package(tid="0100000000BB0000")])
+        self.catalogue([on, off])
+        layout.save_device(self.c, "dev1", dict(games={on["id"].lower(): dict(pack="p")}))   # 记录里的游戏号大小写不一也认
+        got = {g["id"]: g["onPhone"] for g in library.catalog(self.c)["games"]}
+        self.assertEqual(got, {on["id"]: True, off["id"]: False})
+
     def test_catalogue_keeps_unsupported_and_unverified_distinct(self):
         game = self.game(packages=[self.package()])
         self.catalogue([game])
@@ -1937,6 +1945,43 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(self.c.redact(text), complete[-3000:])
         self.assertGreater(len(complete), 4000)
 
+    def test_diagnostics_and_rotation_bounded_with_2000_jobs(self):
+        """11-13 玩家反馈「文件数超过 1000 个」：任务记录和各任务日志原先整目录打包、从不清。造 2000 个已结束的任务（各带记录 / 请求 / 事件 + 两份日志）：
+        期望包内任务记录 ≤ DIAG_JOBS + 1（本次导出）、包内文件 < 1000，没结束的那个照收；轮转后磁盘上任务 ≤ KEEP_TOTAL，被清任务的日志一起没了"""
+        import zipfile, uuid, core, time as t
+        jobs = self.c.jobpath.parent; jobs.mkdir(parents=True, exist_ok=True)
+        now = t.time(); ids = []
+        for i in range(2000):
+            tid = str(uuid.UUID(int=i + 1)); ids.append(tid)
+            state = "running" if i == 1999 else "completed"   # 最老的那个还没结束：照收
+            (jobs / f"{tid}.json").write_text(json.dumps(dict(id=tid, operation="catalog", state=state, **({} if state == "running" else {"ended": now}))))
+            (jobs / f"{tid}.request.json").write_text("{}"); (jobs / f"{tid}.events.jsonl").write_text("{}\n")
+            for log in (f"{tid}.log", f"{tid}-install.log"):
+                (self.c.logs / log).write_text("x\n")
+            stamp = now - i * 60   # i 越大越旧
+            for f in (jobs / f"{tid}.json", jobs / f"{tid}.request.json", jobs / f"{tid}.events.jsonl", self.c.logs / f"{tid}.log", self.c.logs / f"{tid}-install.log"):
+                os.utime(f, (stamp, stamp))
+        destination = self.root / "diag-2000.zip"; self.c.r["path"] = str(destination)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            names = archive.namelist(); manifest = json.loads(archive.read("manifest.json"))
+        in_jobs = [n for n in names if n.startswith("jobs/")]
+        self.assertLessEqual(len(in_jobs), library.DIAG_JOBS + 1)
+        self.assertIn(f"jobs/{ids[1999]}.txt", names)          # 没结束的最老那个照收
+        self.assertNotIn(f"jobs/{ids[1000]}.txt", names)       # 中间的旧任务不收
+        self.assertIn(f"logs/{ids[0]}.log", names); self.assertNotIn(f"logs/{ids[1000]}.log", names)
+        self.assertLess(len(names), 1000)
+        self.assertEqual((manifest["jobs"]["total"], manifest["jobs"]["limit"]), (2000 + 1, library.DIAG_JOBS))   # + 本次导出自己的记录
+        self.assertGreater(manifest["jobs"]["omittedLogs"], 3000)
+        r = core.prune_jobs(self.c.private, jobs=jobs)
+        left = {p.name.split(".")[0] for p in jobs.iterdir() if p.name.endswith(".json") and not p.name.endswith(".request.json")}
+        self.assertLessEqual(len(left), core.KEEP_TOTAL + 2)   # + 没结束的那个 + 本次导出自己的记录（没结束的不动）
+        self.assertNotIn(ids[1500], left)
+        self.assertFalse((self.c.logs / f"{ids[1500]}.log").exists()); self.assertFalse((self.c.logs / f"{ids[1500]}-install.log").exists())
+        self.assertTrue((self.c.logs / f"{ids[0]}.log").exists())
+        self.assertTrue((self.c.logs / f"{ids[1999]}.log").exists())   # 没结束的任务的日志不动
+        self.assertGreaterEqual(r["logsRemoved"], 2 * (2000 - core.KEEP_TOTAL - 1))
+
     def test_diagnostics_export_includes_latest_phone_pull_redacted(self):
         """先 diag pull 再 diag export：包里要有最近一次拉回的手机日志（原先导出只收 logs/ 和任务记录，玩家照说明交上来的包里没有手机日志），
         走和 logs/ 同一套脱敏，manifest 记拉回时刻与来源机型；更早那次拉回不收；不认识的类型跳过并写明"""
@@ -2062,8 +2107,10 @@ class JobsTests(unittest.TestCase):
             self.assertEqual({archive.read(n).decode() for n in same}, {"synthetic log"})
 
     def test_diagnostic_export_failure_names_the_step_and_reason_but_no_path(self):
-        # #427：游戏库在 SMB 共享盘上导不出，原先只有一句「无法安全读取或写入」，看不出卡在哪一步。期望手写：所选位置的文件夹不在 → 建临时文件那一步失败
-        destination = self.root / "不存在的文件夹" / "诊断.zip"; self.c.r["path"] = str(destination)
+        # #427：游戏库在 SMB 共享盘上导不出，原先只有一句「无法安全读取或写入」，看不出卡在哪一步。期望手写：所选位置的上一级是个普通文件、建不了文件夹
+        #   → 建临时文件那一步失败（#917 起上一级不存在会自动建，不再拿「文件夹不在」触发）
+        blocker = self.root / "是个文件"; blocker.write_text("x")
+        destination = blocker / "诊断.zip"; self.c.r["path"] = str(destination)
         with self.assertRaises(Failure) as caught:
             library.diagnostics(self.c)
         message = str(caught.exception)
@@ -2424,12 +2471,32 @@ class JobsTests(unittest.TestCase):
         self.assertTrue(all(size <= 1 << 20 or size == (4 << 20) + 1 for _, _, size in reads))
         self.assertEqual(marker.read_bytes(), b"unchanged marker")
         self.assertTrue(predictable.is_symlink()); self.assertFalse(destination.is_symlink())
-        previous = destination.read_bytes()
+        # #917：超过 4 MiB 的任务记录不再整包拒绝：留前 4 MiB、manifest truncated 记一笔（期望按造的大小手算：原长 4 MiB+1、留 4 MiB、截 1）
         oversized = self.c.logs / "jobs/oversized.json"
         with oversized.open("wb") as stream: stream.truncate((4 << 20) + 1)
-        with self.assertRaisesRegex(Failure, "4 MiB"):
-            library.diagnostics(self.c)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as z:
+            cut = [t for t in json.loads(z.read("manifest.json"))["truncated"] if t["file"] == "jobs/oversized.txt"]
+            self.assertEqual(cut, [dict(file="jobs/oversized.txt", bytes=(4 << 20) + 1, kept=4 << 20, omitted=1)])
+            self.assertIn("jobs/oversized.txt", z.namelist())   # 收进来了（脱敏后的文本长度不等于原字节数，截多少看 manifest）
         oversized.unlink()
+        # #917：导出期间一直被替换的文件（查名字与打开时 inode 总不同）：重试三次后跳过、manifest changed 记一笔，其余照收
+        busy = self.c.logs / "jobs/busy.json"; busy.write_text("{}")
+        real_stat = os.stat
+        def flipping(path, *a, **k):
+            r = real_stat(path, *a, **k)
+            return os.stat_result((r[0], r[1] + 1, *tuple(r)[2:])) if path == "busy.json" else r
+        with um.patch.object(library.os, "stat", flipping):
+            library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as z:
+            m = json.loads(z.read("manifest.json"))
+            self.assertEqual(m["changed"], ["jobs/busy.txt"]); self.assertNotIn("jobs/busy.txt", z.namelist())
+        busy.unlink()
+        # #917：指定路径的上一级还不存在：建好照常写出
+        nested = destination.parent / "还没建的" / "子目录" / "包.zip"
+        self.c.r["path"] = str(nested); library.diagnostics(self.c); self.assertTrue(zipfile.is_zipfile(nested))
+        self.c.r["path"] = str(destination)
+        previous = destination.read_bytes()
         with um.patch.object(zipfile.ZipFile, "writestr", side_effect=OSError("synthetic write failure")), self.assertRaises(Failure):
             library.diagnostics(self.c)
         with um.patch.object(self.c, "check", side_effect=Cancelled()), self.assertRaises(Cancelled):

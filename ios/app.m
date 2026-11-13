@@ -306,6 +306,7 @@ static const char *host_text(const char *s) {
         {S2A_INIT_FAIL_MSG_GAME, S2A_INIT_FAIL_MSG_GAME_EN}, {S2A_INIT_FAIL_MSG_GENERIC, S2A_INIT_FAIL_MSG_GENERIC_EN},
         {S2A_INIT_FAIL_MSG_FILES, S2A_INIT_FAIL_MSG_FILES_EN}, {S2A_INIT_FAIL_NEXT, S2A_INIT_FAIL_NEXT_EN},
         {S2A_INIT_FAIL_MSG_DEVICE, S2A_INIT_FAIL_MSG_DEVICE_EN},   // #446 设备地址空间 / 内存不够
+        {S2A_INIT_FAIL_MSG_SHADERS, S2A_INIT_FAIL_MSG_SHADERS_EN},   // direct_lib_missing：电脑装 / 自签导入两条路各说一句
     };
     if (!s || s2a_l10n_zh()) return s;
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) if (!strcmp(s, k[i][0])) return k[i][1];
@@ -623,8 +624,11 @@ id s2a_ios_ext_register(UIViewController *vc);   // extdisplay.m：登记外接�
 // 静音键下照样出声（#789，系统设置「静音模式下也播放声音」S2APlayInSilentMode，缺省关 = 跟随静音键）：音频会话类别开 = Playback（不跟静音键），
 //   关 = SoloAmbient（系统缺省，原先一直是它）。启动和每次回前台各设一次（玩家去「设置」改完切回来就生效）；放后台队列，
 //   不在主线程启动早期抢 AVAudioSession（phone_motion.m：真机首次抢会话卡约 2 秒）。类别没变不重设
+//   游戏库设置页（S2ArmShellHost ShellSettingsView「声音」）也能改：库与游戏同一进程，改完不经过回前台，听偏好变更即设（只在这个值真变了才设）
+static atomic_int g_audio_play = -1;   // 上次按哪个值设的（-1 = 还没设过）
 static void audio_category_apply(void) {
     BOOL play = [NSUserDefaults.standardUserDefaults boolForKey:@"S2APlayInSilentMode"];
+    atomic_store(&g_audio_play, play);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         AVAudioSession *s = AVAudioSession.sharedInstance;
         NSString *want = play ? AVAudioSessionCategoryPlayback : AVAudioSessionCategorySoloAmbient;
@@ -647,6 +651,8 @@ static void audio_category_apply(void) {
     // S2ASceneDelegate 的 scene:willConnectToSession 里建（见下）。这里只留 App 级的电量 / 前后台 / 心跳 / 热。
     // 测试层契约第 4 节：每分钟一行「[电] 电量 <N>%，<充电中|已充满|未充电>」（只是读数：能耗记录用；11-13 起不再据此挡局）
     audio_category_apply();
+    [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n;
+        if ((int)[NSUserDefaults.standardUserDefaults boolForKey:@"S2APlayInSilentMode"] != atomic_load(&g_audio_play)) audio_category_apply(); }];   // 游戏库设置页里改的
     { void s2a_diag_boot(void); s2a_diag_boot(); }   // 导出诊断包（diag.m）：订阅 MetricKit、设置页开关回前台时检查
     UIDevice.currentDevice.batteryMonitoringEnabled = YES;
     void (^battery)(NSTimer *) = ^(NSTimer *t) { (void)t; UIDevice *d = UIDevice.currentDevice; UIDeviceBatteryState st = d.batteryState;

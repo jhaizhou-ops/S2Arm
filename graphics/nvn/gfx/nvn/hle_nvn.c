@@ -57,6 +57,8 @@ void s2a_mem_lockorder_vp_enter(void);
 //   max(原周期, 33.3 ms)；登记最终周期给 Surface.setFrameRate 刷新率投票。
 uint64_t s2a_android_limit_frame_period(uint64_t period_ns);
 void s2a_android_present_note(uint64_t period_ns);
+// android/native/cpu_floor.c：每帧一次的上屏计数（一次原子加），安卓侧据此量实际出图帧率。
+void s2a_android_frame_note(void);
 #endif
 
 // ---------- Slot table, thunks, unimplemented stubs ----------
@@ -782,7 +784,11 @@ static uint64_t nvrm_color_game(int f) {
     return nvn_drv_nvrm_recode(nvrm_color(f), drv);
 }
 static int32_t pool_nvmap(pool_t *p) {
-    if (!p || !p->mem || (p->flags & 0x200)) return 0;   // a virtual pool's storage belongs to a physical pool
+    // 句柄 0：NvRmSurface 的 hMem 为 0，游戏的 nvgr_import_nvrmsurface 随后 NvMap GetId / FromId 失败、导入失败（010045B018EC2000 的影片播放器不查返回值，照样 NvBlit 那块已释放的缓冲：sdk 内 SIGSEGV）。
+    //   三支都还没有实现（虚拟池的存储是物理池的页、没有单一 nvmap 句柄），按铁律报红；仍回 0，不另开句柄
+    if (!p) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 纹理没有内存池，NvRmSurface 的 nvmap 句柄给 0（游戏导入会失败）"); return 0; }
+    if (p->flags & 0x200) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 池 %p 是虚拟池（flags %#x 尺寸 %#llx），存储是物理池的页、本层不给虚拟池开 nvmap 句柄，句柄给 0（游戏导入会失败）", (void *)p, p->flags, (unsigned long long)p->size); return 0; }
+    if (!p->mem) { LOG("【红】 nvnTextureGetNvRmSurfaceNVX: 池 %p 池没有存储（flags %#x 尺寸 %#llx），句柄给 0（游戏导入会失败）", (void *)p, p->flags, (unsigned long long)p->size); return 0; }
     int32_t h = __atomic_load_n(&p->nvmap, __ATOMIC_ACQUIRE);
     if (h) return h;
     static int (*mk)(uint64_t, uint32_t); static int looked;
@@ -1248,6 +1254,16 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
 }
+// S2Arm #674: the key a Switch 2 stage would have with the code in place at SetShaders, only to start its library loading early. keys_hash leaves NVN2 stages unkeyed there
+//   (the code can still change before the first draw, which keys them), and with no key at SetShaders the prefetch was never asked: every library of a Switch 2 game was loaded on the
+//   submit thread at its first draw. A key computed from code that changes later is not in the package's map, so the prefetch drops it (nvn_be_shader_prefetch: no stage)
+static int keys_hash_early(const NVNshaderData *sd, uint8_t out[8]) {
+    void *mb; uint64_t mo;
+    if (!sd->control || (uint64_t)(uintptr_t)sd->control >= (1ull << 47) || !nvn2_on() || !nvn2_ctl(sd->control)) return 0;
+    uint32_t n2 = nvn2_code_len(sd->control);
+    if (!sd->data || !n2 || n2 >= (1u << 24) || !nvn_be_addr(sd->data, n2, &mb, &mo)) return 0;
+    return nvn2_key(sd->control, (const void *)(uintptr_t)sd->data, out);
+}
 int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
     if (st >= p->nstage) return 0;
     prog_keys_t *k = pk_get(p, 1);
@@ -1276,6 +1292,7 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
 #endif
     for (int i = 0; i < n; i++) {
         if (keys_hash(&sd[i], 1, k->key[i])) { k->ok |= (uint8_t)(1u << i); dm_shader_miss(k->key[i], sd[i].data, sd[i].control); nvn_be_shader_prefetch(k->key[i]); }   // S2Arm: a key missing from the map is translated on the device now (graphics/nvn/host_adapt.m)
+        else { uint8_t early[8]; if (keys_hash_early(&sd[i], early)) nvn_be_shader_prefetch(early); }   // S2Arm #674: Switch 2 stages, keyed at first use
 #if defined(__ANDROID__)   // Android 直连的阶段 / 源快照 / 按 serial 记 key；Apple 回放不读这些，保持 main 原行为
         // 阶段只在 control 仍有效、code 已映射的本次调用内读定；code 未映射时留给 Bind
         // 用自持 control + 当时的 code 补算，Bind 不碰 guest control。
@@ -3674,6 +3691,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);
     nvn_be_set_frame(g_frame);
+#if defined(__ANDROID__)
+    s2a_android_frame_note();   // 每帧一次（与上一行同点）：安卓侧量实际出图帧率，慢于目标才托 CPU 频率（android/native/cpu_floor.c）
+#endif
     atomic_store(&g_fps_game_itv, s2a_fps_present_hook() | (g_display_mode && s2a_fps_cap_reason() != 0));   // | 不用 ||：钩子每帧都要调（动态步长）。 S2Arm 帧率表：每帧只在这里调一次（present_period 一帧被调 3 次：取图 / 入队 / 节拍器，直连线 10-26 审出），present_itv 只读结果
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
     uint64_t period = present_period(o), now = dm_detclock_enabled() ? guest_ns() : now_ns();

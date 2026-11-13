@@ -4,7 +4,7 @@
 # （10-20 新款出包签名「没有 <团队>.<包名> 的开发描述文件」：巫师3 / 八方2 / 怪猎 / 丝之歌各手工申请过一次）。只在签名报退出码 3 时由 pack/ipa.sh 调用。
 set -u; BID=${1:?包名}; TEAM=${2:?团队号}; ENT=${3:?基础权限}; UDID=${4:-}
 # 第 4 个参数给设备硬件 UDID（启动器「装到 iPhone」：pack/jobs/install.py）：目标指这台真机并允许登记设备，描述文件才含它（免费个人团队必须这样，10-26 测试设备2 实测）
-DEST='generic/platform=iOS'; REG=(); [ -n "$UDID" ] && { DEST="platform=iOS,id=$UDID"; REG=(-allowProvisioningDeviceRegistration -destination-timeout 120); }   # 等目的设备 2 分钟（缺省 30 秒）：锁屏的手机有时间解锁
+DEST='generic/platform=iOS'; REG=(); [ -n "$UDID" ] && { DEST="${S2A_PROFILE_DEST:-platform=iOS,id=$UDID}"; REG=(-allowProvisioningDeviceRegistration -destination-timeout 120); }   # S2A_PROFILE_DEST：Apple Vision Pro 写 id=<UDID>（install.py，按 iPad 兼容装、理论支持未真机验证）   # 等目的设备 2 分钟（缺省 30 秒）：锁屏的手机有时间解锁
 # 工程是 pack/prov/ 里的现成模板（10-26 起；原来每次现跑 xcodegen 生成，用户机没有 Homebrew / xcodegen，新款第一次出包签名必挂）：
 #   模板 = 同一份 xcodegen 规格（name Prov、iOS 17.0、application、UILaunchScreen、自动签名、CODE_SIGN_ENTITLEMENTS app.entitlements）生成的工程，包名 / 团队号留占位 S2ABID / S2ATEAM，这里替换
 # S2A_PROFILE_NEED_UDIDS（我方测试设备，pack/ipa_tail.py 给）：本包名的开发描述文件缺其中任一台 → 先移到 <产物根>/.stale_profiles/（不删），

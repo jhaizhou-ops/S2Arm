@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,9 @@ PUBLIC_KEY = "d553da82bad575ce87bf521a080c9d0997f97d189f0d517e97f80808bafc5225"
 TRUSTED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com", "s2arm.com", "dl.s2arm.com")
 HEALTH_SECONDS = 90
 EXIT_SECONDS = 120
+# 旧版启动器交出替换进程后自己退出（Mac NSApp.terminate / Windows 退出）；#931：点了「现在更新并重启」旧版却一直没退，替换进程只被动等满两分钟报
+#   update_app_busy。等 EXIT_GRACE 秒还在 → 由替换进程主动结束它（先 TERM，再等 EXIT_TERM_SECONDS 秒还在就 KILL）；只结束确认是这个安装目录里的程序的进程
+EXIT_GRACE, EXIT_TERM_SECONDS = 15, 10
 CHUNK = 1 << 20
 
 
@@ -803,6 +807,53 @@ def _prepare(platform, current, updates, install):
     emit(state="ready", **ready)
 
 
+def pid_exe(pid):
+    """这个进程的可执行文件路径；取不到 → None"""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes as w
+            k = ctypes.WinDLL("kernel32", use_last_error=True); k.OpenProcess.restype = w.HANDLE
+            h = k.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return None
+            try:
+                buf, n = ctypes.create_unicode_buffer(32768), w.DWORD(32768)
+                return buf.value if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) else None
+            finally:
+                k.CloseHandle(h)
+        out = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10).stdout.strip()
+        return out or None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def end_old_app(pid, install, grace=EXIT_GRACE, term_seconds=EXIT_TERM_SECONDS):
+    """#931：旧版等 grace 秒还没退 → 结束它（TERM，再等 term_seconds 秒还在就 KILL）。只动可执行文件在这个安装目录里的进程
+    （进程号可能已被别的程序复用）。→ 动手了没有"""
+    deadline = time.monotonic() + grace
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    if not pid_alive(pid):
+        return False
+    exe = pid_exe(pid)
+    root = os.path.normcase(os.path.realpath(str(install)))
+    if not exe or not os.path.normcase(os.path.realpath(exe)).startswith(root + os.sep):
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 旧版 pid {pid} 等 {grace} 秒没退，但它不是 {install} 里的程序（{exe}），不动它", file=sys.stderr)
+        return False
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} 旧版 pid {pid} 等 {grace} 秒没退，结束它（{exe}）", file=sys.stderr)
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        deadline = time.monotonic() + term_seconds
+        while pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if pid_alive(pid) and os.name != "nt":
+            os.kill(int(pid), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+    return True
+
+
 def pid_alive(pid):
     if os.name == "nt":
         import ctypes
@@ -827,10 +878,13 @@ def pid_alive(pid):
 
 
 def remove_tree(path):
-    """Windows 上只读文件（Engine 的 .git 对象）会让 rmtree 半途而废，每次更新留下一整份旧版。"""
+    """Windows 上只读文件（Engine 的 .git 对象）会让 rmtree 半途而废，每次更新留下一整份旧版。
+    删不掉时它所在的目录也加上写权限再删（#931：只给出错的那一项加权限，只读目录里的东西照样删不掉，留下半份 .s2arm-new，之后每次换版都卡在它上面）"""
     def writable(function, target, _):
         try:
-            os.chmod(target, 0o700)
+            for p in (os.path.dirname(target), target):
+                if p and os.path.lexists(p) and not os.path.islink(p):
+                    os.chmod(p, 0o700)
             function(target)
         except OSError:
             pass
@@ -972,7 +1026,7 @@ def clear_stale_pending(private_root, current):
 def swap(staged, install, backup, new):
     """staged → install；失败时安装目录保持或恢复旧版，异常往外抛。"""
     if new.exists():
-        shutil.rmtree(new)
+        remove_tree(new)   # 上一次换版中断留下的半份（#931：原先 shutil.rmtree 遇只读目录就抛，每次都报 update_swap_failed）
     shutil.copytree(staged, new, symlinks=True)
     move_dir(install, backup)
     try:
@@ -996,6 +1050,7 @@ def apply(staged, install, pid, private, args=(), launch=default_launch, health_
     # 先在锁外等旧版退出：等待期间别的 prepare 能拿到锁、看到同版本已准备好就直接复用返回，不会陪着等两分钟；
     #   等不到由 _apply 照旧报 update_app_busy
     deadline = time.monotonic() + exit_seconds
+    end_old_app(pid, install, grace=min(EXIT_GRACE, exit_seconds))   # #931：旧版没自己退就由这里结束它，不再只被动等
     while pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.5)
     try:
@@ -1018,11 +1073,12 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
     updates = Path(private) / "updates"
     backup, new = install.with_name(install.name + ".s2arm-old"), install.with_name(install.name + ".s2arm-new")
 
-    def fail(code, message, restart=True):
+    def fail(code, message, restart=True, keep_ready=False):
         (updates / "last_failure.json").write_text(json.dumps({"code": code, "message": message, "time": time.time()}, ensure_ascii=False), encoding="utf-8")   # 不写 encoding 时 Windows 按系统代码页（中文机 GBK）写，两端启动器按 UTF-8 读
         # 同时记进 update.log（诊断包会收）：last_failure.json 启动器下次启动读完就删，原先换版失败事后什么记录都没有（#379）
         record_failure(types.SimpleNamespace(private_root=str(private)), code, message, traceback.format_exc() if sys.exc_info()[0] else "")
-        (updates / "pending.json").unlink(missing_ok=True)
+        if not keep_ready:   # keep_ready：新版原样准备好（还没动安装目录），留着 pending.json，「现在更新并重启」照样能点，不用重新下载（#931）
+            (updates / "pending.json").unlink(missing_ok=True)
         if restart:
             try:
                 launch(install, list(args))
@@ -1033,7 +1089,7 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
     deadline = time.monotonic() + exit_seconds
     while pid_alive(pid):
         if time.monotonic() >= deadline:
-            return fail("update_app_busy", "S2Arm 没有退出，这次没有更新。", restart=False)
+            return fail("update_app_busy", "S2Arm 没有退出，这次没有更新。", restart=False, keep_ready=True)
         time.sleep(0.5)
     health = updates / "health.ok"
     try:

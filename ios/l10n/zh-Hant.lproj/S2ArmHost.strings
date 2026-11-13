@@ -308,6 +308,8 @@
 "diag.upload" = "上傳給開發者";
 "diag.upload.confirm.message" = "會上傳最近幾次執行的紀錄、當機紀錄、裝置和版本資訊，不會上傳存檔、金鑰和遊戲檔案。上傳完成後會給你一組短碼，把它貼到 GitHub 討論串或群組裡，我們就能找到這份診斷資料。";
 "diag.upload.confirm.title" = "要上傳給開發者嗎？";
+"diag.upload.cancelSending" = "正在上傳…（點按取消）";
+"diag.upload.cancelled" = "上傳已取消。可以改用匯出診斷包，手動發給我們。";
 "diag.upload.copy" = "複製短碼";
 "diag.upload.done.message" = "短碼：%@\n點「前往 GitHub 發文」，診斷碼會自動填好；也可以複製短碼貼到討論串或群組裡，7 天內有效。\n儲存庫網址：%@";
 "diag.upload.done.title" = "已上傳";
@@ -316,6 +318,7 @@
 "diag.upload.fail.network" = "無法連上診斷伺服器（%@）。如果剛才跳出「允許使用無線資料」，請選擇允許後點「再試一次」；也可以匯出診斷包手動傳給我們。";
 "diag.upload.fail.rejected" = "診斷包未通過伺服器檢查（%@）。可以改為匯出診斷包，手動傳給我們。";
 "diag.upload.fail.server" = "診斷伺服器發生錯誤（HTTP %d）。可以改為匯出診斷包，手動傳給我們。";
+"diag.upload.fail.timeout" = "上傳超過 %d 秒還沒完成（網路太慢或連線卡住），已停止。可以再試一次，或改用匯出診斷包。";
 "diag.upload.fail.title" = "上傳失敗";
 "diag.upload.go" = "上傳";
 "diag.upload.post" = "前往 GitHub 發文";

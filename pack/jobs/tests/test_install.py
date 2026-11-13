@@ -294,6 +294,30 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(launches, [])                          # 没有为解包起 App
         self.assertTrue(r["openToFinish"]); self.assertNotIn("unpackPending", r)
 
+    def test_single_app_push_never_launches_the_app_to_unpack(self):
+        """11-13 维护者：装上 App、把包传到位就算装好，玩家自己在手机上点信任、打开时 App 自己解开。原先不带上下文的单款 App（下游壳）推完带 --apply
+        拉起 App 解包，免费账号第一次装还没信任开发者时拉不起，作业打了红却报完成。期望：旧形态资源包、不带上下文，同样不带 --apply"""
+        gid = "0100535012974000"; out, pack = self._fixture(gid)
+        runs = []
+        def run(args, log=None, env=None, cwd=None, on_line=None):
+            runs.append([str(a) for a in args]); on_line("[12:00:00] 资源包：推 2 个文件 3 MB，分 1 批 + 索引 + 清单（1 秒）")
+        with um.patch.object(self.c, "run", run):
+            self.assertEqual(install.push_pack(self.c, "dev1", "io.s2arm.ds.x.team1", pack), (2, 3 << 20))
+        push = next(a for a in runs if a[2].endswith("tools/push_pack.py"))
+        self.assertIn("run", push); self.assertNotIn("--apply", push)
+
+    def test_readiness_downstream_package_comes_from_its_own_record(self):
+        """下游深度方案出的是独立 App：install-check 的「iPhone 版已做好」看它自己的出包记录（原先看容器件，下游款一律报没做好，实际装得上）"""
+        import downstream
+        gid = "0100535012974000"; self.c.r.update(gameId=gid)
+        scheme = {"id": "x"}
+        with um.patch.object(downstream, "requested", return_value=scheme), \
+             um.patch.object(downstream, "last_record", return_value={"ipa": "/lib/downstream/x/a.ipa"}):
+            r, it = self._ready([self._dev()])
+        self.assertTrue(it["package"]["ok"]); self.assertEqual(r["ipaPath"], "/lib/downstream/x/a.ipa")
+        with um.patch.object(downstream, "requested", return_value=scheme), um.patch.object(downstream, "last_record", return_value=None):
+            self.assertFalse(self._ready([self._dev()])[1]["package"]["ok"])
+
     def test_install_signs_installs_and_pushes(self):
         gid = "0100535012974000"; out, pack = self._fixture(gid); self.c.r.update(gameId=gid)
         r, runs, seen, launches = self._install(gid, pushed=2, applied_before="")
@@ -1586,6 +1610,41 @@ class ExportPhoneTests(unittest.TestCase):
         self.assertFalse((out / "旧.img").exists())
         self.assertTrue((out / "甲.img").is_file())
 
+    def test_export_when_old_folder_is_busy_goes_to_a_new_name(self):
+        """D-4MAH：Windows 上旧导出文件夹被占着（资源管理器开着、自签工具拿着上次的 S2Arm.ipa、杀毒在扫），整目录改名抛 PermissionError，
+        原先 .img 都写完了还整次失败。期望：一直被占 → 成功、换到带时刻的新名字、旧文件夹原样不动、记 export_dir_busy；
+        只占一小会儿（前两次被拒）→ 退避后照常换到原名"""
+        self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
+        out = self.c.library / install.EXPORT_DIRS["zh"]; out.mkdir(); (out / "旧.img").write_bytes(b"old")
+        real = os.replace
+        def busy(src, dst):
+            if Path(src) == out: raise PermissionError(13, "拒绝访问", str(src))   # 旧导出文件夹改不了名（Windows WinError 5 / 32）
+            return real(src, dst)
+        with um.patch.object(install, "EXPORT_SWAP_WAIT", 0), um.patch("os.replace", busy):
+            r = self._export(dict(gameId=self.A, mode="export"))
+        got = Path(r["outputPath"])
+        self.assertNotEqual(got, out); self.assertTrue(got.name.startswith(out.name + " "))
+        self.assertTrue((got / "甲.img").is_file()); self.assertTrue((got / "S2Arm.ipa").is_file())
+        self.assertEqual((out / "旧.img").read_bytes(), b"old")   # 旧的原样不动
+        self.assertIn("export_dir_busy", [d.get("code") for d in self.c.job["diagnostics"]])
+        shutil.rmtree(got)
+        tries = {"n": 0}
+        def flaky(src, dst):
+            if Path(src) == out and tries["n"] < 2: tries["n"] += 1; raise PermissionError(13, "拒绝访问", str(src))
+            return real(src, dst)
+        with um.patch.object(install, "EXPORT_SWAP_WAIT", 0), um.patch("os.replace", flaky):
+            r = self._export(dict(gameId=self.A, mode="export"))
+        self.assertEqual(Path(r["outputPath"]), out); self.assertFalse((out / "旧.img").exists()); self.assertTrue((out / "甲.img").is_file())
+
+    def test_permission_next_step_follows_platform(self):
+        """D-4MAH：permission_denied / input_permission 的「下一步」原先写死 macOS「系统设置 → 隐私与安全性」，Windows 玩家照着做不了"""
+        from errors import recovery
+        for code in ("permission_denied", "input_permission"):
+            win, mac = recovery(code, packaged=True, windows=True), recovery(code, packaged=True, windows=False)
+            self.assertIn("受控文件夹访问", win); self.assertNotIn("系统设置", win)
+            self.assertIn("系统设置", mac); self.assertNotIn("受控文件夹访问", mac)
+        self.assertIn("资源管理器", recovery("permission_denied", packaged=True, windows=True))
+
     def test_export_names_follow_ui_language(self):
         """i18n：英文界面（uiLanguage = en）→ 文件夹「S2Arm Self-Sign Export」、说明「How to install on iPhone.txt」（英文正文：Import Here、
         Settings → General → VPN & Device Management）；之后换回中文再导出 → 「S2Arm 自签导出」+「怎么装到 iPhone.txt」，英文名的旧导出删掉，只留一份"""
@@ -1901,13 +1960,34 @@ class PhoneGamesTruthTests(unittest.TestCase):
             with self.assertRaises(Failure) as e:
                 install.container_others(self.c, self.ph(), rec, leave=self.D)
             self.assertEqual(e.exception.code, "container_would_drop")
-            self.assertIn("1 款", str(e.exception)); self.assertIn("乙游戏", str(e.exception))
+            self.assertIn("它们是在别的电脑上装的，到那台电脑上再「装到 iPhone」一次就回来：「乙游戏」", str(e.exception))
+            self.assertNotIn("游戏库删除", str(e.exception))
             self.c.r["acceptDropped"] = True
             self.assertEqual(install.container_others(self.c, self.ph(), rec, leave=self.D), [self.A, self.C])
+
+    def test_recorded_on_phone_but_deleted_from_library_asks_first(self):
+        # 本机记录 A、B 装在手机上；玩家在游戏库里删了 B（库里只剩 A）。原先 B 被静默不带、手机上 B 打不开却没人说。
+        #   期望：没确认 → container_would_drop，说明「已从这台电脑的游戏库删除」并点名 B，不说「别的电脑」；确认后只带 A。
+        #   手机上的游戏目录读不出（phone_games 按「这处没有别的游戏」给空集）时同样问——依据是这台电脑的记录
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=self.A, name="甲")]))
+        rec = dict(games={self.A: {}, self.B: {}})
+        for on_phone in ({self.A, self.B}, set()):
+            self.c.r.pop("acceptDropped", None)
+            with self.subTest(on_phone=sorted(on_phone)), um.patch.object(install, "phone_games", lambda c, ph, s=on_phone: s), \
+                 um.patch.object(install, "phone_game_name", lambda c, ph, g, names: "乙游戏"):
+                with self.assertRaises(Failure) as e:
+                    install.container_others(self.c, self.ph(), rec, leave=self.D)
+                msg = str(e.exception)
+                self.assertEqual((e.exception.code, e.exception.internal), ("container_would_drop", self.B))
+                self.assertIn("它们已从这台电脑的游戏库删除，重新加回游戏库、「打 iPhone 包」再装一次就回来：「乙游戏」", msg)
+                self.assertNotIn("别的电脑", msg)
+                self.c.r["acceptDropped"] = True
+                self.assertEqual(install.container_others(self.c, self.ph(), rec, leave=self.D), [self.A])
 
     def test_app_gone_stops_carrying_this_computers_record(self):
         # 本机记录 A、B。玩家在手机上删了整个 S2Arm（平台确认这个包名没装）→ A、B 也不在手机上，一款都不带。
         # App 还在的两种照旧按本机记录带：还没有 games 目录；只有 A 解开了（B 可能在 App 里、资源包还没解开）
+        atomic(self.c.library / "catalog.json", dict(schema=1, games=[dict(id=self.A, name="甲"), dict(id=self.B, name="乙")]))   # 两款都在游戏库（库里删掉的另走确认，见上一条）
         rec = dict(games={self.A: {}, self.B: {}})
         gone = self.client([], set(), ls_error="取不到 x 的容器（App 没装或不是开发签名）：device socket io failed")
         with um.patch.object(install, "devpush_client", gone):

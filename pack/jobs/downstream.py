@@ -319,7 +319,7 @@ def bundle_id(scheme, team):
 
 def install_ios(c, game, scheme):
     """独立 App 装到 iPhone：改包名 → 按登记的权限申请描述文件、用玩家 Apple ID 签 → devicectl 覆盖装（存档在 App 里，不卸载）
-    → 资源包用 S2Arm 的推送推进去，App 按 S2A_PACK_APPLY_ONLY 解开"""
+    → 资源包用 S2Arm 的推送推进去，传完即装好（App 第一次打开时自己解开）"""
     import install as inst
     from diag import devicectl
     t = scheme["targets"]["ios"]
@@ -363,8 +363,9 @@ def install_ios(c, game, scheme):
             raise Failure("装不上 iPhone：" + (err.strip()[-2000:] or f"devicectl 退出 {rc}"), code=inst.classify(err, default="device_install_failed"))
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-    c.begin("把游戏资源推进 iPhone 并解开（只推变了的文件；第一次要几分钟）", 4, 4)
-    files, size = inst.push_pack(c, dev["id"], bid, Path(rec["pack"]), udid=udid)   # 单款 App：文档根 Documents，App 按 S2A_PACK_APPLY_ONLY 解开
+    c.begin("把游戏资源推进 iPhone（只推变了的文件；第一次要几分钟）", 4, 4)
+    files, size = inst.push_pack(c, dev["id"], bid, Path(rec["pack"]), udid=udid)   # 单款 App：文档根 Documents；传完即装好，App 第一次打开时自己解开（不由电脑拉起）
     record = dict(rec, installed=dict(at=time.time(), device=dev["name"], bundleId=bid, team=team["name"], free=team["free"]))
     atomic(out_dir(c, gid, scheme) / "record.json", record)
-    return dict(bundleId=bid, device=dev["name"], team=team["name"], free=team["free"], packFiles=files, packBytes=size, downstream=record)
+    # openToFinish：两端完成页写「已传到 iPhone，打开会自动完成安装」，并照常提示第一次打开前信任开发者（免费账号）
+    return dict(bundleId=bid, device=dev["name"], team=team["name"], free=team["free"], packFiles=files, packBytes=size, downstream=record, openToFinish=True)

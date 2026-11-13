@@ -76,7 +76,7 @@ class StageBudgetEnv(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             env = self.gui_env(root)
-            context = SimpleNamespace(engine=ROOT, run=Mock())
+            context = SimpleNamespace(engine=ROOT, run=Mock(), keys=root / 'keys/prod.keys')
             with patch.object(ipa, 'bundled_shell', return_value=root / 'shell'):
                 ipa.win_oneclick(context, None, root / 'extract', root / 'fonts', root / 'out',
                                  root / 'events', root / 'log', env, None)
