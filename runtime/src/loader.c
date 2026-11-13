@@ -136,6 +136,15 @@ void *module_sym(module_t *m, const char *name) {
     return NULL;
 }
 void *guest_sym(const char *name) { for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return p; } return NULL; }
+// 同 guest_sym，另给符号表里记的函数长度（字节，0 = 没记）
+static void *guest_sym_sized(const char *name, uint64_t *size) {
+    *size = 0;
+    for (int i = 0; i < g_nmod; i++) { module_t *m = &g_mod[i];
+        for (unsigned j = sym_hash(name) & m->symh_mask; m->symh[j]; j = (j + 1) & m->symh_mask) {
+            const Elf64_Sym *s = &m->symtab[m->symh[j]];
+            if (!strcmp(m->strtab + s->st_name, name)) { *size = s->st_size; return m->base + s->st_value; } } }
+    return NULL;
+}
 module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; i++) {
         const uint8_t *b = g_mod[i].base;
@@ -899,11 +908,15 @@ static void *ro_local_init(void) {
 //   它把指向被卸模块的函数槽写回这个字段：ldr Xt, [x0, #偏移] 紧跟 str Xt, [Xn, Xm]。本机 11 份 SDK（10.x–20.x）都是 0xc8；读不出回 -1。
 //   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令；
 //   更新的 SDK（11-13 两款 Switch 2 游戏）多一个回调参数 RestoreFunctions(RoModule*, void (*)(const char*))、开头先有一条 retab 早退，字段仍在 +0xc8：三个名字都认
+//   函数开头常有提前返回（表空就 ret；11-13 0100F7E00C70E000 的 SDK：第一个 ret 在 +0x24，那两条指令在 +0x90 / +0x94）：按符号表记的函数长度扫全身，
+//   不在第一个 ret 停；符号没记长度时照旧扫到 ret 为止
 static long ro_stub_off(void) {
-    const uint32_t *f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_");
-    if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_PFvPKcE");
-    if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_");
-    for (int i = 1; f && i < 0x100 && f[i - 1] != 0xd65f03c0; i++) {
+    uint64_t size = 0;
+    const uint32_t *f = guest_sym_sized("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_", &size);
+    if (!f) f = guest_sym_sized("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_PFvPKcE", &size);
+    if (!f) f = guest_sym_sized("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_", &size);
+    int n = size ? (int)(size / 4 < 0x400 ? size / 4 : 0x400) : 0x100;
+    for (int i = 1; f && i < n && (size || f[i - 1] != 0xd65f03c0); i++) {
         uint32_t s = f[i], l = f[i - 1];
         if ((s & 0xffe00c00) == 0xf8200800 && (l & 0xffc00000) == 0xf9400000 && ((l >> 5) & 31) == 0 && (l & 31) == (s & 31)) return (long)((l >> 10) & 0xfff) * 8;
     }

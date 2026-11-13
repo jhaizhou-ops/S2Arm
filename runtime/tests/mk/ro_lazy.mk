@@ -11,5 +11,7 @@ native-test-ro_lazy: $(BUILD)/tests/t_ro_lazy
 	$(BUILD)/tests/t_ro_lazy $(BUILD)/tests/ro_lazy_old
 	python3 runtime/tests/ro_lazy/prepare.py $(BUILD)/tests/ro_lazy_cb cb   # 更新的 SDK（RestoreFunctions 带回调参数、开头 retab 早退）
 	$(BUILD)/tests/t_ro_lazy $(BUILD)/tests/ro_lazy_cb
+	python3 runtime/tests/ro_lazy/prepare.py $(BUILD)/tests/ro_lazy_early early   # RestoreFunctions 开头提前 ret（按符号长度扫全身）
+	$(BUILD)/tests/t_ro_lazy $(BUILD)/tests/ro_lazy_early
 TEST_TARGETS += native-test-ro_lazy
 endif
