@@ -637,20 +637,49 @@ class DeviceChoiceTests(unittest.TestCase):
 class DiagCommandTests(unittest.TestCase):
     """#94：只敲 s2armctl diag 原先 IndexError；现在不给路径 = 导出到桌面，认不出的写法打用法退出 2"""
 
-    def _main(self, *argv):
-        posted = []
-        err = io.StringIO()
-        with mock.patch.object(ctl, "call", side_effect=lambda m, p, b=None, **kw: posted.append((m, p, b)) or {"ok": True}), \
+    def _main(self, *argv, state="completed", write=True):
+        """假控制口：POST /diagnostics 之后 /state 出一个新任务（state），导出时按 write 决定作业是否真写出文件"""
+        posted, tasks = [], []
+        err, out = io.StringIO(), io.StringIO()
+        def call(m, p, b=None, **kw):
+            if m == "POST":
+                posted.append((m, p, b))
+                op = "diagnostics" if b["action"] == "export" else "pullDiagnostics"
+                tasks.append({"id": "t1", "operation": op, "state": state, "message": "导出失败：磁盘写不进" if state == "failed" else "", "started": 1})
+                if write and b["action"] == "export" and state == "completed":
+                    Path(b["path"]).write_bytes(b"PK" + b"x" * 2048)
+                return {"ok": True}
+            return {"tasks": list(tasks), "games": [], "busy": False}
+        with mock.patch.object(ctl, "call", side_effect=call), mock.patch.object(ctl.time, "sleep", lambda s: None), \
+             mock.patch.object(ctl, "brief", lambda s: ""), mock.patch.object(ctl, "errors", lambda *a, **k: print("错误：导出失败：磁盘写不进")), \
              mock.patch.object(sys, "argv", ["s2armctl", "diag", *argv]), \
-             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 ctl.main(); code = 0
             except SystemExit as e:
                 code = e.code
-        return code, posted, err.getvalue()
+        return code, posted, err.getvalue() + out.getvalue()
+
+    def test_export_waits_for_the_job_and_prints_path_and_size(self):
+        # #917：原先 POST 回 ok 就退 0、作业失败 / 没写出文件调用方看不到。期望按假任务手写：完成 + 文件在 → 退 0、打绝对路径与大小
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "包.zip")
+            code, _, text = self._main("export", target)
+            self.assertEqual(code, 0, text); self.assertIn(f"诊断包：{target}（0.0 MB）", text)
+
+    def test_export_job_failed_or_file_missing_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, _, text = self._main("export", os.path.join(d, "a.zip"), state="failed")
+            self.assertEqual(code, 1); self.assertIn("磁盘写不进", text)
+            code, _, text = self._main("export", os.path.join(d, "b.zip"), write=False)
+            self.assertNotIn(code, (0, None)); self.assertIn("诊断包不在", str(code) + text)
 
     def test_bare_diag_exports_with_a_default_path(self):
-        code, posted, _ = self._main()
+        with tempfile.TemporaryDirectory() as home:   # 假家目录带桌面：缺省路径落在这里，不写进仓库或真桌面
+            os.mkdir(os.path.join(home, "Desktop"))
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                code, posted, _ = self._main()
+            self.assertTrue(posted[0][2]["path"].startswith(os.path.join(home, "Desktop")), posted)
         self.assertEqual(code, 0)
         self.assertEqual(len(posted), 1)
         method, path, body = posted[0]

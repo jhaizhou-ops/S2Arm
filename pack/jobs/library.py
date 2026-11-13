@@ -2715,27 +2715,43 @@ def diagnostics(c):
         c.begin("导出脱敏诊断")
 
         step = "在所选位置建临时文件"
+        destination.parent.mkdir(parents=True, exist_ok=True)   # #917：命令行给的路径上一级还不存在（玩家指定的就是要放那里）：建好再写，不报错不回落桌面
         fd, name = tempfile.mkstemp(prefix="." + destination.name + ".", suffix=".partial", dir=destination.parent)
         temporary = Path(name)
         with os.fdopen(fd, "w+b") as output:
             created = os.fstat(output.fileno())
             with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
                 def write_file(parent_fd, name, member, job=False):
-                    c.check()
-                    info = winproc.stat_at(name, parent_fd) if os.name == "nt" else os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode):
-                        return
-                    if os.name == "nt":
-                        source_file = winproc.open_file(name, parent_fd)
-                    else:
-                        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
-                        source_file = os.fdopen(file_fd, "rb")
-                    with source_file as source:
+                    # #917：在跑的作业（含这次导出自己）一直原子替换自己的任务记录，查名字到打开之间换了一份（inode 变）很常见；
+                    #   原先整包报「发生变化，请重试」不生成，重试照样撞上。改为重查名字再开，三次都在换就跳过这一份、记进 manifest changed
+                    for _ in range(3):
+                        c.check()
+                        try:
+                            info = winproc.stat_at(name, parent_fd) if os.name == "nt" else os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                        except FileNotFoundError:
+                            return   # 列目录后被删（作业收尾清理）：没有可收的
+                        if not stat.S_ISREG(info.st_mode):
+                            return
+                        try:
+                            if os.name == "nt":
+                                source_file = winproc.open_file(name, parent_fd)
+                            else:
+                                file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                                source_file = os.fdopen(file_fd, "rb")
+                        except FileNotFoundError:
+                            return
+                        held = contextlib.ExitStack()
+                        source = held.enter_context(source_file)
                         opened = winproc.file_info(source) if os.name == "nt" else os.fstat(source.fileno())
+                        if (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino):
+                            break
+                        held.close()
+                    else:
+                        changed.append(member)
+                        return
+                    with held:
                         if not stat.S_ISREG(opened.st_mode):
                             return
-                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                            raise Failure("诊断文件在导出期间发生变化，请重试。")
                         stem, suffix = os.path.splitext(member)
                         # Archive separators are known structure, not email local-part characters.
                         public_stem = "/".join(redact_member_component(part) for part in stem.split("/"))
@@ -2746,12 +2762,12 @@ def diagnostics(c):
                             n += 1
                             public_member = f"{public_stem} ({n}){suffix}"
                         if job:
+                            # 超过单份上限的任务记录（长局 / AI 连续操作攒下的事件）：留前 4 MiB、记进 manifest truncated，不再整包拒绝（#917）
                             limit = DIAGNOSTIC_JOB_LIMIT
-                            if opened.st_size > limit:
-                                raise Failure("诊断任务文件超过 4 MiB 上限，未生成诊断包。")
                             data = source.read(limit + 1)
                             if len(data) > limit:
-                                raise Failure("诊断任务文件超过 4 MiB 上限，未生成诊断包。")
+                                truncated.append(dict(file=public_member, bytes=opened.st_size, kept=limit, omitted=max(opened.st_size, len(data)) - limit))
+                                data = data[:limit]
                             # These allowlisted job/log files are text. Invalid UTF-8 is
                             # replaced, never copied as raw bytes around redaction.
                             archive.writestr(public_member, redact(data.decode(errors="replace")))
@@ -2779,6 +2795,7 @@ def diagnostics(c):
 
                 step = "读日志与任务记录"
                 truncated = []
+                changed = []   # 导出期间一直在换、跳过的（#917）
                 if roots["jobs"] is not None:
                     for name in sorted(winproc.listdir(roots["jobs"]) if os.name == "nt" else os.listdir(roots["jobs"])):
                         if name.endswith(".json"):
@@ -2796,7 +2813,8 @@ def diagnostics(c):
                             try:
                                 opened = child.info if os.name == "nt" else os.fstat(child)
                                 if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                                    raise Failure("诊断目录在导出期间发生变化，请重试。")
+                                    changed.append(member + "/")   # 列到打开之间被换掉的目录：跳过、记一笔（#917）
+                                    continue
                                 logs(child, member + "/")
                             finally:
                                 winproc.close(child) if os.name == "nt" else os.close(child)
@@ -2896,7 +2914,8 @@ def diagnostics(c):
                 # These names have already been sanitized; redacting them again
                 # would hide task UUIDs and break the archive index.
                 manifest["files"] = sorted(archive.namelist() + ["manifest.json"])
-                manifest["truncated"] = truncated   # 超过单份上限被截的日志：原长、留下、截掉的字节（空 = 全部整份）
+                manifest["truncated"] = truncated   # 超过单份上限被截的日志 / 任务记录：原长、留下、截掉的字节（空 = 全部整份）
+                manifest["changed"] = changed   # 导出期间一直在被替换、没收进来的（#917；空 = 全收到）
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             # 身份在写完、落盘后再取（仍握着句柄，防调包不变）：exFAT / FAT 上新文件写入数据分到存储后 inode 号会变，
             #   建文件时取的身份必然对不上（诊断包存到 exFAT 盘上一律报「临时文件在导出期间发生变化」）

@@ -734,7 +734,15 @@ def main():
     if cmd == 'diag':
         body = diag_body(rest)
         if body is None: print('用法：s2armctl diag [export [输出.zip]] | diag pull', file=sys.stderr); sys.exit(2)
-        print(json.dumps(call('POST', '/diagnostics', body), ensure_ascii=False)); return
+        # #917：原先 POST 一回 {"ok":true} 就退 0——控制口只是把导出作业起在后台，作业随后失败（或文件没写出来）调用方看不到。
+        #   改为等这一次的作业结束：失败照 errors 打原因、退 1；导出成功再核文件真在，打绝对路径与大小
+        before = {t['id'] for t in call('GET', '/state')['tasks']}
+        call('POST', '/diagnostics', body)
+        wait_op('diagnostics' if body['action'] == 'export' else 'pullDiagnostics', before, limit=900)
+        if body['action'] == 'export':
+            if not os.path.isfile(body['path']): sys.exit(f'导出作业报完成，但诊断包不在 {body["path"]}')
+            print(f'诊断包：{body["path"]}（{os.path.getsize(body["path"]) / 1048576:.1f} MB）')
+        return
     if cmd == 'snapshot':
         out = rest[0]
         # 优先系统截图按主窗口区域截（与屏幕所见一致，含弹出层 / 毛玻璃；需要调用方有屏幕录制权限）；不行再让 App 自己画

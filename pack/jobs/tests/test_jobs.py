@@ -2062,8 +2062,10 @@ class JobsTests(unittest.TestCase):
             self.assertEqual({archive.read(n).decode() for n in same}, {"synthetic log"})
 
     def test_diagnostic_export_failure_names_the_step_and_reason_but_no_path(self):
-        # #427：游戏库在 SMB 共享盘上导不出，原先只有一句「无法安全读取或写入」，看不出卡在哪一步。期望手写：所选位置的文件夹不在 → 建临时文件那一步失败
-        destination = self.root / "不存在的文件夹" / "诊断.zip"; self.c.r["path"] = str(destination)
+        # #427：游戏库在 SMB 共享盘上导不出，原先只有一句「无法安全读取或写入」，看不出卡在哪一步。期望手写：所选位置的上一级是个普通文件、建不了文件夹
+        #   → 建临时文件那一步失败（#917 起上一级不存在会自动建，不再拿「文件夹不在」触发）
+        blocker = self.root / "是个文件"; blocker.write_text("x")
+        destination = blocker / "诊断.zip"; self.c.r["path"] = str(destination)
         with self.assertRaises(Failure) as caught:
             library.diagnostics(self.c)
         message = str(caught.exception)
@@ -2424,12 +2426,32 @@ class JobsTests(unittest.TestCase):
         self.assertTrue(all(size <= 1 << 20 or size == (4 << 20) + 1 for _, _, size in reads))
         self.assertEqual(marker.read_bytes(), b"unchanged marker")
         self.assertTrue(predictable.is_symlink()); self.assertFalse(destination.is_symlink())
-        previous = destination.read_bytes()
+        # #917：超过 4 MiB 的任务记录不再整包拒绝：留前 4 MiB、manifest truncated 记一笔（期望按造的大小手算：原长 4 MiB+1、留 4 MiB、截 1）
         oversized = self.c.logs / "jobs/oversized.json"
         with oversized.open("wb") as stream: stream.truncate((4 << 20) + 1)
-        with self.assertRaisesRegex(Failure, "4 MiB"):
-            library.diagnostics(self.c)
+        library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as z:
+            cut = [t for t in json.loads(z.read("manifest.json"))["truncated"] if t["file"] == "jobs/oversized.txt"]
+            self.assertEqual(cut, [dict(file="jobs/oversized.txt", bytes=(4 << 20) + 1, kept=4 << 20, omitted=1)])
+            self.assertIn("jobs/oversized.txt", z.namelist())   # 收进来了（脱敏后的文本长度不等于原字节数，截多少看 manifest）
         oversized.unlink()
+        # #917：导出期间一直被替换的文件（查名字与打开时 inode 总不同）：重试三次后跳过、manifest changed 记一笔，其余照收
+        busy = self.c.logs / "jobs/busy.json"; busy.write_text("{}")
+        real_stat = os.stat
+        def flipping(path, *a, **k):
+            r = real_stat(path, *a, **k)
+            return os.stat_result((r[0], r[1] + 1, *tuple(r)[2:])) if path == "busy.json" else r
+        with um.patch.object(library.os, "stat", flipping):
+            library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as z:
+            m = json.loads(z.read("manifest.json"))
+            self.assertEqual(m["changed"], ["jobs/busy.txt"]); self.assertNotIn("jobs/busy.txt", z.namelist())
+        busy.unlink()
+        # #917：指定路径的上一级还不存在：建好照常写出
+        nested = destination.parent / "还没建的" / "子目录" / "包.zip"
+        self.c.r["path"] = str(nested); library.diagnostics(self.c); self.assertTrue(zipfile.is_zipfile(nested))
+        self.c.r["path"] = str(destination)
+        previous = destination.read_bytes()
         with um.patch.object(zipfile.ZipFile, "writestr", side_effect=OSError("synthetic write failure")), self.assertRaises(Failure):
             library.diagnostics(self.c)
         with um.patch.object(self.c, "check", side_effect=Cancelled()), self.assertRaises(Cancelled):
