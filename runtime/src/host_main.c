@@ -388,8 +388,7 @@ static int host_run(int argc, char **argv) {
     // 只链上老的 void S2A_Init、没有 S2A_InitSession：它把初始化异常报红后吞掉，照常起游戏会在后面别处崩；同工具模式，停下说清楚（审计 P2-268）
     else if (S2A_Init) die("【红】C# 服务层只导出了 S2A_Init、没有 S2A_InitSession：初始化失败报不出来，不起游戏（宿主与服务层版本不配套，重新出包）");
     else LOG("S2A_Init：没链 C#（原生层单独构建），进 C# 的系统调用一律报红");
-    // 只有直连（11-07 拆通用模式）：包里没有本宿主口径的直连库（没导完、旧版本出的包、设备跑不了直连）就停在这里报「游戏文件缺失」，
-    //   iOS 提示页带「上传给开发者」反馈入口；原先这里静默退成通用模式（11-02 / 11-05 普查两款这样起局，一款崩、一款卡死，直连问题藏在后面）
+    // 包里没有直连库也照样起局（11-13「不许堵门」）：gfxmode.c 一律直连、着色器首次遇到时现编；只有设备本身跑不了直连（物理做不下去）才停下
     if (s2a_gfx_mode() != S2A_GFX_DIRECT) failed_session(S2A_INIT_FAIL_E_DIRECT_LIB);
     s2a_boot_mark("S2A_Init 返回（C# 运行时 + 服务登记）");
     s2a_window_probe("C# 初始化后");
