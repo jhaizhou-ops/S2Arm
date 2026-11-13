@@ -172,7 +172,9 @@ def win_oneclick(c, oneclick, extraction, fonts, out, events, log, env, line, so
     结果事件里的 ipa / pack 改指交付件。sources / gid：游戏库里这款选中的原件与游戏号，一并交下去——
     共用解包目录只有序号 0 那支程序，多程序合集的其余序号要 oneclick_win 从原件解（#613：原先不给原件，多程序合集直接报「改给原件」）"""
     work = out / "work"
-    env = dict(env, S2A_FONTS=str(fonts))
+    # S2A_KEYS：多程序合集序号 1.. 要 oneclick_win 从原件解，用玩家导入的密钥（作业层 c.keys，同 build.py 刷新链）；
+    #   不给就落回 ~/.switch/prod.keys，玩家机上没有 → 「编 App 与签名」报 prod.keys 不在（#943）
+    env = dict(env, S2A_FONTS=str(fonts), S2A_KEYS=str(c.keys))
     c.run([os.sys.executable, "-X", "utf8", "-m", "pack.orch.oneclick_win", "--from-extract", extraction, "--out", work, "--target", "ios",
            "--shell", bundled_shell(c), "--events", events, *(["--title-id", gid] if gid else []), *map(str, sources)],
           log, env, cwd=c.engine, on_line=line)   # 按包起（模块里 from pack… 导入），从引擎根起

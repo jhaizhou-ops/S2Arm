@@ -170,8 +170,9 @@ class WinOneclick(unittest.TestCase):
         (self.t / "Shell").mkdir(); (self.t / "Shell/manifest.json").write_text("{}")
         self.out = self.t / "iPhone/0100FD70134FA000"; self.out.mkdir(parents=True)
         self.events = self.t / "ev.jsonl"; self.calls = []
+        self.envs = []
         def run(args, log, env=None, on_line=None, **kw):
-            self.calls.append([str(a) for a in args])
+            self.calls.append([str(a) for a in args]); self.envs.append(env)
             if "--from-extract" in map(str, args):
                 pk = self.out / "work/pkg/product/pkg"; (pk / "pack").mkdir(parents=True)
                 (pk / "t0100fd70134fa000.ipa").write_bytes(b"ipa"); (pk / "pack/a.bin").write_bytes(b"a")
@@ -179,7 +180,7 @@ class WinOneclick(unittest.TestCase):
                                                                       build_id="b1", graphics_mode="direct")) + "\n")
             else:   # deliver_pack.py <源> <目标>
                 __import__("shutil").copytree(args[-2], args[-1])
-        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run)
+        self.c = types.SimpleNamespace(r={"resources": str(self.t)}, private=self.t, engine=ROOT, run=run, keys=self.t / "keys/prod.keys")
 
     def go(self):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None)
@@ -199,6 +200,8 @@ class WinOneclick(unittest.TestCase):
         self.ipa.win_oneclick(self.c, ROOT / "pack/orch/oneclick_win.py", self.t / "extract", self.t / "Fonts", self.out, self.events, self.t / "log", {}, None,
                               sources=[self.t / "a.xci", self.t / "b.nsp"], gid="0100FD70134FA000")
         self.assertEqual(self.calls[0][-4:], ["--title-id", "0100FD70134FA000", str(self.t / "a.xci"), str(self.t / "b.nsp")])
+        # #943：从原件解其余序号要玩家导入的密钥，作业层交 S2A_KEYS 下去（不给就落回 ~/.switch/prod.keys，玩家机没有）
+        self.assertEqual(self.envs[0]["S2A_KEYS"], str(self.t / "keys/prod.keys"))
 
     def test_failed_pack_not_delivered(self):
         self.ok = False
