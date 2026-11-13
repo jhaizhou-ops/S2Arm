@@ -1467,7 +1467,41 @@ class JobsTests(unittest.TestCase):
             build.launch(self.c)
         self.assertEqual(len(ran), 1); self.assertNotIn("S2A_INPUT_CONFIG", ran[0])
         self.assertTrue(any(sev == "warning" and "默认键位" in m for m, sev in notes), notes)
+    def test_launch_collects_mac_pipeline_records_for_the_next_package(self):
+        # GUI 起局与 runtime/run_mac.sh 同口径：宿主写到本款 S2A_DOCS/wire/，收局后并进出包只读的
+        # S2A_RUN_ROOT/s2arm/pso_seed/。按整行保留首见顺序、去重；下一局只追加新行。
+        game = self.game(); self.catalogue([game]); self.c.r["gameId"] = game["id"]
+        self.fake_host(game["id"])
+        sessions = ["R\tfirst\nR\tsecond\nR\tfirst\n", "R\tsecond\nC\tthird\n"]
+        def run(command, log, env, **kwargs):
+            source = Path(env["S2A_DOCS"]) / "wire" / game["id"] / "pso_user.tsv"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(sessions.pop(0))
+        with patch.object(build, "validate_runtime", return_value={"gameId": game["id"], "memoryRequirementsVersion": 2}), \
+             patch.object(self.c, "run", side_effect=run):
+            build.launch(self.c)
+            build.launch(self.c)
+        seed_dir = self.c.work_root / "run" / "s2arm" / "pso_seed" / game["id"]
+        sources = list(seed_dir.glob("mac_*.tsv"))
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].read_text(), "R\tfirst\nR\tsecond\nC\tthird\n")
 
+    def test_launch_collects_mac_pipeline_records_after_host_failure_or_cancellation(self):
+        game = self.game(); self.catalogue([game]); self.c.r["gameId"] = game["id"]
+        self.fake_host(game["id"])
+        for row, failure in (("R\tfrom-failure\n", Failure("fixture host failed")),
+                             ("R\tfrom-cancel\n", Cancelled())):
+            def run(command, log, env, **kwargs):
+                source = Path(env["S2A_DOCS"]) / "wire" / game["id"] / "pso_user.tsv"
+                source.parent.mkdir(parents=True, exist_ok=True); source.write_text(row)
+                raise failure
+            with patch.object(build, "validate_runtime", return_value={"gameId": game["id"], "memoryRequirementsVersion": 2}), \
+                 patch.object(self.c, "run", side_effect=run):
+                with self.assertRaises(type(failure)):
+                    build.launch(self.c)
+        sources = list((self.c.work_root / "run" / "s2arm" / "pso_seed" / game["id"]).glob("mac_*.tsv"))
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].read_text(), "R\tfrom-failure\nR\tfrom-cancel\n")
     def test_launch_removes_only_its_snapshot_after_exit_failure_or_cancellation(self):
         game = self.game(); self.catalogue([game]); self.c.r.update(gameId=game["id"], inputGuideHandled=True,
             launchInputConfig=dict(schema=1, keyboard={"A": {"code": 14}}, mouse={}, gamepad={}, axes={},

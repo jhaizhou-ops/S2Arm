@@ -17,7 +17,7 @@ import uuid
 import community
 import host_update
 import layout
-from core import Failure, atomic, clone, contained, digest, read, tree_hash
+from core import Cancelled, Failure, atomic, clone, contained, digest, read, tree_hash
 from library import input_identity, require_game, selected_packages, source_path, stage_sources, validate_input
 import milestones as ms
 import toolchain
@@ -198,6 +198,31 @@ def runtime_env(c, game, runtime, input_ok=True):
     return env
 
 
+def collect_pipeline_seed(c, game_id, docs):
+    """把 GUI Mac 局见过的管线并进下一次出包读取的不可变来源；失败不改变本局结果。"""
+    game_id = game_id.upper()
+    source = Path(docs) / "wire" / game_id / "pso_user.tsv"
+    if not source.is_file() or source.is_symlink():
+        return
+    script = c.engine / "tools" / "pso_seed_keep.sh"
+    message = ""
+    try:
+        result = subprocess.run(["/bin/bash", str(script), "--one", game_id, str(source)],
+                                env=c.env(), capture_output=True, text=True, timeout=30)
+        output = (result.stdout if result.returncode == 0 else result.stderr or result.stdout).strip()
+        if result.returncode:
+            message = f"管线种子来源：本局记录未能收纳（退出 {result.returncode}：{output[-300:]}）"
+        elif output:
+            message = output.splitlines()[-1]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        message = f"管线种子来源：本局记录未能收纳（{error}）"
+    if message:
+        try:
+            c.emit("message", message)
+        except Cancelled:
+            pass
+
+
 def launch(c):
     require_automatic_memory(c)
     with c.lock("execution"):
@@ -261,6 +286,7 @@ def launch(c):
             marker.unlink(missing_ok=True)
             if seed:
                 finish_seed(c, game["id"], log)
+            collect_pipeline_seed(c, game["id"], env["S2A_DOCS"])
             # Context.run waits for the host, including failure/cancellation.
             # Do not accumulate per-run snapshots after the process exits.
             if env.get("S2A_INPUT_CONFIG"):

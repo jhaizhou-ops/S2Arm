@@ -162,6 +162,30 @@ class Sizes(JobCase):
         self.assertFalse(rows[str(gone)]["connected"])
         self.assertNotIn("freeBytes", rows[str(gone)])
 
+    def test_overview_drops_previous_library_roots(self):
+        """换过游戏库后存储总览「存放位置」只列本库的（玩家反馈：设置里改了游戏库位置，总览第二行一直是换之前的 C 盘路径）。
+        索引在私有目录、各库共用：① 整库搬家后旧路径那行和本库同号；② 换到别的库后旧库根还在（有 .s2arm-library.json），
+        它下面记的游戏还指向旧库——本库导入同一款不能认到旧库的文件夹往那里写；真的另一个存放位置（外接盘）照留"""
+        L = self.c.library
+        here = layout.default_id(self.c)
+        idx = layout.load_index(self.c)
+        moved = self.root / "搬走前的库"                                  # ① 同号的旧路径（搬完已删掉）
+        old = self.root / "上一个库"; old.mkdir()                          # ② 旧库还在，有游戏库标识
+        (old / ".s2arm-library.json").write_text('{"schema": 1, "id": "lib-old"}')
+        (old / layout.LOCATION_JSON).write_text('{"schema": 1, "id": "loc-old"}')
+        d = old / "games" / "Old"; d.mkdir(parents=True); (d / layout.GAME_JSON).write_text('{"schema": 1, "id": "%s"}' % OTHER)
+        idx["locations"] += [dict(id=here, path=str(moved)), dict(id="loc-old", path=str(old))]
+        idx["games"][OTHER] = dict(location="loc-old", folder="Old")
+        layout.save_index(self.c)
+        disk = self.root / "外接盘"
+        layout.register_location(self.c, disk)
+        self.c._layout_idx = None                                          # 下一个作业：从盘上重读索引
+        rows = [r["path"] for r in sizes.overview(self.context("storageOverview"))["locations"]]
+        self.assertEqual(rows, [str(L), str(disk)])
+        c = self.context("catalog")
+        self.assertEqual(layout.state(c, OTHER), ("none", None))         # 不再认到上一个库里的那份
+        self.assertNotIn(OTHER, layout.load_index(c)["games"])
+
     def test_catalog_job_returns_sizes(self):
         sizes.refresh(self.c, GID)
         result, event = self.worker("catalog")

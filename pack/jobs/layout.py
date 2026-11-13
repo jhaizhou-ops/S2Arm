@@ -71,20 +71,41 @@ def _index_path(c):
 
 def load_index(c):
     idx = getattr(c, "_layout_idx", None)
-    if idx is None:
+    fresh = idx is None
+    if fresh:
         idx = read(_index_path(c), {}) or {}
         idx.setdefault("schema", 1); idx.setdefault("locations", []); idx.setdefault("games", {})
         c._layout_idx = idx
     want = default_id(c)   # 默认位置总在表里、排第一；它的号以库里的标识文件为准（迁移写标识后，旧的 "default" 引用跟着改）
     old = next((l for l in idx["locations"] if l.get("path") == str(c.library)), None)
-    if old is None or old.get("id") != want:
+    changed = old is None or old.get("id") != want
+    if changed:
         if old is not None:
             idx["locations"].remove(old)
             for e in idx["games"].values():
                 if e.get("location") == old.get("id"):
                     e["location"] = want
-        idx["locations"].insert(0, dict(id=want, path=str(c.library)))
+        idx["locations"].insert(0, dict(id=want, path=str(c.library), library=True))
+    elif not old.get("library"):
+        old["library"] = True
+    if fresh or changed:
+        _drop_other_libraries(c, idx, want)
     return idx
+
+
+def _drop_other_libraries(c, idx, want):
+    """索引在私有目录、换过游戏库的都共用这一份：别的游戏库的根不是本库的存放位置，从表里去掉（存储总览不再列、找游戏不去那里找）。
+    认法（都不含当前库）：① 和本库同号的另一行——整库搬家时位置标识跟着搬，旧路径那行留下来同号；② 记过是游戏库根（library）的行；
+    ③ 那里有游戏库标识 .s2arm-library.json（v0.3.6 以前的旧表没记 library）。②③ 的位置号下的游戏记录一并去掉：那是别的库的款，
+    留着会让本库导入同一款时认到别的库的文件夹、往那边写（存储总览「存放位置」一直列着换库前的 C 盘路径）。①的游戏记录本来就指向本库，不动"""
+    here = str(c.library)
+    stale = [l for l in idx["locations"][1:] if l.get("path") != here and
+             (l.get("id") == want or l.get("library") or (Path(l.get("path", "")) / ".s2arm-library.json").is_file())]
+    if not stale:
+        return
+    gone = {l.get("id") for l in stale} - {want}
+    idx["locations"] = [l for l in idx["locations"] if l not in stale]
+    idx["games"] = {g: e for g, e in idx["games"].items() if e.get("location") not in gone}
 
 
 def default_id(c):
