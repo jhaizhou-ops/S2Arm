@@ -354,7 +354,10 @@ int nvn_be_wait(uint64_t fence, uint64_t timeout_ns) {
         //       下一次提交前换一份池镜像（照 nvk_finish_lag 的做法，见 rp_buf_frame_flip），让 CPU 回放与显卡执行重叠。
         //       代价：游戏在这之后读 GPU 回写的内存最多晚一次提交看到。两份镜像决定了这里只能放行一格。
         //   2 = 诊断档：一律不等（量重叠上限；池镜像只有两份，可能读错内容，不用于出货）。
-        static int lag = -1; if (lag < 0) lag = nvn_plat_flag("nvk_sync_lag", 0);
+        // 缺省 1（允许「最多一次提交还在显卡上飞」）：真机上这一档把帧从 70 压到 40–47 毫秒、14 → 20–24 帧
+        // （读数见坑记录续 25）；代价是游戏在这一帧读到的是上一次提交为止的显卡回写，剔除会偏保守、多记约 46% 绘制，
+        // 但不会漏画（保守方向）。画面按同一取景逐帧核对通过。要回到「每笔都真等」：debug.s2a.nvk_sync_lag=0。
+        static int lag = -1; if (lag < 0) lag = nvn_plat_flag("nvk_sync_lag", 1);
         if (lag > 0) {
             uint64_t done = __atomic_load_n(&g_done_fence, __ATOMIC_ACQUIRE);
             uint64_t ahead = fence > done ? (fence - done + SUB_STEP - 1) / SUB_STEP : 0;
