@@ -227,7 +227,13 @@ class FakeW:
             return st if st else {"verdict": impactor, "code": None if impactor == "ok" else "impactor_missing",
                                   "download": "https://github.com/claration/impactor/releases/tag/v2.7.2"}
         self.team = "ABCDE12345"   # 真实 accounts.json 每个账号都带十位团队号（审计 P2-253 Windows 实机核过）
-        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team)
+        self.unselected, self.picks = [], []   # 账号存档里存着却没选中的 Apple ID（D-ZM37）；picks 记 select_only_account 收到的 plumesign
+        def select_only(exe):
+            self.picks.append(exe)
+            if len(self.unselected) != 1: return None
+            self.unselected = []; return "a@x"
+        self.impactor = types.SimpleNamespace(status=status, bundled=real.bundled, logged_in=lambda: self.logged, selected_team=lambda: self.team,
+                                              unselected_accounts=lambda: self.unselected, select_only_account=select_only)
         self.logged = False
         self.plumesign_path = lambda given=None: "C:/plumesign.exe" if plume else None
     def mux_devices(self):
@@ -468,6 +474,23 @@ class WinInstall(unittest.TestCase):
         (d / impactor.PLUMESIGN_EXE).write_bytes(b"x")
         w2 = FakeW([("U1", "USB", 3)]); self.go(w2)
         self.assertEqual(w2.calls[0].plumesign, str(d / impactor.PLUMESIGN_EXE))
+
+    def test_unselected_account(self):
+        # D-ZM37：Impactor 存了 Apple ID 却没选中，plumesign 报「No account selected」。期望手写：
+        #   只存一个 → 装机签名前用 plumesign 选上（交的是装机用的同一份 plumesign），照常装好；
+        #   存多个 → 清单登录项 ✗、说「没有选中」、动作 openImpactor，仍不挡装机（只提示）
+        w = FakeW([("U1", "USB", 3)]); w.unselected = ["a@x"]
+        res = self.go(w)
+        self.assertEqual((w.picks, w.unselected, res["device"]), (["C:/plumesign.exe"], [], "U1"))
+        import impactor   # 登录项只在随包形态（发版启动器）出现
+        d = self.t / "launcher" / impactor.BUNDLE_DIR; d.mkdir(parents=True)
+        for n in impactor.BUNDLED: (d / n).write_bytes(b"x")
+        self.c.r["resources"] = str(self.t / "launcher")
+        w = FakeW([("U1", "USB", 3)]); w.logged = True; w.unselected = ["a@x", "b@x"]
+        with patch.object(self.m, "win_install_mod", return_value=w):
+            r = self.m.readiness_windows(self.c, self.gid)
+        login = next(i for i in r["items"] if i["id"] == "impactor_login")
+        self.assertEqual((login["ok"], login["action"]), (False, "openImpactor")); self.assertIn("没有选中", login["detail"]); self.assertTrue(r["ready"])
 
     def test_logged_in_reads_impactor_account_store(self):
         import json as _j, impactor
