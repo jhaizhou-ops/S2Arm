@@ -43,7 +43,8 @@ struct fd_binding {
     char stage[16];
     // 下面这些只由 program 内容决定，加载时算一次；逐笔 draw 不再做 strcmp / 除法。
     int8_t stage_idx;         // 0=vs 1=fs 2=gs 3=tcs 4=tes 5=cs，-1 = 其它/未知
-    int8_t tex_slot;          // kind==2 的组合纹理槽（<0 = 该 handleIndex 不合法）
+    int16_t tex_slot;         // 组合槽 0..31 或分离贴图槽 128..255；-1 = 未解析
+    int16_t samp_slot;        // -1 = 组合句柄；0..127 = 分离采样器来源槽
     int16_t ubo_slot;         // kind==0 的 NVN 用户槽（cbuf - 3，clamp 到 0）
     uint8_t is_support;       // kind==0 且 stage=="program"（SupportBuffer）
     // kind==1 的地址来源（编译期从 ShaderProgramInfo.SBuffers 解析）：

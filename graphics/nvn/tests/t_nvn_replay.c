@@ -86,7 +86,7 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
 void nvn_gpu_tex_release(nvn_gpu_tex t) { g_tex_releases++; free(t); }
 nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex t, const view_t *v, nvn_gpu_view *out, nvn_gpu_err *err) { (void)err; g_view_creates++; g_vw_last_has = v != NULL; if (v) g_vw_last = *v; *out = calloc(1, sizeof **out); (*out)->of = t; (*out)->has_v = v != NULL; (*out)->rid = ++g_vid; return (nvn_gpu_rc){NVN_GPU_OK}; }
 void nvn_gpu_view_release(nvn_gpu_view v) { g_view_releases++; if (v && g_nrel < 8192) g_released_id[g_nrel++] = v->rid; free(v); }
-nvn_gpu_rc nvn_gpu_samp_create(const samp_par *p, nvn_gpu_samp *out, nvn_gpu_err *err) { (void)p; (void)err; g_samp_creates++; *out = calloc(1, sizeof **out); return (nvn_gpu_rc){NVN_GPU_OK}; }
+nvn_gpu_rc nvn_gpu_samp_create(const samp_par *p, nvn_gpu_samp *out, nvn_gpu_err *err) { (void)p; (void)err; g_samp_creates++; *out = calloc(1, sizeof **out); (*out)->x = p->ws; return (nvn_gpu_rc){NVN_GPU_OK}; }
 void nvn_gpu_samp_release(nvn_gpu_samp s) { g_samp_releases++; free(s); }
 static uint32_t g_caps_nosample = ~0u;   // 用例：这个格式在替身设备上不能直接采样（后端走计算解码的 BC 格式，能力位回 0）
 uint32_t nvn_gpu_format_caps(uint32_t f) { if (f == g_caps_nosample) return 0;
@@ -340,6 +340,11 @@ static void t_deferred_bind(void) {   // 延后绑定：回放到这条时才读
     range.address = 0x8000; range.size = 128;   // 录制之后、回放之前游戏改了
     nvn_be_exec(a.b);
     CHECK(rp_S.ubo[1][3].addr == 0x9000 && rp_S.ubo[1][3].size == 128 && rp_S.ubo[1][3].stage == 1);
+    uint64_t sampler_handle = 0;
+    p_bind_handles d = {0}; d.stage = 1; d.first = 11; d.n = 1; d.defer = 1; d.src = (uint64_t)(uintptr_t)&sampler_handle;
+    p_bind_pool_bases bases = {0, 10}; memcpy(d.h + 1, &bases, sizeof bases);
+    rp_state_op(OP_BIND_SAMP, &d, sizeof d);
+    CHECK(rp_S.samp_bound[1][11] && rp_S.samp[1][11] == ((uint64_t)10 << 20)); // 句柄 0 属于录制时的池
 }
 
 static void t_program_stages(void) {
@@ -1284,7 +1289,7 @@ static void t_report_counter(void) {   // 计数器报告：段完成后才写�
 // 最小的可画环境：一个不带属性、不带绑定的程序，一张 64x36 的颜色目标
 static tex_t g_qrt;
 static void q_env(stream *s) {
-    memset(&g_fprog, 0, sizeof g_fprog); g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.color_out_mask = 0xffffffffu;
     g_qrt = mk_tex(91, 0, NVN_FORMAT_RGBA8, 64, 36, 1, 0);
     put_set_rt(s, &g_qrt, NULL);
     p_viewports *vp = put(s, OP_VIEWPORTS, sizeof *vp); vp->n = 1; vp->v[0][2] = 64; vp->v[0][3] = 36;
@@ -1810,6 +1815,9 @@ static void t_tex_fact_gens(void) {
     tex_t t = mk_tex(777, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
     nvn_be_reg_tex(9, &t, NULL); CHECK(rp_tex_reg_gen() == r0 + 1);
     nvn_be_unreg_tex_range(9, 1); CHECK(rp_tex_reg_gen() == r0 + 2);
+    samp_par sp = {0};
+    nvn_be_reg_samp(4, &sp); CHECK(rp_tex_reg_gen() == r0 + 3); // 登记采样器使绑定缓存失效
+    nvn_be_reg_samp(4, &sp); CHECK(rp_tex_reg_gen() == r0 + 4); // 原位重登记同样失效
     nvn_be_tex_release(&t); pass_fresh();
 }
 
@@ -2187,7 +2195,7 @@ static void t_draw(void) {   // 绘制：状态在绘制时才变成后端的管
     pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; memset(g_pmem, 0, sizeof g_pmem); g_arena_used = 0;
     g_pipe_gets = g_set_pipes = g_set_dyns = g_gdraws = g_nvb = g_resolves = g_resolve_rc = 0; memset(g_nfb, 0, sizeof g_nfb);
     uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem);
-    memset(&g_fprog, 0, sizeof g_fprog); g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
     g_fprog.nent[0] = 2; g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][0].src_kind = NVN_RB_SUPPORT;
     g_fprog.ent[0][1].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][1].src_kind = NVN_RB_CBUF; g_fprog.ent[0][1].src_reg = 2;
     g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
@@ -2354,7 +2362,7 @@ static void t_bind_reuse(void) {   // 按脏位少发绑定：没变的阶段不
     pass_fresh(); memset(g_pg_gen, 0, sizeof g_pg_gen); g_pg_tracked = 1; g_dirty_now = 100; memset(g_pmem, 0, sizeof g_pmem); g_arena_used = 0;
     g_gdraws = g_resolve_rc = 0; memset(g_nfb, 0, sizeof g_nfb);
     uint64_t base = (uint64_t)(uintptr_t)g_pmem; nvn_be_pool_add(g_pmem, sizeof g_pmem);
-    memset(&g_fprog, 0, sizeof g_fprog); g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
+    memset(&g_fprog, 0, sizeof g_fprog); for (int st = 0; st < RP_PROG_STAGES; ++st) for (int i = 0; i < RP_PROG_ENT_MAX; ++i) g_fprog.ent[st][i].src_reg2 = UINT16_MAX; g_fprog.sh[0] = &g_fsh[0]; g_fprog.sh[1] = &g_fsh[1]; g_fprog.support_bytes = 2608; g_fprog.attr_mask = 1; g_fprog.color_out_mask = 0xffffffffu;
     g_fprog.nent[0] = 2; g_fprog.ent[0][0].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][0].src_kind = NVN_RB_SUPPORT;
     g_fprog.ent[0][1].cls = NVN_GPU_RES_UBO; g_fprog.ent[0][1].src_kind = NVN_RB_CBUF; g_fprog.ent[0][1].src_reg = 2;
     g_fprog.nent[1] = 1; g_fprog.ent[1][0].cls = NVN_GPU_RES_TEX_SAMP; g_fprog.ent[1][0].src_kind = NVN_RB_TEX; g_fprog.ent[1][0].src_reg = 5;
@@ -2454,7 +2462,7 @@ static void t_decl_sampling(void) {
     for (uint32_t k = 0; k < 8 && g_nfb[1] == 8; k++) CHECK(g_fb[1][k].u.ts.view == z && g_fb[1][k].u.ts.samp != NULL);
     memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0];
     g_cprog.nent[0] = 1; g_cprog.ent[0][0].cls = NVN_GPU_RES_TEX_SAMP;
-    g_cprog.ent[0][0].src_kind = NVN_RB_TEX; g_cprog.ent[0][0].count = 1;
+    g_cprog.ent[0][0].src_kind = NVN_RB_TEX; g_cprog.ent[0][0].src_reg2 = UINT16_MAX; g_cprog.ent[0][0].count = 1;
     g_cprog.dtt[0][0] = NVN_TEXTURE_TARGET_CUBEMAP + 1; g_cprog.dcls[0][0] = 1;
     stream cs = {0}; bh = put(&cs, OP_BIND_TEX, sizeof *bh);
     bh->stage = 5; bh->first = 0; bh->n = 1; bh->h[0] = 7 | 3 << 20;
@@ -2462,6 +2470,49 @@ static void t_decl_sampling(void) {
     CHECK(g_ncb == 1 && g_cb[0].u.ts.view == z);
     CHECK(nvn_unimpl_kinds() == 0);
     pass_fresh();
+}
+
+// Two independent slots feed one sampled descriptor; slot 0 is a valid sampler handle.
+static void t_separate_sampler(void) {
+    pass_fresh(); g_resolve_rc = 0; g_gdraws = 0; nvn_unimpl_reset();
+    stream init = {0}; q_env(&init);
+    tex_t t = mk_tex(7030, 0x4000, NVN_FORMAT_RGBA8, 4, 4, 1, 0);
+    samp_par sp = {0}; sp.ws = 1; nvn_be_reg_tex(7, &t, NULL); nvn_be_reg_samp(3, &sp);
+    g_fprog.nent[1] = 1; nvn_gpu_layout_ent *e = &g_fprog.ent[1][0];
+    e->cls = NVN_GPU_RES_TEX_SAMP; e->src_kind = NVN_RB_TEX; e->src_reg = 130; e->src_reg2 = 4; e->count = 1;
+    p_bind_handles *b = put(&init, OP_BIND_TEX, sizeof *b); b->stage = 1; b->first = 130; b->n = 1; b->h[0] = 7;
+    q_draw(&init); end(&init); submit1(&init); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 0 && nvn_unimpl_count("draw", "separate_sampler_unbound") == 1);
+    stream draw = {0}; b = put(&draw, OP_BIND_SAMP, sizeof *b); b->stage = 1; b->first = 4; b->n = 1; b->h[0] = (uint64_t)3 << 20;
+    q_draw(&draw); end(&draw); submit1(&draw); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 1 && g_fb[1][0].u.ts.view && g_fb[1][0].u.ts.samp && g_fb[1][0].u.ts.samp->x == 1);
+    sp.ws = 6; nvn_be_reg_samp(3, &sp);
+    stream again = {0}; q_draw(&again); end(&again); submit1(&again); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 2 && g_fb[1][0].u.ts.samp && g_fb[1][0].u.ts.samp->x == 6);
+    stream missing = {0}; b = put(&missing, OP_BIND_SAMP, sizeof *b); b->stage = 1; b->first = 4; b->n = 1; b->h[0] = (uint64_t)31 << 20;
+    q_draw(&missing); end(&missing); submit1(&missing); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "separate_sampler_unresolved") == 1);
+    sp.ws = 7; nvn_be_reg_samp(0, &sp);
+    stream zero = {0}; b = put(&zero, OP_BIND_SAMP, sizeof *b); b->stage = 1; b->first = 4; b->n = 1; b->h[0] = 0;
+    q_draw(&zero); end(&zero); submit1(&zero); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 3 && g_fb[1][0].u.ts.samp && g_fb[1][0].u.ts.samp->x == 7);
+    memset(&g_cprog, 0, sizeof g_cprog); g_cprog.is_compute = 1; g_cprog.sh[0] = &g_fsh[0];
+    g_cprog.nent[0] = 1; g_cprog.ent[0][0].cls = NVN_GPU_RES_TEX_SAMP;
+    g_cprog.ent[0][0].src_kind = NVN_RB_TEX; g_cprog.ent[0][0].src_reg = 130;
+    g_cprog.ent[0][0].src_reg2 = 4; g_cprog.ent[0][0].count = 1;
+    int dispatch_before = g_ndisp;
+    stream compute = {0}; b = put(&compute, OP_BIND_TEX, sizeof *b); b->stage = 5; b->first = 130; b->n = 1; b->h[0] = 7;
+    b = put(&compute, OP_BIND_SAMP, sizeof *b); b->stage = 5; b->first = 4; b->n = 1; b->h[0] = (uint64_t)3 << 20;
+    put_dispatch1(&compute); end(&compute); submit1(&compute); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_ndisp == dispatch_before + 1 && g_ncb == 1 && g_cb[0].u.ts.samp && g_cb[0].u.ts.samp->x == 6);
+    int released = g_samp_releases;
+    rp_view_pin_begin();
+    nvn_gpu_samp old = rp_samp_by_id(0); CHECK(old != NULL);
+    sp.ws = 1; nvn_be_reg_samp(0, &sp);
+    CHECK(g_samp_releases == released && old->x == 7); // 已取出者在编码窗口内仍活着
+    CHECK(rp_samp_by_id(0) && rp_samp_by_id(0)->x == 1);
+    rp_view_pin_end(); CHECK(g_samp_releases == released + 1);
+    nvn_be_tex_release(&t); pass_fresh();
 }
 
 int main(int argc, char **argv) {
@@ -2518,6 +2569,7 @@ int main(int argc, char **argv) {
     t_gs_dirty_and_topology();
     t_gs_bind(); t_storage_sync_before_pass(); t_stage_dropped_clears_binds();
     t_decl_sampling();
+    t_separate_sampler();
     t_present();
     t_view_pin();
     t_pass_3d_slice_view();

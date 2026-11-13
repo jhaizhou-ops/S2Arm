@@ -41,6 +41,9 @@ static treg_t *g_treg; static int g_ntreg;
 static uint64_t g_treg_gen;   // 登记表里「编译事实看得到的内容」每变一次加一（登记 / 注销 / 清空）；rp_tex_reg_gen 给着色器来源的快路径判缓存用
 uint64_t rp_tex_reg_gen(void) { return __atomic_load_n(&g_treg_gen, __ATOMIC_ACQUIRE); }
 static sreg_t *g_sreg; static int g_nsreg;
+static uint32_t g_pin_depth;
+struct pinned_samp { nvn_gpu_samp samp; struct pinned_samp *next; };
+static struct pinned_samp *g_pinned_samps;
 static int g_tpool_n;
 static nvn_hmap g_by_serial = {.klen = 8};                  // 序号 → struct rp_tex *
 static nvn_hmap g_alias = {.klen = sizeof(alias_key)};      // 键 → struct rp_tex *
@@ -80,8 +83,16 @@ void nvn_be_reg_samp(int id, const samp_par *p) {
     if (id >= g_nsreg) { int n = id + 256; sreg_t *nr = realloc(g_sreg, (size_t)n * sizeof *nr); if (!nr) { pthread_mutex_unlock(&g_rmu); return; }
         memset(nr + g_nsreg, 0, (size_t)(n - g_nsreg) * sizeof *nr); g_sreg = nr; g_nsreg = n; }
     sreg_t *r = &g_sreg[id];
-    if (r->s) { nvn_gpu_samp_release(r->s); r->s = NULL; }   // 后端把真正销毁推迟到最后一次使用结束（契约 A3）
+    if (r->s) {
+        if (g_pin_depth) {
+            struct pinned_samp *pin = malloc(sizeof *pin);
+            if (!pin) { nvn_unimpl("gpu", "sampler_pin_allocation", p); pthread_mutex_unlock(&g_rmu); return; }
+            pin->samp = r->s; pin->next = g_pinned_samps; g_pinned_samps = pin;
+        } else nvn_gpu_samp_release(r->s);
+        r->s = NULL;
+    }
     r->p = *p; r->ok = 1;
+    __atomic_fetch_add(&g_treg_gen, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_rmu);
 }
 
@@ -396,7 +407,7 @@ static uint32_t vf_base(uint64_t serial, const view_t *v) {
 static struct { uint64_t serial; view_t v; uint8_t has_v; nvn_gpu_view view; struct rp_tex *of; } g_vf[VF_N];
 static int g_vf_next;
 static uint32_t g_vf_seen[VF_N];       // 本轮取用记号：等于 g_pin_token 的项已交给调用方，轮转不能放
-static uint32_t g_pin_token, g_pin_depth;
+static uint32_t g_pin_token;
 // 窗口内取用数超过环容量时的溢出视图（生产上界：8 颜色 + 深度 + 影子 ≤ 12；这里只是防御）。
 // 不进环、由窗口结束时统一放：后端在 pass_begin 里已 cmd_ref，窗口之后不再需要核心持有。
 static struct { nvn_gpu_view view; } g_pin_tmp[4096];
@@ -408,6 +419,10 @@ void rp_view_pin_end(void) {
         g_pin_token++;
         for (int i = 0; i < g_npin_tmp; i++) if (g_pin_tmp[i].view) nvn_gpu_view_release(g_pin_tmp[i].view);
         g_npin_tmp = 0;
+        while (g_pinned_samps) {
+            struct pinned_samp *pin = g_pinned_samps; g_pinned_samps = pin->next;
+            nvn_gpu_samp_release(pin->samp); free(pin);
+        }
     }
     pthread_mutex_unlock(&g_rmu);
 }

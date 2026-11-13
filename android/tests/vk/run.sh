@@ -91,7 +91,7 @@ export TMPDIR="$repo/build/vk-tests"
 out=$(mktemp -d "$TMPDIR/s2a-nvn-vk.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/shaders"
-for s in logic_float.frag logic_uint.frag logic_float_mrt.frag logic_uint_mrt.frag gs_probe.vert gs_probe.geom gs_probe.frag tri.vert tri.frag tri_combined.frag tri3.vert tri_solid.frag tri_invert.frag solid_green.frag solid_blue.frag out1_green.frag tex_u.frag quad.vert quad.frag inst.vert point.vert quad2.frag arr.frag cube.frag cubearr.frag tex3d.frag comp.comp pushc.frag pushc.comp tbuf.comp itbuf.comp itbuf_unknown.comp itbuf_unknown_read.comp img.comp tsamp.comp arr2.frag; do
+for s in logic_float.frag logic_uint.frag logic_float_mrt.frag logic_uint_mrt.frag gs_probe.vert gs_probe.geom gs_probe.frag tri.vert tri.frag tri_combined.frag tri3.vert tri_solid.frag tri_invert.frag solid_green.frag solid_blue.frag out1_green.frag tex_u.frag quad.vert quad.frag inst.vert point.vert quad2.frag arr.frag cube.frag cubearr.frag tex3d.frag comp.comp pushc.frag pushc.comp tbuf.comp itbuf.comp itbuf_unknown.comp itbuf_unknown_read.comp img.comp tsamp.comp arr2.frag separate.vert separate.frag; do
     "$glslc" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/$s" -o "$out/shaders/$s.spv"
 done
 
@@ -125,7 +125,7 @@ cflags=(-D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unu
 case "$mode" in
     --tsan) cflags+=(-fsanitize=thread) ;;
     --asan) cflags+=(-fsanitize=address,undefined -fno-omit-frame-pointer) ;;
-    ""|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap) ;;
+    ""|--separate-core|--separate-neg-sampler|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap) ;;
     *) echo "未知参数：${mode}（可用 --tsan / --asan）" >&2; exit 64 ;;
 esac
 
@@ -141,6 +141,24 @@ if [ "$mode" = "--gs-core" ]; then
          "$repo/android/native/direct/sha256.c" "$repo/android/native/direct/json.c" "$repo/android/native/direct/jv.c" "$repo/android/native/direct/compile_request.c"
          "$repo/android/native/direct/offline_library.c" "$repo/android/native/direct/program_cache.c" "$repo/runtime/src/direct_host.c")
     cflags+=(-ffunction-sections -fdata-sections -Wno-unused-function)
+fi
+if [ "$mode" = "--separate-core" ] || [ "$mode" = "--separate-neg-sampler" ]; then
+    src=("$repo/android/tests/vk/t_replay_separate.c" "$repo/graphics/nvn/replay/rp_draw.c" "$repo/graphics/nvn/replay/rp_state.c" "$repo/graphics/nvn/replay/nvn_unimpl.c"
+         "$repo/android/native/nvn/backend_vulkan.c" "$repo/android/native/direct/vk_device.c" "$repo/android/native/direct/gs_path.c" "$repo/android/native/capprobe/capprobe_host.c"
+         "$repo/android/native/nvn/nvn_vk_format.c" "$repo/graphics/nvn/gfx/nvn/nvn_fmt_expand.c" "$repo/android/native/nvn/nvn_vk_bcdec.c"
+         "$repo/android/native/nvn/nvn_vk_driver_cache.c" "$repo/android/native/direct/sha256.c")
+    cflags+=(-ffunction-sections -fdata-sections -Wno-unused-function)
+fi
+if [ "$mode" = "--separate-neg-sampler" ]; then
+    python3 - "$repo/graphics/nvn/replay/rp_draw.c" "$out/rp_draw_mutant.c" <<'PYMUT'
+import pathlib, sys
+s = pathlib.Path(sys.argv[1]).read_text()
+a = 'ts[st][i] = rp_samp_by_id((int)(sh >> 20));'
+b = 'ts[st][i] = rp_samp_by_id((int)(h >> 20)); (void)sh;'
+if s.count(a) != 1: raise SystemExit('sampler negative control anchor changed')
+pathlib.Path(sys.argv[2]).write_text(s.replace(a, b))
+PYMUT
+    src[1]="$out/rp_draw_mutant.c"
 fi
 # 负控只修改临时源副本，不关闭 validation，也不改设备特性。
 case "$mode" in
@@ -205,6 +223,27 @@ with open(sys.argv[2], 'w') as f:
 PYPROBE
 export S2A_CAPPROBE_RESULT="$out/probe-result.json"
 
+if [ "$mode" = "--separate-neg-sampler" ]; then
+    set +e
+    timeout 60 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/separate-neg-log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -eq 0 ] || ! grep -q 'round 0 pixel 0: 0,255,0,255' "$out/separate-neg-log" || grep -qE 'Validation Error|VUID-|SYNC-HAZARD-|commit round|wait round' "$out/separate-neg-log"; then
+        echo '【红】分离采样器来源负控未击中像素断言，或 validation 有报错' >&2; exit 1
+    fi
+    echo 'PASS: 改错采样器来源命中像素负控，validation 0 条'; exit 0
+fi
+if [ "$mode" = "--separate-core" ]; then
+    set +e
+    timeout 60 "$out/t_backend_vk" "$out/shaders" 2>&1 | tee "$out/separate-log"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -ne 0 ] || ! grep -q llvmpipe "$out/separate-log" || grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$out/separate-log"; then
+        cp "$out/separate-log" "$repo/build/vk-separate-failure.log"
+        echo "【红】分离来源回放采样 rc=$rc 或 validation 有报错；完整日志 build/vk-separate-failure.log" >&2; exit 1
+    fi
+    echo '【绿】分离来源回放采样：repeat 红、clamp 绿，validation 0 条'; exit 0
+fi
 if [ "$mode" = "--gs-core" ]; then
     rm -rf "$repo/build/696-real-compiler/core-compiler"
     set +e
@@ -255,6 +294,7 @@ if [ "$mode" = "--gs-only" ] || [ "$mode" = "--gs-compiler" ]; then
 fi
 
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run.sh" --gs-core; fi
+if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run.sh" --separate-core; fi
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_copy_t2b.sh"; fi
 if [ "$mode" = "" ]; then bash "$repo/android/tests/vk/run_replay_clear_tex.sh"; fi
 

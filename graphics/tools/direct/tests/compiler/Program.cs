@@ -53,6 +53,9 @@ internal static unsafe class Program
     private static ulong Ldc(int dest, int offset, int slot = 0, int srcA = 0xFF) =>
         0xEF90000000000000UL | (4UL << 48) | ((ulong)slot << 36) | ((ulong)(offset & 0xFFFF) << 20) |
         (7UL << 16) | ((ulong)srcA << 8) | (uint)dest;
+    // LOP.OR Rd, Ra, Rb: exact Maxwell opcode and fields from InstTable / InstLopR.
+    private static ulong LopOr(int dest, int a, int b) =>
+        0x5C40000000000000UL | (7UL << 48) | (1UL << 41) | ((ulong)b << 20) | (7UL << 16) | ((ulong)a << 8) | (uint)dest;
     private static ulong Ald4(int location) =>
         0xEFD8000000000000UL | (0xFFUL << 39) | (3UL << 47) | ((ulong)(0x80 + location * 16) << 20) | (7UL << 16) | (0xFFUL << 8);
     // TEX R0, R2, texture0：2D、坐标 R2/R3、写 RGBA。
@@ -1629,6 +1632,28 @@ internal static unsafe class Program
             DirectProgram combinedProgram = DirectProgram.Parse(combinedDoc.RootElement.GetProperty("program"), "program", p);
             var combined = new DirectGpuAccessor(p, combinedProgram, combinedProgram.StageOf("fs"), 5, new DirectAllocator(p), new List<DirectQuery>());
             Throws("MISSING_FACT", () => combined.QuerySamplerType(forward, slots), "separate query cannot borrow a combined texture fact");
+        }
+
+        // Separate NVN c2 texture/sampler words, translated by the real Maxwell compiler.
+        // Both operand orders produce the same pair of reflected sources.
+        {
+            const string separateFact = "[{\"stage\":\"fs\",\"handle\":90,\"cbufSlot\":2,\"samplerType\":\"2d\",\"format\":\"Unknown\",\"isBuffer\":false,\"normalized\":true,\"separate\":true,\"arrayLength\":1}]";
+            foreach (bool reverse in new[] { false, true })
+            {
+                byte[] shader = Guest(true, new[] { Fadd32i(2, 0.5f), Fadd32i(3, 0.5f),
+                    Ldc(6, 0x168, 2), Ldc(7, 0x568, 2), LopOr(4, reverse ? 7 : 6, reverse ? 6 : 7), TexBindless2D(0, 2, 4) });
+                try {
+                    using JsonDocument separateResult = ParseResult(DirectShaderCompiler.Compile(RequestJson(profile, "graphics", 1, 1, "separate-c2", vs, shader, textureFacts: separateFact, fsCbUse: 4)));
+                    var root = separateResult.RootElement;
+                    var binding = root.GetProperty("content").GetProperty("bindings").EnumerateArray()
+                        .Single(b => b.GetProperty("kind").GetString() == "texture");
+                    Check(root.GetProperty("schema").GetString() == "s2a-direct-program-v2" &&
+                          binding.GetProperty("slot").GetInt32() == 90 && binding.GetProperty("samp_slot").GetInt32() == 0,
+                          "real separate c2 shader emits v2 texture word 90 and sampler slot 0");
+                } catch (DirectCompileException error) {
+                    Check(false, "real separate c2 shader " + (reverse ? "reversed" : "forward") + " must compile: " + error.Code + " " + error.Message);
+                }
+            }
         }
 
         // 7c) guest UBO：c[0] 的 LDC 必须变成 set0 binding1 的 uniform binding、槽位 0，

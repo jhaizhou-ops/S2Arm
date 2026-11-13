@@ -17,6 +17,7 @@ struct rp_state {
     NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][16], ssbo[6][16];
     uint64_t tex[6][RP_NTEX], samp[6][128], img[6][32];
+    uint8_t samp_bound[6][128]; // 显式绑定过，句柄 0 本身也是合法池项
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];
     float blend_color[4];
