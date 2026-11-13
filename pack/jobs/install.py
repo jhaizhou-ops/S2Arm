@@ -740,8 +740,15 @@ def backup_saves(c, ident, bid, gid, docs="Documents"):
     save_dir = f"{docs}/{SAVE_REL}"
     rc, data, err = devicectl(c, "device", "info", "files", "--device", ident, "--domain-type", "appDataContainer", "--domain-identifier", bid,
                               "--subdirectory", save_dir, timeout=120)
-    files = [f["relativePath"] for f in ((data.get("result") or {}).get("files") or [])
-             if not (f.get("resources") or {}).get("isDirectory") and not f["relativePath"].rsplit("/", 1)[-1].startswith(".")]
+    # 文件清单的路径字段（#908：玩家 Xcode 16.0 的 devicectl 有条目不带 relativePath，原先 f["relativePath"] 抛 KeyError、整个装机作业崩成
+    #   「本地任务失败」，每次都装不上）：relativePath / path 都认；都没有的条目读不懂 → 走「备份不了存档、确认后照装」，条目字段名记进日志，不再崩
+    entries = [f for f in ((data.get("result") or {}).get("files") or []) if isinstance(f, dict)]
+    unknown = [sorted(f) for f in entries if not (f.get("relativePath") or f.get("path")) and not (f.get("resources") or {}).get("isDirectory")]   # 目录条目读不出路径不碍事
+    files = [p for p in (f.get("relativePath") or f.get("path") for f in entries if not (f.get("resources") or {}).get("isDirectory"))
+             if p and not p.rsplit("/", 1)[-1].startswith(".")]
+    if not rc and unknown:
+        print(f"[s2a] 存档文件清单有 {len(unknown)} 条读不出路径，字段：{unknown[0]}", file=sys.stderr)
+        return backup_failed(c, f"读不懂 iPhone 返回的存档文件清单（{len(unknown)} 条没有路径字段，多半是 Xcode 版本不同）")
     if rc:
         # 列不出：App 不在机上（第一次装）才算没有存档；App 在却列不出要分清两种——devicectl 对「目录不存在」和「锁屏 / 隧道断」报同一个错
         #   （11-07 满屏线 Duo 实测：容器第一次装半途失败 / 从没进过游戏，机上 Documents/games 是空目录，原先每次都拒装、玩家永久卡死）。

@@ -833,6 +833,25 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual((d / "0000000000000001/0/save.dat").read_text(), "内容:" + got[0])
         self.assertEqual(d.parent, self.c.library / "games/0100C2500FC20000/save_backup")
 
+    def test_list_entry_without_relative_path_asks_not_crash(self):
+        # #908：Xcode 16.0 的 devicectl 有条目不带 relativePath，原先 KeyError 让整个装机作业崩成「本地任务失败」。
+        #   path 字段照认、照备份；两种都没有 → 停在「备份不了存档」确认（save_backup_failed），玩家确认后照装
+        import diag
+        def run(entries):
+            def devicectl(c, *a, timeout=0):
+                if a[:3] == ("device", "info", "files"):
+                    return 0, {"result": {"files": entries}}, ""
+                Path(a[a.index("--destination") + 1]).write_text("x"); return 0, {}, ""
+            with um.patch.object(diag, "devicectl", devicectl):
+                return install.backup_saves(self.c, "C891", "s2arm.z.0100c2500fc20000", "0100C2500FC20000")
+        d = run([dict(path="0000000000000001/0/save.dat", resources=dict(isDirectory=False))])
+        self.assertTrue((d / "0000000000000001/0/save.dat").is_file())
+        with self.assertRaises(Failure) as e:
+            run([dict(name="save.dat", resources=dict(isDirectory=False))])
+        self.assertEqual(e.exception.code, "save_backup_failed"); self.assertIn("读不懂 iPhone 返回的存档文件清单", e.exception.internal)
+        self._accept()
+        self.assertIsNone(run([dict(name="save.dat", resources=dict(isDirectory=False))]))
+
     def test_nothing_on_device(self):
         self.assertEqual(self._run([])[0], None)                       # 第一次装：机上没有存档，不备份不报错
 
