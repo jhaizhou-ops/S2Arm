@@ -51,6 +51,24 @@ class TargetTests(JobCase):
         self.assertEqual([row["id"] for row in rows], ["synthetic-iOS", "synthetic-iPadOS"])
         self.assertEqual(arch.call_count, 2)
 
+    def test_missing_reality_field_falls_back_to_physical_traits(self):
+        """devicectl 缺 reality 字段（据报有 Xcode 测试版不再输出）：有硬件 UDID 且有配对 / 连接方式的照收，模拟器样（无 UDID、无配对）不收；
+        有 reality 字段的照旧按它（simulated 不收）"""
+        import diag
+        self.c.r["developerDir"] = str(self.root / "synthetic-developer")
+        devices = [
+            dict(identifier="real-no-reality", hardwareProperties=dict(platform="iOS", productType="iPhone18,2", udid="U1"),
+                 deviceProperties=dict(name="a", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", transportType="wired", tunnelState="connected")),
+            dict(identifier="sim-no-reality", hardwareProperties=dict(platform="iOS", productType="iPhone18,2"),
+                 deviceProperties=dict(name="b", osVersionNumber="27.1"), connectionProperties=dict(tunnelState="connected")),
+            dict(identifier="sim-with-reality", hardwareProperties=dict(reality="simulated", platform="iOS", productType="iPhone18,2", udid="U3"),
+                 deviceProperties=dict(name="c", osVersionNumber="27.1"), connectionProperties=dict(pairingState="paired", tunnelState="connected")),
+        ]
+        with patch.object(diag, "devicectl", return_value=(0, {"result": {"devices": devices}}, "")), \
+             patch.object(target, "gpu_arch", return_value="applegpu_g18p"):
+            rows = target.connected(self.c)
+        self.assertEqual([r["id"] for r in rows], ["real-no-reality"])
+
     def test_target_probe_preserves_error_code(self):
         with patch.object(target, "device_list", return_value=([], "", None, None)), \
              patch.object(target, "models", side_effect=target.TargetError("missing database", code="xcode_unavailable")):

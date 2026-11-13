@@ -52,6 +52,15 @@ def devicectl(c, *args, timeout=120):
     return p.returncode, data, (p.stderr or p.stdout).strip()
 
 
+def is_physical(d):
+    """devicectl 的这台是真机：有 reality 字段就照它（physical）；缺了（公开项目反映有 Xcode 测试版不再输出它，本机 26.6 / 27.0 / 27.1 都还有）
+    按真机才有的特征认——有硬件 UDID、且有配对状态或连接方式（模拟器两样都没有）。原先缺字段就一台都认不出、整个装机找不到设备"""
+    h, cp = d.get("hardwareProperties", {}), d.get("connectionProperties", {})
+    if "reality" in h:
+        return h.get("reality") == "physical"
+    return bool(h.get("udid")) and bool(cp.get("pairingState") or cp.get("transportType"))
+
+
 def reachable(d):
     """连着线或隧道已通。数据线连着、已配对时隧道空闲是 disconnected，devicectl 用到会自己拉起（10-26 测试设备2 插着线被判「没连 iPhone」）"""
     cp = d.get("connectionProperties", {})

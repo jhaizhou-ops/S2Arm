@@ -120,9 +120,9 @@ def os_choices(env):
 
 def _keep_device(d):
     """连着的 iOS / iPadOS 真机：physical + 隧道通或有线已配对（与 connected() 同一判据，10-28 按维护方 A3 第 5 条抽出来共用）"""
-    from diag import reachable
+    from diag import is_physical, reachable
     h = d.get("hardwareProperties", {})
-    return h.get("reality") == "physical" and h.get("platform") in ("iOS", "iPadOS") and reachable(d)
+    return is_physical(d) and h.get("platform") in ("iOS", "iPadOS") and reachable(d)
 
 
 def _row(d, dev_dir, with_link=False):
