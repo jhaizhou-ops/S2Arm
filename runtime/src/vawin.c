@@ -584,7 +584,7 @@ uint64_t s2a_window_container_need(const char *bundle) {
     int (*span)(const char *, char *, size_t) = (int (*)(const char *, char *, size_t))dlsym(RTLD_DEFAULT, "s2a_loader_span_images");
     uint64_t (*poolf)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_app_pool");
     void (*pools)(uint64_t) = (void (*)(uint64_t))dlsym(RTLD_DEFAULT, "s2a_app_pool_set");
-    uint64_t pool0 = poolf ? poolf() : 0, top = 0, span_max = 0; int n = 0, ast = -1, ok = 1, span_unknown = 0; char first[256] = ""; struct dirent *e;
+    uint64_t pool0 = poolf ? poolf() : 0, top = 0, span_max = 0; int n = 0, ast = -1, ok = 1; char first[256] = ""; struct dirent *e;
     while (ok && (e = readdir(d))) {
         char dir[1400], img[1400], why[400] = ""; struct stat st;
         if (e->d_name[0] == '.' || strlen(e->d_name) > 200) continue;
@@ -612,7 +612,10 @@ uint64_t s2a_window_container_need(const char *bundle) {
         { uint64_t pid = strtoull(e->d_name, NULL, 16), sl = 0; char sp[1400];
           if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/span_peak", e->d_name, (unsigned long long)pid); sl = read_u64(sp); }
           if (!sl) sl = s2a_window_span_seen(pid);
-          if (!sl) span_unknown = 1; else if (sl > span_max) span_max = sl; }
+          // 这款还没玩过、没有记录：它的跨度不会超过它自己的布局需求 ni，按 ni 算（原先整容器取 0，一款没玩过就把别款也打回 3 GB）。
+          //   ni 比空洞还大的（乙布局款）照旧落到 s2a_window_host_below 的 HOST_BELOW
+          if (!sl) sl = ni;
+          if (sl > span_max) span_max = sl; }
         if (ni > top) top = ni;
         n++;
     }
@@ -620,7 +623,7 @@ uint64_t s2a_window_container_need(const char *bundle) {
     if (ok && !n) LOG("【红】地址窗口：多款容器 %s 下没有游戏，不占窗口", gd);
     g_ctr_astype = ast;
     if (!ok || !n) return 0;
-    g_span_learned = span_unknown ? 0 : span_max;
+    g_span_learned = span_max;
     g_npdm[0] = 0;
     LOG("地址窗口：多款容器 %d 款取最大 %llu MB（地址空间类型 %d）", n, (unsigned long long)(top >> 20), ast);
     return top;
