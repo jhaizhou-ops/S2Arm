@@ -274,6 +274,19 @@ class Upgrade3Tests(JobCase):
                 self.assertFalse(library.iphone_ready(self.c, A))
 
 
+class DevicesTests(JobCase):
+    """devices()：exFAT 搬库带来的 ._<名>.json 附属文件不算设备记录；单个记录读不出不拖垮整个请求（#911）"""
+    def test_skips_appledouble_and_unreadable_records(self):
+        d = self.c.library / layout.DEVICES; d.mkdir(parents=True, exist_ok=True)
+        atomic(d / "phone-1.json", dict(games={A: {}}, signed=dict(at=5, free=False, device="甲机")))
+        (d / "._phone-1.json").write_bytes(b"\x00\x05\x16\x07" + b"\xb0" * 4092)   # 访达附属文件：非 UTF-8
+        (d / ".DS_Store").write_bytes(b"\xb0\x00")
+        (d / "phone-2.json").write_bytes(b"\xff\xfe{")   # 本身坏掉的记录（任何编码都解不成 JSON）
+        with patch("sys.stderr"):
+            self.assertEqual([k for k, _ in layout.devices(self.c)], ["phone-1"])
+            self.assertEqual(layout.install_record(self.c, A), dict(at=5, free=False, device="甲机", deviceKey="phone-1"))
+
+
 class LocationTests(JobCase):
     """游戏库结构 v3：多个存放位置 + 索引表。期望按设计文档的规则手写"""
     def setUp(self):

@@ -470,9 +470,18 @@ def install_record(c, gid):
 
 
 def devices(c):
-    """[(设备键, 记录)…]"""
+    """[(设备键, 记录)…]。访达往 exFAT 等非 APFS 盘搬库会给每个记录配一份 ._<名>.json 附属文件（4 KB 非 UTF-8 元数据），
+    按 os_junk 跳过（#911：读它抛 UnicodeDecodeError，整次刷新游戏库失败）；单个记录读不出只记一行、跳过这一台，不拖垮整个请求"""
     d = c.library / DEVICES
-    return [(p.stem, read(p, {})) for p in sorted(d.glob("*.json"))] if d.is_dir() else []
+    out = []
+    for p in (sorted(d.glob("*.json")) if d.is_dir() else []):
+        if os_junk(p.name):
+            continue
+        try:
+            out.append((p.stem, read(p, {})))
+        except (OSError, ValueError) as e:   # UnicodeDecodeError / JSONDecodeError 都是 ValueError
+            print(f"[s2a] 设备记录 {p.name} 读不出，跳过：{type(e).__name__}: {e}", file=sys.stderr)
+    return out
 
 
 # ---- 迁移（旧布局 → VERSION 2）----
