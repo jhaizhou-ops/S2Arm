@@ -538,10 +538,22 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     // 先把这笔要用的资源都取好：池镜像同步、贴图上传是传输，不能出现在通道里，必须在开通道之前做完
     nvn_gpu_buf vb_buf[16]; uint64_t vb_off[16]; uint32_t streams = 0;
     for (int i = 0; i < rp_S.nattr && i < 16; i++) if (g_prog->attr_mask >> i & 1) streams |= 1u << rp_S.attr[i].stream;
-    for (int i = 0; i < 16; i++) if (streams >> i & 1) {
-        uint64_t va = nvn_ga2ca(rp_S.vbuf[i].address), vn = rp_S.vbuf[i].size;   // 记录里的顶点缓冲地址是 GPU 地址
-        if (!va || !vn) { skip("vertex_stream_unbound", rec); return; }
-        if (!rp_buf_resolve(c, va, vn, &vb_buf[i], &vb_off[i])) { skip("vertex_buffer_unresolved", rec); return; }
+    {   // 一次抢锁解析全部顶点流（逐段各抢一次时这把锁和完成线程互抢，重叠档能吃到 13.7–16.6 毫秒/帧）
+        uint64_t vaddr[16], vlen[16], voff[16]; unsigned char vok[16]; int nv = 0;
+        for (int i = 0; i < 16; i++) if (streams >> i & 1) {
+            uint64_t va = nvn_ga2ca(rp_S.vbuf[i].address), vn = rp_S.vbuf[i].size;   // 记录里的顶点缓冲地址是 GPU 地址
+            if (!va || !vn) { skip("vertex_stream_unbound", rec); return; }
+            vaddr[nv] = va; vlen[nv] = vn; nv++;
+        }
+        if (nv) {
+            nvn_gpu_buf vbuf[16];
+            rp_buf_resolve_multi(nv, vaddr, vlen, vbuf, voff, vok);
+            int k = 0;
+            for (int i = 0; i < 16; i++) if (streams >> i & 1) {
+                if (!vok[k]) { skip("vertex_buffer_unresolved", rec); return; }
+                vb_buf[i] = vbuf[k]; vb_off[i] = voff[k]; k++;
+            }
+        }
     }
     // 存储缓冲同样要在开通道之前同步：同一次提交里第二次同步这块池页时要录成传输、结束通道（rp_xfer_cmd），
     // 放到发绑定时才做，通道会在设了管线之后被结束，这一笔的绑定与绘制落在通道外，后端置粘滞、整段作废
@@ -549,11 +561,22 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     // 解析失败不在这里报：发绑定时同样的解析会按原来的名字记未接。
     // 结果留给发绑定直接用（g_sb_pre），发绑定时不再解析：即使这块页在开通道之后又被别的游戏线程写脏，也不会在通道里再同步一次。
     memset(g_sb_ok, 0, sizeof g_sb_ok);
-    for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st] && i < RP_PROG_ENT_MAX; i++) {
-        const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
-        if (e->src_kind != NVN_RB_SBUFP && e->src_kind != NVN_RB_UBOP) continue;
-        const p_bind_buf *sb = e->src_reg < 16 ? (e->src_kind == NVN_RB_UBOP ? &rp_S.ubo[st][e->src_reg] : &rp_S.ssbo[st][e->src_reg]) : NULL;
-        if (sb && sb->addr && sb->size && rp_buf_resolve(c, sb->addr, sb->size, &g_sb_buf[st][i], &g_sb_off[st][i])) g_sb_ok[st][i] = 1;
+    {   // 一次抢锁把这一笔的存储缓冲全解析掉（同顶点流：逐段各抢一次锁会和完成线程互抢）
+        enum { SB_BATCH = 64 };
+        uint64_t ba[SB_BATCH], bl[SB_BATCH], bo[SB_BATCH]; nvn_gpu_buf bb[SB_BATCH]; unsigned char bok[SB_BATCH];
+        int bs[SB_BATCH], bi[SB_BATCH], nb = 0;
+        for (int st = 0; st < RP_PROG_STAGES; st++) for (uint32_t i = 0; i < g_prog->nent[st] && i < RP_PROG_ENT_MAX; i++) {
+            const nvn_gpu_layout_ent *e = &g_prog->ent[st][i];
+            if (e->src_kind != NVN_RB_SBUFP && e->src_kind != NVN_RB_UBOP) continue;
+            const p_bind_buf *sb = e->src_reg < 16 ? (e->src_kind == NVN_RB_UBOP ? &rp_S.ubo[st][e->src_reg] : &rp_S.ssbo[st][e->src_reg]) : NULL;
+            if (!sb || !sb->addr || !sb->size) continue;
+            if (nb < SB_BATCH) { bs[nb] = st; bi[nb] = (int)i; ba[nb] = sb->addr; bl[nb] = sb->size; nb++; }
+            else if (rp_buf_resolve(c, sb->addr, sb->size, &g_sb_buf[st][i], &g_sb_off[st][i])) g_sb_ok[st][i] = 1;   // 超出一批的照旧逐段解析
+        }
+        if (nb) {
+            rp_buf_resolve_multi(nb, ba, bl, bb, bo, bok);
+            for (int k = 0; k < nb; k++) if (bok[k]) { g_sb_buf[bs[k]][bi[k]] = bb[k]; g_sb_off[bs[k]][bi[k]] = bo[k]; g_sb_ok[bs[k]][bi[k]] = 1; }
+        }
     }
     nvn_gpu_draw_args a; memset(&a, 0, sizeof a);
     if (di && (di->itype < 0 || di->itype > 2)) { skip("index_type_invalid", rec); return; }
