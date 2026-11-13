@@ -96,11 +96,17 @@ static nvn_gpu_view g_av[RP_PROG_STAGES][RP_TEXARR_MAX]; static nvn_gpu_samp g_a
 // 每次取一遍能力表就是 3700 次加锁（和提交完成线程抢同一把锁）。这里取一次就记住，会话重开（rp_draw_reset）再取。
 static nvn_gpu_caps g_caps_c; static int g_caps_ok;
 static const nvn_gpu_caps *caps_cached(void) { if (!g_caps_ok) { nvn_gpu_caps_get(&g_caps_c); g_caps_ok = 1; } return &g_caps_c; }
+static uint64_t dt_now(void);   // 计时器（定义在文件后部）
+static int g_btm;   // 暂存分段计时开关（跟 nvk_bind_tm 一起，见 rp_bind_tm 那边）
+static uint64_t g_bt[8];   // 分段计时累加（正式定义在后面，这里先给暂存路径用）
 static int alloc_copy(nvn_gpu_cmd c, uint64_t n, const void *src, nvn_gpu_slice *sl) {
     const uint32_t align = caps_cached()->min_ubo_align ? caps_cached()->min_ubo_align : 256;
     nvn_gpu_err err = {0};
+    const uint64_t a0 = g_btm ? dt_now() : 0;
     if (!nvn_gpu_ok(nvn_gpu_arena_alloc(c, n, align, sl, &err)) || !sl->cpu) return 0;
+    const uint64_t a1 = g_btm ? dt_now() : 0;
     if (src) memcpy(sl->cpu, src, (size_t)n); else memset(sl->cpu, 0, (size_t)n);
+    if (a0) { const uint64_t a2 = dt_now(); g_bt[6] += a1 - a0; g_bt[7] += a2 - a1; }
     return 1;
 }
 
@@ -200,9 +206,10 @@ static void drv2_store(const drv2_key *k, const nvn_gpu_slice *sl) {
 static int g_bind_keep[RP_PROG_STAGES], g_pipe_set;   // 这一笔：阶段的绑定状态没变（rp_draw 在换管线之前取）；这一笔重设过管线
 // 读数（随 nvk_gputime）：整组重建分两块——[0] 含暂存与构造的总时间、[1] 其中交给后端 nvn_gpu_bind 的时间、[2] 重建次数
 static uint64_t dt_now(void);   // 计时器（定义在文件后部）
-static uint64_t g_bt[6];   // [0] 总 [1] 交后端 [2] 次数 [3] 驱动段 DRV0/DRV2 [4] 常量缓冲 [5] 其它
+static uint64_t g_bt[8];   // [0] 总 [1] 交后端 [2] 次数 [3] 驱动段 DRV0/DRV2 [4] 常量缓冲 [5] 其它 [6] 暂存申请 [7] 内容拷贝
 void rp_bind_tm_take(uint64_t *tot, uint64_t *backend, uint64_t *n) { *tot = g_bt[0]; *backend = g_bt[1]; *n = g_bt[2]; g_bt[0] = g_bt[1] = g_bt[2] = 0; }
 void rp_bind_tm_take2(uint64_t *drv, uint64_t *buf, uint64_t *rest) { *drv = g_bt[3]; *buf = g_bt[4]; *rest = g_bt[5]; g_bt[3] = g_bt[4] = g_bt[5] = 0; }
+void rp_bind_tm_take3(uint64_t *alloc, uint64_t *copy) { *alloc = g_bt[6]; *copy = g_bt[7]; g_bt[6] = g_bt[7] = 0; }   // 暂存申请 / 内容拷贝（见 alloc_copy）
 
 
 // 调试读回用的绘制历史（见文件后部 dump_chain）
@@ -314,6 +321,7 @@ static int bind_stage_at(nvn_gpu_cmd c, const struct rp_prog *pg, int pi, int st
         rp_perf_add(RP_PERF_KEEP_F_ITEMS, 1);
     }
     static int btm = -1; static unsigned btk; if (btm < 0 || !(++btk & 255)) btm = nvn_plat_flag("nvk_bind_tm", 0) != 0;
+    g_btm = btm;
     const uint64_t btm0 = btm ? dt_now() : 0;
     if (st < RP_PROG_STAGES) g_lb[pi].ok = 0;
     for (uint32_t i = 0; i < pg->nent[pi]; i++) {
