@@ -1310,6 +1310,7 @@
       {"id": "diag.upload.send", "zh-Hans": "上传", "en": "Upload"},
       {"id": "diag.upload.cancel", "zh-Hans": "取消", "en": "Cancel"},
       {"id": "diag.upload.sending", "zh-Hans": "正在上传…", "en": "Uploading…"},
+      {"id": "diag.upload.cancelled", "zh-Hans": "上传已取消。可以先导出诊断包，手动发给我们。", "en": "Upload cancelled. You can export the diagnostics package and send it to us yourself."},
       {"id": "diag.upload.done", "zh-Hans": "已上传。把下面这个码贴到 GitHub 帖子或群里，开发者凭它找到你的诊断：", "en": "Uploaded. Paste this code into the GitHub issue or group so the developers can find your diagnostics:"},
       {"id": "diag.upload.copy", "zh-Hans": "复制", "en": "Copy"},
       {"id": "diag.upload.close", "zh-Hans": "完成", "en": "Done"},

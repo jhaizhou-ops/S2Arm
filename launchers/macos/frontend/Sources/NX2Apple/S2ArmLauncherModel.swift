@@ -851,7 +851,7 @@ public final class S2ArmLauncherModel: ObservableObject {
 
     /// 游戏库层的「上传给开发者」弹窗（LauncherView 挂）：游戏库「更多」菜单与控制口 /diagnostics {action: upload} 打开；"" = 不针对某款
     @Published var diagUploadFor: String?
-    /// 控制口替玩家点弹窗里的按钮（send / copy / close）：弹窗收到就照点、清掉（UploadDiagnosticsSheet.onReceive）
+    /// 控制口替玩家点弹窗里的按钮（send / copy / close / cancel）：弹窗收到就照点、清掉（UploadDiagnosticsSheet.onReceive）
     struct DiagUploadCommand: Equatable { let id = UUID(); let action: String }
     @Published var diagUploadCommand: DiagUploadCommand?
 

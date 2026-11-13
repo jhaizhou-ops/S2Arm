@@ -1360,6 +1360,7 @@
   "s2arm.diagUpload.cancel": "Cancel",
   "s2arm.diagUpload.send": "Upload",
   "s2arm.diagUpload.sending": "Uploading…",
+  "s2arm.diagUpload.cancelled": "Upload cancelled. You can export the diagnostics package and send it to us yourself.",
   "s2arm.diagUpload.done": "Uploaded. Paste this code into the GitHub issue or group so the developers can find your diagnostics:",
   "s2arm.diagUpload.copy": "Copy",
   "s2arm.diagUpload.close": "Done",
