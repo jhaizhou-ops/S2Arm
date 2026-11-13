@@ -13976,8 +13976,14 @@ static void dispatch(const p_dispatch *dp) {
     id<MTLComputePipelineState> ps = hm_get_id(cps, ck);
     if ((id)ps == (id)NSNull.null) return;   // its pipeline failed before: built once, reported once (see below)
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = par_compute(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e);
+        // #884：Metal 编译服务对一条计算管线现编一直不返回，提交线程跟着卡死（开场剧情固定定格）。至多等 DM_NVN_CPSO_WAIT_MS（缺省 10000，0 = 不限，
+        //   同渲染「不能跳过的绘制」上限 DM_NVN_PSO_UNSAFE_WAIT_MS）：等不到就跳过这一次派发、不记失败，后台编完下一次派发直接用（pso_archive.h par_compute_wait）
+        static int64_t cwait = -2; if (cwait == -2) { const char *v = getenv("DM_NVN_CPSO_WAIT_MS"); long ms = v && *v ? strtol(v, NULL, 10) : 10000; cwait = ms > 0 ? (int64_t)ms * 1000000 : -1; }
+        NSError *e = nil; uint64_t bt = bp_now(); int gave_up = 0;
+        ps = par_compute_wait(fc ? se_fn(cs, fc) : cs->fn, par_ckey(cs, fc), &e, cwait, &gave_up);
         { uint64_t d_ = bp_now() - bt; g_bp_pso_n++; g_bp_pso_ns += d_; fe_sync_note(d_); }
+        if (gave_up) { if (!(cs->logged & (1ull << 40))) { cs->logged |= 1ull << 40; MLOG("【红】 compute pipeline %s%s still compiling after %lld ms: this dispatch skipped (not recorded as failed; used once the background build returns)",
+                                                    cs->key, fc ? " (sampler-emulation variant)" : "", (long long)(cwait / 1000000)); } return; }
         // A failure is remembered like a success: it was rebuilt at every dispatch (Monster Hunter Rise's 36,880-byte threadgroup memory, over Apple's 32,768: 2,472–6,450 builds in one
         // Mac run; on the test device the compiles kept the frame from ending for 45 s, 10-26 cold run, frame 1150)
         if (!ps) { MLOG("【红】 failed to create compute pipeline %s%s: %s", cs->key, fc ? " (sampler-emulation variant)" : "", e.localizedDescription.UTF8String); hm_put_id(cps, ck, NSNull.null); return; }
