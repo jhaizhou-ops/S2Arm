@@ -578,3 +578,4 @@
 20261113-0107-frag-depth-register-by-targets.patch
 20261112-1859-psel-invalid-uid-list.patch
 20261113-0410-nim-shop-async-commands.patch
+20261113-0659-hle-host-junk-filter.patch
