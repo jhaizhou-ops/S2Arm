@@ -353,6 +353,17 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(push[0][push[0].index("--pack-root") + 1], f"Library/Application Support/S2Arm/games/{A}/资源包")   # 资源包根单独给（pick_pack_root 选的那处）
         self.assertIn(f"@bundle/Games/{A}/launch.ctx", push[0])
 
+    def test_other_game_without_local_pack_does_not_block(self):
+        """预检清单 #31（11-13）：容器里带着的别的款（乙）本机资源包没了（清理过 / 换电脑）——不拦整单：照装甲、只推甲，乙不推、设备记录里乙的资源包号照旧。期望手写"""
+        import shutil
+        A, B = "0100000000010000", "0100000000020000"
+        self._fixture(A); _, pack_b = self._fixture(B); shutil.rmtree(pack_b)
+        self.c.r.update(gameId=A)
+        r, runs, seen, launches = self._install(A, pushed=1, applied_before="", existing=(B,))
+        push = [a[3:] for a in runs if a[2].endswith("tools/push_pack.py")]
+        self.assertEqual(len(push), 1); self.assertIn(f"Documents/games/{A}", push[0])
+        self.assertEqual(layout.load_device(self.c, "00000000-0000000000000002")["games"][B], dict(pack="cafe01"))
+
     def test_container_missing_pack_refuses_before_install(self):
         gid = "0100000000010000"
         # 有容器件但没有资源包（image/ios/pack）：ios_pack 拒绝，不走到找设备 / 组装

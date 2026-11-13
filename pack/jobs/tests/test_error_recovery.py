@@ -327,11 +327,11 @@ raise SystemExit(main.main())
                                     ("applegpu_g17p", 17, 27, "target_unsupported")):   # 系统下限 iOS 18（10-26）：17 拒
             with self.subTest(code=code, arch=arch, os=osv):
                 self.c.r["target"] = dict(model="fixture", gpuArch=arch, os=osv)
-                with patch.object(target, "os_choices", return_value=[sdk]):
-                    with self.assertRaises(Failure) as raised:
-                        ipa.resolve_target(self.c)
-                self.assertEqual(raised.exception.code, code)
-                self.assertTrue(self.c.describe_failure(raised.exception)["suggestion"])
+                # 预检清单 #40 #41（11-13）：目标那台跑不了也照出包（一包通用），只记一条带码的提醒；码的处理建议照旧有
+                with patch.object(target, "os_choices", return_value=[sdk]), patch.object(self.c, "diagnostic") as warn:
+                    self.assertEqual(ipa.resolve_target(self.c)["gpuArch"], arch)
+                self.assertEqual((warn.call_args.kwargs["code"], warn.call_args.kwargs["severity"]), (code, "warning"))
+                self.assertTrue(self.c.describe_failure(Failure(warn.call_args.args[0], code=code))["suggestion"])
         self.c.r["target"]["os"] = 26
         with patch.object(target, "os_choices", return_value=[26]):
             self.assertEqual(ipa.resolve_target(self.c)["os"], 26)

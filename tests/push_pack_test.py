@@ -850,7 +850,13 @@ class LockedProbe(Base):
             self.run_probe(dev)
         self.assertEqual(e.exception.code, "device_locked")
         self.assertIn("锁屏", str(e.exception))
-        self.assertEqual(dev.writes[0], 1)   # 手机说锁着：不再白写第二次
+        self.assertEqual(dev.writes[0], 2)   # 手机说锁着也再写一次（预检清单 #72：锁屏时写文件照样成功），两次都不进才报锁屏
+
+    def test_locked_but_second_write_succeeds_pushes(self):   # 11-13：手机说锁着、第一次写挂了、第二次写成了 → 照推，不报锁屏
+        dev = self.failing(1, lock=True)
+        self.run_probe(dev)
+        self.assertEqual(dev.writes[0], 2)
+        self.assertIn(f"{RP}/index.tsv", dev.files)
 
     def test_unlocked_transient_stall_retries_and_pushes(self):   # 11-13 实测形态：没锁，写探针挂一次 → 再写一次成了，照推
         dev = self.failing(1, lock=False)

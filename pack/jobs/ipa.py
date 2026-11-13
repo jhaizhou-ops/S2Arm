@@ -738,8 +738,8 @@ def oneclick_result(path):
 
 def resolve_target(c):
     """目标设备（只用来提示地址窗口，一包通用）：请求里给了（前端：连着的设备或玩家选的机型）就用它；没给就认连着的那一台。
-    认不出目标 → None、照常出包；所用 Xcode 的 SDK 比目标系统旧也不拦（直连库按 iOS 18 下限编）；
-    目标本身装不了（系统低于 18、GPU 太老：target_unsupported）照旧报红——包在那台上跑不了"""
+    目标有什么问题都不拦出包（预检清单 #39–#42，11-13 维护者：别预先判断拦玩家）：认不出 GPU、SDK 比目标旧、读不出 SDK、
+    目标芯片太老 / 系统太低——包本身照出、一包通用，能装哪台由装机那一步说；看得出的问题记一条提醒（severity warning）给玩家看"""
     import target as tg
     want = c.r.get("target") or {}
     try:
@@ -750,16 +750,14 @@ def resolve_target(c):
             if len(devs) != 1:
                 return None
             want = devs[0]
-        sdk_top = tg.os_choices(c.env())[0]   # 读不出 SDK = Xcode 本身不可用，照旧报红
         if not want.get("gpuArch"):
-            # 所用 Xcode 认不出目标的 GPU（新机型比 Xcode 的设备特征库新，诊断 D-6FTP iPhone19,7）：不拦——一包通用、
-            #   目标只用来提示地址窗口（读 os），原先 11 次出包都停在「检查游戏输入」
+            # 所用 Xcode 认不出目标的 GPU（新机型比 Xcode 的设备特征库新，诊断 D-6FTP iPhone19,7）：一包通用，目标只用来提示地址窗口（读 os）
             return dict(want)
-        return tg.check(want, sdk_top)
+        return tg.check(want, tg.os_choices(c.env())[0])
     except tg.TargetError as e:
-        if not want or e.code == "xcode_sdk_too_old":   # 没给目标时探测连着的设备出错也不拦
-            return dict(want) or None
-        raise Failure(str(e), code=e.code) from e
+        if want and e.code == "target_unsupported":   # 那台设备跑不了这个包：照出，提醒一句（装到别的设备照样能用）
+            c.diagnostic(str(e), code=e.code, severity="warning")
+        return dict(want) or None
 
 
 # 只登记 oneclick.sh 实际 lap 阶段；子步骤从各自产生错误的脚本取，不虚构事件名。

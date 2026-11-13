@@ -596,13 +596,18 @@ def ios_pack(c, gid):
     pack = layout.ios_pack(c, gid)
     if not (pack / "manifest.json").is_file():
         raise Failure(f"没找到这款的资源包（{pack}），没有装。请重新「打 iPhone 包」后再装。", code="pack_missing")
-    if not pack_id(pack):   # 清单没有 index_sha256（只在这里核一次，push_pack 不再重读，v0.2.3 清理）
-        raise Failure(f"资源包缺清单或清单没有 index_sha256（{pack}）：请重新打 iPhone 包。", code="job_failed")
     return pack
 
 
 def pack_id(pack):
-    return read(Path(pack) / "manifest.json", {}).get("index_sha256") or ""
+    """资源包号：清单的 index_sha256；清单没写就按推送实际用的 index.tsv 现算（原先缺这个字段就整单不装，预检清单 #16：推送本来不读它）"""
+    pid = read(Path(pack) / "manifest.json", {}).get("index_sha256") or ""
+    if not pid:
+        try:
+            pid = hashlib.sha256((Path(pack) / "index.tsv").read_bytes()).hexdigest()
+        except OSError:
+            pid = ""
+    return pid
 
 
 PUSHING = "正在传输资源"   # 推送阶段的进度消息（定文案，两端前端按它本地化；数字走 done / total / unit）
@@ -1547,7 +1552,11 @@ def phone_games(c, ph):
     if not bid or not ph.udid:
         return set()
     with tempfile.TemporaryDirectory(dir=c.private) as w:
-        cl = devpush_client(c, ph.udid, bid, w)
+        try:
+            cl = devpush_client(c, ph.udid, bid, w)
+        except Failure as e:   # 工具不在（预检清单 #29）：同「列不出」——按没有别的游戏继续装，不拦整单
+            note(c, f"列不出{_who(ph)}上装了哪些游戏，按没有别的游戏继续装（{e}）")
+            return set()
         names = set()
         for root in (DOCS_GAMES, PACK_GAMES, PACK_GAMES_ALT):
             rc, out = cl.call("ls", root)
@@ -1659,7 +1668,17 @@ def put_game(c, gid, ph, steps=True, others=None, skipped=()):
     # 已同意过「这次不带」的款（#479）：按壳号记在设备记录 staleAgreed，同一版壳不再每次问；换了壳号重新问。重新打过 iPhone 包的款组装时带得进，自然不在名单里
     ipa, games, sid = packer.assemble(c, gid, others, failed=rec.get("failedShells", []), agreed=rec.get("staleAgreed") or {})
     left_out = sorted({g.upper() for g in list(others) + list(skipped) if g} - set(games))   # 这次没带进去的（玩家已同意；游戏库删掉的也在里面，不碍事：它们组装时本来就不带、不问）
-    packs = {g: ios_pack(c, g) for g in games}   # 每款都要有资源包，缺一款就不装（不装半套）
+    # 这次要装的那款必须有资源包（上面已核）；容器里带着的别的款本机资源包不在（清理过 / 换了电脑）不拦整单（预检清单 #31）：
+    #   它的资源包多半已在手机上，不推、记录照旧；手机上也没有的，App 里那款会显示要重新导入
+    packs = {}
+    for g in games:
+        try:
+            packs[g] = ios_pack(c, g)
+        except Failure as e:
+            if gid and g.upper() == gid.upper():
+                raise
+            packs[g] = None
+            note(c, f"{g} 本机没有资源包（{e}）：这次不推它，手机上已有的照旧")
     skipped = same_app(c, ph, rec, packer.ipa_digest(ipa))
     if skipped:   # #845：手机上的 S2Arm 就是这次组出的这一个、签名离到期还早 → 不重签不重装，直接推资源（数据和存档本来就不动）
         if steps: c.begin("手机上的 S2Arm 已是这一版，跳过签名和安装", 5, 6)
@@ -1668,7 +1687,7 @@ def put_game(c, gid, ph, steps=True, others=None, skipped=()):
         ph.install(ipa, games, steps=steps)
     # 装上的包名和记录里的不同（换了签名方式 / 包名被占自动换过）= 手机上是另一个 App，资源包都不在里面：每款都推
     moved = bool(rec.get("bundleId")) and bool(ph.bid) and rec["bundleId"] != ph.bid
-    stale = [g for g in games if moved or g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack")]
+    stale = [g for g in games if packs[g] is not None and (moved or g == gid or pack_id(packs[g]) != (rec["games"].get(g) or {}).get("pack"))]
     ph.before_push({g: packs[g] for g in stale})
     img = bool(stale)   # 容器装机传完并核过即装好、不等机上解开（单一 IMG 与旧形态同口径，App 打开时游戏库解开；见 push_pack）
     if steps: c.begin("核对手机上游戏的资源（有变化的才推，通常一个都不用推）" if not gid else

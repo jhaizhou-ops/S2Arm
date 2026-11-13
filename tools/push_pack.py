@@ -294,7 +294,12 @@ class Devicectl:
     def put_big(self, src, rel):   # 大文件优先走 s2a-devpush 流式（usbmuxd 能到时快且不落临时文件），不行退回 devicectl（大于上限的不退，见 DC_FALLBACK_MAX）
         if self.dp:
             try:
-                return self.dp.put(src, rel)
+                try:
+                    return self.dp.put(src, rel)
+                except Fail as first:   # 流式断一次多半是瞬时的（插拔 / 同网切线）：隔 3 秒再流一次，再不行才考虑 devicectl（预检清单 #77）
+                    self.say(f"流式写 {Path(rel).name} 断了（{str(first)[-160:]}），3 秒后再试一次")
+                    time.sleep(3)
+                    return self.dp.put(src, rel)
             except Fail as e:
                 # devicectl 会把整个文件读进系统设备服务的内存（#641）：本机可用内存的一半装得下才交给它（至少放行 S2A_DC_FALLBACK_MAX / 2 GiB）
                 size, mem = Path(src).stat().st_size, avail_mem()
@@ -782,15 +787,14 @@ def probe(dev, work, sleep=None):
     except Fail as e:
         first = e
     locked = getattr(dev, "lock_state", lambda: None)()   # True 锁着 / False 没锁 / None 判不了（Windows、假设备）
-    if locked:
-        raise DeviceLocked(LOCKED_MSG) from first
+    # 锁着也照样再写一次（预检清单 #72：锁屏时写文件照样成功，见上）；两次都写不进才报
     (sleep or time.sleep)(2)
     try:
         return (getattr(dev, "dp", None) or dev).put(str(src), rel)
     except Fail as e:
         second = e
     why = str(second).splitlines()[-1][:200] if str(second) else type(second).__name__
-    if locked is None and any(k in str(first) + str(second) for k in LOCKED_SIGNS):   # 判不了锁屏状态时按报错原文认
+    if locked or (locked is None and any(k in str(first) + str(second) for k in LOCKED_SIGNS)):   # 锁着、或判不了时按报错原文认
         raise DeviceLocked(LOCKED_MSG) from second
     raise Fail(f"iPhone 写不进资源包（{why}）。" + ("手机没有锁屏，是电脑和手机的连接出了问题：" if locked is False else "")
                + "拔下数据线重新插好（无线连接的换成数据线），保持手机亮屏，再点一次。") from second
