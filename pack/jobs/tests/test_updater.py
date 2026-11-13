@@ -79,6 +79,47 @@ class ApplyTests(Base):
         self.assertEqual(launched, [self.install])                     # 旧版被拉起来（启动器已退）
         self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
 
+    @unittest.skipIf(os.name == "nt", "用 /bin/sleep 当进程：只在 Mac / Linux 跑")
+    def test_old_app_that_does_not_quit_is_ended_but_strangers_are_left_alone(self):
+        """#931：点了更新旧版却没退，替换进程原先只被动等满两分钟报 update_app_busy。期望：等宽限还在 → 结束它（可执行文件在安装目录里）；
+        进程号对应的是安装目录外的程序（进程号被复用）→ 不动"""
+        import subprocess
+        import subprocess
+        mine = subprocess.Popen(["/bin/sleep", "60"]); self.addCleanup(mine.kill)
+        stranger = subprocess.Popen(["/bin/sleep", "60"]); self.addCleanup(stranger.kill)
+        self.assertEqual(updater.pid_exe(stranger.pid), "/bin/sleep")   # 真读数：进程号 → 可执行文件路径
+        # 拷进安装目录的系统程序会被 macOS 当场杀掉，跑不起来：「安装目录里的旧版」用打桩的路径代表，结束它的流程照真跑
+        inside = str(self.install / "Contents/MacOS/S2ArmApple")
+        real = updater.pid_exe
+        t = time.monotonic()
+        with patch.object(updater, "pid_exe", lambda pid: inside if pid == mine.pid else real(pid)):
+            self.assertTrue(updater.end_old_app(mine.pid, self.install, grace=0.5, term_seconds=3))
+            self.assertIsNotNone(mine.wait(timeout=5))
+            self.assertLess(time.monotonic() - t, 5)
+            self.assertFalse(updater.end_old_app(stranger.pid, self.install, grace=0.5, term_seconds=1))
+        self.assertIsNone(stranger.poll())
+
+    def test_app_busy_keeps_the_prepared_update(self):
+        """#931：旧版一直没退（报 update_app_busy）时新版原样准备好、安装目录没动：pending.json 留着，「现在更新并重启」照样能点，不用重新下载"""
+        pending = self.private / "updates/pending.json"; pending.write_text("{}")
+        with patch.object(updater, "pid_alive", lambda pid: True), patch.object(updater, "end_old_app", lambda *a, **k: False):
+            rc = self.run_apply(lambda i, a: None, exit_seconds=0.5)
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads((self.private / "updates/last_failure.json").read_text())["code"], "update_app_busy")
+        self.assertTrue(pending.is_file())
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "只读目录的权限语义：Mac / Linux、非 root")
+    def test_half_copied_new_dir_with_read_only_dirs_is_cleared_before_swap(self):
+        """#931：上次换版中断留下半份 .s2arm-new，里面有只读目录。原先 shutil.rmtree 删不掉就抛，之后每次都报 update_swap_failed、要 sudo 手删"""
+        new = self.install.with_name(self.install.name + ".s2arm-new")
+        (new / "Contents/Resources").mkdir(parents=True); (new / "Contents/Resources/x").write_text("x")
+        os.chmod(new / "Contents/Resources", 0o555); os.chmod(new / "Contents", 0o555)
+        self.addCleanup(lambda: [os.chmod(p, 0o755) for p in (new / "Contents", new / "Contents/Resources") if p.exists()])
+        self.assertEqual(self.run_apply(self.healthy), 0)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "new")
+        self.assertFalse(new.exists())
+
     def healthy(self, install, args):
         (self.private / "updates/health.ok").write_text("ok")
 
