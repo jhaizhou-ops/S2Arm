@@ -3323,11 +3323,21 @@ static uint64_t span_hash(const uint8_t *m, size_t n) {
 //   one address map). Valid for a span inside one host page (a GOB, a page_span piece): the shadow's 2 MiB blocks are page-aligned. Outside the far region the guest address is the host's
 static const uint8_t *host_rd(const uint8_t *g) { const uint8_t *h = s2a_far_g2h((uint64_t)(uintptr_t)g); return h ? h : g; }
 static uint64_t gob_hash(uint64_t g) { return span_hash(host_rd((const uint8_t *)(uintptr_t)(g << 9)), 512); }
+// 宿主能读的存储字节数（#819）：普通池里的贴图截到池尾。按稀疏规则排布的贴图（SPARSE 标志、整页对齐）放进比它小的普通池时，算出的存储（64 KB）越过池尾，
+//   越过的那段是补齐、游戏从不放数据，真机 GPU 也只读贴图真用到的地址；按全长读（逐页哈希 / 写保护 / GPU 去混排源）会读进池后没映射的内存，iPad 上 SIGBUS
+//   （贴图 64×64 ASTC 4×4 7 级、存储 +65536、池 8192）。稀疏池（按页表取）与不在池里的照旧
+int nvn_sparse_pool(const void *pool);
+static uint64_t tex_rd_size(const tex_t *t) {
+    if (!t->pool || !t->pool->mem || nvn_sparse_pool(t->pool)) return t->L.size;
+    const uint8_t *end = t->pool->mem + t->pool->size;
+    if ((const uint8_t *)t->mem < t->pool->mem || (const uint8_t *)t->mem >= end) return t->L.size;
+    return MIN(t->L.size, (uint64_t)(end - (const uint8_t *)t->mem));
+}
 static void page_span(const tex_t *t, size_t k, const uint8_t **lo, size_t *n) {   // the texture's bytes in host page k of its storage (pages counted from the one holding t->mem)
-    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + t->L.size, p0 = a & ~(pg - 1);
+    uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem, e = a + tex_rd_size(t), p0 = a & ~(pg - 1);
     uintptr_t b = MAX(a, p0 + k * pg), c = MIN(e, p0 + (k + 1) * pg); *lo = (const uint8_t *)b; *n = c > b ? c - b : 0;
 }
-static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; return t->L.size ? (uint32_t)(((a + t->L.size - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
+static uint32_t page_count(const tex_t *t) { uintptr_t pg = nvn_dirty_page_size(), a = (uintptr_t)t->mem; uint64_t n = tex_rd_size(t); return n ? (uint32_t)(((a + n - 1) & ~(pg - 1)) - (a & ~(pg - 1))) / (uint32_t)pg + 1 : 0; }
 static unsigned tex_layers(const tex_t *t) { return (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1; }   // as pkg_upload_ (a cube array's depth counts layer-faces)
 // Block-linear storage (Tegra X1): each layer holds its levels one after another; a level is rows of blocks, a block 2^tileH GOBs tall and one GOB (64 bytes x 8 rows of format blocks) wide,
 // laid out GOB column after GOB column. So a byte range of one block row is a run of GOB columns: a texel rectangle. fn gets (level, layer, x, y, w, h) in texels for every rectangle [lo, hi)
@@ -3438,14 +3448,13 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
     int sparse = t->pool && nvn_sparse_pool(t->pool);
-    // #819：iPad 上玩 20–40 分钟后在这里读贴图存储时 SIGBUS，四次地址都落在 2 MB 边界（读进了没映射的一段）。存储越过所属池的末尾时记一行（只记一次），
-    //   分清「贴图存储越过池尾」还是「池已释放、贴图还被引用」；只记、不改行为
+    // #819：存储越过所属池的末尾时记一行（只记一次）。读的长度截到池尾（tex_rd_size），不再读进池后没映射的内存
     if (t->pool && !sparse && t->pool->mem && (const uint8_t *)t->mem + t->L.size > t->pool->mem + t->pool->size)
         RED_ONCE(186, "packaged texture ser=%llu %ux%u format %#x levels %u: its storage %#llx +%llu runs %llu bytes past the end of its memory pool %#llx +%llu (read on upload)",
                  (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, (unsigned long long)(uintptr_t)t->mem, (unsigned long long)t->L.size,
                  (unsigned long long)((const uint8_t *)t->mem + t->L.size - (t->pool->mem + t->pool->size)), (unsigned long long)(uintptr_t)t->pool->mem, (unsigned long long)t->pool->size);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
-        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size);
+        if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, tex_rd_size(t));
         *stamp = nvn_dirty_now();
         if (ph && !sparse) {   // after the stamp, before the read: a write in between is after the stamp too, so the next check sees its page (and the hash may hold it, the upload does)
             uint32_t n = page_count(t); uint64_t *h = realloc(*ph, (size_t)MAX(n, 1u) * sizeof *h);
@@ -3462,9 +3471,9 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo; id<MTLBuffer> upsrc = nil;
-    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
+    if ((!unp || gdec) && !sparse && g_nvn_deswz_gpu) { up_begin(); upsrc = up_tex_src((uint64_t)t->mem, tex_rd_size(t), &mo); if (upsrc) mb = (__bridge void *)upsrc; }   // a pool that holds only textures stays out of the residency set (up_tex_src)
     int lin = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认
-    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, t->L.size, &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
+    int use_gpu = (!unp || gdec) && !sparse && g_nvn_deswz_gpu && !lin && (upsrc || nvn_be_addr((uint64_t)t->mem, tex_rd_size(t), &mb, &mo));   // 线性排布（tex_linear_needs_upload）只有 CPU 逐行拷，GPU 去混排不认   // a sparse pool's texture is gathered through its page table on the CPU
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !lin && (!unp || gdec)) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -4388,15 +4397,15 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             pk->check_epoch = g_pkg_epoch;
             uint64_t now = nvn_dirty_now();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
-            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
+            int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, tex_rd_size(t), pk->stamp));
             if (pk->sparse) { uint64_t g = nvn_sparse_gen(); clean = (now == pk->seen && g == pk->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, pk->vgen, pk->stamp); pk->vseen = g; }
             pk->seen = now;
             if (!clean && tracked && !pk->sparse && pk->ph) {   // pages written since the upload: the texture's own bytes in them decide (see NvPkg ph)
                 static uint64_t *bits; static size_t cap;   // submit thread only (up_owner_check)
                 size_t need = (pk->nph + 63) / 64; if (need > cap) { uint64_t *nb = realloc(bits, need * sizeof *bits); if (nb) { bits = nb; cap = need; } }
-                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, t->L.size, pk->stamp, bits, cap * 64) : -1;
+                long np = need <= cap ? nvn_dirty_written_pages(pk->span, t->mem, tex_rd_size(t), pk->stamp, bits, cap * 64) : -1;   // 页数同 page_count（tex_rd_size）
                 if (np == (long)pk->nph) {
-                    nvn_dirty_protect(t->mem, t->L.size); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
+                    nvn_dirty_protect(t->mem, tex_rd_size(t)); uint64_t st = nvn_dirty_now();   // protect, stamp, then read (as pkg_upload_): a write after the stamp shows at the next check
                     static uint64_t *nh, *gens; static size_t ncap;   // the new hashes of the written pages, and every page's write generation (submit thread only)
                     if (pk->nph > ncap) { uint64_t *a = realloc(nh, pk->nph * sizeof *a), *b = a ? realloc(gens, pk->nph * sizeof *b) : NULL; if (a) nh = a; if (b) { gens = b; ncap = pk->nph; } }
                     int changed = 0, gpu = pk->pgpu != NULL;   // the texture holds GPU-written content (pgpu goes with a whole re-upload)
