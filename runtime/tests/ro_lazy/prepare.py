@@ -8,8 +8,9 @@
   只读 0x1000 MOD0（+0x18 = 模块对象相对 MOD0 的偏移 → 数据 0x2100）、0x1300 动态段（DT_JMPREL / DT_PLTRELSZ / DT_PLTGOT = 0x2000）、
        0x1500 一条 JUMP_SLOT（槽 0x2018 = GOT[3] → target）、0x1600 符号表、紧跟字符串表
   数据 0x2000 GOT（GOT[3] 文件原值 0x200 = PLT 表头）、0x2100 模块对象（0xd0 字节）、0x2200 起五个交接全局
-用法：prepare.py <输出目录> [old]；输出目录写 main.* 改写产物，另写 layout.tsv（单测读的期望偏移）
-  old：老 SDK 的形态（11-13 一款第一方游戏的 SDK）——函数名单数 RoModule::RestoreFunction、懒绑定入口字段在 +0xb0（新 SDK 复数名、+0xc8）"""
+用法：prepare.py <输出目录> [old|cb]；输出目录写 main.* 改写产物，另写 layout.tsv（单测读的期望偏移）
+  old：老 SDK 的形态（11-13 一款第一方游戏的 SDK）——函数名单数 RoModule::RestoreFunction、懒绑定入口字段在 +0xb0（新 SDK 复数名、+0xc8）
+  cb：更新的 SDK（11-13 Switch 2 两款）——RestoreFunctions 多一个回调参数（PFvPKcE），函数开头有一条带指针认证的早退 retab，字段仍在 +0xc8"""
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +21,7 @@ import sys
 root = Path(__file__).resolve().parents[3]
 out = Path(sys.argv[1]).resolve()
 OLD = len(sys.argv) > 2 and sys.argv[2] == 'old'
+CB = len(sys.argv) > 2 and sys.argv[2] == 'cb'
 STUB = 0xb0 if OLD else 0xc8   # 模块对象里懒绑定入口字段的偏移
 shutil.rmtree(out, ignore_errors=True); out.mkdir(parents=True)
 RET = 0xd65f03c0
@@ -33,7 +35,7 @@ struct.pack_into('<II', text, 0, 0x14000040, RO)   # 入口跳过表头；text[4
 for off, code in ((TARGET, [0x528000e0, RET]),                          # mov w0, #7
                   (PLT0, [0xa9bf7bf0, RET]),                            # stp x16, x30, [sp, #-16]!
                   (INIT, [0xf9000801, 0xf9000c03, 0xf900001f | (STUB // 8) << 10, RET]),   # str x1,[x0,#0x10]; str x3,[x0,#0x18]; str xzr,[x0,#STUB]
-                  (RESTORE, [0xf9400008 | (STUB // 8) << 10, 0xf82d6988, RET]),         # ldr x8,[x0,#STUB]; str x8,[x12,x13]
+                  (RESTORE, ([0xd65f0fff] if CB else []) + [0xf9400008 | (STUB // 8) << 10, 0xf82d6988, RET]),   # [retab;] ldr x8,[x0,#STUB]; str x8,[x12,x13]
                   (BIND, [RET])):
     struct.pack_into('<%dI' % len(code), text, off, *code)
 
@@ -48,7 +50,8 @@ struct.pack_into('<IIii', ro, EF + 0x18, 0x10, (f + 4) - (RO + EF), TARGET - (f 
 
 names = [('target', 0x12, 1, TARGET),
          ('_ZN2nn2ro6detail8RoModule10InitializeEmmPKNS1_3Elf5Elf643DynEb', 0x12, 1, INIT),
-         ('_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_' if OLD else '_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_', 0x12, 1, RESTORE),
+         ('_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_' if OLD else '_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_PFvPKcE' if CB
+          else '_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_', 0x12, 1, RESTORE),
          ('_ZN2nn2ro9BindEntryEv', 0x12, 1, BIND),
          ('_ZN2nn2ro6detail15g_pAutoLoadListE', 0x11, 3, GLOBALS),
          ('_ZN2nn2ro6detail17g_pManualLoadListE', 0x11, 3, GLOBALS + 8),

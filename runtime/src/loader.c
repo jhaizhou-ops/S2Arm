@@ -897,9 +897,11 @@ static void *ro_local_init(void) {
 }
 // RoModule 里「懒绑定入口」字段的偏移（rtld 填、SDK 的 Initialize 清零）：从游戏 SDK 导出的 RoModule::RestoreFunctions 读——
 //   它把指向被卸模块的函数槽写回这个字段：ldr Xt, [x0, #偏移] 紧跟 str Xt, [Xn, Xm]。本机 11 份 SDK（10.x–20.x）都是 0xc8；读不出回 -1。
-//   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令：两个名字都认
+//   老 SDK（11-13 一款第一方游戏）函数名是单数 RoModule::RestoreFunction、字段在 +0xb0，同样两条指令；
+//   更新的 SDK（11-13 两款 Switch 2 游戏）多一个回调参数 RestoreFunctions(RoModule*, void (*)(const char*))、开头先有一条 retab 早退，字段仍在 +0xc8：三个名字都认
 static long ro_stub_off(void) {
     const uint32_t *f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_");
+    if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule16RestoreFunctionsEPS2_PFvPKcE");
     if (!f) f = guest_sym("_ZN2nn2ro6detail8RoModule15RestoreFunctionEPS2_");
     for (int i = 1; f && i < 0x100 && f[i - 1] != 0xd65f03c0; i++) {
         uint32_t s = f[i], l = f[i - 1];
