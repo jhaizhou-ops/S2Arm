@@ -143,6 +143,7 @@ static int span_path(char *out, size_t n, uint64_t pid) {   // pid = 0：按局�
 }
 uint64_t s2a_window_span_seen(uint64_t pid) { char p[1024]; return pid && span_path(p, sizeof p, pid) ? read_u64(p) : 0; }
 static uint64_t g_span_learned;   // 本款（多款容器 = 各款最大，有一款没记录就 0）学到的跨度
+uint64_t s2a_window_span_learned(void) { return g_span_learned; }   // 单测 t_vawin_container 读
 // 自愈：窗口按学到的跨度收窄后布局仍放不下（svc_mem.c 起局判「连模块段、栈、堆前段都放不下」那一刻）——这份记录不可信，删掉，下一局退回缺省给法
 void s2a_window_span_forget(void) {
     if (!g_span_learned) return;
@@ -605,7 +606,13 @@ uint64_t s2a_window_container_need(const char *bundle) {
         if (pools && pool0) pools(pool0);
         if (!ni) { LOG("【红】地址窗口：多款容器里 %s 的跨度算不出（类型 %d（%s）；%s 读不到、模块段读不到或类型不支持），不占窗口", e->d_name, t, s2a_as_type_bits((uint32_t)t), g_npdm); ok = 0; break; }
         LOG("地址窗口：多款容器 %s 要 %llu MB（地址空间类型 %d）", e->d_name, (unsigned long long)(ni >> 20), t);
-        { uint64_t sl = s2a_window_span_seen(strtoull(e->d_name, NULL, 16)); if (!sl) span_unknown = 1; else if (sl > span_max) span_max = sl; }
+        // 学到的跨度在这款自己的文档根下（选了游戏后 S2A_DOCS = Documents/games/<游戏号>，心跳 span_note 写在那里）；构造期还没选游戏、S2A_DOCS 没设，
+        //   原先按 Documents/wire/... 读，永远读不到：多款容器从来学不到跨度，窗口下方一直只留 3 GB（11-13 0400486024DEC000 三台设备开局约 2–4 分钟宿主地址耗尽崩溃）。
+        //   这款文档根下没有时再看旧位置（单款包时代留下的记录）
+        { uint64_t pid = strtoull(e->d_name, NULL, 16), sl = 0; char sp[1400];
+          if (pid) { s2a_docs_path(sp, sizeof sp, "games/%s/wire/%016llX/span_peak", e->d_name, (unsigned long long)pid); sl = read_u64(sp); }
+          if (!sl) sl = s2a_window_span_seen(pid);
+          if (!sl) span_unknown = 1; else if (sl > span_max) span_max = sl; }
         if (ni > top) top = ni;
         n++;
     }
