@@ -23,7 +23,7 @@ if [ ! -f "$TGZ" ] || [ "$(_s2a_fetch_sha256 "$TGZ")" != "$SHA" ]; then
 fi
 [ "${1:-}" != --check-source ] || { echo "$TGZ"; exit 0; }
 [ "$(uname -s)" = Darwin ] || { echo '🔴 SDL3：此组件只在 Mac 宿主中构建' >&2; exit 1; }
-for tool in cmake ninja; do command -v "$tool" >/dev/null || { echo "🔴 SDL3：需要 $tool（brew install cmake ninja）" >&2; exit 1; }; done
+for tool in cmake ninja; do command -v "$tool" >/dev/null || { echo "🔴 SDL3：需要 ${tool}（brew install cmake ninja）" >&2; exit 1; }; done
 MIN=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET=//p' "$ROOT/tools/toolchain.env")
 [ -n "$MIN" ] || { echo '🔴 SDL3：工具链未声明 macOS 部署下限' >&2; exit 1; }
 SDK=$(xcrun --sdk macosx --show-sdk-path)
