@@ -18,6 +18,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
@@ -25,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #include "nvn_backend.h"
@@ -32,6 +34,7 @@
 #include "nvn_vk_format.h"
 #include "nvn_vk_texview.h"
 #include "nvn_vk_bcdec.h"
+#include "nvn_vk_driver_cache.h"   // 驱动管线缓存的落盘文件层（见「驱动管线缓存」一节）
 #include "nvn_fmt_info.h"
 #include "nvn_fmt_expand.h"
 #include "vk_device.h"
@@ -298,6 +301,18 @@ static uint64_t now_ns(void);
 static int g_draw_tm; static uint64_t g_draw_ns[3];   // 绘制入口分段计时：描述符 / 状态 / 顶点索引与绘制调用
 static uint64_t g_pl_ns, g_pl_n, g_pl_steps;   // 取图形管线：命中查找的累计纳秒 / 次数 / 比过的条数
 static struct nvn_gpu_pipe_s *g_pipe_ht[PIPE_HT_N];   // 图形管线的散列桶（见 pipe_hash）；持 g_mu
+// ---- 驱动管线缓存（#822）：后端建的每条管线都带同一个 VkPipelineCache；会话收尾把驱动给的数据写进 open_desc.cache_dir，
+// 下一局开会话时读回来喂给驱动。真机每局起局二十多秒的同步建管线（每条二三十毫秒）是驱动每次从头编，带上缓存后重开一局按内容命中。
+// 契约（nvn_backend.h open_desc.cache_dir）：NULL = 不落盘；后端有界维护、收尾时写、不逐帧写盘。文件层是旧回放用的 nvn_vk_driver_cache
+// （魔数 + 版本 + SHA-256、临时文件 fsync 后原子替换、坏了当没有、64 MiB 封顶）。
+// 缓存只是加速，不是前提：读 / 建 / 取数据 / 写，任何一步失败都只记一行日志，管线照旧能建（不拦用户）。
+// 调试开关 nvk_pipe_cache=0 关掉（缺省开）：不建缓存、不读不写盘，管线照旧不带缓存建。
+static VkPipelineCache g_plc;                // VK_NULL_HANDLE = 没有（开关关了 / 驱动建不出）：建管线时照传，空句柄就是不带缓存
+static char g_plc_dir[480];                  // 落盘目录副本；空 = 不落盘（只在本局内复用，收尾不写）
+static uint8_t g_plc_uuid[VK_UUID_SIZE];     // 设备 + 驱动的管线缓存标识（文件名里带它，换驱动不互读）
+static size_t g_plc_loaded;                  // 开会话时读到并交给驱动的字节数（0 = 没读到）
+static uint64_t g_plc_rejected;              // 本会话里旧文件读不出 / 驱动不收、被丢掉的次数
+static uint64_t g_plc_made;                  // 本会话经缓存建出的管线条数（图形 + 计算 + 清屏）
 static pthread_mutex_t g_submit_mu = PTHREAD_MUTEX_INITIALIZER; // 提交串行化：校验 signal、vkQueueSubmit、入队
 static pthread_cond_t g_cv;
 static int g_cv_ready;
@@ -1032,6 +1047,136 @@ static void *worker_main(void *arg) {
     return NULL;
 }
 
+// ---------------------------------------------------------------- 驱动管线缓存（#822，见 g_plc 一节的总说明）
+
+static void plc_logf(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void plc_logf(int level, const char *fmt, ...) {
+    char b[320];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    nvn_plat_log(level, "gpu", b);
+}
+
+static double plc_ms(uint64_t from, uint64_t to) { return (double)(to - from) / 1e6; }
+
+// 缓存目录还不存在就补上（最多再补一层父目录，和程序缓存 direct/program_cache.c 的 ensure_dir 同口径：目录通常是
+// <状态目录>/direct-cache/nvn-vk，第一局可能谁都还没建过）。已存在 / 建不出都不在这里报错：写盘那一步会如实记下原因。
+static void plc_ensure_dir(const char *dir) {
+    if (mkdir(dir, 0700) == 0 || errno != ENOENT) return;
+    char parent[sizeof g_plc_dir];
+    snprintf(parent, sizeof parent, "%s", dir);
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent) return;
+    *slash = 0;
+    if (mkdir(parent, 0700) != 0 && errno != EEXIST) return;
+    (void)mkdir(dir, 0700);
+}
+
+// 开会话时：读旧文件（有就喂给驱动）→ 建缓存。线程：与 open 同。任何失败都落到「没有缓存」，不让 open 失败。
+static void plc_open(const char *dir) {
+    g_plc = VK_NULL_HANDLE;
+    g_plc_dir[0] = 0;
+    g_plc_loaded = 0;
+    g_plc_rejected = 0;
+    g_plc_made = 0;
+    memcpy(g_plc_uuid, g.dev->properties.pipelineCacheUUID, sizeof g_plc_uuid);
+    if (!nvn_plat_flag("nvk_pipe_cache", 1)) {
+        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：开关 nvk_pipe_cache=0，管线不带缓存建");
+        return;
+    }
+    void *blob = NULL;
+    size_t bytes = 0;
+    if (!dir || !dir[0]) {
+        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：平台没给缓存目录，只在本局内复用，不落盘");
+    } else if (strlen(dir) >= sizeof g_plc_dir) {
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：缓存目录路径太长，只在本局内复用，不落盘");
+    } else {
+        snprintf(g_plc_dir, sizeof g_plc_dir, "%s", dir);
+        char why[96] = "";
+        uint64_t t0 = now_ns();
+        int r = nvk_driver_cache_read(g_plc_dir, g_plc_uuid, &blob, &bytes, why, sizeof why);
+        if (r < 0) {   // 损坏 / 版本不符 / 超限：当没有，本局收尾会换成新的
+            g_plc_rejected++;
+            blob = NULL;
+            bytes = 0;
+            plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：旧文件不能用（%s），当作没有，本局收尾换成新的", why);
+        } else if (r > 0) {
+            plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：目录里还没有旧文件（头一局，或被清过）");
+        } else {
+            plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：读到旧文件 %zu 字节（%.1f ms）", bytes, plc_ms(t0, now_ns()));
+        }
+    }
+    VkPipelineCacheCreateInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    ci.initialDataSize = bytes;
+    ci.pInitialData = bytes ? blob : NULL;
+    VkResult vr = vkCreatePipelineCache(g.d, &ci, NULL, &g_plc);
+    if (vr != VK_SUCCESS && bytes) {   // 驱动不收这份旧数据：丢掉它、用空缓存重建，别让旧文件挡住缓存
+        g_plc_rejected++;
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：驱动不收旧数据（VkResult %d），改用空缓存", (int)vr);
+        bytes = 0;
+        g_plc = VK_NULL_HANDLE;
+        ci.initialDataSize = 0;
+        ci.pInitialData = NULL;
+        vr = vkCreatePipelineCache(g.d, &ci, NULL, &g_plc);
+    }
+    free(blob);
+    if (vr != VK_SUCCESS) {
+        g_plc = VK_NULL_HANDLE;
+        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：驱动建不出缓存（VkResult %d），管线照旧不带缓存", (int)vr);
+        return;
+    }
+    g_plc_loaded = bytes;
+}
+
+// 收尾时（所有段都完成之后、销毁管线之前）：把驱动当前的缓存数据写盘，再销毁缓存。线程：与 close 同。
+// 本局没新增（大小与读入时一致）就不重写；设备丢了不取数据；写失败只记日志（下一局照旧慢一次，本局不受影响）。
+static void plc_close(void) {
+    if (!g_plc) return;
+    VkPipelineCache pc = g_plc;
+    g_plc = VK_NULL_HANDLE;
+    unsigned long long made = (unsigned long long)__atomic_load_n(&g_plc_made, __ATOMIC_RELAXED);
+    if (g_plc_dir[0] && g.device_lost) {
+        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：设备已丢失，不取数据、不落盘");
+    } else if (g_plc_dir[0]) {
+        uint64_t t0 = now_ns();
+        size_t size = 0;
+        VkResult vr = vkGetPipelineCacheData(g.d, pc, &size, NULL);
+        if (vr != VK_SUCCESS || size == 0) {
+            plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：取不到驱动数据（VkResult %d，%zu 字节），不落盘", (int)vr, size);
+        } else if (size == g_plc_loaded) {
+            plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：本局没有新增（%zu 字节，与读入时一致），不重写；本局经缓存建管线 %llu 条", size, made);
+        } else {
+            void *buf = malloc(size);
+            if (!buf) {
+                plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：内存不够取数据（%zu 字节），不落盘", size);
+            } else {
+                size_t want = size;
+                vr = vkGetPipelineCacheData(g.d, pc, &size, buf);
+                uint64_t t1 = now_ns();
+                if (vr == VK_SUCCESS && size > 0 && size <= want) {
+                    char why[96] = "";
+                    plc_ensure_dir(g_plc_dir);
+                    int w = nvk_driver_cache_write(g_plc_dir, g_plc_uuid, buf, size, why, sizeof why);
+                    uint64_t t2 = now_ns();
+                    if (w == 0)
+                        plc_logf(NVN_PLAT_LOG_INFO, "管线缓存：写出 %zu 字节（读入时 %zu；本局经缓存建管线 %llu 条；取数据 %.1f ms，写盘 %.1f ms）",
+                                 size, g_plc_loaded, made, plc_ms(t0, t1), plc_ms(t1, t2));
+                    else
+                        plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：没写成（%s）。下一局照旧要慢一次，本局不受影响", why);
+                } else {
+                    plc_logf(NVN_PLAT_LOG_WARN, "管线缓存：取数据失败（VkResult %d），不落盘", (int)vr);
+                }
+                free(buf);
+            }
+        }
+    }
+    vkDestroyPipelineCache(g.d, pc, NULL);
+}
+
 // ---------------------------------------------------------------- 打开 / 关闭 / 能力
 
 nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
@@ -1063,6 +1208,7 @@ nvn_gpu_rc nvn_gpu_open(const nvn_gpu_open_desc *d, nvn_gpu_err *err) {
         return fail(err, NVN_GPU_E_DEVICE, "worker 线程创建失败");
     g.worker_started = 1;
     pthread_mutex_lock(&g_seg_mu); g_seg_closed = 0; pthread_mutex_unlock(&g_seg_mu);
+    plc_open(d->cache_dir);   // 缓存是加速不是前提：里面任何一步失败都落到「不带缓存」，不让 open 失败
     g_open = 1;
     return rc(NVN_GPU_OK);
 }
@@ -1184,6 +1330,9 @@ nvn_gpu_rc nvn_gpu_close(uint64_t timeout_ns, nvn_gpu_err *err) {
     pthread_mutex_unlock(&g_mu);
     pthread_join(g.worker, NULL);
     g.worker_started = 0;
+
+    // 在途段都完成了、不会再有新管线：把驱动管线缓存写盘（失败只记日志）再销毁它。放在销毁管线之前，后面的拆除出事也不丢这一局的编译结果。
+    plc_close();
 
     // ⑤ 销毁所有仍活着的后端对象；已 release 的 retired 已由 worker 调完。
     pthread_mutex_lock(&g_mu);
@@ -1982,7 +2131,11 @@ static uint32_t pipe_hash(const nvn_gpu_pipe_desc *d) {
     for (int i = 0; i < 5; i++) { uintptr_t sh = (uintptr_t)d->st[i].sh; PH(&sh, sizeof sh); }
     uint32_t v[4] = {(uint32_t)d->prim, (uint32_t)d->dfmt, (uint32_t)d->sfmt, (uint32_t)d->samples}; PH(v, sizeof v);
     PH(d->cfmt, sizeof d->cfmt); PH(d->blend, sizeof d->blend); PH(&d->color, sizeof d->color); PH(&d->chmask, sizeof d->chmask);
-    PH(&d->ds, sizeof d->ds); PH(&d->poly, sizeof d->poly);
+    PH(&d->ds, sizeof d->ds);
+    {   // poly_st 的位域只占部分对象位；散列和相等判定都不能依赖填充位。
+        uint8_t poly[] = {d->poly.cull, d->poly.front, d->poly.mode, d->poly.offset_en};
+        PH(poly, sizeof poly);
+    }
 #undef PH
     return (uint32_t)(h ^ h >> 32);
 }
@@ -2003,7 +2156,9 @@ static int same_pipe_desc(const nvn_gpu_pipe_desc *a, const nvn_gpu_pipe_desc *b
            memcmp(a->attr, b->attr, sizeof a->attr) == 0 &&
            memcmp(a->stream, b->stream, sizeof a->stream) == 0 &&
            memcmp(&a->ds, &b->ds, sizeof a->ds) == 0 &&
-           memcmp(&a->poly, &b->poly, sizeof a->poly) == 0 && a->origin_ll == b->origin_ll && a->depth_clamp == b->depth_clamp;
+           a->poly.cull == b->poly.cull && a->poly.front == b->poly.front &&
+           a->poly.mode == b->poly.mode && a->poly.offset_en == b->poly.offset_en &&
+           a->origin_ll == b->origin_ll && a->depth_clamp == b->depth_clamp;
 }
 
 static void destroy_pipe_objects(struct nvn_gpu_pipe_s *p) {
@@ -2343,11 +2498,12 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
     gp.layout = p->layout;
     gp.renderPass = p->pass;
     gp.subpass = 0;
-    if (vkCreateGraphicsPipelines(g.d, VK_NULL_HANDLE, 1, &gp, NULL, &p->pipe) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe) != VK_SUCCESS) {
         nvn_gpu_rc bad = fail(err, NVN_GPU_E_COMPILE, "vkCreateGraphicsPipelines 失败");
         destroy_pipe_objects(p);
         return bad;
     }
+    if (g_plc) __atomic_fetch_add(&g_plc_made, 1, __ATOMIC_RELAXED);
     for (int st = 0; st < 5; st++) {
         struct nvn_gpu_shader_s *sh = d->st[st].sh;
         if (!sh) continue;
@@ -2469,10 +2625,11 @@ nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pip
     cp.stage.module = sh->mod;
     cp.stage.pName = sh->entry;
     cp.layout = p->layout;
-    if (vkCreateComputePipelines(g.d, VK_NULL_HANDLE, 1, &cp, NULL, &p->pipe) != VK_SUCCESS) {
+    if (vkCreateComputePipelines(g.d, g_plc, 1, &cp, NULL, &p->pipe) != VK_SUCCESS) {
         destroy_pipe_objects(p);
         return fail(err, NVN_GPU_E_COMPILE, "vkCreateComputePipelines 失败");
     }
+    if (g_plc) __atomic_fetch_add(&g_plc_made, 1, __ATOMIC_RELAXED);
     p->stage_nent[NVN_GPU_SH_CS] = sh->nent;
     p->stage_push_off[NVN_GPU_SH_CS] = sh->push_off;
     p->stage_push_bytes[NVN_GPU_SH_CS] = sh->push_bytes;
@@ -4792,6 +4949,10 @@ void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) {
     if (take) memset(g.stats, 0, sizeof g.stats);
     pthread_mutex_unlock(&g_mu);
     for (int i = 0; i < STAT_N; i++) fn(user, stat_names[i], v[i]);
+    // 会话级读数（开会话起累计，不随 take 清零）：驱动管线缓存（#822）
+    fn(user, "pipe_cache_loaded_bytes", g_plc_loaded);                              // 开会话时读到并交给驱动的字节数（0 = 没读到）
+    fn(user, "pipe_cache_rejected", g_plc_rejected);                                // 旧文件读不出 / 驱动不收、被丢掉的次数
+    fn(user, "pipes_created", __atomic_load_n(&g_plc_made, __ATOMIC_RELAXED));      // 经缓存建出的管线条数（图形 + 计算 + 清屏）
 }
 
 // 测试钩子：让某个 signal 的段在 fence 等待时报失败（走真实的失败终止路径）。

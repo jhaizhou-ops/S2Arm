@@ -17,7 +17,9 @@ public sealed partial class EnvironmentWindow : Window
     private static readonly IBrush Ink = Brush.Parse("#F2F0EB");
     private static readonly IBrush Accent = Brush.Parse("#FFF0D6");
     private readonly SharedText text;
-    private string language = "zh-Hans";
+    private string languageValue = "zh-Hans";
+    /// 界面语言；写入时同步给作业请求（Protocol.JobLanguage：每个作业带 uiLanguage，作业层按它出自签导出的文件夹名与说明等）
+    private string language { get => languageValue; set { languageValue = value; JobLanguage.Current = value; } }
     private bool welcomeHome;   // 点了顶栏品牌名：游戏库页先显示欢迎页（点「游戏库」或去别的页就回到平常）
     private LauncherPaths paths = LauncherPaths.Defaults(AppContext.BaseDirectory);
     private EnvironmentReport? report;

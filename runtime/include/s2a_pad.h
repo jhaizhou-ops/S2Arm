@@ -6,6 +6,8 @@
 //   屏幕被碰（s2a_pad_prefer_touch）→ 触屏接管，实体手柄有按键 / 摇杆动作 → 切回手柄。
 typedef enum { S2A_PAD_TOUCH, S2A_PAD_BLE, S2A_PAD_SYSTEM, S2A_PAD_COUNT } s2a_pad_source;
 // buttons 仅用 Nintendo 标准位 0..15；axes 为左 x/y、右 x/y，±32767，上为正。
+// 进游戏的按键位：Nintendo 0..15 + SL / SR（Ryujinx ControllerKeys SlLeft / SrLeft / SlRight / SrRight = 24..27）；其余位截掉
+#define S2A_PAD_KEYS (0xffffu | 0xfu << 24)
 void s2a_pad_update(s2a_pad_source source, int connected, uint32_t buttons, const int32_t axes[4]);
 void s2a_pad_set_active(int active);
 // 进程内重启（runtime/src/host_main.c s2a_host_rebuild）：清掉上一局的按键 / 摇杆快照、换输入纪元；活跃状态不变（后台时不会被打开）

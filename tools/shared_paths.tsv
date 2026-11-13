@@ -86,6 +86,7 @@ run	测试出包	记分板 / 全绿 / 里程碑 tsv	只追加单行（< 4 KB 原
 ~/.s2arm/run/s2arm/vision_cache	服务接入线	视觉测试员回答缓存（tests/autoplay/vision.sh：按截图 sha256 一张一个 <哈希>.json）	内容寻址：同一截图同一答案；写入是先写局目录再 cp 成整文件，读到的要么没有要么完整；并发写同哈希等价
 ~/.s2arm/.secrets/openrouter.key	服务接入线（维护者 提供）	OpenRouter 密钥（视觉测试员 Jev 后端，tests/autoplay/vision_jev.py）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
 ~/.s2arm/.secrets/relay.key	运维线（维护者 提供，同 ~/.codex-relay/relay.key）	中转站密钥（视觉测试员优先后端，tests/autoplay/vision_or.py；本机与 Spare-host 各一份）	只读：600 权限、仓库外；不打印、不写日志 / 局目录 / 命令行
+~/.s2arm/.secrets/relay.url	合入运维线（11-13）	中转站地址（视觉测试员缺省后端，tests/autoplay/vision_or.py、tools/dev_run.sh；没设 S2A_VISION_RELAY_URL 时读第一行；第三方地址不进公开仓）	只读：600 权限、仓库外；一行地址
 ~/.s2arm/run/s2arm/icons	测试出包	各款 App 图标（tools/game_icons.sh 从游戏原始包重抽，中文优先；pack/ipa.sh 读）	单写者 game_icons.sh，写临时文件再改名；读方只读
 ~/Downloads	测试出包	游戏原始包（xci / nsp）所在目录，tools/game_icons.sh 只读（S2A_GAME_SRC 可改）	只读，不写
 ~/.s2arm/run/s2arm/cache/csclosure	测试出包	着色器阶段键：C# 编译闭包文件清单缓存 <粗键>.files（tools/csproj_closure.py）	同粗键并发只求值一份（<粗键>.files.lock，pid 存活检查）；写临时名再原子改名

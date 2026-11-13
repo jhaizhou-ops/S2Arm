@@ -451,7 +451,9 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     for (int i = 0; i < 16; i++) if (streams >> i & 1) nvn_gpu_set_vbuf(c, (uint32_t)i, vb_buf[i], vb_off[i]);
     uint32_t base_instance = (uint32_t)(di ? di->base_instance : dr->base_instance);
     DT(RP_PERF_D_DYN);
-    for (int st = 0; st < RP_PROG_STAGES; st++) if (g_prog->sh[st] && !bind_stage(c, g_prog, st, base_instance, tv[st], ts[st], rec)) goto draw_done;
+    // 每个阶段都要发，程序里没有的阶段发零条：后端按阶段留着上一笔的绑定，不清掉的话「上一笔有片元、这一笔只有顶点」
+    // 会带着旧的片元绑定去配没有片元布局的管线，后端报布局错、整段作废
+    for (int st = 0; st < RP_PROG_STAGES; st++) if (!bind_stage(c, g_prog, st, base_instance, tv[st], ts[st], rec)) goto draw_done;
     DT(RP_PERF_D_BIND);   // 首版每笔都整组重发（support / c0 每笔在暂存区里新建）；按脏位省重发是后面的事
     a.prim = prim; a.count = count; a.instances = (uint32_t)(di ? di->instances : dr->instances); if (!a.instances) a.instances = 1; a.base_instance = base_instance;
     rp_occl_draw(c);

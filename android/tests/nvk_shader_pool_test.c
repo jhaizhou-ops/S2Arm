@@ -35,6 +35,7 @@ static prog_t gs_program;
 static uint8_t gs_keys[6][8], gs_stages[6], gs_keys_ok;
 #define CHECK(c, ...) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL: "); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
+void nvn_plat_safepoint(void) {}
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_texpool_log")) { diag_queries++; return diag_enabled; }
     return dflt;

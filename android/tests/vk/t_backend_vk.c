@@ -4,13 +4,16 @@
 // 期望值全部是 CPU 手算 / 契约条文，不取自被测实现。
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -37,7 +40,10 @@ int nvn_plat_window_size(void *native, uint32_t *w, uint32_t *h) { (void)native;
 // S2A_TEST_NVK_DQ=1：整套用例在「两级回放开」下再跑一遍；S2A_TEST_DESC_MEMO=1：在「描述符组备忘开」下再跑一遍
 // （备忘开着时内容相同的组不再分配，按「分配了几组」写的那几条期望在这一遍里不比，像素期望照比）。
 static int g_memo_on;
+void nvn_plat_safepoint(void) {}
+static int g_plc_flag_off;   // C88：1 = 调试开关 nvk_pipe_cache 读成 0（管线缓存关）
 int nvn_plat_flag(const char *name, int dflt) {
+    if (!strcmp(name, "nvk_pipe_cache") && g_plc_flag_off) return 0;
     if (!strcmp(name, "nvk_dq") && getenv("S2A_TEST_NVK_DQ")) return 1;
     if (!strcmp(name, "nvk_desc_memo") && getenv("S2A_TEST_DESC_MEMO")) { g_memo_on = 1; return 1; }
     return dflt;
@@ -61,6 +67,43 @@ VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkAllocateDescriptorSets(VkDevice device, 
     VkResult rc = __real_vkAllocateDescriptorSets(device, info, sets);
     if (rc == VK_SUCCESS) g_desc_sets_total += info->descriptorSetCount;
     return rc;
+}
+
+// C88（#822 驱动管线缓存）：包住建缓存 / 取缓存数据 / 建图形管线 / 建计算管线四个入口，只记录并转给真函数。
+// 记下：每次建缓存时交给驱动的初始数据字节数、建出的句柄、取数据拿到的字节数，以及每次建管线调用传的是不是那个缓存。
+// reject_initial 是注入：让「带初始数据」的建缓存调用失败，模拟驱动不收旧数据（其余调用走真实 lavapipe）。
+struct plc_rec {
+    unsigned cache_creates; size_t last_initial; VkPipelineCache last_cache; unsigned reject_initial;
+    size_t last_data;
+    unsigned gp, gp_cached, cp, cp_cached;
+};
+static struct plc_rec g_plc_rec;
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreatePipelineCache(VkDevice, const VkPipelineCacheCreateInfo *, const VkAllocationCallbacks *, VkPipelineCache *);
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreatePipelineCache(VkDevice device, const VkPipelineCacheCreateInfo *ci, const VkAllocationCallbacks *a, VkPipelineCache *out) {
+    g_plc_rec.cache_creates++;
+    g_plc_rec.last_initial = ci->initialDataSize;
+    if (g_plc_rec.reject_initial && ci->initialDataSize) { g_plc_rec.reject_initial--; return VK_ERROR_INITIALIZATION_FAILED; }
+    VkResult r = __real_vkCreatePipelineCache(device, ci, a, out);
+    if (r == VK_SUCCESS) g_plc_rec.last_cache = *out;
+    return r;
+}
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkGetPipelineCacheData(VkDevice, VkPipelineCache, size_t *, void *);
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkGetPipelineCacheData(VkDevice device, VkPipelineCache cache, size_t *size, void *data) {
+    VkResult r = __real_vkGetPipelineCacheData(device, cache, size, data);
+    if (data && r == VK_SUCCESS) g_plc_rec.last_data = *size;
+    return r;
+}
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateGraphicsPipelines(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t n, const VkGraphicsPipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
+    g_plc_rec.gp += n;
+    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) g_plc_rec.gp_cached += n;
+    return __real_vkCreateGraphicsPipelines(device, cache, n, ci, a, out);
+}
+VKAPI_ATTR VkResult VKAPI_CALL __real_vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t, const VkComputePipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
+VKAPI_ATTR VkResult VKAPI_CALL __wrap_vkCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t n, const VkComputePipelineCreateInfo *ci, const VkAllocationCallbacks *a, VkPipeline *out) {
+    g_plc_rec.cp += n;
+    if (cache != VK_NULL_HANDLE && cache == g_plc_rec.last_cache) g_plc_rec.cp_cached += n;
+    return __real_vkCreateComputePipelines(device, cache, n, ci, a, out);
 }
 
 // 限定注入：真实 R32_UINT 支持不变，仅模拟驱动只报告单一 texel 能力。
@@ -3177,6 +3220,35 @@ static void fill_gpipe_desc(nvn_gpu_pipe_desc *pd, nvn_gpu_shader vs, nvn_gpu_sh
     pd->origin_ll = 1;   // 与 full_dyn 的窗口原点一致（契约 v6：两处必须相同）
 }
 
+// 真实 Vulkan 管线缓存：同一语义的位域对象即便填充位不同也应命中。
+static void poly_key_padding(const char *dir) {
+    nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
+    if (!load_shader_pair(dir, "tri3.vert", "solid_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) {
+        CHECK(0, "poly key shaders"); return;
+    }
+    nvn_gpu_pipe_desc a, b; fill_gpipe_desc(&a, vs, fs, 0); memcpy(&b, &a, sizeof b);
+    memset(&a.poly, 0, sizeof a.poly); memset(&b.poly, 0xff, sizeof b.poly);
+    a.poly.cull = b.poly.cull = 0; a.poly.front = b.poly.front = 1;
+    a.poly.mode = b.poly.mode = NVN_POLYGON_MODE_FILL; a.poly.offset_en = b.poly.offset_en = 0;
+    CHECK(memcmp(&a.poly, &b.poly, sizeof a.poly) != 0, "poly 夹具须保留不同填充位");
+    nvn_gpu_err e = {0}; nvn_gpu_pipe p = NULL, q = NULL;
+    CHECK(OK(nvn_gpu_pipe_get(&a, NVN_GPU_PIPE_SYNC, &p, &e)) && p, "poly 首次取管线 %s", e.why);
+    CHECK(OK(nvn_gpu_pipe_get(&b, NVN_GPU_PIPE_SYNC, &q, &e)) && q, "poly 再次取管线 %s", e.why);
+    CHECK(p == q, "poly：四成员相同、填充位不同时应命中同一条管线");
+    for (int i = 0; i < 4; i++) {
+        nvn_gpu_pipe_desc c; memcpy(&c, &a, sizeof c);
+        if (i == 0) c.poly.cull = 2;
+        if (i == 1) c.poly.front = 0;
+        if (i == 2) c.poly.mode = NVN_POLYGON_MODE_LINE;
+        if (i == 3) c.poly.offset_en = 4;
+        if (i == 2 && !g_dev.core_features.fillModeNonSolid) continue;
+        nvn_gpu_pipe changed = NULL;
+        CHECK(OK(nvn_gpu_pipe_get(&c, NVN_GPU_PIPE_SYNC, &changed, &e)) && changed, "poly 字段 %d 管线 %s", i, e.why);
+        CHECK(changed != p, "poly 字段 %d 不同须保留不同管线", i);
+    }
+    nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); free(vm); free(fm);
+}
+
 static void full_dyn(nvn_gpu_dyn *d) {
     memset(d, 0, sizeof *d); d->origin_ll = 1;   /* 原点在左下 = Vulkan 的自然方向 */
     d->nvp = 1; d->vp[0][2] = 64; d->vp[0][3] = 64; d->vp[0][5] = 1;
@@ -5309,6 +5381,211 @@ static int c697_bc4_3d_run(void) {
     return open_backend();
 }
 
+// ---- C88：驱动管线缓存落盘与读回（#822）----
+// 契约（nvn_backend.h open_desc.cache_dir）：给了目录，后端收尾时把驱动的管线缓存写进去，下一局开会话读回来喂给驱动；
+// NULL = 不落盘。缓存只是加速不是前提：文件坏了 / 驱动不收旧数据 / 目录写不了，会话照常开、管线照常建、close 照常返回 OK。
+// 期望（手算，不取自被测实现）：
+//  ① 空目录、会话 1 建 3 条管线（2 图形 + 1 计算）：建缓存时没有初始数据；3 次建管线调用全带着那个缓存句柄（不是空句柄）；
+//     close 后目录里恰好 1 个文件，名字 <32 位十六进制>-v<版本>.bin；
+//  ② 会话 2（同目录）：交给驱动的初始数据字节数 = 会话 1 收尾时从驱动取出的字节数；统计里 pipe_cache_loaded_bytes 同值、rejected = 0；
+//     建同样 3 条管线，同样全带缓存句柄；
+//  ③ 文件中间改一个字节：会话 3 照开，读入 0 字节、rejected = 1，管线照建；收尾换成好文件（会话 4 又能读到，数同会话 1 取出的）；
+//  ④ 驱动不收带初始数据的缓存（注入）：会话照开，退回空缓存重建（句柄仍有、管线照带）、rejected = 1；
+//  ⑤ 缓存目录其实是个普通文件（写不了）：会话照开、管线照建、close 返回 OK，那个文件内容不变；
+//  ⑥ cache_dir = NULL：会话照开、管线照建且仍带缓存句柄（本局内复用）、读入 0；
+//  ⑦ 开关 nvk_pipe_cache=0：不建缓存（建缓存调用 0 次）、3 次建管线调用全是空句柄、目录里的文件原样不动；
+//  ⑧ 缓存目录和它的上一层都还不存在（真机头一局的常态：<状态目录>/direct-cache/nvn-vk 谁都没建过）：收尾补出目录再写，目录里恰好 1 个文件、名字合规。
+struct c88_run { int opened, closed; unsigned caches, gp, gp_cached, cp, cp_cached; size_t initial, data; uint64_t st_loaded, st_rejected, st_made; int st_seen; };
+
+static void c88_stat_cb(void *u, const char *name, uint64_t v) {
+    struct c88_run *o = (struct c88_run *)u;
+    if (!strcmp(name, "pipe_cache_loaded_bytes")) { o->st_loaded = v; o->st_seen++; }
+    else if (!strcmp(name, "pipe_cache_rejected")) { o->st_rejected = v; o->st_seen++; }
+    else if (!strcmp(name, "pipes_created")) { o->st_made = v; o->st_seen++; }
+}
+
+// 建 3 条管线：两条图形（片元着色器不同 → 两条）+ 一条计算。管线归后端缓存持有，着色器对象用完即放（管线持有引用）。
+static void c88_make_pipes(const char *sdir) {
+    nvn_gpu_shader vs = NULL, fs = NULL, vs2 = NULL, fs2 = NULL, cs = NULL;
+    void *vm = NULL, *fm = NULL, *vm2 = NULL, *fm2 = NULL;
+    nvn_gpu_err e;
+    if (!load_shader_pair(sdir, "tri3.vert", "solid_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) { CHECK(0, "C88 读不到 solid_green"); return; }
+    if (!load_shader_pair(sdir, "tri3.vert", "solid_blue.frag", NULL, NULL, &vs2, &fs2, &vm2, &fm2)) { CHECK(0, "C88 读不到 solid_blue"); return; }
+    nvn_gpu_pipe_desc pd, pd2; nvn_gpu_pipe p1 = NULL, p2 = NULL, cp = NULL;
+    fill_gpipe_desc(&pd, vs, fs, 0); fill_gpipe_desc(&pd2, vs2, fs2, 0);
+    CHECK(OK(nvn_gpu_pipe_get(&pd, NVN_GPU_PIPE_SYNC, &p1, &e)), "C88 图形管线 1：%d %s", e.rc.code, e.why);
+    CHECK(OK(nvn_gpu_pipe_get(&pd2, NVN_GPU_PIPE_SYNC, &p2, &e)), "C88 图形管线 2：%d %s", e.rc.code, e.why);
+    char path[512]; size_t csz = 0;
+    snprintf(path, sizeof path, "%s/comp.comp.spv", sdir);
+    void *cm = read_file(path, &csz);
+    CHECK(cm != NULL, "C88 读不到 comp.comp.spv");
+    if (cm) {
+        nvn_gpu_layout_ent ce; memset(&ce, 0, sizeof ce);
+        ce.set = 0; ce.cls = NVN_GPU_RES_SSBO; ce.access = NVN_GPU_ACC_W; ce.binding = 0; ce.count = 1; ce.stages = 1u << NVN_GPU_SH_CS;
+        nvn_gpu_layout cl; memset(&cl, 0, sizeof cl); cl.ent = &ce; cl.nent = 1;
+        nvn_gpu_shader_src src; memset(&src, 0, sizeof src);
+        src.stage = NVN_GPU_SH_CS; src.kind = NVN_GPU_BLOB_SPIRV; src.entry = "main"; src.blob = cm; src.bytes = csz; src.layout = &cl;
+        CHECK(OK(nvn_gpu_shader_load(&src, &cs, &e)), "C88 计算着色器：%d %s", e.rc.code, e.why);
+        nvn_gpu_stage_desc sd; memset(&sd, 0, sizeof sd); sd.sh = cs;
+        CHECK(OK(nvn_gpu_cpipe_get(&sd, NVN_GPU_PIPE_SYNC, &cp, &e)), "C88 计算管线：%d %s", e.rc.code, e.why);
+        free(cm);
+    }
+    CHECK(p1 && p2 && p1 != p2, "C88 两条图形管线应当是两个不同的对象");
+    nvn_gpu_shader_release(vs); nvn_gpu_shader_release(fs); nvn_gpu_shader_release(vs2); nvn_gpu_shader_release(fs2);
+    if (cs) nvn_gpu_shader_release(cs);
+    free(vm); free(fm); free(vm2); free(fm2);
+}
+
+// 开一个会话（cache_dir 可为 NULL）→ 建 3 条管线 → 读统计 → close。记下这一段里包装函数看到的调用。
+static struct c88_run c88_session(const char *sdir, const char *cache_dir) {
+    struct c88_run o; memset(&o, 0, sizeof o);
+    struct plc_rec b = g_plc_rec;
+    g_desc.cache_dir = cache_dir;
+    o.opened = open_backend();
+    g_desc.cache_dir = NULL;
+    if (!o.opened) return o;
+    c88_make_pipes(sdir);
+    nvn_gpu_stats(c88_stat_cb, &o, 0);
+    nvn_gpu_err e;
+    o.closed = OK(nvn_gpu_close(5000000000ull, &e));
+    if (!o.closed) printf("C88 close 失败：%d %s\n", e.rc.code, e.why);
+    o.caches = g_plc_rec.cache_creates - b.cache_creates; o.initial = g_plc_rec.last_initial; o.data = g_plc_rec.last_data;
+    o.gp = g_plc_rec.gp - b.gp; o.gp_cached = g_plc_rec.gp_cached - b.gp_cached;
+    o.cp = g_plc_rec.cp - b.cp; o.cp_cached = g_plc_rec.cp_cached - b.cp_cached;
+    return o;
+}
+
+// 数目录里的普通文件（不含 . / ..），记下最后一个的名字和大小。
+static int c88_ls(const char *dir, char *name, size_t nn, long *size) {
+    int n = 0;
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char p[600]; struct stat st;
+        snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) { n++; if (name) snprintf(name, nn, "%s", de->d_name); if (size) *size = (long)st.st_size; }
+        else n += 100;   // 不是普通文件（残留的临时目录等）也算多出来的东西
+    }
+    closedir(d);
+    return n;
+}
+
+static int c88_name_ok(const char *n) {   // <32 位小写十六进制>-v<数字>.bin
+    size_t l = strlen(n);
+    if (l < 32 + 3 + 4 || strcmp(n + l - 4, ".bin")) return 0;
+    for (int i = 0; i < 32; i++) if (!((n[i] >= '0' && n[i] <= '9') || (n[i] >= 'a' && n[i] <= 'f'))) return 0;
+    if (n[32] != '-' || n[33] != 'v') return 0;
+    for (size_t i = 34; i < l - 4; i++) if (n[i] < '0' || n[i] > '9') return 0;
+    return l > 34 + 4;
+}
+
+static void c88_flip_middle_byte(const char *path) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) { CHECK(0, "C88 打不开 %s 去改一个字节", path); return; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, sz / 2, SEEK_SET);
+    int c = fgetc(f);
+    fseek(f, sz / 2, SEEK_SET);
+    fputc(c ^ 0xFF, f);
+    fclose(f);
+}
+
+static void c88_pipe_cache(const char *sdir) {
+    char tmpl[512];
+    const char *tmp = getenv("TMPDIR");
+    snprintf(tmpl, sizeof tmpl, "%s/s2a-plc.XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    char *root = mkdtemp(tmpl);
+    CHECK(root != NULL, "C88 建不出临时目录");
+    if (!root) return;
+    char dir[600], fname[256] = "", file[900], notdir[700];
+    long fsize = 0;
+    snprintf(dir, sizeof dir, "%s/cache", root);
+    CHECK(mkdir(dir, 0700) == 0, "C88 建不出缓存目录");
+    // ① 空目录 → 会话 1
+    CHECK(c88_ls(dir, NULL, 0, NULL) == 0, "C88 ① 起始目录应为空");
+    struct c88_run r1 = c88_session(sdir, dir);
+    CHECK(r1.opened && r1.closed, "C88 ① 会话 1 open=%d close=%d", r1.opened, r1.closed);
+    CHECK(r1.caches == 1 && r1.initial == 0, "C88 ① 建缓存应 1 次且没有初始数据 → %u 次、初始 %zu 字节", r1.caches, r1.initial);
+    CHECK(r1.gp == 2 && r1.gp_cached == 2, "C88 ① 图形管线创建 2 次、全带缓存句柄 → %u 次、带缓存 %u 次（带空句柄 = 缓存没传进去）", r1.gp, r1.gp_cached);
+    CHECK(r1.cp == 1 && r1.cp_cached == 1, "C88 ① 计算管线创建 1 次、带缓存句柄 → %u 次、带缓存 %u 次", r1.cp, r1.cp_cached);
+    CHECK(r1.st_seen == 3 && r1.st_loaded == 0 && r1.st_rejected == 0 && r1.st_made == 3, "C88 ① 统计：loaded=%llu rejected=%llu created=%llu（期望 0 / 0 / 3）",
+          (unsigned long long)r1.st_loaded, (unsigned long long)r1.st_rejected, (unsigned long long)r1.st_made);
+    int nfiles = c88_ls(dir, fname, sizeof fname, &fsize);
+    CHECK(nfiles == 1, "C88 ① close 后目录里应恰好 1 个文件（没有残留临时文件）→ %d", nfiles);
+    CHECK(nfiles == 1 && c88_name_ok(fname), "C88 ① 文件名应是 <32 位十六进制>-v<版本>.bin → %s", fname);
+    CHECK(r1.data > 0, "C88 ① 收尾应从驱动取出缓存数据 → %zu 字节", r1.data);
+    snprintf(file, sizeof file, "%s/%s", dir, fname);
+    // ② 会话 2：读回
+    struct c88_run r2 = c88_session(sdir, dir);
+    CHECK(r2.opened && r2.closed, "C88 ② 会话 2 open=%d close=%d", r2.opened, r2.closed);
+    CHECK(r2.caches == 1 && r2.initial == r1.data, "C88 ② 交给驱动的初始数据应等于会话 1 收尾取出的 %zu 字节 → %u 次建缓存、%zu 字节", r1.data, r2.caches, r2.initial);
+    CHECK(r2.st_loaded == r1.data && r2.st_rejected == 0, "C88 ② 统计 loaded=%llu（期望 %zu）rejected=%llu（期望 0）", (unsigned long long)r2.st_loaded, r1.data, (unsigned long long)r2.st_rejected);
+    CHECK(r2.gp == 2 && r2.gp_cached == 2 && r2.cp == 1 && r2.cp_cached == 1, "C88 ② 管线创建应全带缓存句柄 → 图形 %u/%u 计算 %u/%u", r2.gp_cached, r2.gp, r2.cp_cached, r2.cp);
+    // ③ 改坏文件
+    c88_flip_middle_byte(file);
+    struct c88_run r3 = c88_session(sdir, dir);
+    CHECK(r3.opened && r3.closed, "C88 ③ 坏文件下会话照开 open=%d close=%d", r3.opened, r3.closed);
+    CHECK(r3.st_loaded == 0 && r3.st_rejected == 1 && r3.initial == 0, "C88 ③ 坏文件：读入应为 0、rejected=1、不交初始数据 → loaded=%llu rejected=%llu 初始 %zu 字节", (unsigned long long)r3.st_loaded, (unsigned long long)r3.st_rejected, r3.initial);
+    CHECK(r3.gp == 2 && r3.gp_cached == 2 && r3.cp == 1 && r3.cp_cached == 1, "C88 ③ 坏文件下管线照建且带缓存句柄");
+    struct c88_run r4 = c88_session(sdir, dir);
+    CHECK(r4.st_loaded == r1.data && r4.st_rejected == 0, "C88 ③ 收尾应已把坏文件换成好的：下一局读入 %llu（期望 %zu）、rejected=%llu（期望 0）", (unsigned long long)r4.st_loaded, r1.data, (unsigned long long)r4.st_rejected);
+    // ④ 驱动不收旧数据
+    g_plc_rec.reject_initial = 1;
+    struct c88_run r5 = c88_session(sdir, dir);
+    CHECK(r5.opened && r5.closed, "C88 ④ 驱动不收旧数据时会话照开 open=%d close=%d", r5.opened, r5.closed);
+    CHECK(r5.caches == 2 && r5.initial == 0, "C88 ④ 应先带旧数据建、被拒后用空缓存重建（共 2 次，最后一次没有初始数据）→ %u 次、最后初始 %zu 字节", r5.caches, r5.initial);
+    CHECK(r5.st_loaded == 0 && r5.st_rejected == 1, "C88 ④ 统计 loaded=%llu（期望 0）rejected=%llu（期望 1）", (unsigned long long)r5.st_loaded, (unsigned long long)r5.st_rejected);
+    CHECK(r5.gp == 2 && r5.gp_cached == 2 && r5.cp == 1 && r5.cp_cached == 1, "C88 ④ 退回空缓存后管线照建且带缓存句柄 → 图形 %u/%u 计算 %u/%u", r5.gp_cached, r5.gp, r5.cp_cached, r5.cp);
+    // ⑤ 目录写不了：路径是个普通文件
+    snprintf(notdir, sizeof notdir, "%s/notadir", root);
+    { FILE *f = fopen(notdir, "wb"); CHECK(f != NULL, "C88 ⑤ 建不出占位文件"); if (f) { fputs("x", f); fclose(f); } }
+    struct c88_run r6 = c88_session(sdir, notdir);
+    CHECK(r6.opened && r6.closed, "C88 ⑤ 目录写不了时会话照开、close 返回 OK → open=%d close=%d", r6.opened, r6.closed);
+    CHECK(r6.gp == 2 && r6.gp_cached == 2 && r6.cp == 1 && r6.cp_cached == 1, "C88 ⑤ 目录写不了时管线照建");
+    { struct stat st; CHECK(stat(notdir, &st) == 0 && st.st_size == 1, "C88 ⑤ 占位文件内容不应被动"); }
+    // ⑥ 不给目录
+    struct c88_run r7 = c88_session(sdir, NULL);
+    CHECK(r7.opened && r7.closed && r7.st_loaded == 0 && r7.st_rejected == 0, "C88 ⑥ cache_dir=NULL：会话照开照关、读入 0、rejected 0");
+    CHECK(r7.gp == 2 && r7.gp_cached == 2 && r7.cp == 1 && r7.cp_cached == 1, "C88 ⑥ cache_dir=NULL 时管线仍带缓存句柄（本局内复用）→ 图形 %u/%u 计算 %u/%u", r7.gp_cached, r7.gp, r7.cp_cached, r7.cp);
+    // ⑦ 开关关掉：不读、不建缓存、不碰文件
+    long before_size = 0; char before_name[256] = "";
+    c88_ls(dir, before_name, sizeof before_name, &before_size);
+    struct stat st0; snprintf(file, sizeof file, "%s/%s", dir, before_name); stat(file, &st0);
+    g_plc_flag_off = 1;
+    struct c88_run r8 = c88_session(sdir, dir);
+    g_plc_flag_off = 0;
+    CHECK(r8.opened && r8.closed, "C88 ⑦ 开关关掉时会话照开照关");
+    CHECK(r8.caches == 0, "C88 ⑦ 开关关掉：不应建缓存 → %u 次", r8.caches);
+    CHECK(r8.gp == 2 && r8.gp_cached == 0 && r8.cp == 1 && r8.cp_cached == 0, "C88 ⑦ 开关关掉：管线创建都不带缓存句柄 → 图形 %u/%u 带缓存、计算 %u/%u 带缓存", r8.gp_cached, r8.gp, r8.cp_cached, r8.cp);
+    CHECK(r8.st_loaded == 0 && r8.st_made == 0, "C88 ⑦ 开关关掉：读入 0、经缓存建 0 条 → loaded=%llu created=%llu", (unsigned long long)r8.st_loaded, (unsigned long long)r8.st_made);
+    { struct stat st1; int ok = stat(file, &st1) == 0 && st1.st_size == st0.st_size && st1.st_mtime == st0.st_mtime && c88_ls(dir, NULL, 0, NULL) == 1;
+      CHECK(ok, "C88 ⑦ 开关关掉：目录里的文件应原样不动（大小 / 修改时间 / 个数）"); }
+    // ⑧ 目录和它的上一层都不存在
+    char fresh[700], fresh_dir[760], fresh_name[256] = "", fresh_file[1100];
+    long fresh_size = 0;
+    snprintf(fresh, sizeof fresh, "%s/fresh", root);
+    snprintf(fresh_dir, sizeof fresh_dir, "%s/cache", fresh);
+    struct c88_run r9 = c88_session(sdir, fresh_dir);
+    CHECK(r9.opened && r9.closed, "C88 ⑧ 目录都不存在时会话照开照关 open=%d close=%d", r9.opened, r9.closed);
+    CHECK(r9.gp == 2 && r9.gp_cached == 2 && r9.cp == 1 && r9.cp_cached == 1, "C88 ⑧ 管线照建且带缓存句柄");
+    int fresh_n = c88_ls(fresh_dir, fresh_name, sizeof fresh_name, &fresh_size);
+    CHECK(fresh_n == 1 && c88_name_ok(fresh_name) && fresh_size > 0,
+          "C88 ⑧ 目录原先不存在：收尾应补出目录并写出恰好 1 个合规文件 → 文件数 %d（-1 = 目录没补出来）、名字 %s、%ld 字节", fresh_n, fresh_name, fresh_size);
+    struct c88_run r10 = c88_session(sdir, fresh_dir);
+    CHECK(r10.st_loaded == r9.data && r10.st_rejected == 0, "C88 ⑧ 补出来的目录里的文件下一局应能读回：loaded=%llu（期望 %zu）rejected=%llu（期望 0）",
+          (unsigned long long)r10.st_loaded, r9.data, (unsigned long long)r10.st_rejected);
+    printf("C88 管线缓存：文件 %ld 字节（驱动取出 %zu 字节）；重开读回 %zu 字节；坏文件 / 驱动不收 / 目录写不了 / 目录不存在 / 无目录 / 开关关 均照常建管线\n", fsize, r1.data, r2.st_loaded);
+    // 清理
+    if (fresh_n >= 0 && fresh_name[0]) { snprintf(fresh_file, sizeof fresh_file, "%s/%s", fresh_dir, fresh_name); unlink(fresh_file); }
+    rmdir(fresh_dir); rmdir(fresh);
+    DIR *d = opendir(dir);
+    if (d) { struct dirent *de; while ((de = readdir(d))) { if (strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) { char p[900]; snprintf(p, sizeof p, "%s/%s", dir, de->d_name); unlink(p); } } closedir(d); }
+    rmdir(dir); unlink(notdir); rmdir(root);
+}
+
 int main(int argc, char **argv) {
     t29_format_expand();
     char why[256] = {0};
@@ -5360,6 +5637,7 @@ int main(int argc, char **argv) {
         s2a_vk_device_destroy(&g_dev, 1);
         return g_fail ? 1 : 0;
     }
+    poly_key_padding(argv[1]);
     c697_swapchain_images();
     c690_native_bc_image_copy(NVN_FORMAT_RGB_DXT1_SRGB, 8, 1);
     c690_native_bc_image_copy(NVN_FORMAT_RGBA_DXT5, 16, 2);
@@ -5646,7 +5924,9 @@ int main(int argc, char **argv) {
         CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "attachment subresource close：%d %s", e18.rc.code, e18.why);
     }
 
-    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
+    c88_pipe_cache(argv[1]);   // 每个会话自己开 / 关（带不同的 cache_dir）
+
+    printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75/C88 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
            g_fail ? "红" : "绿", g_fail, atomic_load(&g_ndone), atomic_load(&g_retired));
     s2a_vk_device_destroy(&g_dev, 1);   // 最后一个会话已在 t20 close 里证明空闲
     { extern uint64_t nvn_vk_dbg_dq_recs(void); uint64_t n = nvn_vk_dbg_dq_recs();

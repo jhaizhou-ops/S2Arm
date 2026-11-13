@@ -36,6 +36,7 @@ THE SOFTWARE.
 */
 #import <CoreBluetooth/CoreBluetooth.h>
 #include "NS2Transport.h"
+#include <stdatomic.h>
 #include <math.h>
 #include <pthread.h>
 #include <errno.h>
@@ -110,6 +111,8 @@ static ns2_info deviceInfo;
 static ns2_motion latestMotion, latestMotionLeft;
 static ns2_mouse latestMouse[2];   // Joy-Con 2 光学鼠标最近一笔，[0] 左只、[1] 右只（拼成一对时两只各一份），只经 ns2_get_mouse_side 读   // latestMotionLeft：拼对时左只的六轴（latestMotion 是右只的），只经 ns2_get_motion_left 读
 static BOOL motionRequested;
+// 单只 Joy-Con 出原始方向还是横握视角（ns2_set_joycon_raw；缺省横握，同改前）
+static _Atomic int joyconRaw;
 static ns2_state_callback stateCallback;
 static ns2_status_callback statusCallback;
 static ns2_motion_callback motionCallback;
@@ -740,7 +743,7 @@ static NS2Bridge *bridge;
         // 部分固件的设备时钟不可靠；对外用接收时的单调时钟，设备值保留用于诊断。
         // Some firmware has unreliable device timestamps; export monotonic arrival time and retain the device value for diagnostics.
         motion.host_timestamp_us = now_ns() / 1000;
-        if (!paired) ns2_joycon_sideways_motion(kind, &motion);   // 单只 Joy-Con 2：换成横握视角；Pro 不动
+        if (!paired && !atomic_load(&joyconRaw)) ns2_joycon_sideways_motion(kind, &motion);   // 单只 Joy-Con 2：换成横握视角（原始方向时不转，宿主按游戏样式转）；Pro 不动
         latestMotion = motion;
     }
     // 拼对时左只的六轴另存（不经回调、不转向）：Mac 启动器通道 INPUT 包的 motion_left 带给宿主，游戏的左手传感器用它（手柄当车把左右一起倾斜时，左右两只坐标相反，
@@ -793,8 +796,10 @@ static NS2Bridge *bridge;
         BOOL paired = pair_locked();
         ns2_state mine = state, other = linkShared[slot ^ 1].last;
         pthread_mutex_unlock(&stateMu);
+        int side = paired ? 0 : ns2_decode_side_buttons(data.bytes, data.length);
         if (paired) ns2_joycon_pair_state(kind == NS2_KIND_JOYCON_L ? &mine : &other, kind == NS2_KIND_JOYCON_L ? &other : &mine, &state);
-        else ns2_joycon_sideways(kind, ns2_decode_side_buttons(data.bytes, data.length), &state);
+        else if (atomic_load(&joyconRaw)) ns2_joycon_raw(kind, side, &state);
+        else ns2_joycon_sideways(kind, side, &state);
     }
     emit_state(state);
 }
@@ -1438,6 +1443,7 @@ void ns2_set_bond_host(const uint8_t *host) {
         if (host) LOG("NS2 Pro BLE 记住这台设备：开（长按 SYNC 连上的手柄会写入本机地址）");
     });
 }
+void ns2_set_joycon_raw(int raw) { atomic_store(&joyconRaw, raw ? 1 : 0); }
 void ns2_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&stateMu);
     BOOL next = enabled && !terminal;

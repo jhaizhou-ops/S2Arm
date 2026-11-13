@@ -617,7 +617,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
     UIStackView *rows = vp_column(@[
         vp_text_label(S2AL(@"vpad.edit.hint"), 11, YES),
         [self sliderRow:S2AL(@"vpad.edit.globalOpacity") low:0.2 high:1 value:_layoutStore.globalOpacity id:@"vpad.edit.globalAlpha" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gAlpha valueLabel:&v0],
-        [self sliderRow:S2AL(@"vpad.edit.globalSize") low:0.6 high:1.6 value:_layoutStore.globalScale id:@"vpad.edit.globalSize" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gSize valueLabel:&v1],
+        [self sliderRow:S2AL(@"vpad.edit.globalSize") low:S2A_VPAD_SCALE_MIN high:S2A_VPAD_SCALE_MAX value:_layoutStore.globalScale id:@"vpad.edit.globalSize" changed:@selector(globalChanged:) commit:@selector(globalCommit) slider:&_gSize valueLabel:&v1],
         [self sliderRow:S2AL(@"vpad.idleOpacity") low:0 high:1 value:_layoutStore.idleKeyOpacity id:@"vpad.edit.idle" changed:@selector(idleChanged:) commit:@selector(idleCommit) slider:&_gIdle valueLabel:&v2],
         [self swatchRow],
         [self switchRow:S2AL(@"vpad.edit.slide") note:S2AL(@"vpad.edit.slide.note") on:[NSUserDefaults.standardUserDefaults boolForKey:kSlideSwitchKey] id:@"vpad.edit.slide" action:@selector(slideChanged:) control:NULL]]);
@@ -655,7 +655,7 @@ static NSString *const kSlideSwitchKey = @"S2AVPadSlideSwitch";   // 滑动切�
 - (void)buildKeyPanel {
     UIVisualEffectView *g = vp_glass(14); g.hidden = YES; g.accessibilityIdentifier = @"vpad.edit.key"; _keyPanel = g; UILabel *v0, *v1;
     _keyTitle = vp_text_label(@"", 14, NO); _keyTitle.font = [UIFont boldSystemFontOfSize:14];
-    UIStackView *size = [self sliderRow:S2AL(@"vpad.edit.size") low:0.6 high:1.6 value:1 id:@"vpad.edit.size" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_sizeSlider valueLabel:&v0];
+    UIStackView *size = [self sliderRow:S2AL(@"vpad.edit.size") low:S2A_VPAD_SCALE_MIN high:S2A_VPAD_SCALE_MAX value:1 id:@"vpad.edit.size" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_sizeSlider valueLabel:&v0];
     UIStackView *alpha = [self sliderRow:S2AL(@"vpad.edit.opacity") low:0.2 high:1 value:1 id:@"vpad.edit.alpha" changed:@selector(panelChanged:) commit:@selector(panelCommit) slider:&_alphaSlider valueLabel:&v1];
     _sizeValue = v0; _alphaValue = v1;
     UIStackView *hide = [self switchRow:S2AL(@"vpad.edit.hideKey") note:S2AL(@"vpad.edit.hideKey.note") on:NO id:@"vpad.edit.hide" action:@selector(hideChanged) control:&_hideSwitch];

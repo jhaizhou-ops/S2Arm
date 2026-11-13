@@ -363,6 +363,7 @@ void nvn_be_exec(const uint8_t *p) {
     static int inited; if (!inited) { inited = 1; rp_state_reset(); }
     if (!p) return;
     for (;;) {
+        nvn_plat_safepoint();   // 一次提交可连续回放数秒：让平台的停世界事务在命令之间越过本线程（nvn_plat.h）
         op_hdr h; memcpy(&h, p, sizeof h);
         if (rec_bad(h)) { nvn_unimpl("rec", "bad_record", p); return; }   // 按这条列表的 END 处理
         const void *a = p + 8;

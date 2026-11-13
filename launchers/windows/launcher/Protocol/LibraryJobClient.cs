@@ -24,6 +24,7 @@ public static class LibraryJobClient
             ["engineDir"] = Path.GetFullPath(paths.Engine), ["libraryId"] = libraryId
         };
         if (selectedPaths is not null) payload["paths"] = selectedPaths;
+        JobLanguage.Stamp(payload);
         if (moveFrom is not null) payload["moveFrom"] = Path.GetFullPath(moveFrom);
         // 库路径规则只在作业层 setup（剃刀 W19）：带上启动器安装目录（库不能放在它里面或包含它），
         //   freeDefault = 玩家没选过位置，缺省位置被别的文件占着时由 setup 换到旁边，结果里的 library 是实际位置

@@ -358,11 +358,12 @@ T_PUSH=$(date +%s); disarm; PH=测试; CAPN=$CAP; W0=$T_PUSH; arm $CAP
 ACT_S=${ACT_S:-60}; SEC=$(( CAP - 15 ))   # 留 15 秒收局拉回
 # 真机驾驶员（11-01 维护者：iOS 上没有视觉脚本也没有密钥，真机自动玩家到不了 MARK）：App 带 S2A_VISION_REMOTE=1 把每一问写进 Documents/vision/ 信箱，
 #   Mac 侧 tools/vision_bridge.sh 经 devicectl 拉走、跑同一个 vision.sh、把答案推回。S2A_VISION_BRIDGE=auto（缺省）= Mac 上驾驶员可用才开：脚本在，且
-#   缺省后端（本机 claude CLI 直连，11-12 起；中转站已停用）PATH 上有 claude、或显式 S2A_VISION_BACKEND=or / jev 时有 OpenRouter 钥匙；1 / 0 强制。
+#   不设后端 = 自动选：有中转站钥匙 ~/.s2arm/.secrets/relay.key 和地址（S2A_VISION_RELAY_URL 或 ~/.s2arm/.secrets/relay.url）或 PATH 上有 claude；=relay 要钥匙和地址、=cli 要 PATH 上有 claude、
+#   =or / jev 时有 OpenRouter 钥匙；1 / 0 强制。
 #   驾驶员不可用（没 CLI / 没登录 / 没钥匙）由 vision.sh 退出 3、答案带 unavailable，经桥推回手机，自动玩家红停
 VSH=${S2A_VISION_SH:-$TOOLS/../tests/autoplay/vision.sh}; VBR=${S2A_VISION_BRIDGE:-auto}
-[ "$VBR" = auto ] && { VBR=0; [ -r "$VSH" ] && { [ -n "${S2A_VISION_SH:-}" ] || case ${S2A_VISION_BACKEND:-cli} in (cli) command -v claude > /dev/null;; (*) [ -r "$HOME/.s2arm/.secrets/openrouter.key" ];; esac; } && VBR=1; }
-[ "$VBR" = 0 ] && [ "${S2A_VISION_BRIDGE:-auto}" = auto ] && echo "【红】真机驾驶员不开：Mac 上看屏驾驶员不可用（缺省走本机 claude CLI：PATH 上没有 claude；或 S2A_VISION_BACKEND=${S2A_VISION_BACKEND:-cli} 缺 OpenRouter 钥匙），自动玩家到不了 MARK" >&2
+[ "$VBR" = auto ] && { VBR=0; [ -r "$VSH" ] && { [ -n "${S2A_VISION_SH:-}" ] || case ${S2A_VISION_BACKEND:-auto} in (auto) { [ -r "$HOME/.s2arm/.secrets/relay.key" ] && { [ -n "${S2A_VISION_RELAY_URL:-}" ] || [ -r "$HOME/.s2arm/.secrets/relay.url" ]; }; } || command -v claude > /dev/null;; (relay) [ -r "$HOME/.s2arm/.secrets/relay.key" ] && { [ -n "${S2A_VISION_RELAY_URL:-}" ] || [ -r "$HOME/.s2arm/.secrets/relay.url" ]; };; (cli) command -v claude > /dev/null;; (*) [ -r "$HOME/.s2arm/.secrets/openrouter.key" ];; esac; } && VBR=1; }
+[ "$VBR" = 0 ] && [ "${S2A_VISION_BRIDGE:-auto}" = auto ] && echo "【红】真机驾驶员不开：Mac 上看屏驾驶员不可用（S2A_VISION_BACKEND=${S2A_VISION_BACKEND:-自动}：中转站缺钥匙 ~/.s2arm/.secrets/relay.key 或地址 ~/.s2arm/.secrets/relay.url / cli 时 PATH 上没有 claude / or、jev 时缺 OpenRouter 钥匙），自动玩家到不了 MARK" >&2
 ENV=$(python3 - "${ENVJSON:-}" <<PY
 import json, sys
 e = {"S2A_FRAMES_TSV": "frames.tsv", "S2A_AUTOPLAY": "1"}   # iPhone 上自动玩家缺省关（人手动打开 App 不带环境变量），执行器起局显式开

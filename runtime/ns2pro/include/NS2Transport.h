@@ -36,6 +36,14 @@ int ns2_decode_report05_motion(const uint8_t *bytes, size_t length, ns2_motion *
 // 单只 Joy-Con 横握：把已校准的状态 / 六轴换成横握视角（按键随朝向转、SL / SR 当 L / R、唯一的摇杆当左摇杆）；Pro 不动
 void ns2_joycon_sideways(ns2_kind kind, int side_buttons, ns2_state *state);
 void ns2_joycon_sideways_motion(ns2_kind kind, ns2_motion *motion);
+// 单只 Joy-Con 原始方向（#520 A，照真机：游戏收 JoyLeft / JoyRight 就报这个样式，由游戏按 NpadJoyHoldType 自己转）：
+//   按键 / 摇杆 / 六轴不动，只把这只的 SL / SR 放进扩展位 NS2_BUTTON_SL / NS2_BUTTON_SR；Pro / 一对不动
+enum { NS2_BUTTON_SL = 21, NS2_BUTTON_SR = 22 };
+void ns2_joycon_raw(ns2_kind kind, int side_buttons, ns2_state *state);
+// 原始方向的状态再换成横握视角（宿主发现游戏不收单只样式、退回 Pro 手柄时用）：取出扩展位的 SL / SR 后同 ns2_joycon_sideways
+void ns2_joycon_raw_to_sideways(ns2_kind kind, ns2_state *state);
+// 传输层对单只 Joy-Con 出哪种：0 = 横握视角（缺省，同改前；iPhone / iPad 用）、1 = 原始方向（Mac 连接程序开，宿主按游戏样式决定转不转）
+void ns2_set_joycon_raw(int raw);
 // Joy-Con 2 左右拼成一对（竖握）：输入是两只各自已校准、未转横握的状态；按键取并集，左摇杆取左只、右摇杆取右只，不转向；NULL 当全 0
 void ns2_joycon_pair_state(const ns2_state *left, const ns2_state *right, ns2_state *out);
 // 扫描策略（纯函数，NS2Transport.m 的 NS2Bridge 调）：

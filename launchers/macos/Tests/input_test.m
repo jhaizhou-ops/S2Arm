@@ -1079,6 +1079,7 @@ int main(int argc, const char **argv) {
     expect(s2a_mac_ns2_connect(), "Switch 2 Pro motion relay connects");
     int relayClient = accept(relayListener, NULL, NULL);
     s2a_pad_set_motion_enabled(1);
+    s2a_mac_ns2_set_game_style(1 << 4);   // 游戏用 JoyconRight：单只右 Joy-Con 的六轴原样给（#520 A）
     ns2_relay_packet motionPacket = {
         .magic = NS2_RELAY_MAGIC, .version = NS2_RELAY_VERSION, .type = NS2_RELAY_INPUT,
         .ready = 1, .status = NS2_STATUS_READY, .motion_known = 1, .kind = NS2_KIND_JOYCON_R,
@@ -1089,6 +1090,35 @@ int main(int argc, const char **argv) {
     for (int attempt = 0; attempt < 100 && !s2a_pad_read_motion(&ns2Motion); attempt++) usleep(1000);
     expect(ns2Motion.host_timestamp_us == 1234 && ns2Motion.gyro_x == 90 && ns2Motion.acceleration_z == 1,
            "Switch 2 Pro motion reaches shared Mac six-axis entry");
+    // #520 A：游戏不用单只样式（扮 Pro）时，单只右 Joy-Con 的六轴在游戏端转成横握视角：(ax, az) → (−az, ax)、(gx, gz) → (−gz, gx)
+    s2a_mac_ns2_set_game_style(1 << 0);
+    expect(s2a_pad_read_motion(&ns2Motion) && ns2Motion.gyro_x == 0 && ns2Motion.gyro_z == 90 && ns2Motion.acceleration_x == -1 && ns2Motion.acceleration_z == 0,
+           "single right Joy-Con motion turns sideways when the game uses a Pro controller");
+    // 按键 / 摇杆同理：通道收原始方向（SL 在扩展位 21）；游戏用 JoyconRight 原样给、SL 换成 Ryujinx SlRight，扮 Pro 时转横握、SL 当 L
+    ns2_relay_packet rawPacket = motionPacket; rawPacket.state = (ns2_state){(1ull << 2) | (1ull << NS2_BUTTON_SL), 0, 0, 300, -400};
+    expect(send(relayClient, &rawPacket, sizeof rawPacket, 0) == sizeof rawPacket, "raw single Joy-Con packet sent");
+    ns2_state shaped; uint32_t side = 0;
+    for (int attempt = 0; attempt < 100 && !(s2a_mac_ns2_read(&shaped, &side), shaped.buttons); attempt++) usleep(1000);
+    expect(shaped.buttons == ((1ull << 0) | (1ull << 6)) && side == 0 && shaped.lx == -400 && shaped.ly == -300 && !s2a_mac_ns2_raw_now(),
+           "game uses Pro: raw right Joy-Con becomes sideways (X -> A, SL -> L, stick (300,-400) -> (-400,-300))");
+    s2a_mac_ns2_set_game_style(1 << 4);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(shaped.buttons == (1ull << 2) && side == (1u << 26) && shaped.rx == 300 && shaped.ry == -400 && s2a_mac_ns2_raw_now(),
+           "game uses JoyconRight: raw keys and right stick pass through, SL becomes Ryujinx SlRight");
+    s2a_mac_ns2_set_game_style(1 << 3);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(side == 0 && shaped.buttons == ((1ull << 0) | (1ull << 6)) && !s2a_mac_ns2_raw_now(), "game uses JoyconLeft with a right Joy-Con: not raw (sideways)");
+    // 游戏不收 Pro、只收双 Joy-Con（InputPump 报 JoyconPair）：单只右 Joy-Con 照原始方向（真机双手模式只接一侧、直握；11-11 一款体育游戏的球类项目实机）
+    s2a_mac_ns2_set_game_style(1 << 2);
+    s2a_mac_ns2_read(&shaped, &side);
+    expect(shaped.buttons == (1ull << 2) && side == (1u << 26) && s2a_mac_ns2_raw_now(), "game uses JoyconPair only: single Joy-Con stays raw (vertical)");
+    expect(s2a_mac_ns2_single_style(NS2_KIND_JOYCON_L) == (1 << 3) && s2a_mac_ns2_single_style(NS2_KIND_JOYCON_R) == (1 << 4) &&
+           !s2a_mac_ns2_single_style(NS2_KIND_PRO) && !s2a_mac_ns2_single_style(NS2_KIND_JOYCON_PAIR) && !s2a_mac_ns2_single_style(NS2_KIND_NONE),
+           "single Joy-Con style hint: only one Joy-Con maps to JoyconLeft / JoyconRight");
+    ns2_state pro = {(1ull << 6) | (1ull << NS2_BUTTON_SL), 1, 2, 3, 4};
+    expect(s2a_mac_ns2_shape(NS2_KIND_PRO, 0, &pro) == 0 && pro.buttons == ((1ull << 6) | (1ull << NS2_BUTTON_SL)) && pro.lx == 1,
+           "shape leaves the Pro controller untouched");
+    s2a_mac_ns2_set_game_style(1 << 4);
     // 通道 v2 带型号（#520）：游戏端照收；菜单显示名跟着型号
     expect(s2a_mac_ns2_kind() == NS2_KIND_JOYCON_R && !strcmp(s2a_mac_ns2_kind_name(s2a_mac_ns2_kind()), "Joy-Con 2 (R)"),
            "relay v2 carries the controller kind to the game");

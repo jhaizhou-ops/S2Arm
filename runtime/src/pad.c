@@ -74,7 +74,8 @@ void s2a_pad_update(s2a_pad_source source, int connected, uint32_t buttons, cons
     }
     if (!connected) memset(p, 0, sizeof *p);
     else {
-        buttons &= 0xffffu; // NS2 Home/Capture/C/GL/GR 不可误当成 Ryujinx 的摇杆方向位。
+        // NS2 Home/Capture/C/GL/GR（16..20）不可误当成 Ryujinx 的摇杆方向位；SL / SR（Ryujinx 24..27，单只 Joy-Con 原始方向时 Mac 前端给，#520 A）放行
+        buttons &= S2A_PAD_KEYS;
         p->latch |= buttons & ~p->buttons;
         p->buttons = buttons; p->connected = 1;
         memcpy(p->axes, axes, sizeof p->axes);

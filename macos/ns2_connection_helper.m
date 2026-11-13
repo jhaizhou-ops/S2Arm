@@ -298,6 +298,7 @@ int main(void) {
             pthread_detach(parentWatch);
         start_relay(socketPath);
         configure_bonding();
+        ns2_set_joycon_raw(1);   // 单只 Joy-Con 报原始方向（通道 v2），游戏宿主按游戏样式决定转不转（macos/ns2_controller.c，#520 A）
         if (!ns2_start_with_motion(receive_input, emit_status, receive_motion, NULL)) {
             emit_status(NS2_STATUS_ERROR, "Could not start the controller connection", NULL);
             close(listenFD);

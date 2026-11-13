@@ -28,7 +28,8 @@ iOS「设置」App 的 S2Arm 页 Root.plist 原文英文、zh-Hans.lproj/Root.st
 import json, os, pathlib, plistlib, re, shutil, subprocess, sys
 
 H = pathlib.Path(__file__).resolve().parents[1]
-SRCS = ['ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/cheats_parse.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
+SRCS = ['ios/diagzip.m', 'ios/ea_rumble.m', 'ios/extdisplay.m', 'ios/input_config.m', 'ios/play_layout.m', 'ios/prov_expiry.m', 'ios/root_ready.m',   # 11-13 补登：原先没扫，扫过无中文显示串
+        'ios/vpad.m', 'ios/vpad_settings.m', 'ios/vpad_layout.m', 'ios/vpad_cheats.m', 'ios/cheats_parse.m', 'ios/vpad_shell.m', 'ios/cpatch_settings.m', 'ios/cpatch_model.m',
         'ios/app.m', 'ios/app_settings.m', 'ios/controller.m', 'ios/diag.m', 'ios/diagredact.m', 'ios/dprompt.m', 'ios/hud.m', 'ios/iml_probe.m',
         'ios/lan_permission.m', 'ios/ldn_lan.m', 'ios/loadpage.m', 'ios/notice.m', 'ios/phone_motion.m', 'ios/save_transfer.m', 'ios/settings.m',
         'ios/textinput.m', 'ios/touch_config.m']

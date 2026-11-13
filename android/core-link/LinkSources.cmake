@@ -88,6 +88,7 @@ function(s2a_android_nvk_sources output)
         native/nvn/nvn_vk_program_result.c native/nvn/nvn_vk_compute_request.c native/gfx_plat/nvk_shader.c
         # nvn_gpu_* 的 Vulkan 后端与它的零件
         native/nvn/backend_vulkan.c native/nvn/nvn_vk_format.c native/nvn/nvn_vk_bcdec.c
+        native/nvn/nvn_vk_driver_cache.c   # 驱动管线缓存落盘文件层（backend_vulkan.c 的 plc_open / plc_close 用；SHA-256 用上面的 sha256.c）
         ../graphics/nvn/gfx/nvn/nvn_fmt_expand.c
         # 回放核心（安卓 / 鸿蒙共用）
         ../graphics/nvn/replay/rp_exec.c ../graphics/nvn/replay/rp_copy_t2b.c ../graphics/nvn/replay/rp_clear_tex.c ../graphics/nvn/replay/rp_state.c ../graphics/nvn/replay/rp_entry.c

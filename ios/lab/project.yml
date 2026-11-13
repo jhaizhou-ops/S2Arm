@@ -40,6 +40,7 @@ targets:
       - sdk: ExternalAccessory.framework
       - sdk: UniformTypeIdentifiers.framework
       - sdk: MetricKit.framework
+      - sdk: CoreTelephony.framework
       - sdk: Metal.framework
       - sdk: libz.tbd
     info:

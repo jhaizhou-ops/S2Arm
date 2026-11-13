@@ -82,7 +82,9 @@ src=("$repo/android/tests/vk/t_backend_vk.c"
      "$repo/android/native/capprobe/capprobe_host.c"
      "$repo/android/native/nvn/nvn_vk_format.c"
      "$repo/graphics/nvn/gfx/nvn/nvn_fmt_expand.c"
-     "$repo/android/native/nvn/nvn_vk_bcdec.c")
+     "$repo/android/native/nvn/nvn_vk_bcdec.c"
+     "$repo/android/native/nvn/nvn_vk_driver_cache.c"
+     "$repo/android/native/direct/sha256.c")
 bc_src=("$repo/android/tests/vk/t_bc_decode.c"
      "$repo/android/native/nvn/nvn_vk_bcdec.c"
      "$repo/android/native/direct/vk_device.c"
@@ -104,6 +106,7 @@ if [ "$mode" = "--gs-core" ]; then
          "$repo/android/native/nvn/backend_vulkan.c" "$repo/android/native/direct/vk_device.c" "$repo/android/native/direct/gs_path.c" "$repo/android/native/capprobe/capprobe_host.c"
          "$repo/android/native/nvn/nvn_vk_format.c" "$repo/graphics/nvn/gfx/nvn/nvn_fmt_expand.c" "$repo/android/native/nvn/nvn_vk_bcdec.c"
          "$repo/android/native/nvn/nvn_vk_program_result.c" "$repo/android/native/nvn/nvn_vk_compute_request.c"
+         "$repo/android/native/nvn/nvn_vk_driver_cache.c"
          "$repo/android/native/direct/source_store.c" "$repo/android/native/direct/control.c" "$repo/android/native/direct/input_identity.c" "$repo/android/native/direct/texture_facts.c"
          "$repo/android/native/direct/sha256.c" "$repo/android/native/direct/json.c" "$repo/android/native/direct/jv.c" "$repo/android/native/direct/compile_request.c"
          "$repo/android/native/direct/offline_library.c" "$repo/android/native/direct/program_cache.c" "$repo/runtime/src/direct_host.c")
@@ -127,7 +130,12 @@ pathlib.Path(target).write_text(s.replace(a, b))
 PYMUT
         src[1]="$out/backend_mutant.c" ;;
 esac
-cc "${cflags[@]}" "${inc[@]}" "${src[@]}" -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/t_backend_vk"
+# 管线缓存四个入口的 --wrap 只给默认档：--gs-core 档的测试源（t_replay_gs.c）没有对应的 __wrap 定义，带上会链接失败。
+pc_wrap=(-Wl,--wrap=vkCreatePipelineCache -Wl,--wrap=vkGetPipelineCacheData
+         -Wl,--wrap=vkCreateGraphicsPipelines -Wl,--wrap=vkCreateComputePipelines)
+if [ "$mode" = "--gs-core" ]; then pc_wrap=(); fi
+cc "${cflags[@]}" "${inc[@]}" "${src[@]}" -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties \
+    ${pc_wrap[@]+"${pc_wrap[@]}"} -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/t_backend_vk"
 
 export VK_DRIVER_FILES=$icd
 export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0}

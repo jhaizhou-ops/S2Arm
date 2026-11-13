@@ -95,10 +95,59 @@ namespace S2A.Services
             type == ControllerType.Handheld ? (styles & type) != 0 && !device.System.State.DockedMode
             : device.Hid.Npads.StyleSupported(type, styles) || (type == ControllerType.ProController && (styles & ControllerType.JoyconPair) != 0)
                                    || (type == ControllerType.JoyconPair && (styles & ControllerType.ProController) != 0);   // 这一对 Remap 自己会换
+        // 单只 Joy-Con（#520 A，照真机）：连着单只 Joy-Con 2（宿主 s2a_vpad_joycon_style 报它那一侧的 JoyconLeft / JoyconRight）、
+        //   游戏收这个样式、只有一个手柄 → 改成 Player1 的这个样式，游戏按 NpadJoyHoldType 自己转竖 / 横；
+        //   Joy-Con 断开 / 换成别的、或游戏不收了 → 换回改之前的。返回要改成的 (手柄号, 样式)，不改为 (Unknown, None)。纯函数，单测 --joycon-style
+        internal static (PlayerIndex, ControllerType) JoyconPick(ControllerType styles, ControllerType single, int pads, ControllerType current,
+                                                                ControllerType before, PlayerIndex playerBefore)
+        {
+            if (single != ControllerType.None && (styles & single) != 0 && pads == 1)
+                return current == single ? (PlayerIndex.Unknown, ControllerType.None) : (PlayerIndex.Player1, single);
+            if (before != ControllerType.None && current is ControllerType.JoyconLeft or ControllerType.JoyconRight)
+                return (playerBefore, before);
+            return (PlayerIndex.Unknown, ControllerType.None);
+        }
+        private static ControllerType _joyconBefore = ControllerType.None;
+        private static PlayerIndex _joyconPlayerBefore;
+        private static delegate* unmanaged<int> _joyconStyle;
+        private static delegate* unmanaged<int, void> _setStyle;
+        private static bool FollowJoyconStyle(Switch device, ControllerType styles)
+        {
+            ControllerType single = _joyconStyle != null ? (ControllerType)_joyconStyle() : ControllerType.None;
+            (PlayerIndex player, ControllerType type) = JoyconPick(styles, single, _pads, _type, _joyconBefore, _joyconPlayerBefore);
+            if (type == ControllerType.None) return single != ControllerType.None && _type == single;
+            if (type == single)
+            {
+                if (_joyconBefore == ControllerType.None) { _joyconBefore = _type; _joyconPlayerBefore = _player; }
+                Console.Error.WriteLine($"S2A 虚拟手柄：连着单只 Joy-Con、游戏收 {single}，改成 {player} 的 {type}（游戏按握法自己转）");
+            }
+            else
+            {
+                _joyconBefore = ControllerType.None;
+                Console.Error.WriteLine($"S2A 虚拟手柄：单只 Joy-Con 不在了或游戏不收 {_type}，换回 {player} 的 {type}");
+            }
+            SetPrimary(device, player, type);
+            return true;
+        }
+        // 告诉宿主的样式（宿主据此定单只 Joy-Con 报原始方向还是转横握）：Pro / 双 Joy-Con 这一对 Remap 会自己互换，按游戏收不收 Pro 报——
+        //   收 Pro 报 Pro（宿主转横握扮 Pro，一只手柄全键可用，同改前）；不收 Pro、只收双 Joy-Con 报 JoyconPair（11-11 实机：一款体育游戏的球类项目：
+        //   游戏只收 掌机 / 双 Joy-Con、要玩家直握一只，真机是双手模式只接一侧、按原始方向报）。其余样式原样。纯函数，单测 --joycon-style
+        internal static ControllerType ReportedStyle(ControllerType styles, ControllerType type)
+        {
+            if (styles == ControllerType.None || type is not (ControllerType.ProController or ControllerType.JoyconPair)) return type;
+            return (styles & ControllerType.ProController) != 0 ? ControllerType.ProController
+                 : (styles & ControllerType.JoyconPair) != 0 ? ControllerType.JoyconPair : type;
+        }
+        private static void ReportStyle(Switch device)
+        {
+            if (_setStyle != null) _setStyle((int)ReportedStyle(device.Hid.Npads.SupportedStyleSets, _type));
+        }
         internal static void FollowSupportedStyles(Switch device)
         {
             ControllerType styles = device.Hid.Npads.SupportedStyleSets;
             if (styles == ControllerType.None) return;
+            ReportStyle(device);   // 游戏改了声明、样式没变时也要更新（改配时 SetPrimary 另报）
+            if (FollowJoyconStyle(device, styles)) return;
             if (_styleBefore != ControllerType.None && _type != _styleBefore && Accepts(device, styles, _styleBefore))
             {
                 Console.Error.WriteLine($"S2A 虚拟手柄：游戏又收 {_styleBefore}，换回去");
@@ -182,6 +231,7 @@ namespace S2A.Services
                 _feedback?.SetPlayer(_player);
                 Interlocked.Increment(ref _configurationGeneration);
             }
+            ReportStyle(device);   // 宿主按这一格的样式决定单只 Joy-Con 报原始方向还是转横握（#520 A）
 
             if (_thread != null)
             {
@@ -254,6 +304,14 @@ namespace S2A.Services
                 // 游戏声明触屏配置时告诉宿主前端：iOS 壳自动切仅触屏（ios/touch_config.m），Mac 游戏窗口在缺省键位下把左键让给触屏（front_mac.m）；平台例外同上，安卓宿主没有这个导出
                 if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_touch_configured", out nint vconfigured))   // 平台例外：宿主前端（iOS 壳 touch_config.m / Mac 游戏窗口 front_mac.m）专有导出，同 s2a_vpad_touch_wanted / s2a_vpad_read_touch，安卓与无窗口宿主没有，进不了 Native.Imports 的 DllImport
                     VPadTouchConfigured = (delegate* unmanaged<int, int>)vconfigured;
+                // 单只 Joy-Con 原始方向（#520 A）：Mac 游戏窗口（macos/front_mac.m）专有导出；平台例外同 s2a_vpad_touch_configured，iOS / 安卓宿主没有
+                if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_joycon_style", out nint vjoycon) &&   // 平台例外：Mac 游戏窗口专有导出，进不了 Native.Imports 的 DllImport
+                    NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_set_style", out nint vstyle))   // 平台例外：同上
+                {
+                    _joyconStyle = (delegate* unmanaged<int>)vjoycon;
+                    _setStyle = (delegate* unmanaged<int, void>)vstyle;
+                    ReportStyle(device);
+                }
                 if (NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "s2a_vpad_read_ex", out nint extended))
                 {
                     nint program = NativeLibrary.GetMainProgramHandle();
@@ -295,6 +353,7 @@ namespace S2A.Services
             _lastSticks = default;
             _movedOffHandheld = false;   // 审计 P1-94：上一局「挪出掌机格」不带进下一局（同进程重启）
             _styleBefore = ControllerType.None;   // 同上：上一局「按样式换过」不带进下一局
+            _joyconBefore = ControllerType.None;   // 同上：上一局「按单只 Joy-Con 换过」不带进下一局
         }
 
         private static delegate* unmanaged<int*, uint> _vpadRead;
