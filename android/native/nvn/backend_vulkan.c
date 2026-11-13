@@ -318,6 +318,7 @@ static uint64_t g_life_ns[8], g_life_n[8];
 #define LIFE_ADD(i) do { if (g_draw_tm) { uint64_t ln_ = now_ns(); __atomic_fetch_add(&g_life_ns[i], ln_ - lt_, __ATOMIC_RELAXED); __atomic_fetch_add(&g_life_n[i], 1, __ATOMIC_RELAXED); lt_ = ln_; } } while (0)
 static uint64_t now_ns(void);
 static int g_draw_tm; static uint64_t g_draw_ns[3];   // 绘制入口分段计时：描述符 / 状态 / 顶点索引与绘制调用
+static void draw_tm_init(void) { if (!g_draw_tm) g_draw_tm = nvn_plat_flag("nvk_gputime", 0) != 0; }   // 与 GPU 时间戳同一个开关
 static uint64_t g_pl_ns, g_pl_n, g_pl_steps;   // 取图形管线：命中查找的累计纳秒 / 次数 / 比过的条数
 static struct nvn_gpu_pipe_s *g_pipe_ht[PIPE_HT_N];   // 图形管线的散列桶（见 pipe_hash）；持 g_mu
 // ---- 驱动管线缓存（#822）：后端建的每条管线都带同一个 VkPipelineCache；会话收尾把驱动给的数据写进 open_desc.cache_dir，
@@ -3751,7 +3752,8 @@ static int prepare_bind_layouts(struct nvn_gpu_cmd_s *c, int compute) {
 }
 
 void nvn_gpu_draw(nvn_gpu_cmd ch, const nvn_gpu_draw_args *a) {
-    const int dtm = g_draw_tm; const uint64_t dt0 = dtm ? now_ns() : 0;   // 诊断：这笔绘制各段用时（nvk_gputime 开着才计）
+    draw_tm_init();   // 诊断：这笔绘制各段用时（nvk_gputime 开着才计）
+    const int dtm = g_draw_tm; const uint64_t dt0 = dtm ? now_ns() : 0;
     struct nvn_gpu_cmd_s *c = ch;
     if (!c || !rc_is(c->sticky, NVN_GPU_OK)) return;
     if (!c->in_pass || !c->pipe || !a) { set_sticky(c, NVN_GPU_E_ORDER, "draw 缺通道 / 管线 / 参数"); return; }
@@ -3902,7 +3904,34 @@ void nvn_gpu_draw(nvn_gpu_cmd ch, const nvn_gpu_draw_args *a) {
     } else {
         vkCmdDraw(c->cb, a->count, inst, a->first, a->base_instance);
     }
-    if (dtm) { const uint64_t dt3 = now_ns(); __atomic_fetch_add(&g_draw_ns[0], dt1 - dt0, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[1], dt2 - dt1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[2], dt3 - dt2, __ATOMIC_RELAXED); }
+    if (dtm) { const uint64_t dt3 = now_ns(); __atomic_fetch_add(&g_draw_ns[0], dt1 - dt0, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[1], dt2 - dt1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_draw_ns[2], dt3 - dt2, __ATOMIC_RELAXED);
+        // 每 5 秒一次：把后端逐笔的三段（描述符 / 状态 / 顶点索引与绘制调用）摊到每笔上打印，
+        // 找到后端这笔 5 微秒里到底是谁（真机读数见坑记录续 27）。
+        static uint64_t w_t0; static uint64_t w_n;
+        w_n++;
+        const uint64_t now = dt3;
+        if (!w_t0) w_t0 = now;
+        if (now - w_t0 >= 5000000000ull) {
+            const uint64_t a0 = __atomic_exchange_n(&g_draw_ns[0], 0, __ATOMIC_RELAXED);
+            const uint64_t a1 = __atomic_exchange_n(&g_draw_ns[1], 0, __ATOMIC_RELAXED);
+            const uint64_t a2 = __atomic_exchange_n(&g_draw_ns[2], 0, __ATOMIC_RELAXED);
+            const uint64_t d0 = __atomic_exchange_n(&g_desc_ns[0], 0, __ATOMIC_RELAXED);
+            const uint64_t d1 = __atomic_exchange_n(&g_desc_ns[1], 0, __ATOMIC_RELAXED);
+            const uint64_t d2 = __atomic_exchange_n(&g_desc_ns[2], 0, __ATOMIC_RELAXED);
+            const uint64_t d3 = __atomic_exchange_n(&g_desc_ns[3], 0, __ATOMIC_RELAXED);
+            const uint64_t dnw = __atomic_exchange_n(&g_desc_nw, 0, __ATOMIC_RELAXED);
+            const uint64_t dsets = __atomic_exchange_n(&g_desc_sets, 0, __ATOMIC_RELAXED);
+            char b2[320];
+            snprintf(b2, sizeof b2, "后端逐笔（微秒/笔，共 %llu 笔）：入口 %.2f（描述符准备 %.2f / 更新 %.2f / 绑定 %.2f / 收尾 %.2f）、状态 %.2f、顶点索引与绘制 %.2f；描述符更新 %.2f 笔/笔（%.1f 套）",
+                     (unsigned long long)w_n,
+                     (double)(a0 + a1 + a2) / 1000.0 / (double)w_n, (double)d0 / 1000.0 / (double)w_n, (double)d1 / 1000.0 / (double)w_n,
+                     (double)d2 / 1000.0 / (double)w_n, (double)d3 / 1000.0 / (double)w_n,
+                     (double)a1 / 1000.0 / (double)w_n, (double)a2 / 1000.0 / (double)w_n,
+                     (double)dnw / (double)w_n, (double)dsets / (double)w_n);
+            nvn_plat_log(NVN_PLAT_LOG_INFO, "draw", b2);
+            w_t0 = now; w_n = 0;
+        }
+    }
 }
 
 // 本段未实现的区域：一律粘滞 UNSUPPORTED / 返回 UNSUPPORTED，不空实现。
