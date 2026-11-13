@@ -393,6 +393,40 @@ class ScanTests(unittest.TestCase):
         self.assertNotIn('fixtureperson', p.stdout + p.stderr)
         self.assertEqual(r['coverage']['unreviewed_binary_or_encoding'], 1)
 
+    def test_identity_compatibility_fixtures_are_scanned(self):
+        names = ['android/tests/fixtures/input-identity-v1/' + name + '.bin'
+                 for name in ('vs', 'vsfs', 'cs')]
+        self.commit({name: b'\0\x01identity-compat\0' for name in names})
+        proc, report = self.scan()
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(report['coverage'], {'binary_ascii': 3})
+        self.assertEqual(report['uncovered'], [])
+
+    def test_identity_fixture_scope_and_content_checks(self):
+        directory = 'android/tests/fixtures/input-identity-v1/'
+        name = directory + 'cs.bin'
+        unlisted = [directory + 'other.bin',
+                    'android/tests/fixtures/input-identity-v2/cs.bin',
+                    'assets/cs.bin', directory + 'prod.keys']
+        self.commit({name: b'\0/Users/fixtureperson/identity\0',
+                     **{p: b'original sentinel: must not read' for p in unlisted}})
+        approved_oid = self.git('rev-parse', 'HEAD:' + name)
+        read = self.mod.Blobs.read
+        observed = []
+
+        def checked_read(reader, oid, size):
+            self.assertEqual(oid, approved_oid, 'unlisted payloads and credentials stay unread')
+            observed.append(oid)
+            return read(reader, oid, size)
+
+        with patch.object(self.mod.Blobs, 'read', checked_read):
+            report = self.mod.scan(self.root, 'HEAD', ['.'])
+        self.assertTrue(observed)
+        self.assertEqual([(f['path'], f['category']) for f in report['findings']],
+                         [(name, 'home_path')])
+        self.assertEqual({f['path'] for f in report['uncovered_blocking']}, set(unlisted))
+        self.assertNotIn('fixtureperson', json.dumps(report))
+
     def test_git_paths_nul_preserved_and_output_json_escaped(self):
         names = ['文档/截图.PNG', 'docs/a b.md', 'docs/a\nb.md', 'docs/a\tb.md',
                  'docs/a"b.md', 'docs/a\\b.md', '-leading.md']

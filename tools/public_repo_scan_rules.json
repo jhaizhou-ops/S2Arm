@@ -532,6 +532,9 @@
       "sessions"
     ],
     "binary_ascii_globs": [
+      "android/tests/fixtures/input-identity-v1/vs.bin",
+      "android/tests/fixtures/input-identity-v1/vsfs.bin",
+      "android/tests/fixtures/input-identity-v1/cs.bin",
       "android/codecs/tests/vectors/*.h264",
       "android/codecs/tests/vectors/*.headers",
       "android/codecs/tests/vectors/*.pps-change",
