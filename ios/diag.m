@@ -357,12 +357,34 @@ static NSURL *issue_url(NSString *code) {
     [u appendFormat:@"&platform=%@&title=%@", enc(plat), enc(@S2A_DIAG_ISSUE_TITLE)];
     return [NSURL URLWithString:u];
 }
-static void post_zip(NSURL *zip, int attempt, void (^done)(NSString *code, NSString *fail)) {
+// 总时限（11-13 玩家卡在「正在上传…」）：原先 timeoutInterval = 120 只管两次收发之间多久没动静，网慢 / 代理半通时可以一直挂着，失败还再试一次，没有总上限。
+//   现在从第一次开始算 90 秒（两次尝试合计），每次尝试的资源时限 = 剩下的时间，到点按失败处理；进行中的那次可被「取消」停掉（settings 那一行）
+#define DIAG_UPLOAD_TOTAL_S 90.0
+static NSURLSessionTask *g_upload_task;   // 正在传的那次（主线程读写）；取消时 cancel 它
+static BOOL g_upload_cancelled;
+BOOL s2a_diag_is_uploading(void) { return g_upload_task != nil; }
+void s2a_diag_cancel_upload(void) {   // 主线程调：停掉正在传的那次，结果按「已取消」给（不再重试）
+    if (!g_upload_task) return;
+    g_upload_cancelled = YES; LOG("诊断包：玩家取消上传"); [g_upload_task cancel];
+}
+static void post_zip(NSURL *zip, int attempt, CFAbsoluteTime started, void (^done)(NSString *code, NSString *fail)) {
+    double left = DIAG_UPLOAD_TOTAL_S - (CFAbsoluteTimeGetCurrent() - started);
+    if (left < 1) { LOG("【红】诊断包：上传超过 %.0f 秒总时限，按失败处理", DIAG_UPLOAD_TOTAL_S);
+        dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(nil, [NSString stringWithFormat:S2AL(@"diag.upload.fail.timeout"), (int)DIAG_UPLOAD_TOTAL_S]); }); return; }
+    NSURLSessionConfiguration *cfg = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    cfg.timeoutIntervalForRequest = MIN(30.0, left); cfg.timeoutIntervalForResource = left;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
     NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://diag.s2arm.com/v1/upload"]];
-    rq.HTTPMethod = @"POST"; rq.timeoutInterval = 120;
+    rq.HTTPMethod = @"POST";
     [rq setValue:@"application/zip" forHTTPHeaderField:@"Content-Type"];
     [rq setValue:[@"ios/" stringByAppendingString:[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"0"] forHTTPHeaderField:@"X-S2Arm-Client"];
-    [[NSURLSession.sharedSession uploadTaskWithRequest:rq fromFile:zip completionHandler:^(NSData *data, NSURLResponse *resp, NSError *e) {
+    NSURLSessionUploadTask *task = [session uploadTaskWithRequest:rq fromFile:zip completionHandler:^(NSData *data, NSURLResponse *resp, NSError *e) {
+        [session finishTasksAndInvalidate];
+        if (g_upload_cancelled || [e.domain isEqualToString:NSURLErrorDomain] && e.code == NSURLErrorCancelled) {
+            dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(nil, S2AL(@"diag.upload.cancelled")); }); return; }
+        if ([e.domain isEqualToString:NSURLErrorDomain] && e.code == NSURLErrorTimedOut && CFAbsoluteTimeGetCurrent() - started >= DIAG_UPLOAD_TOTAL_S - 1) {
+            LOG("【红】诊断包：上传超过 %.0f 秒总时限（%s），按失败处理", DIAG_UPLOAD_TOTAL_S, e.localizedDescription.UTF8String);
+            dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(nil, [NSString stringWithFormat:S2AL(@"diag.upload.fail.timeout"), (int)DIAG_UPLOAD_TOTAL_S]); }); return; }
         int status = [resp isKindOfClass:NSHTTPURLResponse.class] ? (int)((NSHTTPURLResponse *)resp).statusCode : 0;
         id j = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSDictionary *d = [j isKindOfClass:NSDictionary.class] ? j : nil;
@@ -370,11 +392,11 @@ static void post_zip(NSURL *zip, int attempt, void (^done)(NSString *code, NSStr
         s2a_up_verdict v = s2a_diag_up_verdict(status, e != nil, attempt, code.UTF8String);
         if (v == S2A_UP_OK) {
             LOG("诊断包：已上传，短码 %s（第 %d 次），发帖页 %s", code.UTF8String, attempt + 1, issue_url(code).absoluteString.UTF8String);
-            dispatch_async(dispatch_get_main_queue(), ^{ done(code, nil); }); return;
+            dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(code, nil); }); return;
         }
         if (v == S2A_UP_RETRY) {
             LOG("诊断包：上传第 %d 次没成（HTTP %d %s），2 秒后再试一次", attempt + 1, status, e ? e.localizedDescription.UTF8String : "");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ post_zip(zip, attempt + 1, done); }); return;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ post_zip(zip, attempt + 1, started, done); }); return;
         }
         // 给玩家的原因：服务端 message 是中文一句、可直接给玩家看（中文界面用它），英文界面按错误种类给本地一句
         NSString *msg = [d[@"message"] isKindOfClass:NSString.class] ? d[@"message"] : nil, *fail;
@@ -385,15 +407,16 @@ static void post_zip(NSURL *zip, int attempt, void (^done)(NSString *code, NSStr
         else if (status == 400 || status == 413) fail = s2a_l10n_zh() && msg.length ? msg : [NSString stringWithFormat:S2AL(@"diag.upload.fail.rejected"), why];
         else fail = [NSString stringWithFormat:S2AL(@"diag.upload.fail.server"), status];
         LOG("【红】诊断包：上传失败（HTTP %d %s %s），退回导出", status, why.UTF8String, e ? e.localizedDescription.UTF8String : "");
-        dispatch_async(dispatch_get_main_queue(), ^{ done(nil, fail); });
-    }] resume];
+        dispatch_async(dispatch_get_main_queue(), ^{ g_upload_task = nil; done(nil, fail); });
+    }];
+    dispatch_async(dispatch_get_main_queue(), ^{ if (!g_upload_cancelled) { g_upload_task = task; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil]; [task resume]; } else { [task cancel]; } });
 }
 // 传一份已打好的包并给结果（主线程调）：成功显示短码 +「复制短码」；失败说原因，给「再试一次」和「导出诊断包」两条路
 //   （国行 iPhone 第一次联网时系统先弹「允许使用无线数据」，弹着时请求一律报断网——玩家点了允许，再试一次就能传）
 static void upload_zip(UIViewController *host, NSURL *zip) {
     if (g_exporting) return;
-    g_exporting = YES; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
-    post_zip(zip, 0, ^(NSString *code, NSString *fail) {
+    g_exporting = YES; g_upload_cancelled = NO; [NSNotificationCenter.defaultCenter postNotificationName:@"S2ADiagExportChanged" object:nil];
+    post_zip(zip, 0, CFAbsoluteTimeGetCurrent(), ^(NSString *code, NSString *fail) {
         busy_done();
         UIAlertController *a;
         if (code) {
