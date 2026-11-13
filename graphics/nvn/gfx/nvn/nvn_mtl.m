@@ -9873,6 +9873,8 @@ static __attribute__((noinline, cold)) void p20_note(NvShader *sh, int st, const
          sh->key, st, b->kind == NVN_RB_IMG ? "image" : b->kind == NVN_RB_TEXU ? "texture handle in uniform" : "texture", (int)b->reg, (unsigned)b->dtt, (unsigned)b->dpf, d2d ? " (type unknown offline, taken as 2D)" : "",
          tt, pf, mtl_fmt_depth((MTLPixelFormat)pf) ? (unsigned)NVN_DPF_DEPTH : (unsigned)mtl_pf_dpf((MTLPixelFormat)pf), tm ? "; type differs" : "", cm ? "; class differs" : "");
 }
+static long g_td_frame;   // DM_NVN_TEXDUMP selected frame (defined with the TEXDUMP code below; < 0 = off): the bind site checks it before noting 3D textures
+static void td_note_3d(id<MTLTexture> t, uint64_t ser);
 static inline void p20_check(NvShader *sh, int st, const nvn_rbind *b, int tid, void *tv) {
     g_p20_checked++;
     unsigned tt, pf;
@@ -10072,6 +10074,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             __unsafe_unretained id<MTLTexture> size_view = t;
             if (t && g_fb_n && g_fb_seq == g_draw_seq && nvn_stage == 1) for (int q = 0; q < g_fb_n; q++) if (t == g_fb_src[q]) { t = g_fb_use[q]; trid = g_fb_rid[q]; break; }   // same-pass feedback sampling: read the snapshot instead (see fb_prepare)
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
+            if (__builtin_expect(g_td_frame >= 0, 0) && t && tid < g_ntreg && t.textureType == MTLTextureType3D) td_note_3d(t, g_treg[tid].t.serial);   // TEXDUMP: 3D textures the frame samples (td_dump saves them as slice atlases)
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
                        (unsigned long)(t.parentTexture ? t.parentRelativeLevel : 0), (unsigned long)t.mipmapLevelCount,
@@ -15552,6 +15555,14 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
 static long g_td_frame = -2; static const char *g_td_path; static NSMutableArray *g_td_list; static int g_td_done;
 static char *g_td_owned_path;
 static NSIndexSet *g_td_frames;   // only the explicit comma-list mode; sorted and deduplicated
+static NSMutableArray *g_td_3d;   // 3D textures sampled in the selected frame: @[texture, serial] (at most 16; saved by td_dump as slice atlases)
+static void td_note_3d(id<MTLTexture> t, uint64_t ser) {
+    if (g_td_done || (long)atomic_load(&g_cur_frame) != g_td_frame) return;
+    if (!g_td_3d) g_td_3d = [NSMutableArray array];
+    if (g_td_3d.count >= 16) return;
+    for (NSArray *e in g_td_3d) if ([e[1] unsignedLongLongValue] == ser) return;
+    [g_td_3d addObject:@[t.parentTexture && t.parentTexture.textureType == MTLTextureType3D ? t.parentTexture : t, @(ser)]];
+}
 static void td_dump(void);
 static void td_path(char *path, size_t n, int index) {
     if (!g_td_frames) { snprintf(path, n, g_td_path, index); return; }   // legacy single-frame / size filenames
@@ -15565,6 +15576,7 @@ static void td_clear(int pending_gpu) {
     // Only entries with a pass index own a diagnostic copy. Game attachments stay resident.
     for (NSArray *e in g_td_list) if (e.count > 4) { if (pending_gpu) defer_obj_release(e[0]); else res_remove(e[0]); }
     [g_td_list removeAllObjects];
+    [g_td_3d removeAllObjects];   // 3D textures are the game's own (no copy): just forget them
 }
 // DM_NVN_TEXDUMP=size=WxH:path instead picks the frame by content: the first frame that opens a render pass whose first color attachment level is WxH (for one-off work whose frame differs between runs)
 static unsigned g_td_w, g_td_h;
@@ -15613,7 +15625,7 @@ static void td_dump(void) {
     g_td_done = 1;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     mtl_finish_gpu();
-    static id<MTLRenderPipelineState> ps; static id<MTLSamplerState> sp;
+    static id<MTLRenderPipelineState> ps, ps_i[2], ps_3d[3]; static id<MTLSamplerState> sp;
     if (!ps) {
         static const char *src_msl =
             "#include <metal_stdlib>\nusing namespace metal;\n"
@@ -15627,6 +15639,28 @@ static void td_dump(void) {
         ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
         MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new]; sp = [g_dev newSamplerStateWithDescriptor:sd];
         if (!ps) { MLOG("【红】 TEXDUMP pipeline failed %s", e.localizedDescription.UTF8String); td_clear(0); return; }
+        // Integer targets (G-buffer normals / material IDs): a float view reads them as undefined (shows black); read the integer and show 0-255 per channel (signed: +128)
+        // 3D textures: every slice side by side (16 per row), RGB and alpha as separate images (alpha is often the transmittance of a fog / light volume)
+        static const char *int_msl =
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct V { float4 p [[position]]; float2 uv; };\n"
+            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }\n"
+            "fragment float4 fu(V in [[stage_in]], texture2d<uint> t [[texture(0)]]) { uint4 c = t.read(uint2(in.p.xy)); return float4(float3(min(c.rgb, 255u)) / 255.0, 1); }\n"
+            "fragment float4 fi(V in [[stage_in]], texture2d<int> t [[texture(0)]]) { int4 c = t.read(uint2(in.p.xy)); return float4(float3(clamp(c.rgb + 128, 0, 255)) / 255.0, 1); }\n"
+            "static bool cell(float2 p, uint4 k, thread uint3 &c) {   // k: slice width, height, depth, slices per row\n"
+            "    uint2 q = uint2(p); uint z = (q.y / k.y) * k.w + q.x / k.x; c = uint3(q.x % k.x, q.y % k.y, z); return z < k.z; }\n"
+            "#define PICK(c) (a ? float4(c.aaa, 1) : float4(c.rgb, 1))\n"
+            "fragment float4 f3(V in [[stage_in]], texture3d<float> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = t.read(q); return PICK(c); }\n"
+            "fragment float4 f3u(V in [[stage_in]], texture3d<uint> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = float4(min(t.read(q), 255u)) / 255.0; return PICK(c); }\n"
+            "fragment float4 f3i(V in [[stage_in]], texture3d<int> t [[texture(0)]], constant uint4 &k [[buffer(0)]], constant uint &a [[buffer(1)]]) { uint3 q; if (!cell(in.p.xy, k, q)) return float4(0.25, 0, 0.25, 1); float4 c = float4(clamp(t.read(q) + 128, 0, 255)) / 255.0; return PICK(c); }\n";
+        id<MTLLibrary> il = [g_dev newLibraryWithSource:@(int_msl) options:nil error:&e];
+        const char *fn[5] = {"fu", "fi", "f3", "f3u", "f3i"};
+        for (int k = 0; il && k < 5; k++) {
+            d.vertexFunction = [il newFunctionWithName:@"vs"]; d.fragmentFunction = [il newFunctionWithName:@(fn[k])];
+            id<MTLRenderPipelineState> p = [g_dev newRenderPipelineStateWithDescriptor:d error:&e];
+            if (k < 2) ps_i[k] = p; else ps_3d[k - 2] = p;
+        }
+        if (!il || !ps_i[0] || !ps_i[1] || !ps_3d[0] || !ps_3d[1] || !ps_3d[2]) MLOG("【红】 TEXDUMP integer / 3D pipelines failed %s (those targets are dumped as float)", e.localizedDescription.UTF8String);
     }
     MLOG("[texdump] frame %ld: %lu color targets", g_td_frame, (unsigned long)g_td_list.count);
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
@@ -15675,13 +15709,40 @@ static void td_dump(void) {
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
-        [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
+        int cls = mtl_fmt_depth(t.pixelFormat) ? NVN_DPF_DEPTH : mtl_pf_dpf(t.pixelFormat);
+        id<MTLRenderPipelineState> use = cls == NVN_DPF_UINT && ps_i[0] ? ps_i[0] : cls == NVN_DPF_SINT && ps_i[1] ? ps_i[1] : ps;
+        [en setRenderPipelineState:use]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; if (!cb_run(cb)) continue;
         char path[1024]; td_path(path, sizeof path, (int)(ser * 100 + sl * 10 + lv));
         if (e.count > 4) { td_path(path, sizeof path, 0); char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = ""; if (dot && slash && dot < slash) dot = NULL; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);
         shot(o, path, 0, NULL);
+    }
+    // 3D textures the frame sampled (td_note_3d): level 0, every slice in a grid of 16 per row; <TEXDUMP path with %d = 0>_v3d_<serial>_rgb.png / _a.png
+    for (NSArray *e in g_td_3d) {
+        id<MTLTexture> t = e[0]; uint64_t ser = [e[1] unsignedLongLongValue];
+        int cls = mtl_pf_dpf(t.pixelFormat); id<MTLRenderPipelineState> use = ps_3d[cls == NVN_DPF_UINT ? 1 : cls == NVN_DPF_SINT ? 2 : 0];
+        NSUInteger W = t.width, H = t.height, D = t.depth, cols = MIN(D, (NSUInteger)16), rows = (D + cols - 1) / cols;
+        if (!use || W * cols > 8192 || H * rows > 8192) { MLOG("[texdump] 3D ser=%llu %lux%lux%lu format %lu: not saved (%s)", ser, (unsigned long)W, (unsigned long)H, (unsigned long)D, (unsigned long)t.pixelFormat, use ? "atlas too large" : "no pipeline"); continue; }
+        for (uint32_t a = 0; a < 2; a++) {
+            MTLTextureDescriptor *od = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:W * cols height:H * rows mipmapped:NO];
+            od.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; od.storageMode = MTLStorageModePrivate;
+            id<MTLTexture> o = [g_dev newTextureWithDescriptor:od];
+            id<MTLCommandBuffer> cb = q_cb();
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = o; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
+            uint32_t k[4] = {(uint32_t)W, (uint32_t)H, (uint32_t)D, (uint32_t)cols};
+            [en setRenderPipelineState:use]; [en setFragmentTexture:t atIndex:0]; [en setFragmentBytes:k length:sizeof k atIndex:0]; [en setFragmentBytes:&a length:sizeof a atIndex:1];
+            [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; if (!cb_run(cb)) continue;
+            char path[1024]; td_path(path, sizeof path, 0); char *dot = strrchr(path, '.'), *slash = strrchr(path, '/'); char ext[16] = "";
+            if (dot && slash && dot < slash) dot = NULL;
+            if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+            char tail[64]; snprintf(tail, sizeof tail, "_v3d_%llu_%s%s", (unsigned long long)ser, a ? "a" : "rgb", ext); strlcat(path, tail, sizeof path);
+            MLOG("[texdump] 3D ser=%llu %lux%lux%lu format %lu (%s) → %lu slices per row", ser, (unsigned long)W, (unsigned long)H, (unsigned long)D, (unsigned long)t.pixelFormat, a ? "alpha" : "rgb", (unsigned long)cols);
+            shot(o, path, 0, NULL);
+        }
     }
     td_clear(0);
 }

@@ -291,6 +291,7 @@ float s2a_ios_res_scale(NSUserDefaults *defaults) {
 // 诊断局（#438，设置「诊断」组的开关 S2ADiagRunNext）：只管下一局。起局时读到开着就设上逐通道读数的环境变量、立刻关掉开关；
 //   读数写本款文档根下的 diagrun/（出图 PNG 与颜色目标 PNG；逐通道记录 [pass] 行走 stderr → host.log），导出诊断包时带上（diag.m）。
 //   帧号：第 3600 / 7200 次出图（60 帧游戏约 1 / 2 分钟）。这些是重探针、会拖慢帧率，所以只开一局。启动环境显式给的优先
+//   帧内快照到第 60 个渲染 pass（延迟光照这类合成 pass 常在 30 以后）；整数格式的目标按整数值出图，这一帧采样到的 3D 纹理逐层拼成一张图（RGB / alpha 各一张）
 void s2a_ios_apply_diag_run(NSUserDefaults *defaults) {
     if (![defaults boolForKey:@"S2ADiagRunNext"]) return;
     [defaults setBool:NO forKey:@"S2ADiagRunNext"];
@@ -304,7 +305,7 @@ void s2a_ios_apply_diag_run(NSUserDefaults *defaults) {
     }
     NSString *td = [NSString stringWithFormat:@"3600,7200:%@/td_%%d.png", dir], *shot = [NSString stringWithFormat:@"3600,7200:%@/shot_%%d.png", dir];
     struct { const char *name; NSString *value; } vars[] = {
-        {"DM_NVN_PASSDUMP", @"3600-3601"}, {"DM_NVN_TEXDUMP", td}, {"DM_NVN_TEXSNAP", @"0,4,8,12,16,20,24,28"}, {"DM_NVN_SHOT", shot}};
+        {"DM_NVN_PASSDUMP", @"3600-3601"}, {"DM_NVN_TEXDUMP", td}, {"DM_NVN_TEXSNAP", @"0,5,10,15,20,25,30,35,40,45,50,55,60"}, {"DM_NVN_SHOT", shot}};
     for (size_t i = 0; i < sizeof vars / sizeof vars[0]; i++)
         if (!getenv(vars[i].name)) setenv(vars[i].name, vars[i].value.UTF8String, 1);
     fprintf(stderr, "[S2A 诊断局] 本局开逐通道读数（第 3600 / 7200 次出图），读数写 %s，下一局自动关\n", dir.fileSystemRepresentation);
