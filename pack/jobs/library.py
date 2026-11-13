@@ -23,7 +23,7 @@ import time
 import uuid
 import zipfile
 from errors import explain
-from core import Failure, atomic, contained, digest, prune_jobs, read
+from core import Failure, atomic, contained, digest, prune_jobs, read, task_of_log
 import toolchain
 import winproc
 import filelock
@@ -1726,6 +1726,7 @@ def import_games(c):
 
 
 JOB_LIST_LIMIT = 200
+DIAG_JOBS = 50   # 诊断包只带最近这么多个任务（记录 + 各自的日志），外加还没结束的（上传服务单包 1000 个文件上限；11-13）
 
 
 def _mtime(path):
@@ -2796,10 +2797,27 @@ def diagnostics(c):
                 step = "读日志与任务记录"
                 truncated = []
                 changed = []   # 导出期间一直在换、跳过的（#917）
+                # 只带最近 DIAG_JOBS 个任务（按记录改动时间）+ 还没结束的：任务记录 / 各任务日志原先整目录收，用久了上万个文件，
+                #   超过上传服务 1000 个文件上限（「文件数超过 1000 个」）、打包也慢（11-13 维护者机器 703 个任务 + 12296 个任务日志）
+                picked, job_total, included = set(), 0, 0
                 if roots["jobs"] is not None:
-                    for name in sorted(winproc.listdir(roots["jobs"]) if os.name == "nt" else os.listdir(roots["jobs"])):
-                        if name.endswith(".json"):
-                            write_file(roots["jobs"], name, "jobs/" + name[:-5] + ".txt", job=True)
+                    records = []
+                    for name in (winproc.listdir(roots["jobs"]) if os.name == "nt" else os.listdir(roots["jobs"])):
+                        if name.endswith(".json") and not name.endswith(".request.json"):
+                            try:
+                                info = winproc.stat_at(name, roots["jobs"]) if os.name == "nt" else os.stat(name, dir_fd=roots["jobs"], follow_symlinks=False)
+                            except OSError:
+                                continue
+                            records.append((info.st_mtime, name))
+                    records.sort(reverse=True)
+                    job_total = len(records)
+                    for rank, (_, name) in enumerate(records):
+                        task = name[:-5]
+                        if rank < DIAG_JOBS or (read(c.jobpath.parent / name, {}) or {}).get("state") in ("queued", "running"):
+                            picked.add(task.lower()); included += 1
+                            write_file(roots["jobs"], name, "jobs/" + task + ".txt", job=True)
+                picked.add(c.task.lower())   # 本次导出自己
+                skipped_logs = [0]
 
                 def logs(directory_fd, relative=""):
                     for name in sorted(winproc.listdir(directory_fd) if os.name == "nt" else os.listdir(directory_fd)):
@@ -2808,6 +2826,10 @@ def diagnostics(c):
                         member = relative + name
                         if not relative and name == "jobs":
                             continue   # 任务记录上面已按 jobs/ 收过
+                        owner = task_of_log(name) if not relative else None
+                        if owner and owner not in picked:   # 没选进来的任务的日志（<任务>.log、<任务>-install.log、<任务>/…）：不收，只计数
+                            skipped_logs[0] += 1
+                            continue
                         if stat.S_ISDIR(info.st_mode):
                             child = winproc.open_dir_nofollow(name, directory_fd) if os.name == "nt" else os.open(name, flags, dir_fd=directory_fd)
                             try:
@@ -2916,6 +2938,7 @@ def diagnostics(c):
                 manifest["files"] = sorted(archive.namelist() + ["manifest.json"])
                 manifest["truncated"] = truncated   # 超过单份上限被截的日志 / 任务记录：原长、留下、截掉的字节（空 = 全部整份）
                 manifest["changed"] = changed   # 导出期间一直在被替换、没收进来的（#917；空 = 全收到）
+                manifest["jobs"] = dict(total=job_total, included=included, limit=DIAG_JOBS, omittedLogs=skipped_logs[0])   # 任务记录共几个、收了几个（含没结束的）、省掉的任务日志数
                 archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             # 身份在写完、落盘后再取（仍握着句柄，防调包不变）：exFAT / FAT 上新文件写入数据分到存储后 inode 号会变，
             #   建文件时取的身份必然对不上（诊断包存到 exFAT 盘上一律报「临时文件在导出期间发生变化」）
