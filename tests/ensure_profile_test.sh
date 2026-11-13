@@ -3,6 +3,8 @@
 #   ① 假 xcodebuild 打 Xcode 26 缺 iOS 平台组件的原文（「iOS 26.5 is not installed. Please download and install the platform from Xcode」）并退 65
 #      → 退 1、有一行「【红】本机 Xcode 没装 iOS 平台组件 … xcodebuild -downloadPlatform iOS」（11-05 七龙珠Z 新包名签不了）
 #   ② 别的编译错误（假 xcodebuild 打 error: Signing requires a development team）→ 退 1、不出平台组件那行（只认真缺平台）
+#   ⑥ #897 免费个人团队：Xcode 先打真正原因「error: … Personal development teams … do not support the Extended Virtual Addressing capability.」、
+#      再打泛泛的「error: No profiles for … were found」→ 退 1、红行带第一条（Personal development teams），不是最后那条
 #   ③ S2A_PROFILE_NEED_UDIDS=「U1 U2」、描述文件目录里本包名一份只含 U1、一份含 U1 U2、别的包名一份只含 U1（假 security cms 原样吐文件）
 #      → 只有「本包名缺 U2」那份移进 <产物根>/.stale_profiles/，另两份原地不动；假 xcodebuild 成功 → 退 0（11-07 Duo 登记前申请的描述文件装不上 Duo）
 #   ④ 没给 S2A_PROFILE_NEED_UDIDS → 一份都不移
@@ -19,6 +21,9 @@ ck "① 缺 iOS 平台组件 → 退 ${r}（期望 1）、给出修法行" '[ $r
 fake 'error: Signing for "Prov" requires a development team.'
 o=$(run); r=$?
 ck "② 别的签名错误 → 退 ${r}（期望 1）、不出平台组件行" '[ $r = 1 ] && ! grep -q "没装 iOS 平台组件" <<< "$o"'
+printf '#!/bin/bash\necho "error: Cannot create a iOS App Development provisioning profile for \"com.example.t1\". Personal development teams, including \"T\", do not support the Extended Virtual Addressing capability."\necho "error: No profiles for '"'"'com.example.t1'"'"' were found: Xcode couldn'"'"'t find any iOS App Development provisioning profiles matching '"'"'com.example.t1'"'"'."\nexit 65\n' > "$T/bin/xcodebuild"; chmod +x "$T/bin/xcodebuild"
+o=$(run); r=$?
+ck "⑥ 免费团队不支持的权限 → 退 ${r}（期望 1）、红行带第一条原因" '[ $r = 1 ] && grep -q "【红】申请 com.example.t1 的开发描述文件失败（error: Cannot create.*Personal development teams" <<< "$o"'
 P=$T/prof; mkdir -p "$P"; pl() { printf '<plist><dict><key>application-identifier</key><string>%s</string><key>ProvisionedDevices</key><array>%s</array></dict></plist>\n' "$1" "$2"; }
 pl TEAM123.com.example.t1 '<string>U1</string>' > "$P/old.mobileprovision"; pl TEAM123.com.example.t1 '<string>U1</string><string>U2</string>' > "$P/new.mobileprovision"
 pl TEAM123.com.example.other '<string>U1</string>' > "$P/other.mobileprovision"

@@ -85,6 +85,8 @@ class PickTests(unittest.TestCase):
         self.assertEqual(install.classify("The maximum number of apps for free development profiles has been reached."), "free_app_limit")   # 较早 iOS 的装机原文：说的是装上的 apps
         self.assertEqual(install.classify("This device has reached the maximum number of installed apps using a free developer profile"), "free_app_limit")   # 11-06 iOS 27 原文
         self.assertEqual(install.classify('error: No Account for Team "TEAM1".'), "xcode_account_missing")
+        # #897 免费个人团队申请了付费团队才有的权限（Xcode 原文，第一条 error；后面跟的「No profiles … were found」不该盖过它）
+        self.assertEqual(install.classify('error: Cannot create a iOS App Development provisioning profile for "io.s2arm.ds.x". Personal development teams, including "T", do not support the Extended Virtual Addressing capability.'), "free_team_capability")
         self.assertEqual(install.classify("error: something else"), "signing_failed")
 
     FAKE_TEAM = "ABCDE" + "12345"

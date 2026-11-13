@@ -24,7 +24,8 @@ H=$(cd "$(dirname "$0")" && pwd); D=$(mktemp -d); trap 'rm -rf "$D"' EXIT; cp -R
   || { KL=${S2A_ROOTS:-${S2A_RUN_ROOT:-$HOME/.s2arm/run}/s2arm/roots}/.failed/${BID}_ensure_profile.log; mkdir -p "$(dirname "$KL")"; if ! cp "$D/build.log" "$KL" 2> /dev/null; then KL="（没留住：拷不进 ${KL}）"; fi   # 失败留全文（临时目录退出即删，10-30 凌晨原因一栏是空的、现场也没了）
        # 11-08：第一次签名弹钥匙串授权框没人点，xcodebuild 等到 timeout 打 BUILD INTERRUPTED，末尾的 error 行是无关的 DVTDevice 杂音
        grep -aq 'BUILD INTERRUPTED' "$D/build.log" && { echo "【红】等钥匙串授权超时：在这台 Mac 屏幕上的钥匙串弹窗里点「始终允许」（需要的话输入 Mac 登录密码），再点一次「装到 iPhone」"; exit 1; }
-       echo "【红】申请 ${BID} 的开发描述文件失败（$(grep -a -i 'error' "$D/build.log" | grep -v '^ *$' | tail -1 | cut -c1-200 | grep . || echo "xcodebuild 没打错误行，末行：$(tail -1 "$D/build.log" | cut -c1-160)")；全文 ${KL}）"
+       # #897：Xcode 先打真正的原因（第一条 error:，如「Personal development teams … do not support the … capability」），后面跟泛泛的「No profiles … were found」；原先取最后一条，原因丢了
+       echo "【红】申请 ${BID} 的开发描述文件失败（$(grep -a 'error:' "$D/build.log" | head -1 | cut -c1-240 | grep . || grep -a -i 'error' "$D/build.log" | grep -v '^ *$' | tail -1 | cut -c1-200 | grep . || echo "xcodebuild 没打错误行，末行：$(tail -1 "$D/build.log" | cut -c1-160)")；全文 ${KL}）"
        grep -a -o 'error:The device needs to be unlocked[^}]*\|error:[^}]*locked[^}]*' "$D/build.log" | head -1 | cut -c1-200
        # 11-05：Xcode 升级后 iOS 平台组件不跟着装，xcodebuild 报「iOS 26.5 is not installed. Please download and install the platform」——
        #   新包名一律申请不到描述文件（老包名有现成的不受影响），原文埋在长行里看不出修法，这里直说

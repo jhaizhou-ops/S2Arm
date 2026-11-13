@@ -541,6 +541,7 @@ SIGN_ERRORS = (
     # ①仍排在前面，万一一行里两种字样都有，按删 App 无效的那件事报，免得玩家白删。
     (r"App ID limit|\b10 App IDs\b|maximum number of App IDs|(?:error|code)\D{0,20}\b9120\b", "free_appid_limit"),
     (r"maximum number of (?:installed )?apps\b|(?:maximum|limit)[^\n]{0,100}free development profiles", "free_app_limit"),
+    (r"Personal development teams[^\n]{0,160}do not support", "free_team_capability"),   # #897 免费个人团队申请了只有付费团队才有的权限（如扩展虚拟寻址）
     (r"(?:error|code)\D{0,20}\b9401\b|App ID with Identifier[^\n]{0,120}is not available", "app_id_taken"),   # 包名已被占用（Apple 9401）
     # 手机上已有同包名、别的签名装的 App（玩家自签装过 S2Arm）：系统安装服务拒绝覆盖（installation_proxy MismatchedApplicationIdentifierEntitlement）
     (r"MismatchedApplicationIdentifierEntitlement|application-identifier entitlement string[^\n]{0,240}does not match", "app_other_signer"),

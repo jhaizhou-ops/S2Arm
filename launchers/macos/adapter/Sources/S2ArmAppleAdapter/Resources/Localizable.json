@@ -7234,5 +7234,9 @@
  {
   "source": "进程卡在系统内核里还没退出（多为内存不够时等换页）；等它自行结束后再开，关掉其他占内存的程序可减少再次卡住。",
   "en": "The process is stuck in the system kernel and has not exited yet (usually waiting on paging when memory is short). Wait for it to end on its own before starting again; closing other memory-heavy apps makes it less likely to happen again."
+ },
+ {
+  "source": "免费个人开发者团队签不了这个 App 申请的某项权限（例如「扩展虚拟寻址」）；更新 S2Arm 后重新安装（新版对免费团队只申请能签的权限），或在 Xcode 改用付费开发者团队。",
+  "en": "A free personal development team cannot sign a capability this app requests (such as Extended Virtual Addressing). Update S2Arm and install again (the new version requests only what a free team can sign), or switch to a paid development team in Xcode."
  }
 ]
