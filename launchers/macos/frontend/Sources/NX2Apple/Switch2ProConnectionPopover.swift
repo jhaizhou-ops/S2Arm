@@ -34,12 +34,12 @@ struct Switch2ProConnectionPopover: View {
             Divider().opacity(0.3)
 
             if controller.hasSystemController {
-                Text(zh ? "连接与断开由 macOS 管理。如需重新配对，请打开系统设置中的「蓝牙」。"
-                        : "macOS manages this connection. To pair again, open Bluetooth in System Settings.")
+                Text(zh ? "此手柄的连接由 macOS 管理；下方选项用于 Switch 手柄。重新配对请打开系统设置中的「蓝牙」。"
+                        : "macOS manages this controller. The options below manage Switch controllers. To pair again, open Bluetooth in System Settings.")
                     .font(.manrope(11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            }
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(zh ? "开启 S2Arm 时自动连接手柄" : "Connect controller when S2Arm opens")
@@ -119,7 +119,6 @@ struct Switch2ProConnectionPopover: View {
                 .font(.manrope(11.3))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .padding(18)
         .frame(width: 350)

@@ -43,6 +43,7 @@ final class NS2LauncherController: ObservableObject {
     }
 
     private let defaults: UserDefaults
+    private let helperExecutableURL: URL?
     private let systemControllers: () -> [GCController]
     private let notifications: NotificationCenter
     private var observers: [NSObjectProtocol] = []
@@ -53,11 +54,13 @@ final class NS2LauncherController: ObservableObject {
     private var intentionalStop = false
 
     init(socketURL: URL, systemControllers: @escaping () -> [GCController] = { GCController.controllers() },
-         notifications: NotificationCenter = .default) {
+         notifications: NotificationCenter = .default, preferences: UserDefaults? = nil,
+         helperExecutableURL: URL? = nil) {
         self.socketURL = socketURL
         self.systemControllers = systemControllers
         self.notifications = notifications
-        defaults = UserDefaults(suiteName: "org.s2arm.macos.game") ?? .standard
+        self.helperExecutableURL = helperExecutableURL
+        defaults = preferences ?? UserDefaults(suiteName: "org.s2arm.macos.game") ?? .standard
         autoConnectOnOpen = defaults.object(forKey: "S2AMacNS2AutoConnectOnOpen") as? Bool ?? false
         disconnectAfterGame = defaults.object(forKey: "S2AMacNS2DisconnectAfterGame") as? Bool ?? false
         rememberDevice = defaults.object(forKey: "S2AMacNS2RememberDevice") as? Bool ?? false
@@ -121,7 +124,6 @@ final class NS2LauncherController: ObservableObject {
     var hasConnectionProcess: Bool { process != nil }
 
     func startIfEnabled() {
-        guard !hasSystemController else { return }
         guard autoConnectOnOpen else {
             phase = .off
             helperDetail = "手柄未连接。需要时可在上方手动连接。"
@@ -343,6 +345,7 @@ final class NS2LauncherController: ObservableObject {
     }
 
     private var helperURL: URL? {
+        if let helperExecutableURL { return helperExecutableURL }
         let bundled = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("S2ArmNS2Connection")
         if let bundled, FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
 #if DEBUG

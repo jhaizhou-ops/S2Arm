@@ -7,6 +7,31 @@ import GameController
 //   没连 / 旧连接程序没报 kind 时写通用的 Switch 手柄 / Switch Controller
 final class NS2LauncherControllerTests: XCTestCase {
     @MainActor
+    private func preferences(autoConnect: Bool) -> UserDefaults {
+        let suite = "org.s2arm.test.controller." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(autoConnect, forKey: "S2AMacNS2AutoConnectOnOpen")
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        return defaults
+    }
+
+    @MainActor
+    func testSystemControllerPreservesSwitchAutoConnectPreference() {
+        let pad = NamedSystemController("DualSense Wireless Controller")
+        for enabled in [false, true] {
+            let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
+                                                  systemControllers: { [pad] }, notifications: NotificationCenter(),
+                                                  preferences: preferences(autoConnect: enabled),
+                                                  helperExecutableURL: URL(fileURLWithPath: "/usr/bin/true"))
+            defer { controller.shutdown() }
+            controller.startIfEnabled()
+            XCTAssertEqual(controller.hasConnectionProcess, enabled,
+                           "系统手柄已连接时，Switch 连接程序仍须按玩家的自动连接开关启动")
+            XCTAssertEqual(controller.buttonStatus, "已连接")
+        }
+    }
+
+    @MainActor
     func testSystemControllerConnectionNotification() async {
         let notifications = NotificationCenter()
         let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
@@ -28,16 +53,16 @@ final class NS2LauncherControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testAlreadyConnectedSystemControllerNeedsNoSwitchHelper() {
+    func testAlreadyConnectedSystemControllerKeepsInputAndStatus() {
         let pad = NamedSystemController("DualSense Wireless Controller")
         var inputs = 0
         pad.extendedGamepad?.valueChangedHandler = { _, _ in inputs += 1 }
         let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"),
-                                              systemControllers: { [pad] }, notifications: NotificationCenter())
+                                              systemControllers: { [pad] }, notifications: NotificationCenter(),
+                                              preferences: preferences(autoConnect: false))
         controller.startIfEnabled()
         XCTAssertEqual(controller.title(simplifiedChinese: true), "DualSense Wireless Controller")
         XCTAssertEqual(controller.buttonStatus, "已连接")
-        XCTAssertFalse(controller.hasConnectionProcess, "系统已连接的手柄不用启动 Switch 蓝牙扫描")
         controller.gameDidStart()
         controller.gameDidExit()
         XCTAssertEqual(controller.buttonStatus, "已连接", "关闭游戏不能把系统仍连接的手柄显示成断开")
