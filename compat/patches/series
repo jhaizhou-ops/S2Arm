@@ -579,3 +579,4 @@
 20261112-1859-psel-invalid-uid-list.patch
 20261113-0410-nim-shop-async-commands.patch
 20261113-0515-svc-gaps-resolver13-applet170-auddmg-input.patch
+20261113-2332-audio-dsp-neon-biquad-adpcm-sink.patch
