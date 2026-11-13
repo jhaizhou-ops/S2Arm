@@ -1507,7 +1507,14 @@ static int session_accepting(void) {
 // 暂存缓冲（每帧约 9 MB 常量缓冲 + 顶点镜像落盘）是 CPU 反复小段写的：写在缓存内存上比写在不缓存映射上快数倍，
 // 且该类型带 coherent 位、不需要显式 flush（见坑记录续 21 的带宽争用读数）。
 static nvn_gpu_rc buf_create_impl(uint64_t bytes, int mem, const void *init, int prefer_cached, nvn_gpu_buf *out, nvn_gpu_err *err);
-nvn_gpu_rc nvn_gpu_buf_create(uint64_t bytes, int mem, const void *init, nvn_gpu_buf *out, nvn_gpu_err *err) { return buf_create_impl(bytes, mem, init, 0, out, err); }
+nvn_gpu_rc nvn_gpu_buf_create(uint64_t bytes, int mem, const void *init, nvn_gpu_buf *out, nvn_gpu_err *err) {
+    // 开关 nvk_mem_cached：所有主机可见缓冲（含池镜像）也走 HOST_CACHED 类型。缺省跟随重叠档（nvk_sync_lag≠0 时开）：
+    // 默认档 A/B 中性（绑定 5.2 / 回放 33.2 / GPU 忙 39.0–39.5），而重叠档里 CPU 直写镜像 550 KB/帧与显卡抢带宽，
+    // 开了之后顶点流 22–25 → 17.9 毫秒、帧 p50 52 → 50（读数见坑记录续 23）。
+    static int all_cached = -1; static unsigned k;
+    if (all_cached < 0 || !(++k & 255)) all_cached = nvn_plat_flag("nvk_mem_cached", nvn_plat_flag("nvk_sync_lag", 0) != 0) != 0;
+    return buf_create_impl(bytes, mem, init, all_cached, out, err);
+}
 static nvn_gpu_rc buf_create_impl(uint64_t bytes, int mem, const void *init, int prefer_cached, nvn_gpu_buf *out, nvn_gpu_err *err) {
     if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
     *out = NULL;
