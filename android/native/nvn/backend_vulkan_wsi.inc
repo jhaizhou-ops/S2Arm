@@ -4,6 +4,7 @@
 // 内部段不占时间线上的值，完成后只做资源回收。
 #include "nvn_plat_vk.h"
 #include "nvn_plat.h"
+#include "backend_vulkan_timing.h"
 
 struct nvn_gpu_surface_s {
     void *native;
@@ -22,6 +23,7 @@ struct nvn_gpu_surface_s {
     int64_t held;                                   // 取了没呈现、留作下次取图结果的那张（没有就是 -1）
     uint32_t held_sem;
     uint64_t presents;
+    struct wsi_timing timing;
     VkSurfaceTransformFlagBitsKHR built_transform;   // 建这一代交换链时表面的方向与尺寸：判「次优」是不是真的变了（见 wsi_suboptimal_stale）
     VkExtent2D built_cur;
     uint32_t subopt_n;
@@ -168,6 +170,7 @@ static nvn_gpu_rc wsi_build(struct nvn_gpu_surface_s *s, nvn_gpu_err *err) {
     for (uint32_t i = 0; i < ni; i++) if (!s->rendered[i] && vkCreateSemaphore(g.d, &si, NULL, &s->rendered[i]) != VK_SUCCESS) { wsi_destroy_swapchain(s); return fail(err, NVN_GPU_E_OOM, "信号量创建失败"); }
     s->held = -1; s->outdated = 0; s->acquire_next = 0;
     s->built_transform = caps.currentTransform; s->built_cur = caps.currentExtent; s->subopt_n = 0;
+    wsi_timing_init(&s->timing, g.d, nvn_plat_flag("display_timing", 0) == 1, g.dev->has_display_timing);
     return rc(NVN_GPU_OK);
 }
 
@@ -393,10 +396,20 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
     VkPresentInfoKHR pi; memset(&pi, 0, sizeof pi);
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR; pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &s->rendered[idx];
     pi.swapchainCount = 1; pi.pSwapchains = &s->swapchain; pi.pImageIndices = &idx;
+    uint32_t timing_id = wsi_timing_id(&s->timing);
+    VkPresentTimeGOOGLE pt = { timing_id, 0 };
+    VkPresentTimesInfoGOOGLE pts = { VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, pi.pNext, 1, &pt };
+    if (timing_id) pi.pNext = &pts;
     r = vkQueuePresentKHR(g.queue, &pi);
     pthread_mutex_unlock(&g_submit_mu);
     s->presents++;
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+        uint64_t tnow = now_ns();
+        if (!s->timing.start) s->timing.start = tnow;
+        wsi_timing_submitted(&s->timing, timing_id);
+        wsi_timing_poll(&s->timing, g.d, s->swapchain);
+        tnow = now_ns();
+        wsi_timing_report(&s->timing, tnow);
         shown.status = NVN_GPU_SHOWN_UNKNOWN;   // 交给了呈现引擎，但没有实际上屏时刻（没有 CAP_SHOWN_TIME）
         if ((r == VK_SUBOPTIMAL_KHR && wsi_suboptimal_stale(s)) || s->outdated == 2) s->outdated = 1;
     } else if (r == VK_ERROR_OUT_OF_DATE_KHR) { s->outdated = 1; out = fail(err, NVN_GPU_E_OUTDATED, "呈现时交换链已过期"); }

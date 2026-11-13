@@ -40,15 +40,22 @@ int nvn_plat_window_size(void *native, uint32_t *w, uint32_t *h) { (void)native;
 // S2A_TEST_NVK_DQ=1：整套用例在「两级回放开」下再跑一遍；S2A_TEST_DESC_MEMO=1：在「描述符组备忘开」下再跑一遍
 // （备忘开着时内容相同的组不再分配，按「分配了几组」写的那几条期望在这一遍里不比，像素期望照比）。
 static int g_memo_on;
+static int g_shown_timing_test;
 void nvn_plat_safepoint(void) {}
 static int g_plc_flag_off;   // C88：1 = 调试开关 nvk_pipe_cache 读成 0（管线缓存关）
 int nvn_plat_flag(const char *name, int dflt) {
+    if (!strcmp(name, "display_timing") && g_shown_timing_test) return 1;
     if (!strcmp(name, "nvk_pipe_cache") && g_plc_flag_off) return 0;
     if (!strcmp(name, "nvk_dq") && getenv("S2A_TEST_NVK_DQ")) return 1;
     if (!strcmp(name, "nvk_desc_memo") && getenv("S2A_TEST_DESC_MEMO")) { g_memo_on = 1; return 1; }
     return dflt;
 }
-void nvn_plat_log(int level, const char *cls, const char *text) { (void)level; printf("[%s] %s\n", cls ? cls : "", text ? text : ""); }
+static int g_shown_empty_logged;
+void nvn_plat_log(int level, const char *cls, const char *text) {
+    (void)level;
+    if (text && strstr(text, "分时（实际上屏）") && strstr(text, "帧率= ") && strstr(text, "扩展未启用或不支持")) g_shown_empty_logged++;
+    printf("[%s] %s\n", cls ? cls : "", text ? text : "");
+}
 static int g_tri_origin_ul;   // 1 = 按 NVN 窗口原点在左上画（视口翻转）：期望上下对调。缺省 0 = 原点在左下（Vulkan 的自然方向）
 
 // C66 only: model a strict driver enforcing maxSets=64; all other calls
@@ -189,6 +196,23 @@ static const struct done_rec *wait_signal(uint64_t signal, int base, int ms) {
 static uint8_t *buf_cpu(nvn_gpu_buf b) { return nvn_gpu_buf_cpu(b); }
 
 static struct s2a_vk_device g_dev;
+// Inject only the optional extension: lavapipe still executes real presents,
+// and never sees the simulated extension structure on its unsupported device.
+static unsigned g_timing_tags, g_timing_bad;
+static uint32_t g_timing_previous;
+static VkSwapchainKHR g_timing_previous_swapchain;
+#ifdef S2A_C883_TEST
+static VKAPI_ATTR VkResult VKAPI_CALL fake_past_timing(VkDevice device, VkSwapchainKHR swapchain,
+        uint32_t *count, VkPastPresentationTimingGOOGLE *timings) {
+    (void)device; (void)swapchain; (void)timings; *count = 0; return VK_SUCCESS;
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __real_vkGetDeviceProcAddr(VkDevice, const char *);
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL __wrap_vkGetDeviceProcAddr(VkDevice device, const char *name) {
+    if (g_shown_timing_test == 1 && !strcmp(name, "vkGetPastPresentationTimingGOOGLE"))
+        return (PFN_vkVoidFunction)fake_past_timing;
+    return __real_vkGetDeviceProcAddr(device, name);
+}
+#endif
 static nvn_gpu_open_desc g_desc;
 
 // 保守故障注入：不等 fence 就返回 TIMEOUT，记录完成证明前的视图销毁；其余调用走真实 Vulkan。
@@ -265,6 +289,18 @@ static int g_wsi_subopt, g_wsi_rotated;
 VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR *pi) {
     PFN_vkQueuePresentKHR real = (PFN_vkQueuePresentKHR)vkGetDeviceProcAddr(g_dev.device, "vkQueuePresentKHR");
     VkPresentInfoKHR mapped = *pi; uint32_t idx;
+    if (g_shown_timing_test && mapped.pNext) {
+        const VkPresentTimesInfoGOOGLE *times = mapped.pNext;
+        if (times->sType == VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE) {
+            if (times->swapchainCount != 1 || !times->pTimes || !times->pTimes[0].presentID ||
+                times->pTimes[0].desiredPresentTime != 0 ||
+                (g_timing_previous_swapchain == pi->pSwapchains[0] &&
+                 times->pTimes[0].presentID == g_timing_previous)) g_timing_bad++;
+            else { g_timing_previous = times->pTimes[0].presentID; g_timing_previous_swapchain = pi->pSwapchains[0]; }
+            g_timing_tags++;
+            mapped.pNext = times->pNext;
+        }
+    }
     if (g_w697_count && pi->swapchainCount == 1) {
         idx = pi->pImageIndices[0];
         CHECK(idx >= g_w697_base && idx < g_w697_count, "C697 present virtual index %u outside range", idx);
@@ -922,6 +958,10 @@ static void c71_present(void) {
     CHECK(OK(r), "C71 present：%d %s", r.code, e.why);
     CHECK(g_shown_n == 1 && g_shown_ticket == 42 && g_shown_status == NVN_GPU_SHOWN_UNKNOWN, "C71 presented 应恰好一次、UNKNOWN（没有上屏时刻），得 n=%d status=%u", g_shown_n, g_shown_status);
     CHECK(OK(nvn_gpu_fence_wait(7, 5000000000ull, &e)), "C71 wait 7：%d %s", e.rc.code, e.why);
+    if (g_shown_timing_test == 2) {
+        struct timespec pause = {5, 100000000};
+        while (nanosleep(&pause, &pause) && errno == EINTR) {}
+    }
 
     // 取了不呈现：交回后下一次取到的是同一张
     nvn_gpu_drawable a, b; memset(&a, 0, sizeof a); memset(&b, 0, sizeof b);
@@ -5713,6 +5753,35 @@ int main(int argc, char **argv) {
     memset(&g_desc, 0, sizeof g_desc);
     g_desc.host_device = &g_dev;
     g_desc.app_label = "nvn-backend-vk-test";
+    if (argc > 2 && (!strcmp(argv[2], "--shown-only") || !strcmp(argv[2], "--shown-unsupported"))) {
+        g_shown_timing_test = !strcmp(argv[2], "--shown-only") ? 1 : 2;
+        if (g_shown_timing_test == 2) {
+            uint32_t count = 0;
+            VkResult er = vkEnumerateDeviceExtensionProperties(g_dev.physical, NULL, &count, NULL);
+            VkExtensionProperties *exts = calloc(count ? count : 1, sizeof *exts);
+            CHECK(er == VK_SUCCESS && exts, "C883 enumerate extension count");
+            if (exts && er == VK_SUCCESS) {
+                er = vkEnumerateDeviceExtensionProperties(g_dev.physical, NULL, &count, exts);
+                CHECK(er == VK_SUCCESS, "C883 enumerate extension list");
+                int supported = 0;
+                for (uint32_t i = 0; i < count; i++) if (!strcmp(exts[i].extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME)) supported = 1;
+                CHECK(!supported, "C883 unsupported arm requires actual lavapipe without display timing");
+            }
+            free(exts);
+        }
+        g_dev.has_display_timing = g_shown_timing_test == 1; // simulated capability, not a lavapipe claim
+        if (!open_backend()) return 1;
+        c71_present();
+        if (g_shown_timing_test == 1)
+            CHECK(g_timing_tags >= 3 && g_timing_bad == 0,
+                  "C883 supported opt-in presents carry distinct IDs: tags=%u invalid=%u", g_timing_tags, g_timing_bad);
+        else CHECK(!g_timing_tags && g_shown_empty_logged,
+                   "C883 unsupported has no ID and logs empty metrics with reason: tags=%u logs=%d", g_timing_tags, g_shown_empty_logged);
+        nvn_gpu_err ce = {0};
+        CHECK(OK(nvn_gpu_close(5000000000ull, &ce)), "C883 close: %s", ce.why);
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
     if (!open_backend()) return 1;
     if (!getenv("S2A_TEST_WSI697_ONLY") && !c697_bc4_3d_run()) return 1;
     if (getenv("S2A_TEST_BC4_3D_ONLY")) {

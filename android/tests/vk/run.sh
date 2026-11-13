@@ -18,6 +18,17 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 mode=${1:-}
+if [ "$mode" = "--shown-only" ] && [ -z "${S2A_VULKAN_IMAGE_ID:-}" ]; then
+    . "$repo/android/tools/ndk_toolchain.sh"
+    ndk=$(s2a_ndk_resolve) || { echo 'NDK 29 missing' >&2; exit 2; }
+    grep -q '^Pkg.Revision = 29\.0\.14206865$' "$ndk/source.properties" || { echo 'NDK 29.0.14206865 required' >&2; exit 2; }
+    tag=$(s2a_ndk_prebuilt_tag "$ndk") || exit 2
+    header_dir="$ndk/toolchains/llvm/prebuilt/$tag/sysroot/usr/include/vulkan"
+    [ -f "$header_dir/vulkan_core.h" ] || { echo 'NDK 29 Vulkan headers missing' >&2; exit 2; }
+    mkdir -p "$repo/build/c883-ndk"
+    cp -R "$header_dir" "$repo/build/c883-ndk/"
+    cp -R "$(dirname "$header_dir")/vk_video" "$repo/build/c883-ndk/"
+fi
 if [ "$(uname -s)" = Darwin ]; then
     export S2A_VULKAN_CACHE="$repo/build/vulkan-cache"
     if [ -z "$mode" ]; then python3 "$repo/android/tests/gs_compiler_chain_test.py"; fi
@@ -105,6 +116,10 @@ inc=(-I "$repo/android/tests/vkhost"
      -I "$repo/android/native/nvn"
      -I "$repo/android/native/direct"
      -I "$repo/runtime/include")
+if [ "$mode" = "--shown-only" ]; then
+    [ -f "$repo/build/c883-ndk/vulkan/vulkan_core.h" ] || { echo 'NDK 29 Vulkan headers not staged' >&2; exit 2; }
+    inc=(-I "$repo/build/c883-ndk" "${inc[@]}")
+fi
 src=("$repo/android/tests/vk/t_backend_vk.c"
      "$repo/android/native/nvn/backend_vulkan.c"
      "$repo/android/native/direct/vk_device.c"
@@ -125,6 +140,7 @@ cflags=(-D_POSIX_C_SOURCE=200809L -std=c11 -O1 -g -Wall -Wextra -Werror -Wno-unu
 case "$mode" in
     --tsan) cflags+=(-fsanitize=thread) ;;
     --asan) cflags+=(-fsanitize=address,undefined -fno-omit-frame-pointer) ;;
+    --shown-only) cflags+=(-DS2A_C883_TEST=1) ;;
     ""|--separate-core|--separate-neg-sampler|--gs-only|--gs-compiler|--gs-core|--gs-no-cap|--gs-neg-stage|--gs-neg-flags|--gs-neg-cap) ;;
     *) echo "未知参数：${mode}（可用 --tsan / --asan）" >&2; exit 64 ;;
 esac
@@ -183,6 +199,7 @@ pc_wrap=(-Wl,--wrap=vkCreatePipelineCache -Wl,--wrap=vkGetPipelineCacheData
          -Wl,--wrap=vkCreateGraphicsPipelines -Wl,--wrap=vkCreateComputePipelines)
 # --gs-core / --separate-* 档的测试源没有这四个 __wrap 定义（只有默认档的 t_backend_vk.c 有），带上会链接失败
 case "$mode" in --gs-core|--separate-core|--separate-neg-sampler) pc_wrap=() ;; esac
+if [ "$mode" = "--shown-only" ]; then pc_wrap+=(-Wl,--wrap=vkGetDeviceProcAddr); fi
 cc "${cflags[@]}" "${inc[@]}" "${src[@]}" -Wl,--wrap=vkAllocateDescriptorSets -Wl,--wrap=vkGetPhysicalDeviceFormatProperties \
     ${pc_wrap[@]+"${pc_wrap[@]}"} -Wl,--gc-sections -lvulkan -lpthread -lm -o "$out/t_backend_vk"
 
@@ -245,6 +262,17 @@ if [ "$mode" = "--separate-core" ]; then
     fi
     echo '【绿】分离来源回放采样：repeat 红、clamp 绿，validation 0 条'; exit 0
 fi
+if [ "$mode" = "--shown-only" ]; then
+    for shown_mode in --shown-only --shown-unsupported; do
+        set +e
+        timeout 90 "$out/t_backend_vk" "$out/shaders" "$shown_mode" 2>&1 | tee "$out/shown-log"
+        rc=${PIPESTATUS[0]}
+        set -e
+        if [ "$rc" -ne 0 ] || grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$out/shown-log"; then exit 1; fi
+    done
+    echo 'C883 WSI validation 0 条'; exit 0
+fi
+
 if [ "$mode" = "--gs-core" ]; then
     rm -rf "$repo/build/696-real-compiler/core-compiler"
     set +e
