@@ -118,9 +118,27 @@ extension S2ArmLauncherModel {
         updatePopup = nil
         do {
             try provider.client.updateApply(ready: ready, install: Bundle.main.bundlePath, arguments: Array(CommandLine.arguments.dropFirst()))
-            NSApp.terminate(nil)
+            QuitAfterSheets.run()   // 「现在更新」在弹窗（sheet）里点：弹窗这一刻还挂在窗口上，直接 terminate 会被 AppKit 忽略
         } catch {
             updateState = .failed("update_failed")
+        }
+    }
+}
+
+/// 退出 App，先等窗口上的 sheet 摘掉。窗口挂着 sheet 时 `NSApp.terminate` 被 AppKit 忽略、不报错（macOS 27.0.1 实测）：
+/// 更新弹窗里点「现在更新」，替换进程起来了、S2Arm 没退，等满 120 秒记 update_app_busy，界面上什么都没发生。
+/// 每 `pollSeconds` 看一次：没有 sheet 了就退；到 `forcePolls` 次还挂着就主动摘；到 `maxPolls` 次照旧调一次退出、不再等。
+@MainActor enum QuitAfterSheets {
+    static let pollSeconds = 0.05, forcePolls = 20, maxPolls = 100
+
+    static func run(windows: @escaping @MainActor () -> [NSWindow] = { NSApp.windows }, polls: Int = 0,
+                    terminate: @escaping @MainActor () -> Void = { NSApp.terminate(nil) }) {
+        let attached = windows().filter { $0.attachedSheet != nil }
+        if attached.isEmpty || polls >= maxPolls { terminate(); return }
+        if polls >= forcePolls { for window in attached { if let sheet = window.attachedSheet { window.endSheet(sheet) } } }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+            run(windows: windows, polls: polls + 1, terminate: terminate)
         }
     }
 }
