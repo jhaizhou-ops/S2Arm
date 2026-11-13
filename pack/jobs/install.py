@@ -938,6 +938,38 @@ def export_readme(games, lang="zh"):
     return _readme_en(games) if lang == "en" else _readme_zh(games)
 
 
+EXPORT_SWAP_TRIES, EXPORT_SWAP_WAIT = 5, 2.0   # 换导出文件夹被占用时的退避：最多 5 次、每次等 2 秒（资源管理器刷新、杀毒扫完常在几秒内放手）
+
+
+def swap_export_dir(out, dest, old, tries=None, wait=None):
+    """刚写好的导出 out 换到 dest（原来的挪到 old 随临时目录删）。→ 实际放到的路径。
+    D-4MAH：Windows 上旧导出文件夹被占着（资源管理器开着、自签工具还拿着上次的 S2Arm.ipa、杀毒软件在扫刚写的 .img），
+    整目录改名抛 PermissionError，原先整次导出失败（.img 都写完了）。现在：退避重试几次；还不行就不动旧的，换个带时刻的新名字放"""
+    tries = EXPORT_SWAP_TRIES if tries is None else tries
+    wait = EXPORT_SWAP_WAIT if wait is None else wait
+    for attempt in range(tries):
+        moved = False
+        try:
+            if dest.exists():
+                os.replace(dest, old); moved = True
+            os.replace(out, dest)
+            return dest
+        except PermissionError:
+            if moved and not dest.exists():   # 旧的挪走了、新的没换进去：挪回去，再等
+                try:
+                    os.replace(old, dest)
+                except OSError:
+                    pass
+            if attempt + 1 < tries:
+                time.sleep(wait)
+    alt = dest.with_name(f"{dest.name} {time.strftime('%m%d-%H%M%S')}")
+    n = 2
+    while alt.exists():
+        alt = dest.with_name(f"{dest.name} {time.strftime('%m%d-%H%M%S')}-{n}"); n += 1
+    os.replace(out, alt)
+    return alt
+
+
 def export_phone(c, gid=None):
     """导出，自己签名安装：本版壳 + 游戏库里能放进本壳、已出成单一 IMG 的各款组一个容器（ipa.assemble，同一键装），
     出未签名 S2Arm.ipa + 每款一个 <游戏名>.img + 说明到游戏库根「S2Arm 自签导出」（英文界面「S2Arm Self-Sign Export」）。不连手机、不签名。
@@ -983,14 +1015,16 @@ def export_phone(c, gid=None):
         c.begin("写安装说明", 4, 4)
         lang = ui_lang(c); readme = EXPORT_READMES[lang]
         (out / readme).write_text(export_readme(listed, lang), encoding="utf-8-sig" if os.name == "nt" else "utf-8")
-        dest = export_dir(c)
-        old = work / "old"
-        if dest.exists():
-            os.replace(dest, old)
-        os.replace(out, dest)
+        want = export_dir(c)
+        dest = swap_export_dir(out, want, work / "old")
+        if dest != want:   # 旧导出文件夹被占着换不掉：这次写到新名字，照常算成功（几 GB 的 .img 都写完了，不因旧文件夹被占整次失败）
+            c.diagnostic(f"原来的导出文件夹正被别的程序占用，这次导出到新文件夹：{dest.name}", code="export_dir_busy", severity="warning")   # 下一步见 errors.RECOVERY
         for other, name in EXPORT_DIRS.items():   # 换过界面语言：另一种语言名字的旧导出挪进临时目录随它删，游戏库根只留这一份
             if other != lang and (c.library / name).exists():
-                os.replace(c.library / name, work / ("old-" + other))
+                try:
+                    os.replace(c.library / name, work / ("old-" + other))
+                except PermissionError:   # 被占着：留着，不挡这次导出
+                    pass
     finally:
         shutil.rmtree(work, ignore_errors=True)
     size = sum(p.stat().st_size for p in dest.iterdir() if p.is_file())

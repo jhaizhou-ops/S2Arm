@@ -1419,6 +1419,8 @@ def wait_writable(c, path, poll=5.0):
         finally: f.unlink(missing_ok=True)
     e = _wait_probe(c, f"写 {path.name}", probe, poll)
     if isinstance(e, PermissionError):
+        if os.name == "nt":   # D-4MAH：Windows 没有「系统设置 › 隐私与安全性」，下一步见 errors.WINDOWS_RECOVERY
+            raise Failure(f"系统不让 S2Arm 往游戏库所在的磁盘写（{path}）", code="permission_denied")
         raise Failure(f"系统不让 S2Arm 往游戏库所在的磁盘写（{path}）：到「系统设置 › 隐私与安全性 › 文件与文件夹」"
                       "（外接盘看「可移除的宗卷」）里打开 S2Arm，再点一次", code="permission_denied")
     if e is not None:
@@ -1446,6 +1448,8 @@ def wait_readable(c, paths, poll=5.0):
         e = _wait_probe(c, f"读 {path.name}", probe, poll)
         if e is not None:
             if isinstance(e, PermissionError):
+                if os.name == "nt":   # D-4MAH：同上，Windows 的下一步见 errors.WINDOWS_RECOVERY
+                    raise Failure(f"系统不让 S2Arm 读 {path.name}（{path.parent}）", code="input_permission")
                 raise Failure(f"系统不让 S2Arm 读 {path.name}（{path.parent}）：到「系统设置 › 隐私与安全性 › 文件与文件夹」"
                               "或「完全磁盘访问权限」里打开 S2Arm，再点一次", code="input_permission")
             raise Failure(f"读不了游戏文件 {path.name}：{e}", code="input_unreadable")

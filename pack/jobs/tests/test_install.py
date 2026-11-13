@@ -1610,6 +1610,41 @@ class ExportPhoneTests(unittest.TestCase):
         self.assertFalse((out / "旧.img").exists())
         self.assertTrue((out / "甲.img").is_file())
 
+    def test_export_when_old_folder_is_busy_goes_to_a_new_name(self):
+        """D-4MAH：Windows 上旧导出文件夹被占着（资源管理器开着、自签工具拿着上次的 S2Arm.ipa、杀毒在扫），整目录改名抛 PermissionError，
+        原先 .img 都写完了还整次失败。期望：一直被占 → 成功、换到带时刻的新名字、旧文件夹原样不动、记 export_dir_busy；
+        只占一小会儿（前两次被拒）→ 退避后照常换到原名"""
+        self._library((self.A, "甲")); self._img(self.A, b"S2AIMG01-a")
+        out = self.c.library / install.EXPORT_DIRS["zh"]; out.mkdir(); (out / "旧.img").write_bytes(b"old")
+        real = os.replace
+        def busy(src, dst):
+            if Path(src) == out: raise PermissionError(13, "拒绝访问", str(src))   # 旧导出文件夹改不了名（Windows WinError 5 / 32）
+            return real(src, dst)
+        with um.patch.object(install, "EXPORT_SWAP_WAIT", 0), um.patch("os.replace", busy):
+            r = self._export(dict(gameId=self.A, mode="export"))
+        got = Path(r["outputPath"])
+        self.assertNotEqual(got, out); self.assertTrue(got.name.startswith(out.name + " "))
+        self.assertTrue((got / "甲.img").is_file()); self.assertTrue((got / "S2Arm.ipa").is_file())
+        self.assertEqual((out / "旧.img").read_bytes(), b"old")   # 旧的原样不动
+        self.assertIn("export_dir_busy", [d.get("code") for d in self.c.job["diagnostics"]])
+        shutil.rmtree(got)
+        tries = {"n": 0}
+        def flaky(src, dst):
+            if Path(src) == out and tries["n"] < 2: tries["n"] += 1; raise PermissionError(13, "拒绝访问", str(src))
+            return real(src, dst)
+        with um.patch.object(install, "EXPORT_SWAP_WAIT", 0), um.patch("os.replace", flaky):
+            r = self._export(dict(gameId=self.A, mode="export"))
+        self.assertEqual(Path(r["outputPath"]), out); self.assertFalse((out / "旧.img").exists()); self.assertTrue((out / "甲.img").is_file())
+
+    def test_permission_next_step_follows_platform(self):
+        """D-4MAH：permission_denied / input_permission 的「下一步」原先写死 macOS「系统设置 → 隐私与安全性」，Windows 玩家照着做不了"""
+        from errors import recovery
+        for code in ("permission_denied", "input_permission"):
+            win, mac = recovery(code, packaged=True, windows=True), recovery(code, packaged=True, windows=False)
+            self.assertIn("受控文件夹访问", win); self.assertNotIn("系统设置", win)
+            self.assertIn("系统设置", mac); self.assertNotIn("受控文件夹访问", mac)
+        self.assertIn("资源管理器", recovery("permission_denied", packaged=True, windows=True))
+
     def test_export_names_follow_ui_language(self):
         """i18n：英文界面（uiLanguage = en）→ 文件夹「S2Arm Self-Sign Export」、说明「How to install on iPhone.txt」（英文正文：Import Here、
         Settings → General → VPN & Device Management）；之后换回中文再导出 → 「S2Arm 自签导出」+「怎么装到 iPhone.txt」，英文名的旧导出删掉，只留一份"""
