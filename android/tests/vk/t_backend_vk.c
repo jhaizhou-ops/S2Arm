@@ -799,6 +799,7 @@ static int tri_alpha_reads_one(uint32_t f) {
            (f >= NVN_FORMAT_RGBX32F && f <= NVN_FORMAT_RGBX32I);
 }
 static const uint8_t *g_tri_expect;   // 非空：整张图期望都是这 4 个字节（压缩格式用，纹素不是按像素摆的）
+static const uint8_t *g_tri_px;       // 非空：2x2 各纹素的期望 RGBA8（16 字节，按纹素顺序；打包格式用，存储字节不是 RGBA8）
 static int g_tri_tol;
 static uint64_t g_tri_signal = 5;
 static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *texels, int tbpp, int trow, int want_a) {
@@ -933,18 +934,18 @@ static void tri_impl(const char *shader_dir, uint32_t tex_fmt, const uint8_t *te
             int tx = (int)(u * 2.0f); if (tx > 1) tx = 1;
             int ty = (int)(v * 2.0f); if (ty > 1) ty = 1;
             if (g_tri_origin_ul) ty = 1 - ty;   // 原点在左上：同一个裁剪空间 y 落到相反的行
-            const uint8_t *src = g_tri_expect ? g_tri_expect : texels + (ty * 2 + tx) * tbpp;
+            const uint8_t *src = g_tri_expect ? g_tri_expect : g_tri_px ? g_tri_px + (ty * 2 + tx) * 4 : texels + (ty * 2 + tx) * tbpp;
             // 期望：先取纹素（没有 alpha 的格式按 want_a），再按生效的通道映射手算（视图设了用视图的，否则用存储的）
             // 没有 alpha 的 NVN 格式（RGBX / BGRX / RGB5 / BGR5 / RGB_DXT1）：硬件把 a 读作 1，与存储的第 4 个字节无关；
             // 判定按「视图的有效格式」——视图换格式时以视图格式为准（与硬件一致）
             int noalpha = tri_alpha_reads_one(g_tri_view_fmt ? g_tri_view_fmt : tex_fmt);
-            uint8_t px[4] = {src[0], src[1], src[2], (uint8_t)(tbpp == 4 && !noalpha ? src[3] : want_a)}, mapped[4], sw[4] = {2, 3, 4, 5};
+            uint8_t px[4] = {src[0], src[1], src[2], (uint8_t)((tbpp == 4 && !noalpha) || g_tri_px ? src[3] : want_a)}, mapped[4], sw[4] = {2, 3, 4, 5};
             if (g_tri_vsw_on) memcpy(sw, g_tri_vsw, 4);
             else if (g_tri_swz) for (int ch = 0; ch < 4; ch++) sw[ch] = (uint8_t)(g_tri_swz >> (3 * ch) & 7);
             for (int ch = 0; ch < 4; ch++) mapped[ch] = sw[ch] == 0 ? 0 : sw[ch] == 1 ? 255 : px[sw[ch] - 2];
             const uint8_t *want = mapped;
             const uint8_t *got = buf_cpu(rb) + (y * 64 + x) * 4;
-            if (abs(got[0] - want[0]) > g_tri_tol || abs(got[1] - want[1]) > g_tri_tol || abs(got[2] - want[2]) > g_tri_tol || abs(got[3] - (g_tri_vsw_on || g_tri_swz ? want[3] : want_a)) > g_tri_tol) {
+            if (abs(got[0] - want[0]) > g_tri_tol || abs(got[1] - want[1]) > g_tri_tol || abs(got[2] - want[2]) > g_tri_tol || abs(got[3] - (g_tri_vsw_on || g_tri_swz || g_tri_px ? want[3] : want_a)) > g_tri_tol) {
                 g_fail++;
                 printf("FAIL %s:%d: 三角像素 (%d,%d) = %02x%02x%02x%02x，期望 %02x%02x%02x%02x\n",
                        __FILE__, __LINE__, x, y, got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
@@ -981,6 +982,138 @@ static void c200_alpha_reads_one(const char *dir, int k) {
     case 2: g_tri_view_fmt = NVN_FORMAT_RGBA8; tri_impl(dir, NVN_FORMAT_RGBX8, t4, 4, 8, 0); g_tri_view_fmt = 0; break;   // 视图有 alpha：按视图格式照读存储的第 4 字节
     default: g_tri_view_fmt = NVN_FORMAT_RGBX8; tri_impl(dir, NVN_FORMAT_RGBA8, t4, 4, 8, 255); g_tri_view_fmt = 0; break; // 视图没有 alpha：a 读作 1
     }
+}
+
+// C975（#975）：16 位打包格式按 NVN 的位序采样、写入。NVN 从最低位起给分量命名：
+//   RGBA4 = r 0–3、g 4–7、b 8–11、a 12–15；RGB5A1 = r 0–4、g 5–9、b 10–14、a 15（RGB5 的 bit15 是填充位，a 读作 1）；
+//   RGB565 = r 0–4、g 5–10、b 11–15；BGR565 = b 0–4、g 5–10、r 11–15；BGR5A1 = b 0–4、g 5–9、r 10–14、a 15（BGR5 同 RGB5）；
+//   A1BGR5 = a 0、b 1–5、g 6–10、r 11–15。565 没有 alpha，读作 1。
+//   依据：iOS 11-03 真机实测（graphics/nvn/gfx/tex/nvn_fmt_mtl.c:54–60）；Ryujinx Vulkan 同口径（FormatTable.cs：R4G4B4A4Unorm → A4B4G4R4UnormPack16；
+//   TextureView.cs：R5G6B5Unorm 配 R5G6B5UnormPack16 时把 r / b 对调，即 r 在低位）。
+// 采样：纹素由各分量的字段值按上面的位移拼成 16 位、小端存；期望 = round(字段值 × 255 / 字段最大值)，字段值只取
+//   转 8 位离 .5 远的（4 位全是 17 的倍数；5 位 0/6/9/17/31；6 位 0/21/63），完全按规则手算，不经被测的格式映射。
+//   四个纹素各分量互不对称：哪一处位序反了都读得出来。
+// 写入：同一组字段值（第 4 个纹素）当清屏色，① 当渲染目标 LOAD_CLEAR、② clear_view（vkCmdClearColorImage），读回原始 16 位，
+//   比对手拼的位型（RGB5 / BGR5 的填充位不比）。本设备走退回格式（通道补偿）的格式不能当渲染目标：核 tex_create 与开通道都具名拒绝。
+// forced = 1：开完后端把能退的格式全切到退回格式，在 lavapipe 上也把通道补偿这一路走一遍（结束恢复设备的路由）。
+static const struct c975_fmt { uint32_t fmt; const char *name; int lo[4], bits[4]; int fld[4][4]; } c975_cs[8] = {
+    {NVN_FORMAT_RGBA4,  "RGBA4",  {0, 4, 8, 12},  {4, 4, 4, 4}, {{15, 0, 0, 5}, {0, 15, 0, 10}, {0, 0, 15, 15}, {3, 6, 9, 12}}},
+    {NVN_FORMAT_RGB5,   "RGB5",   {0, 5, 10, 0},  {5, 5, 5, 0}, {{31, 0, 0, 0}, {0, 31, 0, 0}, {0, 0, 31, 0}, {9, 17, 6, 0}}},
+    {NVN_FORMAT_RGB5A1, "RGB5A1", {0, 5, 10, 15}, {5, 5, 5, 1}, {{31, 0, 0, 1}, {0, 31, 0, 0}, {0, 0, 31, 1}, {9, 17, 6, 1}}},
+    {NVN_FORMAT_RGB565, "RGB565", {0, 5, 11, 0},  {5, 6, 5, 0}, {{31, 0, 0, 0}, {0, 63, 0, 0}, {0, 0, 31, 0}, {9, 21, 6, 0}}},
+    {NVN_FORMAT_BGR565, "BGR565", {11, 5, 0, 0},  {5, 6, 5, 0}, {{31, 0, 0, 0}, {0, 63, 0, 0}, {0, 0, 31, 0}, {9, 21, 6, 0}}},
+    {NVN_FORMAT_BGR5,   "BGR5",   {10, 5, 0, 0},  {5, 5, 5, 0}, {{31, 0, 0, 0}, {0, 31, 0, 0}, {0, 0, 31, 0}, {9, 17, 6, 0}}},
+    {NVN_FORMAT_BGR5A1, "BGR5A1", {10, 5, 0, 15}, {5, 5, 5, 1}, {{31, 0, 0, 1}, {0, 31, 0, 0}, {0, 0, 31, 1}, {9, 17, 6, 1}}},
+    {NVN_FORMAT_A1BGR5, "A1BGR5", {11, 6, 1, 0},  {5, 5, 5, 1}, {{31, 0, 0, 1}, {0, 31, 0, 0}, {0, 0, 31, 1}, {9, 17, 6, 1}}},
+};
+static uint16_t c975_word(const struct c975_fmt *f, const int fld[4], uint16_t *mask) {
+    uint32_t v = 0, m = 0;
+    for (int ch = 0; ch < 4; ch++) {
+        if (!f->bits[ch]) continue;
+        uint32_t max = (1u << f->bits[ch]) - 1u;
+        v |= (uint32_t)fld[ch] << f->lo[ch];
+        m |= max << f->lo[ch];
+    }
+    if (mask) *mask = (uint16_t)m;
+    return (uint16_t)v;
+}
+// 清成第 4 个纹素的颜色，读回 2x2 原始字节；sig 是这次提交的序号。返回读回的第一个纹素（失败返回 -1）。
+static int c975_clear_raw(nvn_gpu_tex t, nvn_gpu_view v, int as_rt, const float col[4], uint64_t sig, char *why, size_t why_size) {
+    nvn_gpu_buf rb = make_buf(8, NVN_GPU_MEM_SHARED, NULL);
+    nvn_gpu_cmd c = begin_cmd();
+    if (as_rt) {
+        nvn_gpu_pass_desc pass; memset(&pass, 0, sizeof pass);
+        pass.ncolor = 1; pass.color[0].view = v; pass.color[0].load = NVN_GPU_LOAD_CLEAR; pass.color[0].store = NVN_GPU_STORE_STORE;
+        for (int i = 0; i < 4; i++) pass.color[0].clear.f[i] = col[i];
+        pass.w = 2; pass.h = 2; pass.layers = 1;
+        nvn_gpu_pass_begin(c, &pass);
+        nvn_gpu_pass_end(c);
+    } else {
+        nvn_gpu_clear_view(c, v, col, NULL, 0);
+    }
+    nvn_gpu_copy_tex_buf(c, t, 0, 0, NULL, rb, 0, 4, 8);
+    nvn_gpu_err e; memset(&e, 0, sizeof e);
+    nvn_gpu_rc r = nvn_gpu_cmd_commit(c, sig, on_done, NULL, &e);
+    int got = -1;
+    if (OK(r)) {
+        r = nvn_gpu_fence_wait(sig, 5000000000ull, &e);
+        CHECK(OK(r), "C975 wait %llu：%d %s", (unsigned long long)sig, r.code, e.why);
+        uint16_t w; memcpy(&w, buf_cpu(rb), 2); got = w;
+        for (int i = 1; i < 4; i++) { uint16_t x; memcpy(&x, buf_cpu(rb) + i * 2, 2); if (x != w) got = -2; }
+    }
+    snprintf(why, why_size, "%d %s", r.code, e.why);
+    nvn_gpu_buf_release(rb, NULL, NULL);
+    return got;
+}
+static void c975_fmt16_order(const char *dir, int k, int forced) {
+    const struct c975_fmt *f = &c975_cs[k];
+    uint32_t dev_mask = nvn_vk_format_p16_fallback();
+    if (forced) nvn_vk_format_set_p16_fallback(0xffu);
+    uint8_t map[4];
+    int remap = nvn_vk_format_chanmap(f->fmt, map);
+    uint32_t caps = nvn_gpu_format_caps(f->fmt);
+    printf("C975 %s：%s 路由 vk=%d 通道补偿=%d（%u%u%u%u）caps=0x%x\n", f->name, forced ? "强制退回" : "设备", (int)nvn_vk_format(f->fmt),
+           remap, map[0], map[1], map[2], map[3], caps);
+    if (forced && !remap) { nvn_vk_format_set_p16_fallback(dev_mask); return; }   // 没有退回格式的项：设备路由那一轮已核
+    CHECK(caps & NVN_GPU_FMT_SAMPLE, "C975 %s：%s 路由不能采样（caps=0x%x）", f->name, forced ? "退回" : "设备", caps);
+    if (!(caps & NVN_GPU_FMT_SAMPLE)) { nvn_vk_format_set_p16_fallback(dev_mask); return; }
+    uint8_t texels[8], want[16];
+    for (int t = 0; t < 4; t++) {
+        uint16_t v = c975_word(f, f->fld[t], NULL);
+        for (int ch = 0; ch < 4; ch++) {
+            int max = f->bits[ch] ? (1 << f->bits[ch]) - 1 : 0;
+            want[t * 4 + ch] = (uint8_t)(max ? (f->fld[t][ch] * 255 + max / 2) / max : ch == 3 ? 255 : 0);
+        }
+        texels[t * 2] = (uint8_t)(v & 0xff); texels[t * 2 + 1] = (uint8_t)(v >> 8);
+    }
+    printf("C975 执行：%s 采样（纹素 %02x%02x %02x%02x %02x%02x %02x%02x，小端）\n", f->name,
+           texels[1], texels[0], texels[3], texels[2], texels[5], texels[4], texels[7], texels[6]);
+    g_tri_px = want;
+    tri_impl(dir, f->fmt, texels, 2, 4, 255);
+    g_tri_px = NULL;
+
+    float col[4];
+    for (int ch = 0; ch < 4; ch++) col[ch] = f->bits[ch] ? (float)f->fld[3][ch] / (float)((1 << f->bits[ch]) - 1) : 1.0f;
+    uint16_t mask, wword = c975_word(f, f->fld[3], &mask);
+    char why[300];
+    // ② clear_view：两条路由都得对（退回格式时清屏值按通道补偿换位）
+    {
+        nvn_gpu_tex t = make_tex(2, 2, f->fmt, NVN_GPU_TEX_SAMPLED);
+        nvn_gpu_view v = make_view(t);
+        int got = c975_clear_raw(t, v, 0, col, 6, why, sizeof why);
+        CHECK(got >= 0 && ((uint16_t)got & mask) == wword, "C975 %s clear_view：读回 %04x（掩码 %04x），期望 %04x（%s）",
+              f->name, got < 0 ? 0xffffu : (unsigned)got, mask, wword, why);
+        if (got >= 0 && ((uint16_t)got & mask) == wword) printf("C975 %s clear_view：读回 %04x = 期望 %04x\n", f->name, (unsigned)got & mask, wword);
+        nvn_gpu_view_release(v); nvn_gpu_tex_release(t);
+    }
+    // ① 渲染目标
+    if (remap) {
+        CHECK(!(caps & (NVN_GPU_FMT_RENDER | NVN_GPU_FMT_STORAGE | NVN_GPU_FMT_VERTEX)), "C975 %s：退回格式不该报渲染 / 存储 / 顶点能力（caps=0x%x）", f->name, caps);
+        nvn_gpu_tex_desc td; memset(&td, 0, sizeof td);
+        td.d.target = NVN_TEXTURE_TARGET_2D; td.d.format = (int)f->fmt; td.d.width = 2; td.d.height = 2; td.d.depth = 1; td.d.levels = 1;
+        td.usage = NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_RENDER;
+        nvn_gpu_tex bad = NULL; nvn_gpu_err e; memset(&e, 0, sizeof e);
+        nvn_gpu_rc r = nvn_gpu_tex_create(&td, &bad, &e);
+        CHECK(!OK(r) && !bad && strstr(e.why, "不能当渲染目标"), "C975 %s：退回格式建渲染目标应具名拒绝：%d %s", f->name, r.code, e.why);
+        if (bad) nvn_gpu_tex_release(bad);
+        nvn_gpu_tex t = make_tex(2, 2, f->fmt, NVN_GPU_TEX_SAMPLED);
+        nvn_gpu_view v = make_view(t);
+        int got = c975_clear_raw(t, v, 1, col, 7, why, sizeof why);
+        CHECK(got == -1 && strstr(why, "不能当渲染目标"), "C975 %s：退回格式当颜色附件应具名拒绝：读回 %d，%s", f->name, got, why);
+        printf("C975 %s 渲染目标：退回格式具名拒绝（%s）\n", f->name, why);
+        nvn_gpu_view_release(v); nvn_gpu_tex_release(t);
+    } else if (caps & NVN_GPU_FMT_RENDER) {
+        nvn_gpu_tex t = make_tex(2, 2, f->fmt, NVN_GPU_TEX_SAMPLED | NVN_GPU_TEX_RENDER);
+        nvn_gpu_view v = make_view(t);
+        int got = c975_clear_raw(t, v, 1, col, 7, why, sizeof why);
+        CHECK(got >= 0 && ((uint16_t)got & mask) == wword, "C975 %s 渲染目标清屏：读回 %04x（掩码 %04x），期望 %04x（%s）",
+              f->name, got < 0 ? 0xffffu : (unsigned)got, mask, wword, why);
+        if (got >= 0 && ((uint16_t)got & mask) == wword) printf("C975 %s 渲染目标清屏：读回 %04x = 期望 %04x\n", f->name, (unsigned)got & mask, wword);
+        nvn_gpu_view_release(v); nvn_gpu_tex_release(t);
+    } else {
+        printf("C975 %s：本设备精确格式没有颜色附件能力（caps=0x%x），渲染目标一项不适用\n", f->name, caps);
+    }
+    nvn_vk_format_set_p16_fallback(dev_mask);
 }
 
 static void c70_swizzle(const char *dir, int view_overrides) {
@@ -7020,6 +7153,12 @@ int main(int argc, char **argv) {
         c200_alpha_reads_one(argv[1], k);
         nvn_gpu_err e200;
         CHECK(OK(nvn_gpu_close(5000000000ull, &e200)), "C200 close：%d %s", e200.rc.code, e200.why);
+    }
+    for (int k = 0; k < 16; k++) {   // C975：16 位打包格式 8 种 × {设备路由, 强制退回}，各一个会话（tri_impl 的提交序号固定）
+        if (!open_backend()) return 1;
+        c975_fmt16_order(argv[1], k % 8, k / 8);
+        nvn_gpu_err e975;
+        CHECK(OK(nvn_gpu_close(5000000000ull, &e975)), "C975 close：%d %s", e975.rc.code, e975.why);
     }
     if (!open_backend()) return 1;
     t31_vertex_formats(argv[1]);

@@ -31,6 +31,23 @@ int nvn_vk_format_substituted(uint32_t nvn_format);   // 1 = 本设备上这个 
 void nvn_vk_depth24_to_f32(void *texels, size_t n);
 void nvn_vk_depth_f32_to_24(void *texels, size_t n);
 VkFormat nvn_vk_tex_format(uint32_t nvn_format);   // 贴图专用：需要上传展开时返回展开目标格式
+// #975：NVN 16 位打包格式从最低位起命名（RGBA4 = r 在 0–3 位 … a 在 12–15 位；iOS nvn_fmt_mtl.c 真机实测、
+// Ryujinx FormatTable.cs 同口径），Vulkan 的 PACK16 格式是首名分量在最高位。每个格式有一个位序精确对上的
+// Vulkan 格式（exact）；exact 在本设备不能采样（要的扩展没开 / 缺 SAMPLED_IMAGE）时退到同尺寸的退回格式
+// （fallback），由采样视图的通道映射把分量放回去。通道映射对渲染目标 / 存储图像 / 顶点取数 / blit 不起作用，
+// 走退回格式的格式在这些用途上由调用方具名报红。
+enum { NVN_VK_P16_N = 8 };
+// 第 i 项（0..NVN_VK_P16_N-1）：NVN 格式、精确格式、退回格式（没有 = UNDEFINED）。越界返回 0。
+int nvn_vk_p16_entry(int i, uint32_t *nvn_format, VkFormat *exact, VkFormat *fallback);
+// 纯判定（可单测）：exact[i] / fallback[i] 是第 i 项两种格式的 optimalTilingFeatures（精确格式要的扩展没开时
+// 调用方传 0）。精确格式不能采样、退回格式能采样时第 i 位置 1。
+uint32_t nvn_vk_p16_fallback_pick(const VkFormatFeatureFlags exact[NVN_VK_P16_N], const VkFormatFeatureFlags fallback[NVN_VK_P16_N]);
+// 建设备时设一次（vk_device.c）；默认 0 = 全走精确格式。
+void nvn_vk_format_set_p16_fallback(uint32_t mask);
+uint32_t nvn_vk_format_p16_fallback(void);
+// 本设备上这个 NVN 格式的分量位置：map[c] = NVN 第 c 个分量（r,g,b,a）在映射出的 Vulkan 格式里是第几个
+// 分量（0 = R … 3 = A）。返回 1 = 非恒等（走了退回格式，只能采样）；0 = 恒等（map 写 0,1,2,3）。
+int nvn_vk_format_chanmap(uint32_t nvn_format, uint8_t map[4]);
 // CPU 顶点解码：设备不支持顶点获取（bufferFeatures 无 VERTEX_BUFFER_BIT）的格式，
 // 把一个顶点的属性字节解成 float4，经 R32G32B32A32_SFLOAT 顶点缓冲进 shader。
 // 返回该格式的存储字节数；0 = 无解码路径（调用方按不支持报红）。out 恒写满 4 分量，

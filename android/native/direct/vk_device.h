@@ -50,6 +50,9 @@ struct s2a_vk_device {
     uint32_t bc_decode_mask;
     // #398：深度格式替换位（NVN_VK_DEPTH_SUBST_*，nvn_vk_format.h）。0 = D24 原样可用。
     uint32_t depth_subst_mask;
+    // #975：VK_EXT_4444_formats 已启用（formatA4B4G4R4）；16 位打包格式走退回格式的位（nvn_vk_format.h k_p16 序）。
+    int formats_4444_enabled;
+    uint32_t p16_fallback_mask;
     int bc_decode_forced;   // S2A_VK_BC_DECODE=force（仅 debug 构建生效）
     // VK_EXT_external_memory_host：把 host 指针（guest 内存池直映射地址）导入成 VkBuffer 内存的零拷贝路径。
     // 只有驱动 advertise 且 debug.s2a.host_import=1 时才启用；未启用时行为与之前完全一致。
@@ -64,6 +67,10 @@ struct s2a_vk_device {
     int has_display_timing;
 };
 
+// #975：查格式特性（代替 vkGetPhysicalDeviceFormatProperties）。A4B4G4R4_EXT 不发查询，按 VK_EXT_4444_formats
+// formatA4B4G4R4 特性保证的特性取值（格式表只在启用该特性时映射到它）：设备按 Vulkan 1.1 建，验证层把设备扩展加的
+// 格式当非法枚举（VUID-vkGetPhysicalDeviceFormatProperties-format-parameter）。其余格式照常查询。
+void s2a_vk_format_properties(VkPhysicalDevice physical, VkFormat format, VkFormatProperties *out);
 // 创建 instance/physical/device/queue/command pool。why 写 ASCII 原因。
 int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size);
 // 返回实际 VkResult；失败（包括 DEVICE_LOST）不证明退休。

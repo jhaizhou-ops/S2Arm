@@ -46,6 +46,57 @@ void nvn_vk_depth_f32_to_24(void *texels, size_t n) {
     }
 }
 
+// #975：16 位打包格式（见 nvn_vk_format.h）。精确格式按 NVN 低位起的位段逐个对上 Vulkan 的位段：
+//   RGBA4  r0-3 g4-7 b8-11 a12-15       = A4B4G4R4（VK_EXT_4444_formats）；退回 B4G4R4A4（必备）：r 落在它的 A、g 落在 R、b 落在 G、a 落在 B
+//   RGB5A1 r0-4 g5-9 b10-14 a15 / RGB5  = A1B5G5R5（VK_KHR_maintenance5）；退回 A1R5G5B5（必备），r/b 对调
+//   RGB565 r0-4 g5-10 b11-15            = B5G6R5；退回 R5G6B5（必备），r/b 对调
+//   BGR565 b0-4 g5-10 r11-15            = R5G6B5（必备），无需退回
+//   BGR5A1 b0-4 g5-9 r10-14 a15 / BGR5  = A1R5G5B5（必备），无需退回
+//   A1BGR5 a0 b1-5 g6-10 r11-15         = R5G5B5A1；退回 B5G5R5A1，r/b 对调
+// map 是退回格式下 NVN 分量 r,g,b,a 各落在 Vulkan 的第几个分量。RGB5 / BGR5 的 bit15 是填充位，
+// a 读 1 由视图（nvn_fmt_alpha_reads_one）钉。
+static const struct { uint32_t nvn; VkFormat exact, fallback; uint8_t map[4]; } k_p16[NVN_VK_P16_N] = {
+    { NVN_FORMAT_RGBA4,  VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT, VK_FORMAT_B4G4R4A4_UNORM_PACK16, {3, 0, 1, 2} },
+    { NVN_FORMAT_RGB5,   VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR, VK_FORMAT_A1R5G5B5_UNORM_PACK16, {2, 1, 0, 3} },
+    { NVN_FORMAT_RGB5A1, VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR, VK_FORMAT_A1R5G5B5_UNORM_PACK16, {2, 1, 0, 3} },
+    { NVN_FORMAT_RGB565, VK_FORMAT_B5G6R5_UNORM_PACK16,       VK_FORMAT_R5G6B5_UNORM_PACK16,   {2, 1, 0, 3} },
+    { NVN_FORMAT_BGR565, VK_FORMAT_R5G6B5_UNORM_PACK16,       VK_FORMAT_UNDEFINED,             {0, 1, 2, 3} },
+    { NVN_FORMAT_BGR5,   VK_FORMAT_A1R5G5B5_UNORM_PACK16,     VK_FORMAT_UNDEFINED,             {0, 1, 2, 3} },
+    { NVN_FORMAT_BGR5A1, VK_FORMAT_A1R5G5B5_UNORM_PACK16,     VK_FORMAT_UNDEFINED,             {0, 1, 2, 3} },
+    { NVN_FORMAT_A1BGR5, VK_FORMAT_R5G5B5A1_UNORM_PACK16,     VK_FORMAT_B5G5R5A1_UNORM_PACK16, {2, 1, 0, 3} },
+};
+static uint32_t g_p16_fallback;   // 第 i 位 = k_p16[i] 走退回格式；同 g_depth_subst，建设备时设一次
+
+int nvn_vk_p16_entry(int i, uint32_t *nvn_format, VkFormat *exact, VkFormat *fallback) {
+    if (i < 0 || i >= NVN_VK_P16_N) return 0;
+    if (nvn_format) *nvn_format = k_p16[i].nvn;
+    if (exact) *exact = k_p16[i].exact;
+    if (fallback) *fallback = k_p16[i].fallback;
+    return 1;
+}
+uint32_t nvn_vk_p16_fallback_pick(const VkFormatFeatureFlags exact[NVN_VK_P16_N], const VkFormatFeatureFlags fallback[NVN_VK_P16_N]) {
+    const VkFormatFeatureFlags s = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    uint32_t m = 0;
+    for (int i = 0; i < NVN_VK_P16_N; i++)
+        if (k_p16[i].fallback != VK_FORMAT_UNDEFINED && !(exact[i] & s) && (fallback[i] & s)) m |= 1u << i;
+    return m;
+}
+void nvn_vk_format_set_p16_fallback(uint32_t mask) {   // 没有退回格式的项不收（位置 1 也照走精确格式）
+    for (int i = 0; i < NVN_VK_P16_N; i++) if (k_p16[i].fallback == VK_FORMAT_UNDEFINED) mask &= ~(1u << i);
+    g_p16_fallback = mask & ((1u << NVN_VK_P16_N) - 1u);
+}
+uint32_t nvn_vk_format_p16_fallback(void) { return g_p16_fallback; }
+static int p16_index(uint32_t f) {
+    for (int i = 0; i < NVN_VK_P16_N; i++) if (k_p16[i].nvn == f) return i;
+    return -1;
+}
+int nvn_vk_format_chanmap(uint32_t f, uint8_t map[4]) {
+    int i = p16_index(f);
+    int remap = i >= 0 && ((g_p16_fallback >> i) & 1u);
+    for (int c = 0; c < 4; c++) map[c] = remap ? k_p16[i].map[c] : (uint8_t)c;
+    return remap;
+}
+
 VkFormat nvn_vk_tex_format(uint32_t f) {
     nvn_fmt_info info;
     if (!nvn_fmt_info_of(f, &info)) return VK_FORMAT_UNDEFINED;
@@ -114,10 +165,13 @@ VkFormat nvn_vk_format(uint32_t f) {
         return (g_depth_subst & NVN_VK_DEPTH_SUBST_D24S8) ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D24_UNORM_S8_UINT;
     case NVN_FORMAT_DEPTH32F_STENCIL8: return VK_FORMAT_D32_SFLOAT_S8_UINT;
     case NVN_FORMAT_RGBA8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
-    case NVN_FORMAT_RGBA4: return VK_FORMAT_R4G4B4A4_UNORM_PACK16;
-    case NVN_FORMAT_RGB5: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
-    case NVN_FORMAT_RGB5A1: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
-    case NVN_FORMAT_RGB565: return VK_FORMAT_R5G6B5_UNORM_PACK16;
+    // #975：16 位打包格式按位段对上（表与退回规则见 k_p16）。BGR5 / RGB5 没有无 alpha 的 Vulkan 形式，
+    // 按多一位 alpha 的形式收，a 由视图钉成 1。
+    case NVN_FORMAT_RGBA4: case NVN_FORMAT_RGB5: case NVN_FORMAT_RGB5A1: case NVN_FORMAT_RGB565:
+    case NVN_FORMAT_BGR565: case NVN_FORMAT_BGR5: case NVN_FORMAT_BGR5A1: case NVN_FORMAT_A1BGR5: {
+        int i = p16_index(f);
+        return ((g_p16_fallback >> i) & 1u) ? k_p16[i].fallback : k_p16[i].exact;
+    }
     case NVN_FORMAT_RGB10A2: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case NVN_FORMAT_RGB10A2UI: return VK_FORMAT_A2B10G10R10_UINT_PACK32;
     // NVN 把 10/10/10/2 的 SNORM/SINT 也列进了枚举（顶点法线/切线常用）；位序按“从低位往上
@@ -139,8 +193,7 @@ VkFormat nvn_vk_format(uint32_t f) {
     case NVN_FORMAT_RGBX32F: return VK_FORMAT_R32G32B32A32_SFLOAT;
     case NVN_FORMAT_RGBX32UI: return VK_FORMAT_R32G32B32A32_UINT;
     case NVN_FORMAT_RGBX32I: return VK_FORMAT_R32G32B32A32_SINT;
-    // BGR 族：NVN 按“低位往上 r,g,b,a”命名，与 Vulkan 的 BGR 打包顺序一一对应。
-    case NVN_FORMAT_BGR565: return VK_FORMAT_B5G6R5_UNORM_PACK16;
+    // BGR 族：NVN 按“低位往上 r,g,b,a”命名，与 Vulkan 的 BGR 打包顺序一一对应（16 位打包的 BGR 见上面 k_p16）。
     case NVN_FORMAT_BGRX8: return VK_FORMAT_B8G8R8A8_UNORM;
     case NVN_FORMAT_BGRA8: return VK_FORMAT_B8G8R8A8_UNORM;
     case NVN_FORMAT_BGRX8_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
@@ -224,11 +277,7 @@ VkFormat nvn_vk_format(uint32_t f) {
     case NVN_FORMAT_RGB10A2_I2F: return VK_FORMAT_A2B10G10R10_SSCALED_PACK32;
     // RGBX：同位宽 RGBA（X 字节读作第 4 分量，Metal 经 swizzle 把 alpha 固定成 1；顶点属性在上游
     // nvn_vattr_fmt_canon 已归一成 RGB，这里的映射主要给纹理 / 视图路径兜底）。
-    // BGR 家族（BGRA8 是 Switch 顶点颜色的常见格式）。BGR5 没有无 alpha 的 Vulkan 形式，
-    // 与既有 RGB5→R5G5B5A1 同样按多一位 alpha 的形式收（中立表 kind 判定一致）。
-    case NVN_FORMAT_BGR5: return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
-    case NVN_FORMAT_BGR5A1: return VK_FORMAT_B5G5R5A1_UNORM_PACK16;
-    case NVN_FORMAT_A1BGR5: return VK_FORMAT_A1R5G5B5_UNORM_PACK16;
+    // BGR 家族（BGRA8 是 Switch 顶点颜色的常见格式）；16 位打包的 BGR5 / BGR5A1 / A1BGR5 见上面 k_p16。
     default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -437,48 +486,48 @@ int nvn_vattr_cpu_decode(uint32_t nvn_format, const uint8_t *src, float out[4]) 
         out[0] = vattr_srgb_lut[src[2]]; out[1] = vattr_srgb_lut[src[1]]; out[2] = vattr_srgb_lut[src[0]];
         out[3] = src[3] * (1.0f / 255.0f);
         return 4;
-    // 16 位打包：Vulkan PACK16 与 NVN 同位序——首名分量在最高位。
-    // RGB5/BGR5 的 bit0 是填充位不是 alpha（NVN 无该分量），alpha 取缺省 1.0。
+    // 16 位打包（#975）：NVN 从最低位起命名——首名分量在最低位（与贴图映射 k_p16 同一口径）。
+    // RGB5/BGR5 的 bit15 是填充位不是 alpha（NVN 无该分量），alpha 取缺省 1.0。
     case NVN_FORMAT_RGBA4:
         memcpy(&v, src, 2);
-        out[0] = ((v >> 12) & 0xf) / 15.0f; out[1] = ((v >> 8) & 0xf) / 15.0f;
-        out[2] = ((v >> 4) & 0xf) / 15.0f; out[3] = (v & 0xf) / 15.0f;
+        out[0] = (v & 0xf) / 15.0f; out[1] = ((v >> 4) & 0xf) / 15.0f;
+        out[2] = ((v >> 8) & 0xf) / 15.0f; out[3] = ((v >> 12) & 0xf) / 15.0f;
         return 2;
     case NVN_FORMAT_RGB5:
         memcpy(&v, src, 2);
-        out[0] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 6) & 0x1f) / 31.0f;
-        out[2] = ((v >> 1) & 0x1f) / 31.0f;
+        out[0] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x1f) / 31.0f;
+        out[2] = ((v >> 10) & 0x1f) / 31.0f;
         return 2;
     case NVN_FORMAT_RGB5A1:
         memcpy(&v, src, 2);
-        out[0] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 6) & 0x1f) / 31.0f;
-        out[2] = ((v >> 1) & 0x1f) / 31.0f; out[3] = (float)(v & 1);
+        out[0] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x1f) / 31.0f;
+        out[2] = ((v >> 10) & 0x1f) / 31.0f; out[3] = (float)((v >> 15) & 1);
         return 2;
     case NVN_FORMAT_RGB565:
         memcpy(&v, src, 2);
-        out[0] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x3f) / 63.0f;
-        out[2] = (v & 0x1f) / 31.0f;
+        out[0] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x3f) / 63.0f;
+        out[2] = ((v >> 11) & 0x1f) / 31.0f;
         return 2;
     case NVN_FORMAT_BGR565:
         memcpy(&v, src, 2);
-        out[2] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x3f) / 63.0f;
-        out[0] = (v & 0x1f) / 31.0f;
+        out[2] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x3f) / 63.0f;
+        out[0] = ((v >> 11) & 0x1f) / 31.0f;
         return 2;
     case NVN_FORMAT_BGR5:
         memcpy(&v, src, 2);
-        out[2] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 6) & 0x1f) / 31.0f;
-        out[0] = ((v >> 1) & 0x1f) / 31.0f;
+        out[2] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x1f) / 31.0f;
+        out[0] = ((v >> 10) & 0x1f) / 31.0f;
         return 2;
     case NVN_FORMAT_BGR5A1:
         memcpy(&v, src, 2);
-        out[2] = ((v >> 11) & 0x1f) / 31.0f; out[1] = ((v >> 6) & 0x1f) / 31.0f;
-        out[0] = ((v >> 1) & 0x1f) / 31.0f; out[3] = (float)(v & 1);
+        out[2] = (v & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x1f) / 31.0f;
+        out[0] = ((v >> 10) & 0x1f) / 31.0f; out[3] = (float)((v >> 15) & 1);
         return 2;
     case NVN_FORMAT_A1BGR5:
         memcpy(&v, src, 2);
-        out[3] = (float)((v >> 15) & 1);
-        out[0] = ((v >> 10) & 0x1f) / 31.0f; out[1] = ((v >> 5) & 0x1f) / 31.0f;
-        out[2] = (v & 0x1f) / 31.0f;
+        out[3] = (float)(v & 1);
+        out[2] = ((v >> 1) & 0x1f) / 31.0f; out[1] = ((v >> 6) & 0x1f) / 31.0f;
+        out[0] = ((v >> 11) & 0x1f) / 31.0f;
         return 2;
     // 32 位 UI2F/I2F：无 Vulkan scaled 等价物，顶点路径一律 CPU 解码（must_cpu_decode
     // 保证走得到这里）；缺失分量沿用缺省 (0,0,0,1)。

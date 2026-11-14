@@ -161,6 +161,24 @@
                 }
             }
         },
+        "no_exact16": {
+            "formats": {
+                "VK_FORMAT_B5G6R5_UNORM_PACK16": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                },
+                "VK_FORMAT_R5G5B5A1_UNORM_PACK16": {
+                    "VkFormatProperties": {
+                        "linearTilingFeatures": [],
+                        "optimalTilingFeatures": [],
+                        "bufferFeatures": []
+                    }
+                }
+            }
+        },
         "unchanged": {}
     },
     "profiles": {
@@ -270,6 +288,24 @@
             ],
             "capabilities": [
                 "unchanged"
+            ]
+        },
+        "VP_S2A_SIM_no_exact16": {
+            "version": 1,
+            "api-version": "1.1.0",
+            "label": "无 16 位打包精确格式",
+            "description": "藏掉 B5G6R5_UNORM_PACK16 与 R5G5B5A1_UNORM_PACK16，sim_tiers.sh 再用 exclude_device_extensions 去掉 VK_EXT_4444_formats（#975）。期望：契约绿，NVN RGBA4 / RGB565 / A1BGR5 走退回格式 + 采样通道补偿，读回仍按 NVN 位序；当渲染目标具名报红。",
+            "contributors": {},
+            "history": [
+                {
+                    "revision": 1,
+                    "date": "2026-11-14",
+                    "author": "S2Arm",
+                    "comment": "首版（#975）：只按 Vulkan 规范格式名 / 扩展名手写，不含任何设备报告数据"
+                }
+            ],
+            "capabilities": [
+                "no_exact16"
             ]
         }
     }
