@@ -150,6 +150,17 @@
   ],
   "allowlist": [
     {
+      "id": "vendor_binary",
+      "categories": [
+        "vendor_binary"
+      ],
+      "paths": [
+        "launchers/macos/frontend/Vendor/*.zip",
+        "launchers/macos/frontend/vendor/*.zip"
+      ],
+      "reason": "第三方官方二进制发行包（macOS 自动更新框架 Sparkle 的发行 zip）：不读正文，只登记元数据。"
+    },
+    {
       "id": "upstream_inkscape_export_path",
       "categories": [
         "home_path"
