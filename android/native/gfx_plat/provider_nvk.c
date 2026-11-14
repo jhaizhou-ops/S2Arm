@@ -516,7 +516,6 @@ static int32_t activate_impl(void *context) {
         char cwhy[192] = "";
         if (s2a_program_cache_dir(g_context.state_dir, ctx->cache_dir, sizeof ctx->cache_dir,
                                   cwhy, sizeof cwhy) == 0) {
-            /* MEASURE-COLD */ strncat(ctx->cache_dir, "-coldB", sizeof ctx->cache_dir - strlen(ctx->cache_dir) - 1);
             setenv("S2A_DIRECT_CACHE_DIR", ctx->cache_dir, 1);
             __android_log_print(ANDROID_LOG_INFO, TAG, "direct activate: program cache directory %s", ctx->cache_dir);
         } else {

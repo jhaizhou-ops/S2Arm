@@ -40,7 +40,9 @@ static struct nvn_pipe_demand_stats g_st;   // 原子累加
 static int dem_eq(const void *a, const void *b) { return memcmp(a, b, sizeof(struct dem_key)) == 0; }
 
 int nvn_vk_pipe_demand_on(void) {
-    return 1;   /* MEASURE-ONLY */
+    static int v = -1;
+    if (v < 0) v = nvn_plat_flag("nvk_pipe_async", 0) ? 1 : 0;
+    return v;
 }
 uint32_t nvk_fu_item_ms(void)   { static int v = -2; if (v == -2) v = nvn_plat_flag("fu_item_ms", 2000); return v > 0 ? (uint32_t)v : 0; }
 uint32_t nvk_fu_frame_ms(void)  { static int v = -2; if (v == -2) v = nvn_plat_flag("fu_frame_ms", 100); return v > 0 ? (uint32_t)v : 0; }
