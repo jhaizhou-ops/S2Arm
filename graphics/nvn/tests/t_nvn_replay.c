@@ -2285,6 +2285,21 @@ static void t_dispatch_indirect_gpu(void) {
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); g_buf_cpu_fake = NULL; nvn_be_pool_del(g_pmem); pass_fresh();
 }
 
+// Ryujinx StateUpdater 与 EnumConversion 合成的 VkFrontFace 仅由 API 值和队列 flip 决定；
+// 后端 C80 的 NDC 合同另含窗口原点转换。下面是两步规范换算的真值表，不调用被测归一化。
+static void t_front_origin_matrix(void) {
+    static const unsigned canonical[2][2][2] = {{{0,1},{1,0}},{{1,0},{0,1}}};
+    pass_fresh(); g_gdraws = g_resolve_rc = 0;
+    for (int api = 0; api < 2; api++) for (int flip = 0; flip < 2; flip++) for (int ll = 0; ll < 2; ll++) {
+        nvn_be_set_origin_lower_left(ll); s2a_nvn_rast_flip = flip;
+        stream s = {0}; q_env(&s);
+        p_bind_state *state = put(&s, OP_BIND_STATE, sizeof *state); state->kind = 4;
+        poly_st poly = {NVN_FACE_BACK, (unsigned)api, NVN_POLYGON_MODE_FILL, 0}; memcpy(state->bytes, &poly, sizeof poly);
+        q_draw(&s); end(&s); int before = g_pipe_gets; submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_last_pdesc.poly.front == canonical[api][flip][ll] && g_last_pdesc.poly.cull == NVN_FACE_BACK && g_last_pdesc.origin_ll == ll && g_pipe_gets == before + 1);
+    }
+    nvn_be_set_origin_lower_left(1); s2a_nvn_rast_flip = 1; pass_fresh();
+}
 static void t_copy_t2t(void) {
     pass_fresh(); g_nct = 0; g_nbl = 0;
     tex_t a = mk_tex(71, 0, NVN_FORMAT_RGBA8, 64, 32, 3, 0), b = mk_tex(72, 0x8000, NVN_FORMAT_RGBA8, 32, 16, 1, 0), f = mk_tex(73, 0xC000, NVN_FORMAT_R11G11B10F, 32, 16, 1, 0);
@@ -2597,11 +2612,11 @@ static void t_draw(void) {   // 绘制：状态在绘制时才变成后端的管
     { stream w1 = {0}; by = put(&w1, OP_BIND_STATE, sizeof *by); by->kind = 4; poly_st pw = {NVN_FACE_BACK, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0}; memcpy(by->bytes, &pw, sizeof pw);
       di = put(&w1, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->itype = 1; di->count = 3; di->ibuf = base + 3 * PG; end(&w1);
       submit1(&w1); fake_complete(NVN_GPU_DONE_OK);
-      CHECK(g_last_pdesc.poly.front == NVN_FRONT_FACE_CW && g_last_pdesc.poly.cull == NVN_FACE_BACK && g_last_pdesc.origin_ll == 1);   // 翻转开着：接口说逆时针 → 规范化坐标里顺时针
+      CHECK(g_last_pdesc.poly.front == NVN_FRONT_FACE_CCW && g_last_pdesc.poly.cull == NVN_FACE_BACK && g_last_pdesc.origin_ll == 1);   // 翻转与当前左下原点共同归一化：这里抵消
       int pg0 = g_pipe_gets; s2a_nvn_rast_flip = 0;                                  // 换一条翻转关着的队列：同样的状态，管线要重取
       stream w2 = {0}; di = put(&w2, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->itype = 1; di->count = 3; di->ibuf = base + 3 * PG; end(&w2);
       submit1(&w2); fake_complete(NVN_GPU_DONE_OK);
-      CHECK(g_pipe_gets == pg0 + 1 && g_last_pdesc.poly.front == NVN_FRONT_FACE_CCW);
+      CHECK(g_pipe_gets == pg0 + 1 && g_last_pdesc.poly.front == NVN_FRONT_FACE_CW);
       s2a_nvn_rast_flip = 1; }
     // 裁剪矩形夹到目标（64×36）内；整个在目标外的不发绘制；深度夹取进管线描述；「y 取反」的视口重排 = 视口上下翻
     { stream c1 = {0}; p_scissor *sc1 = put(&c1, OP_SCISSOR, sizeof *sc1); sc1->x = -5; sc1->y = -6; sc1->w = 20; sc1->h = 100;
@@ -2838,7 +2853,7 @@ int main(int argc, char **argv) {
     t_dispatch_ubop_ro_skip();
     t_compute_image();
     t_compute_sources();
-    t_copy_t2t();
+    t_front_origin_matrix(); t_copy_t2t();
     t_draw();
     t_arena697_detail();
     t_logic_op_accounting();
