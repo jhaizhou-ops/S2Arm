@@ -75,7 +75,9 @@ int s2a_guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return 
 //   每局写闪存 82–223 GB：游戏碰过的约 4.4 GB + 宿主约 3 GB 超过物理内存，系统边刷边逐出、再被写脏（换页抖动）。同一款在 Duo（物理 11.5 GB）上强制文件后备：
 //   正式游戏每 10 秒写盘 0–8 MB、后备文件落盘 4.4 GB 不再涨。所以文件后备能不能用看物理内存，开不开看单进程上限，都不依赖历史：
 //   设了按设的；room 0（Mac 另判）关；上局在前台死掉 / 坏记录 开；有实测按实测；没实测时池 ≤ 剩余 关（Switch 1 款，#783 ㊹ 的小内存机型不误开）；
-//   池 > 剩余且物理内存 ≥ 池 + 宿主估计 开；物理内存也装不下 → 关并 *low = 1（起局提示玩家这台设备内存不够这款，照样开局：文件后备在这种机器上是换页抖动、卡死重启，匿名最坏被系统结束）
+//   池 > 剩余且物理内存 ≥ 池 + 宿主估计 开；物理内存也装不下 → 照样开并 *low = 1（起局提示玩家这台设备内存可能不够这款）。
+//     两种都可能坏时按「能玩下去」选：那台 iPad（7.5 GB）上文件后备 8 局每局都玩到约 30 分钟（27000–41000 帧）才掉帧卡死；匿名内存这款要约 7.9 GB、
+//     比它的物理内存还大，没有实测，按 iPhone 首局约 8 分钟就被系统结束看更早出局（11-13 维护者定：都装不下时提示 + 照样开文件后备）
 int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t phys, uint64_t seen, uint64_t host, uint64_t margin, int died, int *low) {
     *low = 0;
     if (e && *e) return strcmp(e, "0") != 0;
@@ -84,14 +86,14 @@ int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t
     if (seen) return seen + margin > room;
     if (pool <= room) return 0;
     if (phys && phys >= pool + host) return 1;
-    *low = 1; return 0;
+    *low = 1; return 1;
 }
 static uint64_t phys_mem(void) { uint64_t ph = 0; size_t n = sizeof ph; return sysctlbyname("hw.memsize", &ph, &n, NULL, 0) ? 0 : ph; }
 // 三档判定的一句理由（日志用）
 static const char *tier_why(int on, int low, uint64_t seen, int died) {
     return died ? "上一局在前台时死掉，这一局开" : seen == UINT64_MAX ? "实测记录读不出（坏记录），保守开"
          : seen ? (on ? "实测峰值 + 余量大于剩余，装不下" : "实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
-         : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：保持匿名内存，提示玩家内存不够"
+         : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：照样开（能玩下去优先），提示玩家内存可能不够"
          : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
 }
 static void low_ram_notice(uint64_t phys, uint64_t need) {
