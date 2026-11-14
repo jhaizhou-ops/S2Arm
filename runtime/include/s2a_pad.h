@@ -14,6 +14,8 @@ void s2a_pad_set_active(int active);
 // 进程内重启（runtime/src/host_main.c s2a_host_rebuild）：清掉上一局的按键 / 摇杆快照、换输入纪元；活跃状态不变（后台时不会被打开）
 void s2a_pad_session_reset(void);
 int s2a_pad_has_controller(void);   // 当前生效的是实体手柄（触屏接管时为 0）
+// 当前生效的输入来源（s2a_pad_source）：宿主按它挑六轴来源——玩家拿手柄就用手柄的陀螺仪，戳屏幕就用手机
+int s2a_pad_selected_source(void);
 // 屏幕被碰：连着实体手柄时改由触屏生效（虚拟按键要显示），返回 1 = 发生了切换
 int s2a_pad_prefer_touch(void);
 uint32_t s2a_pad_read(int32_t axes[4], s2a_pad_source *source);

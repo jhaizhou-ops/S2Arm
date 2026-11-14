@@ -1,9 +1,10 @@
-// 本地多手柄的震动与体感：玩家 2–4（槽 1–3，系统扩展手柄各一只；分槽见 ios/controller.m planSlots）。
-//   服务层（services/S2A.Services/ControllerFeedback.cs）按玩家把震动交给 s2a_pad_set_rumble_slot、按槽读 s2a_pad_read_motion_slot；
-//   导出协议同 Mac（macos/front_mac.m，#520）。原先 iOS 只有玩家 1 一路（controller.m 单例），玩家 2 起的震动和体感都没地方去。
-//   震动：每只手柄各一个 Core Haptics 引擎（GCDeviceHaptics），连续事件循环播放、两侧振幅取大调强度，1 秒没新帧自动停；失败退避 / 判死同 ios/haptic_retry.h。
-//     强度走设置里同一个震动开关与档位（controller.m s2a_ios_rumble_gain）和同一条手感曲线（s2a_hp_feel）。
-//   体感：每只手柄自己的 GCMotion（重力 + 用户加速度 + 角速度），换算成 NS2 坐标（runtime/include/phone_axes.h，同 Mac）；游戏要六轴时才开传感器。
+// 本地多手柄的震动与体感：槽 0 = 玩家 1，槽 1–3 = 玩家 2–4（系统扩展手柄各一只；分槽见 ios/controller.m planSlots）。
+//   体感：每只手柄自己的 GCMotion（重力 + 用户加速度 + 角速度），换算成 NS2 坐标（runtime/include/phone_axes.h，同 Mac）；
+//     游戏要六轴时才开传感器。玩家 1 的样本由 controller.m 的 s2a_pad_read_motion 经 s2a_pad_read_motion_slot(0, …) 取，
+//     服务层按槽读玩家 2–4（s2a_pad_read_motion_slot，ControllerFeedback 按玩家分发）。
+//   震动：玩家 2–4 每只手柄各一个 Core Haptics 引擎（GCDeviceHaptics），连续事件循环播放、两侧振幅取大调强度，1 秒没新帧自动停；
+//     失败退避 / 判死同 ios/haptic_retry.h。强度走设置里同一个震动开关与档位（controller.m s2a_ios_rumble_gain）和同一条手感曲线（s2a_hp_feel）。
+//     玩家 1 的震动仍走 controller.m 的单例（s2a_pad_rumble_session / system_play_on_queue）。
 #import <GameController/GameController.h>
 #import <CoreHaptics/CoreHaptics.h>
 #include "native.h"
@@ -26,6 +27,7 @@ static uint64_t g_since[SLOT_PADS];
 static s2a_pad_motion g_motion[SLOT_PADS];
 static int g_motion_known[SLOT_PADS];
 static _Atomic int g_motion_wanted, g_active;
+static _Atomic int g_motion_first_logged;   // 首个样本只打一次（真机排查体感用）
 static dispatch_queue_t g_q;   // 震动对象只在这条队列上碰
 
 void s2a_ios_slot_feedback_stop(void);
@@ -162,11 +164,29 @@ static void motion_activate(GCController *c, BOOL on) {
     GCMotion *m = c.motion;
     if (m.sensorsRequireManualActivation) m.sensorsActive = on;
 }
-// 服务层按槽要体感（P2 起）：out[0]；返回 1 有样本、0 没有
+// 手柄给的加速度：正常路径是 gravity + userAcceleration；但 DualSense / Switch Pro 在 iOS 上实测只有 hasRotationRate
+//   （hasGravityAndUserAcceleration = NO、hasAttitude = NO，2026-11-14 真机日志），那两项恒为 0。此时退到「总加速度
+//   acceleration（含重力）」——数学上就是 gravity + userAcceleration，换算出来一模一样。
+//   两者都没有就只报角速度（accel 全 0）：甩 / 转这类靠角速度的动作照常，倾斜瞄准会漂，但总比整路样本丢掉好。
+//   姿态四元数反推重力那条没留：手上两只手柄都不给 attitude，验不了符号方向，宁可不要没验证过的分支。
+static void motion_acceleration(GCMotion *m, double gravity[3], double user[3]) {
+    gravity[0] = gravity[1] = gravity[2] = 0; user[0] = user[1] = user[2] = 0;
+    if (m.hasGravityAndUserAcceleration) {
+        gravity[0] = m.gravity.x; gravity[1] = m.gravity.y; gravity[2] = m.gravity.z;
+        user[0] = m.userAcceleration.x; user[1] = m.userAcceleration.y; user[2] = m.userAcceleration.z;
+        return;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"   // acceleration 在 iOS 14 起弃用，但 DualSense / Pro 上它才是唯一的加速度来源
+    double a[3] = {m.acceleration.x, m.acceleration.y, m.acceleration.z};
+#pragma clang diagnostic pop
+    if (a[0] || a[1] || a[2]) { gravity[0] = a[0]; gravity[1] = a[1]; gravity[2] = a[2]; }
+}
+// 服务层按槽要体感（玩家 2–4）：out[0]；返回 1 有样本、0 没有。玩家 1 也走这里（controller.m 的 s2a_pad_read_motion）
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion_slot(int slot, s2a_pad_motion out[2]) {
     if (!out) return 0;
     out[0] = out[1] = (s2a_pad_motion){0};
-    if (slot <= 0 || slot >= SLOT_PADS || !atomic_load(&g_active)) return 0;
+    if (slot < 0 || slot >= SLOT_PADS || !atomic_load(&g_active)) return 0;
     pthread_mutex_lock(&g_mu);
     int known = g_motion_known[slot];
     if (known) out[0] = g_motion[slot];
@@ -175,9 +195,10 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_motion_slot(int sl
 }
 
 // ---------- controller.m 调 ----------
-// 槽 slot 换了手柄（inputQueue 上，planSlots 分完槽）：nil = 空槽。旧手柄摘体感回调、停震动；新手柄装体感回调
+// 槽 slot 换了手柄（inputQueue 上，planSlots 分完槽；槽 0 = 玩家 1 由 attachSystem / clearSystem 调）：nil = 空槽。
+//   旧手柄摘体感回调、停震动；新手柄装体感回调
 void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
-    if (slot <= 0 || slot >= SLOT_PADS) return;
+    if (slot < 0 || slot >= SLOT_PADS) return;
     pthread_mutex_lock(&g_mu);
     GCController *old = g_owner[slot];
     if (old == c) { pthread_mutex_unlock(&g_mu); return; }
@@ -186,23 +207,36 @@ void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
     if (old) {
         old.motion.valueChangedHandler = nil;
         BOOL elsewhere = NO;
-        pthread_mutex_lock(&g_mu); for (int s = 1; s < SLOT_PADS; s++) if (g_owner[s] == old) elsewhere = YES; pthread_mutex_unlock(&g_mu);
+        pthread_mutex_lock(&g_mu); for (int s = 0; s < SLOT_PADS; s++) if (s != slot && g_owner[s] == old) elsewhere = YES; pthread_mutex_unlock(&g_mu);
         if (!elsewhere) { motion_activate(old, NO); dispatch_async(queue(), ^{ rumbler_stop([g_rumblers objectForKey:old]); }); }
     }
     GCMotion *m = c.motion;
-    if (!m) { if (c) LOG("玩家手柄体感：玩家 %d（%s）没有体感传感器", slot + 1, c.vendorName.UTF8String ?: "?"); return; }
+    if (!m) {
+        // 系统不给这只手柄六轴。已知：iOS 的 GameController 只对 Switch Pro / DualSense / DualShock 提供 GCMotion，
+        //   **Joy-Con 一代的电量 / 按键能读到，但 motion 是 nil**（Apple 论坛 712394，2022 年起如此），这条路没有体感可读
+        if (c) LOG("玩家手柄体感：玩家 %d（%s）没有体感传感器（系统不提供 GCMotion：Joy-Con 一代属已知限制）", slot + 1, c.vendorName.UTF8String ?: "?");
+        return;
+    }
+    // 有传感器才打这一行：插上手柄第一眼就能分清「系统没给六轴」和「App 没读」，以及加速度要走哪条兜底
+    if (c) LOG("玩家手柄体感：玩家 %d（%s）已接上六轴（旋转 %s、姿态 %s、重力/用户加速度 %s）", slot + 1, c.vendorName.UTF8String ?: "?",
+               m.hasRotationRate ? "有" : "无", m.hasAttitude ? "有" : "无", m.hasGravityAndUserAcceleration ? "有" : "无");
     __weak GCController *weakC = c;
     m.valueChangedHandler = ^(GCMotion *motion) {
-        if (!(motion.hasRotationRate && motion.hasGravityAndUserAcceleration)) return;
-        double gravity[3] = {motion.gravity.x, motion.gravity.y, motion.gravity.z}, user[3] = {motion.userAcceleration.x, motion.userAcceleration.y, motion.userAcceleration.z};
+        if (!motion.hasRotationRate) return;   // 只要系统给角速度就收：加速度由 motion_acceleration 兜底
+        double gravity[3], user[3];
+        motion_acceleration(motion, gravity, user);
         double rotation[3] = {motion.rotationRate.x, motion.rotationRate.y, motion.rotationRate.z};
         float acceleration[3], gyro[3];
         s2a_gc_motion_axes(gravity, user, rotation, acceleration, gyro);
         s2a_pad_motion sample = {up_ns() / 1000, acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]};
         GCController *owner = weakC;
         pthread_mutex_lock(&g_mu);
-        for (int s = 1; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
+        for (int s = 0; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
+        int first = atomic_exchange(&g_motion_first_logged, 1);
         pthread_mutex_unlock(&g_mu);
+        if (!first)   // 首个样本：哪条加速度兜底、数值长什么样，一条日志看全（真机排查体感不灵用它）
+            LOG("玩家手柄体感：首个样本（%s）：加速度 (%.2f, %.2f, %.2f) g、角速度 (%.1f, %.1f, %.1f) 度/秒",
+                owner.vendorName.UTF8String ?: "?", acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]);
     };
     if (atomic_load(&g_motion_wanted)) motion_activate(c, YES);
 }
@@ -212,7 +246,7 @@ void s2a_ios_slot_feedback_motion_wanted(int want) {
     if (atomic_exchange(&g_motion_wanted, want) == want) return;
     GCController *owners[SLOT_PADS];
     pthread_mutex_lock(&g_mu); for (int s = 0; s < SLOT_PADS; s++) owners[s] = g_owner[s]; pthread_mutex_unlock(&g_mu);
-    for (int s = 1; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], want);
+    for (int s = 0; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], want);
 }
 // 前后台（controller.m 同 g_slots_active）与震动开关关掉时：后台不收、不震；关掉时马上停
 void s2a_ios_slot_feedback_active(int active) {

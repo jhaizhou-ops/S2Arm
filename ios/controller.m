@@ -6,6 +6,7 @@
 #import <UIKit/UIGestureRecognizerSubclass.h>   // S2ATouchWatch 要改 state
 #include "native.h"
 #include "s2a_pad.h"
+#include "motion_pick.h"   // 玩家 1 六轴来源仲裁（纯函数，单测 t_motion_pick）
 #include "NS2Module.h"
 #include "pad_liveness.h"
 #include "haptic_retry.h"
@@ -37,6 +38,23 @@ static _Atomic int g_ble_foreground;
 static _Atomic int g_motion_requested;
 static _Atomic int g_phone_motion_wanted;   // 游戏要六轴（不论有没有外接手柄）
 static pthread_mutex_t g_motion_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// ---------- 玩家 1 的六轴来源仲裁（系统手柄 / NS2 Pro / 手机）----------
+// 按「谁在操作」选，不按「谁连上了」：手柄在驱动输入 → 那把手柄的六轴（ios/slot_feedback.m 的 GCMotion 回调）；
+//   触屏在驱动输入 → 手机陀螺仪（手柄多半躺在包里，它只报躺着不动的抖）；选中那一路没样本才退下一路。
+//   跟 macos/front_mac.m sample_motion(active) 同一个判据。换源滞回 S2A_MOTION_DWELL_MS，换源丢一帧（known = 0）
+//   让服务层重建姿态（ControllerFeedback 见 known = 0 会清六轴状态），绝不把两台刚体的角速度接到一条姿态上。
+#define S2A_MOTION_DWELL_MS 300
+#define S2A_MOTION_PHONE_GRACE_MS 2000
+// 来源编号（S2A_MOTION_*）与选法在 runtime/include/motion_pick.h（纯函数，单测 t_motion_pick）
+static int g_motion_src;               // 当前生效来源（只有 HID 线程读写）
+static int g_motion_sel;               // 上一次看到的 pad.c 选中来源（S2A_PAD_*）
+static uint64_t g_motion_sel_us;       // 它最近一次翻转的时刻
+static uint64_t g_motion_pad_since_us; // 六轴由手柄供上的起始时刻（0 = 现在是手机 / 没有）
+static _Atomic int g_phone_motion_on;  // 手机传感器当前是否开着（缓存，只为幂等）
+static const char *motion_src_name(int src);
+static void phone_motion_use(int on);
+static void phone_motion_force(int on);
 // ready / 连接代次变更与震动 mailbox 写入必须原子，拒绝暂停前挂起的旧请求。
 static pthread_mutex_t g_feedback_mu = PTHREAD_MUTEX_INITIALIZER;
 #define SYSTEM_SESSION_BASE 0x5359000000000000ull
@@ -334,10 +352,12 @@ static void pad_face_sync(void);
 // 本地多手柄（双人同玩）：槽 0 = 玩家 1，仍走 pad.c（触屏 / NS2 Pro / 系统手柄三选一，服务层读 s2a_pad_read_ex）；
 //   槽 1–3 = 其余系统扩展手柄各一只，服务层读 s2a_vpad_read_pad（协议同 Mac macos/front_mac.m）。分槽规则共用 runtime/src/pad.c s2a_slot_plan。
 //   输入队列上写、服务层输入线程读：按槽原子量（同 front_mac.m）。
-// 震动 / 体感：玩家 1 走这里的单例（g_haptic_device / s2a_pad_rumble_session）；玩家 2–4（槽 1–3）走 ios/slot_feedback.m 的按槽导出
-//   （s2a_pad_set_rumble_slot / s2a_pad_read_motion_slot，服务层 ControllerFeedback 按玩家分发，协议同 Mac），这里分槽后把每槽的手柄交过去
+// 震动 / 体感：玩家 1 走这里的单例（g_haptic_device / s2a_pad_rumble_session）；玩家 1–4 的体感走 ios/slot_feedback.m 的
+//   按槽导出（槽 0 = 玩家 1，s2a_pad_read_motion 读它；槽 1–3 = 玩家 2–4，服务层 ControllerFeedback 按玩家读），
+//   震动槽 1–3 也走那里（s2a_pad_set_rumble_slot，协议同 Mac），这里分槽后把每槽的手柄交过去
 void s2a_ios_slot_feedback_owner(int slot, GCController *c); void s2a_ios_slot_feedback_motion_wanted(int want);
 void s2a_ios_slot_feedback_active(int active); void s2a_ios_slot_feedback_stop(void);
+int s2a_pad_read_motion_slot(int slot, s2a_pad_motion out[2]);
 #define S2A_IOS_MAX_PADS 4
 static _Atomic uint32_t g_slot_buttons[S2A_IOS_MAX_PADS];
 static _Atomic int32_t g_slot_sticks[S2A_IOS_MAX_PADS][4];
@@ -507,7 +527,8 @@ static void pad_face_sync(void) {
     pad_face_sync();
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!self->_foreground) return;
-        s2a_phone_motion_enable(atomic_load(&g_phone_motion_wanted) && !atomic_load(&g_ble_ready));
+        // 设置页可能刚改了「手机陀螺仪」：按新偏好重来一次（不走缓存，缓存可能与真实开关不同步）
+        phone_motion_force(atomic_load(&g_phone_motion_wanted) && !atomic_load(&g_ble_ready));
         phone_refresh_availability();
         BOOL previous = self->_adapterEnabled;
         [self reloadAdapterPreference];
@@ -602,6 +623,7 @@ static void pad_face_sync(void) {
     _systemRev++;          // 挂起的延迟复查作废：已经有新对象了
     _systemRecheck = NO;
     system_select_device(next);   // 震动侧跟着换设备（原 selectSystem 里的调用，挪到这里）
+    s2a_ios_slot_feedback_owner(0, next);   // 玩家 1 的体感跟着换手柄（回调在 ios/slot_feedback.m，同玩家 2–4）
     prepare_pad(next, _inputQueue);   // 回调队列 + 「-」「Home」关系统手势
     __weak S2AController *weakSelf = self;
     next.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *pad, GCControllerElement *element) {
@@ -617,6 +639,7 @@ static void pad_face_sync(void) {
     _systemRev++;
     _systemRecheck = NO;
     system_select_device(nil);    // 震动侧一并摘掉（原 selectSystem 里 next 为 nil 时同样会调）
+    s2a_ios_slot_feedback_owner(0, nil);   // 玩家 1 的体感跟着摘（样本清零，s2a_pad_read_motion 自然回落）
     old.extendedGamepad.valueChangedHandler = nil;
     s2a_pad_update(S2A_PAD_SYSTEM, 0, 0, NULL);
 }
@@ -838,7 +861,7 @@ static void log_controllers(int why) {   // why：0 启动时、1 连接通知�
         else if (_blePaused) [self stopBLE:"automatic connection disabled"];
     }
     if (foreground) [self settingsChanged:nil];
-    else { s2a_phone_motion_enable(0); s2a_phone_rumble_stop(); }
+    else { phone_motion_force(0); s2a_phone_rumble_stop(); }   // 缓存跟着关：回前台由 s2a_pad_read_motion 按需再开
 }
 @end
 
@@ -1026,32 +1049,102 @@ __attribute__((visibility("default"), used)) void s2a_pad_stop_rumble(uint64_t s
     } else if (atomic_load(&g_adapter_enabled) && session && session == atomic_load(&g_feedback_session) && atomic_load(&g_ble_ready)) atomic_load(&g_ns2)->stop_rumble();
     pthread_mutex_unlock(&g_feedback_mu);
 }
+// ---------- 玩家 1 的六轴来源仲裁 ----------
+static const char *motion_src_name(int src) {
+    switch (src) {
+        case S2A_MOTION_PHONE: return "手机陀螺仪";
+        case S2A_MOTION_GC: return "系统手柄";
+        case S2A_MOTION_NS2: return "NS2 Pro";
+        default: return "无";
+    }
+}
+// 手机传感器开关缓存：真实开关在 phone_motion.m（幂等，重复调用只打一次日志）
+static void phone_motion_use(int on) {
+    on = !!on;
+    if (on == !!atomic_load(&g_phone_motion_on)) return;
+    atomic_store(&g_phone_motion_on, on);
+    s2a_phone_motion_enable(on);
+}
+// 设置页改了「手机陀螺仪」/ 切后台：不管缓存，按新值重来一次（缓存可能和真实开关不同步）
+static void phone_motion_force(int on) {
+    on = !!on;
+    atomic_store(&g_phone_motion_on, on);
+    s2a_phone_motion_enable(on);
+}
+
 __attribute__((visibility("default"), used)) void s2a_pad_set_motion_enabled(int enabled) {
     pthread_mutex_lock(&g_motion_mu);
     int want = !!enabled;
     atomic_store(&g_phone_motion_wanted, want);
-    s2a_ios_slot_feedback_motion_wanted(want);   // 玩家 2–4 的手柄传感器跟着开关
+    s2a_ios_slot_feedback_motion_wanted(want);   // 玩家 1–4 的手柄传感器跟着开关
     enabled = want && atomic_load(&g_adapter_enabled);
     const ns2_api *api = atomic_load(&g_ns2);
     if (atomic_exchange(&g_motion_requested, enabled) != enabled && api && atomic_load(&g_adapter_enabled)) api->set_motion_enabled(enabled);
     int ns2 = enabled && atomic_load(&g_ble_ready);
     pthread_mutex_unlock(&g_motion_mu);
-    s2a_phone_motion_enable(want && atomic_load(&g_ble_foreground) && !ns2);   // 后台与游戏不要六轴时关闭。
+    if (!want) {
+        // 游戏不要六轴：来源归零、手机传感器关掉（手柄侧传感器由 s2a_ios_slot_feedback_motion_wanted 停）
+        g_motion_src = S2A_MOTION_NONE;
+        g_motion_sel = S2A_PAD_TOUCH;
+        g_motion_sel_us = 0;
+        g_motion_pad_since_us = 0;
+        phone_motion_use(0);
+        return;
+    }
+    // 手机传感器先按老规矩开着（没有 NS2 时）；真正读哪一路由 s2a_pad_read_motion 每帧定，手柄供上 2 秒后关掉省电。
+    //   后台一律关（前后台切换时 setForeground: 也会再关一次）
+    phone_motion_use(atomic_load(&g_ble_foreground) && !ns2);
 }
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion(s2a_pad_motion *out) {
     if (!out) return 0;
+    *out = (s2a_pad_motion){0};
+    if (!atomic_load(&g_phone_motion_wanted)) return 0;   // 游戏没要六轴：三路都不采
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000;
+
+    // 谁在操作：pad.c 的最后输入切换（SYSTEM / BLE / TOUCH）。六轴跟它走，不按连接状态——
+    //   玩家戳过屏幕、此后没有手柄动作，就是手机；手柄一动，pad.c 自己会切回去
+    int sel = s2a_pad_selected_source();
+    if (sel != g_motion_sel || !g_motion_sel_us) { g_motion_sel = sel; g_motion_sel_us = now; }
+    BOOL settled = now - g_motion_sel_us >= (uint64_t)S2A_MOTION_DWELL_MS * 1000;
+    // 触屏在操作就把手机传感器叫起来：它可能刚被「手柄让位省电」关掉，不叫起来手机这一路永远回不来
+    if (sel == S2A_PAD_TOUCH && atomic_load(&g_ble_foreground) && s2a_phone_motion_available()) phone_motion_use(1);
+
     ns2_motion motion = {0};
     pthread_mutex_lock(&g_motion_mu);
     if (atomic_load(&g_adapter_enabled) && atomic_load(&g_ble_ready) && atomic_load(&g_motion_requested)) atomic_load(&g_ns2)->get_motion(&motion);
     pthread_mutex_unlock(&g_motion_mu);
-    *out = (s2a_pad_motion){0};
-    if (!motion.known) {
-        // 没有外接手柄的样本：手机自身当掌机六轴（游戏要六轴时才开着）；中途连上了外接手柄则在它出样本那次关掉手机传感器
-        return atomic_load(&g_phone_motion_wanted) ? s2a_phone_motion_read(out) : 0;
+    s2a_pad_motion slot[2] = {{0}};
+    int gc_known = s2a_pad_read_motion_slot(0, slot);   // 玩家 1 这只手柄自己的 GCMotion（ios/slot_feedback.m）
+    s2a_pad_motion phone = {0};
+    int phone_known = s2a_phone_motion_read(&phone);
+
+    int target = s2a_motion_pick(sel, motion.known, gc_known, phone_known);
+    int cur = g_motion_src;
+    int cur_ok = cur == S2A_MOTION_GC ? gc_known : cur == S2A_MOTION_NS2 ? motion.known : cur == S2A_MOTION_PHONE ? phone_known : 0;
+    int next = (cur == S2A_MOTION_NONE || !cur_ok || settled) ? target : cur;
+    if (next != g_motion_src) {
+        int previous = g_motion_src;
+        LOG("六轴：来源 %s → %s", motion_src_name(previous), motion_src_name(next));
+        g_motion_src = next;
+        g_motion_pad_since_us = 0;
+        // 换源丢一帧：服务层收到 known = 0 会清六轴状态，下一帧才是新来源的样本（不跨刚体积分）
+        if (previous != S2A_MOTION_NONE && next != S2A_MOTION_NONE) return 0;
     }
-    s2a_phone_motion_enable(0);
-    *out = (s2a_pad_motion){motion.host_timestamp_us,
-        motion.acceleration_x, motion.acceleration_y, motion.acceleration_z,
-        motion.gyro_x, motion.gyro_y, motion.gyro_z};
-    return 1;
+    if (next == S2A_MOTION_PHONE) {
+        g_motion_pad_since_us = 0;
+        phone_motion_use(1);
+        *out = phone;
+        return 1;
+    }
+    if (next == S2A_MOTION_GC || next == S2A_MOTION_NS2) {
+        if (!g_motion_pad_since_us) g_motion_pad_since_us = now;
+        // 手柄稳定供六轴 2 秒后关掉手机传感器：拿外接手柄玩一整局不该一直开着 200 Hz CoreMotion
+        if (now - g_motion_pad_since_us > (uint64_t)S2A_MOTION_PHONE_GRACE_MS * 1000) phone_motion_use(0);
+        if (next == S2A_MOTION_GC) *out = slot[0];
+        else *out = (s2a_pad_motion){motion.host_timestamp_us,
+            motion.acceleration_x, motion.acceleration_y, motion.acceleration_z,
+            motion.gyro_x, motion.gyro_y, motion.gyro_z};
+        return 1;
+    }
+    return 0;
 }
