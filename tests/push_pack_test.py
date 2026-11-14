@@ -931,6 +931,41 @@ sys.exit(0 if pathlib.Path(sys.argv[-1]).exists() else 1)
             dev.put(self.pk / "a", "remote")
         self.assertEqual(seen, [40])
 
+    def denied_helper(self, rm_ok=True):
+        # #074d88 三台设备原文：机上旧 game.img 打开写被拒。假工具：删过之前 put / put-at 一律被拒；rm 按 rm_ok 成 / 败；每次调用记一行
+        script = self.w / "denied.py"; ops = self.w / "ops"; gone = self.w / "gone"
+        script.write_text(f'''import pathlib, sys
+op = sys.argv[1]; pathlib.Path({str(ops)!r}).open("a").write(op + "\\n")
+if op == "rm":
+    if {rm_ok!r}: pathlib.Path({str(gone)!r}).touch(); print("rm " + sys.argv[2]); sys.exit(0)
+    print("删不掉 " + sys.argv[2] + "：afc error: Permission denied"); sys.exit(1)
+if op in ("put", "put-at") and not pathlib.Path({str(gone)!r}).exists():
+    print("打不开 " + sys.argv[3] + "：afc error: Permission denied"); sys.exit(1)
+print(op + " 8 字节 → " + sys.argv[3])
+''', encoding="utf-8")
+        return push.Devpush(sys.executable, "-u", str(script), self.w), ops
+
+    def test_denied_file_is_removed_and_rewritten(self):
+        # 期望（手写）：打开写被拒 → 删掉这一个文件 → 从头写一次，成功不抛
+        dev, ops = self.denied_helper()
+        dev.put(self.pk / "a", "Library/S2Arm/games/G/资源包/game.img")
+        self.assertEqual(ops.read_text().split(), ["put", "rm", "put"])
+
+    def test_denied_resume_falls_back_to_full_rewrite(self):
+        # 期望（手写）：续传那段打不开写 → 续不了，删掉整份从头 put（不是再 put-at）
+        dev, ops = self.denied_helper()
+        dev.put_at(self.pk / "a", "Library/S2Arm/games/G/资源包/game.img", 4)
+        self.assertEqual(ops.read_text().split(), ["put-at", "rm", "put"])
+
+    def test_denied_and_not_removable_reports_phone_words_and_next_step(self):
+        # 期望（手写）：删也被拒 → 不再写，报手机原话（Permission denied）+ 下一步（手机上打开一次 S2Arm）；分类成「App 写不进」
+        dev, ops = self.denied_helper(rm_ok=False)
+        with self.assertRaises(push.Fail) as cm:
+            dev.put(self.pk / "a", "Library/S2Arm/games/G/资源包/game.img")
+        self.assertEqual(ops.read_text().split(), ["put", "rm"])
+        self.assertIn("Permission denied", str(cm.exception)); self.assertIn("在手机上打开一次 S2Arm", str(cm.exception))
+        self.assertEqual(push.push_reason(str(cm.exception)), "手机上这个文件 App 写不进（Permission denied）")
+
     def image_plan(self):
         (self.pk / "romfs.img").write_bytes(b"x" * 100)
         (self.w / "direct_img.tsv").write_text("romfs.img\t100\timage-sha\n")
