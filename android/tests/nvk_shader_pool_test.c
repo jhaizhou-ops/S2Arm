@@ -39,6 +39,8 @@ static uint8_t gs_keys[6][8], gs_stages[6], gs_keys_ok;
 #define CHECK(c, ...) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL: "); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
 void nvn_plat_safepoint(void) {}
+// 宿主夹具没有跨局缓存目录：程序预热清单不落盘（nvk_prog_warm 只读平台目录，不读环境变量）。
+const char *nvn_plat_dir(int which) { (void)which; return NULL; }
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_texpool_log")) { diag_queries++; return diag_enabled; }
     return dflt;

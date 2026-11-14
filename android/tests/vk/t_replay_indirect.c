@@ -75,6 +75,8 @@ uint64_t rp_tex_reg_gen(void){return 1;}uint64_t rp_tex_fact_sig(const uint64_t 
 void rp_tex_mark_gpu_written(const tex_t *t){(void)t;}int rp_tex_debug_state(uint64_t s){(void)s;return 0;}
 nvn_gpu_tex rp_tex_backend_by_serial(uint64_t s){(void)s;return NULL;}
 const p_set_rt *rp_pass_target(void){return &target;}int rp_pass_slot_attached(int i){return i==0;}
+// 回放核心的当前帧号（rp_entry.c）；本用例不跑帧号逻辑，给 0。
+uint64_t rp_frame(void) { return 0; }
 void rp_pass_slot_size(int i,uint32_t *w,uint32_t *h){(void)i;*w=*h=64;}void rp_pass_note_draw(int d){(void)d;}
 // #950 给 rp_draw.c 新加的通道依赖：中性替身（没有待折清除、不缩渲染区域）
 int rp_pass_parked(void){return 0;}void rp_pass_prepare_draw(nvn_gpu_cmd c){(void)c;}void rp_pass_land_reads(nvn_gpu_cmd c,const tex_t *const *ts,int n){(void)c;(void)ts;(void)n;}

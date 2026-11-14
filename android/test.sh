@@ -360,6 +360,20 @@ s2a_gate_step "$PY" "$android_dir/tests/w2_observation_draw_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/nvk_fu_decision_test.py"
 # C4b 管线异步缝：真 nvn_vk_first_draw.c TU + 真 pipe_worker/nvn_first_use，假 Vulkan。
 s2a_gate_step "$PY" "$android_dir/tests/nvn_vk_pipe_async_draw_test.py"
+# nvk 新层：首次使用的准备工作下沉（iOS 蓝本 warm_start / pso_pend）。
+# 回放计时：帧级「回放耗时」只在最外层累加一次（三层嵌套每层 1 ms 期望 3 ms，修前 6 ms）。
+s2a_gate_step "$PY" "$android_dir/tests/replay_exec_time_test.py"
+# 预热调度时序合同：先程序后管线、在途重试、有界 Stop、开关关时不起线程。
+s2a_gate_step bash "$android_dir/tools/nvn_warm_test.sh"
+# 预热用的两个清单模块与「同一配方只有一份」的双检（纯逻辑）：往返一致、碰撞不去重、坏文件整份拒绝、
+# 4 线程并发建同一配方只装一份。
+s2a_gate_step bash "$android_dir/tools/nvk_warm_modules_test.sh"
+# 复核 P1-1 / P1-2：程序借用（ASan 下读收尾释放后的记录）与配方级在途表（同配方合并 / 不同配方不排队）
+s2a_gate_step bash "$android_dir/tools/nvk_pipe_flight_test.sh"
+# 首用待定表（纯逻辑）与 demand 后台建管线（fake Vulkan）：状态机 / 同键合并 / 有界等待 / late-stuck / P0 不串管线。
+s2a_gate_step bash "$android_dir/tools/nvk_pipe_pend_test.sh"
+s2a_gate_step bash "$android_dir/tools/nvn_vk_pipe_demand_test.sh"
+s2a_gate_step bash "$android_dir/tools/nvk_shader_lease_test.sh"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_lifecycle_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_adapter_test.py"
 # vk_record host regression links the real Linux Vulkan loader; the dispatch itself is mocked.

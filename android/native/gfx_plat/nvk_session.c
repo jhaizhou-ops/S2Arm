@@ -4,6 +4,8 @@
 #include "nvn_plat.h"
 #include "rp_exec.h"
 #include "direct/vk_device.h"
+#include "nvn/nvn_warm.h"   // 预热调度：会话 open 后起、Stop 前收（nvn_warm.h 合同）
+#include "nvn/nvn_vk_pipe_demand.h"   // 首用管线后台构建：会话 open 后起、Stop 前收（nvn_vk_pipe_demand.h 合同）
 #include <android/log.h>
 #include <android/native_window.h>
 #include <pthread.h>
@@ -20,7 +22,19 @@ static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC
 void nvk_session_request_stop(void) {
     uint64_t expected = 0, now = mono_ns();
     atomic_compare_exchange_strong_explicit(&g_stop_started, &expected, now, memory_order_acq_rel, memory_order_acquire);
+    // 首用管线后台构建先收（有界 join：丢弃未开工队列、只等当前一条建完），且必须在 nvk_shader_stop 之前：
+    // 该线程要借用程序、调 nvn_gpu_pipe_get，着色器准入还开着才借得到。
+    nvn_vk_pipe_demand_stop();
     nvk_shader_stop();
+    // 预热线程在着色器准入关闭之后收：放在 nvk_shader_stop 之后是硬要求——准入关了新工作才会被
+    // 各 owner 拒绝；迟到的结果由 owner 丢弃。
+    // nvk_warm_stop 有界（≤500 毫秒统一截止）且**不做文件 IO**：清单落盘归预热线程自己（没有预热线程时
+    // 归一次性 saver），这里只等「静默 + 落盘完成」。它占的是本会话 700 毫秒硬界限里的那一段，所以
+    // 非 0 必须在日志里点名，收尾超时的读数才归得了因。
+    if (nvk_warm_stop() != 0)
+        __android_log_print(ANDROID_LOG_ERROR, TAG,
+                            "【红】nvk stop: warm 预热的静默/清单落盘没在 500 毫秒统一截止内完成"
+                            "（本项超时；清单没写盘、旧文件保留；占的是会话 700 毫秒硬界限）");
 }
 uint64_t nvk_session_stop_deadline(void) {
     uint64_t start = atomic_load_explicit(&g_stop_started, memory_order_acquire);
@@ -83,6 +97,10 @@ int nvk_session_open(struct s2a_vk_device *dev, const char *cache_dir, char *why
                         caps.name, caps.api_version, caps.caps,
                         (unsigned long long)caps.max_buf_bytes, (unsigned long long)caps.max_ssbo_range);
     pthread_mutex_unlock(&g_mu);
+    // 开局预热（iOS 蓝本：nvn_mtl.m warm_start 在 shader map 读完就起，后台把上一局清单建出来）。
+    // 放在解锁之后：预热线程会取会话缓存目录 / 后端锁，不在 g_mu 里起线程。
+    nvk_warm_start();
+    nvn_vk_pipe_demand_start();
     return 0;
 }
 
@@ -109,6 +127,7 @@ int nvk_session_close(void) {
     dump_unimpl();
     rp_present_set_surface(NULL, 0); g_surface = NULL;   // 还接着的面由 nvn_gpu_close 在在途段清空后收掉
     { uint64_t sh = 0, dp = 0; rp_present_stats(&sh, &dp); __android_log_print(ANDROID_LOG_INFO, TAG, "nvk session: presents shown=%llu dropped=%llu", (unsigned long long)sh, (unsigned long long)dp); }
+    nvn_vk_pipe_demand_stop();   // 幂等：确保后台建管线线程在设备关闭前已 join
     nvn_gpu_err err = {0};
     nvn_gpu_rc rc = nvn_gpu_close(2000000000ull, &err);
     if (!nvn_gpu_ok(rc)) {

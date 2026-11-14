@@ -7178,3 +7178,6 @@ int main(int argc, char **argv) {
       else CHECK(n == 0, "两级回放关着：期望没有调用进队列 → %llu 条", (unsigned long long)n); }
     return g_fail ? 1 : 0;
 }
+
+// 回放核心的当前帧号（rp_entry.c）；后端用例不跑帧号逻辑，给 0 让 rp_draw 的异步/跳过分支能链接。
+uint64_t rp_frame(void) { return 0; }

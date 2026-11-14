@@ -111,12 +111,20 @@
         "docs/validation/*",
         "docs/兼容性清单.md",
         "docs/名单_*",
-        "docs/名单_*/*", "docs/*.md"
+        "docs/名单_*/*",
+        "docs/*.md"
       ],
-      "messages": true, "reason_note": "11-09 维护者批统一规则：公开仓不出现任天堂第一方游戏名（11-10 jhz 定：第一方按「任天堂发行」算，不论哪家工作室开发，如猎天使魔女 2 / 3、异界锁链）；第三方只在说明性场合保留。先管给人看的文档与名单（11-09 晚起含 docs/ 下全部 Markdown，坑记录也算）与提交信息（messages: true），代码注释另议；pack/display_names.tsv 第一列是与 pack/oneclick/titles.tsv 对上的内部键，不在本规则内（显示名已是程序号）"
+      "messages": true,
+      "reason_note": "11-09 维护者批统一规则：公开仓不出现任天堂第一方游戏名（11-10 jhz 定：第一方按「任天堂发行」算，不论哪家工作室开发，如猎天使魔女 2 / 3、异界锁链）；第三方只在说明性场合保留。先管给人看的文档与名单（11-09 晚起含 docs/ 下全部 Markdown，坑记录也算）与提交信息（messages: true），代码注释另议；pack/display_names.tsv 第一列是与 pack/oneclick/titles.tsv 对上的内部键，不在本规则内（显示名已是程序号）"
     }
   ],
   "metadata_rules": [
+    {
+      "category": "vendor_binary",
+      "globs": [
+        "launchers/macos/frontend/vendor/*.zip"
+      ]
+    },
     {
       "category": "game_macro",
       "globs": [
@@ -141,6 +149,17 @@
     }
   ],
   "allowlist": [
+    {
+      "id": "vendor_binary",
+      "categories": [
+        "vendor_binary"
+      ],
+      "paths": [
+        "launchers/macos/frontend/Vendor/*.zip",
+        "launchers/macos/frontend/vendor/*.zip"
+      ],
+      "reason": "第三方官方二进制发行包（macOS 自动更新框架 Sparkle 的发行 zip）：不读正文，只登记元数据。"
+    },
     {
       "id": "upstream_inkscape_export_path",
       "categories": [

@@ -49,6 +49,10 @@ int s2a_nvn_texture_format_at(unsigned index, uint32_t *nvn_format, const char *
 // 索引与 s2a_nvn_texture_format_at / g_targets 同源，新增名字只改一处。
 int s2a_nvn_texture_format_index(const char *name, uint16_t *out);
 int s2a_nvn_texture_target_index(const char *name, uint8_t *out);
+// 身份解码用：稳定小整数 → 名字（与 *_index 同一张表；越界返回 -1）。
+// 调用方必须再做一次 name → index 的往返校验：表里允许两个目标共享一个名字（"2d"），
+// 只有编码器会产出的那个索引才是规范索引。
+int s2a_nvn_texture_target_at(uint8_t index, const char **name);
 
 #ifdef __cplusplus
 }

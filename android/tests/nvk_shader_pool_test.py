@@ -34,7 +34,9 @@ def main():
             (include/name).symlink_to(sysinc/name)
     inc = (include, ROOT/'runtime/include', native, native/'nvn', native/'direct', gfx, gfx/'replay', gfx/'gfx/nvn',
            gfx/'gfx/nvn/include', ROOT/'android/tests/vkhost')
-    libs = [gfx/'replay/nvn_unimpl.c', gfx/'replay/rp_state.c', native/'nvn/nvn_vk_compute_request.c']
+    # nvk_shader.c 的预热发布/清单记账在 nvn_vk_prog_warm.c（纯逻辑 + 文件层，宿主可链）。
+    libs = [gfx/'replay/nvn_unimpl.c', gfx/'replay/rp_state.c', native/'nvn/nvn_vk_compute_request.c',
+            native/'nvn/nvn_vk_prog_warm.c']
     libs += [ROOT/'runtime/src/direct_host.c']
     libs += [native/'direct'/f for f in ('source_store.c', 'control.c', 'input_identity.c',
                                         'texture_facts.c', 'sha256.c', 'json.c', 'compile_request.c')]
@@ -45,7 +47,11 @@ def main():
     # host_link 自动补链的 offline_library.c、program_cache.c 要用。宏只加在测试侧、只加给非 macOS：
     # 这两个文件还要给 NDK 和苹果宿主编，在源文件里定义会改变 macOS 上的可见声明；macOS 的参数与原来逐字相同。
     if sys.platform != 'darwin':
-        base.append('-D_POSIX_C_SOURCE=200809L')
+        # glibc 在 -std=c11 下不暴露 POSIX 声明（O_CLOEXEC / openat / fstatat / strdup / realpath 等），
+        # host_link 自动补链的 offline_library.c、program_cache.c 要用。用 _GNU_SOURCE（POSIX 宏的超集：
+        # 新版 glibc 里 realpath 不算在 _POSIX_C_SOURCE 200809 的可见集里）。宏只加在测试侧、只加给非 macOS：
+        # 这两个文件还要给 NDK 和苹果宿主编，在源文件里定义会改变 macOS 上的可见声明。
+        base.append('-D_GNU_SOURCE')
     base += ['-I'+str(p) for p in inc]
     original = native/'gfx_plat/nvk_shader.c'
 
@@ -137,7 +143,7 @@ def main():
              'if (0 && !(caps.caps & NVN_GPU_CAP_GEOMETRY))', 1, 'disabled GS fails before compiler'),
             ('withdraw-guard', 'if (!shader_texture_pool_ready()) return -1;',
              'if (0 && !shader_texture_pool_ready()) return -1;', 2, 'expected accounting=texture_pool_over_limit'),
-            ('wrong-gfx-length', 'in.texture_array_length = (uint32_t)rp_S.tex_pool_n;',
+            ('wrong-gfx-length', 'in.texture_array_length = s->tex_pool_n;',
              'in.texture_array_length = 1;', 1, 'gfx n=7 request retains exact capacity'),
             ('wrong-cs-length', 'st.tex_pool_n = (uint32_t)rp_S.tex_pool_n;',
              'st.tex_pool_n = 1;', 1, 'cs n=7 request retains exact capacity'),

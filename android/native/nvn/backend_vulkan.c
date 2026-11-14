@@ -32,8 +32,11 @@
 #include "nvn_backend.h"
 #include "nvn_plat.h"   // 调试开关与一行日志（上屏段的调试色、GPU 时间读数）
 #include "nvn_vk_format.h"
+#include "nvn_pipe_flight.h"   // 配方级在途表（纯逻辑）：同配方合并成一份创建，不同配方不互相排队
 #include "nvn_vk_texview.h"
 #include "nvn_vk_bcdec.h"
+#include "nvn_vk_pipe_once.h"     // 装缓存的双检去重（纯逻辑，宿单测用假创建驱动）
+#include "nvn_vk_pipe_warm.h"     // 预热清单：warm 标记 / 命中计数的口径
 #include "nvn_vk_driver_cache.h"   // 驱动管线缓存的落盘文件层（见「驱动管线缓存」一节）
 #include "nvn_fmt_info.h"
 #include "nvn_fmt_expand.h"
@@ -133,6 +136,7 @@ struct nvn_gpu_pipe_s {
     uint32_t stage_nent[6];
     uint32_t stage_push_off[6], stage_push_bytes[6];
     nvn_gpu_pipe_desc key;
+    uint8_t warm;          // 1 = 这份对象是预热带 / 预热线程建的，真实 draw 第一次命中时计数（见 nvn_gpu_pipe_get）
     struct nvn_gpu_pipe_s *all_next;
     struct nvn_gpu_pipe_s *hnext;   // 图形管线的散列桶链（g_pipe_ht）
 };
@@ -346,10 +350,14 @@ static uint64_t g_plc_t_saved;               // 上一次局中保存（含「�
 static uint64_t g_plc_made_saved;            // 那一次的 g_plc_made。原子读写
 static size_t g_plc_size_saved;              // 上一次落盘（或开局读入）的数据字节数：取到的数据与它一致就不写。持 g_plc_mu
 static uint64_t g_plc_first_ns, g_plc_every_ns, g_plc_thr_new;   // 触发的三个阈值：开会话时读一次
-static pthread_mutex_t g_plc_mu = PTHREAD_MUTEX_INITIALIZER;     // 护 g_plc 的销毁与 g_plc_size_saved：触发取数据 vs 收尾；触发用 trylock，拿不到就让给别人
+// 护 g_plc 的销毁与 g_plc_size_saved（触发取数据 vs 收尾；触发用 trylock，拿不到就让给别人）。
+// 缓存对象本身的并发不靠这把锁：创建缓存时没设 EXTERNALLY_SYNCHRONIZED = 实现内部同步（见 plc_open 的注释）；
+// 这把锁保护的是我们自己的状态：g_plc 的销毁不能和取数据撞上、g_plc_size_saved 的读写要成对。
+static pthread_mutex_t g_plc_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_plcw_busy;                      // 后台写在飞（进程级，跨会话；原子读写）
 static int g_plcw_failed;                    // 最近一次后台写失败了：收尾时即使大小没变也再写一次。原子读写
 static uint64_t g_plcw_started, g_plcw_ok, g_plcw_fail, g_plcw_same;   // 读数（进程累计，不随会话清零）：交给后台写的次数 / 成功 / 失败 / 与上次一致没写
+static uint64_t g_plcw_get_ns;   // 触发线程上「查大小 + 取数据 + 拷字节」的累计纳秒（后台写盘不算；长帧归因读它）
 static pthread_mutex_t g_submit_mu = PTHREAD_MUTEX_INITIALIZER; // 提交串行化：校验 signal、vkQueueSubmit、入队
 static pthread_cond_t g_cv;
 static int g_cv_ready;
@@ -1214,6 +1222,14 @@ static void plc_open(const char *dir) {
     VkPipelineCacheCreateInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    // 并发依据（P1）：flags 保持 0，即**不**设 VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT。
+    // 规范里「宿主访问 pipelineCache 必须外部同步」这一条以「建缓存时设了该标志」为前提
+    // （vkCreateGraphicsPipelines 的 VUID-vkCreateGraphicsPipelines-pipelineCache-02876；参考
+    // https://docs.vulkan.org/refpages/latest/refpages/source/vkCreateGraphicsPipelines.html）；
+    // 不设该标志 = 实现必须自己同步宿主访问（缺省语义），所以不同配方的建管线可以并发拿同一个缓存，
+    // 不需要一把全局创建锁。本后端只在设备策略兜底 debug.s2a.nvk_pipe_serial=1 时把创建重新串行化
+    // （见 nvn_gpu_pipe_get）。vkGetPipelineCacheData / 收尾销毁仍只在 g_plc_mu 下串行——那是我们
+    // 自己状态（销毁 vs 取数据、g_plc_size_saved）的互斥，不是缓存访问的规范要求。
     ci.initialDataSize = bytes;
     ci.pInitialData = bytes ? blob : NULL;
     VkResult vr = vkCreatePipelineCache(g.d, &ci, NULL, &g_plc);
@@ -1346,6 +1362,7 @@ static void plc_save_midrun_impl(int force) {
         }
     }
     free(buf);
+    __atomic_fetch_add(&g_plcw_get_ns, now_ns() - tg0, __ATOMIC_RELAXED);   // 触发线程这一段的累计（后台写盘不算）
     if (!started) __atomic_store_n(&g_plcw_busy, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&g_plc_mu);
 }
@@ -2479,6 +2496,67 @@ static int same_pipe_desc(const nvn_gpu_pipe_desc *a, const nvn_gpu_pipe_desc *b
            a->origin_ll == b->origin_ll && a->depth_clamp == b->depth_clamp;
 }
 
+// 创建管线的并发边界（P1：原先在 g_create_mu 下跑完整个 pipe_build，后台预热一条配方时，无关配方的
+// 首次 draw 也得排队；拿锁后又不复检缓存，已排队的同配方还会再建一次）。现在的分工：
+//   · 缓存查找 / 安装 / warm 计数在 g_mu 下（短锁，见 pipe_find_locked / pipe_install_locked）；
+//   · pipe_build 在锁外做，不同配方真并行——依据是 VkPipelineCache 没设
+//     VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED（不设 = 内部同步，见 plc_open 的注释）；
+//   · 同配方并发需求由「在途表」合并成一份创建（见 pipe_inflight 一节）。
+// g_create_mu 只在设备策略兜底 debug.s2a.nvk_pipe_serial=1 时使用（把创建重新串行化）；
+// 缺省 0 = 不同配方并发建。release 包 debug.s2a.* 属性门关着，读不到 → 缺省行为。
+static pthread_mutex_t g_create_mu = PTHREAD_MUTEX_INITIALIZER;
+// 设备策略兜底开关：每建一条读一次（建管线本身 0.2–1 毫秒起，release 包读属性直接返回缺省，不值得缓存）。
+static int pipe_serial_on(void) { return nvn_plat_flag("nvk_pipe_serial", 0) != 0; }
+// 预热（W3）：t_warm_scope = 本线程的创建算「预建」（预热线程设 1，见 nvk_pipe_warm_build）。
+// 预建对象打 warm 位；真实 draw 第一次命中它时计 warm 命中。计数都是进程累计，nvn_gpu_stats 报。
+static _Thread_local int t_warm_scope;
+static uint64_t g_warm_hits, g_warm_created, g_pipe_dup;
+// 在途表读数（见 pipe_inflight）：同配方需求合并等待的次数 / 表满（或停用）自己直接建的次数 /
+// 认领后复检命中的次数（省掉一次重复建）。
+// 在途表读数由 nvn_pipe_flight 内部计数（见 nvn_gpu_stats 的 pipe_inflight_* 项）
+
+void nvn_gpu_pipe_warm_scope(int on) { t_warm_scope = on ? 1 : 0; }
+uint64_t nvn_gpu_pipe_warm_hits(void) { return __atomic_load_n(&g_warm_hits, __ATOMIC_RELAXED); }
+uint64_t nvn_gpu_pipe_warm_created(void) { return __atomic_load_n(&g_warm_created, __ATOMIC_RELAXED); }
+
+// 缓存里按配方找一条图形管线（调用方持 g_mu）。散列只取描述里一部分字段（都是 same_pipe_desc 比的），
+// 相等与否仍由 same_pipe_desc 定。
+static struct nvn_gpu_pipe_s *pipe_find_locked(const nvn_gpu_pipe_desc *d) {
+    const uint32_t hb = pipe_hash(d) % PIPE_HT_N;
+    static int scan = -1; static uint32_t scan_n;   // 诊断开关 nvk_pipe_scan=1：走原来的整表逐条比（同一局里对比用），每 256 次取管线读一次
+    if (scan < 0 || !(++scan_n & 255)) scan = nvn_plat_flag("nvk_pipe_scan", 0) != 0;
+    struct timespec lk0; clock_gettime(CLOCK_MONOTONIC, &lk0); uint32_t steps = 0;
+    for (struct nvn_gpu_pipe_s *q = scan ? g.pipes : g_pipe_ht[hb]; q; q = scan ? q->all_next : q->hnext) {
+        steps++;
+        if (same_pipe_desc(&q->key, d)) {
+            { struct timespec lk1; clock_gettime(CLOCK_MONOTONIC, &lk1);   // 诊断读数：查找这一段用了多久、比了多少条（随对象读数那几行打）
+              __atomic_fetch_add(&g_pl_ns, (uint64_t)(lk1.tv_sec - lk0.tv_sec) * 1000000000ull + (uint64_t)lk1.tv_nsec - (uint64_t)lk0.tv_nsec, __ATOMIC_RELAXED);
+              __atomic_fetch_add(&g_pl_n, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_pl_steps, steps, __ATOMIC_RELAXED); }
+            return q;
+        }
+    }
+    return NULL;
+}
+
+// ---- 配方级在途表（P1：同配方合并成一份创建，不同配方不互相排队）----
+// 表项是一次「配方 → 创建」的汇合点：建者占一项并真的去建；同配方的其它需求挂在这一项上等自己的结果，
+// 不占全局锁、也不让无关配方排队。容量固定 128（同时最多 128 种配方在途）；满了不排队、这一次自己
+// 直接建并计数（安装时双检兜底，不会出现两份同配方对象）。
+// 线程 / 锁：只用 g_pi_mu 保护；它从不与 g_mu / g_create_mu 嵌套持有（先放缓存锁再来这里，发布结果前
+//   也已放掉 g_mu），所以不会出现「建者持 g_mu 等表锁 / 等待者持表锁等 g_mu」的死锁；
+//   pthread_cond_wait 期间释放 g_pi_mu。cond 在进程内首次使用时初始化（pthread_once）；任意一只初始化
+//   失败就整张表停用（退回不合并的同步建：功能不受影响，只在读数上记 g_pi_full）。
+// 生命周期：表项不拥有对象，只记一次创建的结果。成功对象在 g_mu 下装进 g.pipes，等待者醒来拿到的是
+//   同一份已安装的指针；后端 close 之后不再有调用（close 的前提是前端静默 / 预热线程已 join，
+//   与改动前相同，本表不延长会话生命期）。
+// 逻辑全部在 nvn/nvn_pipe_flight.c（纯逻辑、宿主单测覆盖）；这里只做后端接线：配方键就是
+// nvn_gpu_pipe_desc，同一配方的判据与缓存一致（same_pipe_desc）。
+static nvk_pf g_pi;
+static pthread_once_t g_pi_once = PTHREAD_ONCE_INIT;
+static void pi_init(void) { nvk_pf_init(&g_pi, sizeof(nvn_gpu_pipe_desc)); }
+static void pi_ensure(void) { pthread_once(&g_pi_once, pi_init); }
+static int pi_eq(const void *a, const void *b) { return same_pipe_desc((const nvn_gpu_pipe_desc *)a, (const nvn_gpu_pipe_desc *)b); }
+
 static void destroy_pipe_objects(struct nvn_gpu_pipe_s *p) {
     if (!p) return;
     if (p->pipe) vkDestroyPipeline(g.d, p->pipe, NULL);
@@ -2490,12 +2568,23 @@ static void destroy_pipe_objects(struct nvn_gpu_pipe_s *p) {
     free(p);
 }
 
-nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) {
-    if (!session_accepting()) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭 / 未打开");
-    (void)mode;
-    if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
+// 建一套图形管线对象（只碰驱动与 VkPipelineCache，不装缓存、不碰 g.pipes 表）。
+// 线程：在 g_mu / g_pi_mu 之外执行，不同配方的多条线程（[提交] / [后台] 预热 / 其它提交线程）会同时进来。
+// 并发只读清单（P1 复查过，全部只读或由各自对象同步；这里不写任何共享状态）：
+//   · d->st[st].sh 指向的 struct nvn_gpu_shader_s：mod / entry / nent / ents / tfmt / push_off / push_bytes /
+//     missing_storage_format_feature 都是 nvn_gpu_shader_load 装载期写死的（ents / tfmt 就是「描述符布局缓存」
+//     本身，建管线只读它、往自己的 p->stage_* 里拷）。refs / released 是唯一会被并发写的字段，但只在 g_mu 下
+//     由 nvn_gpu_shader_release 与 install_link（装缓存时加引用）改，本函数不读写它们。
+//     生命期不在本函数内建立：调用方必须保证 desc 里各阶段的着色器在整个调用期间有效（核心 / 预热 owner 的
+//     程序借用合同）；安装成功后再由管线持有一份引用。
+//   · g.dev / g.caps / g_plc：会话打开后到 close 前不变（g_plc 由驱动内部同步，见 plc_open）；
+//     close 的前提是前端已静默、预热线程已 join，不再有在建的管线。
+//   · 渲染通道 / 管线布局 / 描述符 set layout / 管线对象都是本函数新建的私有对象，不共享。
+// 不读的：g.pipes / g_pipe_ht（装缓存时才在 g_mu 下碰，见 pipe_install_locked）、通道对象缓存 g_pc_*（那是
+//   通道录制路径的缓存，跟建管线无关）。以后往这里加共享可写状态必须先加锁或改成构建期私有，不能裸加。
+// 装缓存由 pipe_install_locked 做（g_mu 下双检 + 着色器引用）。
+static nvn_gpu_rc pipe_build(const nvn_gpu_pipe_desc *d, struct nvn_gpu_pipe_s **out, nvn_gpu_err *err) {
     *out = NULL;
-    if (!d) return fail(err, NVN_GPU_E_ARG, "管线描述为空");
     // NVN POINT=0 / LINE=1 / FILL=2；完整 poly 已由 same_pipe_desc 纳入缓存键。
     if (d->poly.mode > 2) return fail(err, NVN_GPU_E_ARG, "未知多边形填充模式 %u", (unsigned)d->poly.mode);
     if (d->poly.mode != 2 && !g.dev->core_features.fillModeNonSolid)
@@ -2512,24 +2601,6 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
         return fail(err, NVN_GPU_E_UNSUPPORTED, "GS 非原生图元未实现");
     for (int i = NVN_GPU_SH_TCS; i < 5; i++)
         if (d->st[i].sh) return fail(err, NVN_GPU_E_UNSUPPORTED, "细分阶段：本段未实现");
-
-    const uint32_t hb = pipe_hash(d) % PIPE_HT_N;
-    pthread_mutex_lock(&g_mu);
-    static int scan = -1; static uint32_t scan_n;   // 诊断开关 nvk_pipe_scan=1：走原来的整表逐条比（同一局里对比用），每 256 次取管线读一次
-    if (scan < 0 || !(++scan_n & 255)) scan = nvn_plat_flag("nvk_pipe_scan", 0) != 0;
-    struct timespec lk0; clock_gettime(CLOCK_MONOTONIC, &lk0); uint32_t steps = 0;
-    for (struct nvn_gpu_pipe_s *q = scan ? g.pipes : g_pipe_ht[hb]; q; q = scan ? q->all_next : q->hnext) {
-        steps++;
-        if (same_pipe_desc(&q->key, d)) {
-            { struct timespec lk1; clock_gettime(CLOCK_MONOTONIC, &lk1);   // 诊断读数：查找这一段用了多久、比了多少条（随对象读数那几行打）
-              __atomic_fetch_add(&g_pl_ns, (uint64_t)(lk1.tv_sec - lk0.tv_sec) * 1000000000ull + (uint64_t)lk1.tv_nsec - (uint64_t)lk0.tv_nsec, __ATOMIC_RELAXED);
-              __atomic_fetch_add(&g_pl_n, 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_pl_steps, steps, __ATOMIC_RELAXED); }
-            pthread_mutex_unlock(&g_mu);
-            *out = q;   // 后端缓存持有，核心不 release
-            return rc(NVN_GPU_OK);
-        }
-    }
-    pthread_mutex_unlock(&g_mu);
 
     struct merged { uint8_t set, binding, cls; uint16_t count; uint32_t stages; } m[64];
     uint32_t nm = 0, maxset = 0;
@@ -2859,16 +2930,175 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
             }
         }
     }
-    pthread_mutex_lock(&g_mu);
+    p->key = *d;   // 装缓存时按它查重 / 定位散列桶；着色器引用到装的时候才加
+    *out = p;
+    return rc(NVN_GPU_OK);
+}
+
+// ---- 装缓存：双检去重（并发建同一配方只留一份）----
+// 双检的几步做成回调交给 nvk_pipe_once_adopt（纯逻辑、宿主单测用假创建驱动）：
+//   find  → pipe_find_locked（调用方的锁下再查一次）
+//   link  → 加着色器引用并挂进 g.pipes / g_pipe_ht
+//   destroy → 已有同配方的另一份时销毁这份新建的（不能出现两份同配方管线）
+static void *install_find(void *ctx, const void *key, size_t key_bytes) {
+    (void)ctx; (void)key_bytes;
+    return pipe_find_locked((const nvn_gpu_pipe_desc *)key);
+}
+static void install_link(void *ctx, void *fresh) {
+    (void)ctx;
+    struct nvn_gpu_pipe_s *p = fresh;
+    const uint32_t hb = pipe_hash(&p->key) % PIPE_HT_N;
     for (int st = 0; st < 5; st++)
-        if (d->st[st].sh) d->st[st].sh->refs++; // 管线持有
-    pthread_mutex_unlock(&g_mu);
-    p->key = *d;
-    pthread_mutex_lock(&g_mu);
+        if (p->key.st[st].sh) p->key.st[st].sh->refs++;   // 管线持有
     p->all_next = g.pipes;
     g.pipes = p;
-    p->hnext = g_pipe_ht[hb]; g_pipe_ht[hb] = p;
+    p->hnext = g_pipe_ht[hb];
+    g_pipe_ht[hb] = p;
+    if (t_warm_scope) {   // 预热线程建的：打 warm 标记，等真实 draw 第一次命中
+        p->warm = 1;
+        __atomic_fetch_add(&g_warm_created, 1, __ATOMIC_RELAXED);
+    }
+}
+static void install_destroy(void *ctx, void *fresh) {
+    (void)ctx;
+    destroy_pipe_objects(fresh);
+}
+
+// 装一条新建的图形管线（调用方持 g_mu）。返回交给调用方的对象：
+//   · 建的过程中已有同配方的另一份（预热线程 / 另一个提交线程先装进去了）→ 销毁新建的那份、用既有的；
+//   · 没有 → 装进缓存。
+static struct nvn_gpu_pipe_s *pipe_install_locked(struct nvn_gpu_pipe_s *fresh) {
+    nvk_pipe_once_ops ops = { NULL, install_find, install_link, install_destroy };
+    void *out = NULL;
+    int r = nvk_pipe_once_adopt(&ops, &fresh->key, sizeof fresh->key, fresh, &out);
+    if (r < 0) {   // 不该发生（三个回调都在）：如实失败，调用方报红，不返回假成功
+        destroy_pipe_objects(fresh);
+        return NULL;
+    }
+    if (r > 0) __atomic_fetch_add(&g_pipe_dup, 1, __ATOMIC_RELAXED);
+    return out;
+}
+
+// 真实 draw 第一次拿到预建对象：预热验收读数（每份只计一次）。预热线程自己再取同一条（重试路径）
+// 不算命中，否则读数会虚高。调用方持 g_mu（warm 位由「缓存命中」与「等到在途创建」两条路一起改）。
+static void pipe_hit_note_locked(struct nvn_gpu_pipe_s *hit) {
+    if (hit->warm && !t_warm_scope) {
+        hit->warm = 0;
+        __atomic_fetch_add(&g_warm_hits, 1, __ATOMIC_RELAXED);
+    }
+}
+
+// 只查缓存、不建（异步首用 / 预热「先看有没有」用）。线程：[提交] / [后台]。1 = 有（*out），0 = 没有。
+// 不记 warm 命中（那是「真实 draw 第一次拿到预建对象」的口径，见 pipe_hit_note_locked）。
+int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) {
+    if (out) *out = NULL;
+    if (!out || !d || !session_accepting()) return 0;
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *hit = pipe_find_locked(d);
     pthread_mutex_unlock(&g_mu);
+    if (!hit) return 0;
+    *out = hit;   // 后端缓存持有，核心不 release
+    return 1;
+}
+
+// 取（或建）图形管线。线程：[提交] 与 [后台] 都可调（预热线程用 SYNC 建）。
+// ASYNC / PROVISIONAL 的「先返回 PENDING、后台再建」本后端不内建：本层 v1 两种 mode 都按同步建处理（语义同 SYNC）。
+// 后台建 + 可跳首用由其上安卓 demand 层（nvn_vk_pipe_demand.c）承接：它用 nvn_gpu_pipe_lookup 判命中、后台线程调 SYNC 建。
+//
+// 并发语义（P1 收口）：
+//   ① 缓存命中：g_mu 短锁查表，命中即返回——建管线在飞时不占这把锁，不同配方的需求不会被串行化；
+//   ② 缓存未命中：查「在途表」（g_pi_mu 短锁）。同配方有在途创建 → 挂上去等它（不重复建、不等全局锁）；
+//      不同配方 → 各自认领各自建（pipe_build 在锁外，可真并行）；
+//   ③ 认领后复检缓存（只拿 g_mu）：另一个线程可能刚把同配方装好（我们的第一次查询在它安装之前），
+//      复检到就省掉这次创建；
+//   ④ 建好后在 g_mu 下安装：pipe_install_locked 再双检一次，万一仍有同配方的另一份就销毁新建的那份、
+//      用既有的（g_pipe_dup 计数）——正常路径下在途表已保证这里不会重复，这条是表满 / 表停用时的兜底；
+//   ⑤ 失败原样返回；挂了等待者的那份由建者把同一个错误广播出去（不重试、不返回假成功）。
+// 调用方契约：d->st[].sh 指向的着色器在整个调用期间必须有效（核心 / 预热 owner 的程序借用合同，见 pipe_build）。
+// 设备策略：debug.s2a.nvk_pipe_serial=1 时创建重新串行化（见 ④ 前的注释），缺省 0 = 并发建。
+nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) {
+    if (!session_accepting()) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭 / 未打开");
+    (void)mode;
+    if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
+    *out = NULL;
+    if (!d) return fail(err, NVN_GPU_E_ARG, "管线描述为空");
+
+    // ① 缓存命中（短锁）
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *hit = pipe_find_locked(d);
+    if (hit) {
+        pipe_hit_note_locked(hit);
+        pthread_mutex_unlock(&g_mu);
+        *out = hit;   // 后端缓存持有，核心不 release
+        return rc(NVN_GPU_OK);
+    }
+    pthread_mutex_unlock(&g_mu);
+
+    // ② 在途表：同配方合并成一份创建；不同配方互不等待（逻辑在 nvn_pipe_flight.c）
+    pi_ensure();
+    int handle = -1;
+    const int role = nvk_pf_enter(&g_pi, d, pi_eq, &handle);   // 1 = 我是建者 / 2 = 等别人 / 0 = 表满或停用
+    if (role == 2) {
+        void *got = NULL;
+        char gwhy[NVK_PF_WHY];
+        const int code = nvk_pf_wait(&g_pi, handle, &got, gwhy, sizeof gwhy);
+        if (code) {
+            if (err) { err->rc = rc(code); memcpy(err->why, gwhy, sizeof err->why); }
+            return rc(code);
+        }
+        // 等到的是预建/已建对象：与缓存命中同一口径记一次 warm 命中（warm 位只在 g_mu 下读写）
+        if (got) {
+            pthread_mutex_lock(&g_mu);
+            pipe_hit_note_locked(got);
+            pthread_mutex_unlock(&g_mu);
+        }
+        *out = got;   // 后端缓存持有，核心不 release
+        return rc(NVN_GPU_OK);
+    }
+    const int own = (role == 1);   // 0 = 表满/停用：这一次不合并，自己建（安装双检兜底；full 由模块计数）
+
+    // ③ 认领后复检缓存（只拿 g_mu 看一眼；锁顺序固定为「先缓存、后表」）
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *late = pipe_find_locked(d);
+    if (late) {
+        pipe_hit_note_locked(late);
+        pthread_mutex_unlock(&g_mu);
+        if (own) {
+            nvk_pf_note_late_hit(&g_pi);
+            nvk_pf_publish(&g_pi, handle, late, 0, NULL);
+        }
+        *out = late;
+        return rc(NVN_GPU_OK);
+    }
+    pthread_mutex_unlock(&g_mu);
+
+    // ④ 建管线（锁外）。设备策略兜底：debug.s2a.nvk_pipe_serial=1 时把创建重新串行化——不同配方在
+    // g_create_mu 上排队（回到「全局创建锁」的行为；同配方仍由在途表合并）。用于实测不能同缓存并发建的
+    // 驱动；release 包 debug.s2a.* 属性门关着 → 读不到 → 缺省 0 = 并发建。
+    struct nvn_gpu_pipe_s *fresh = NULL;
+    nvn_gpu_rc br;
+    if (pipe_serial_on()) {
+        pthread_mutex_lock(&g_create_mu);
+        br = pipe_build(d, &fresh, err);
+        pthread_mutex_unlock(&g_create_mu);
+    } else {
+        br = pipe_build(d, &fresh, err);
+    }
+    if (!nvn_gpu_ok(br)) {
+        if (own) nvk_pf_publish(&g_pi, handle, NULL, br.code, err ? err->why : NULL);   // 同配方的等待者拿到同一个错误
+        return br;
+    }
+
+    // ⑤ 安装：g_mu 下双检（同配方已被别人装好 → 销毁新建的那份、用既有的，g_pipe_dup 计数）
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *p = pipe_install_locked(fresh);
+    pthread_mutex_unlock(&g_mu);
+    if (!p) {
+        nvn_gpu_rc oom = fail(err, NVN_GPU_E_OOM, "图形管线装缓存失败");
+        if (own) nvk_pf_publish(&g_pi, handle, NULL, oom.code, err ? err->why : NULL);
+        return oom;
+    }
+    if (own) nvk_pf_publish(&g_pi, handle, p, 0, NULL);
     *out = p;
     return rc(NVN_GPU_OK);
 }
@@ -5961,6 +6191,17 @@ void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) {
     pthread_mutex_unlock(&g_mu);
     for (int i = 0; i < STAT_N; i++) fn(user, stat_names[i], v[i]);
     // 会话级读数（开会话起累计，不随 take 清零）：驱动管线缓存（#822）
+    fn(user, "pipe_cache_save_trigger_ns", __atomic_load_n(&g_plcw_get_ns, __ATOMIC_RELAXED));
+    fn(user, "pipe_warm_created", __atomic_load_n(&g_warm_created, __ATOMIC_RELAXED));   // 预建出来的管线对象数
+    fn(user, "pipe_warm_hits", __atomic_load_n(&g_warm_hits, __ATOMIC_RELAXED));         // 真实 draw 第一次拿到预建对象的次数
+    fn(user, "pipe_install_dup", __atomic_load_n(&g_pipe_dup, __ATOMIC_RELAXED));        // 双检抓到「别人已经装过同配方」的次数（新建那份已销毁）
+    {   // 在途表读数来自 nvn_pipe_flight（模块内计数）：合并等待 / 表满自己建 / 认领后复检命中 / 已发布 / 失败
+        uint64_t pw = 0, pf = 0, pl = 0, pp = 0, pfail = 0;
+        nvk_pf_stats(&g_pi, &pw, &pf, &pl, &pp, &pfail);
+        fn(user, "pipe_inflight_wait", pw);       // 同配方需求合并到在途创建、等它建完的次数
+        fn(user, "pipe_inflight_full", pf);       // 在途表满 128（或初始化失败停用）：这一次不合并、自己建
+        fn(user, "pipe_inflight_late_hit", pl);   // 认领后复检缓存命中：省掉一次重复创建
+    }
     fn(user, "pipe_cache_loaded_bytes", g_plc_loaded);                              // 开会话时读到并交给驱动的字节数（0 = 没读到）
     fn(user, "pipe_cache_rejected", g_plc_rejected);                                // 旧文件读不出 / 驱动不收、被丢掉的次数
     fn(user, "pipes_created", __atomic_load_n(&g_plc_made, __ATOMIC_RELAXED));      // 经缓存建出的管线条数（图形 + 计算 + 清屏）
@@ -5997,3 +6238,52 @@ void nvn_gpu_vk_test_set_fault(int mode) {
 }
 
 #include "backend_vulkan_wsi.inc"
+
+#ifdef S2A_NVK_BACKEND_HOST_TEST
+// ---- 宿主单测入口（只有宿主测试的 cc 命令行定义 S2A_NVK_BACKEND_HOST_TEST；正式构建里这段不存在）----
+// 目的：让 android/tests/nvk_pipe_inflight_test.c 用真实的 nvn_gpu_pipe_get / pipe_build / 安装双检
+// 跑并发用例，而不需要真设备、worker 线程与上屏链路。测试自己提供 Vk* 桩和一个 struct s2a_vk_device
+// （instance / physical / device / queue 填非空假值），并记录驱动侧调用。
+// 这里只置管线这条路要用的会话状态：g.dev / g.d、能力表、驱动管线缓存；不起 worker、不碰段 / 缓冲 /
+// 贴图 / 上屏。plc_open 走真实路径，测试能核对 VkPipelineCacheCreateInfo.flags（并发依据）。
+// 测试结束调 nvn_gpu_vk_test_close_pipe_only 收掉管线、着色器与缓存。
+void nvn_gpu_vk_test_open_pipe_only(struct s2a_vk_device *dev) {
+    if (g_open || !dev || !dev->device) return;
+    memset(&g, 0, sizeof g);
+    g.dev = dev;
+    g.d = dev->device;
+    g.phys = dev->physical;
+    g.queue = dev->queue;
+    nvn_gpu_open_desc od;
+    memset(&od, 0, sizeof od);
+    fill_caps(&g, &od);
+    plc_open(NULL);   // 缓存目录为空：只建缓存、不读写盘；nvk_pipe_cache=0 时 g_plc = VK_NULL_HANDLE
+    g_open = 1;
+}
+
+void nvn_gpu_vk_test_close_pipe_only(void) {
+    if (!g_open) return;
+    pthread_mutex_lock(&g_mu);
+    g_open = 0;   // 之后 nvn_gpu_pipe_get / nvn_gpu_shader_load 入口按「会话关闭」拒收
+    struct nvn_gpu_pipe_s *p = g.pipes;
+    g.pipes = NULL;
+    memset(g_pipe_ht, 0, sizeof g_pipe_ht);
+    struct nvn_gpu_shader_s *sh = g.shaders;
+    g.shaders = NULL;
+    pthread_mutex_unlock(&g_mu);
+    while (p) { struct nvn_gpu_pipe_s *pn = p->all_next; destroy_pipe_objects(p); p = pn; }
+    while (sh) {
+        struct nvn_gpu_shader_s *sn = sh->all_next;
+        if (sh->mod) vkDestroyShaderModule(g.d, sh->mod, NULL);
+        free(sh->ents);
+        free(sh->tfmt);
+        free(sh);
+        sh = sn;
+    }
+    pthread_mutex_lock(&g_plc_mu);
+    VkPipelineCache pc = g_plc;
+    g_plc = VK_NULL_HANDLE;
+    pthread_mutex_unlock(&g_plc_mu);
+    if (pc) vkDestroyPipelineCache(g.d, pc, NULL);
+}
+#endif

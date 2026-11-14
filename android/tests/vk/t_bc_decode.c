@@ -178,3 +178,6 @@ int main(void) {
     printf("bc-decode 逐像素：%s（%d 处不符/异常）\n", g_bad ? "红" : "绿", g_bad);
     return g_bad ? 1 : 0;
 }
+
+// 回放核心的当前帧号（rp_entry.c）；后端用例不跑帧号逻辑，给 0 让 rp_draw 的异步/跳过分支能链接。
+uint64_t rp_frame(void) { return 0; }
