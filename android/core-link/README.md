@@ -64,6 +64,12 @@ Static NativeAOT 构建在最终库链接后自动执行 `audit.py`，生成构�
   `--exclude-libs` 隐藏的内部定义可满足静态调用，但不被当成动态导出。
   二进制符号名逐字比较，不把 ELF 的 `_s2a_*` 改成 `s2a_*`；Mach-O host fixture
   也保留实际 C ABI 下划线，仅源码运行时查找清单按已识别的 Mach-O 格式映射名称。
+- 同库服务出口的弱引用（#961）：从 CMake 实际 target 源码里找只声明、带 `weak` 的托管服务
+  出口（`S2A_` 驼峰名，例如 `direct_prompt.c` 的 `S2A_SaveAtomicState`、`hle_nvn.c` 的
+  `S2A_NvMapFromGuest`），要求 NativeAOT 归档里有全局代码定义（nm `T`），且最终未剥离库的
+  符号表里有代码定义（`T` / `t`）。弱引用缺定义照样链接成功、运行时是 NULL，归档从没提供
+  这条导出时「归档定义 ∩ 库内未解析」为空，所以单列。弱定义、数据 / 绝对符号、库里仍是
+  `w`、库被剥离都报红；报告在 `weak_service_exports`。目标里没有这类弱引用时不要求。
 - 从实际 `link.txt` 中的 runtime 对象/库提取 `__start_*` / `__stop_*` 需求，
   检查最终定义、对应可装载节及非空 `__modules`，并核对根地址等于该节的起止地址。
   根必须属于该节，或是边界值准确的 linker-script ABS 定义；仅名字相同不能满足。
