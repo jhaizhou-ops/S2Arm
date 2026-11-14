@@ -229,6 +229,8 @@
 "app.fpsCap.ladder" = "This device can't hold 60 FPS steadily right now, so the game is back at its native frame rate. It will try 60 FPS again automatically once things are stable.";
 "app.fpsCap.lowPower" = "Low Power Mode is on, so the game is temporarily back at its native frame rate. 60 FPS resumes automatically when you turn off Low Power Mode.";
 "app.fpsCap.restored" = "60 FPS is back.";
+"app.lowRam.title" = "This device may not have enough memory";
+"app.lowRam.body" = "This game needs more memory than this device has. It will still start, but it may stutter or be closed by the system.";
 "app.fpsCap.thermal" = "The phone is too hot (critical), so the game is temporarily back at its native frame rate. 60 FPS resumes automatically once it cools down.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open the game again.";
 "app.gpuStop.title" = "Graphics error — stopped";

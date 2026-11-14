@@ -550,6 +550,10 @@ static void qp_fps_restart_ask(void) {
 }
 void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
 // 60 帧降档 / 恢复（runtime/src/fps.c s2a_fps_cap_tick，审计 P1-80）：降档时设置里的 60 帧开关仍显示玩家选的「开」，画面已回到原生帧率——横幅说清楚，原因去掉自动恢复
+// 客体内存三档判定落到「物理内存也装不下」（runtime/src/vawin.c low_ram_notice，#964）：照样开局，游戏内提示一次（不拦）
+void s2a_ios_low_ram_notice(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"app.lowRam.title"), S2AL(@"app.lowRam.body"), 3, 10); });
+}
 void s2a_ios_fps_capped(int reason) {
     NSString *body = reason == 1 ? S2AL(@"app.fpsCap.thermal") : reason == 2 ? S2AL(@"app.fpsCap.lowPower") : reason == 4 ? S2AL(@"app.fpsCap.ladder") : S2AL(@"app.fpsCap.restored");
     dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), body, 0, 6); });

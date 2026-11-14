@@ -229,6 +229,8 @@
 "app.fpsCap.ladder" = "这台设备暂时跑不稳 60 帧，已回到原生帧率；跑稳后会自动再试 60 帧。";
 "app.fpsCap.lowPower" = "低电量模式开着，已暂时回到原生帧率，关掉低电量模式后自动恢复。";
 "app.fpsCap.restored" = "60 帧已恢复。";
+"app.lowRam.title" = "这台设备内存可能不够";
+"app.lowRam.body" = "这款游戏需要的内存比这台设备多。照样可以开始，但可能卡顿，或被系统关掉。";
 "app.fpsCap.thermal" = "手机温度过高（危急），已暂时回到原生帧率，降温后自动恢复。";
 "app.gpuStop.body" = "请从后台划掉本 App，再重新打开游戏。\nPlease reopen the game.";
 "app.gpuStop.title" = "画面出错，已停止\nGraphics error — stopped";

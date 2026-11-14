@@ -229,6 +229,8 @@
 "app.fpsCap.ladder" = "這台裝置目前無法穩定跑 60 幀，已回到原生幀率；穩定後會自動再嘗試 60 幀。";
 "app.fpsCap.lowPower" = "低耗電模式已開啟，已暫時回到原生幀率，關閉低耗電模式後會自動恢復。";
 "app.fpsCap.restored" = "60 幀已恢復。";
+"app.lowRam.title" = "這台裝置記憶體可能不夠";
+"app.lowRam.body" = "這款遊戲需要的記憶體比這台裝置多。照樣可以開始，但可能卡頓，或被系統關掉。";
 "app.fpsCap.thermal" = "手機溫度過高（危急），已暫時回到原生幀率，降溫後會自動恢復。";
 "app.gpuStop.body" = "請從背景滑掉本 App，再重新開啟遊戲。\nPlease reopen the game.";
 "app.gpuStop.title" = "畫面發生錯誤，已停止\nGraphics error — stopped";

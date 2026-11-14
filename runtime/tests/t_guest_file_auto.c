@@ -10,7 +10,7 @@
 int s2a_guest_file_wanted2(const char *e, uint64_t pool, uint64_t room, uint64_t host, uint64_t margin);   // vawin.c（不进 native.h：抽取阶段键）
 int s2a_guest_file_wanted3(const char *e, uint64_t pool, uint64_t room, uint64_t seen, uint64_t host, uint64_t margin);
 uint64_t s2a_guest_mem_seen(void); void s2a_guest_mem_note(uint64_t footprint);
-int s2a_guest_file_wanted5(const char *e, uint64_t room, uint64_t seen, uint64_t margin, int died); int s2a_guest_run_died(void); void s2a_guest_run_mark(int running);
+int s2a_guest_file_wanted5(const char *e, uint64_t room, uint64_t seen, uint64_t margin, int died); int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t phys, uint64_t seen, uint64_t host, uint64_t margin, int died, int *low); int s2a_guest_run_died(void); void s2a_guest_run_mark(int running);
 int s2a_guest_file_wanted_mac(const char *e, uint64_t pool, uint64_t room, int pressed); int s2a_guest_pressure_seen(void); void s2a_guest_pressure_note(void);   // #306 Mac 判定与压力记录
 #include <stdio.h>
 #include <unistd.h>
@@ -101,6 +101,20 @@ int main(void) {
         CHECK(p0 == 0 && p1 == 1 && !strncmp(buf, "critical ", 9) && p2 == 0, "㊳ 压力记录：没有 0 → 记一次 1（内容「critical 时间」）→ 删掉后再记不重写 0（得 %d %d「%.9s」%d）", p0, p1, buf, p2);
         unlink(path); unsetenv("S2A_GUEST_PRESSURE_MARK");
     }
+    // 11-13 #964 三档（s2a_guest_file_wanted6）：不依赖历史，按单进程上限、物理内存、池 + 宿主估计判。期望按规则手写，例子取真机读数：
+    //   一款 Switch 2 大款（0400486024DEC000） Duo（iPhone19,4 物理 11570 MB，剩余 6141 / 8189 MB）：9216 > 剩余，11570 ≥ 9216 + 2048 = 11264 → 开（实测正式游戏每 10 秒写盘 0–8 MB）；
+    //   同款 iPad Pro（iPad14,3 物理 7535 MB，剩余 8189）：7535 < 11264 → 关并提示（文件后备在它上面每局写 82–223 GB）；Switch 1 款小内存机（㊹）池 3285 ≤ 4096 → 关、不提示
+    { int low = -1; const uint64_t PD = 11570 * MB, PI = 7535 * MB;
+      CHECK(s2a_guest_file_wanted6(NULL, S2, R, PD, 0, H2, G, 0, &low) == 1 && low == 0, "㊻ 这款 Duo 首局（剩余 6141、物理 11570）：开（得 low %d）", low);
+      CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PD, 0, H2, G, 0, &low) == 1 && low == 0, "㊼ 同上、干净起局剩余 8189：池 9216 仍大于剩余，开");
+      CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PI, 0, H2, G, 0, &low) == 0 && low == 1, "㊽ 这款 iPad 首局（物理 7535 < 11264）：关、提示内存不够");
+      CHECK(s2a_guest_file_wanted6(NULL, S1, 4096 * MB, 6144 * MB, 0, H2, G, 0, &low) == 0 && low == 0, "㊾ Switch 1 款小内存机（池 3285 ≤ 剩余 4096）：关、不提示（守 ㊹）");
+      CHECK(s2a_guest_file_wanted6(NULL, S2, RP, S2 + H2, 0, H2, G, 0, &low) == 1 && s2a_guest_file_wanted6(NULL, S2, RP, S2 + H2 - 1, 0, H2, G, 0, &low) == 0 && low == 1,
+            "㊿ 边界：物理 = 池 + 宿主估计 开，少 1 字节 关并提示");
+      CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PI, 0, H2, G, 1, &low) == 1 && s2a_guest_file_wanted6(NULL, S2, RP, PI, UINT64_MAX, H2, G, 0, &low) == 1, "51 上局在前台死掉 / 坏记录：开（物理内存不够也开，安全阀）");
+      CHECK(s2a_guest_file_wanted6(NULL, S2, RP, PD, 2118 * MB, H2, G, 0, &low) == 0 && s2a_guest_file_wanted6(NULL, S2, RP, PD, 7800 * MB, H2, G, 0, &low) == 1, "52 有实测按实测：2118 关、7800 开（同 ㊵ ㊶）");
+      CHECK(s2a_guest_file_wanted6(NULL, S2, 0, PD, 0, H2, G, 1, &low) == 0, "53 Mac（room 0）：关");
+      CHECK(s2a_guest_file_wanted6("1", S1, RP, PI, 0, H2, G, 0, &low) == 1 && s2a_guest_file_wanted6("0", S2, R, PD, 0, H2, G, 1, &low) == 0, "54 显式 1 / 0 压过一切"); }
     printf("%s t_guest_file_auto：%d 项不符\n", bad ? "✗" : "✓", bad);
     return bad != 0;
 }

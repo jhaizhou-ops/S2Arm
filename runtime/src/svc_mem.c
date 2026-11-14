@@ -413,6 +413,13 @@ uint64_t s2a_npdm_window_need(const char *npdm) {
     uint64_t mod = s2a_module_span(npdm_dir(npdm));
     return mod ? s2a_layout_need(t, sr, mod) : 0;   // 读不到模块 = 不知道要多大
 }
+// 本款应用池（vawin.c 多款容器「装游戏前按本款再判」文件后备时按名字取，#964）：那一刻已选定游戏、模块目录已是这一款，但布局还没按本款排、
+//   s2a_app_pool 仍是容器缺省 3285 MiB——一款 Switch 2 大款（0400486024DEC000） 会被判成「池 ≤ 剩余」照旧匿名、首局被杀。按本款 NPDM 认 Switch 2 → 9 GiB，否则缺省；读不到 0
+uint64_t s2a_npdm_app_pool(const char *npdm) {
+    uint32_t t, ms; uint64_t sr, pid;
+    if (npdm_read(npdm, &t, &sr, &ms, &pid, 0)) return 0;
+    return g_npdm_ounce ? 0x240000000ull : 0xCD500000ull;
+}
 // 本款程序号（vawin.c 构造函数占窗口时按名字取）：同 s2a_npdm_window_need 的不写本局状态读法（apply = 0）；读不到 / 没有 ACI0 为 0。
 //   审计 P1-139：构造期客体内存文件后备要按程序号找本款实测峰值 / 「上一局前台死掉」标记，那时图形模式还没落定，不能经 s2a_npdm_program_id → s2a_gfx_mode
 uint64_t s2a_npdm_pid(const char *npdm) {
