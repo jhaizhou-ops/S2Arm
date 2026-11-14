@@ -32,6 +32,11 @@ static uint64_t g_gap_over33;   // 超过 33 毫秒的帧数（精确按纳秒�
 // 这里按弱引用处理（同 rp_entry.c 的 nvn_ft_written）：没有实现时这一项显示 0，不改变既有日志与回放语义。
 // 只在上屏线程、只在长帧日志打开时查（nvn_gpu_stats 要锁后端、走一遍统计表）。
 extern void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) __attribute__((weak));
+// 首用管线异步（安卓 demand 层，nvn_vk_pipe_demand.h 合同）：弱引用取后台构建累计账，给分时读数补
+// 「提交/去重/建成/失败/超时/队满」一行。宿主回放单测 / iOS 没链 demand 层 → 符号为 0，不打这行，
+// 回放语义不变（与上面 nvn_gpu_stats、rp_draw.c 的 demand 弱引用同一手法）。
+extern int  nvn_vk_pipe_demand_on(void) __attribute__((weak));
+extern void nvn_vk_pipe_demand_stats6(uint64_t out[6]) __attribute__((weak));
 struct plc_ns_rd { uint64_t ns; int got; };
 static uint64_t g_plc_ns_last;   // 上次取到的累计值（只在 [上屏] 动）
 static void plc_ns_cb(void *user, const char *name, uint64_t value) {
@@ -173,6 +178,13 @@ uint64_t nvn_be_present(const tex_t *t, double period_s, const int crop[4]) {
                          (double)pf[RP_PERF_D_PASS] / 1e6 / f, (double)pf[RP_PERF_D_PIPE] / 1e6 / f, (double)pf[RP_PERF_D_PGET] / 1e6 / f,
                          (double)pf[RP_PERF_PB_VIEW] / 1e6 / f, (double)pf[RP_PERF_PB_BAR] / 1e6 / f, (double)pf[RP_PERF_PB_BE] / 1e6 / f, (double)pf[RP_PERF_PB_MARK] / 1e6 / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                if (nvn_vk_pipe_demand_on && nvn_vk_pipe_demand_stats6 && nvn_vk_pipe_demand_on()) {   // 首用异步开着才有账可报（弱引用见文件头）
+                    uint64_t ds[6] = {0}; nvn_vk_pipe_demand_stats6(ds);
+                    snprintf(b, sizeof b, "分时（首用后台建管线，累计）：提交 %llu、去重 %llu、建成 %llu、失败 %llu、超时 %llu、队满 %llu",
+                             (unsigned long long)ds[0], (unsigned long long)ds[1], (unsigned long long)ds[2],
+                             (unsigned long long)ds[3], (unsigned long long)ds[4], (unsigned long long)ds[5]);
+                    nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                }
                 snprintf(b, sizeof b, "分时（贴图解析，每帧）：等锁 %.2f 毫秒、持锁 %.2f 毫秒、没见过的序号 %.1f 个、新建视图 %.1f 个、内容检查按纪元跳过 %.0f 次；影子附件 %.2f 毫秒；新贴图：后端建 %.2f 毫秒、扫存储 %.2f 毫秒、上传 %.1f 张 %.2f 毫秒、填零 %.1f 张 %.2f 毫秒、改由通道清零 %.1f 张",
                          (double)pf[RP_PERF_RES_LOCK] / 1e6 / f, (double)pf[RP_PERF_RES_INIT] / 1e6 / f, (double)pf[RP_PERF_RES_NEW] / f, (double)pf[RP_PERF_RES_VIEWMAKE] / f, (double)pf[RP_PERF_TEX_EPOCH] / f, (double)pf[RP_PERF_PB_SHADOW] / 1e6 / f,
                          (double)pf[RP_PERF_RES_MAKE] / 1e6 / f, (double)pf[RP_PERF_RES_SCAN] / 1e6 / f, (double)pf[RP_PERF_RES_UPN] / f, (double)pf[RP_PERF_RES_UP] / 1e6 / f, (double)pf[RP_PERF_RES_ZERON] / f, (double)pf[RP_PERF_RES_ZERO] / 1e6 / f, (double)pf[RP_PERF_RES_ZDEFER] / f);

@@ -41,6 +41,9 @@ uint32_t nvk_fu_unsafe_ms(void);
 
 struct nvn_pipe_demand_stats { uint64_t kicked, dedup, built, failed, timeouts, full; };
 void nvn_vk_pipe_demand_stats(struct nvn_pipe_demand_stats *out);
+// 平面数组出口：给共用回放层（rp_present.c 的分时账）按弱引用取，不跨层引本头文件。
+// out[6] = kicked, dedup, built, failed, timeouts, full（与 nvn_pipe_demand_stats 同序）。
+void nvn_vk_pipe_demand_stats6(uint64_t out[6]);
 
 #ifdef __cplusplus
 }

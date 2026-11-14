@@ -237,3 +237,11 @@ void nvn_vk_pipe_demand_stats(struct nvn_pipe_demand_stats *out) {
     out->timeouts = __atomic_load_n(&g_st.timeouts, __ATOMIC_RELAXED);
     out->full = __atomic_load_n(&g_st.full, __ATOMIC_RELAXED);
 }
+
+// 平面数组出口（合同见头文件）：共用回放层按弱引用取账，不跨层引结构体定义。
+void nvn_vk_pipe_demand_stats6(uint64_t out[6]) {
+    if (!out) return;
+    struct nvn_pipe_demand_stats s; nvn_vk_pipe_demand_stats(&s);
+    out[0] = s.kicked; out[1] = s.dedup; out[2] = s.built;
+    out[3] = s.failed; out[4] = s.timeouts; out[5] = s.full;
+}
