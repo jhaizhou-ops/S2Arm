@@ -457,7 +457,10 @@ static int clone_tree(const char *from, const char *to, unsigned *files, uint64_
     }
     if (!S_ISREG(st.st_mode)) { clone_skip("搬", from, 0); return 0; }
 #if defined(__APPLE__)
-    if (clonefile(from, to, CLONE_NOOWNERCOPY))
+    // 克隆照抄权限位（CLONE_NOOWNERCOPY 只把属主换成 App）：旧树里没有写位的文件（玩家机上整条写不进的那棵）搬过来归 App 却仍只读，
+    //   之后电脑端经 AFC 打开写 game.img 被拒「Permission denied」（#074d88，三台设备都在搬家后的 Library/S2Arm 里）。同逐字节拷的退路：补上 App 自己的读写位
+    if (!clonefile(from, to, CLONE_NOOWNERCOPY)) { if (chmod(to, (st.st_mode & 0777) | 0600)) { snprintf(why, n, "改 %s 为可写：%s", to, strerror(errno)); return -1; } }
+    else
 #endif
     { int c = copy_file(from, to, st.st_mode, why, n); if (c < 0) return -1; if (c > 0) { clone_skip("读", from, errno); return 0; } }
     (*files)++; *bytes += (uint64_t)st.st_size; return 0;
