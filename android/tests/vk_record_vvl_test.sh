@@ -64,6 +64,10 @@ cc -std=gnu11 -O1 -g -ffunction-sections -fdata-sections "${sanitize[@]}" "${arg
     "$repo"/android/native/direct/{vk_record,t2t_plan,buffer_texture_plan,bind_defer,vk_device,gs_path}.c "$clear_source" \
     "$repo"/android/native/nvn/{nvn_vk_format,nvn_vk_query}.c \
     -Wl,--gc-sections -l:libvulkan.so.1 -lpthread -lm -ldl -o "$out/vk_record"
+# 释放负控预期同一 VUID 报 12 次；VVL 默认将重复消息截在 10 次。
+# 只取消本夹具的日志限流，校验层与原有逐项错误断言保持开启。
+printf 'khronos_validation.enable_message_limit = false\n' > "$out/vk_layer_settings.txt"
+export VK_LAYER_SETTINGS_PATH="$out"
 set +e
 if [ "${1:-}" = --release-negative ]; then
     stdbuf -oL -eL "$out/vk_record" "$out/shaders" >"$out/record.log" 2>&1
