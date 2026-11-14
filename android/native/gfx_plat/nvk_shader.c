@@ -1046,9 +1046,31 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     if (e) {
         if (e_failed) return -1;
         *out = &e->prog;
-        { struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages;
-          for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id.keys[st], 8);
-          nvk_prog_warm_note(&rec); }   // 真实用过的身份：uses++（这次没有源快照，note 不会覆盖记录里的 c1）
+        // 真实用过的身份：uses++，并**把程序对象里真实的 c1 一起记进清单**。
+        // 这里原先只记身份（没有源快照，就没有 c1）。后果是：只要某份程序第一次是被「已发布对象命中」记进清单的，
+        // 清单里这条就永远 c1_ok=0；下一局预热按它建出来的程序也 c1_ok=0，而 rp_draw 对带 C1 绑定的绘制
+        // （火把/粒子等用 BRX 跳表的着色器）直接跳过 → 光消失、画面发黑。程序对象里就有 c1，直接抄过来即可。
+        struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages;
+        for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id.keys[st], 8);
+        rec.c1_ok = (uint8_t)(e->prog.c1_ok & (uint8_t)((1u << nst) - 1u));
+        for (int st = 0; st < nst; st++)
+            if (rec.c1_ok & (1u << st)) memcpy(rec.c1[st], e->prog.c1[st], NVK_PROG_REC_C1_BYTES);
+        // 程序对象本身也没有 c1（例如它是上一局按残缺清单预热出来的）：这一笔手上正好有源快照，补采一次，
+        // 让清单在下一次落盘时被修好（这一局仍会跳过该笔，下一局不再跳）。
+        if ((rec.c1_ok & (uint8_t)((1u << nst) - 1u)) != (uint8_t)((1u << nst) - 1u)) {
+            for (int st = 0; st < nst; st++) {
+                if (rec.c1_ok & (1u << st)) continue;
+                struct s2a_source_entry_view v;
+                if (s2a_source_acquire(id.keys[st], &v)) {
+                    if (v.complete && v.c1 && v.c1_bytes >= NVK_PROG_REC_C1_BYTES) {
+                        memcpy(rec.c1[st], v.c1, NVK_PROG_REC_C1_BYTES);
+                        rec.c1_ok |= (uint8_t)(1u << st);
+                    }
+                    s2a_source_release(v.ref);
+                }
+            }
+        }
+        nvk_prog_warm_note(&rec);
         return 0;
     }
     // 2) 同身份在途：等它发布，不重复准备同一份程序。
@@ -1058,6 +1080,13 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     if (w > 0) {
         if (win->failed) return -1;
         *out = &win->prog;   // 预建对象的采用计数在 await_inflight 的锁内记（每份一次）
+        // 同一处的 c1 记账（原因见上面「已发布」分支）：预建对象里有 c1 就记进清单。
+        { struct nvk_prog_rec rec; memset(&rec, 0, sizeof rec); memcpy(rec.identity, sha, 32); rec.stage_mask = stages;
+          for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id.keys[st], 8);
+          rec.c1_ok = (uint8_t)(win->prog.c1_ok & (uint8_t)((1u << nst) - 1u));
+          for (int st = 0; st < nst; st++)
+              if (rec.c1_ok & (1u << st)) memcpy(rec.c1[st], win->prog.c1[st], NVK_PROG_REC_C1_BYTES);
+          nvk_prog_warm_note(&rec); }
         return 0;
     }
     // 3) 本线程接手：认领在途 → 捕获快照（读 rp_S 只在这里）→ 工作 → 发布。
@@ -1499,6 +1528,32 @@ int nvk_prog_warm_build(const struct nvk_prog_rec *rec) {
     if (shader_enter()) { warm_diag("程序预热：会话已置停局位，预热停止建设备对象"); inflight_abort(rec->identity); nvk_prog_warm_stat_build(-1); return -1; }
     struct entry *e = warm_work_run(rec, nst);
     shader_leave();
+    // 清单记录缺 c1，但这份程序真的带 C1 绑定（BRX 跳表着色器：火把/粒子等）：**不能发布**。
+    // 发布出去的程序 c1_ok=0，rp_draw 会把所有带 C1 绑定的绘制跳过（"c1_segment_not_captured"）——画面直接缺光/发黑。
+    // 这里如实拒绝（计 retried），留给真实 draw 用源快照现场编：那次会把 c1 一起记进清单，下一局这条就修好了。
+    if (e && !e->failed) {
+        int need = 0;
+        for (int st = 0; st < nst && st < RP_PROG_STAGES; st++) {
+            if (e->prog.c1_ok & (1u << st)) continue;
+            for (uint32_t i = 0; i < e->prog.nent[st] && i < RP_PROG_ENT_MAX; i++)
+                if (e->prog.ent[st][i].src_kind == NVN_RB_C1) { need = 1; break; }
+            if (need) break;
+        }
+        if (need) {
+            static _Atomic unsigned n;
+            unsigned k = atomic_fetch_add(&n, 1);
+            if (k < 4) {
+                char b[176];
+                snprintf(b, sizeof b, "程序预热：清单 c1_ok=%#x 缺 C1 绑定所需的常量段，拒绝发布（留现场编，本次第 %u 条）",
+                         (unsigned)rec->c1_ok, k + 1);
+                nvn_plat_log(NVN_PLAT_LOG_INFO, "warm", b);
+            }
+            entry_free(e);
+            inflight_abort(rec->identity);
+            nvk_prog_warm_stat_build(-1);
+            return -1;   // 本局不再重试（重试也没用，清单要等真实 draw 把 c1 记回去）；真实 draw 会自己备出来
+        }
+    }
     if (!e) {   // 缓存/离线库里没有这份身份的结果字节：正常分支（不是 bug），真实 draw 到时同步编
         inflight_abort(rec->identity);
         nvk_prog_warm_stat_build(-1);
