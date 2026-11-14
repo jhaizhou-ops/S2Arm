@@ -293,6 +293,7 @@ static void note_build(void) {
         [bs addObject:s2a_notice_button(S2AL(@"diag.upload"), primary, ^(UIButton *b) { (void)b; s2a_diag_upload(); })]; }
     g_note_view = s2a_notice_page(g_root.bounds, g_note[0], g_note[1], g_note[2], [g_note[3] floatValue], [g_note[4] length] ? g_note[4] : nil, bs);
     [g_root addSubview:g_note_view];
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_note_view); }   // 左上角小齿轮：故障报修
 }
 // C 层递来的规格文案（起局自检提示页 host_main.c → s2a_selfcheck_page、初启失败页正文 init_fail.c）是 runtime/include 里的中文原宏；
 //   英文 App 按逐字相等换成同名 <宏>_EN（#316）。不在表里的原样显示
@@ -388,6 +389,7 @@ static void help_build(NSString *title, NSString *detail, NSString *app) {
     UIButton *btn = s2a_notice_button(S2AL(@"app.packHelp.recheckPlaced"), YES, ^(UIButton *b) { b.enabled = NO; [b setTitle:S2AL(@"app.packHelp.checking") forState:UIControlStateDisabled];
         void (*f)(void) = g_help_recheck; if (f) f(); });
     g_help = s2a_notice_help_page(g_root.bounds, title, detail, app, btn); [g_root addSubview:g_help];
+    { void s2a_report_gear_attach(UIView *); s2a_report_gear_attach(g_help); }   // 左上角小齿轮：故障报修
     // 测试开关（真机验收没法点屏）：S2A_PACK_RECHECK_AUTO=<秒> 每隔这么久代按一次「重新检查」，说明页收起即停
     { static int armed; const char *e = getenv("S2A_PACK_RECHECK_AUTO"); double sec = e ? atof(e) : 0;
       if (sec > 0 && !armed) { armed = 1; LOG("说明页：测试开关 S2A_PACK_RECHECK_AUTO=%s，每 %.0f 秒代按「重新检查」", e, sec);
@@ -554,6 +556,10 @@ static void qp_fps_restart_ask(void) {
 void s2a_dprompt_notice(NSString *title, NSString *body, double delay, double seconds);   // dprompt.m
 // 档位梯子压回原生帧率 / 恢复（runtime/src/qladder_host.c，原因 4）：设置里的 60 帧开关仍显示玩家选的「开」，画面已回到原生帧率——横幅说清楚。
 //   热 / 低电量自动降档（原因 1 / 2）11-13 删了（维护者「不读电量、不设自己挡自己的闸」），这里不再有对应文案
+// 客体内存三档判定落到「物理内存也装不下」（runtime/src/vawin.c low_ram_notice，#964）：照样开局，游戏内提示一次（不拦）
+void s2a_ios_low_ram_notice(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"app.lowRam.title"), S2AL(@"app.lowRam.body"), 3, 10); });
+}
 void s2a_ios_fps_capped(int reason) {
     NSString *body = reason == 4 ? S2AL(@"app.fpsCap.ladder") : S2AL(@"app.fpsCap.restored");
     dispatch_async(dispatch_get_main_queue(), ^{ s2a_dprompt_notice(S2AL(@"cpatch.group.fps"), body, 0, 6); });
@@ -1229,8 +1235,8 @@ double dm_brightness_now(void) { return g_brightness; }
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 // 界面语言（runtime/include/s2a_ui_text.h，#316）：C 层递上来的提示 / 横幅按它取中文原宏或 _EN；判据同 S2AL 字符串表（ios/s2a_l10n.h）。盖过各 .c 的弱缺省
 int s2a_ui_zh(void) { return s2a_l10n_zh(); }
-// 游戏语言缺省跟宿主界面语言（维护者 11-13）：进程一起来就把界面实际显示的语言（zh-Hans / zh-Hant / en）交给服务层（S2A_UI_LANGUAGE → Host.cs PickLanguage →
-//   SystemLocale.FromUi）。构造期写：此时只有主线程、服务层还没读环境；已给的（开发 / 判定局）不覆盖。玩家在启动设置里单独指定的语言走 S2A_SYSTEM_LANGUAGE，优先于它
-//   界面语言玩家选过（App 设置「界面语言」，S2AUILanguageKey）：同一处先把本 App 的 AppleLanguages 设成它（字符串表 / 游戏库 / 系统弹框随之），跟随系统就清掉覆盖
-__attribute__((constructor)) static void s2a_ui_language_env(void) { @autoreleasepool { setenv("S2A_UI_LANGUAGE", s2a_l10n_apply_choice().UTF8String, 0); } }
+// 界面语言玩家选过（App 设置「界面语言」，S2AUILanguageKey）：进程一起来先把本 App 的 AppleLanguages 设成它（字符串表 / 游戏库 / 系统弹框随之），跟随系统就清掉覆盖。
+//   游戏语言不经界面语言传（11-13：界面只有简 / 繁 / 英，日 / 韩语设备会被落成英语、导入的 Switch 存档名字乱码）：服务层缺省读本 App 的首选语言列表
+//   （Host.cs PickLanguage → SystemLocale.FromPreferred），选过界面语言时列表第一项就是它，跟随系统时是设备系统语言；玩家逐款选的游戏语言走 S2A_SYSTEM_LANGUAGE（settings.m）
+__attribute__((constructor)) static void s2a_ui_language_env(void) { @autoreleasepool { (void)s2a_l10n_apply_choice(); } }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled ? 1 : 0; }

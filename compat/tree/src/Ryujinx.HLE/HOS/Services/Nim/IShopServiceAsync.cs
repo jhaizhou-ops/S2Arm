@@ -1,4 +1,5 @@
 using Ryujinx.Common.Logging;
+using Ryujinx.HLE.HOS.Kernel.Threading;
 using System;
 using System.Text;
 
@@ -8,18 +9,23 @@ namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServ
     // completes at once with an empty JSON object ("{}") and error code 0, as other implementations answer it (they found games fail on an empty body).
     // Command numbers and arguments follow the protocol documented for this interface: 0 Cancel, 1 GetSize, 2 Read, 3 GetErrorCode, 4 Request, 5 Prepare.
     // Before this, every command was unknown; Civilization VII calls Prepare once at boot and got the unknown-command failure.
+    // Completion is this request's own event (its handle goes out with the object, IShopServiceAccessor): Request clears it, finishes, then signals it;
+    // Cancel signals it too, so a waiter never hangs.
     class IShopServiceAsync : IpcService
     {
         private static readonly byte[] EmptyBody = Encoding.ASCII.GetBytes("{}");
         private byte[] _body = Array.Empty<byte>();
 
-        public IShopServiceAsync() { }
+        public KEvent Completion { get; }
+
+        public IShopServiceAsync(Horizon system) { Completion = new KEvent(system.KernelContext); }
 
         [CommandCmif(0)]
         // Cancel()
         public ResultCode Cancel(ServiceCtx context)
         {
             _body = Array.Empty<byte>();
+            Completion.ReadableEvent.Signal();
             return ResultCode.Success;
         }
 
@@ -55,7 +61,9 @@ namespace Ryujinx.HLE.HOS.Services.Nim.ShopServiceAccessServerInterface.ShopServ
         // Request(): starts the prepared request; it completes at once with an empty JSON body
         public ResultCode Request(ServiceCtx context)
         {
+            Completion.ReadableEvent.Clear();
             _body = EmptyBody;
+            Completion.ReadableEvent.Signal();
             Logger.Stub?.PrintStub(LogClass.ServiceNim, "no eShop: request completes with an empty JSON body");
             return ResultCode.Success;
         }

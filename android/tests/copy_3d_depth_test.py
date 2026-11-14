@@ -67,7 +67,7 @@ bc_upload_stub = bc_upload_signature + r''' {
 }
 '''
 production = '\n'.join(function(x) for x in (
-    'static int copy_region(', 'static int check_copy_params(',
+    'static void copy_region_block_clamp(', 'static int copy_region(', 'static int check_copy_params(',   # block_clamp：#697 小 mip 整块区域裁边，copy_region 调它
     'static void copy_buf_tex_impl(', 'void nvn_gpu_copy_buf_tex(', 'void nvn_gpu_copy_tex_buf('))   # copy_buf_tex_impl：#422 起 nvn_gpu_copy_buf_tex 是它的薄壳
 main = r'''
 static int check_case(int direction, unsigned layer, const NVNcopyRegion *region, int expected, const char *name) {

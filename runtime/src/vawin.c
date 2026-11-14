@@ -70,6 +70,34 @@ int s2a_guest_file_wanted(const char *e, uint64_t pool, uint64_t room) { return 
 //   掉到 17 帧后卡死重启；碰巧没开的一局稳 30 帧、实占峰值 2118 MB。整段 MAP_SHARED 文件不是换页、是强制写回（坑记录 #306），只在真装不下时才开：
 //   设了按设的；room 0（Mac 另判）关；上一局在前台死掉 / 坏记录 → 开；有实测（只记匿名内存局的实占，s2a_guest_mem_note）→ 实测 + 余量 > 剩余才开；
 //   没实测 → 关：先用匿名内存，心跳记实占；真装不下被系统收掉的那一局留下「在跑」标记，下一局由 died 开
+// 11-13 #964 三档（取代 wanted5 的「没实测就先匿名、死一次再开」：每台设备第一次玩 Switch 2 大款必先被系统杀一次）：
+//   #783 的反例拿错了款——iPad 那局「稳 30 帧、匿名 2118 MB」是另一款 Switch 1 游戏；一款 Switch 2 大款（0400486024DEC000） 在那台 iPad（物理内存 7.5 GB）上 8 局全开文件后备、
+//   每局写闪存 82–223 GB：游戏碰过的约 4.4 GB + 宿主约 3 GB 超过物理内存，系统边刷边逐出、再被写脏（换页抖动）。同一款在 Duo（物理 11.5 GB）上强制文件后备：
+//   正式游戏每 10 秒写盘 0–8 MB、后备文件落盘 4.4 GB 不再涨。所以文件后备能不能用看物理内存，开不开看单进程上限，都不依赖历史：
+//   设了按设的；room 0（Mac 另判）关；上局在前台死掉 / 坏记录 开；有实测按实测；没实测时池 ≤ 剩余 关（Switch 1 款，#783 ㊹ 的小内存机型不误开）；
+//   池 > 剩余且物理内存 ≥ 池 + 宿主估计 开；物理内存也装不下 → 关并 *low = 1（起局提示玩家这台设备内存不够这款，照样开局：文件后备在这种机器上是换页抖动、卡死重启，匿名最坏被系统结束）
+int s2a_guest_file_wanted6(const char *e, uint64_t pool, uint64_t room, uint64_t phys, uint64_t seen, uint64_t host, uint64_t margin, int died, int *low) {
+    *low = 0;
+    if (e && *e) return strcmp(e, "0") != 0;
+    if (!room) return 0;
+    if (died || seen == UINT64_MAX) return 1;
+    if (seen) return seen + margin > room;
+    if (pool <= room) return 0;
+    if (phys && phys >= pool + host) return 1;
+    *low = 1; return 0;
+}
+static uint64_t phys_mem(void) { uint64_t ph = 0; size_t n = sizeof ph; return sysctlbyname("hw.memsize", &ph, &n, NULL, 0) ? 0 : ph; }
+// 三档判定的一句理由（日志用）
+static const char *tier_why(int on, int low, uint64_t seen, int died) {
+    return died ? "上一局在前台时死掉，这一局开" : seen == UINT64_MAX ? "实测记录读不出（坏记录），保守开"
+         : seen ? (on ? "实测峰值 + 余量大于剩余，装不下" : "实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
+         : low ? "池大于剩余、物理内存也装不下池 + 宿主估计：保持匿名内存，提示玩家内存不够"
+         : on ? "池大于剩余、物理内存装得下：开" : "池不大于剩余：装得下、保持匿名内存";
+}
+static void low_ram_notice(uint64_t phys, uint64_t need) {
+    LOG("【黄】客体内存：这台设备物理内存 %llu MB，装不下这款要的约 %llu MB（池 + 宿主估计），照样开局；可能卡顿或被系统结束", (unsigned long long)(phys >> 20), (unsigned long long)(need >> 20));
+    void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_ios_low_ram_notice"); if (f) f();   // ios/app.m：游戏内提示条；单测 / 安卓没有
+}
 int s2a_guest_file_wanted5(const char *e, uint64_t room, uint64_t seen, uint64_t margin, int died) {
     if (e && *e) return strcmp(e, "0") != 0;
     if (!room) return 0;
@@ -243,18 +271,20 @@ static void guest_file_attach_(void) {
     uint64_t room = os_proc_available_memory(), ballast = test_ballast_bytes();   // 预热进程（ActivePrewarm）此刻的上限可能是后台档，偏小只会多开、不会漏开
     // 余量缺省 512 MB（S2A_GUEST_FILE_MARGIN_MB）；池只作日志里的上界，不作判据（#783，见 s2a_guest_file_wanted5）
     if (ballast) { room = room > ballast ? room - ballast : 1; LOG("【黄】测试压舱：文件后备判定按余量少 %llu MB 算（S2A_TEST_BALLAST_MB，装模块前才真占）", (unsigned long long)(ballast >> 20)); }
-    uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen();
-    int died = room && s2a_guest_run_died();
-    int on = s2a_guest_file_wanted5(e, room, seen, margin, died);
+    uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen(), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+    int died = room && s2a_guest_run_died(), low = 0;
+    char pp0[1024]; int known = mem_peak_path(pp0, sizeof pp0);   // 多款容器还没选游戏：池是容器缺省、读不到本款记录，先不判（装游戏前按本款再判）
+    int on = s2a_guest_file_wanted6(e, known || (e && *e) ? pool : 0, room, phys, seen, host, margin, died, &low);
     char pp[1024]; int late = !on && !(e && *e) && room && !mem_peak_path(pp, sizeof pp);   // 多款容器还没选游戏：装游戏前按本款再判
     const char *why = e && *e ? "按 S2A_GUEST_FILE 显式设定" : !room ? "自动：不知道单进程上限（Mac 会换页），缺省关"
                     : late ? "自动：还没选游戏（多款容器），先用匿名内存，装游戏前按本款实测再判"
                     : died ? "自动：上一局在前台时死掉（「在跑」标记还在：被内存上限杀 / 崩溃 / 测试局在前台被 devicectl 结束），这一局开"
                     : seen == UINT64_MAX ? "自动：本款实测峰值记录读不出（坏记录），保守开"
-                    : seen ? (on ? "自动：本机本款实测峰值 + 余量大于剩余，装不下" : "自动：本机本款实测峰值 + 余量不大于剩余，装得下、保持匿名内存")
-                    : "自动：没有本款实测，先用匿名内存、记下实占（真装不下被系统收掉，下一局由「在跑」标记开）";
-    LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB（上界，不作判据）、离单进程内存上限还剩 %llu MB%s、本机本款实测峰值 %llu MB（0 = 没有）%s", on ? "开" : "关", why,
-        (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
+                    : tier_why(on, low, seen, died);
+    LOG("客体内存文件后备：%s——%s；本款应用内存池 %llu MB、离单进程内存上限还剩 %llu MB%s、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）%s", on ? "开" : "关", why,
+        (unsigned long long)(pool >> 20), (unsigned long long)(room >> 20), room ? "" : "（0 = 未知）", (unsigned long long)(phys >> 20), (unsigned long long)(host >> 20),
+        (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20), s2a_process_prewarmed() ? "；预热进程" : "");
+    if (low && !late) low_ram_notice(phys, pool + host);
     if (late) { g_gfile_late = 1; g_gfile_room0 = room; return; }
     if (!on) return;
     guest_file_map();
@@ -313,11 +343,18 @@ void s2a_guest_file_test_pending(void) { g_gfile_pending = 1; }   // 单测（t_
 int s2a_guest_file_retry(void) {
     if (g_gfile_late && g_gfd < 0 && g_ok) {   // 多款容器：此刻已选定游戏，按本款实测 / 「在跑」标记再判（剩余用起局时那一刻的，和单款同口径）
         g_gfile_late = 0;
-        uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen(); int died = s2a_guest_run_died();
-        int on = s2a_guest_file_wanted5(NULL, g_gfile_room0, seen, margin, died);
-        LOG("客体内存文件后备（装游戏前按本款再判）：%s——%s；起局时离单进程内存上限还剩 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）", on ? "开" : "关",
-            died ? "上一局在前台时死掉" : seen == UINT64_MAX ? "实测记录读不出（坏记录），保守开" : seen ? (on ? "实测峰值 + 余量大于剩余，装不下" : "实测峰值 + 余量不大于剩余，装得下")
-            : "没有本款实测，先用匿名内存、记下实占", (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
+        uint64_t margin = env_mb("S2A_GUEST_FILE_MARGIN_MB", 512), seen = s2a_guest_mem_seen(), host = env_mb("S2A_GUEST_FILE_HOST_MB", 2048), phys = phys_mem();
+        // 此刻已选定游戏、模块目录已是这一款，但布局还没按本款排（s2a_app_pool 仍是容器缺省）：按本款 main.npdm 取池（Switch 2 9 GiB），读不到退回 s2a_app_pool
+        uint64_t pool = 0;
+        { const char *(*dirf)(void) = (const char *(*)(void))dlsym(RTLD_DEFAULT, "s2a_module_dir"); uint64_t (*npf)(const char *) = (uint64_t (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_npdm_app_pool");
+          if (dirf && npf && dirf()) { char np[1100]; snprintf(np, sizeof np, "%s/main.npdm", dirf()); pool = npf(np); }
+          if (!pool) { uint64_t (*poolf)(void) = (uint64_t (*)(void))dlsym(RTLD_DEFAULT, "s2a_app_pool"); pool = poolf ? poolf() : 0; } }
+        int died = s2a_guest_run_died(), low = 0;
+        int on = s2a_guest_file_wanted6(NULL, pool, g_gfile_room0, phys, seen, host, margin, died, &low);
+        LOG("客体内存文件后备（装游戏前按本款再判）：%s——%s；本款应用内存池 %llu MB、起局时离单进程内存上限还剩 %llu MB、物理内存 %llu MB、宿主估计 %llu MB、本机本款实测峰值 %llu MB（0 = 没有）",
+            on ? "开" : "关", tier_why(on, low, seen, died), (unsigned long long)(pool >> 20), (unsigned long long)(g_gfile_room0 >> 20), (unsigned long long)(phys >> 20),
+            (unsigned long long)(host >> 20), (unsigned long long)(seen == UINT64_MAX ? 0 : seen >> 20));
+        if (low) low_ram_notice(phys, pool + host);
         if (!on) return 0;
         g_gfile_pending = 1;   // 下面整段换成文件：窗口原封不动才换
     }

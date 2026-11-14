@@ -193,7 +193,8 @@ void nvn_be_read_texels(const tex_t *t, unsigned level, unsigned layer0, const N
 // ---------- 程序（描述符池登记、贴图内容归属在 rp_res.c）----------
 void nvn_be_prog_release(prog_t *p) { (void)p; }               // 还没有按程序的管线缓存：没有东西要释放
 void nvn_be_shader_prefetch(const uint8_t key[8]) { (void)key; }   // 预取是提速手段，不影响正确性；着色器链接上后再接
-int nvn_be_multi_draw_range(void) { return 0; }                // 0 = 前端逐条录间接计数多绘；OP_MULTI_DRAW 接上后改 1
+// 1 = 超过 1,024 条的间接计数多绘整段录一条 OP_MULTI_DRAW（rp_multi_draw 一次交后端）；设备没开 drawIndirectCount 时仍逐条录（rp_draw 报名跳过）
+int nvn_be_multi_draw_range(void) { nvn_gpu_caps caps; nvn_gpu_caps_get(&caps); return (caps.caps & NVN_GPU_CAP_INDIRECT_COUNT) != 0; }
 int nvn_be_buf_extent_consumer(void) { return 1; }             // Vulkan 上 size = 0 的存储绑定要按地址求活缓冲长度：让前端登记
 
 // ---------- 全局状态 ----------

@@ -2959,6 +2959,11 @@ def diagnostics(c):
                 if phone is not None:
                     manifest["phone_diagnostics"] = phone   # 最近一次拉回的手机诊断：拉回时刻、来源设备（机型 / 系统）、收了几份、跳过了哪些
                 manifest = redact_fields(manifest)
+                # 玩家在「故障报修」里写的一句「发生了什么」（选填，11-13 维护者）：原样放进 manifest.json 的 note（iOS ios/diag.m 同字段）；
+                #   收件服务去控制字符、截 200 字后存进元数据，取件把它放在定位卡最上面。是玩家自己要交的原话，不过脱敏、不设必填
+                note = c.r.get("note")
+                if isinstance(note, str) and note.strip():
+                    manifest["note"] = note.strip()
                 # These names have already been sanitized; redacting them again
                 # would hide task UUIDs and break the archive index.
                 manifest["files"] = sorted(archive.namelist() + ["manifest.json"])

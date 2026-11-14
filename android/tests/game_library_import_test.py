@@ -33,7 +33,8 @@ STUBS = {
  public static final int MODE_PRIVATE=0; private static final java.util.Map<String,SharedPreferences> prefs=new java.util.HashMap<>();
  public SharedPreferences getSharedPreferences(String name,int mode){if(mode!=MODE_PRIVATE)throw new AssertionError("unexpected preference mode");
   String key=root.getAbsolutePath()+"/"+name; return prefs.computeIfAbsent(key,k->new MemoryPreferences());}
- public final String getString(int id,Object... args){throw new AssertionError("diagnostic string unexpectedly requested");}
+ public final String getString(int id,Object... args){if(id>=100&&id<113)return id==100?"PLAYER_ERR "+java.util.Arrays.toString(args):"E"+id;   // PlayerError 玩家文案
+  throw new AssertionError("diagnostic string unexpectedly requested");}
  private static class MemoryPreferences implements SharedPreferences {
   private final java.util.Map<String,Boolean> values=new java.util.HashMap<>();
   public boolean getBoolean(String key,boolean fallback){return values.getOrDefault(key,fallback);}
@@ -103,7 +104,7 @@ STUBS = {
   public Builder setPositiveButton(int id,DialogInterface.OnClickListener l){return this;} public Builder setNegativeButton(int id,DialogInterface.OnClickListener l){return this;}
   public AlertDialog show(){return new AlertDialog();} } }''',
 'org/s2arm/android/R.java': '''package org.s2arm.android; public class R { public static class string { public static final int import_game=1, fps_overlay_show=2, export_diagnostics=3, export_diagnostics_running=4, export_diagnostics_failed=5, export_diagnostics_done=6,
- library_game_starting=7, library_current_game=8, library_switch_title=9, library_switch_message=10, library_switch_confirm=11, library_switch_waiting=12, library_switch_timeout=13, library_launch_failed=14, library_switch_cancel=15; } }''',
+ library_game_starting=7, library_current_game=8, library_switch_title=9, library_switch_message=10, library_switch_confirm=11, library_switch_waiting=12, library_switch_timeout=13, library_launch_failed=14, library_switch_cancel=15, player_err_fmt=100, player_err_import=101, player_err_start=102, player_err_no_space=103, player_err_no_space_next=104, player_err_apk=105, player_err_apk_next=106, player_err_access=107, player_err_access_next=108, player_err_pack=109, player_err_pack_next=110, player_err_other=111, player_err_other_next=112; } }''',
 # These unrelated app boundaries must never be called in an import test.
 'org/s2arm/android/DiagnosticExport.java': '''package org.s2arm.android; import android.content.Context; import java.io.IOException; import java.nio.file.Path;
  public class DiagnosticExport { public static Path run(Context context) throws IOException {throw new AssertionError("diagnostic export unexpectedly called");} }''',
@@ -132,7 +133,7 @@ import java.io.*; import java.nio.file.*; import java.lang.reflect.*; import jav
 public class ImportProbe {
  static int checks; static boolean refused;
  static void done(BlockingQueue<String> q) throws Exception { refused=false; long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
-  while(System.nanoTime()<end){String s=q.poll(1,TimeUnit.SECONDS); if(s!=null && s.contains("refused:"))refused=true; if(s!=null && s.startsWith("Games:"))return;}
+  while(System.nanoTime()<end){String s=q.poll(1,TimeUnit.SECONDS); if(s!=null && s.startsWith("PLAYER_ERR [E101"))refused=true; if(s!=null && s.startsWith("Games:"))return;}
   throw new AssertionError("import did not finish"); }
  static void demand(boolean yes,String message){checks++;if(!yes)throw new AssertionError(message);}
  static void stage(Path p) throws Exception {Files.createDirectories(p.getParent()); Method m=GameInstallTest.class.getDeclaredMethod("pack",String.class);m.setAccessible(true);Files.move(((File)m.invoke(null,p.toString())).toPath(),p);}

@@ -7016,6 +7016,10 @@
   "en": "Wait for the task that is using the library to finish (or cancel it in the task list), then try again. Nothing was changed."
  },
  {
+  "source": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「装到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",
+  "en": "This computer cannot reach the sign-in helper server Impactor needs for signing (mac-ani.jkcoxson.com, built into Impactor and not configurable); S2Arm already retried once. Check this computer's network: if a browser can open that address, click Install to iPhone again; if not, switch DNS (for example 223.5.5.5 or 1.1.1.1) or turn a proxy on or off, then install again. The iPhone, installed apps and saves are not affected."
+ },
+ {
   "source": "Apple ID 登录已过期，请重新登录后再装：在装机页点「打开 Impactor」→「设置」，选中你的 Apple ID 点「移除账号」，再点「添加账号」用同一个 Apple ID 重新登录（邮箱、密码、手机上的验证码，输入前切到英文输入法），然后回来再点一次「装到 iPhone」。密码只在 Impactor 里输，S2Arm 不经手。",
   "en": "Your Apple ID sign-in has expired. Sign in again, then install: on the install page click Open Impactor → Settings, select your Apple ID and click Remove Account, then Add Account and sign in with the same Apple ID (email, password and the code on your devices; switch the keyboard to English first). Come back and click Install to iPhone again. You enter the password only in Impactor; S2Arm never sees it."
  },

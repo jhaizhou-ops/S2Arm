@@ -72,6 +72,12 @@ final class GameLibrary {
         listener.onStatus(text);
     }
 
+    /** 失败：日志照旧记原始英文串（工具按它认），界面给玩家文案（原因 + 下一步 + 细节）。 */
+    private void failure(String logText, int what, Throwable error) {
+        Log.i("S2Arm", logText);
+        listener.onStatus(PlayerError.text(context, what, error));
+    }
+
     /** Resume without an import target only reports the library. */
     void scanImports() { scanImports(null); }
 
@@ -107,7 +113,7 @@ final class GameLibrary {
                     listener.onGameReady(session);
                 } catch (BootContract.BadGame | GamePack.BadPack | IOException | RuntimeException error) {
                     if (timing != null) for (String line : timing.lines()) Log.d("S2ArmBootTiming", line);
-                    status("Game admission failed: " + error.getMessage());
+                    failure("Game admission failed: " + error.getMessage(), R.string.player_err_start, error);
                 }
             });
             return;
@@ -132,14 +138,14 @@ final class GameLibrary {
                             }
                         }
                         @Override public void refused(File source, Exception error) {
-                            status("Game import of requested directory refused: " + error.getMessage());
+                            failure("Game import of requested directory refused: " + error.getMessage(), R.string.player_err_import, error);
                         }
                         @Override public void cleanupDeferred(File source, IOException error) {
                             status("Imported staging cleanup deferred: " + error.getMessage());
                         }
                     });
             } catch (IOException error) {
-                status("Game import deferred: " + error.getMessage());
+                failure("Game import deferred: " + error.getMessage(), R.string.player_err_import, error);
             }
             status(describe());
         });
@@ -167,11 +173,12 @@ final class GameLibrary {
                             DebugGate.open()), progress());
                         status("Game " + outcome(r));
                     } catch (GamePack.BadPack | BootContract.BadGame | IOException | RuntimeException e) {
-                        status("Game import refused" + (root.isEmpty() ? "" : " (" + root.substring(0, root.length() - 1) + ")") + ": " + e.getMessage());
+                        failure("Game import refused" + (root.isEmpty() ? "" : " (" + root.substring(0, root.length() - 1) + ")") + ": " + e.getMessage(),
+                            R.string.player_err_import, e);
                     }
                 }
             } catch (GamePack.BadPack | IOException | RuntimeException e) {
-                status("Game import refused: " + e.getMessage());
+                failure("Game import refused: " + e.getMessage(), R.string.player_err_import, e);
             }
             status(describe());
         });

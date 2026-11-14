@@ -43,7 +43,11 @@ void s2a_ios_apply_overlay_settings(NSUserDefaults *defaults) {
 //   以及撑不住就问玩家的「问过」与「本款原生 60 帧」记号——原先全在 App 级，一款游戏自动退回 16:9、关 60 帧会串到所有游戏
 NSArray *s2a_ios_per_game_keys(void) {
     return @[@"S2AResolutionScale", @"S2AAntiAliasing", @"S2AScalingFilter", @"S2AFrameRateLimit", @"S2AWidescreen", @"S2AFps60",
-             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AWidenForce"];
+             @"S2AFps60Manual", @"S2ADockedMode", @"S2ACommunityPatches", @"S2AWidescreenAsked", @"S2AFps60Asked", @"S2AFpsNative60", @"S2AWidenForce", S2AGameLanguageKey];
+}
+NSArray<NSString *> *s2a_ios_game_languages(void) {
+    return @[@"system", @"SimplifiedChinese", @"TraditionalChinese", @"AmericanEnglish", @"BritishEnglish", @"Japanese", @"Korean", @"French", @"CanadianFrench", @"German",
+             @"Spanish", @"LatinAmericanSpanish", @"Italian", @"Dutch", @"Portuguese", @"BrazilianPortuguese", @"Russian", @"Polish", @"Thai"];
 }
 @interface S2AGameLayeredDefaults : NSUserDefaults
 - (instancetype)initWithGame:(NSUserDefaults *)game app:(NSUserDefaults *)app keys:(NSSet<NSString *> *)keys;
@@ -166,6 +170,20 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         docked = [defaults boolForKey:@"S2ADockedMode"] ? "1" : "0";
         apply_environment("S2A_DOCKED", @(docked));
         fprintf(stderr, "[S2A 画面设置] S2A_DOCKED=%s（本 App 设置）\n", docked);
+    }
+    // 游戏语言（按款，11-13）：选了哪种就交宿主枚举名给 S2A_SYSTEM_LANGUAGE（Host.cs PickLanguage 优先用它）；跟随系统不设，服务层读本 App 首选语言。
+    //   游戏按语言整套换字体，从 Switch 导入的存档里玩家起的名字要和当时 Switch 的语言对上才显示得出来
+    const char *gameLanguage = getenv("S2A_SYSTEM_LANGUAGE");
+    if (gameLanguage) fprintf(stderr, "[S2A 画面设置] S2A_SYSTEM_LANGUAGE=%s（启动环境）\n", gameLanguage);
+    else {
+        NSString *v = [defaults stringForKey:S2AGameLanguageKey];
+        if (v && ![s2a_ios_game_languages() containsObject:v]) {
+            fprintf(stderr, "[S2A 画面设置] 【红】%s=%s 无效，清除保存值、跟随系统\n", S2AGameLanguageKey.UTF8String, v.UTF8String);
+            [defaults removeObjectForKey:S2AGameLanguageKey];
+        } else if (v && ![v isEqualToString:@"system"]) {
+            apply_environment("S2A_SYSTEM_LANGUAGE", v);
+            fprintf(stderr, "[S2A 画面设置] S2A_SYSTEM_LANGUAGE=%s（本款设置）\n", v.UTF8String);
+        }
     }
     // 按游戏的设置（11-07 维护者：游戏库里按住游戏 / 点设置，60 帧、宽屏强制启用点一下就切）：多款容器选了游戏后 S2A_LAUNCH_GAME_ID 有值，
     //   游戏库把这款的选择写在独立偏好 S2AGame.<游戏号>（shell S2ArmShellHost）；排在 App 级设置前面（两边都只在环境变量未设时写，先写的赢）。

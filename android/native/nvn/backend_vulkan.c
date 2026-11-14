@@ -4542,11 +4542,26 @@ static void lay_rest_at_commit(struct nvn_gpu_cmd_s *c) {
     }
 }
 
-static int copy_region(const struct nvn_gpu_tex_s *t, uint32_t level, const NVNcopyRegion *r, VkOffset3D *off, VkExtent3D *ext) {
+// 压缩格式（块 > 1）：区域可以按整块给到 mip 边缘之外（小于一块的 mip，例如 2×2，游戏照 NVN 给 4×4），
+//   只要没超过边缘所在的那一整块，就裁到边（Vulkan 对压缩格式本来就要求区域到边为止）；超过整块照旧非法。
+static void copy_region_block_clamp(const struct nvn_gpu_tex_s *t, uint32_t w, uint32_t h, NVNcopyRegion *rr) {
+    nvn_fmt_info f;
+    if (!nvn_fmt_info_of(t->nvn_format, &f) || (f.bw <= 1 && f.bh <= 1) || rr->xoffset < 0 || rr->yoffset < 0) return;
+    uint32_t bw = f.bw > 1 ? f.bw : 1, bh = f.bh > 1 ? f.bh : 1;
+    uint32_t aw = (w + bw - 1) / bw * bw, ah = (h + bh - 1) / bh * bh;
+    if (rr->width > 0 && (uint32_t)rr->xoffset < w && (uint32_t)rr->xoffset + (uint32_t)rr->width > w &&
+        (uint32_t)rr->xoffset + (uint32_t)rr->width <= aw) rr->width = (int)(w - (uint32_t)rr->xoffset);
+    if (rr->height > 0 && (uint32_t)rr->yoffset < h && (uint32_t)rr->yoffset + (uint32_t)rr->height > h &&
+        (uint32_t)rr->yoffset + (uint32_t)rr->height <= ah) rr->height = (int)(h - (uint32_t)rr->yoffset);
+}
+
+static int copy_region(const struct nvn_gpu_tex_s *t, uint32_t level, const NVNcopyRegion *r_in, VkOffset3D *off, VkExtent3D *ext) {
     uint32_t w = t->w >> level, h = t->h >> level, d = t->depth >> level;
     if (!w) w = 1;
     if (!h) h = 1;
     if (!d) d = 1;
+    NVNcopyRegion clamped; const NVNcopyRegion *r = r_in;
+    if (r_in) { clamped = *r_in; copy_region_block_clamp(t, w, h, &clamped); r = &clamped; }
     if (t->target == NVN_TEXTURE_TARGET_3D) {
         if (r && (r->width > 0 || r->height > 0)) {
             uint32_t rz = (uint32_t)(r->depth > 0 ? r->depth : 1);
@@ -5058,6 +5073,15 @@ static void copy_buf_tex_impl(nvn_gpu_cmd ch, nvn_gpu_buf bh, uint64_t off, uint
     struct nvn_gpu_buf_s *b = bh;
     if (t && t->bc_decoded) {   // 压缩字节进现解贴图：在段里解码（#697），不直拷
         if (!b) { set_sticky(c, NVN_GPU_E_ARG, "缓冲为空"); return; }
+        NVNcopyRegion r3;
+        if (t->target == NVN_TEXTURE_TARGET_3D) {   // 与下面直拷同一口径：3D 贴图的 layer 是切片号（#697 Mali：32×32×32 的 BC 贴图按 layer 1 进来被判「层越界」）
+            if (layer >= t->depth) { set_sticky(c, NVN_GPU_E_ARG, "3D 贴图 slice %u 越界（depth=%u）", layer, t->depth); return; }
+            memset(&r3, 0, sizeof r3);
+            if (r) r3 = *r;
+            if (r3.depth <= 0) r3.depth = 1;
+            r3.zoffset = (int)layer;
+            r = &r3; layer = 0;
+        }
         bc_copy_from_buf(c, t, level, layer, r, b, off, row_bytes, image_bytes);
         return;
     }
@@ -5366,10 +5390,19 @@ static int bc_src_check(struct nvn_gpu_cmd_s *c, struct nvn_gpu_tex_s *t, uint32
                         uint64_t row_bytes, uint64_t image_bytes, VkOffset3D *offp, VkExtent3D *extp, int *bbp,
                         uint64_t *bwp, uint64_t *bhp, uint64_t *slice_stridep) {
     VkOffset3D off; VkExtent3D ext; int bb = 0;
-    if (level >= t->levels || layer >= t->layers || copy_region(t, level, r, &off, &ext) ||
-        !ext.width || !ext.height || !ext.depth ||
-        !nvn_vk_bcdec_route(t->nvn_format, NULL, NULL, NULL, NULL, &bb)) {
-        set_sticky(c, NVN_GPU_E_ARG, "BC 上传子资源或区域非法"); return 0;
+    // 原先四种原因合成一句「子资源或区域非法」，真机读数分不出是哪一种（#697 Mali）：逐条报，带上数值
+    if (level >= t->levels || layer >= t->layers) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 上传子资源越界：级 %u / 共 %u，层 %u / 共 %u", level, t->levels, layer, t->layers); return 0;
+    }
+    if (!nvn_vk_bcdec_route(t->nvn_format, NULL, NULL, NULL, NULL, &bb)) {
+        set_sticky(c, NVN_GPU_E_ARG, "BC 上传：格式 %#x 没有现解路线", t->nvn_format); return 0;
+    }
+    if (copy_region(t, level, r, &off, &ext) || !ext.width || !ext.height || !ext.depth) {
+        uint32_t mw = t->w >> level, mh = t->h >> level, md = t->depth >> level;
+        set_sticky(c, NVN_GPU_E_ARG, "BC 上传区域超出这一级：级 %u（%ux%ux%u），区域 (%d,%d,%d) %dx%dx%d，目标 %u",
+                   level, mw ? mw : 1, mh ? mh : 1, md ? md : 1, r ? r->xoffset : 0, r ? r->yoffset : 0, r ? r->zoffset : 0,
+                   r ? r->width : 0, r ? r->height : 0, r ? r->depth : 0, t->target);
+        return 0;
     }
     uint32_t mw = t->w >> level, mh = t->h >> level; if (!mw) mw = 1; if (!mh) mh = 1;
     if ((off.x & 3) || (off.y & 3) || ((ext.width & 3) && (uint32_t)off.x + ext.width != mw) ||

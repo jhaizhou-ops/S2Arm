@@ -5709,6 +5709,7 @@ static void shmap_load_once(void) {
     uint8_t gmem_use;   // 0 未判 / 1 不绑原始内存池表 / 2 绑（gmem_uses：动态占比计数用）
     uint8_t tensor, tensor_log;   // HMMA: 1 = spatial stand-in, 2 = none, 3 = native SIMD-group matrix ABI 1; 0 = not checked
     uint16_t tensor_sq;   // S2Arm 11-05: such a shader's HMUL2 Rd, Ra, |Ra| (nvn2_hsq_count): its output is the signed square of what it reads plus the network's residual, the stand-in squares its input (nvn_tensor.inc)
+    uint16_t tensor_srgb;   // HSETP2 Rd, Ra, 0.04045 (nvn2_srgb_count): its output is the sRGB decode (to linear) of what it reads plus the network's residual, the stand-in decodes its input (nvn_tensor.inc)
     id<MTLLibrary> at_lib; NSString *at_main, *at_u; NSMutableDictionary<NSNumber *, id<MTLFunction>> *at_fns; uint8_t has_atms;   // gap families 34 / 37: a fragment main0 declaring S2A_AT / S2A_MSOFF (Dsh.cs FsAlphaMs): its library and entry names, specialized per (u, at, msoff) on demand (fs_atms_fn)
     int load_depth_zero;   // captured with the identity, also used by its layer variant
     uint8_t u_mask;   // S2Arm gap 2 A: the colour outputs fn_u returns as uint, bit n = color(n) (json u_mask; dmsh_build.py fs_uint turns only the integer-bit writers)
@@ -5759,7 +5760,7 @@ static void shmap_load_once(void) {
 } @end   // gp (S2Arm): the guest program, for its fragment shader's code / control at a typed-output variant (pso_fout_variant)   // geo_raster: GS output reader paired with this program's fragment stage
 @implementation NvProg @end
 // Warm-up entry: built in the background, waiting to be taken by the submit thread. vs / fs retain the actual shared shader objects (pso holds only raw pointers).
-@interface WarmItem : NSObject { @public int kind, fc; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; } @end   // fc: a compute pipeline of the sampler-emulation variant (#800)
+@interface WarmItem : NSObject { @public int kind, fc; NSString *key, *vs_key, *fs_key; NvShader *shader, *vs, *fs; pso_key pso; id<MTLFunction> fsfn; id object; NSData *mkey; } @end   // fc: a compute pipeline of the sampler-emulation variant (#800); mkey: a task / mesh pipeline's key (kind 4, nvn_geometry.inc mtk_warm)
 @implementation WarmItem @end
 static NSMutableDictionary<NSString *, NvShader *> *g_shcache;
 #define NVN_SHADER_FLIGHT_IMPL 1
@@ -6502,17 +6503,17 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only
         if (st >= 0) o->smask |= 1u << st; else o->unres = 1;
         // S2Arm 11-05: a Switch 2 compute shader with tensor-core matrix multiplies (the game's own upscaling network): not dispatched, stood in by nvn_tensor.inc. The guest code is
         //   read here, while the program is in use (as the fallback paths above do), before the shader is loaded: such a shader is built from its reflection alone (t_refl_only)
-        unsigned nh = 0, nsq = 0;
+        unsigned nh = 0, nsq = 0, nsrgb = 0;
         if (st == 5) {
             const void *ctl = p->sd[i].control; uint32_t ncode = 0;
             if (ctl && (uintptr_t)ctl < (1ull << 47) && nvn2_on() && nvn2_ctl(ctl)) { memcpy(&ncode, (const uint8_t *)ctl + 0x44, 4); if (p->sd[i].data && ncode && ncode < (1u << 24)) nh = nvn2_hmma_count((const void *)(uintptr_t)p->sd[i].data, ncode); }
-            if (nh) nsq = nvn2_hsq_count((const void *)(uintptr_t)p->sd[i].data, ncode);   // the network's output domain (nvn_tensor.inc)
+            if (nh) { nsq = nvn2_hsq_count((const void *)(uintptr_t)p->sd[i].data, ncode); nsrgb = nvn2_srgb_count((const void *)(uintptr_t)p->sd[i].data, ncode); }   // the network's output domain (nvn_tensor.inc)
         }
         t_refl_only = nh > 0;
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
         t_refl_only = 0;
         if (sh) o->sh[st] = sh; else MLOG("【红】 shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
-        if (sh && st == 5 && nh) sh->tensor_sq = (uint16_t)MIN(nsq, 0xffffu);
+        if (sh && st == 5 && nh) { sh->tensor_sq = (uint16_t)MIN(nsq, 0xffffu); sh->tensor_srgb = (uint16_t)MIN(nsrgb, 0xffffu); }
         if (sh && st == 5 && sh->tensor != 1 && sh->tensor != 3) {
             if (nh) MLOG("compute shader %s: %u tensor-core matrix multiplies (HMMA): the game's own upscaling network, stood in (nvn_tensor.inc)", sh->key, nh);
             if (!sh->tensor || nh) sh->tensor = nh ? 1 : 2;   // a full build of the same key (an earlier prewarm) is still never dispatched
@@ -8685,7 +8686,7 @@ static NSString *warm_key(const char *s, size_t n) {
 // The prewarm runs the lines of its lists as tasks: a shader (S), a compute pipeline (C), or every render pipeline (R) of one shader pair (the pipelines of a pair share their
 // shaders, so one worker builds them one after the other). The tasks keep the lists' order (a pair at its first line). shader_load shares successful objects and in-flight loads
 // with prefetch and runtime, without negatively caching failures. After the upstream reference implementation (MIT) warm_parse / warm_task
-@interface WarmTask : NSObject { @public int kind, stage, fc; NSString *key, *vkey, *fkey; NSMutableArray<NSData *> *rs; } @end   // fc: a C line's sampler-emulation bits this GPU runs (#800, warm_parse)
+@interface WarmTask : NSObject { @public int kind, stage, fc; uint32_t pad; NSString *key, *vkey, *fkey, *tkey; NSMutableArray<NSData *> *rs; } @end   // fc: a C line's sampler-emulation bits this GPU runs (#800, warm_parse)
 @implementation WarmTask @end
 static _Atomic long g_warm_done;   // lines done (the prepare step's progress)
 static _Atomic int g_wp_phase, g_wp_why, g_wp_play; static _Atomic long g_wp_total; static _Atomic uint64_t g_wp_t0;
@@ -8851,6 +8852,12 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 //   worker; its list has a pair with 73 lines, so the prepare step's last lines ran on one core while the rest idled and the first frame waited the whole 15 s cap with
                 //   12497 of 12523 lines done. The shaders' loads are shared anyway (shader_load_depth: one load per key, waiters join the one in flight), so the pair bought nothing
                 t = [WarmTask new]; t->kind = 1; t->vkey = vkey; t->fkey = fkey; t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]]; [tasks addObject:t];
+            } else if ([c[0] isEqualToString:@"M"] && c.count >= 4) {   // a task / mesh pipeline (nvn_geometry.inc mtk_record): the mesh shader in the vertex place, then the task shader key ("-": none) and the padded variant's mask
+                pso_skey sk; if (pso_skey_parse(c[1].UTF8String, &sk)) continue;
+                NSString *mkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs), *tkey = [c[2] isEqualToString:@"-"] ? @"" : c[2];
+                if (!mkey.length || warm_stale(mkey, stale) || (fkey.length && warm_stale(fkey, stale)) || (tkey.length && warm_stale(tkey, stale))) continue;
+                t = [WarmTask new]; t->kind = 4; t->vkey = mkey; t->fkey = fkey; t->tkey = tkey; t->pad = (uint32_t)strtoul(c[3].UTF8String, NULL, 16);
+                t->rs = [NSMutableArray arrayWithObject:[NSData dataWithBytes:&sk length:sizeof sk]]; [tasks addObject:t];
             } else continue;
             n++;
         }
@@ -8901,6 +8908,9 @@ static void warm_bump(const char *vk, const char *fk) {
         if (!((n - added) & (n - added - 1)) || n == added) MLOG("pipeline prewarm: the game registered a program whose pipelines were still queued: %llu lines moved to the front so far (%llu taken from the front)", (unsigned long long)n, (unsigned long long)atomic_load(&g_wu_taken)); }
 }
 static void warm_task_(WarmTask *t);
+static uint64_t g_warm_mps;   // task / mesh pipelines the prewarm built (M lines)
+static id mtk_warm(const pso_skey *sk, NSString *mkey, NSString *fkey, NSString *tkey, uint32_t pad, NSData **key);   // nvn_geometry.inc
+static void mtk_warm_claim(NSData *key, id ps);
 static void warm_task(WarmTask *t) { atomic_fetch_add(&g_warm_busy, 1); par_write_in_place = 1; warm_task_(t); par_write_in_place = 0; atomic_fetch_sub(&g_warm_busy, 1); }   // the prewarm writes what it compiles into the archive (pso_archive.h)
 static void warm_task_(WarmTask *t) {
     @autoreleasepool {
@@ -8917,6 +8927,12 @@ static void warm_task_(WarmTask *t) {
             id ps = fn ? par_compute(fn, par_ckey(cs, t->fc), &e) : nil;
             if (cs && !ps) MLOG("【红】 background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->fc = t->fc; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
+            g_warm_done++; return;
+        }
+        if (t->kind == 4) {   // a task / mesh pipeline: built here and handed to the mesh draws' table (nvn_geometry.inc), so the scene's first mesh draw neither waits nor is skipped
+            pso_skey sk; [t->rs[0] getBytes:&sk length:sizeof sk]; NSData *mk = nil;
+            id ps = mtk_warm(&sk, t->vkey, t->fkey, t->tkey, t->pad, &mk);
+            if (ps) { WarmItem *item = [WarmItem new]; item->kind = 4; item->object = ps; item->mkey = mk; warm_enqueue(item); g_warm_mps++; }
             g_warm_done++; return;
         }
         pso_skey sk; [t->rs[0] getBytes:&sk length:sizeof sk];
@@ -8944,6 +8960,7 @@ static void warm_task_(WarmTask *t) {
 }
 static void warm_finish(void) {
     shader_load_stats();
+    if (g_warm_mps) MLOG("pipeline prewarm: %llu task / mesh pipelines built (M lines)", (unsigned long long)g_warm_mps);
     MLOG("pipeline prewarm done: shaders %llu / render pipelines %llu (specialized fragment skipped %llu) / compute pipelines %llu, background time %.1f ms; shader keys not in the shader map (another game version) %llu; not in the library yet (compiled at their first use) %llu",
          (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_skip_fz, (unsigned long long)g_warm_cps, (bp_now() - g_warm_t0) / 1e6, (unsigned long long)g_warm_skip_stale, (unsigned long long)atomic_load(&g_cold_skips));
     if (g_par_on) MLOG("pipeline archive after the prewarm: %llu builds from the archive, %llu compiled (written beside it, in the background), %llu stale files dropped",
@@ -14021,6 +14038,8 @@ static void warm_claim(void) {
             if (!item->shader->warm_claimed) { item->shader->warm_claimed = 1; g_warm_claim_shaders++; }
         } else if (item->kind == 3) {   // S2Arm: prefetched at ProgramSetShaders; its S line waits for its first use (shader_used)
             // Already published by shader_load, including its complete identity.
+        } else if (item->kind == 4) {
+            mtk_warm_claim(item->mkey, item->object);
         } else if (item->kind == 1) {
             if (!hm_get_id(&g_pso, &item->pso)) { hm_put_id(&g_pso, &item->pso, item->object); g_warm_claim_rps++; }
         } else {

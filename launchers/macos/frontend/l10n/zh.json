@@ -1358,6 +1358,8 @@
   "s2arm.diagUpload.github": "去 GitHub 发帖",
   "s2arm.diagUpload.repo": "仓库地址：{0}",
   "s2arm.diagUpload.not": "不会上传：存档、密钥、游戏文件。上传后最多保存 7 天，开发者看完即删。",
+  "s2arm.diagUpload.noteLabel": "发生了什么？（选填）",
+  "s2arm.diagUpload.notePlaceholder": "写一句就行，比如「过完开场动画就黑屏」「一打开地图就闪退」。不写也能传。",
   "s2arm.diagUpload.cancel": "取消",
   "s2arm.diagUpload.send": "上传",
   "s2arm.diagUpload.sending": "正在上传…",

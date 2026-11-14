@@ -10,6 +10,10 @@
 //   每个分量先加一个本地偏置、再 HMUL2 R, R, |R| 取带符号平方，加网络残差后写 RG11B10 输出——输出在输入的平方域；照原样放大写进去等于每个分量开了平方根
 //   （0.04 → 0.2），暗森林整屏发白。标题画面 11 支网络 0 条这种平方，读写同域。规则：出口层的 HMUL2 R, R, |R| 条数（nvn2_hsq_count，prog_get 记进 tensor_sq）> 0
 //   → 放大前先把输入逐分量平方进一张 RGBA16F 临时图（tensor_sq_pass），再交 MetalFX；偏置与残差是网络算的，顶替没有，按 0
+// 输出域之二（11-14 一款体育游戏整个画面像盖了一层半透明白底）：10 支出口层（725bcf5c3f4bb3f3 等）读 RGB9E5 低分辨率画面、写 RG11B10，出口处把结果从 sRGB 解码成线性
+//   （HSETP2 比 0.04045、HMUL2 × 1/12.92、HFMA2 + 0.055/1.055、MUFU LG2 × 2.4 EX2，逐条核过）——网络在 sRGB 域算，读的画面是 sRGB 编码的值；
+//   照原样放大写进去等于线性图里放了 sRGB 值（0.2 → 应为 0.033），暗部整体抬亮、发灰发白。规则：出口层的 HSETP2 R, 0.04045 条数（nvn2_srgb_count，prog_get 记进 tensor_srgb）> 0、
+//   且不是平方域 → 放大前先把输入逐分量 sRGB 解码进同一种 RGBA16F 临时图（tensor_sq_pass 的第二个核），再交 MetalFX；分屏输入块不在左上角时先裁块再解码
 // 有效区域（11-05 第十九版：平方修好后仍只有左上 1/4 屏是画面、其余白）：这一族出口层（带平方的 15 支，机器码同构，逐支核过）只读一张贴图、写一张图，
 //   参数在推常量槽（c[24 + k]，NVN_RB_PUSH）里按 float4 排：c[1].xy（int）= 输出起点，c[6].xy（int）= 输出宽高（各线程按「剩余宽度 = c[6].x − 组号 × c[4].z」夹边），
 //   c[6].zw（float）= 每个输出像素在输入上走的归一化坐标步长（采样坐标 = (输出 x + 0.5) × c[6].z）。动态分辨率下游戏只把画面画在输入图左上一块：
@@ -111,33 +115,41 @@ static id<MTLTexture> tensor_sq_tex(NSUInteger w, NSUInteger h) {
     return t;
 }
 // 逐分量带符号平方：d.rgb = s.rgb · |s.rgb|，d.a = s.a（出口层只对颜色分量做平方）
+// 逐分量 sRGB 解码（tensor_srgb）：x ≤ 0.04045 → x / 12.92，否则 ((x + 0.055) / 1.055)^2.4，同出口层那段（门限比较在前，负值走线性段）；d.a = s.a
 static const char k_tensor_sq_msl[] =
 "#include <metal_stdlib>\nusing namespace metal;\n"
 "kernel void tensor_sq(texture2d<float, access::read> s [[texture(0)]], texture2d<float, access::write> d [[texture(1)]], uint2 p [[thread_position_in_grid]]) {\n"
 "  if (p.x >= d.get_width() || p.y >= d.get_height()) return;\n"
-"  float4 v = s.read(p); d.write(float4(v.rgb * abs(v.rgb), v.a), p); }\n";
+"  float4 v = s.read(p); d.write(float4(v.rgb * abs(v.rgb), v.a), p); }\n"
+"kernel void tensor_srgb(texture2d<float, access::read> s [[texture(0)]], texture2d<float, access::write> d [[texture(1)]], uint2 p [[thread_position_in_grid]]) {\n"
+"  if (p.x >= d.get_width() || p.y >= d.get_height()) return;\n"
+"  float4 v = s.read(p); float3 c = select(pow((max(v.rgb, 0.04045f) + 0.055f) / 1.055f, 2.4f), v.rgb / 12.92f, v.rgb <= 0.04045f); d.write(float4(c, v.a), p); }\n";
 // S2Arm #674: k_tensor_sq_msl is compiled from source as well; built at the first stand-in it held the submit thread 74-118 ms in the first 3D scene when the system's compile
 //   cache missed. On Switch 2 with the stand-in on, mtl_init starts the build in the background (tensor_sq_prewarm); the first pass waits for it (tensor_sq_ready), as ixc_prewarm / ixc_ready
-static id<MTLComputePipelineState> g_tsq_ps; static NSError *g_tsq_err;
+static id<MTLComputePipelineState> g_tsq_ps, g_tsrgb_ps; static NSError *g_tsq_err;
 static dispatch_group_t g_tsq_pre;   // the background build, NULL = not started
 static void tensor_sq_build(void) {
     NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_tensor_sq_msl) options:nil error:&e]; id<MTLFunction> f = lib ? [lib newFunctionWithName:@"tensor_sq"] : nil;
-    g_tsq_ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil; g_tsq_err = e;
+    id<MTLFunction> g = lib ? [lib newFunctionWithName:@"tensor_srgb"] : nil;
+    g_tsq_ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
+    g_tsrgb_ps = g_tsq_ps && g ? [g_dev newComputePipelineStateWithFunction:g error:&e] : nil; g_tsq_err = e;
 }
 static void tensor_sq_prewarm(void) { if (!nvn2_on() || !tensor_standin_enabled() || g_tsq_pre) return; g_tsq_pre = dispatch_group_create(); dispatch_group_async(g_tsq_pre, s2a_qos_global(S2A_QOS_SHADER_PREFETCH), ^{ @autoreleasepool { tensor_sq_build(); } }); }
-static id<MTLComputePipelineState> tensor_sq_ready(void) { if (g_tsq_pre) dispatch_group_wait(g_tsq_pre, DISPATCH_TIME_FOREVER); else tensor_sq_build(); return g_tsq_ps; }   // once: tensor_sq_pass keeps the table
-static int tensor_sq_pass(id<MTLTexture> s, id<MTLTexture> d) {
-    static id<MTLComputePipelineState> ps; static id at; static int failed;
+static id<MTLComputePipelineState> tensor_sq_ready(void) { if (g_tsq_pre) dispatch_group_wait(g_tsq_pre, DISPATCH_TIME_FOREVER); else tensor_sq_build(); return g_tsq_ps; }   // once: tensor_sq_pass keeps the table (g_tsrgb_ps is built with it)
+static uint64_t g_tensor_srgb_runs;
+// dom：1 = 带符号平方（tensor_sq）、2 = sRGB 解码（tensor_srgb）；两个核同一份源码、同一张参数表
+static int tensor_sq_pass(id<MTLTexture> s, id<MTLTexture> d, int dom) {
+    static id<MTLComputePipelineState> ps[2]; static id at; static int failed;
     if (failed) return 0;
     if (!at) { NSError *e = nil;
-        ps = tensor_sq_ready(); if (!ps) e = g_tsq_err;
-        at = ps ? rec_table(tab_new(1, 2, 0, &e)) : nil;
-        if (!at) { failed = 1; MLOG("【红】 张量核网络顶替：平方计算核建不出（%s），要平方的出口层输出图不写", e.localizedDescription.UTF8String); return 0; } }
-    id ce = enc_c_begin(NULL); enc_c_table(ce, at); tab_tex(at, s, 0); tab_tex(at, d, 1); [ce setComputePipelineState:ps];
+        ps[0] = tensor_sq_ready(); ps[1] = g_tsrgb_ps; if (!ps[0] || !ps[1]) e = g_tsq_err;
+        at = ps[0] && ps[1] ? rec_table(tab_new(1, 2, 0, &e)) : nil;
+        if (!at) { failed = 1; MLOG("【红】 张量核网络顶替：平方 / sRGB 解码计算核建不出（%s），要换输出域的出口层输出图不写", e.localizedDescription.UTF8String); return 0; } }
+    id ce = enc_c_begin(NULL); enc_c_table(ce, at); tab_tex(at, s, 0); tab_tex(at, d, 1); [ce setComputePipelineState:ps[dom == 2]];
     enc_c_dispatch(ce, MTLSizeMake((d.width + 15) / 16, (d.height + 15) / 16, 1), MTLSizeMake(16, 16, 1));
     enc_c_end(ce);
     args_dirty_all();   // the compute table was this pass's: the game's next dispatch binds its own again
-    g_tensor_sq_runs++;
+    if (dom == 2) g_tensor_srgb_runs++; else g_tensor_sq_runs++;
     return 1;
 }
 
@@ -207,10 +219,14 @@ static void tensor_standin(NvShader *cs) {
         if (!(cs->tensor_log & 1)) { cs->tensor_log |= 1; MLOG("【红】 张量核网络顶替：%s 写图 %lux%lu，读的贴图里没有宽高比一致、放大 1–4 倍的低分辨率画面，这一遍不写", cs->key, o ? (unsigned long)o.width : 0ul, o ? (unsigned long)o.height : 0ul); }
         return;
     }
+    int dom = cs->tensor_sq ? 1 : cs->tensor_srgb ? 2 : 0;   // 出口层的输出域（文件头）：0 同域、1 平方、2 sRGB 解码
     if (!(cs->tensor_log & 2)) { cs->tensor_log |= 2; MLOG("张量核网络顶替：%s 不派发，读 %lux%lu（格式 %lu）→ 写 %lux%lu（格式 %lu）用 MetalFX 空间放大%s", cs->key, (unsigned long)c.width, (unsigned long)c.height, (unsigned long)c.pixelFormat, (unsigned long)o.width, (unsigned long)o.height, (unsigned long)o.pixelFormat,
-        cs->tensor_sq ? "；它的输出是读的画面逐分量带符号平方加残差（HMUL2 R, R, |R|），放大前先把输入平方" : ""); }
+        dom == 1 ? "；它的输出是读的画面逐分量带符号平方加残差（HMUL2 R, R, |R|），放大前先把输入平方" : dom == 2 ? "；它的输出是读的画面加残差后从 sRGB 解码成线性（HSETP2 R, 0.04045），放大前先把输入 sRGB 解码" : ""); }
     int icrop = io && (rio[6] || rio[7]);   // 分屏输入块不在左上角：先拷进临时图（tensor_rect_io）
-    id<MTLTexture> in = cs->tensor_sq ? tensor_sq_tex(c.width, c.height) : icrop ? tensor_in_tex(c.pixelFormat, rio[0], rio[1], MTLTextureUsageShaderRead) : c;   // what MetalFX reads: the input itself, its signed square (see the file header), or its crop
+    id<MTLTexture> crop = icrop ? tensor_in_tex(c.pixelFormat, rio[0], rio[1], MTLTextureUsageShaderRead) : nil;
+    if (icrop && !crop) { g_tensor_red++; return; }
+    id<MTLTexture> src = crop ? crop : c;   // 换域那一遍读的：输入本身或它的裁块
+    id<MTLTexture> in = dom ? tensor_sq_tex(src.width, src.height) : src;   // what MetalFX reads: the input itself, its crop, or its signed square / sRGB decode (see the file header)
     if (!in) { g_tensor_red++; return; }
     NSUInteger rc[6] = {c.width, c.height, 0, 0, o.width, o.height};   // 输入内容宽高、输出区域（文件头「有效区域」）
     int rect = io ? (memcpy(rc, rio, sizeof rc), 1) : tensor_rect(cs, tc, c, to, o, rc);
@@ -235,11 +251,12 @@ static void tensor_standin(NvShader *cs) {
     pkg_gpu_wrote(to, 0, 0, 1, 0, 0, (uint32_t)to->d.width, (uint32_t)to->d.height);
     if (g_wd > 0) { pthread_mutex_lock(&g_wd_mu); s2a_widen_gpu_wrote((uint32_t)to->serial, (uint32_t)tc->serial); pthread_mutex_unlock(&g_wd_mu); }
     rp_flush(); (void)blit(); enc_close_blit();   // 前一侧全屏障（同 dlss_eval）
-    if (icrop) {   // 裁块：把输入块拷进临时图左上角，拷贝编码器关了即全屏障，MetalFX 读到拷完的临时图
-        enc_b_copy_texture(blit(), c, 0, 0, MTLOriginMake(rio[6], rio[7], 0), MTLSizeMake(rio[0], rio[1], 1), in, 0, 0, MTLOriginMake(0, 0, 0));
+    if (crop) {   // 裁块：把输入块拷进临时图左上角，拷贝编码器关了即全屏障，换域那一遍 / MetalFX 读到拷完的临时图
+        enc_b_copy_texture(blit(), c, 0, 0, MTLOriginMake(rio[6], rio[7], 0), MTLSizeMake(rio[0], rio[1], 1), crop, 0, 0, MTLOriginMake(0, 0, 0));
         enc_close_blit();
-    } else if (in != c) {   // 平方这一遍，之后再一个全屏障，MetalFX 读到写完的临时图
-        if (!tensor_sq_pass(c, in)) { g_tensor_red++; return; }
+    }
+    if (dom) {   // 平方 / sRGB 解码这一遍，之后再一个全屏障，MetalFX 读到写完的临时图
+        if (!tensor_sq_pass(src, in, dom)) { g_tensor_red++; return; }
         (void)blit(); enc_close_blit();
     }
     uint64_t a[15] = {0}; a[11] = rc[0]; a[12] = rc[1]; a[13] = 1;   // 输入内容宽高：有效区域（不成立 / 这一族以外 = 整张输入图）

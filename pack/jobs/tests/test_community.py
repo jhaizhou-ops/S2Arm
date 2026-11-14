@@ -70,6 +70,21 @@ class CommunityTests(unittest.TestCase):
         self.c.r = {"gameId": GID, "settings": {"language": "Klingon"}}
         with self.assertRaises(Failure): community.save(self.c)
 
+    def test_game_language_ios_same_as_table(self):
+        # 游戏语言 iOS 下拉（ios/settings.m s2a_ios_game_languages、ios/app_settings.m 的标签）与定义表 language 的 options 同值同序、条数相同；
+        #   每个值都是宿主 SystemLanguage 枚举名（compat/tree/.../SystemLanguage.cs）、iOS 平台在表里声明了
+        import re
+        item = next(i for i in json.loads((REPO / community.SETTINGS_TABLE).read_text(encoding="utf-8"))["items"] if i["id"] == "language")
+        values = [o["value"] for o in item["options"]]
+        ios = re.search(r"s2a_ios_game_languages\(void\) \{\s*return @\[(.*?)\];", (REPO / "ios/settings.m").read_text(encoding="utf-8"), re.S).group(1)
+        self.assertEqual(re.findall(r'@"(\w+)"', ios), values)
+        menu = (REPO / "ios/app_settings.m").read_text(encoding="utf-8")
+        labels = re.search(r"labels = @\[S2AL\(@\"settings.gameLanguage.system\"\),(.*?)\];", menu, re.S).group(1)
+        self.assertEqual(len(re.findall(r'@"[^"]+"\)?', labels)) + 1, len(values))   # 字面量与 S2AL(@"键") 各算一项
+        enum = (REPO / "compat/tree/src/Ryujinx.HLE/HOS/SystemState/SystemLanguage.cs").read_text(encoding="utf-8")
+        self.assertEqual([v for v in values[1:] if not re.search(r"\b%s,?\s" % v, enum)], [])
+        self.assertIn("ios", item["platforms"])
+
     def test_diag_run_is_one_session_only(self):
         # #438 诊断局：打开后下一次起局设定好的四个探针（帧号 3600 / 7200，图写这款文件夹 diagrun/），起局时就把这项从 launch.json 去掉，
         #   第二次起局不再开；上一次诊断局的图清掉。期望值按规格手写

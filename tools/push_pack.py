@@ -62,6 +62,7 @@ IMG = re.compile(r"(^|.*/)romfs\.img$|game\.img")   # 单文件镜像（旧形�
 #   CoreDeviceService 内存（#641 实测 12.2 GiB 的资源包：服务涨到约 20 GB、整机换页 10 GB 并卡死，下一次流式写在 0 字节就失败）。
 #   批次 tar（≤1 GB）照旧可以退回
 DC_FALLBACK_MAX = 2 << 30
+DENIED = "Permission denied"   # afc 打开写被拒的原文（s2a-devpush「打不开 <远端>：afc error: Permission denied」）
 
 
 def push_reason(text):
@@ -69,6 +70,7 @@ def push_reason(text):
     USB 看不到手机 / 手机锁屏 / 连接断了；认不出就空串（照原文报）。按 s2a-devpush 与 devicectl 的报错特征认，不看英文全文"""
     t = str(text or "")
     if "找不到设备" in t or "No device" in t or "usbmuxd" in t.lower() and "connect" in t.lower(): return "USB 看不到手机（没插数据线，或手机只在无线连接上）"
+    if DENIED in t: return "手机上这个文件 App 写不进（Permission denied）"
     if "锁屏" in t or "locked" in t.lower() or "passcode" in t.lower(): return "手机锁屏了"
     if "没有任何进展" in t or "socket io failed" in t or "Broken pipe" in t or "Connection reset" in t or "disconnected" in t.lower(): return "和手机的连接断了（数据线松了 / Wi-Fi 断开）"
     return ""
@@ -178,8 +180,18 @@ class Devpush:
 
     def put(self, src, rel):
         rc, out = self.call("put", src, rel)
+        if rc and DENIED in out: rc, out = self.rewrite(src, rel, out)
         if rc:
             raise Fail(f"资源包写进 iPhone 时中断（{out.splitlines()[-1] if out else f'退出码 {rc}'}）：确认手机解锁、数据线插稳后再点一次")   # 哪个文件写进 devpush.log
+
+    def rewrite(self, src, rel, first):
+        """机上这个文件打不开写（afc「Permission denied」，#074d88 三台不同设备：手机上 game.img 写不进，重试 / 续传次次一样）：
+        同一处的旧文件删掉、从头写一份新的（AFC 新建的文件归 App、可写）。删不掉 = 它所在的目录 App 也写不进：报手机原话 + 下一步。→ (rc, 输出)"""
+        ok, why = self.rm(rel)
+        if not ok:
+            return 1, (f"手机上的 {rel} 写不进也删不掉（{first.splitlines()[-1] if first else DENIED}；删除：{why.splitlines()[-1] if why else '失败'}）。"
+                       "在手机上打开一次 S2Arm（它会把写不进的目录搬到能写的位置），再点「装到 iPhone」")
+        return self.call("put", src, rel)
 
     def ls(self, rel):
         rc, out = self.call("ls", rel)
@@ -205,6 +217,7 @@ class Devpush:
 
     def put_at(self, src, rel, off):   # 本地从 off 起接着写进机上同一文件的 off 处（不截短）
         rc, out = self.call("put-at", src, rel, off)
+        if rc and DENIED in out: rc, out = self.rewrite(src, rel, out)   # 已传的那段打不开写：续不了，删掉整份重传
         if rc:
             raise Fail(f"资源包写进 iPhone 时中断（{out.splitlines()[-1] if out else f'退出码 {rc}'}）：确认手机解锁、数据线插稳后再点一次")
 

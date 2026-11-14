@@ -225,6 +225,8 @@
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
 "app.fpsCap.ladder" = "This device can't hold 60 FPS steadily right now, so the game is back at its native frame rate. It will try 60 FPS again automatically once things are stable.";
 "app.fpsCap.restored" = "60 FPS is back.";
+"app.lowRam.title" = "This device may not have enough memory";
+"app.lowRam.body" = "This game needs more memory than this device has. It will still start, but it may stutter or be closed by the system.";
 "app.gpuStop.body" = "Swipe this app away in the app switcher and open the game again.";
 "app.gpuStop.title" = "Graphics error — stopped";
 "app.library.broken.title" = "Game files are incomplete";
@@ -316,6 +318,9 @@
 "diag.upload.fail.timeout" = "The upload didn't finish within %d seconds (the network is slow or the connection stalled), so it was stopped. You can try again or export the diagnostics package instead.";
 "diag.upload.fail.title" = "Upload didn’t work";
 "diag.upload.go" = "Upload";
+"diag.report.title" = "Report a Problem";
+"diag.report.message" = "We’ll upload this device’s logs and device info to help find the cause, then give you a short code. You can write a sentence about what happened (optional).";
+"diag.report.placeholder" = "What happened? (optional)";
 "diag.upload.post" = "Post on GitHub";
 "diag.upload.retry" = "Try again";
 "dprompt.expiry.body" = "Time left: %@. After it expires the game won’t open, but your saves are safe: connect the phone and click “Install on iPhone” again, or refresh in AltStore.";
@@ -466,10 +471,14 @@
 "vpad.layouts.split.title" = "Split-screen touch layout";
 "vpad.layouts.split.footer" = "Edit the lower controls area. Positions are saved separately from the regular layout; touch mode and stick response are shared.";
 "settings.group.language" = "Language";
-"settings.footer.language" = "The language of S2Arm's menus. “Same as system” follows your iPhone's language (Chinese stays Chinese, other languages show English). Games use this language too unless you pick one in a game's launch settings.";
-"settings.language" = "Language";
+"settings.footer.language" = "Interface language is the language of S2Arm's menus. “Same as system” follows your iPhone's language (Chinese stays Chinese, other languages show English). Game language follows your iPhone's system language by default (Japanese, Korean and others included), or the interface language if you picked one in the app. If names in a save imported from a Switch look garbled, set the game language to the one that Switch used.";
+"settings.language" = "Interface language";
 "settings.language.system" = "Same as system";
 "settings.language.zhHans" = "简体中文";
 "settings.language.zhHant" = "繁體中文";
 "settings.language.en" = "English";
 "settings.language.restart" = "Close and reopen S2Arm to use the new language.";
+"settings.gameLanguage" = "Game language";
+"settings.gameLanguage.system" = "Same as system";
+"settings.gameLanguage.restart" = "Takes effect the next time you open this game.";
+"settings.gameLanguage.ja" = "日本語";

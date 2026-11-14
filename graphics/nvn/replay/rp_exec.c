@@ -563,6 +563,7 @@ static uint64_t exec_list(const uint8_t *p) {
             case OP_RENDER_COND: rc_cond(a); break;
             case OP_DRAW: { if (g_rc_skip) break; p_draw t; rp_draw(g_cmd, draw_rec(a, h.size, &t), NULL, p); break; }
             case OP_DRAW_IDX: { if (g_rc_skip) break; p_draw_idx t; rp_draw(g_cmd, NULL, draw_idx_rec(a, h.size, &t), p); break; }
+            case OP_MULTI_DRAW: { if (g_rc_skip) break; p_multi_draw m; if (h.size - 8 < sizeof m) { nvn_unimpl("rec", "multi_draw_short", p); break; } memcpy(&m, a, sizeof m); rp_multi_draw(g_cmd, &m, p); break; }
             case OP_SET_RT: { p_set_rt t; rp_pass_set_rt(g_cmd, set_rt_rec(a, h.size, &t)); sub_split(); break; }
             case OP_CLEAR_COLOR: if (!g_rc_skip) rp_pass_clear_color(g_cmd, a, p); break;
             case OP_CLEAR_DS: if (!g_rc_skip) rp_pass_clear_ds(g_cmd, a, p); break;

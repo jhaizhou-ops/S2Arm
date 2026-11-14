@@ -281,7 +281,7 @@ namespace S2A.Services
             }
         }
 
-        // 系统语言：显式 S2A_SYSTEM_LANGUAGE 优先，否则跟设备系统首选语言（维护者 10-20：装上默认中文版，系统本身是中文）；地区不随语言变（缺省 USA，S2A_REGION 可改）
+        // 系统语言：显式 S2A_SYSTEM_LANGUAGE（玩家逐款选的游戏语言 / 开发局）优先，否则跟设备系统首选语言（维护者 10-20：装上默认中文版，系统本身是中文；11-13 起不再跟界面语言，见 SystemLocale）；地区不随语言变（缺省 USA，S2A_REGION 可改）
         // 带配置的会话（平台装配）：平台给了系统语言标签就按它映射，映射不了退回装配显式给的 Language；不碰 CoreFoundation（#1073）
         public static SystemLanguage Language => Configuration == null ? LegacyLanguage.Value
             : Configuration.SystemLanguageTag is Func<string> tag && SystemLocale.Map(tag()) is SystemLanguage mapped ? mapped
@@ -296,7 +296,7 @@ namespace S2A.Services
                 return l;
             }
 
-            SystemLanguage d = SystemLocale.FromUi(Environment.GetEnvironmentVariable("S2A_UI_LANGUAGE"), SystemLocale.Preferred(), out string why);
+            SystemLanguage d = SystemLocale.FromPreferred(SystemLocale.Preferred(), out string why);
             Console.Error.WriteLine($"[S2A 语言] 系统语言 {d}（依据：{why}）");
             return d;
         }

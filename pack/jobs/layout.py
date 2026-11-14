@@ -99,8 +99,14 @@ def _drop_other_libraries(c, idx, want):
     ③ 那里有游戏库标识 .s2arm-library.json（v0.3.6 以前的旧表没记 library）。②③ 的位置号下的游戏记录一并去掉：那是别的库的款，
     留着会让本库导入同一款时认到别的库的文件夹、往那边写（存储总览「存放位置」一直列着换库前的 C 盘路径）。①的游戏记录本来就指向本库，不动"""
     here = str(c.library)
+    # #946：上一个库根下还记着游戏（索引里有游戏指向它），就不去掉，改当一个普通存放位置留着。0.2.x 换库时没搬文件的玩家，游戏全在旧库根里，
+    #   升到 v0.3.6 后整行连同游戏记录被去掉，库里所有游戏一下变成「未出包」。看不到自己的游戏比总览多列一行严重得多：有游戏的旧库根照留
+    used = {e.get("location") for e in idx["games"].values()} - {want}
     stale = [l for l in idx["locations"][1:] if l.get("path") != here and
-             (l.get("id") == want or l.get("library") or (Path(l.get("path", "")) / ".s2arm-library.json").is_file())]
+             (l.get("id") == want or ((l.get("library") or (Path(l.get("path", "")) / ".s2arm-library.json").is_file()) and l.get("id") not in used))]
+    for l in idx["locations"][1:]:
+        if l.get("id") in used and l.get("library") and l.get("path") != here:
+            l.pop("library")   # 留下来的旧库根降成普通存放位置
     if not stale:
         return
     gone = {l.get("id") for l in stale} - {want}

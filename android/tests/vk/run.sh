@@ -365,6 +365,14 @@ if ! grep -q "llvmpipe" "$out/log"; then
     grep '^device:' "$out/log" >&2 || true
     exit 1
 fi
+if [ "$(grep -c "C697e 小 mip 整块区域：已核对" "$out/log")" -lt 2 ]; then
+    echo "【红】C697e（小 mip 整块区域，原生 / 现解两条路径）没跑全" >&2
+    exit 1
+fi
+if ! grep -q "C697f 3D BC 按切片号上传：已核对" "$out/log"; then
+    echo "【红】没跑到 C697f（缓冲 → 3D BC 现解贴图按切片号上传）" >&2
+    exit 1
+fi
 if ! grep -q "C907 保留路径管线缓存落盘：已核对" "$out/log"; then
     echo "【红】没跑到 C907（停局保留会话时的管线缓存落盘）" >&2
     exit 1

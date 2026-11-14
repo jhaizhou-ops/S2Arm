@@ -1456,7 +1456,9 @@ class WinPhone:
             code = e.err or "device_install_failed"
             from errors import RECOVERY
             if code in RECOVERY and code not in ("device_install_failed", "job_failed"):
-                raise Failure("签名装机没成：" + RECOVERY[code], code=code, internal=str(e)) from e
+                # 连不上签名服务器：plumesign 那句是系统的本地化原话（如「不知道这样的主机。 (os error 11001)」），一并上屏，玩家 / 帮他的人能照着查网络
+                said = f"（Impactor 原话：{str(e).split('：', 1)[-1].strip()}）" if code == "signing_server_unreachable" else ""
+                raise Failure("签名装机没成：" + RECOVERY[code] + said, code=code, internal=str(e)) from e
             raise Failure(str(e), code=code) from e
         rec = layout.load_device(self.c, self.key)
         layout.save_device(self.c, self.key, dict(rec, bundleId=self.bid))

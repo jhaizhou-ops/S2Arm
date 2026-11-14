@@ -442,6 +442,8 @@ typedef BOOL (^VPFlag)(void);
     if (rt.switchGame) [items addObject:vp_act(S2APICK(S2A_DPROMPT_SWITCH_GAME_TITLE), @"square.stack", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.switchGame(c); }]; })];
     if (rt.manageSaves) [items addObject:vp_act(S2AL(@"vpad.menu.saves"), @"tray.full", NO, ^{ [ws afterMenu:^{ UIViewController *c = ws.window.rootViewController; if (c && !c.presentedViewController) rt.manageSaves(c); }]; })];
     [items addObject:vp_act(S2AL(@"vpad.menu.more"), @"ellipsis.circle", NO, ^{ [ws afterMenu:^{ [ws openFullSettings]; }]; })];
+    // 故障报修（11-13 维护者定：各页面齿轮菜单最下面）：写一句发生了什么（可不填）→ 打包上传、给短码（diag.m s2a_diag_report）
+    [items addObject:vp_act(S2AL(@"diag.report.title"), @"exclamationmark.bubble", NO, ^{ [ws afterMenu:^{ void s2a_diag_report(void); s2a_diag_report(); }]; })];
     return items;
 }
 - (void)openFullSettings { void s2a_diag_open_menu(void); s2a_diag_open_menu(); }   // 同四指长按：整页设置，游戏不退出，开着时触屏输入停住

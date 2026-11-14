@@ -125,8 +125,8 @@ def require_automatic_memory(c):
 
 def runtime_env(c, game, runtime, input_ok=True):
     require_automatic_memory(c)
-    # 游戏语言：请求带 gameLanguage（玩家在启动设置里单独指定）就设 S2A_SYSTEM_LANGUAGE；不带就跟启动器界面语言（下面的 S2A_UI_LANGUAGE，维护者 11-13），
-    # 宿主 services/S2A.Services/Host.cs PickLanguage → SystemLocale.FromUi；游戏不支持的落英语，英语也没有用游戏自己的缺省（SystemLocale.TitleFallback）
+    # 游戏语言：请求带 gameLanguage（玩家在启动设置里逐款选）就设 S2A_SYSTEM_LANGUAGE；不带就跟 Mac 系统首选语言（宿主 services/S2A.Services/Host.cs PickLanguage
+    #   → SystemLocale.FromPreferred；11-13 起不跟启动器界面语言：界面只有中英，日 / 韩语玩家的 Switch 存档名字会乱码）；游戏不支持的落英语，英语也没有用游戏自己的缺省
     language = c.r.get("gameLanguage")
     if language is not None and language not in LANGUAGES:
         raise Failure("游戏语言代码无效。")
@@ -193,7 +193,7 @@ def runtime_env(c, game, runtime, input_ok=True):
         env["S2A_INPUT_CONFIG"] = str(path)
     if c.r.get("inputGuideHandled") is True:
         env["S2A_INPUT_GUIDE_SHOWN"] = "1"
-    if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 也是游戏语言的缺省（维护者 11-13：没单独指定就跟启动器界面语言，Host.cs PickLanguage）
+    if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 宿主自己的界面文案（按键引导等）跟启动器界面语言；不再决定游戏语言（见上 gameLanguage）
         env["S2A_UI_LANGUAGE"] = c.r["uiLanguage"]
     return env
 

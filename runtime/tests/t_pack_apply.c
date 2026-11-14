@@ -587,6 +587,9 @@ int main(void) {
         char old[900]; snprintf(old, sizeof old, "%s/games/%s/资源包/romfs.img", sup, gid); struct stat so;
         CHECK(r == 1 && s2a_games_repair_files() == 1 && !strcmp(root, want) && !strcmp(buf, "hello") && !access(want, W_OK) && !stat(old, &so),
               "主位置整条写不进 → 搬到 Library/S2Arm：返回 1、1 个文件、资源包根换到备用位置、内容一致、可写、旧的还在（实际 %d / %u /「%s」/「%s」）", r, s2a_games_repair_files(), root, buf);
+        // #074d88（三台设备推 game.img 报 AFC「Permission denied」，都在搬家后的 Library/S2Arm 里）：旧树里的文件本身也没有写位（夹具 a-w，romfs.img 0444），
+        //   clonefile 原样照抄权限位，搬过来的文件归 App 却仍是 0444，之后电脑端经 AFC 打开写入被拒。期望：搬过来的文件 App 可写（同逐字节拷的退路 | 0600）
+        CHECK(!access(fp, W_OK), "搬过来的文件 App 可写（源文件 0444；实际 access W_OK = %d）", access(fp, W_OK));
         CHECK(s2a_games_repair(pd) == 0, "搬过之后再查：不再动（返回 0）");
         snprintf(c, sizeof c, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", base, base); sh(c);
     }

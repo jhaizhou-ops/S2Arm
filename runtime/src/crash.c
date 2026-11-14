@@ -63,16 +63,72 @@ void s2a_code_words(uint64_t a, int before, int after, char *b, size_t n) {
     for (int i = 0; i < k && o + 12 < n; i++)
         o += (size_t)snprintf(b + o, n - o, i == before ? "%s[%08x]" : "%s%08x", i ? " " : "", w[i]);
 }
+// 调用点 → 被调的是谁（11-13 诊断#59429a：游戏刚调完一个函数就拿返回值读 +0x18 崩了，原先只列帧链里的调用点、漏了 lr 那一次，
+//   而且只有指令字，看不出 bl 进的 PLT 是哪个导入、绑到宿主接管还是 sdk）。site 那条是 bl：目标是 PLT 桩（adrp x16 / ldr x17, [x16, #o]）时
+//   回 GOT 槽地址（*slot）；目标本身也回。不是 bl 回 0。只经内核读，不二次缺页；信号里可调
+static int mem_read(uint64_t a, void *out, size_t n) {
 #if defined(__APPLE__)
+    vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)a, (vm_size_t)n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+#else
+    struct iovec l = {out, n}, r = {(void *)(uintptr_t)a, n};
+    return process_vm_readv(getpid(), &l, 1, &r, 1, 0) == (ssize_t)n;
+#endif
+}
+uint64_t s2a_call_target(uint64_t site, uint64_t *slot) {
+    uint32_t w, st[2]; *slot = 0;
+    if ((site & 3) || !mem_read(site, &w, 4) || (w & 0xFC000000u) != 0x94000000u) return 0;
+    uint64_t t = site + (uint64_t)((int64_t)((int32_t)(w << 6) >> 6) * 4);
+    if (mem_read(t, st, 8) && (st[0] & 0x9F00001Fu) == 0x90000010u && (st[1] & 0xFFC003FFu) == 0xF9400211u) {
+        int64_t pg = (int64_t)((((uint64_t)(st[0] >> 5) & 0x7FFFF) << 2) | ((st[0] >> 29) & 3));
+        pg = (pg << 43) >> 43;   // 21 位有符号页数
+        *slot = (t & ~0xFFFull) + (uint64_t)(pg * 4096) + ((st[1] >> 10) & 0xFFF) * 8;
+    }
+    return t;
+}
+// GOT 槽 → 导入名：在含它的游戏模块的 RELA / JMPREL 里找 r_offset 落在这个槽的那条（装载器 relocate 同一张表，装完一直留在模块里）。找不到回 NULL
+const char *s2a_import_name(uint64_t slot) {
+    for (int i = 0; i < g_nmod; i++) {
+        const module_t *m = &g_mod[i];
+        if (!m->dyn || !m->symtab || !m->strtab || slot < (uint64_t)m->base || slot >= (uint64_t)m->base + m->size) continue;
+        uint64_t tab[2] = {0}, sz[2] = {0};
+        for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
+            case 7: tab[0] = d->d_un.d_ptr; break; case 8: sz[0] = d->d_un.d_val; break;     // DT_RELA / DT_RELASZ
+            case 23: tab[1] = d->d_un.d_ptr; break; case 2: sz[1] = d->d_un.d_val; break;    // DT_JMPREL / DT_PLTRELSZ
+        }
+        for (int t = 0; t < 2; t++) {
+            const Elf64_Rela *r = (const Elf64_Rela *)(m->base + tab[t]);
+            for (uint64_t k = 0; tab[t] && k < sz[t] / sizeof *r; k++)
+                if ((uint64_t)m->base + r[k].r_offset == slot) { uint32_t si = (uint32_t)(r[k].r_info >> 32); return si ? m->strtab + m->symtab[si].st_name : NULL; }
+        }
+        return NULL;
+    }
+    return NULL;
+}
+#if defined(__APPLE__)
+// 一处调用点的「被调的是谁」：「 → 导入 <名>，绑到 <宿主符号 / 模块+偏移>」或「 → 调 <模块+偏移>」；不是 bl 写空串
+static void callee_text(uint64_t site, char *b, size_t n) {
+    uint64_t slot, t = s2a_call_target(site, &slot), v = 0; char at[160]; b[0] = 0;
+    if (!t) return;
+    if (slot && mem_read(slot, &v, 8)) {
+        const char *nm = s2a_import_name(slot); where(v, at, sizeof at);
+        snprintf(b, n, " → 导入 %s，绑到 %s", nm ? nm : "（槽不在重定位表里）", at);
+    } else { where(t, at, sizeof at); snprintf(b, n, " → 调 %s", at); }
+}
 // 崩溃完整报告里的指令原文（只 Mac / iOS 的完整报告调；安卓走 crash_android_fatal.inc）：pc 前 8 条后 2 条；
-//   帧链里落在游戏模块的前 8 个返回地址，各取调用那条（返回地址 −4）前 3 条到它本身
-static void code_note(uint64_t pc, uint64_t fp) {
-    char b[400], at[160];
+//   lr 那次调用（崩溃函数里最近一次调用，帧链里没有它：返回值是空的多半就是它）、帧链里落在游戏模块的前 8 个返回地址，各取调用那条（返回地址 −4）前 3 条到它本身，并写被调的是谁
+static void code_note(uint64_t pc, uint64_t lr0, uint64_t fp) {
+    char b[400], at[160], ce[400];
     where(pc, at, sizeof at); s2a_code_words(pc & ~3ull, 8, 2, b, sizeof b); LOG("指令 pc %s：%s", at, b);
     uint64_t lr[32]; int k = s2a_frames(fp, lr, 32), shown = 0;
+    if (module_of((void *)(uintptr_t)lr0) && (k == 0 || lr[0] != lr0)) {
+        where(lr0 - 4, at, sizeof at); s2a_code_words((lr0 - 4) & ~3ull, 3, 0, b, sizeof b); callee_text((lr0 - 4) & ~3ull, ce, sizeof ce);
+        LOG("指令 lr 调用点 %s：%s%s", at, b, ce);
+    }
     for (int i = 0; i < k && shown < 8; i++) {
         if (!module_of((void *)(uintptr_t)lr[i])) continue;
-        where(lr[i] - 4, at, sizeof at); s2a_code_words((lr[i] - 4) & ~3ull, 3, 0, b, sizeof b); LOG("指令 #%d 调用点 %s：%s", i, at, b); shown++;
+        where(lr[i] - 4, at, sizeof at); s2a_code_words((lr[i] - 4) & ~3ull, 3, 0, b, sizeof b); callee_text((lr[i] - 4) & ~3ull, ce, sizeof ce);
+        LOG("指令 #%d 调用点 %s：%s%s", i, at, b, ce); shown++;
     }
 }
 #endif
@@ -323,7 +379,7 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
     LOG("【红】CRASH 信号 %d 地址 %p pc %s lr %s sp %#llx", sig, si->si_addr, bp, bl, (unsigned long long)uc->uc_mcontext->__ss.__sp);
     for (int i = 0; i < 29; i += 4) LOG("  x%-2d %016llx %016llx %016llx %016llx", i, uc->uc_mcontext->__ss.__x[i], uc->uc_mcontext->__ss.__x[i + 1], i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0);
     s2a_backtrace(fp);
-    code_note(pc, fp);
+    code_note(pc, lr, fp);
     fault_region_note(sig, si, uc);
     { uint64_t ht, hl, fs, fh; int fn; s2a_low_holes(&ht, &hl); s2a_fd_usage(&fn, &fs, &fh);   // 资源耗尽类崩溃先看这两样：低区地址 / 文件句柄
       LOG("崩溃时余量：低区空洞合计 %llu MB、最大一块 %llu MB；文件句柄已开 %d 个，软上限 %llu、硬上限 %llu", (unsigned long long)(ht >> 20), (unsigned long long)(hl >> 20), fn, (unsigned long long)fs, (unsigned long long)fh); }

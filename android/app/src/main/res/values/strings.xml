@@ -43,6 +43,20 @@
     <string name="touch_layout_err_read">the file could not be read. Save it to this device first, or choose it from another location.</string>
     <string name="touch_layout_err_write">the chosen location could not be written. Choose another location.</string>
     <string name="touch_layout_document_unavailable">Document could not be opened</string>
+    <!-- 玩家看到的失败文案（PlayerError）：做什么没成功 + 原因 + 下一步，最后一行是原始细节 -->
+    <string name="player_err_fmt">%1$s: %2$s %3$s\nDetails: %4$s</string>
+    <string name="player_err_import">Import didn\'t work</string>
+    <string name="player_err_start">The game couldn\'t start</string>
+    <string name="player_err_no_space">There isn\'t enough free storage on this phone.</string>
+    <string name="player_err_no_space_next">Free up some space, then try again.</string>
+    <string name="player_err_apk">This game package was built for a different version of the app.</string>
+    <string name="player_err_apk_next">Import the game package made together with this app build.</string>
+    <string name="player_err_access">The files couldn\'t be read.</string>
+    <string name="player_err_access_next">Pick the folder again and allow access.</string>
+    <string name="player_err_pack">The game package is incomplete or damaged.</string>
+    <string name="player_err_pack_next">Copy the game package from your computer again, then import it.</string>
+    <string name="player_err_other">Something unexpected went wrong.</string>
+    <string name="player_err_other_next">Tap Export diagnostics… on the library screen and send us the file.</string>
     <string name="library_game_starting">The game is still starting; it opens in a moment…</string>
     <string name="library_current_game">the game that is running</string>
     <string name="library_switch_title">Switch game</string>

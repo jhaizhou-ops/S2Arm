@@ -137,6 +137,17 @@ struct ShellSettingsView: View {
                                 }.equatable()
                             }
                         }
+                        // S2Arm: at the bottom, "Report a problem" (the host asks for an optional sentence, then uploads the logs and shows a short code)
+                        if let report = actions.onReportProblem {
+                            SettingsGroup(title: ShellStrings.text("Report a problem")) {
+                                SourceRow(symbol: "exclamationmark.bubble", title: ShellStrings.text("Report a problem"),
+                                          note: ShellStrings.text("Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened.")) {
+                                    Button(ShellStrings.text("Report…")) { report() }
+                                        .buttonStyle(ShellButtonStyle(fills: true)).accessibilityIdentifier("shellSettings.report")
+                                        .shellTarget("shs.report") { report() }
+                                }
+                            }
+                        }
                         // S2Arm: the version, the same text the computer's S2Arm shows (written when the computer installs the app; ShellVersion).
                         if !ShellVersion.display.isEmpty {
                             Text(verbatim: "S2Arm " + ShellVersion.display).shellText(12.5).foregroundStyle(.white.opacity(0.45))

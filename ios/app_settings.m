@@ -292,7 +292,7 @@ static UILabel *textLabel(UIFontTextStyle style) {
 }
 - (NSInteger)rowsForGroup:(NSInteger)group {
     if (group == 6) return 2;
-    if (group == 7) return 1;
+    if (group == 7) return 2;   // 界面语言、游戏语言
     if (group == 4 || group == 5) return 1;
     return group == 0 ? 7 + (_patchGroups.count > 0) : [@[@0, @4, @4, @2][group] integerValue];   // 诊断组第 4 行：诊断局
 }
@@ -306,6 +306,20 @@ static UILabel *textLabel(UIFontTextStyle style) {
         return [self dropdown:split?S2AL(@"play.split"):S2AL(@"play.orientation") labels:split?@[S2AL(@"play.auto"),S2AL(@"play.on"),S2AL(@"play.off")]:@[S2AL(@"play.auto"),S2AL(@"play.landscape"),S2AL(@"play.portrait")] selected:selected enabled:^BOOL(NSInteger i){ return YES; } choose:^(NSInteger i){
             [NSUserDefaults.standardUserDefaults setObject:values[i] forKey:key]; [weakSelf refresh];
         } identifier:[@"settings." stringByAppendingString:key]];
+    }
+    if (group == 7 && row == 1) {   // 游戏语言（按款，11-13；定义表 game_settings.v1.json language）：跟随系统 + Switch 全部语言，存这款的 S2AGameLanguage，下次开游戏生效
+        NSArray<NSString *> *values = s2a_ios_game_languages();
+        NSArray<NSString *> *labels = @[S2AL(@"settings.gameLanguage.system"), S2AL(@"settings.language.zhHans"), S2AL(@"settings.language.zhHant"), @"English (US)", @"English (UK)", S2AL(@"settings.gameLanguage.ja"), @"한국어", @"Français", @"Français (Canada)", @"Deutsch",
+                                        @"Español", @"Español (Latinoamérica)", @"Italiano", @"Nederlands", @"Português", @"Português (Brasil)", @"Русский", @"Polski", @"ไทย"];
+        NSUserDefaults *d = s2a_ios_settings_defaults();
+        NSString *cur = [d stringForKey:S2AGameLanguageKey]; NSInteger selected = cur ? (NSInteger)[values indexOfObject:cur] : 0; if (selected == NSNotFound) selected = 0;
+        return [self dropdown:S2AL(@"settings.gameLanguage") labels:labels selected:selected enabled:^BOOL(NSInteger i) { (void)i; return YES; } choose:^(NSInteger i) {
+            if (i == selected) return;
+            if (i == 0) [d removeObjectForKey:S2AGameLanguageKey]; else [d setObject:values[i] forKey:S2AGameLanguageKey];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"settings.gameLanguage") message:S2AL(@"settings.gameLanguage.restart") preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.gotIt") style:UIAlertActionStyleCancel handler:nil]];
+            [weakSelf.navigationController.topViewController presentViewController:alert animated:YES completion:nil]; [weakSelf refresh];
+        } identifier:@"settings.gameLanguage"];
     }
     if (group == 7) {   // 界面语言（11-13 维护者）：跟随系统 / 简 / 繁 / 英，存 S2AUILanguageKey；重开 App 生效（ios/app.m 起进程时设本 App 的 AppleLanguages）
         NSArray *values = @[@"system", @"zh-Hans", @"zh-Hant", @"en"];

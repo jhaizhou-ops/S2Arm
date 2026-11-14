@@ -225,6 +225,8 @@
 /* 宿主其余界面（#316 第二轮）：设置页、提示页 / 加载页、存档管理、手柄连接、诊断、联机、文字输入等 */
 "app.fpsCap.ladder" = "这台设备暂时跑不稳 60 帧，已回到原生帧率；跑稳后会自动再试 60 帧。";
 "app.fpsCap.restored" = "60 帧已恢复。";
+"app.lowRam.title" = "这台设备内存可能不够";
+"app.lowRam.body" = "这款游戏需要的内存比这台设备多。照样可以开始，但可能卡顿，或被系统关掉。";
 "app.gpuStop.body" = "请从后台划掉本 App，再重新打开游戏。\nPlease reopen the game.";
 "app.gpuStop.title" = "画面出错，已停止\nGraphics error — stopped";
 "app.library.broken.title" = "游戏资源不完整";
@@ -316,6 +318,9 @@
 "diag.upload.fail.timeout" = "上传超过 %d 秒还没完成（网络太慢或连接卡住），已停止。可以再试一次，或改用导出诊断包。";
 "diag.upload.fail.title" = "上传没成功";
 "diag.upload.go" = "上传";
+"diag.report.title" = "故障报修";
+"diag.report.message" = "会上传这台设备的日志和设备信息，帮我们找原因，然后给你一个短码。可以写一句发生了什么（可不填）。";
+"diag.report.placeholder" = "发生了什么（可不填）";
 "diag.upload.post" = "去 GitHub 发帖";
 "diag.upload.retry" = "再试一次";
 "dprompt.expiry.body" = "还剩%@。到期后游戏打不开，存档不会丢：连上手机再点一次「装到 iPhone」，或在 AltStore 里刷新。";
@@ -465,11 +470,15 @@
 /* Duo shared layout settings and split touch editor */
 "vpad.layouts.split.title" = "分屏触屏布局";
 "vpad.layouts.split.footer" = "编辑分屏下半区；位置与普通布局分别保存，键 / 触模式和手感共用。";
-"settings.group.language" = "界面语言";
-"settings.footer.language" = "S2Arm 菜单的语言。「跟随系统」按手机的语言（中文系统用中文，其他语言显示英文）。游戏默认也用这个语言，除非在这款游戏的启动设置里单独选了。";
+"settings.group.language" = "语言";
+"settings.footer.language" = "界面语言是 S2Arm 菜单的语言。「跟随系统」按手机的语言（中文系统用中文，其他语言显示英文）。游戏语言默认跟手机的系统语言（日语、韩语等也能对上），在 App 里选过界面语言就跟它；从 Switch 导入的存档名字显示乱码时，把游戏语言选成当时 Switch 用的语言。";
 "settings.language" = "界面语言";
 "settings.language.system" = "跟随系统";
 "settings.language.zhHans" = "简体中文";
 "settings.language.zhHant" = "繁體中文";
 "settings.language.en" = "English";
 "settings.language.restart" = "关掉 S2Arm 再重新打开后生效。";
+"settings.gameLanguage" = "游戏语言";
+"settings.gameLanguage.system" = "跟随系统";
+"settings.gameLanguage.restart" = "下次打开这款游戏时生效。";
+"settings.gameLanguage.ja" = "日本語";

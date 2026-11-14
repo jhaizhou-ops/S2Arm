@@ -188,8 +188,9 @@ static int resolve_locked(uint64_t addr, uint64_t len, const uint8_t *mem, uint6
         nvn_dirty_protect((const void *)a, b - a); uint64_t st = nvn_dirty_now(); if (!st) st = 1;   // 先保护、取代号、再读
         uint64_t last = 0; for (uint64_t k = i; k <= j; k++) if (m->sub[k] > last) last = m->sub[k];
         // 本次提交里第一次同步这一串：镜像是 CPU 也能写的共享缓冲，直接写进去，不录成 GPU 上的拷贝（理由与真机读数见坑记录）。
-        int landing_hit = 0;   // 这一段里有没有正在锁外拷回的区间与 [a,b) 相交：有就只能退回录拷贝
-        if (s->nlr) { const uint64_t ra = a - (uintptr_t)mem, rb = b - (uintptr_t)mem;
+        // 正在拷回的段数多于登记数（表满 16 段没记上）→ 说不清哪段在拷，按原口径整池退回录拷贝
+        int landing_hit = s->landing > s->nlr;   // 这一段里有没有正在锁外拷回的区间与 [a,b) 相交：有就只能退回录拷贝
+        if (!landing_hit && s->nlr) { const uint64_t ra = a - (uintptr_t)mem, rb = b - (uintptr_t)mem;
             for (int k = 0; k < s->nlr; k++) if (s->lr[k].off < rb && ra < s->lr[k].off + s->lr[k].len) { landing_hit = 1; break; } }
         uint8_t *d = last != rp_sub_serial() && rp_fence_done(m->prev_fence) && !landing_hit ? nvn_gpu_buf_cpu(m->buf) : NULL;
         if (d) { sync_write(NULL, d, s, m, a - (uintptr_t)mem, b - (uintptr_t)mem); last = rp_sub_serial(); rp_perf_add(RP_PERF_BUF_SYNC_DIRECT_KB, (b - a) / 1024); }

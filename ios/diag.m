@@ -54,6 +54,8 @@ static NSArray<NSString *> *archived_logs(void) {
 static NSString *const kOpenToggle = @"S2ADiagExportOnOpen";   // Settings.bundle 里的开关
 static UIViewController *g_vc;
 static BOOL g_prompted, g_exporting;
+// 「故障报修」里玩家写的一句「发生了什么」（选填）：随这一份包写进 manifest.json 顶层 note（收件服务存进元数据、取件写进定位卡「玩家说」），传完清掉
+static NSString *g_report_note;
 static __weak UIAlertController *g_promptAlert;   // 「把上次的诊断发给我们？」正显示着时指向它：导出要先把它关掉再弹分享面板，不叠在一起
 
 // ---------- 单次会话日志的摘要（manifest.sessions 一项；只在导出诊断包的后台线程算）----------
@@ -256,6 +258,7 @@ static NSURL *build_zip(NSUInteger cap, BOOL slim, NSString **err) {
     NSDictionary *manifest = @{
         @"schema": @1, @"exported_at": [iso stringFromDate:NSDate.date],
         @"tester": @{@"id": tester_id(), @"group": @"", @"note": @""},
+        @"note": g_report_note ?: @"",
         @"app": @{@"bundle": bundle, @"version": [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"", @"commit": commit,
                   // 包号：单款包 S2ABuildID；多款容器的壳没有按款包号，记壳号 S2AShellId（同 s2a_catalogue.json shell_id）
                   @"build_id": [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2ABuildID"] ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"S2AShellId"] ?: @"",
@@ -439,7 +442,37 @@ static void upload_now(void) {
     UIViewController *host = diag_host();
     if (g_exporting || !host) return;
     LOG("诊断包：开始打包上传");
-    build_async(^(NSURL *zip, NSString *err) { busy_done(); if (!zip) build_failed(host, err); else upload_zip(host, zip); });
+    build_async(^(NSURL *zip, NSString *err) { g_report_note = nil; busy_done(); if (!zip) build_failed(host, err); else upload_zip(host, zip); });
+}
+// 「故障报修」（11-13 维护者定：各页面的小齿轮菜单最下面；游戏库在设置页最下面）：说清会传什么，给一个可不填的文本框写「发生了什么」，
+//   点「上传」照现有流程打包上传、给短码。不填也能传，不做任何必填校验
+void s2a_diag_report(void) {
+    UIViewController *host = diag_host();
+    if (g_exporting || !host) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.report.title") message:S2AL(@"diag.report.message") preferredStyle:UIAlertControllerStyleAlert];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = S2AL(@"diag.report.placeholder"); f.clearButtonMode = UITextFieldViewModeWhileEditing; f.accessibilityIdentifier = @"diag.report.note"; }];
+    __weak UIAlertController *wa = a;
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.go") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x;
+        NSString *t = [wa.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        g_report_note = t.length ? t : nil;
+        LOG("诊断包：故障报修（玩家%s写说明，%lu 字）", g_report_note ? "" : "没", (unsigned long)t.length);
+        upload_now(); }]];
+    present_over(host, a);
+}
+void s2a_shell_report_problem(void) { s2a_diag_report(); }   // 游戏库设置页「故障报修」（shell/Sources/S2ArmShellBridge/include/s2a_shell.h，壳里有空的弱定义）
+// 页面左上角的小齿轮（加载页 / 提示页 / 帮助页；游戏中用虚拟按键自己的齿轮、游戏库用库界面的齿轮）：菜单最下面「故障报修」
+void s2a_report_gear_attach(UIView *page) {
+    if (!page) return;
+    UIButton *g = [UIButton buttonWithType:UIButtonTypeSystem]; g.accessibilityIdentifier = @"page.gear"; g.accessibilityLabel = S2AL(@"diag.report.title");
+    [g setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal]; g.tintColor = UIColor.whiteColor;
+    g.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45]; g.layer.cornerRadius = 18; g.alpha = 0.9; g.translatesAutoresizingMaskIntoConstraints = NO;
+    g.showsMenuAsPrimaryAction = YES;
+    g.menu = [UIMenu menuWithTitle:@"" children:@[[UIAction actionWithTitle:S2AL(@"diag.report.title") image:[UIImage systemImageNamed:@"exclamationmark.bubble"] identifier:nil
+        handler:^(__unused UIAction *x) { dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ s2a_diag_report(); }); }]]];
+    [page addSubview:g];
+    [NSLayoutConstraint activateConstraints:@[[g.widthAnchor constraintEqualToConstant:36], [g.heightAnchor constraintEqualToConstant:36],
+        [g.leadingAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.leadingAnchor constant:12], [g.topAnchor constraintEqualToAnchor:page.safeAreaLayoutGuide.topAnchor constant:12]]];
 }
 // 「上传给开发者」（四指菜单 / 提示页按钮，主线程调）：先说清会传什么、不传什么，玩家点了才传
 void s2a_diag_upload(void) {

@@ -1357,6 +1357,8 @@
   "s2arm.diagUpload.github": "Post on GitHub",
   "s2arm.diagUpload.repo": "Repository: {0}",
   "s2arm.diagUpload.not": "Never uploaded: saves, keys, game files. Kept at most 7 days and deleted once the developers have read it.",
+  "s2arm.diagUpload.noteLabel": "What happened? (optional)",
+  "s2arm.diagUpload.notePlaceholder": "One line is enough, e.g. \"Black screen after the first cutscene\" or \"Crashes when I open the map\". You can leave it empty.",
   "s2arm.diagUpload.cancel": "Cancel",
   "s2arm.diagUpload.send": "Upload",
   "s2arm.diagUpload.sending": "Uploading…",

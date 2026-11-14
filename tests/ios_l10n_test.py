@@ -88,7 +88,7 @@ SAVESYNC_DIR = 'launchers/shared/SaveSync/Sources/SaveSync'
 MAC_L10N = {'zh': 'launchers/macos/frontend/l10n/zh.json', 'en': 'launchers/macos/frontend/l10n/en.json'}
 MAC_CLOUD_SRC = 'launchers/macos/frontend/Sources/NX2Apple/S2ArmLauncherModel+CloudSaves.swift'
 EN_CJK = {}   # 原先「<游戏名>资源包」文件夹名照写的三条已随访达拷文件夹那条路删掉（iOS 装机剃刀 #28，11-11）
-ENDONYM = {'settings.language.zhHans', 'settings.language.zhHant'}   # 界面语言选项里语言的自称（简体中文 / 繁體中文）：每种语言表里都照写同一个自称，玩家不认识当前界面语言也认得出自己的语言
+ENDONYM = {'settings.language.zhHans', 'settings.language.zhHant', 'settings.gameLanguage.ja'}   # 界面语言 / 游戏语言选项里语言的自称（简体中文 / 繁體中文 / 日本語）：每种语言表里都照写同一个自称，玩家不认识当前界面语言也认得出自己的语言
 CJK = re.compile('[㐀-䶿一-鿿　-〿！（），：；？]')
 PH = re.compile(r"%%|%(?:(\d+)\$)?([-+ #0']*(?:\d+|\*)?(?:\.(?:\d+|\*))?(?:hh|h|ll|l|q|L|z|j|t)?[@dDuUxXoOfeEgGcCsSpaAF])")
 

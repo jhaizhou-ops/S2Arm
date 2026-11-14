@@ -278,7 +278,7 @@ public class MainActivity extends Activity
             @Override public void onStatus(String text) { runOnUiThread(() -> {
                 if (isDestroyed()) return;
                 games.setText(text);
-                if (text.startsWith("Game admission failed:")) {
+                if (text.startsWith(getString(R.string.player_err_start))) {   // GameLibrary 起局失败（Game admission failed）
                     panel.setVisibility(android.view.View.VISIBLE);
                     games.setTextColor(0xFFFF5252);
                 }
@@ -289,7 +289,7 @@ public class MainActivity extends Activity
                     if (gameSession == null) {
                         gameSession = ready;
                         try { GameResume.publish(getCacheDir(), android.os.Process.myPid(), ready.spec); }
-                        catch (java.io.IOException error) { status.setText("Game startup failed: " + error.getMessage()); stopGame("session receipt failed", false); return; }
+                        catch (java.io.IOException error) { Log.e("S2Arm", "Game startup failed", error); status.setText(PlayerError.text(MainActivity.this, R.string.player_err_start, error)); stopGame("session receipt failed", false); return; }
                     }
                     tryStartGame();
                 });
@@ -595,7 +595,7 @@ public class MainActivity extends Activity
         } catch (java.io.IOException | RuntimeException | LinkageError error) {
             Log.e("S2Arm", "Game startup failed", error);
             panel.setVisibility(android.view.View.VISIBLE);
-            status.setText("Game startup failed: " + error.getMessage());
+            status.setText(PlayerError.text(this, R.string.player_err_start, error));
             stopGame("game startup failed", false);
         }
     }

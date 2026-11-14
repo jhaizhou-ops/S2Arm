@@ -13482,6 +13482,166 @@
           }
         }
       }
+    },
+    "The system no longer lets S2Arm open the iCloud folder you chose before (this happens after the app is signed again with a different certificate). Choose the same folder again to keep syncing.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The system no longer lets S2Arm open the iCloud folder you chose before (this happens after the app is signed again with a different certificate). Choose the same folder again to keep syncing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统不再允许 S2Arm 打开你之前选的 iCloud 文件夹（App 换了证书重新签名后会这样）。重新选一次同一个文件夹，就能接着同步。"
+          }
+        }
+      }
+    },
+    "Choose the iCloud folder again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose the iCloud folder again"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新选择 iCloud 文件夹"
+          }
+        }
+      }
+    },
+    "Choose Folder…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose Folder…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择文件夹…"
+          }
+        }
+      }
+    },
+    "Don’t sync this time and start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Don’t sync this time and start"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这次不同步，开始游戏"
+          }
+        }
+      }
+    },
+    "Report a problem": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report a problem"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "故障报修"
+          }
+        }
+      }
+    },
+    "Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把这台设备的日志发给开发者，并给你一个短码。可以写一句发生了什么。"
+          }
+        }
+      }
+    },
+    "Report…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "报修…"
+          }
+        }
+      }
+    },
+    "Signing doesn’t match the bundle ID": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signing doesn’t match the bundle ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "签名和包名不一致"
+          }
+        }
+      }
+    },
+    "This copy of S2Arm was signed with the App ID “%@”, but its bundle ID is “%@”. iOS may refuse to hand the folder you pick to S2Arm, so tapping Open may do nothing. If that happens, change the bundle ID to “%@” in your signing tool and sign again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This copy of S2Arm was signed with the App ID “%@”, but its bundle ID is “%@”. iOS may refuse to hand the folder you pick to S2Arm, so tapping Open may do nothing. If that happens, change the bundle ID to “%@” in your signing tool and sign again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这份 S2Arm 签名用的 App ID 是「%@」，包名却是「%@」。系统可能不肯把你选的文件夹交给 S2Arm，点「打开」会没反应。遇到这种情况，请在签名工具里把包名改成「%@」再签一次。"
+          }
+        }
+      }
+    },
+    "Continue to Choose": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue to Choose"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续选择"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

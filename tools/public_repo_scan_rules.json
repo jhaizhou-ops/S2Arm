@@ -347,6 +347,7 @@
       "paths": [
         "graphics/metal/shaders/AA-LICENSE.txt",
         "runtime/rewriter/LICENSES/*",
+        "launchers/macos/frontend/Vendor/Sparkle-LICENSE.txt",
         "compat/tree/*/Smaa*.glsl",
         "compat/tree/*/SMAA*.glsl"
       ],
