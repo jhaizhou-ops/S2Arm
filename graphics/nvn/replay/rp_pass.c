@@ -10,11 +10,17 @@
 #include "rp_exec.h"
 #include "rp_state.h"
 #include "rp_res.h"
+#include "nvn_first_use.h"   // 首用跳过判据的 fresh 标记（iOS rt_fresh_now）
 #include "nvn_unimpl.h"
 #include "nvn_plat.h"
 #include "nvn_fmt_info.h"
 #include <math.h>
 #include <string.h>
+
+// 首用跳过开关（安卓 demand 层，弱引用）：iOS / 鸿蒙 / 宿主单测没有实现 → 不标记，行为同现状。
+int nvn_vk_pipe_demand_on(void) __attribute__((weak));
+#pragma weak s2a_fu_rt_mark_fresh   // 只编回放核的宿主门禁可能没链接 nvn_first_use.c；缺实现时 enabled 为假、不会调用
+static int rp_pass_fu_enabled(void) { return nvn_vk_pipe_demand_on && nvn_vk_pipe_demand_on(); }
 
 static struct {
     p_set_rt rt; tex_t kept[9]; int has_rt;
@@ -489,6 +495,17 @@ int rp_pass_begin(nvn_gpu_cmd c) {
                     rp_perf_add(RP_PERF_P_AREA, 1); rp_perf_add(RP_PERF_P_AREA_KPIX, (uint64_t)w * h / 1000);
                 }
             }
+        }
+    }
+    // 首用跳过判据的 fresh 标记：本帧把这个附件整张清过（load=CLEAR）且不是子区域渲染 → 内容本帧从清晰值重来。
+    if (rp_pass_fu_enabled()) {
+        uint64_t ff = rp_frame();
+        if (!P.area_on) {
+            for (uint32_t i = 0; i < d.ncolor && i < 8; i++)
+                if (d.color[i].view && d.color[i].load == NVN_GPU_LOAD_CLEAR && P.rt.color[i])
+                    s2a_fu_rt_mark_fresh(P.rt.color[i]->serial, ff);
+            if (d.depth.view && d.depth.load == NVN_GPU_LOAD_CLEAR && P.rt.depth) s2a_fu_rt_mark_fresh(P.rt.depth->serial, ff);
+            if (d.stencil.view && d.stencil.load == NVN_GPU_LOAD_CLEAR && P.rt.depth) s2a_fu_rt_mark_fresh(P.rt.depth->serial, ff);
         }
     }
     P.area_want = 0;

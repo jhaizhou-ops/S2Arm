@@ -296,7 +296,12 @@ enum {
 };
 // 取（或建）图形管线。核心从不因 PENDING 跳绘制：拿不到就改用 SYNC 等。线程：[提交] 与 [后台]。生命周期：后端缓存持有，核心不 release。
 // 出错：NVN_GPU_E_COMPILE / NVN_GPU_E_PENDING / NVN_GPU_E_LAYOUT（阶段布局合并冲突）/ NVN_GPU_E_ARG（顶点 / 片元接口不配对，同 pso_pair_ok）。
+// 注：VK 后端本身把 ASYNC / PROVISIONAL 按 SYNC 处理（本层不内建后台建管线）。真正的「后台建 + 可跳首用」在其上的
+//   安卓 demand 层（android/native/nvn/nvn_vk_pipe_demand.c）：它用 nvn_gpu_pipe_lookup 判命中、用后台线程调 SYNC 建，
+//   由回放层 rp_draw 按 iOS skip_safe / 帧预算 / late-stuck 决定跳过或限时等。
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err);
+// 只查缓存、不建：1 = 已有（*out 有效，后端缓存持有），0 = 没有。给异步首用 / 预热等「先看有没有」的调用方。线程：[提交] / [后台]。
+int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out);
 nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err);   // 计算管线；mode 只认 SYNC / ASYNC
 
 // ---------- 命令：开段、丢弃、通道、状态、绑定、绘制、派发、拷贝 ----------

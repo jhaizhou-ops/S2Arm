@@ -370,6 +370,9 @@ s2a_gate_step bash "$android_dir/tools/nvn_warm_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvk_warm_modules_test.sh"
 # 复核 P1-1 / P1-2：程序借用（ASan 下读收尾释放后的记录）与配方级在途表（同配方合并 / 不同配方不排队）
 s2a_gate_step bash "$android_dir/tools/nvk_pipe_flight_test.sh"
+# 首用待定表（纯逻辑）与 demand 后台建管线（fake Vulkan）：状态机 / 同键合并 / 有界等待 / late-stuck / P0 不串管线。
+s2a_gate_step bash "$android_dir/tools/nvk_pipe_pend_test.sh"
+s2a_gate_step bash "$android_dir/tools/nvn_vk_pipe_demand_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvk_shader_lease_test.sh"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_lifecycle_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_adapter_test.py"

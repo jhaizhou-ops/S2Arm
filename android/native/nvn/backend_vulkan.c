@@ -2988,9 +2988,22 @@ static void pipe_hit_note_locked(struct nvn_gpu_pipe_s *hit) {
     }
 }
 
+// 只查缓存、不建（异步首用 / 预热「先看有没有」用）。线程：[提交] / [后台]。1 = 有（*out），0 = 没有。
+// 不记 warm 命中（那是「真实 draw 第一次拿到预建对象」的口径，见 pipe_hit_note_locked）。
+int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out) {
+    if (out) *out = NULL;
+    if (!out || !d || !session_accepting()) return 0;
+    pthread_mutex_lock(&g_mu);
+    struct nvn_gpu_pipe_s *hit = pipe_find_locked(d);
+    pthread_mutex_unlock(&g_mu);
+    if (!hit) return 0;
+    *out = hit;   // 后端缓存持有，核心不 release
+    return 1;
+}
+
 // 取（或建）图形管线。线程：[提交] 与 [后台] 都可调（预热线程用 SYNC 建）。
-// ASYNC / PROVISIONAL 的「先返回 PENDING、后台再建」按本轮范围收缩没有实现：本层 v1 不跳过任何绘制，
-// 一次绘制拿不到管线必须当场建出来，挂在异步上只会多一次空转。两种 mode 都按同步建处理（语义同 SYNC）。
+// ASYNC / PROVISIONAL 的「先返回 PENDING、后台再建」本后端不内建：本层 v1 两种 mode 都按同步建处理（语义同 SYNC）。
+// 后台建 + 可跳首用由其上安卓 demand 层（nvn_vk_pipe_demand.c）承接：它用 nvn_gpu_pipe_lookup 判命中、后台线程调 SYNC 建。
 //
 // 并发语义（P1 收口）：
 //   ① 缓存命中：g_mu 短锁查表，命中即返回——建管线在飞时不占这把锁，不同配方的需求不会被串行化；
