@@ -264,10 +264,12 @@ namespace S2A.DirectCompiler
 
         // ---------- textures / samplers ----------
         // 直连宿主按 NVN 组合纹理槽给事实：handle=8+2*slot、cbufSlot=-1。着色器把同一个
-        // 句柄经常量缓冲表读取时，查询会带 cbufSlot>=0；handle 仍落在同一个组合槽
-        // （nvn_vk_first_draw 的 handleIndex→nvn_tex_slot 表）。所以 cbuf 查询没有精确
-        // 事实时，回落到同 (stage, handle) 的直接事实；没有同句柄直接事实仍然是缺事实，
-        // 不猜槽位、也不跨句柄借事实。
+        // 句柄经 c2 驱动句柄表读取时，查询会带 cbufSlot=2；handle 仍落在同一个组合槽
+        // （nvn_vk_first_draw 的 handleIndex→nvn_tex_slot 表）。所以只有 c2 查询没有精确
+        // 事实时，才回落到同 (stage, handle) 的直接事实。别的常量缓冲（游戏自己的 UBO，槽 3..18）
+        // 里同一个字偏移只是巧合，不是那个组合槽：不借事实（#999：c4 字节 0x20 的句柄曾被当成组合槽 0 绑上）。
+        // 没有同句柄直接事实仍然是缺事实，不猜槽位、也不跨句柄借事实。
+        private const int HandleTableCbuf = 2;
         private DirectTextureFact FindTexture(int handle, int cbufSlot) =>
             _program.Textures.FirstOrDefault(t =>
                 t.Stage == _stage.Stage && t.Handle == handle && t.CbufSlot == cbufSlot);
@@ -275,7 +277,7 @@ namespace S2A.DirectCompiler
         private DirectTextureFact NeedTexture(string method, int handle, int cbufSlot)
         {
             DirectTextureFact fact = FindTexture(handle, cbufSlot);
-            if (fact == null && cbufSlot >= 0)
+            if (fact == null && cbufSlot == HandleTableCbuf)
                 fact = FindTexture(handle, -1);
             if (fact == null && cbufSlot >= 0)
             {
@@ -306,7 +308,8 @@ namespace S2A.DirectCompiler
             return true;
         }
 
-        public bool HasDirectTextureFact(int handle) =>
+        // 反射到 cbuf 句柄时能否当作同一个组合槽：只认经 c2 句柄表读的、且有同句柄直接事实
+        public bool HasDirectTextureFact(int handle, int cbufSlot) => cbufSlot == HandleTableCbuf &&
             _program.Textures.Any(t => t.Stage == _stage.Stage && t.Handle == handle && t.CbufSlot == -1);
 
         public SamplerType QuerySamplerType(int handle, int cbufSlot = -1) =>
@@ -363,7 +366,7 @@ namespace S2A.DirectCompiler
         {
             _textureHandle = handle;
             DirectTextureFact fact = FindTexture(handle, cbufSlot);
-            if (fact == null && cbufSlot >= 0)
+            if (fact == null && cbufSlot == HandleTableCbuf)
                 fact = FindTexture(handle, -1);
             Queries.Add(new DirectQuery("RegisterTexture", $"handle={handle},cbufSlot={cbufSlot}",
                 fact == null ? "unbound" : "bound", fact == null ? "unbound" : "texture-fact:" + _stage.Stage + ":" + handle + ":" + cbufSlot));
