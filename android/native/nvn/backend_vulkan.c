@@ -96,6 +96,7 @@ struct nvn_gpu_view_s {
     uint32_t base_level, levels, base_layer, layers;
     int released, refs;
     int swizzled;   // 通道映射非恒等：只能采样，不能当附件
+    int p16_remap;  // #975：16 位打包格式在本设备走退回格式，通道映射里合进了格式自带的分量换位：不能当附件 / 存储图像
     VkImageViewType type;
     VkImageAspectFlags aspect;   // 这个视图取的面（深度模板格式的采样视图只取一个面）
     uint32_t att_layer;          // 当附件时取的层 / 3D 深度切片（视图没设层范围 = 0）
@@ -1510,7 +1511,7 @@ uint32_t nvn_gpu_format_caps(uint32_t nvn_format) {
         bcdec = 1;
     }
     VkFormatProperties p;
-    vkGetPhysicalDeviceFormatProperties(g.phys, f, &p);
+    s2a_vk_format_properties(g.phys, f, &p);
     VkFormatFeatureFlags o = p.optimalTilingFeatures;
     uint32_t out = 0;
     if (o & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) out |= NVN_GPU_FMT_SAMPLE;
@@ -1527,12 +1528,14 @@ uint32_t nvn_gpu_format_caps(uint32_t nvn_format) {
         VkFormat sf = nvn_vk_format(nvn_format);
         VkFormatProperties sp;
         memset(&sp, 0, sizeof sp);
-        if (sf != VK_FORMAT_UNDEFINED) vkGetPhysicalDeviceFormatProperties(g.phys, sf, &sp);
+        if (sf != VK_FORMAT_UNDEFINED) s2a_vk_format_properties(g.phys, sf, &sp);
         if (!(sp.optimalTilingFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) out &= ~NVN_GPU_FMT_VERTEX;
     }
     // 走计算解码的块压缩格式：能力是照「解码后的格式」查的，但它只能被采样——建图入口不收渲染 / 存储用途。
     // 把解码后格式的「可存储」原样报出去，核心会给带 IMAGE 标志的压缩贴图加存储用途，建图就被拒（#697：Mali 上 5 种格式的贴图全建不出来，背景全黑）。
     if (bcdec) out &= NVN_GPU_FMT_SAMPLE | NVN_GPU_FMT_FILTER;
+    // #975：16 位打包格式走退回格式时，分量位置靠采样视图的通道映射补回；渲染 / 存储 / 顶点取数不经通道映射，不报这些能力。
+    { uint8_t map[4]; if (nvn_vk_format_chanmap(nvn_format, map)) out &= NVN_GPU_FMT_SAMPLE | NVN_GPU_FMT_FILTER; }
     return out;
 }
 
@@ -2654,6 +2657,14 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
         }
         // 必须 CPU 解码的格式（32 位 UI2F/I2F）：本后端没有解码合成 binding，按映射出的整数
         // 格式绑定会把整数位模式当 float 静默读错值——明确报红，不返回成功兜底。
+        {   // #975：走退回格式的 16 位打包格式，分量位置只在采样视图里补回；顶点取数按格式原样解，分量会错位
+            uint8_t map[4];
+            if (nvn_vk_format_chanmap(nvn_vattr_fmt_canon(d->attr[i].fmt), map)) {
+                nvn_gpu_rc bad = fail(err, NVN_GPU_E_UNSUPPORTED, "顶点属性格式 0x%x：本设备走退回格式，顶点取数不经通道映射", d->attr[i].fmt);
+                destroy_pipe_objects(p);
+                return bad;
+            }
+        }
         if (nvn_vattr_must_cpu_decode(d->attr[i].fmt)) {
             nvn_gpu_rc bad = fail(err, NVN_GPU_E_UNSUPPORTED,
                                   "顶点属性格式 0x%x 需要 CPU 顶点解码（本后端未实现）", d->attr[i].fmt);
@@ -2999,6 +3010,7 @@ nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pip
 // 第一次当附件时另建一个，随视图销毁。建不出来回空。
 static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
     struct nvn_gpu_tex_s *t = v->tex;
+    if (v->p16_remap) return VK_NULL_HANDLE;   // #975：恒等形态会按退回格式的分量顺序写，调用方具名报红
     if (!v->swizzled && v->levels == 1 && v->layers == 1 && v->type == VK_IMAGE_VIEW_TYPE_2D && v->aspect == t->aspect) return v->view;
     pthread_mutex_lock(&g_mu);
     int image3d = t->target == NVN_TEXTURE_TARGET_3D && t->depth > 1;
@@ -3021,6 +3033,7 @@ static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
 // 图像形态的视图：存储图像视图必须用恒等通道映射（Vulkan 规定 image 视图不参与通道映射），而采样视图可能带着
 // 通道映射（游戏设的，或没有 alpha 的格式把 a 钉成 ONE）。第一次当存储图像时另建一个，随视图销毁。
 static VkImageView view_image_form(struct nvn_gpu_view_s *v) {
+    if (v->p16_remap) return VK_NULL_HANDLE;   // #975：同 view_attachment
     if (!v->swizzled) return v->view;
     pthread_mutex_lock(&g_mu);
     if (!v->img) {
@@ -3134,6 +3147,17 @@ static void pc_destroy_all(void) {
     for (uint32_t i = 0; i < g_pc_nrp; i++) vkDestroyRenderPass(g.d, g_pc_rp[i].rp, NULL);
     free(g_pc_rp); g_pc_rp = NULL; g_pc_nrp = g_pc_rpcap = 0;
     pthread_mutex_unlock(&g_pc_mu);
+}
+// #975：走退回格式的 16 位打包格式当颜色附件，硬件按退回格式的分量顺序写，与 NVN 位序不符：开通道前具名报红。
+static int pass_p16_reject(struct nvn_gpu_cmd_s *c, const nvn_gpu_pass_desc *d) {
+    for (uint32_t i = 0; i < d->ncolor && i < 8; i++) {
+        struct nvn_gpu_view_s *v = d->color[i].view;
+        if (v && v->p16_remap) {
+            set_sticky(c, NVN_GPU_E_UNSUPPORTED, "颜色附件 %u：16 位打包格式 0x%x 在本设备走退回格式，不能当渲染目标", i, v->nvn_format);
+            return 1;
+        }
+    }
+    return 0;
 }
 // 渲染通道的附件描述：布局按「这张图这一段用什么布局」定（见「图像布局」）。
 // att_tex / att_lay 回填各附件的贴图与这一段用的布局；att_tex 可能重复（同一张图的不同级 / 层挂在不同槽）。
@@ -3325,6 +3349,7 @@ static int pass_reopen(struct nvn_gpu_cmd_s *c, const struct reopen_fix *fx, uin
     uint32_t natt = 0;
     int has_depth = 0;
     g_pc_use = pc_on();
+    if (pass_p16_reject(c, &d)) return 0;
     VkRenderPass pass = make_pass(&d, fb_views, att, col, &dref, &natt, &has_depth, att_tex, att_lay, c->opt);
     if (!pass) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "通道重开：渲染通道创建失败"); return 0; }
     for (uint32_t i = 0; i < natt; i++) {   // 新布局（fb_sample 置位的附件变成 GENERAL），要在开新通道之前转完
@@ -3403,6 +3428,7 @@ void nvn_gpu_pass_begin(nvn_gpu_cmd ch, const nvn_gpu_pass_desc *d) {
     uint32_t natt = 0;
     int has_depth = 0;
     g_pc_use = pc_on();
+    if (pass_p16_reject(c, d)) return;
     VkRenderPass pass = make_pass(d, fb_views, att, col, &dref, &natt, &has_depth, att_tex, att_lay, c->opt);
     PBP_STEP(0);
     if (!pass) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "渲染通道创建失败（附件格式 / 采样数）"); return; }
@@ -3760,6 +3786,7 @@ static int write_binds(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, 
             break;
         case NVN_GPU_RES_IMAGE:
             if (!b->u.view) { set_sticky(c, NVN_GPU_E_LAYOUT, "IMAGE 绑定缺 view"); return -1; }
+            if (b->u.view->p16_remap) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "IMAGE 绑定：16 位打包格式 0x%x 在本设备走退回格式，不能当存储图像", b->u.view->nvn_format); return -1; }
             memset(im, 0, sizeof *im);
             im->imageView = view_image_form(b->u.view);   // 带通道映射的视图不能当存储图像用：另建恒等形态
             im->imageLayout = VK_IMAGE_LAYOUT_GENERAL;   // 存储图像一律 GENERAL（Vulkan 要求），迁移见 prepare_bind_layouts
@@ -4437,6 +4464,11 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
                        (d->usage & (NVN_GPU_TEX_RENDER | NVN_GPU_TEX_STORAGE))))
         return fail(err, NVN_GPU_E_UNSUPPORTED, "BC format 0x%x decode: 不支持此用途或维度", d->d.format);
     if (!d->d.width || !d->d.height) return fail(err, NVN_GPU_E_ARG, "尺寸为 0");
+    {   // #975：走退回格式的 16 位打包格式写进去的分量位置不对（通道映射只管采样），渲染 / 存储用途具名拒绝
+        uint8_t map[4];
+        if ((d->usage & (NVN_GPU_TEX_RENDER | NVN_GPU_TEX_STORAGE)) && nvn_vk_format_chanmap((uint32_t)d->d.format, map))
+            return fail(err, NVN_GPU_E_UNSUPPORTED, "16 位打包格式 0x%x：本设备没有位序对得上的 Vulkan 格式（走退回格式 + 采样通道补偿），不能当渲染目标 / 存储图像", d->d.format);
+    }
     uint32_t levels = d->d.levels ? (uint32_t)d->d.levels : 1;
     uint32_t samples = d->d.samples > 1 ? (uint32_t)d->d.samples : 1;
     if (bc_decoded && samples != 1) return fail(err, NVN_GPU_E_UNSUPPORTED, "BC 计算解码不支持多重采样");
@@ -4644,7 +4676,10 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
     ci.subresourceRange = (VkImageSubresourceRange){o->aspect, base_level, levels, base_layer, layers};
     // 通道映射：视图自己设了就用视图的，否则用存储自带的（与 nvn_mtl.m:6546 同序，是取代不是叠加）。
     // NVN 的取值 0 零 / 1 一 / 2 R / 3 G / 4 B / 5 A，其它值按该通道恒等。
+    // #975：16 位打包格式走退回格式时，NVN 的分量 c 在 Vulkan 格式里是第 fmap[c] 个分量，再叠在上面这一层之下。
     {
+        uint8_t fmap[4];
+        o->p16_remap = nvn_vk_format_chanmap(o->nvn_format, fmap);
         uint8_t sw[4] = {2, 3, 4, 5};
         if (v && v->set_swizzle) memcpy(sw, v->swz, 4);
         else if (t->swz) for (int ch = 0; ch < 4; ch++) sw[ch] = (uint8_t)(t->swz >> (3 * ch) & 7);
@@ -4653,6 +4688,7 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
         for (int ch = 0; ch < 4; ch++) {
             if (sw[ch] > 5) sw[ch] = (uint8_t)(2 + ch);
             if (a_one && sw[ch] == 5) sw[ch] = 1;
+            if (sw[ch] >= 2) sw[ch] = (uint8_t)(2 + fmap[sw[ch] - 2]);
             *comp[ch] = sw[ch] == 0 ? VK_COMPONENT_SWIZZLE_ZERO : sw[ch] == 1 ? VK_COMPONENT_SWIZZLE_ONE : (VkComponentSwizzle)(VK_COMPONENT_SWIZZLE_R + (sw[ch] - 2));
             if (sw[ch] != 2 + ch) o->swizzled = 1;
         }
@@ -4687,7 +4723,7 @@ nvn_gpu_rc nvn_gpu_view_create_buf(nvn_gpu_buf b, uint64_t off, uint64_t bytes, 
         info.bw != 1 || info.bh != 1 || !info.bytes)
         return fail(err, NVN_GPU_E_UNSUPPORTED, "缓冲视图格式 0x%x 不支持", fmt);
     VkFormatProperties fp;
-    vkGetPhysicalDeviceFormatProperties(g.phys, f, &fp);
+    s2a_vk_format_properties(g.phys, f, &fp);
     VkFormatFeatureFlags features = fp.bufferFeatures &
         (VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT | VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT);
     uint32_t caps = nvn_gpu_format_caps(fmt);
@@ -5075,9 +5111,11 @@ void nvn_gpu_clear_view(nvn_gpu_cmd ch, nvn_gpu_view vh, const float rgba[4], co
     } else {
         VkClearColorValue col;
         memset(&col, 0, sizeof col);
+        uint8_t fmap[4];   // #975：退回格式下 NVN 的分量 i 是 Vulkan 的第 fmap[i] 个分量（恒等时 0,1,2,3）
+        nvn_vk_format_chanmap(v->nvn_format, fmap);
         for (int i = 0; i < 4; i++) {
-            if (is_int) col.uint32[i] = u4 ? u4[i] : 0;
-            else col.float32[i] = rgba ? rgba[i] : 0.0f;
+            if (is_int) col.uint32[fmap[i]] = u4 ? u4[i] : 0;
+            else col.float32[fmap[i]] = rgba ? rgba[i] : 0.0f;
         }
         vkCmdClearColorImage(c->cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &col, 1, &range);
     }
@@ -5490,6 +5528,9 @@ void nvn_gpu_blit(nvn_gpu_cmd ch, nvn_gpu_view sv, const NVNcopyRegion *sr, nvn_
     if (!sv || !dv || !sv->tex || !dv->tex || !sr || !dr) { set_sticky(c, NVN_GPU_E_ARG, "blit 参数为空"); return; }
     struct nvn_gpu_tex_s *s = sv->tex, *d = dv->tex;
     if (sv->format != s->format || dv->format != d->format) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：视图换了格式（拷贝按存储的格式做）"); return; }
+    if ((sv->p16_remap || dv->p16_remap) && s->nvn_format != d->nvn_format) {   // #975：按分量换算，退回格式的分量位置与 NVN 不同
+        set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：16 位打包格式 0x%x → 0x%x 有一边走退回格式，按分量换算会错位", s->nvn_format, d->nvn_format); return;
+    }
     if (s->samples > 1 && d->samples == 1) {
         nvn_fmt_info f;
         if (linear || s->w != d->w || s->h != d->h || s->format != d->format || s->nvn_format != d->nvn_format ||
@@ -5521,7 +5562,7 @@ void nvn_gpu_blit(nvn_gpu_cmd ch, nvn_gpu_view sv, const NVNcopyRegion *sr, nvn_
     if (s->samples > 1 || d->samples > 1 || nvn_vk_format_is_depth(s->format) || nvn_vk_format_is_depth(d->format)) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：多重采样 / 深度模板没接"); return; }
     { nvn_fmt_info a, b; int ai = nvn_fmt_info_of(s->nvn_format, &a) && (a.kind == NVN_FMT_UINT || a.kind == NVN_FMT_SINT), bi = nvn_fmt_info_of(d->nvn_format, &b) && (b.kind == NVN_FMT_UINT || b.kind == NVN_FMT_SINT);
       if (ai || bi) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：整数格式没接"); return; } }
-    VkFormatProperties fs, fd; vkGetPhysicalDeviceFormatProperties(g.phys, s->format, &fs); vkGetPhysicalDeviceFormatProperties(g.phys, d->format, &fd);
+    VkFormatProperties fs, fd; s2a_vk_format_properties(g.phys, s->format, &fs); s2a_vk_format_properties(g.phys, d->format, &fd);
     if (!(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !(fd.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
         (linear && !(fs.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))) { set_sticky(c, NVN_GPU_E_UNSUPPORTED, "blit：设备不支持这对格式（%d → %d，线性 %d）", (int)s->format, (int)d->format, linear); return; }
     VkOffset3D so, dof; VkExtent3D se, de;

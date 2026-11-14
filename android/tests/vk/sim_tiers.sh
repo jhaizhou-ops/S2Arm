@@ -19,7 +19,7 @@ tiers_json="$repo/android/tests/vk/profiles/s2a_sim_tiers.json"
 profiles_sha=b502e9b0d7508e06e6300af272548cf0ee32f380
 profiles_url=https://github.com/KhronosGroup/Vulkan-Profiles.git
 
-all=(no_bc no_d24 no_vertex_stores no_dual_src_blend no_calibrated_timestamps no_depth_clamp)
+all=(no_bc no_d24 no_vertex_stores no_dual_src_blend no_calibrated_timestamps no_exact16 no_depth_clamp)
 want=("$@"); [ ${#want[@]} -gt 0 ] || want=("${all[@]}")
 for t in "${want[@]}"; do
     case " ${all[*]} " in *" $t "*) ;; *) echo "未知档：${t}（可用：${all[*]}）" >&2; exit 64 ;; esac
@@ -130,11 +130,19 @@ check_tier() {
                 VK_KHRONOS_PROFILES_EXCLUDE_DEVICE_EXTENSIONS=VK_KHR_calibrated_timestamps,VK_EXT_calibrated_timestamps || rc=$?
             [ "$rc" -eq 0 ] || red no_calibrated_timestamps "run.sh rc=$rc"
             has "$log" "calibrated_timestamps=0" || red no_calibrated_timestamps "层没去掉校准时间戳扩展（期望走完成点兜底）" ;;
+        no_exact16)
+            run_tier no_exact16 "$log" VK_KHRONOS_PROFILES_EXCLUDE_DEVICE_EXTENSIONS=VK_EXT_4444_formats || rc=$?
+            [ "$rc" -eq 0 ] || red no_exact16 "run.sh rc=${rc}，期望契约绿（16 位打包格式走退回格式 + 通道补偿）"
+            has "$log" "vk packed16 route: 4444=0" || red no_exact16 "层没去掉 VK_EXT_4444_formats"
+            for f in RGBA4 RGB565 A1BGR5; do
+                grep -qE "C975 ${f}：设备 路由 vk=[0-9]+ 通道补偿=1" "$log" || red no_exact16 "C975 ${f} 没在设备路由上走退回格式"
+                has "$log" "C975 ${f} 渲染目标：退回格式具名拒绝" || red no_exact16 "C975 ${f} 当渲染目标没具名报红"
+            done ;;
         no_depth_clamp)
             run_tier no_depth_clamp "$log" || rc=$?
             [ "$rc" -ne 0 ] || red no_depth_clamp "负对照竟然绿了：缺硬门槛 depthClamp 应建设备失败"
             has "$log" "required feature missing: depthClamp" || red no_depth_clamp "没看到拒绝原因 required feature missing: depthClamp" ;;
-        *) echo "未知档：${tier}（可用：no_bc no_d24 no_vertex_stores no_dual_src_blend no_calibrated_timestamps no_depth_clamp）" >&2; exit 64 ;;
+        *) echo "未知档：${tier}（可用：${all[*]}）" >&2; exit 64 ;;
     esac
     local t=$((SECONDS - start))
     if [ "$fails" -eq "$before" ]; then echo "【绿】${tier}（${t}s）"; else echo "  日志：${log}（失败时末尾 40 行如下）" >&2; tail -40 "$log" >&2; fi

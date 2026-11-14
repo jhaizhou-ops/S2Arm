@@ -92,6 +92,17 @@ static int val_wanted(void) {
 }
 #endif
 
+void s2a_vk_format_properties(VkPhysicalDevice physical, VkFormat format, VkFormatProperties *out) {
+    memset(out, 0, sizeof *out);
+    if (format == VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT) {
+        out->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                     VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        return;
+    }
+    vkGetPhysicalDeviceFormatProperties(physical, format, out);
+}
+
 int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) {
     if (!out) return fail(why, why_size, "null device");
     memset(out, 0, sizeof *out);
@@ -300,11 +311,16 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     draw_parameters.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
     VkPhysicalDeviceIndexTypeUint8FeaturesEXT index_u8 = {0};
     index_u8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT;
+    // #975：VK_EXT_4444_formats 给 NVN RGBA4 的精确格式 A4B4G4R4（可选；没有就走退回格式 + 通道补偿）。
+    VkPhysicalDevice4444FormatsFeaturesEXT f4444 = {0};
+    f4444.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT;
+    const int has_4444 = has_device_extension(out->physical, "VK_EXT_4444_formats");
     {
         VkPhysicalDeviceFeatures2 query = {0};
         query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         draw_parameters.pNext = &timeline;
         timeline.pNext = &index_u8;
+        index_u8.pNext = has_4444 ? &f4444 : NULL;
         query.pNext = &draw_parameters;
         if (out->has_swapchain_maintenance1) {
             maintenance.pNext = &draw_parameters;
@@ -314,6 +330,8 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         out->swapchain_maintenance1_enabled = out->has_swapchain_maintenance1 && maintenance.swapchainMaintenance1 == VK_TRUE;
         out->timeline_semaphore_enabled = timeline.timelineSemaphore == VK_TRUE;
         out->shader_draw_parameters_enabled = draw_parameters.shaderDrawParameters == VK_TRUE;
+        out->formats_4444_enabled = has_4444 && f4444.formatA4B4G4R4 == VK_TRUE;
+        index_u8.pNext = NULL;   // 查询链拆掉；建设备的链在下面按启用情况重接
     }
     // C2 顶点 SPIR-V 声明 DrawParameters（gl_VertexIndex / gl_InstanceIndex）；没有该特征不能合法消费模块。
     if (!out->shader_draw_parameters_enabled)
@@ -390,7 +408,28 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
     }
     int indirect_count_ext = has_device_extension(out->physical, "VK_KHR_draw_indirect_count");
     if (indirect_count_ext) device_ext[device_ext_count++] = "VK_KHR_draw_indirect_count";
+    if (out->formats_4444_enabled) device_ext[device_ext_count++] = "VK_EXT_4444_formats";
     out->device_extension_count = device_ext_count;
+
+    // #975：NVN 16 位打包格式的路由（格式表在 nvn_vk_format.c 的 k_p16，弱引用同 #398 深度替换）。
+    // 精确格式要扩展的：A4B4G4R4 看上面 4444 是否启用；A1B5G5R5 要 VK_KHR_maintenance5，本设备按 Vulkan 1.1 建，
+    // 它的依赖链（dynamic_rendering → depth_stencil_resolve → create_renderpass2）这里不开，按不可用处理（走退回格式）。
+    {
+        extern int nvn_vk_p16_entry(int, uint32_t *, VkFormat *, VkFormat *) __attribute__((weak));
+        extern uint32_t nvn_vk_p16_fallback_pick(const VkFormatFeatureFlags *, const VkFormatFeatureFlags *) __attribute__((weak));
+        extern void nvn_vk_format_set_p16_fallback(uint32_t) __attribute__((weak));
+        VkFormatFeatureFlags ex[8] = {0}, fb[8] = {0};   // 8 = NVN_VK_P16_N
+        VkFormat e = VK_FORMAT_UNDEFINED, f = VK_FORMAT_UNDEFINED;
+        for (int i = 0; nvn_vk_p16_entry && i < 8 && nvn_vk_p16_entry(i, NULL, &e, &f); i++) {
+            VkFormatProperties fp;
+            int gated = (e == VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT && !out->formats_4444_enabled) || e == VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR;
+            if (!gated) { s2a_vk_format_properties(out->physical, e, &fp); ex[i] = fp.optimalTilingFeatures; }
+            if (f != VK_FORMAT_UNDEFINED) { s2a_vk_format_properties(out->physical, f, &fp); fb[i] = fp.optimalTilingFeatures; }
+        }
+        out->p16_fallback_mask = nvn_vk_p16_fallback_pick ? nvn_vk_p16_fallback_pick(ex, fb) : 0;
+        if (nvn_vk_format_set_p16_fallback) nvn_vk_format_set_p16_fallback(out->p16_fallback_mask);
+        fprintf(stderr, "[s2a] vk packed16 route: 4444=%d fallback=0x%02x\n", out->formats_4444_enabled, out->p16_fallback_mask);
+    }
 
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {0};
@@ -417,6 +456,14 @@ int s2a_vk_device_create(struct s2a_vk_device *out, char *why, size_t why_size) 
         device_info.pNext = &maintenance;
     } else {
         device_info.pNext = &draw_parameters;
+    }
+    if (out->formats_4444_enabled) {   // 接在链尾：只开 A4B4G4R4（A4R4G4B4 用不到）
+        f4444.formatA4B4G4R4 = VK_TRUE;
+        f4444.formatA4R4G4B4 = VK_FALSE;
+        f4444.pNext = NULL;
+        VkBaseOutStructure *tail = (VkBaseOutStructure *)device_info.pNext;
+        while (tail->pNext) tail = tail->pNext;
+        tail->pNext = (VkBaseOutStructure *)&f4444;
     }
     if (vkCreateDevice(out->physical, &device_info, NULL, &out->device) != VK_SUCCESS)
         return fail(why, why_size, "vkCreateDevice failed");
