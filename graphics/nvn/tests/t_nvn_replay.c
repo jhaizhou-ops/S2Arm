@@ -2785,7 +2785,56 @@ static void t_separate_sampler(void) {
     nvn_be_tex_release(&t); pass_fresh();
 }
 
+// Registered views must obey the same encode-window lifetime as cached attachment
+// views and samplers, including re-registration and nested windows.
+static void t_registered_view_pin(void) {
+    res_fresh();
+    tex_t a = mk_tex(81001, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    tex_t b = mk_tex(81002, 4096, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    nvn_be_tex_init(&a); nvn_be_tex_init(&b);
+    nvn_be_reg_tex(3, &a, NULL);
+    rp_view_pin_begin();
+    nvn_gpu_view first = rp_view_by_id(3, &g_fake_cmd, NULL);
+    CHECK(first != NULL); int first_id = first ? first->rid : 0;
+    rp_view_pin_begin();
+    nvn_be_reg_tex(3, &b, NULL);
+    CHECK(!was_view_released(first_id));
+    nvn_gpu_view second = rp_view_by_id(3, &g_fake_cmd, NULL);
+    CHECK(second != NULL); int second_id = second ? second->rid : 0;
+    nvn_be_unreg_tex_range(3, 1);
+    CHECK(rp_view_by_id(3, &g_fake_cmd, NULL) == NULL);
+    CHECK(!was_view_released(second_id));
+    rp_view_pin_end();
+    CHECK(!was_view_released(first_id) && !was_view_released(second_id));
+    rp_view_pin_end();
+    CHECK(was_view_released(first_id) && was_view_released(second_id));
+    res_fresh();
+}
+
+static void t_invalidated_attachment_pin(void) {
+    res_fresh();
+    tex_t t = mk_tex(82001, 0, NVN_FORMAT_RGBA8, 16, 16, 1, 0);
+    nvn_be_tex_init(&t);
+    rp_view_pin_begin();
+    nvn_gpu_view v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); int id = v ? v->rid : 0;
+    rp_view_pin_begin();
+    nvn_be_tex_release(&t);
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(!was_view_released(id));
+    rp_view_pin_end();
+    CHECK(was_view_released(id));
+    v = rp_view_for(&t, NULL, &g_fake_cmd);
+    CHECK(v != NULL); id = v ? v->rid : 0;
+    nvn_be_tex_release(&t);
+    CHECK(was_view_released(id));
+    res_fresh();
+}
+
 int main(int argc, char **argv) {
+    t_invalidated_attachment_pin();
+    t_registered_view_pin();
     t_state_persists();
     t_unimpl_names();
     t_one_commit_per_submit();
