@@ -646,7 +646,18 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     DT(RP_PERF_D_PROG);
     // 先把这笔要用的资源都取好：池镜像同步、贴图上传是传输，不能出现在通道里，必须在开通道之前做完
     nvn_gpu_buf vb_buf[16]; uint64_t vb_off[16]; uint32_t streams = 0;
-    for (int i = 0; i < rp_S.nattr && i < 16; i++) if (g_prog->attr_mask >> i & 1) streams |= 1u << rp_S.attr[i].stream;
+    // #977：着色器读了但游戏没设格式的属性（属性表外 / 格式 0）不取它的流；由核心补一条 RGBA32F、步长 0、内容全 0 的属性
+    // （编译端把这种输入按 Float 声明；同 iOS ZERO_ATTR、Ryujinx IsZero → 零缓冲），绑到一条没被有格式属性占用的流上。
+    uint32_t zattr = 0, zused = 0; int zstream = -1;
+    for (int i = 0; i < 16; i++) {
+        const int has = i < rp_S.nattr && rp_S.attr[i].fmt;
+        if (has) zused |= 1u << rp_S.attr[i].stream;   // 有格式的属性都会在后端占一条绑定（不论着色器读不读）
+        if (g_prog->attr_mask >> i & 1) { if (has) streams |= 1u << rp_S.attr[i].stream; else zattr |= 1u << i; }
+    }
+    if (zattr) {
+        for (int s = 0; s < 16 && zstream < 0; s++) if (!(zused >> s & 1)) zstream = s;
+        if (zstream < 0) { skip("zero_attr_no_free_stream", rec); return; }
+    }
     {   // 一次抢锁解析全部顶点流（逐段各抢一次时这把锁和完成线程互抢，重叠档能吃到 13.7–16.6 毫秒/帧）
         uint64_t vaddr[16], vlen[16], voff[16]; unsigned char vok[16]; int nv = 0;
         for (int i = 0; i < 16; i++) if (streams >> i & 1) {
@@ -831,6 +842,10 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
         { static int fm = -1; if (fm < 0) fm = nvn_plat_flag("nvk_fullmask", 0); if (fm) pd.chmask.mask = 0xffffffffu; }   // 临时实验：颜色写掩码一律全开
         for (int i = 0; i < rp_S.nattr && i < 16; i++) pd.attr[i] = rp_S.attr[i];
         for (int i = 0; i < rp_S.nstream && i < 16; i++) pd.stream[i] = rp_S.stream[i];
+        if (zattr) {
+            for (int i = 0; i < 16; i++) if (zattr >> i & 1) { pd.attr[i].fmt = NVN_FORMAT_RGBA32F; pd.attr[i].offset = 0; pd.attr[i].stream = (uint32_t)zstream; }
+            pd.stream[zstream].stride = 0; pd.stream[zstream].divisor = 0;
+        }
         pd.ds = rp_S.ds; pd.poly = rp_S.poly; pd.rast_discard = (uint8_t)(rp_S.rast_discard != 0);
         // 正面绕序（对照 nvn_mtl.m @12766）：游戏自带驱动只在建队列时按当时的窗口原点写一次「光栅翻转」位（原点不是左上 = 开），
         // 之后改原点不再动它。y 朝上的规范化设备坐标里：翻转开着时正面是接口值的反面，关着时就是接口值。
@@ -872,6 +887,11 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     nvn_gpu_dyn dyn; if (!fill_dyn(&dyn, tw, th, rec)) goto draw_done;
     nvn_gpu_set_dyn(c, &dyn);
     for (int i = 0; i < 16; i++) if (streams >> i & 1) nvn_gpu_set_vbuf(c, (uint32_t)i, vb_buf[i], vb_off[i]);
+    if (zattr) {   // 零属性的流：每笔从暂存区取 16 字节全 0
+        nvn_gpu_slice zs;
+        if (!alloc_copy(c, 16, NULL, &zs)) { skip("arena_alloc_failed", rec); goto draw_done; }
+        nvn_gpu_set_vbuf(c, (uint32_t)zstream, zs.buf, zs.off);
+    }
     uint32_t base_instance = ind ? 0 : (uint32_t)(di ? di->base_instance : dr->base_instance);
     DT(RP_PERF_D_DYN);
     // 每个阶段都要发，程序里没有的阶段发零条：后端按阶段留着上一笔的绑定，不清掉的话「上一笔有片元、这一笔只有顶点」
