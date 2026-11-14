@@ -103,6 +103,9 @@ void s2a_svc_red_summary(void) {   // 退出时一行，健康表读：空 = 报
     char b[1024]; size_t k = 0; b[0] = 0;
     for (int i = 0; i < 256; i++) { uint64_t n = atomic_load(&g_red[i]); if (n && k < sizeof b - 32) k += (size_t)snprintf(b + k, sizeof b - k, " %#x×%llu", i, (unsigned long long)n); }
     LOG("未实现系统调用：%s", k ? b : " 无");
+    // 栈指针未对齐的读写替游戏做了几条（crash.c / emul_sp.c s2a_emul_sp_unaligned；Switch 不查 SP 对齐、苹果查）：有才报
+    { __attribute__((weak)) uint64_t s2a_sp_unaligned_count(void); uint64_t n = s2a_sp_unaligned_count ? s2a_sp_unaligned_count() : 0;
+      if (n) LOG("栈指针未对齐：替游戏模拟了 %llu 条读写（Switch 不查栈对齐，苹果查）", (unsigned long long)n); }
 }
 
 int svc_thread(int num, uint64_t *regs);                    // thread.c：线程 / 同步，1 = 已处理
