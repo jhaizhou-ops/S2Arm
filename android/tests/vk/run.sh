@@ -292,7 +292,8 @@ fi
 if [ "$mode" = "--gs-core" ]; then
     rm -rf "$repo/build/696-real-compiler/core-compiler"
     set +e
-    timeout 60 "$out/t_backend_vk" "$repo/build/696-real-compiler" 2>&1 | tee "$out/gs-log"
+    timeout 60 "$out/t_backend_vk" "$repo/build/696-real-compiler" \
+        "$repo/graphics/tools/direct/compiler/cli/bin/Release/net10.0/S2A.DirectCompiler.Cli.dll" 2>&1 | tee "$out/gs-log"
     rc=${PIPESTATUS[0]}
     set -e
     if [ "$rc" -ne 0 ] || grep -qE 'Validation Error|VUID-|SYNC-HAZARD-' "$out/gs-log"; then echo "【红】GS 核心整链 rc=$rc" >&2; exit 1; fi

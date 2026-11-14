@@ -20,6 +20,7 @@ static uint8_t *request_data, *result_data, *profile_data;
 static size_t request_len, result_len, profile_len;
 static char closure[128]; static int compile_calls;
 static const char *case_dir;
+static char *compiler_dll;
 static prog_t guest_program; static uint8_t guest_keys[6][8], guest_stages[6];
 static p_set_rt target; static tex_t target_tex; static nvn_gpu_view target_view;
 int g_s2a_logfd = 2; int s2a_nvn_rast_flip;
@@ -86,7 +87,7 @@ static int32_t compiled_result(uint64_t session, uint64_t generation, s2a_direct
     snprintf(result_path, sizeof result_path, "%s/core-compiler/program.json", case_dir);
     FILE *f = fopen(req_path, "wb"); if (!f) return -1;
     if (fwrite(req.data, 1, (size_t)req.bytes, f) != (size_t)req.bytes || fclose(f)) return -1;
-    char *const argv[] = {"dotnet", "/src/graphics/tools/direct/compiler/cli/bin/Release/net10.0/S2A.DirectCompiler.Cli.dll",
+    char *const argv[] = {"dotnet", compiler_dll,
                           "compile", "--request", req_path, "--output", out_dir, NULL};
     pid_t pid; int status = 0;
     if (posix_spawnp(&pid, "dotnet", NULL, NULL, argv, environ) || waitpid(pid, &status, 0) != pid ||
@@ -98,7 +99,8 @@ static int32_t compiled_result(uint64_t session, uint64_t generation, s2a_direct
 s2a_direct_compile_fn s2a_direct_bound_compile_any(void) { return compiled_result; }
 static void put32(uint8_t *p, uint32_t n) { p[0] = n; p[1] = n >> 8; p[2] = n >> 16; p[3] = n >> 24; }
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 3) return 2;
+    compiler_dll = argv[2];
     case_dir = argv[1];
     char path[1024];
 #define READ(dst, len, suffix) do { snprintf(path, sizeof path, "%s/%s", argv[1], suffix); dst = read_file(path, &len); if (!dst) return 2; } while (0)
