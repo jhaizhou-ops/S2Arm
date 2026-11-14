@@ -63,4 +63,3 @@ int main(void) {
     return g_fail ? 1 : 0;
 }
 
-uint64_t rp_frame(void) { return 0; }

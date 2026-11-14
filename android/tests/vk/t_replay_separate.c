@@ -43,8 +43,6 @@ void rp_tex_mark_gpu_written(const tex_t *t) { (void)t; }
 int rp_tex_debug_state(uint64_t s) { (void)s; return 0; }
 nvn_gpu_tex rp_tex_backend_by_serial(uint64_t s) { (void)s; return NULL; }
 const p_set_rt *rp_pass_target(void) { return &target; }
-// 回放核心的当前帧号（rp_entry.c）；本用例不跑帧号逻辑，给 0。
-uint64_t rp_frame(void) { return 0; }
 int rp_pass_slot_attached(int i) { return i == 0; }
 void rp_pass_slot_size(int i, uint32_t *w, uint32_t *h) { (void)i; *w = *h = 4; }
 void rp_pass_note_draw(int d) { (void)d; }
