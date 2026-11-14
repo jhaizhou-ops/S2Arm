@@ -98,6 +98,7 @@ static uint64_t mono_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONI
 static unsigned g_fake_nst = 2;
 static int g_parse_fail;
 static int g_load_calls, g_release_calls;
+static int g_fake_c1;   // 1 = 假编译结果里带一条 NVN_RB_C1 绑定（stage 0 的 cbuf 槽 1）：复现「光照着色器要 c1」
 
 int s2a_direct_provider_compile_context(struct s2a_direct_compile_context *c) {
     memset(c, 0, sizeof *c);
@@ -130,6 +131,13 @@ int nvn_vk_program_parse_graphics_stages(const uint8_t *bytes, size_t length, st
     memset(out, 0, sizeof *out);
     if (g_parse_fail) return -1;
     static uint8_t spirv[4] = {3, 2, 1, 0};   // 假 SPIR-V：装载替身不看内容
+    if (g_fake_c1) {   // 一条 stage 0 的 C1（cbuf 槽 1）绑定：layout_ent 会把它映射成 NVN_RB_C1
+        out->binding_count = 1;
+        struct fd_binding *b = &out->bindings[0];
+        memset(b, 0, sizeof *b);
+        b->kind = 0; b->slot = 1; b->stage_idx = 0; b->set = 0; b->binding = 0;
+        snprintf(b->stage, sizeof b->stage, "vs");
+    }
     for (unsigned st = 0; st < g_fake_nst && st < FD_MAX_STAGES; st++) {
         out->stage[st].present = 1;
         out->stage[st].spirv = spirv;
@@ -174,6 +182,38 @@ static int publish(unsigned seed, unsigned nst) {
     rec.stage_mask = nst >= 3 ? 7u : (nst == 2 ? 3u : 1u);
     g_fake_nst = nst;
     return nvk_prog_warm_build(&rec);
+}
+
+// ⑦ 预热守卫：清单记录缺 c1、但程序带 C1 绑定 → 必须拒绝发布（否则 rp_draw 会把这类绘制全跳过：火把光消失）
+static int publish_c1(unsigned seed, unsigned nst, int c1_ok) {
+    struct nvk_prog_rec rec;
+    memset(&rec, 0, sizeof rec);
+    ident_fill(rec.identity, seed);
+    rec.stage_mask = nst >= 3 ? 7u : (nst == 2 ? 3u : 1u);
+    rec.c1_ok = (uint8_t)c1_ok;
+    if (c1_ok) for (int st = 0; st < 3; st++) if (c1_ok & (1 << st)) memset(rec.c1[st], (uint8_t)(seed + st), NVK_PROG_REC_C1_BYTES);
+    g_fake_nst = nst;
+    return nvk_prog_warm_build(&rec);
+}
+static void case_c1_guard(void) {
+    rp_shader_reset();
+    g_load_calls = g_release_calls = 0;
+    g_fake_c1 = 1;
+    // (a) 清单缺 c1：必须拒绝（返回 -1），且这个身份不许出现在 g_progs 里
+    CHECK(publish_c1(10, 2, 0) == -1, "清单缺 c1 且程序带 C1 绑定：预热必须拒绝发布（返回 -1）");
+    const struct rp_prog *p = NULL;
+    uint8_t id[32]; ident_fill(id, 10);
+    CHECK(rp_shader_prog_borrow(id, &p) == 0 && p == NULL, "被拒绝的程序不得发布（借不到）");
+    // (b) 清单带 c1：正常发布，且程序对象拿到 c1
+    CHECK(publish_c1(11, 2, 3) == 0, "清单带 c1：预热应发布成功");
+    ident_fill(id, 11);
+    CHECK(rp_shader_prog_borrow(id, &p) == 1 && p != NULL, "带 c1 的程序已发布");
+    CHECK((p->c1_ok & 3u) == 3u && p->c1[0][0] == 11 && p->c1[1][0] == 12, "程序对象带回 c1（c1_ok=%#x）", (unsigned)p->c1_ok);
+    rp_shader_prog_return(id);
+    // (c) 程序不带 C1 绑定、清单也没 c1：这是合法情况，必须照常发布（别把正常程序也拒了）
+    g_fake_c1 = 0;
+    CHECK(publish_c1(12, 2, 0) == 0, "程序不带 C1 绑定：清单无 c1 也应正常发布");
+    g_fake_c1 = 0;
 }
 
 // ① 借到 → 归还 → 收尾释放
@@ -360,6 +400,7 @@ int main(void) {
     setenv("S2A_DIRECT_CACHE_DIR", "lease-fixture-not-used", 1);
     unsetenv("S2A_SHADER_REVISION_ROOT");
     CHECK(nvk_shader_open() == 0, "会话可开");
+    case_c1_guard();
     case_borrow_return_reset();
     case_reset_refused_while_borrowed();
     case_quiesce_counts_borrow();
