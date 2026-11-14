@@ -1564,6 +1564,45 @@ static void t_stage_dropped_clears_binds(void) {
 // 绘制要绑的存储缓冲，同一次提交里第二次同步时要录成传输、结束通道：必须发生在开通道之前，
 // 不能在设了管线之后、发绑定的途中把通道结束掉（真后端随后收到通道外的绑定，置粘滞、整段作废；#697 Mali 真机）。
 // 池不受写跟踪 → 每次用都整段同步；同一段里两笔都绑同一段存储缓冲，第二笔那次同步一定走传输。
+// 合法 NVN 存储槽尚未绑定时，Ryujinx 为描述符保留 64 KiB 物理空缓冲，不能跳过整笔绘制。
+// 不把真实地址解析失败或槽号越界当空槽；内部资源不登记到 guest 池。
+static void t_storage_null_binding(void) {
+    pass_fresh(); g_gdraws = g_resolve_rc = 0; memset(g_nfb, 0, sizeof g_nfb);
+    int created = g_buf_creates, released = g_buf_releases;
+    stream s = {0}; q_env(&s);
+    g_fprog.nent[0] = 1;
+    nvn_gpu_layout_ent *e = &g_fprog.ent[0][0];
+    e->cls = NVN_GPU_RES_SSBO; e->src_kind = NVN_RB_SBUFP; e->src_reg = 0; e->access = NVN_GPU_ACC_R;
+    q_draw(&s); q_draw(&s); end(&s); submit1(&s); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 2 && nvn_unimpl_kinds() == 0);
+    nvn_gpu_buf empty = g_nfb[0] == 1 ? g_fb[0][0].u.b.buf : NULL;
+    CHECK(empty && g_fb[0][0].u.b.off == 0 && g_fb[0][0].u.b.len == 0x10000);
+    CHECK(g_buf_creates == created + 1); // 两笔复用同一对象
+    e->src_reg = 16;
+    stream bad = {0}; q_draw(&bad); end(&bad); submit1(&bad); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "storage_buffer_unbound") == 1);
+    e->src_reg = 0;
+    stream missing = {0};
+    p_bind_buf *b = put(&missing, OP_BIND_SSBO, sizeof *b); b->stage = 0; b->index = 0; b->addr = 0x12340; b->size = 32;
+    q_draw(&missing); end(&missing); submit1(&missing); fake_complete(NVN_GPU_DONE_OK);
+    CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "storage_buffer_unresolved") == 1);
+    // 地址或长度只空一个，以及 UBO 指针来源，不能被合法空 SBUFP 路径接走。
+    for (int k = 0; k < 3; k++) {
+        stream invalid = {0}; q_env(&invalid);
+        g_fprog.nent[0] = 1; e = &g_fprog.ent[0][0];
+        e->cls = NVN_GPU_RES_SSBO; e->src_kind = k == 2 ? NVN_RB_UBOP : NVN_RB_SBUFP; e->src_reg = 0; e->access = NVN_GPU_ACC_R;
+        if (k < 2) {
+            b = put(&invalid, OP_BIND_SSBO, sizeof *b); b->stage = 0; b->index = 0;
+            b->addr = k == 0 ? 0x12340 : 0; b->size = k == 0 ? 0 : 32;
+        }
+        int draws = g_gdraws, allocated = g_buf_creates;
+        uint64_t unbound = nvn_unimpl_count("draw", "storage_buffer_unbound");
+        q_draw(&invalid); end(&invalid); submit1(&invalid); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_gdraws == draws && nvn_unimpl_count("draw", "storage_buffer_unbound") == unbound + 1 && g_buf_creates == allocated);
+    }
+    pass_fresh();
+    CHECK(g_buf_releases == released + 1);
+}
 static void t_storage_sync_before_pass(void) {
     pass_fresh(); g_gdraws = g_resolves = g_resolve_rc = 0; g_arena_used = 0; g_bind_outside = 0; g_draw_outside = 0; g_pass_open = 0; g_nbw = 0;
     memset(g_pmem, 0, sizeof g_pmem); nvn_be_pool_add(g_pmem, sizeof g_pmem);
@@ -2843,7 +2882,7 @@ int main(int argc, char **argv) {
     t_arena697_detail();
     t_logic_op_accounting();
     t_gs_dirty_and_topology();
-    t_gs_bind(); t_storage_sync_before_pass(); t_stage_dropped_clears_binds();
+    t_gs_bind(); t_storage_null_binding(); t_storage_sync_before_pass(); t_stage_dropped_clears_binds();
     t_decl_sampling();
     t_separate_sampler();
     t_present();
