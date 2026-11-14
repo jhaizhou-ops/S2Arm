@@ -23,7 +23,8 @@ extern "C" {
 
 #define NVK_PF_MAX 128        // 同时在途的配方上限
 #define NVK_PF_WHY 192        // 错误原文缓冲（与 nvn_gpu_err.why 同长）
-#define NVK_PF_KEY_MAX 512    // 配方键上限（nvn_gpu_pipe_desc 约 400 字节）
+#define NVK_PF_KEY_MAX 2560   // 配方键上限：必须 >= sizeof(nvn_gpu_pipe_desc)（实测 2360，含 st[5].spec[48]）；
+                              // 小于它时 nvk_pf_init 会整表停用（不合并，但也不越界）——所以这里留足。
 
 struct nvk_pf_ent {
     pthread_cond_t cv;

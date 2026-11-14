@@ -19,6 +19,7 @@
 
 typedef struct { int key; } pkey_t;   // 不用 key_t：<sys/types.h> 已占用这个名字
 static int key_eq(const void *a, const void *b) { return ((const pkey_t *)a)->key == ((const pkey_t *)b)->key; }
+static int key_eq_big(const void *a, const void *b) { return !memcmp(a, b, 2360); }
 
 static int g_fail, g_checks;
 #define CHECK(cond, ...) do { g_checks++; if (!(cond)) { g_fail++; \
@@ -131,7 +132,23 @@ static void case_late_hit(void) {
     CHECK(l == 2, "late-hit counted, got %llu", (unsigned long long)l);
 }
 
+// ⑥ 键上限必须容得下真实描述（否则整表会静默停用，P1-2 静默失效）：用一个 2360 字节的键走一遍。
+static void case_big_key(void) {
+    static uint8_t big[NVK_PF_KEY_MAX];
+    struct bigkey { uint8_t b[2360]; } k1, k2;
+    memset(&k1, 0x5a, sizeof k1); memset(&k2, 0x5a, sizeof k2);
+    (void)big;
+    nvk_pf_init(&g_t, sizeof k1);
+    int h1 = -1, h2 = -1;
+    CHECK(nvk_pf_enter(&g_t, &k1, key_eq_big, &h1) == 1, "2360-byte key: owner claims a slot (key max must fit it)");
+    CHECK(nvk_pf_enter(&g_t, &k2, key_eq_big, &h2) == 2, "2360-byte key: identical key merges instead of disabling the table");
+    nvk_pf_publish(&g_t, h1, (void *)0x1, 0, NULL);
+    void *obj = NULL; char why[NVK_PF_WHY];
+    CHECK(nvk_pf_wait(&g_t, h2, &obj, why, sizeof why) == 0 && obj == (void *)0x1, "2360-byte key: waiter gets the object");
+}
+
 int main(void) {
+    case_big_key();
     case_merge();
     case_independent();
     case_failure();
