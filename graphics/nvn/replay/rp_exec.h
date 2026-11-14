@@ -100,6 +100,7 @@ int rp_res_new_sizes_take(void);     // 诊断读数：上次调用以来新建�
 int rp_fence_done(uint64_t f);       // 栅栏值 f 及之前交出去的活显卡都做完了
 extern int rp_split_draws;       // 中途交段：每段的笔数（见 rp_exec.c）
 uint64_t rp_seg_serial(void);   // 第几个后端段：段里的暂存内容（arena 切片）只在同一段里能复用
+void rp_frame_take(uint64_t *exec_ns, uint64_t *draws, uint64_t *subs);   // 取走本帧的回放耗时 / 绘制笔数 / 提交次数（长帧日志用）
 uint64_t rp_sub_serial(void);   // 第几次提交（一次提交内可复用的暂存内容按它判）
 void rp_perf_take(uint64_t out[RP_PERF_N]);
 void rp_draw_reset(void);

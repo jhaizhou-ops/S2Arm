@@ -2826,12 +2826,15 @@ nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *
     gp.layout = p->layout;
     gp.renderPass = p->pass;
     gp.subpass = 0;
+    const uint64_t pl_t0 = now_ns();   // 驱动编译管线是同步的：超过 3 毫秒就打一行（走路/进新场景时会集中出现）
     if (vkCreateGraphicsPipelines(g.d, g_plc, 1, &gp, NULL, &p->pipe) != VK_SUCCESS) {
         nvn_gpu_rc bad = fail(err, NVN_GPU_E_COMPILE, "vkCreateGraphicsPipelines 失败");
         destroy_pipe_objects(p);
         return bad;
     }
     plc_created();
+    { const uint64_t dt = now_ns() - pl_t0;   // 编译耗时：>3 毫秒单独记一行（正常建管线在 0.2–1 毫秒）
+      if (dt > 1000000ull) { char b[160]; snprintf(b, sizeof b, "图形管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
     for (int st = 0; st < 5; st++) {
         struct nvn_gpu_shader_s *sh = d->st[st].sh;
         if (!sh) continue;
@@ -2953,11 +2956,14 @@ nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pip
     cp.stage.module = sh->mod;
     cp.stage.pName = sh->entry;
     cp.layout = p->layout;
+    const uint64_t pc_t0 = now_ns();   // 同图形管线：超过 3 毫秒打一行，用来对长帧
     if (vkCreateComputePipelines(g.d, g_plc, 1, &cp, NULL, &p->pipe) != VK_SUCCESS) {
         destroy_pipe_objects(p);
         return fail(err, NVN_GPU_E_COMPILE, "vkCreateComputePipelines 失败");
     }
     plc_created();
+    { const uint64_t dt = now_ns() - pc_t0;
+      if (dt > 1000000ull) { char b[160]; snprintf(b, sizeof b, "计算管线编译 %.1f 毫秒", (double)dt / 1e6); nvn_plat_log(NVN_PLAT_LOG_INFO, "pipe", b); } }
     p->stage_nent[NVN_GPU_SH_CS] = sh->nent;
     p->stage_push_off[NVN_GPU_SH_CS] = sh->push_off;
     p->stage_push_bytes[NVN_GPU_SH_CS] = sh->push_bytes;
@@ -4361,7 +4367,10 @@ static int check_copy_params(const struct nvn_gpu_tex_s *t, uint32_t level, cons
     return 0;
 }
 
+// 建贴图（vkCreateImage + 要显存 + 建默认视图）在真机上单张 0.3–2 毫秒；走路/进新场景时会成批出现，
+// 所以超过 3 毫秒的单独记一行，用来和「长帧」对时间（见坑记录续 34）。
 nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_gpu_err *err) {
+    const uint64_t tc_t0 = now_ns();
     if (!session_accepting()) return fail(err, NVN_GPU_E_STOPPED, "会话正在关闭 / 未打开");
     if (!out) return fail(err, NVN_GPU_E_ARG, "out 为空");
     *out = NULL;
@@ -4523,6 +4532,8 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     g.texs = t;
     pthread_mutex_unlock(&g_mu);
     *out = t;
+    { const uint64_t dt = now_ns() - tc_t0;   // 建贴图超过 3 毫秒单独记一行（走路 / 进新场景时会成批出现）
+      if (dt > 3000000ull) { char b[160]; snprintf(b, sizeof b, "建贴图 %.1f 毫秒（%ux%u）", (double)dt / 1e6, d->d.width, d->d.height); nvn_plat_log(NVN_PLAT_LOG_INFO, "tex", b); } }
     return rc(NVN_GPU_OK);
 }
 

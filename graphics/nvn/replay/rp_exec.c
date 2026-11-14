@@ -441,9 +441,17 @@ void rp_exec_dump_ops(char *b, size_t n) {
         if (o >= n) break;
     }
 }
+// 帧级账（给「长帧」日志用）：本帧回放花了多久、画了多少笔、提交几次。上屏那边发现帧间隔异常时取走打印。
+static uint64_t g_fr_exec_ns, g_fr_draws, g_fr_subs;
+void rp_frame_take(uint64_t *exec_ns, uint64_t *draws, uint64_t *subs) {
+    *exec_ns = __atomic_exchange_n(&g_fr_exec_ns, 0, __ATOMIC_RELAXED);
+    *draws = __atomic_exchange_n(&g_fr_draws, 0, __ATOMIC_RELAXED);
+    *subs = __atomic_exchange_n(&g_fr_subs, 0, __ATOMIC_RELAXED);
+}
 void nvn_be_exec(const uint8_t *p) {
     static int inited; if (!inited) { inited = 1; rp_state_reset(); }
     if (!p) return;
+    const uint64_t fr_t0 = now_ns();
     // 回放耗时按命令类别分（开关 debug.s2a.nvk_exec_tm，缺省 0）：绘制类 vs 其余（传输 / 整屏清除 / 派发 / 状态），
     // 用来判「回放总时长里有多少不在 rp_draw 的各步上」。取时刻本身有开销，只在量的时候开。
     static int tm = -1;
@@ -455,7 +463,7 @@ void nvn_be_exec(const uint8_t *p) {
         uint64_t t_cmd = tm ? now_ns() : 0;
         const void *a = p + 8;
         switch (h.op) {
-            case OP_END: return;
+            case OP_END: __atomic_fetch_add(&g_fr_exec_ns, now_ns() - fr_t0, __ATOMIC_RELAXED); return;
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
                 if (g_ret_n >= 64) { nvn_unimpl("rec", "call_depth_over_64", p); break; }
@@ -509,6 +517,7 @@ void nvn_be_exec(const uint8_t *p) {
                 if (!rp_state_op(h.op, a, h.size)) nvn_unimpl("op", rp_op_name(h.op), p);
                 break;
         }
+        if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) __atomic_fetch_add(&g_fr_draws, 1, __ATOMIC_RELAXED);   // 帧级账：这一帧画了多少笔
         // OP_CALL 不记：它里面那批记录各自会记（记了就把同一段算两遍）
         if (tm && h.op != OP_CALL) {
             uint64_t dns = now_ns() - t_cmd;
@@ -520,6 +529,7 @@ void nvn_be_exec(const uint8_t *p) {
 
 // 一次 NVN 队列提交（hle_nvn.c nvnQueueSubmitCommands）。跨队列停靠（等别的队列还没回放的信号）未接：见 OP_SIGNAL_EVENT+WAIT。
 void nvn_be_submit(void *q, const uint64_t *h, int n) {
+    __atomic_fetch_add(&g_fr_subs, 1, __ATOMIC_RELAXED);   // 帧级账：这一帧提交了几次
     nvn_hle_queue_enter(q);
     uint64_t t0 = now_ns();
     // 一次提交拆三段记账（SUBMIT_NS 仍是含三段的整段）：开段（cmd_begin + 状态重发） / 主回放循环 / 收尾交后端

@@ -35,6 +35,16 @@ static void frame_gap_note(void) {
     uint32_t ms = (uint32_t)(d / 1000000ull); if (ms > 255) ms = 255;
     __atomic_fetch_add(&g_gap_hist[ms], 1, __ATOMIC_RELAXED);
     if (d > 33333333ull) __atomic_fetch_add(&g_gap_over33, 1, __ATOMIC_RELAXED);
+    // 长帧日志（缺省开，扫坑用）：一次超过 80 毫秒就把上一帧的账打出来——回放花了多久、画了多少笔、提交几次。
+    // 回放接近这个间隔说明卡在我们这边；回放很小则说明卡在游戏线程 / present / 等窗口（不归回放层管）。
+    static int hl = -1; if (hl < 0) hl = nvn_plat_flag("nvk_hitch_log", 1) != 0;
+    uint64_t ex = 0, dr = 0, sb = 0; rp_frame_take(&ex, &dr, &sb);   // 每帧都取（不清账时相邻两帧会累加，读数会虚高）
+    if (hl && d > 80000000ull) {
+        char lb[220];
+        snprintf(lb, sizeof lb, "长帧 %.1f 毫秒（上一帧：回放 %.1f 毫秒、绘制 %llu 笔、提交 %llu 次）",
+                 (double)d / 1e6, (double)ex / 1e6, (unsigned long long)dr, (unsigned long long)sb);
+        nvn_plat_log(NVN_PLAT_LOG_INFO, "present", lb);
+    }
 }
 static void rp_frame_gap_take(uint64_t out[5]) { for (int i = 0; i < 5; i++) out[i] = __atomic_exchange_n(&g_gap_bucket[i], 0, __ATOMIC_RELAXED); }
 // 取走直方图并算 p50 / p99 / 最长 / >33 毫秒帧数（毫秒；空窗口返回 0）
