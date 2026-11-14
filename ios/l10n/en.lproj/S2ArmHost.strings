@@ -323,6 +323,9 @@
 "diag.upload.fail.timeout" = "The upload didn't finish within %d seconds (the network is slow or the connection stalled), so it was stopped. You can try again or export the diagnostics package instead.";
 "diag.upload.fail.title" = "Upload didn’t work";
 "diag.upload.go" = "Upload";
+"diag.report.title" = "Report a Problem";
+"diag.report.message" = "We’ll upload this device’s logs and device info to help find the cause, then give you a short code. You can write a sentence about what happened (optional).";
+"diag.report.placeholder" = "What happened? (optional)";
 "diag.upload.post" = "Post on GitHub";
 "diag.upload.retry" = "Try again";
 "dprompt.expiry.body" = "Time left: %@. After it expires the game won’t open, but your saves are safe: connect the phone and click “Install on iPhone” again, or refresh in AltStore.";

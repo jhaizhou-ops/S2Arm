@@ -13416,6 +13416,54 @@
           }
         }
       }
+    },
+    "Report a problem": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report a problem"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "故障报修"
+          }
+        }
+      }
+    },
+    "Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sends this device's logs to the developers and gives you a short code. You can add a sentence about what happened."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "把这台设备的日志发给开发者，并给你一个短码。可以写一句发生了什么。"
+          }
+        }
+      }
+    },
+    "Report…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "报修…"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

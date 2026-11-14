@@ -79,6 +79,9 @@ char *s2a_shell_save_context(void);
 char *s2a_shell_save_request(const char *json);
 void *s2a_shell_cloud_sync_vc(const char *game_id, void (*done)(void *ctx), void *ctx);
 
+// 故障报修（游戏库设置页最下面）：实现在宿主 ios/diag.m（可不填的一句说明 → 打包上传、给短码）；本包弱定义缺省什么也不做
+void s2a_shell_report_problem(void);
+
 #ifdef __cplusplus
 }
 #endif
