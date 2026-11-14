@@ -66,3 +66,13 @@ bash build/measure/bench.sh 40 build/measure/ab-<组>-<轮>   # 每组 3 局取�
 - **稳态 ON≈OFF，无回归、无红行、无 c1 缺段（火把/粒子光正常），demand 线程 + 跳过逻辑开启不崩不黑。**
 - 该窗口是**热态**（程序/管线清单已命中），日志中无 `首用跳过` / `首用后台建管线` 记录 → 首次缺画/跳过的收益**未被触发**；要量「冷进场首用」收益必须清掉跨会话预热清单（需保存档的冷起，或维护方基准台），本机 release 包不可 run-as 清内部缓存，未做。
 - 因此本清单的**完整 A/B（冷进场首用收益 + 3 局中位）仍是验收前置**；本轮只完成了「稳态无回归 + 画面安全」这一半。
+## 7. 冷进场 A/B 的实测阻塞（2026-11-14，本机）
+
+目的：制造**冷进场**（清掉跨会话预热清单 `<files>/user/0/direct-cache/nvn-vk/{programs-v1.bin,pipes-*.bin}`）来触发首用跳过/后台建管线，量其收益与画面。
+- 缓存是**应用私有内部目录**（`state_dir = getFilesDir()/user/0`，见 provider_nvk.c:517 与 s2a_program_cache_dir），非 adb 可直接读写。
+- 本机设备（Xiaomi/HyperOS，targetSdk 36）**`run-as` 被 SELinux 拒**：`seapp_context_lookup_internal: No match ... fromRunAs ... Permission denied`；即便 APK 已 `DEBUGGABLE`（`dumpsys package` 的 flags 有 DEBUGGABLE）也进不去。
+- 无 root / 无 su；`pm clear` 会连存档一起清（不可接受）。
+- 结论：**清缓存式冷进场在本机不可行**。可行的替代：
+  1. 维护方基准台（可 run-as 的 debuggable 设备 / 工程机）按本清单跑；
+  2. 或加一个**仅测量构建**的调试开关，让 warm/prefetch 与跨局程序缓存跳过读取（`debug.s2a.nvk_warm=0` 只停预热线程，程序缓存读取仍在，不足以制造冷首用；需专门「清单当作不存在」的测量开关）；
+  3. 或走到预热清单未覆盖的新区域（新内容首用）——需连续输入自动化，本机未做。
