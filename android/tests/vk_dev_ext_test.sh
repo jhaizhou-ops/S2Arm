@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 设备扩展查询的宿主单测：从 vk_device.c（缺省本仓的；可传别的路径做修前对照）摘出 device_extension_state 编进替身。
-#   摘不到 device_extension_state 时（修前的代码只有 has_device_extension）按修前语义包一层：回 0 / 1，没有「未知」。
+# 设备 / 实例扩展查询的宿主单测：从 vk_device.c（缺省本仓的；可传别的路径做修前对照）摘出 extension_state 编进替身。
+#   摘不到 extension_state 时（修前的代码只有 has_device_extension / has_instance_extension）按修前语义包一层：回 0 / 1，没有「未知」。
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 src=${1:-$repo/android/native/direct/vk_device.c}
@@ -24,9 +24,11 @@ while depth:
 open(sys.argv[3], 'w').write(s[m.start():i] + '\n')
 PY
 }
-if ! extract "$src" device_extension_state "$out/snippet.inc"; then
-  extract "$src" has_device_extension "$out/snippet.inc" || { echo '摘不到 has_device_extension' >&2; exit 2; }
-  printf 'static int device_extension_state(VkPhysicalDevice p, const char *name, char *why, size_t n) { (void)why; (void)n; return has_device_extension(p, name); }\n' >> "$out/snippet.inc"
+if ! extract "$src" extension_state "$out/snippet.inc"; then
+  extract "$src" has_instance_extension "$out/snippet.inc" || { echo '摘不到 has_instance_extension' >&2; exit 2; }
+  extract "$src" has_device_extension "$out/snippet.b" || { echo '摘不到 has_device_extension' >&2; exit 2; }
+  cat "$out/snippet.b" >> "$out/snippet.inc"
+  printf 'static int extension_state(VkPhysicalDevice p, const char *name, char *why, size_t n) { (void)why; (void)n; return p ? has_device_extension(p, name) : has_instance_extension(name); }\n' >> "$out/snippet.inc"
 fi
 build() { cc -std=c11 -Wall -Wextra -Werror -Wno-unused-function -I "$out/ndk" -I "$out" "$repo/android/tests/vk_dev_ext_test.c" -o "$out/$1"; }
 build test
@@ -40,8 +42,9 @@ PY
   if "$out/mutant" > "$out/mutant.log" 2>&1; then echo "FAIL: negative control escaped ($1)" >&2; exit 1; fi
   grep -q "$4" "$out/mutant.log" || { cat "$out/mutant.log" >&2; exit 1; }
   echo "PASS: negative control detects $1"
-  extract "$src" device_extension_state "$out/snippet.inc"
+  extract "$src" extension_state "$out/snippet.inc"
 }
 neg '第二次取数结果不检查' 'if (r != VK_SUCCESS || got > count) {' 'if (0) {' 'FAIL: second enumeration fails'
 neg 'VK_INCOMPLETE 不重取' 'if (r == VK_INCOMPLETE) { free(ext); continue; }' '' 'FAIL: list grows between calls'
+neg '实例查询走设备枚举' 'VkResult r = physical ? vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL) : vkEnumerateInstanceExtensionProperties(NULL, &count, NULL);' 'VkResult r = vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL);' 'FAIL: instance query used the wrong enumerator'
 neg '分配失败当不支持' 'if (!ext) { snprintf(why, why_n, "分配 %u 项失败（第 %d 轮）", count, round); return -1; }' 'if (!ext) return 0;' 'FAIL: allocation fails'
