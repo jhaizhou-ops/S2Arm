@@ -127,6 +127,11 @@ int s2a_pad_has_controller(void) {
     lock(); int result = active && selected() != S2A_PAD_TOUCH;
     pthread_mutex_unlock(&pad_mu); return result;
 }
+// 当前生效的输入来源（s2a_pad_source）：宿主按它挑六轴来源（玩家 1 的体感跟「谁在操作」走，ios/controller.m）
+int s2a_pad_selected_source(void) {
+    lock(); int source = (int)selected();
+    pthread_mutex_unlock(&pad_mu); return source;
+}
 uint32_t s2a_pad_read(int32_t axes[4], s2a_pad_source *source) {
     s2a_pad_snapshot snapshot;
     s2a_pad_read_ex(&snapshot);

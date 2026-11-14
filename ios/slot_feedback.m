@@ -1,9 +1,10 @@
-// 本地多手柄的震动与体感：玩家 2–4（槽 1–3，系统扩展手柄各一只；分槽见 ios/controller.m planSlots）。
-//   服务层（services/S2A.Services/ControllerFeedback.cs）按玩家把震动交给 s2a_pad_set_rumble_slot、按槽读 s2a_pad_read_motion_slot；
-//   导出协议同 Mac（macos/front_mac.m，#520）。原先 iOS 只有玩家 1 一路（controller.m 单例），玩家 2 起的震动和体感都没地方去。
-//   震动：每只手柄各一个 Core Haptics 引擎（GCDeviceHaptics），连续事件循环播放、两侧振幅取大调强度，1 秒没新帧自动停；失败退避 / 判死同 ios/haptic_retry.h。
-//     强度走设置里同一个震动开关与档位（controller.m s2a_ios_rumble_gain）和同一条手感曲线（s2a_hp_feel）。
-//   体感：每只手柄自己的 GCMotion（重力 + 用户加速度 + 角速度），换算成 NS2 坐标（runtime/include/phone_axes.h，同 Mac）；游戏要六轴时才开传感器。
+// 本地多手柄的震动与体感：槽 0 = 玩家 1，槽 1–3 = 玩家 2–4（系统扩展手柄各一只；分槽见 ios/controller.m planSlots）。
+//   体感：每只手柄自己的 GCMotion（重力 + 用户加速度 + 角速度），换算成 NS2 坐标（runtime/include/phone_axes.h，同 Mac）；
+//     游戏要六轴时才开传感器。玩家 1 的样本由 controller.m 的 s2a_pad_read_motion 经 s2a_pad_read_motion_slot(0, …) 取，
+//     服务层按槽读玩家 2–4（s2a_pad_read_motion_slot，ControllerFeedback 按玩家分发）。
+//   震动：玩家 2–4 每只手柄各一个 Core Haptics 引擎（GCDeviceHaptics），连续事件循环播放、两侧振幅取大调强度，1 秒没新帧自动停；
+//     失败退避 / 判死同 ios/haptic_retry.h。强度走设置里同一个震动开关与档位（controller.m s2a_ios_rumble_gain）和同一条手感曲线（s2a_hp_feel）。
+//     玩家 1 的震动仍走 controller.m 的单例（s2a_pad_rumble_session / system_play_on_queue）。
 #import <GameController/GameController.h>
 #import <CoreHaptics/CoreHaptics.h>
 #include "native.h"
@@ -162,11 +163,11 @@ static void motion_activate(GCController *c, BOOL on) {
     GCMotion *m = c.motion;
     if (m.sensorsRequireManualActivation) m.sensorsActive = on;
 }
-// 服务层按槽要体感（P2 起）：out[0]；返回 1 有样本、0 没有
+// 服务层按槽要体感（玩家 2–4）：out[0]；返回 1 有样本、0 没有。玩家 1 也走这里（controller.m 的 s2a_pad_read_motion）
 __attribute__((visibility("default"), used)) int s2a_pad_read_motion_slot(int slot, s2a_pad_motion out[2]) {
     if (!out) return 0;
     out[0] = out[1] = (s2a_pad_motion){0};
-    if (slot <= 0 || slot >= SLOT_PADS || !atomic_load(&g_active)) return 0;
+    if (slot < 0 || slot >= SLOT_PADS || !atomic_load(&g_active)) return 0;
     pthread_mutex_lock(&g_mu);
     int known = g_motion_known[slot];
     if (known) out[0] = g_motion[slot];
@@ -175,9 +176,10 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_motion_slot(int sl
 }
 
 // ---------- controller.m 调 ----------
-// 槽 slot 换了手柄（inputQueue 上，planSlots 分完槽）：nil = 空槽。旧手柄摘体感回调、停震动；新手柄装体感回调
+// 槽 slot 换了手柄（inputQueue 上，planSlots 分完槽；槽 0 = 玩家 1 由 attachSystem / clearSystem 调）：nil = 空槽。
+//   旧手柄摘体感回调、停震动；新手柄装体感回调
 void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
-    if (slot <= 0 || slot >= SLOT_PADS) return;
+    if (slot < 0 || slot >= SLOT_PADS) return;
     pthread_mutex_lock(&g_mu);
     GCController *old = g_owner[slot];
     if (old == c) { pthread_mutex_unlock(&g_mu); return; }
@@ -186,11 +188,14 @@ void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
     if (old) {
         old.motion.valueChangedHandler = nil;
         BOOL elsewhere = NO;
-        pthread_mutex_lock(&g_mu); for (int s = 1; s < SLOT_PADS; s++) if (g_owner[s] == old) elsewhere = YES; pthread_mutex_unlock(&g_mu);
+        pthread_mutex_lock(&g_mu); for (int s = 0; s < SLOT_PADS; s++) if (s != slot && g_owner[s] == old) elsewhere = YES; pthread_mutex_unlock(&g_mu);
         if (!elsewhere) { motion_activate(old, NO); dispatch_async(queue(), ^{ rumbler_stop([g_rumblers objectForKey:old]); }); }
     }
     GCMotion *m = c.motion;
     if (!m) { if (c) LOG("玩家手柄体感：玩家 %d（%s）没有体感传感器", slot + 1, c.vendorName.UTF8String ?: "?"); return; }
+    // 有传感器才打这一行：插上手柄第一眼就能分清「系统没给六轴」和「App 没读」，Joy-Con / Pro / DualSense / DS4 同一套路径
+    if (c) LOG("玩家手柄体感：玩家 %d（%s）已接上六轴（旋转 %s、重力/用户加速度 %s）", slot + 1, c.vendorName.UTF8String ?: "?",
+               m.hasRotationRate ? "有" : "无", m.hasGravityAndUserAcceleration ? "有" : "无");
     __weak GCController *weakC = c;
     m.valueChangedHandler = ^(GCMotion *motion) {
         if (!(motion.hasRotationRate && motion.hasGravityAndUserAcceleration)) return;
@@ -201,7 +206,7 @@ void s2a_ios_slot_feedback_owner(int slot, GCController *c) {
         s2a_pad_motion sample = {up_ns() / 1000, acceleration[0], acceleration[1], acceleration[2], gyro[0], gyro[1], gyro[2]};
         GCController *owner = weakC;
         pthread_mutex_lock(&g_mu);
-        for (int s = 1; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
+        for (int s = 0; s < SLOT_PADS; s++) if (owner && g_owner[s] == owner) { g_motion[s] = sample; g_motion_known[s] = 1; }
         pthread_mutex_unlock(&g_mu);
     };
     if (atomic_load(&g_motion_wanted)) motion_activate(c, YES);
@@ -212,7 +217,7 @@ void s2a_ios_slot_feedback_motion_wanted(int want) {
     if (atomic_exchange(&g_motion_wanted, want) == want) return;
     GCController *owners[SLOT_PADS];
     pthread_mutex_lock(&g_mu); for (int s = 0; s < SLOT_PADS; s++) owners[s] = g_owner[s]; pthread_mutex_unlock(&g_mu);
-    for (int s = 1; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], want);
+    for (int s = 0; s < SLOT_PADS; s++) if (owners[s]) motion_activate(owners[s], want);
 }
 // 前后台（controller.m 同 g_slots_active）与震动开关关掉时：后台不收、不震；关掉时马上停
 void s2a_ios_slot_feedback_active(int active) {
