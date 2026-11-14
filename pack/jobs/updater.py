@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import types
 import time
@@ -1023,16 +1024,52 @@ def clear_stale_pending(private_root, current):
     return True
 
 
-def swap(staged, install, backup, new):
-    """staged → install；失败时安装目录保持或恢复旧版，异常往外抛。"""
-    if new.exists():
-        remove_tree(new)   # 上一次换版中断留下的半份（#931：原先 shutil.rmtree 遇只读目录就抛，每次都报 update_swap_failed）
-    shutil.copytree(staged, new, symlinks=True)
-    move_dir(install, backup)
+SWAP_WATCHDOG = 180   # 换目录这一段（改名 / 拷贝）的时限：卡住（#965：系统「App 管理」保护挡住往 /Applications 里的 App 写文件时，写调用就停在那里）就装回旧版、记原因、拉起旧版
+
+
+def step(text):
+    """换版每一步记进 apply.log（apply 把标准错误接到了它）：#965 换版停在一半，日志里只有「apply 开始」一行，看不出停在哪"""
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}", file=sys.stderr, flush=True)
+
+
+def same_volume(a, b):
     try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def swap(staged, install, backup, new):
+    """staged → install；失败时安装目录保持或恢复旧版，异常往外抛。
+    #965：原先先把新版逐个文件拷进 /Applications 下的 .s2arm-new 再改名。往 /Applications 里的 App 包写文件会碰上 macOS「App 管理」保护：
+    替换进程是 App 退出后在后台跑的，系统要问的那个 App 已经不在，写调用被拒（v0.3.6 玩家：.s2arm-new/Contents/Resources PermissionError）
+    或一直停住（v0.3.7 玩家：.s2arm-new 只有半个 Contents、Info.plist 读不出、日志零记录、App 没重启）。
+    数据目录和 /Applications 在同一个卷（缺省 ~/Library/Application Support，都在数据卷）时只做三次整目录改名，不往任何 App 包里写文件；
+    不在同一个卷（数据目录放外置盘）才照旧拷贝"""
+    if new.exists():
+        step(f"清掉上次换版留下的 {new.name}")
+        remove_tree(new)   # 上一次换版中断留下的半份（#931：原先 shutil.rmtree 遇只读目录就抛，每次都报 update_swap_failed）
+    moved = same_volume(staged.parent, install.parent)
+    if moved:
+        step(f"新版改名到 {new}（同一个卷，只改名、不拷贝）")
+        retry_rename(staged, new)
+    else:
+        step(f"新版拷到 {new}（数据目录和安装目录不在同一个卷）")
+        shutil.copytree(staged, new, symlinks=True)
+    try:
+        step(f"旧版改名为 {backup.name}")
+        move_dir(install, backup)
+    except OSError:
+        if moved:
+            retry_rename(new, staged)   # 新版放回原处：pending.json 指的位置照样在
+        raise
+    try:
+        step(f"新版改名为 {install.name}")
         move_dir(new, install)
     except OSError:
         move_dir(backup, install)
+        if moved and new.exists():
+            retry_rename(new, staged)
         raise
 
 
@@ -1091,6 +1128,7 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
         if time.monotonic() >= deadline:
             return fail("update_app_busy", "S2Arm 没有退出，这次没有更新。", restart=False, keep_ready=True)
         time.sleep(0.5)
+    step(f"旧版 pid {pid} 已退出，开始换目录")
     health = updates / "health.ok"
     try:
         # A previous apply may have stopped between swap()'s two renames.
@@ -1110,8 +1148,16 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
                 remove_tree(bad)
         # 换目录之前清掉确认标记：此后出现的 health.ok 只能来自换上去的这一版
         health.unlink(missing_ok=True)
-        swap(staged, install, backup, new)
+        watchdog = threading.Timer(SWAP_WATCHDOG, stuck_swap, (staged, install, backup, new, private, args, launch))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            swap(staged, install, backup, new)
+        finally:
+            watchdog.cancel()
+        step("目录换好了，启动新版")
     except (OSError, shutil.Error):
+        step(f"换目录失败：{traceback.format_exc().strip().splitlines()[-1]}")
         remove_tree(new) if new.exists() else None
         if not holds_copy(install):   # 失败句和盘上一致：安装目录里读不到旧版就不说「已保留」（审计 P1-157）
             return fail("update_rollback_failed", "替换安装目录失败，旧版也没能恢复。请重新下载 S2Arm。", restart=False)
@@ -1124,10 +1170,12 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
     except (OSError, subprocess.SubprocessError):
         pass
     if health.exists():
+        step("新版起来了（health.ok），删掉旧版副本")
         remove_tree(backup)
         (updates / "pending.json").unlink(missing_ok=True)
         drop_version_dirs(updates)
         return 0
+    step(f"新版 {health_seconds} 秒内没起来，装回旧版")
     # 新版没能启动：装回旧版
     try:
         if install.exists():
@@ -1139,6 +1187,33 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
     if not holds_copy(install):
         return fail("update_rollback_failed", "新版没能启动，旧版也没能恢复。请重新下载 S2Arm。", restart=False)
     return fail("update_rolled_back", "新版没能启动，已回到旧版。")
+
+
+def stuck_swap(staged, install, backup, new, private, args, launch):
+    """换目录超过 SWAP_WATCHDOG 秒没完（写调用被系统挡住、一直不返回）：在看门狗线程里收尾——装回旧版、记原因、拉起旧版、退出整个进程
+    （卡住的那个调用取消不了，进程退出它就跟着没了）。旧版能不能装回都照实记"""
+    step(f"换目录 {SWAP_WATCHDOG} 秒没完成，判定卡住：装回旧版")
+    try:
+        if not holds_copy(install) and holds_copy(backup):
+            retry_rename(backup, install, seconds=10)
+        restored = holds_copy(install)
+    except OSError:
+        restored = False
+    code, message = ("update_swap_failed", "替换安装目录时被系统挡住、一直没完成，已保留旧版。可以下载新版的 DMG 覆盖安装。") if restored else \
+                    ("update_rollback_failed", "替换安装目录时被系统挡住，旧版也没能恢复。请下载新版的 DMG 重新安装。")
+    updates = Path(private) / "updates"
+    try:
+        (updates / "last_failure.json").write_text(json.dumps({"code": code, "message": message, "time": time.time()}, ensure_ascii=False), encoding="utf-8")
+        record_failure(types.SimpleNamespace(private_root=str(private)), code, message, f"换目录超时 {SWAP_WATCHDOG} 秒（新版 {staged} → {install}）")
+    except OSError:
+        pass
+    if restored:
+        try:
+            launch(Path(install), list(args))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    step(f"已记 {code}，退出替换进程")
+    os._exit(1)
 
 
 def record_failure(args, code, message, detail=""):
@@ -1187,6 +1262,11 @@ def main(argv=None):
             print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} apply 开始：{a.staged} → {a.install}（等 pid {a.pid} 退出）", file=sys.stderr)
         except OSError:
             pass
+        if hasattr(os, "setsid"):   # 自成一个会话 / 进程组：App 退出、被结束时发给它那一组的信号不会带上替换进程（#965）
+            try:
+                os.setsid()
+            except OSError:
+                pass
     # 打开时要看什么（inbox）：查版本、取公告都可能失败，失败不走下面的更新失败记录（不写 update.log），查不到就当没有新版、没有公告，界面照常
     if a.command == "inbox":
         try:

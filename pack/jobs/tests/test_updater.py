@@ -177,6 +177,48 @@ class ApplyTests(Base):
         self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
         self.assertEqual(launches, ["old"])
 
+    def test_same_volume_swap_only_renames_and_logs_each_step(self):
+        """#965：数据目录和安装目录同一个卷时，换版只做整目录改名、不往安装目录旁的新 App 里拷文件（拷文件会碰上 macOS「App 管理」保护被挡住）；
+        每一步记进 apply.log。期望（手写）：新版换上、staged 原地已被改走、copytree 一次都没调、日志有「只改名」「新版改名为」「新版起来了」"""
+        def ok(install, args): (self.private / "updates/health.ok").write_text("1")
+        log = self.private / "updates/apply.log"
+        with open(log, "a", encoding="utf-8") as f, patch.object(updater.sys, "stderr", f), \
+             patch.object(updater.shutil, "copytree", side_effect=AssertionError("同卷不该拷贝")):
+            self.assertEqual(self.run_apply(ok), 0)
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "new")
+        self.assertFalse(self.staged.exists())
+        text = log.read_text(encoding="utf-8")
+        for words in ("开始换目录", "只改名", "旧版改名为", "新版改名为", "新版起来了"):
+            self.assertIn(words, text)
+
+    def test_failed_swap_puts_renamed_new_version_back(self):
+        """#965：同卷改名走法，旧版改不了名（被占）→ 新版放回 staged 原处（pending 指的位置还在），旧版原样、被拉起"""
+        real = os.rename
+        def flaky(source, target):
+            if Path(source) == self.install or Path(source).parent == self.install: raise PermissionError(13, "locked")   # 整目录改名、逐项搬（move_dir 退路）都被拒
+            real(source, target)
+        launches = []
+        with patch.object(updater.os, "rename", flaky), patch.object(updater.time, "sleep", lambda s: None), \
+             patch.object(updater.time, "monotonic", side_effect=iter(range(0, 10**6, 100)).__next__):
+            self.assertEqual(self.run_apply(lambda i, a: launches.append((i / "S2Arm.exe").read_text())), 1)
+        self.assertEqual((self.staged / "S2Arm.exe").read_text(), "new")
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+        self.assertEqual(launches, ["old"])
+
+    def test_stuck_swap_restores_old_records_and_relaunches(self):
+        """#965：换目录卡住（写调用被系统挡住不返回）→ 看门狗装回旧版、写 last_failure.json 与 update.log、拉起旧版、退出进程。
+        场景手写：旧版已改名成 .s2arm-old、安装位置空着时卡住"""
+        backup = self.install.with_name(self.install.name + ".s2arm-old"); os.rename(self.install, backup)
+        launches = []
+        with patch.object(updater.os, "_exit", side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                updater.stuck_swap(self.staged, self.install, backup, self.install.with_name("x.s2arm-new"), self.private, ["--a"],
+                                   lambda i, a: launches.append(((i / "S2Arm.exe").read_text(), a)))
+        self.assertEqual((self.install / "S2Arm.exe").read_text(), "old")
+        self.assertEqual(launches, [("old", ["--a"])])
+        self.assertEqual(json.loads((self.private / "updates/last_failure.json").read_text())["code"], "update_swap_failed")
+        self.assertIn("update_swap_failed", (self.private / "logs/update.log").read_text(encoding="utf-8"))
+
     def test_install_folder_held_open_swaps_its_contents(self):
         # #379：下载工具持有安装目录本身的句柄，整目录改名一直被拒、里面的文件能改名 → 逐项换上新版，确认起来后旧副本删掉
         real = os.rename
