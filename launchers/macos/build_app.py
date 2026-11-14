@@ -122,7 +122,8 @@ def main():
                SWIFTPM_MODULECACHE_OVERRIDE=str(output / "swift-cache"))
     sdk_version = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-version"],
                                           env=env, text=True).strip()
-    command = ["swift", "build", "--disable-sandbox", "--cache-path", str(output / "spm-cache"),
+    # --disable-keychain：拉 Sparkle 二进制包时 SwiftPM 缺省去钥匙串找 github.com 凭据，钥匙串弹授权框等人点，无人值守的出包机就一直挂着（11-13 v0.3.10 候选卡 14 分钟）
+    command = ["swift", "build", "--disable-sandbox", "--disable-keychain", "--cache-path", str(output / "spm-cache"),
                "--package-path", str(ROOT / "launchers/macos"), "--scratch-path", str(output / "spm"), "-c", "release",
                # 不把出包机的源码绝对路径（#filePath / 断言位置）编进发布版：只映射源码目录（整个仓库根会连带改写 build/ 下的模块缓存路径）
                "-Xswiftc", "-file-prefix-map", "-Xswiftc", f"{ROOT / 'launchers/macos/Sources'}=Sources",
