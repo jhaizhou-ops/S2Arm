@@ -253,6 +253,13 @@ def _build(c):
         logs = c.logs / c.task
         logs.mkdir(parents=True, exist_ok=True)
         extraction = ensure_extract(c, game, selected_packages(game), env, logs)
+        import patches   # 金手指 / 社区补丁（11-12）：解包后按真构建号查库，交改写阶段（同 build.prepare）
+        patches.prepare(c, game, extraction, env, target="ios")   # iPhone 包不带画面类补丁（patches.fetch）
+        try:   # 原始程序存一份到这款游戏文件夹（v0.4.0）：以后补丁库更新，「S 级优化升级」只读它、不用回原件（pack/jobs/sgrade.py）
+            import sgrade
+            sgrade.save_program(c, gid, Path(extraction) / "exefs")
+        except OSError as e:
+            c.emit("message", f"【黄】原始程序没存下（以后升级要回原件）：{e}")
         kuan = oneclick_kuan(c, gid)
         if os.name != "nt" and not (out / "roots" / (kuan + "@现行")).exists():   # Windows 机上没有 Mac 包可克隆
             seed_from_sibling(c, game, out / "roots", kuan)
@@ -363,7 +370,7 @@ def _build(c):
     from library import _part_bytes
     image = layout.image_ios(c, gid)
     result = dict(compilerCache=cache_result, outputPath=str(image), ipa="", ipaBytes=0, packBytes=_part_bytes([image / layout.IOS_PACK]), buildId=res.get("build_id") or "", target=tgt, graphicsMode=res.get("graphics_mode") or "unknown",
-                  **({"notes": notes} if notes else {}))
+                  boost=patches.boost(c, game, image), **({"notes": notes} if notes else {}))
     if early:   # 打完放进容器装到这台：早装推过的不再推，push_pack 按机上已解开的清单只补差量（着色器库 + 变了的小文件）
         import install as inst
         c.begin("装到 iPhone 并补推资源包（出包期间已先推 %d 个文件）" % pre.get("files", 0))

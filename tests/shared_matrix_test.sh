@@ -144,6 +144,15 @@ PYEOF
 o=$(cd "$R" && PYTHONPATH="$H/tools" python3 "$T/shared_matrix_mut.py" --root "$R" --check 2>&1); r=$?
 ck "负对照：阉割 gap() 后 --check 应变绿（rc=${r}）" '[ $r = 0 ]'
 
+# 只认提交内容（11-14：门禁机检出目录复用，未跟踪的生成文件曾让真仓 --check 时红时绿）：合成仓提交成 git 仓，
+#   再丢一份未跟踪的生成 cmake（把 newmod 接进安卓）→ --check 输出必须与丢之前逐字相同
+(cd "$R" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm base) > /dev/null 2>&1
+o1=$(run --check); mkdir -p "$R/android/.cxx"
+printf 'set(core alpha oldgap newmod)\nforeach(x IN LISTS core)\n  list(APPEND SRCS runtime/src/${x}.c)\nendforeach()\n' > "$R/android/.cxx/gen.cmake"
+echo 'extern int s2a_newmod_ping(void); int g(void){ return s2a_newmod_ping(); }' > "$R/android/native/gen_use.c"
+o2=$(run --check)
+ck "未跟踪的生成文件不改变 --check 结果" '[ "$o1" = "$o2" ]'
+
 # ---------- 真仓门禁 ----------
 o=$(cd "$H" && python3 tools/shared_matrix.py --check 2>&1); r=$?
 ck "真仓 --check 与已提交基线一致（rc=${r}）" '[ $r = 0 ]'

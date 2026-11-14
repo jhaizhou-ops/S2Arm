@@ -65,7 +65,25 @@ def strip_comments(src):
     return "\n".join(out)
 
 
+_LS = {}
+
+
 def ls_files(root):
+    """仓库里已跟踪的文件（相对路径，排序）。11-14：只认提交内容——门禁机检出目录复用，别的分支 / 并行构建
+    留下的未跟踪文件（生成的 .cmake、obj 下的 .cs 等）曾让真仓 --check 时红时绿（两天害红二十多批）。同一 root 只问一次 git"""
+    key = str(Path(root).resolve())
+    if key not in _LS:
+        _LS[key] = _ls_files(root)
+    return _LS[key]
+
+
+def tracked_glob(root, pattern):
+    """在已跟踪文件里按通配找（代替 Path.glob 直接扫磁盘）→ 绝对 Path 列表，排序"""
+    d, base = os.path.split(pattern)
+    return [Path(root) / f for f in ls_files(root) if os.path.dirname(f) == d and fnmatch.fnmatchcase(os.path.basename(f), base)]
+
+
+def _ls_files(root):
     r = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
     if r.returncode == 0:
         return sorted(f for f in r.stdout.decode("utf-8", "surrogateescape").split("\0") if f)
@@ -171,7 +189,7 @@ def module_entries(root, mod):
         return types | eps, False
     if mod["kind"] == "gfx-csproj":
         syms = set()
-        for cs in sorted(Path(root).glob(os.path.dirname(mod["path"]) + "/*.cs")):
+        for cs in tracked_glob(root, os.path.dirname(mod["path"]) + "/*.cs"):
             t, e, _ = cs_types(read(cs))
             syms |= t | e
         return syms, False
@@ -203,11 +221,9 @@ def cmake_spans(lines):
 def android_cmake(root):
     """→ ({cmake 文件: 文本}, {文件: [core 名单]})；全部 android 的 CMakeLists.txt 与 *.cmake"""
     texts, sets = {}, {}
-    for d, _ds, fs in os.walk(Path(root) / "android"):
-        for f in fs:
-            if f == "CMakeLists.txt" or f.endswith(".cmake"):
-                p = Path(d) / f
-                texts[str(p.relative_to(root))] = read(p)
+    for f in ls_files(root):
+        if f.startswith("android/") and (f.endswith("/CMakeLists.txt") or f.endswith(".cmake")):
+            texts[f] = read(Path(root) / f)
     for f, t in texts.items():
         for m in re.finditer(r"foreach\((\w+)\s+IN\s+LISTS\s+(\w+)\)", t):
             end = t.find("endforeach", m.end())
@@ -614,7 +630,7 @@ def build_matrix(root):
                 else:
                     a_prod_names.update(
                         os.path.relpath(str(cs), root)
-                        for cs in Path(root).glob(os.path.dirname(m["path"]) + "/*.cs"))
+                        for cs in tracked_glob(root, os.path.dirname(m["path"]) + "/*.cs"))
         elif m["kind"] == "pack-stage":
             sw = stage_linked_wired(m, wiring, tg_a, tg_i)
             for plat in ("apple", "android"):

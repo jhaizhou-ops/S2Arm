@@ -215,6 +215,7 @@ def _copy_cover(c, tid, game, metadata, icon):
 
 
 STORE_RETRY = 7 * 86400   # 商店给了定论（抓到 / 商品页 404 / 没有合格横图）的款，7 天内不再查；断网 / 超时 / 预算用尽不算查过，下次照查
+STORE_LOGIC = 2   # 取图逻辑的版本：storeSettled 只在同版本下算数。2 = 美区 404 再查港区（11-14，亚洲版程序号原先被美区 404 定论锁 7 天）；以后取图口径放宽就加一
 STORE_BUDGET = 10.0       # 每次最多花的联网时间（秒）：单页 / 单图各一跳短超时（banner_fetch），超了剩下的下次再查
 
 
@@ -229,7 +230,7 @@ def store_todo(c, ids=None):
         d = layout.find_game(c, gid)
         if g.get("englishName") and d is not None and (d / "banner.jpg").is_file():
             continue
-        if ids is None and now - float(g.get("storeSettled") or 0) < STORE_RETRY:   # 旧字段 storeChecked（断网也记）不认：11-13 前一次没联上就锁 7 天
+        if ids is None and g.get("storeLogic") == STORE_LOGIC and now - float(g.get("storeSettled") or 0) < STORE_RETRY:   # 旧字段 storeChecked（断网也记）不认：11-13 前一次没联上就锁 7 天
             continue
         todo.append(gid)
     return todo
@@ -310,7 +311,7 @@ def store_meta(c, ids=None, budget=STORE_BUDGET):
                     banner, name, settled = got[gid]
                     g.pop("storeChecked", None)
                     if settled:
-                        g["storeSettled"] = int(now)
+                        g["storeSettled"], g["storeLogic"] = int(now), STORE_LOGIC
                     if name and layout._ascii_name(name) and not g.get("englishName"):
                         g["englishName"] = name.strip()
                     if banner:
@@ -1868,6 +1869,7 @@ def catalog(c):
         game["needsPreparation"] = not game["ready"] or manifest.get("inputIdentity") != input_identity(game)
         game["iphoneReady"] = iphone_ready(c, game["id"])
         game["downstream"] = downstream.describe(c, game)   # 下游深度方案（pack/downstream/schemes.json）：命中时启动器弹确认页
+        game["sgrade"] = sgrade_badge(c, game["id"], image)   # 游戏库封面左上角金色 S（v0.4.0）
         game["iphoneRestorable"] = layout.phone_ipa(c, previous=True).is_file()   # 换壳后可装回上一版（install.restore_previous）
         game["iphoneInstall"] = layout.install_record(c, game["id"])
         game["onPhone"] = game["id"].upper() in on_phone
@@ -2159,6 +2161,31 @@ def _prune_roots(c, d):
 
 def _windows_layout():   # 单测可打桩：Windows 的产物根在 work/ 下（ipa.current_root）
     return os.name == "nt"
+
+
+def table_rows(path):
+    """补丁表（cpatch.tsv）里的条目数（去掉表头）；没有 / 读不了 = 0"""
+    try:
+        return max(0, sum(1 for line in open(path, encoding="utf-8") if line.strip()) - 1)
+    except OSError:
+        return 0
+
+
+def sgrade_badge(c, gid, image):
+    """游戏库封面左上角的金色 S（v0.4.0 维护者）：这款有 S 级优化——Mac 运行版本或 iPhone 程序件里已经打进了社区补丁 / 金手指，
+    或者补丁库（随启动器的快照）里有这款的包、下次起局 / 更新 iPhone 就会补上（pack/jobs/rewrite_refresh.py）。出包页取消过「出包时打入」的款不亮"""
+    gid = gid.upper()
+    if layout.game_info(c, gid).get("sgradeOff") is True:
+        return False
+    if table_rows(Path(image) / "cpatch.tsv") or table_rows(layout.ios_kit(c, gid) / "cpatch.tsv"):
+        return True
+    import patches
+    main = Path(image) / "exefs/main"
+    try:
+        bid = main.read_bytes()[0x40:0x48].hex().upper() if main.is_file() else (layout.game_info(c, gid).get("ios") or {}).get("mainBid", "")
+        return patches.has_match(c, gid, bid)
+    except (OSError, ValueError):
+        return False
 
 
 CONTAINER_KIT = layout.IOS_KIT   # 每款 image/ios/kit：装机组装容器要用的文件，出包成功后从产物根存一份独立副本（游戏库结构 v3；旧布局是 iPhone/<号>/container-kit）

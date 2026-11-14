@@ -55,6 +55,16 @@ static void samples_xy(int s, uint32_t *sx, uint32_t *sy) {
 // its 1024×1024 ASTC 6×6 textures (48 GOBs wide instead of 43, level 1 at 0x90000 instead of 0x81000) read 2,183 all-zero blocks in level 0 and 3,043 in level 1, which ASTC
 // decodes as its error colour (magenta clothes)
 enum { SPARSE_TILE = 0x10000 };
+// S2Arm（11-13 金手指堆偏移根修）：可压缩贴图（NVN_TEXTURE_FLAGS_COMPRESSIBLE 0x8、非线性）在有压缩种类的格式上，真驱动按大页给：对齐 64 KB、
+//   大小取整到 64 KB。实测（奥德赛 SDK 驱动，Mac 上跑游戏自带驱动逐格式对比 128×128 单级）：放大的是 32 / 64 / 128 位颜色格式
+//   （R32* 0x0a–0x0c、RG16* / RG32* 0x11–0x18、RGBA8* / RGBA16* / RGBA32* 0x25–0x30、RGBA8_SRGB 0x38、RGB10A2* 0x3d–0x3e、R11G11B10F 0x3f）与
+//   全部深度格式（0x32 D16、0x34 D32F、0x35 D24S8、0x36 D32FS8）；8 / 16 位颜色、块压缩、线性的不放大。0x33 D24、0x37 RGBX8_SRGB 没被探到，
+//   按同一规律（深度 / 32 位颜色）算进来。按 512 答会让游戏从自己堆里少分配，此后的堆对象整体前移（奥德赛差 0x10000，按真机偏移写的金手指写错地方）
+static int compress_big(const nvn_texdesc *d) {
+    if (!(d->flags & 0x8) || (d->flags & (0x10 | 0x40)) || d->target == 10) return 0;
+    int f = d->format;
+    return (f >= 0x0a && f <= 0x0c) || (f >= 0x11 && f <= 0x18) || (f >= 0x25 && f <= 0x30) || (f >= 0x32 && f <= 0x38) || (f >= 0x3d && f <= 0x3f);
+}
 static int sparse_of(const nvn_texdesc *d) { return (d->flags & 0x20) && !(d->flags & (0x10 | 0x40)) && d->target != 10; }
 // The shape of a sparse texture's 64 KB page, chosen by texel size (log2: GOB columns *x, block height *y in GOBs, block depth *z); 0 when the texture has no sparse pages.
 // A sparse texture without a packaged layout is laid out with this block height / depth, not the automatic one: Samurai Shodown's 512×512 ASTC 6×6 sparse textures
@@ -142,6 +152,7 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     o->layer_size = ls;
     o->size = layered ? ls * z : ls;
     o->align = sparse_of(d) ? SPARSE_TILE : 512;
+    if (compress_big(d)) { o->align = 0x10000; o->size = (o->size + 0xffff) & ~(uint64_t)0xffff; }   // 见 compress_big：同真驱动大页
 }
 
 uint64_t nvn_tex_level_offset(const nvn_texdesc *d, unsigned level) {
