@@ -2550,6 +2550,27 @@ static void t_draw(void) {   // 绘制：状态在绘制时才变成后端的管
       CHECK(g_gdraws == g0 + 2 && g_last_da.count == 12 && g_last_da.itype == 2 && g_last_da.base_vertex == 2 && g_last_pdesc.prim_restart == 0);
       { const uint32_t exp2[12] = {5, 6, 7, 5, 7, 8, 20, 21, 22, 20, 22, 23}; CHECK(!memcmp(g_arena + g_last_da.ioff, exp2, sizeof exp2)); }
       nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); }
+    // #977 重启值不是全 1：带索引的直接条带绘制改写成 32 位索引（等于重启值的 → 0xFFFFFFFF，原来的全 1 保持原值、不再触发重启）。
+    // 期望序列按定义手算，不跑被测函数。
+    { int g0 = g_gdraws; stream q = {0}; p_prim_restart *pr;
+      uint16_t ri[7] = {0, 1, 2, 0x1234, 3, 4, 5}; memcpy(g_pmem + 3 * PG + 1536, ri, sizeof ri);
+      uint16_t rk[8] = {0, 1, 2, 0x1234, 3, 4, 0xffff, 5}; memcpy(g_pmem + 3 * PG + 1600, rk, sizeof rk);
+      // ① 重启值 0x1234、u16 三角带
+      pr = put(&q, OP_PRIM_RESTART, sizeof *pr); pr->on = 1; pr->index = 0x1234;
+      di = put(&q, OP_DRAW_IDX, sizeof *di); di->prim = 5; di->itype = 1; di->count = 7; di->base_vertex = 3; di->ibuf = base + 3 * PG + 1536; end(&q); submit1(&q); fake_complete(NVN_GPU_DONE_OK);
+      CHECK(g_gdraws == g0 + 1 && g_last_da.prim == 5 && g_last_pdesc.prim_restart == 1 && g_last_da.itype == 2 && g_last_da.ibuf == &g_arena_buf && g_last_da.base_vertex == 3 && g_last_da.count == 7);
+      { const uint32_t e[7] = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 5}; CHECK(g_last_da.itype == 2 && g_last_da.count == 7 && !memcmp(g_arena + g_last_da.ioff, e, sizeof e)); }
+      // ② 同一重启值，索引里本来有 0xFFFF：保持原值（u32 的 0x0000FFFF，不再当重启）
+      q.n = 0; di = put(&q, OP_DRAW_IDX, sizeof *di); di->prim = 5; di->itype = 1; di->count = 8; di->ibuf = base + 3 * PG + 1600; end(&q); submit1(&q); fake_complete(NVN_GPU_DONE_OK);
+      { const uint32_t e[8] = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 0xFFFFu, 5}; CHECK(g_gdraws == g0 + 2 && g_last_da.itype == 2 && g_last_da.count == 8 && !memcmp(g_arena + g_last_da.ioff, e, sizeof e)); }
+      // ③ 间接绘制碰到这种重启值：具名记账、不画
+      q.n = 0; di = put(&q, OP_DRAW_IDX, sizeof *di); di->prim = 5; di->itype = 1; di->ibuf = base + 3 * PG + 1536; di->ind = base + 3 * PG + 2048; end(&q); submit1(&q); fake_complete(NVN_GPU_DONE_OK);
+      CHECK(g_gdraws == g0 + 2 && nvn_unimpl_count("draw", "indirect_restart_index_not_all_ones") == 1);
+      // ④ 负对照：重启值本来就是全 1（u16 0xFFFF）不改写，索引与重启原样交给后端
+      q.n = 0; pr = put(&q, OP_PRIM_RESTART, sizeof *pr); pr->on = 1; pr->index = 0xffff;
+      di = put(&q, OP_DRAW_IDX, sizeof *di); di->prim = 5; di->itype = 1; di->count = 8; di->ibuf = base + 3 * PG + 1600; end(&q); submit1(&q); fake_complete(NVN_GPU_DONE_OK);
+      CHECK(g_gdraws == g0 + 3 && g_last_da.itype == 1 && g_last_da.ibuf != &g_arena_buf && g_last_da.ioff == 3 * PG + 1600 && g_last_da.count == 8 && g_last_pdesc.prim_restart == 1);
+      q.n = 0; pr = put(&q, OP_PRIM_RESTART, sizeof *pr); pr->on = 0; end(&q); submit1(&q); fake_complete(NVN_GPU_DONE_OK); }
     // 线环（2）、四边形带（8）、多边形（9）（#710）：期望的图元号与索引序列都是按定义手算的，不跑被测的展开函数
     { int g0 = g_gdraws; stream q = {0}; p_prim_restart *pr;
       // ① 线环、不带索引、3 个点：线段列表 (0,1)(1,2)(2,0)，首点进 base vertex
@@ -2622,8 +2643,8 @@ static void t_draw(void) {   // 绘制：状态在绘制时才变成后端的管
     stream x = {0}; p_bind_state *bs = put(&x, OP_BIND_STATE, sizeof *bs); bs->kind = 4; poly_st po = {NVN_FACE_FRONT, NVN_FRONT_FACE_CW, NVN_POLYGON_MODE_FILL, 0}; memcpy(bs->bytes, &po, sizeof po);
     di = put(&x, OP_DRAW_IDX, sizeof *di); di->prim = 4; di->itype = 1; di->count = 3; di->ibuf = base + 3 * PG; end(&x);
     submit1(&x); fake_complete(NVN_GPU_DONE_OK);
-    CHECK(g_gdraws == d0 + 16);   // 新拓扑6笔 + 点模式1笔成功；不支持的线模式不绘制
-    uint64_t dr_n = 0, sk_n = 0; rp_draw_stats(&dr_n, &sk_n); CHECK(dr_n == 19 && sk_n == 4);
+    CHECK(g_gdraws == d0 + 19);   // 新拓扑6笔 + 点模式1笔成功 + #977 重启值改写 3 笔；不支持的线模式不绘制
+    uint64_t dr_n = 0, sk_n = 0; rp_draw_stats(&dr_n, &sk_n); CHECK(dr_n == 22 && sk_n == 5);   // #977 间接 + 非全 1 重启值跳过 1 笔
     g_resolve_rc = 0; t_draw_mdi();   // 间接计数多绘：放在 t_draw 末尾、池和贴图还没释放时，沿用同一套绑定（它多画的几笔不扰动上面按笔数的断言）
     g_resolve_rc = 0; nvn_be_tex_release(&rtt); nvn_be_tex_release(&tx); nvn_be_pool_del(g_pmem); pass_fresh();
 }
