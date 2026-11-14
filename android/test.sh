@@ -527,6 +527,14 @@ fi
 s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/readonly-copy/texture_read_test.py"
 # 共享 guest 入口的主线程 fault 状态准入顺序（真实 guest_main.c；fault/SDK 端点为合成夹具；11-01 #1309 接线）。
 s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/run_guest_entry.py" --out "$out/guest-entry"
+# 主 guest 运行态发布（#961）：真实 HostApi / runtime / guest_main / session / direct_prompt 一起编链，带 5 个回退负对照。
+#   GNU ld --wrap 与 host_android.c 的 eventfd 只在 Linux；Android 日志头取固定 NDK 29 的真头。
+if [ "$(uname -s)" = Linux ]; then
+    s2a_gate_step "$PY" "$android_dir/core-link/runtime-tests/run_save_running.py" --out "$out/save-running" \
+        --ndk-include "${ndk_cc%/bin/*}/sysroot/usr/include"
+else
+    s2a_gate_note "未测：run_save_running.py（主 guest 运行态发布）需 Linux（GNU ld --wrap、eventfd）"
+fi
 # Q19/#530：C# 绑定入口 vs Android 单库实际链接定义（fixture + 当前树正例）。
 s2a_gate_step python3 "$android_dir/core-link/link_symbols.py"
 s2a_gate_step "$PY" "$android_dir/core-link/tests/t_link_symbols.py"
