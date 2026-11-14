@@ -191,6 +191,22 @@ def runtime_env(c, game, runtime, input_ok=True):
         path = c.private / "runtime-input" / game["id"] / (c.task + ".json")
         atomic(path, config)
         env["S2A_INPUT_CONFIG"] = str(path)
+    # 玩家 2–4 自己的键位（启动器按玩家保存的 input-pN.json，键位设置里选玩家）：有就照玩家 1 同一套校验后交给宿主
+    #   （S2A_INPUT_CONFIG_P2..P4；front_mac.m 槽 i = 玩家 i+1，各手柄照自己玩家的映射采样）；没存的那位照玩家 1 的键位。
+    #   input_ok = False（宿主不认键位映射）时不带，同玩家 1 的口径
+    if input_ok:
+        for player in (2, 3, 4):
+            player_config = read(layout.path(c, game["id"], f"input-p{player}.json", create=False))
+            if not player_config:
+                continue
+            try:
+                validate_input(player_config)
+            except Failure as e:   # 映射不合规（旧版本 / 手改坏了）：这位照玩家 1 的键位照常玩，不挡
+                print(f"[起局] 玩家 {player} 的键位映射不合规（{e}），这位照玩家 1 的键位", file=sys.stderr, flush=True)
+                continue
+            path = c.private / "runtime-input" / game["id"] / f"{c.task}-player{player}.json"
+            atomic(path, player_config)
+            env[f"S2A_INPUT_CONFIG_P{player}"] = str(path)
     if c.r.get("inputGuideHandled") is True:
         env["S2A_INPUT_GUIDE_SHOWN"] = "1"
     if c.r.get("uiLanguage") in ("zh-Hans", "zh-Hant", "en"):   # 宿主自己的界面文案（按键引导等）跟启动器界面语言；不再决定游戏语言（见上 gameLanguage）

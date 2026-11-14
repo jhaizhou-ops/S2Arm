@@ -1,6 +1,8 @@
 // S2Arm（不是上游文件）：手柄 / 键位设置弹窗（同旧启动器 InputEditor：看键位、改键、恢复默认、保存）。
 // 左边是 Joy-Con 按键图（自旧启动器 ControllerMap 搬来），点一个键在右边改它的键盘 / 鼠标 / 手柄绑定；下面是鼠标与摇杆选项。
-// 保存走 saveInput 作业（S2ArmLauncherModel+Input），成了自动关；没成的原因留在弹窗里。改键下次开始游戏时生效。
+// 键位按玩家保存（本地最多 4 位玩家）：上面选玩家 1–4，各自一份键位、各自保存（玩家 1 = 这款的 input.json，玩家 2–4 = input-pN.json）；
+//   切玩家不丢没保存的改动（留在弹窗里，保存才写盘）。保存走 saveInput 作业（S2ArmLauncherModel+Input），成了留着弹窗继续改别的玩家；
+//   没成的原因留在弹窗里。改键下次开始游戏时生效（起局时玩家 2–4 的交给宿主，槽位各照各的映射采样）。
 import AppKit
 import SwiftUI
 import NXCore
@@ -13,8 +15,13 @@ struct InputSettingsSheet: View {
     @EnvironmentObject var loc: Localizer
     @Environment(\.dismiss) private var dismiss
     let gameID: String
+    @State private var player = 1
     @State private var config = InputConfig.standard
     @State private var baseline = InputConfig.standard
+    /// 每位玩家的工作副本（切玩家时不丢未保存的改动）与各自的基线（上次保存 / 读出的）
+    @State private var configs: [Int: InputConfig] = [:]
+    @State private var baselines: [Int: InputConfig] = [:]
+    @State private var problems: [Int: Bool] = [:]
     @State private var loaded = false
     @State private var loadProblem = false
     @State private var selected = "A"
@@ -100,8 +107,19 @@ struct InputSettingsSheet: View {
         })
         .onAppear {
             guard !loaded else { return }
-            let input = model.loadInput(gameID: gameID)
-            config = input.config; baseline = input.config; loadProblem = input.problem; loaded = true
+            for p in 1...4 {
+                let input = model.loadInput(gameID: gameID, player: p)
+                configs[p] = input.config; baselines[p] = input.config; problems[p] = input.problem
+            }
+            config = configs[player] ?? .standard; baseline = baselines[player] ?? .standard
+            loadProblem = problems[player] ?? false
+            loaded = true
+        }
+        .onChange(of: config) { configs[player] = $0 }   // 改动实时记到当前玩家的工作副本上（切玩家不丢）
+        .onChange(of: player) { p in
+            config = configs[p] ?? .standard; baseline = baselines[p] ?? .standard
+            loadProblem = problems[p] ?? false
+            selected = "A"; recording = nil; failure = nil; rebind = nil
         }
         .frame(width: 640, height: 720)
         .background(LauncherPalette.background)
@@ -116,6 +134,21 @@ struct InputSettingsSheet: View {
             Text(t("title")).font(.manrope(26, .heavy)).tracking(-0.6)
             Text(game?.name ?? gameID).font(.manrope(14, .semibold)).foregroundStyle(.secondary).lineLimit(1)
             Text(t("subtitle")).font(.manrope(12.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            // 玩家选择（本地最多 4 位玩家）：每位玩家一份键位、各自保存；切玩家不丢没保存的改动
+            HStack(spacing: 10) {
+                Text(t("player")).font(.manrope(12.5, .semibold)).foregroundStyle(.secondary)
+                LauncherSegmented(options: (1...4).map { (value: String($0), label: t("player\($0)")) },
+                                  selection: String(player), choose: { value in
+                    guard let p = Int(value), p != player, !saving else { return }
+                    configs[player] = config   // 保险：切之前把这位的改动先记下（平时 onChange(of: config) 已记）
+                    player = p
+                })
+                    .frame(width: 320)
+                    .disabled(saving)
+                    .accessibilityIdentifier("input.player")
+            }
+            .padding(.top, 6)
+            Text(t("player.note")).font(.manrope(11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if loadProblem {
                 Text(t("loadProblem")).font(.manrope(12.5)).foregroundStyle(LauncherPalette.building)
                     .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
@@ -317,11 +350,12 @@ struct InputSettingsSheet: View {
         guard canSave else { return }
         saving = true; failure = nil
         let config = config
+        let player = player
         Task {
             do {
-                try await model.saveInput(config, gameID: gameID)
-                baseline = config; saving = false
-                dismiss()
+                try await model.saveInput(config, gameID: gameID, player: player)
+                baselines[player] = config; configs[player] = config; saving = false
+                // 成了不关弹窗：键位按玩家分开保存，留着继续给别的玩家改（切玩家用上面的选择器）
             } catch {
                 failure = names.saveFailure(error.localizedDescription, backend: loc.backend)
                 saving = false
@@ -368,7 +402,8 @@ struct InputNames {
     func saveFailure(_ message: String, backend: (String) -> String) -> String {
         let known = ["不支持的输入映射格式。": "format", "输入映射不完整。": "incomplete", "无效输入目标。": "target", "无效键盘映射。": "keyboard",
                      "无效鼠标映射。": "mouse", "无效手柄映射。": "gamepad", "无效摇杆映射。": "axis", "输入映射存在重复绑定。": "duplicate",
-                     "摇杆死区必须在 0 到 1 之间。": "deadzone", "无效鼠标选项。": "mouseOptions", "鼠标灵敏度必须在 0.1 到 10 之间。": "sensitivity"]
+                     "摇杆死区必须在 0 到 1 之间。": "deadzone", "无效鼠标选项。": "mouseOptions", "鼠标灵敏度必须在 0.1 到 10 之间。": "sensitivity",
+                     "无效的玩家序号。": "player"]
         if let id = known[message] { return text("error." + id) }
         return text("error.failed").replacingOccurrences(of: "{0}", with: backend(message))
     }

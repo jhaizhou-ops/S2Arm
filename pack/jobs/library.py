@@ -2699,9 +2699,14 @@ def validate_input(config):
 
 def save_input(c):
     config = validate_input(c.r["config"])
+    # player：键位设置的玩家（1–4；1 / 没给 = 玩家 1 的 input.json，2–4 = 这款文件夹的 input-pN.json）。
+    #   起局时 build.py 读这些文件交给宿主（S2A_INPUT_CONFIG_P2..P4，槽位各照各玩家的映射采样）
+    player = c.r.get("player", 1)
+    if type(player) is not int or not 1 <= player <= 4 or (player != 1 and not c.r.get("gameId")):
+        raise Failure("无效的玩家序号。")
     if c.r.get("gameId"):
         c.game()
-        target = layout.path(c, c.r["gameId"], "input.json")
+        target = layout.path(c, c.r["gameId"], "input.json" if player == 1 else f"input-p{player}.json")
     else:
         target = c.private / "default-input.json"
     atomic(target, config)
