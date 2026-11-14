@@ -62,3 +62,5 @@ int main(void) {
     printf("%s replay CLEAR_TEX: 3 layers x 4 x 4 RGBA readback, failures=%d\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
+
+uint64_t rp_frame(void) { return 0; }

@@ -114,3 +114,5 @@ int main(void) {
     printf("%s replay T2B: 64 RGBA bytes and 8 BC1 bytes, failures=%d\n", g_fail ? "FAIL" : "PASS", g_fail);
     return g_fail ? 1 : 0;
 }
+
+uint64_t rp_frame(void) { return 0; }
