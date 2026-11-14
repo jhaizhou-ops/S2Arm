@@ -137,6 +137,9 @@ void s2a_emul_store_bench(void) { LOG("Android 使用完整读回；未运行 Ma
 #include <sys/mman.h>
 #include <stdatomic.h>
 #include "s2a_emul_ld.h"
+// 门的起止（entry.S）：弱引用放文件级——只链 crash.c 的单测没有 entry.S，强引用会让程序一加载就找不到符号；生产里两个符号都在
+__attribute__((weak_import)) extern void sw_gate(void);
+__attribute__((weak_import)) extern char sw_gate_end[];
 // 拦写模拟自测（帧率能耗线 10-24，拦写模拟开着时（缺省开，S2A_TRACK_EMUL_STORE=0 关）起局跑一次）：一张只读测试页上连写 N 次，每次都「缺页 → 信号里经可写别名模拟 → 返回」，
 // 总时长 / N = 每次缺页 + 模拟的全部成本（含内核投递信号与返回；写跟踪计数里的每次耗时不含这一段）。测试页的缺页在信号处理最前面认领，不进写跟踪
 static _Atomic uint64_t g_esb_page;
@@ -241,7 +244,7 @@ static void on_crash(int sig, siginfo_t *si, void *ctx) {
         uint32_t esr = ((ucontext_t *)ctx)->uc_mcontext->__es.__esr, ec = esr >> 26;
         // 栈指针未对齐（EC 0x26）：Switch 不查、苹果查，替游戏做这一条读写（emul_sp.c）。范围 = 游戏代码（含补丁区）+ 系统调用门进出两头
         //   （门用客体 sp 借 32 字节，entry.S [sw_gate, sw_gate_end)）；宿主自己的代码不会让 sp 不对齐，不在此列
-        { int s2a_emul_sp_unaligned(void *); extern void sw_gate(void); extern char sw_gate_end[];
+        { int s2a_emul_sp_unaligned(void *);
           uint64_t pc0 = ((ucontext_t *)ctx)->uc_mcontext->__ss.__pc;
           int gate = pc0 >= (uint64_t)(uintptr_t)sw_gate && pc0 < (uint64_t)(uintptr_t)sw_gate_end;
           if (ec == 0x26 && (gate || module_of((void *)pc0)) && s2a_emul_sp_unaligned(ctx)) { atomic_fetch_add_explicit(&g_sp_unaligned, 1, memory_order_relaxed); return; } }

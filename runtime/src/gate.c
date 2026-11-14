@@ -9,6 +9,8 @@
 #endif
 #include <pthread.h>
 #include <stdlib.h>
+// 弱缺省定义：真定义在 crash.c（同一个程序里强定义盖过它）；只链 gate.c 的单测没有 crash.c，用这份返回 0
+__attribute__((weak)) uint64_t s2a_sp_unaligned_count(void) { return 0; }
 
 enum { G_SVC, G_CNTPCT, G_CNTVCT, G_WIDE, G_SPIN, G_AREGION };
 typedef struct { uint64_t ret; int kind, arg; uint64_t orig; } gate_t;
@@ -104,7 +106,7 @@ void s2a_svc_red_summary(void) {   // 退出时一行，健康表读：空 = 报
     for (int i = 0; i < 256; i++) { uint64_t n = atomic_load(&g_red[i]); if (n && k < sizeof b - 32) k += (size_t)snprintf(b + k, sizeof b - k, " %#x×%llu", i, (unsigned long long)n); }
     LOG("未实现系统调用：%s", k ? b : " 无");
     // 栈指针未对齐的读写替游戏做了几条（crash.c / emul_sp.c s2a_emul_sp_unaligned；Switch 不查 SP 对齐、苹果查）：有才报
-    { __attribute__((weak)) uint64_t s2a_sp_unaligned_count(void); uint64_t n = s2a_sp_unaligned_count ? s2a_sp_unaligned_count() : 0;
+    { uint64_t n = s2a_sp_unaligned_count();
       if (n) LOG("栈指针未对齐：替游戏模拟了 %llu 条读写（Switch 不查栈对齐，苹果查）", (unsigned long long)n); }
 }
 
