@@ -74,6 +74,7 @@ int main(void) {
             printf("%s present case %d: %zu pixels, %zu differ from RGB %u,%u,%u\n", pass ? "PASS" : "FAIL", mode, pixels, bad, want, want, want);
             failures += !pass;
         }
+        printf("%s t_nvn_present_init: 3 cases, %u failed\n", failures ? "✗" : "✓", failures);
         return failures != 0;
     }
 }
