@@ -58,6 +58,11 @@ uint32_t nvk_fu_unsafe_ms(void) __attribute__((weak));
 #pragma weak s2a_fu_budget_spend
 #pragma weak s2a_fu_wait_decide
 #pragma weak s2a_fu_rt_mark_seen
+// rp_frame 定义在 rp_entry.c（rp_exec.h 强声明）：契约 / 模拟机型档的宿主夹具不链它。
+// 弱化后缺实现时取 0——这些路径只在首用异步开着（rp_fu_enabled）才会走到，夹具里
+// 没链 demand 层、开关恒关，取 0 分支实际不触发；真机 / 全量构建仍绑到 rp_entry.c 的强定义。
+#pragma weak rp_frame
+static uint64_t rp_fu_frame(void) { return rp_frame ? rp_frame() : 0; }
 
 static int rp_fu_enabled(void) { return nvn_vk_pipe_demand_on && nvn_vk_pipe_demand_on(); }
 static uint64_t rp_fu_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
@@ -91,7 +96,7 @@ static int rp_fu_storage_write(void) {
 // iOS skip_safe：无 storage 写 + 每个颜色/深度目标本帧 fresh + 近两帧 steady。任一不满足就不许跳。
 static int rp_fu_skip_safe(const p_set_rt *rt) {
     if (!rt || rp_fu_storage_write()) return 0;
-    const uint64_t frame = rp_frame();
+    const uint64_t frame = rp_fu_frame();
     int targets = 0;
     for (int i = 0; i < rt->n && i < 8; i++) {
         const tex_t *t = rt->color[i];
@@ -125,7 +130,7 @@ static nvn_gpu_rc rp_draw_pipe_async(const nvn_gpu_pipe_desc *pd, const p_set_rt
     if (k == RP_FU_DEMAND_READY) { *out = cached; return rp_fu_ok(); }
     if (k != RP_FU_DEMAND_PENDING)   // NONE / FAILED：回退现场建（拿真实结果/错误，与关闭开关同义）
         return nvn_gpu_pipe_get(pd, NVN_GPU_PIPE_SYNC, out, err);
-    const uint64_t frame = rp_frame();
+    const uint64_t frame = rp_fu_frame();
     const int may_skip = rp_fu_skip_safe(rt);
     int late = 0, stuck = 0;
     if (nvn_vk_pipe_demand_marks) nvn_vk_pipe_demand_marks(pd, ident, &late, &stuck);
@@ -1013,7 +1018,7 @@ void rp_draw(nvn_gpu_cmd c, const p_draw *dr, const p_draw_idx *di, const void *
     nvn_gpu_draw(c, &a);
     // 首用跳过判据的 seen 标记：本笔真画成了，每个颜色/深度目标记「近两帧画过」（跳过的笔不走到这里，故不记）。
     if (rp_fu_enabled()) {
-        uint64_t ff = rp_frame();
+        uint64_t ff = rp_fu_frame();
         for (int i = 0; i < rt->n && i < 8; i++) { const tex_t *t = rt->color[i]; if (!t) continue;
             s2a_fu_rt_mark_seen(t->serial, t->mem ? (uint64_t)(uintptr_t)t->mem : 0, (uint64_t)t->d.format, ff); }
         if (rt->depth) { const tex_t *t = rt->depth;
