@@ -83,7 +83,17 @@ extension S2ArmLauncherModel {
         switch updateState { case .idle, .failed: break; default: return }
         updateFailure = nil
         updateState = .working("update.downloading", 0)
+        saveUpdateNotes()
         sparkleUpdate.checkAndDownload()
+    }
+
+    /// 换上新版后第一次打开要弹「这版更新了什么」（updater.py inbox 读 updates/notes/<版本>.json）：说明随查到的新版记在本机，换完不再联网
+    private func saveUpdateNotes() {
+        guard let update = availableUpdate, let version = update["version"] as? String, let notes = update["notes"], !(notes is NSNull),
+              JSONSerialization.isValidJSONObject(notes), let data = try? JSONSerialization.data(withJSONObject: notes) else { return }
+        let folder = provider.client.environment.privateRoot.appendingPathComponent("updates/notes")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? data.write(to: folder.appendingPathComponent("\(version).json"))
     }
 
     /// 只有玩家点了才重启。有局 / 任务在跑：先拦下说清（草图④：前置检查，不进换版）。替换、回滚、重启都由 Sparkle 做

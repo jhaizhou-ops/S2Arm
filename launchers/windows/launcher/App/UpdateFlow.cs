@@ -243,6 +243,7 @@ public sealed partial class EnvironmentWindow
     {
         if (updateProgress.Length > 0) return;
         updateFailure = ""; updateFailureMessage = ""; updateProgress = T("update.downloading").Replace("{0}", "0"); Render();
+        SaveUpdateNotes();
         try
         {
             var info = await Sparkle().CheckForUpdatesQuietly(true);
@@ -255,6 +256,19 @@ public sealed partial class EnvironmentWindow
             await Sparkle().InitAndBeginDownload(updates[0]);   // 下载、验签完成走 DownloadFinished，失败走 DownloadHadError
         }
         catch (Exception error) { Fail("update_failed", error.Message); }
+    }
+
+    /// <summary>换上新版后第一次打开要弹「这版更新了什么」（updater.py inbox 读 updates/notes/&lt;版本&gt;.json）：说明随查到的新版记在本机</summary>
+    private void SaveUpdateNotes()
+    {
+        if (availableUpdate is not { } update || !update.TryGetProperty("version", out var v) || !update.TryGetProperty("notes", out var notes)
+            || notes.ValueKind != JsonValueKind.Object) return;
+        try
+        {
+            var folder = Path.Combine(UpdatesFolder, "notes"); Directory.CreateDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, v.GetString() + ".json"), notes.GetRawText());
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private void RestartToUpdate()
