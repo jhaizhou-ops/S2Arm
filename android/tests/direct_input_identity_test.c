@@ -323,6 +323,89 @@ int main(void) {
             printf("  identity worst case = %zu B (cap %d)\n", bn, S2A_INPUT_IDENTITY_MAX);
     }
 
+    // ---- 解码（F4.3）：只接受能原样重编码的 blob，坏输入必须明确失败 ----
+    // 判据不是“解出来了”，而是「decode(blob) 成功 ⇔ encode(decode(blob)) 逐字节等于 blob」。
+    {
+        static struct s2a_input_identity_decoded dec;
+        static uint8_t again[4096];
+        char why[192] = "";
+        size_t an = 0;
+        CHECK(s2a_input_identity_decode(base, n, &dec, why, sizeof why) == 0 && !why[0],
+              "canonical identity decodes");
+        CHECK(dec.id.direct_abi == in.direct_abi && dec.id.stage_mask == in.stage_mask &&
+              dec.id.texture_count == in.texture_count, "decoded identity keeps its header fields");
+        CHECK(dec.id.translator_closure && !strcmp(dec.id.translator_closure, in.translator_closure),
+              "decoded closure points into the decode storage");
+        CHECK(dec.id.gfx == &dec.gfx && dec.id.textures == dec.tex, "decoded pointers are internal");
+        CHECK(dec.id.ubo_use[1] == in.ubo_use[1] && dec.id.source_code_bytes[0] == in.source_code_bytes[0],
+              "decoded identity keeps ubo_use and real source lengths");
+        CHECK(dec.tex[0].format && !strcmp(dec.tex[0].format, texts[0].format) &&
+              dec.tex[1].sampler_type && !strcmp(dec.tex[1].sampler_type, texts[1].sampler_type) &&
+              dec.tex[1].cbuf_slot == texts[1].cbuf_slot && dec.tex[1].separate == texts[1].separate,
+              "decoded texture facts keep indices resolved back to the stored names");
+        // 严格对称：解码结果重编码必须逐字节等于原 blob。
+        CHECK(s2a_input_identity_encode(&dec.id, again, sizeof again, &an) == 0 && an == n &&
+              !memcmp(again, base, n), "decode -> encode is byte-identical to the input");
+        if (n > 0) {
+            static uint8_t bad[4096];
+            memcpy(bad, base, n);
+            why[0] = 0;
+            CHECK(s2a_input_identity_decode(base, n - 1, &dec, why, sizeof why) != 0 && why[0],
+                  "truncated blob is rejected with a reason");
+            memcpy(bad, base, n); bad[0] = 'X';
+            CHECK(s2a_input_identity_decode(bad, n, &dec, why, sizeof why) != 0 && why[0],
+                  "foreign magic is rejected");
+            memcpy(bad, base, n); bad[5] = 7;
+            CHECK(s2a_input_identity_decode(bad, n, &dec, why, sizeof why) != 0 && why[0],
+                  "unknown identity version is rejected");
+            memcpy(bad, base, n); bad[n] = 0;
+            CHECK(s2a_input_identity_decode(bad, n + 1, &dec, why, sizeof why) != 0 && why[0],
+                  "trailing bytes after the canonical input are rejected");
+            // closure 是第一个字符串（magic 5 + 版本 1 + directABI 4 = 偏移 10 处的 u32 长度）。
+            memcpy(bad, base, n);
+            bad[10] = 0xff; bad[11] = 0x7f;   // 32767 字节 > 解码存储上限
+            CHECK(s2a_input_identity_decode(bad, n, &dec, why, sizeof why) != 0 && why[0],
+                  "string longer than the decode storage is rejected");
+            // 纹理事实的最后一条固定 17 字节：stage(1) handle(4) cbufSlot(4) target(1) format(2) flags(1) array(4)。
+            // target 索引 9 与索引 1 都叫 "2d"，只有编码器会产出的 1 是规范索引。
+            memcpy(bad, base, n);
+            bad[n - 17 + 9] = 9;
+            CHECK(s2a_input_identity_decode(bad, n, &dec, why, sizeof why) != 0 && why[0],
+                  "non-canonical texture target index is rejected");
+            memcpy(bad, base, n);
+            bad[n - 17 + 12] = 0x80;   // 纹理标志字节只有低 3 位有意义（stage1 handle4 cbuf4 target1 format2 flags1 array4）
+            CHECK(s2a_input_identity_decode(bad, n, &dec, why, sizeof why) != 0 && why[0],
+                  "unknown texture flag bits are rejected");
+            // 字符串超过解码存储上限：编码端接受任意 closure 串（provider 的 closure 字段本身 128 字节），
+            // 解码端必须明确拒绝，绝不截断成“看起来相同”的输入。
+            {
+                struct s2a_input_identity lc = in;
+                char long_closure[200];
+                memset(long_closure, 'c', sizeof long_closure);
+                long_closure[sizeof long_closure - 1] = 0;
+                lc.translator_closure = long_closure;
+                static uint8_t lbuf[8192];
+                size_t ln = 0;
+                CHECK(s2a_input_identity_encode(&lc, lbuf, sizeof lbuf, &ln) == 0, "long closure still encodes");
+                why[0] = 0;
+                CHECK(s2a_input_identity_decode(lbuf, ln, &dec, why, sizeof why) != 0 && why[0],
+                      "closure longer than the decode storage is rejected, not truncated");
+            }
+            // 版本必须由内容决定：v4 blob 改成 v3 后重编码会变成另一版，必须拒绝。
+            struct s2a_input_identity wide = in;
+            wide.ubo_use[0] = 0x38;   // 旧 5 位窗口外的 cbuf 位 → v4
+            static uint8_t wbuf[4096];
+            size_t wn = 0;
+            CHECK(s2a_input_identity_encode(&wide, wbuf, sizeof wbuf, &wn) == 0 &&
+                  wn > 5 && wbuf[5] == 4, "wide constantBufferUse identity is v4");
+            memcpy(bad, wbuf, wn); bad[5] = 3;
+            CHECK(s2a_input_identity_decode(bad, wn, &dec, why, sizeof why) != 0 && why[0],
+                  "identity version that contradicts its content is rejected");
+            CHECK(s2a_input_identity_decode(wbuf, wn, &dec, why, sizeof why) == 0,
+                  "wide identity still decodes (rejection above is about the version byte)");
+        }
+    }
+
     // 容量不足：准确失败，不截断成“看似相同”的输入。
     CHECK(s2a_input_identity_encode(&in, other, 64, &n2) != 0, "small buffer is rejected");
     CHECK(s2a_input_identity_encode(NULL, other, sizeof other, &n2) != 0, "missing input is rejected");

@@ -27,6 +27,27 @@ static uint64_t g_gap_last, g_gap_bucket[5];
 // 验收要「平均帧、p99、>33 ms 帧数」，分桶只能看个大概，直方图能直接出这三个数。
 static uint32_t g_gap_hist[256];
 static uint64_t g_gap_over33;   // 超过 33 毫秒的帧数（精确按纳秒判，不走直方图取整）
+// 管线缓存局中写盘在触发线程上的耗时：后端 nvn_gpu_stats 报的进程累计纳秒（pipe_cache_save_trigger_ns），
+// 帧边界取一次差分。nvn_gpu_stats 是后端契约里的诊断入口（线程 [任意]）；宿主回放单测不链后端，
+// 这里按弱引用处理（同 rp_entry.c 的 nvn_ft_written）：没有实现时这一项显示 0，不改变既有日志与回放语义。
+// 只在上屏线程、只在长帧日志打开时查（nvn_gpu_stats 要锁后端、走一遍统计表）。
+extern void nvn_gpu_stats(nvn_gpu_stat_fn fn, void *user, int take) __attribute__((weak));
+struct plc_ns_rd { uint64_t ns; int got; };
+static uint64_t g_plc_ns_last;   // 上次取到的累计值（只在 [上屏] 动）
+static void plc_ns_cb(void *user, const char *name, uint64_t value) {
+    if (strcmp(name, "pipe_cache_save_trigger_ns")) return;
+    ((struct plc_ns_rd *)user)->ns = value;
+    ((struct plc_ns_rd *)user)->got = 1;
+}
+static uint64_t plc_save_ns_frame(void) {
+    if (!nvn_gpu_stats) return 0;   // 没有后端读数（宿主单测 / 后端没开）：这一项显示 0
+    struct plc_ns_rd rd = {0, 0};
+    nvn_gpu_stats(plc_ns_cb, &rd, 0);   // take = 0：后端别的读数还有消费者，别在这里清零
+    if (!rd.got) return 0;
+    uint64_t d = rd.ns - g_plc_ns_last;   // 进程累计只增
+    g_plc_ns_last = rd.ns;
+    return d;
+}
 static void frame_gap_note(void) {
     uint64_t now = plat_now_ns(), d = g_gap_last ? now - g_gap_last : 0; g_gap_last = now;
     if (!d) return;
@@ -35,15 +56,20 @@ static void frame_gap_note(void) {
     uint32_t ms = (uint32_t)(d / 1000000ull); if (ms > 255) ms = 255;
     __atomic_fetch_add(&g_gap_hist[ms], 1, __ATOMIC_RELAXED);
     if (d > 33333333ull) __atomic_fetch_add(&g_gap_over33, 1, __ATOMIC_RELAXED);
-    // 长帧日志（缺省开，扫坑用）：一次超过 80 毫秒就把上一帧的账打出来——回放花了多久、画了多少笔、提交几次。
-    // 回放接近这个间隔说明卡在我们这边；回放很小则说明卡在游戏线程 / present / 等窗口（不归回放层管）。
-    static int hl = -1; if (hl < 0) hl = nvn_plat_flag("nvk_hitch_log", 0) != 0;   // 缺省关：排查顿卡时开
+    // 长帧日志（缺省关，排查顿卡时开）：一次超过 80 毫秒就把上一帧的账打出来——回放花了多久、画了多少笔、提交几次，
+    // 以及本帧回放各分项花在哪（分项账见 rp_exec.c「逐帧分项账」；每帧只取一次、取即清零）。
+    // 开关与逐帧分项账共用 rp_fr_perf_on() 缓存的那一个值（nvk_hitch_log）。
+    static int hl = -1;
     uint64_t ex = 0, dr = 0, sb = 0; rp_frame_take(&ex, &dr, &sb);   // 每帧都取（不清账时相邻两帧会累加，读数会虚高）
-    if (hl && d > 80000000ull) {
-        char lb[220];
-        snprintf(lb, sizeof lb, "长帧 %.1f 毫秒（上一帧：回放 %.1f 毫秒、绘制 %llu 笔、提交 %llu 次）",
-                 (double)d / 1e6, (double)ex / 1e6, (unsigned long long)dr, (unsigned long long)sb);
-        nvn_plat_log(NVN_PLAT_LOG_INFO, "present", lb);
+    if (hl < 0) hl = rp_fr_perf_on();
+    if (hl) {
+        uint64_t fr[RP_FR_N]; rp_fr_perf_take(fr);   // 本帧分项：与回放账同一个帧边界，每帧只取一次
+        fr[RP_FR_PLC] = plc_save_ns_frame();          // 管线缓存写盘：后端统计项的帧差分
+        if (d > 80000000ull) {
+            char lb[512];
+            rp_hitch_line(lb, sizeof lb, d, ex, dr, sb, fr);
+            nvn_plat_log(NVN_PLAT_LOG_INFO, "present", lb);
+        }
     }
 }
 static void rp_frame_gap_take(uint64_t out[5]) { for (int i = 0; i < 5; i++) out[i] = __atomic_exchange_n(&g_gap_bucket[i], 0, __ATOMIC_RELAXED); }

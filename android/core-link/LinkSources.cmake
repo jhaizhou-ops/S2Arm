@@ -86,6 +86,12 @@ function(s2a_android_nvk_sources output)
         native/direct/compile_worker.c native/direct/program_cache.c native/direct/offline_library.c
         native/direct/compile_request.c native/direct/input_identity.c native/direct/texture_facts.c
         native/nvn/nvn_vk_program_result.c native/nvn/nvn_vk_compute_request.c native/gfx_plat/nvk_shader.c
+        # 首次使用的准备工作下沉（iOS 蓝本 nvn_mtl.m warm_start/pso_pend 的 Vulkan 版）：
+        #   nvn_vk_prog_warm  程序预热清单（跨会话程序内容身份 → 读盘/解析/建设备对象 → 发布到 g_progs）
+        #   nvn_vk_pipe_warm  管线预热清单（完整 nvn_gpu_pipe_desc 配方 → 后台 nvn_gpu_pipe_get）
+        #   nvn_vk_pipe_once  「同一配方只有一份」的双检装载（提交线程与预热线程并发建管线）
+        #   nvn_warm          一个有界后台线程按清单顺序喂上面两类工作（先程序后管线）
+        native/nvn/nvn_vk_prog_warm.c native/nvn/nvn_vk_pipe_warm.c native/nvn/nvn_vk_pipe_once.c native/nvn/nvn_warm.c
         # nvn_gpu_* 的 Vulkan 后端与它的零件
         native/nvn/backend_vulkan.c native/nvn/nvn_vk_format.c native/nvn/nvn_vk_bcdec.c
         native/nvn/nvn_vk_driver_cache.c   # 驱动管线缓存落盘文件层（backend_vulkan.c 的 plc_open / plc_close 用；SHA-256 用上面的 sha256.c）

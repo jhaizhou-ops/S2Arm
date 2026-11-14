@@ -101,6 +101,14 @@ int rp_fence_done(uint64_t f);       // 栅栏值 f 及之前交出去的活显�
 extern int rp_split_draws;       // 中途交段：每段的笔数（见 rp_exec.c）
 uint64_t rp_seg_serial(void);   // 第几个后端段：段里的暂存内容（arena 切片）只在同一段里能复用
 void rp_frame_take(uint64_t *exec_ns, uint64_t *draws, uint64_t *subs);   // 取走本帧的回放耗时 / 绘制笔数 / 提交次数（长帧日志用）
+// 逐帧分项账（长帧归因，开关 nvk_hitch_log）：5 秒窗口的 rp_perf 混了多帧，回答不了「这一帧的时间花在哪」。
+// 这一组只在帧边界由上屏线程取走一次（取即清零），累计点与 rp_perf 的 D_* 同源（见 rp_exec.c 的 fr_perf_project）。
+// 口径：取程序 / 开通道 / 取管线 / 绑定 / 后端绘制 / 收尾各占一笔绘制里的一段；「后端取与设」「管线缓存写盘」
+// 嵌套在取管线里，只细分显示、不再加进合计。
+enum { RP_FR_PROG, RP_FR_PASS, RP_FR_PIPE, RP_FR_PGET, RP_FR_BIND, RP_FR_DRAW, RP_FR_TAIL, RP_FR_PLC, RP_FR_N };
+int rp_fr_perf_on(void);   // 开关（nvk_hitch_log，进程内缓存一次，与长帧日志同一个值）：关着时帧级分项不做任何累计
+void rp_fr_perf_take(uint64_t out[RP_FR_N]);   // [上屏] 取走本帧分项并清零；每帧只调一次（与 rp_frame_take 同一个帧边界）
+int rp_hitch_line(char *b, size_t n, uint64_t gap_ns, uint64_t exec_ns, uint64_t draws, uint64_t subs, const uint64_t fr[RP_FR_N]);   // 长帧行（见 rp_exec.c）
 uint64_t rp_sub_serial(void);   // 第几次提交（一次提交内可复用的暂存内容按它判）
 void rp_perf_take(uint64_t out[RP_PERF_N]);
 void rp_draw_reset(void);

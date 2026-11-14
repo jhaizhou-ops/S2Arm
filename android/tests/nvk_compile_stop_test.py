@@ -92,10 +92,15 @@ int s2a_direct_provider_compile_context(struct s2a_direct_compile_context *c) {
     source += '\n#include "nvk_compile_stop_test.c"\n'
     variant = out/'fixture.c'; variant.write_text(source)
     inc = (out, include, ROOT/'android/tests', ROOT/'runtime/include', native, native/'nvn', native/'direct', gfx, gfx/'replay', gfx/'gfx/nvn', gfx/'gfx/nvn/include', ROOT/'android/tests/vkhost')
-    libs = [gfx/'replay/nvn_unimpl.c', gfx/'replay/rp_state.c', native/'nvn/nvn_vk_compute_request.c', ROOT/'runtime/src/direct_host.c']
+    libs = [gfx/'replay/nvn_unimpl.c', gfx/'replay/rp_state.c', native/'nvn/nvn_vk_compute_request.c',
+            native/'nvn/nvn_vk_prog_warm.c', ROOT/'runtime/src/direct_host.c']
     libs += [native/'direct'/f for f in ('source_store.c', 'control.c', 'input_identity.c', 'texture_facts.c', 'sha256.c', 'json.c', 'compile_request.c')]
     strip = '-Wl,-dead_strip' if sys.platform == 'darwin' else '-Wl,--gc-sections'
     cc = [os.environ.get('CC', 'cc'), '-std=c11', '-O1', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-ffunction-sections', '-fdata-sections', '-pthread']
+    # 与 nvk_shader_pool_test.py 同一条：host_link 自动补链的 offline_library.c / program_cache.c
+    # 在 strict c11 glibc 下要特性宏（realpath / O_CLOEXEC / openat …）；只加给非 macOS（苹果 libc 不需要）。
+    if sys.platform != 'darwin':
+        cc.append('-D_GNU_SOURCE')
     cc += ['-I'+str(p) for p in inc]
     test_shader = native/'gfx_plat/nvk_shader.c'
     if sys.argv[1:] == ['--withdraw-stop']:

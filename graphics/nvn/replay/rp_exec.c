@@ -44,11 +44,58 @@ struct sub { uint32_t mids, freed; uint8_t orphan;   /* mids：还没完成的�
              struct post *p; int n, cap, nfx; /* nfx：p 里时间戳报告以外的条数 */ uint64_t t_commit; struct occ_ev *oe; int noe, oecap; uint64_t fence; struct gw_ev *gw; int ngw, gwcap;
     uint64_t *oc; uint32_t noc, occ_base; };   // oc：中途交过段的提交，各段的遮挡槽结果按整次提交的槽号攒在这里（没拆过为 NULL）；occ_base：最后一段的第一个槽号
 // 分时读数（上屏那边每 5 秒取走一次清零）：一次队列提交里回放花的、交给后端花的、游戏等围栏花的、段从提交到完成隔了多久
+// 回放层只从这里取时刻。宿主单测（android/tests/replay_exec_time_test.c）把本文件整个编进测试 TU 时先定义
+// S2A_RP_EXEC_TEST_CLOCK，换成测试可控的虚拟钟（否则「一帧回放花了多久」没有手算得出的期望值）；
+// 生产构建不带这个宏，走的就是下面那行 CLOCK_MONOTONIC，行为与开销都不变。
+#ifdef S2A_RP_EXEC_TEST_CLOCK
+uint64_t s2a_rp_test_clock_ns(void);   // 测试提供
+static uint64_t now_ns(void) { return s2a_rp_test_clock_ns(); }
+#else
 static uint64_t now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
+#endif
 static uint64_t g_pf[RP_PERF_N];
 void rp_perf_take(uint64_t out[RP_PERF_N]) { for (int i = 0; i < RP_PERF_N; i++) out[i] = __atomic_exchange_n(&g_pf[i], 0, __ATOMIC_ACQ_REL); }
 static void pf_add(int i, uint64_t v) { __atomic_fetch_add(&g_pf[i], v, __ATOMIC_RELAXED); }
-void rp_perf_add(int i, uint64_t v) { pf_add(i, v); }
+
+// ---------- 逐帧分项账（长帧归因，开关 nvk_hitch_log） ----------
+// 5 秒窗口的 g_pf 混了多帧，回答不了「这一帧的 227 毫秒花在哪」。这里另起一组只在帧边界由 [上屏] 取走的计数器，
+// 累计点就是 rp_perf_add 的同一批（见 fr_slot_of：取程序 / 开通道 / 取管线 / 绑定 / 后端绘制 / 收尾）。
+// 只投影「每笔绘制的每一步已经各记一次」的那几项，不在 OP_CALL 递归 / 通道 / 收尾这些嵌套层再做汇总——
+// 子步骤的时间已经记在各自的项里，再汇总一次就是重复统计（与 W1 帧级回放耗时同一条规矩）。
+// 开关是 nvk_hitch_log（与长帧行同一个值，进程内缓存一次）：关着时每次 rp_perf_add 只多一次缓存判断，
+// 不取时刻、不分配、不写。
+static uint64_t g_fr_perf[RP_FR_N];
+static int g_fr_perf_state = -1;   // -1 = 开关还没读；0 = 关；1 = 开
+static int fr_perf_on(void) {
+    if (g_fr_perf_state < 0) g_fr_perf_state = nvn_plat_flag("nvk_hitch_log", 0) != 0;
+    return g_fr_perf_state;
+}
+int rp_fr_perf_on(void) { return fr_perf_on(); }
+void rp_fr_perf_take(uint64_t out[RP_FR_N]) {
+    for (int i = 0; i < RP_FR_N; i++) out[i] = __atomic_exchange_n(&g_fr_perf[i], 0, __ATOMIC_RELAXED);
+}
+// RP_PERF_* → 帧级分项：只挑长帧行要的几项；返回 -1 = 这一项不进逐帧账。
+static int fr_slot_of(int i) {
+    switch (i) {
+        case RP_PERF_D_PROG: return RP_FR_PROG;   // 取程序
+        case RP_PERF_D_PASS: return RP_FR_PASS;   // 开通道
+        case RP_PERF_D_PIPE: return RP_FR_PIPE;   // 取管线（后端取与设 / 管线缓存写盘嵌套在里面）
+        case RP_PERF_D_PGET: return RP_FR_PGET;   //   其中后端取管线 + 设管线：只细分显示，不进合计
+        case RP_PERF_D_BIND: return RP_FR_BIND;   // 绑定
+        case RP_PERF_D_DRAW: return RP_FR_DRAW;   // 后端绘制
+        case RP_PERF_D_TAIL: return RP_FR_TAIL;   // 收尾
+        default: return -1;
+    }
+}
+// 逐帧分项的唯一投影点：rp_perf_add 的累计点本来就是「每笔绘制的每一步各记一次」，
+// 这里不取时刻、不做任何汇总，只把同一个数抄进帧级槽；
+// 嵌套层（OP_CALL / 通道 / 收尾）不在这里重算——子步骤已经各记一次，再汇总就是重复统计。
+static void fr_perf_project(int i, uint64_t v) {
+    if (!fr_perf_on()) return;   // 开关关着：一次缓存判断，之后什么也不做
+    int k = fr_slot_of(i);
+    if (k >= 0) __atomic_fetch_add(&g_fr_perf[k], v, __ATOMIC_RELAXED);
+}
+void rp_perf_add(int i, uint64_t v) { pf_add(i, v); fr_perf_project(i, v); }   // 5 秒窗口 + 帧级分项（后者只在 nvk_hitch_log 打开时记）
 // GPU 忙时估算：每段完成时按完成顺序累计「显卡真正在跑」的区间（判 GPU 到底忙多久、是不是墙）。
 // busy += done_i - max(commit_i, done_{i-1})（第一段：done_0 - commit_0）。commit 在提交前取，done 在完成回调里取；
 // 完成回调线程与提交线程都碰 g_busy_last_done，用一把锁串起来（每段一次，量级可忽略）。
@@ -448,26 +495,60 @@ void rp_frame_take(uint64_t *exec_ns, uint64_t *draws, uint64_t *subs) {
     *draws = __atomic_exchange_n(&g_fr_draws, 0, __ATOMIC_RELAXED);
     *subs = __atomic_exchange_n(&g_fr_subs, 0, __ATOMIC_RELAXED);
 }
-void nvn_be_exec(const uint8_t *p) {
+// 长帧行：既有格式一字不动，末尾追一句「本帧」分项（只在 nvk_hitch_log 打开且帧间隔超阈值时由 [上屏] 调）。
+// gap_ns：这一帧的帧间隔；exec_ns / draws / subs：上一帧的回放账（rp_frame_take）；fr：上一帧的分项（rp_fr_perf_take）。
+// 合计 = 取程序 + 开通道 + 取管线 + 绑定 + 后端绘制 + 收尾（六项按顺序占一笔绘制的整段）；
+// 「后端取与设」「管线缓存写盘」嵌套在取管线里，只作细分，不再加进合计（加了就是重复计）。
+// 其余 = 回放 - 合计：回放里还没归因的部分（命令循环本身 / 不在绘制各步上的命令）。
+// 线程：[上屏]。不取时刻、不分配；返回 snprintf 的返回值（截断时调用方可按它判）。
+int rp_hitch_line(char *b, size_t n, uint64_t gap_ns, uint64_t exec_ns, uint64_t draws, uint64_t subs, const uint64_t fr[RP_FR_N]) {
+    if (!b || !n) return 0;
+    const uint64_t sum = fr[RP_FR_PROG] + fr[RP_FR_PASS] + fr[RP_FR_PIPE] + fr[RP_FR_BIND] + fr[RP_FR_DRAW] + fr[RP_FR_TAIL];
+    return snprintf(b, n,
+        "长帧 %.1f 毫秒（上一帧：回放 %.1f 毫秒、绘制 %llu 笔、提交 %llu 次）；本帧 取程序 %.2f、开通道 %.2f、取管线 %.2f（后端取设 %.2f、管线缓存写盘 %.2f）、绑定 %.2f、后端绘制 %.2f、收尾 %.2f 毫秒；合计 %.2f 毫秒（回放里其余 %.2f 毫秒）",
+        (double)gap_ns / 1e6, (double)exec_ns / 1e6, (unsigned long long)draws, (unsigned long long)subs,
+        (double)fr[RP_FR_PROG] / 1e6, (double)fr[RP_FR_PASS] / 1e6, (double)fr[RP_FR_PIPE] / 1e6,
+        (double)fr[RP_FR_PGET] / 1e6, (double)fr[RP_FR_PLC] / 1e6,
+        (double)fr[RP_FR_BIND] / 1e6, (double)fr[RP_FR_DRAW] / 1e6, (double)fr[RP_FR_TAIL] / 1e6,
+        (double)sum / 1e6, (double)exec_ns / 1e6 - (double)sum / 1e6);
+}
+// 回放一条命令列表；返回这次调用花的时间（纳秒：只有 nvk_exec_tm 打开时才有值，给父层的 OP_CALL 账扣子列表用）。
+// 语义：帧级回放耗时（长帧日志的「回放 xx 毫秒」）只在最外层（g_ret_n == 0，即 nvn_be_submit 直接调进来的那一次）
+//   取一次时刻、在唯一出口（下面 out:）累加一次：OP_END 与坏记录（rec_bad）都走同一个出口，不会每层各加一次
+//   （N 层放大 N 倍），也不会像修前 rec_bad 那条路漏计。里层的 OP_CALL 子列表不动帧级账——它的时间已经包括在
+//   最外层的墙钟里。iOS 蓝本 nvn_mtl.m 的 nvn_be_exec 用显式返回栈（g_cstk_ret）逐条走，天然没有「每层各记一段」
+//   的形态；这里把同一条口径做成结构：最外层取时刻 + 单点退出累加。
+// 线程：[提交]（回放线程）；OP_CALL 的递归也在同一条线程上，嵌套深度记在 g_ret_n。
+// 生命周期：无（只读命令流，写帧级账 / 逐命令账两个全局计数器）。
+// 出错：没有失败路径；坏记录与深度超限按未接登记后照常结束本列表（不返回假成功）。
+static uint64_t exec_list(const uint8_t *p) {
     static int inited; if (!inited) { inited = 1; rp_state_reset(); }
-    if (!p) return;
-    const uint64_t fr_t0 = now_ns();
+    if (!p) return 0;   // 没有列表：不取时刻、不计时（上沿允许 nvn_be_exec(NULL)）
     // 回放耗时按命令类别分（开关 debug.s2a.nvk_exec_tm，缺省 0）：绘制类 vs 其余（传输 / 整屏清除 / 派发 / 状态），
     // 用来判「回放总时长里有多少不在 rp_draw 的各步上」。取时刻本身有开销，只在量的时候开。
     static int tm = -1;
     if (tm < 0) tm = nvn_plat_flag("nvk_exec_tm", 0) != 0;
+    const int outer = g_ret_n == 0;   // 最外层：帧级账只在这里记
+    // 最外层为帧级账取时刻；里层只在逐命令计时打开时取，用来自报本层耗时（父层 OP_CALL 要扣掉子列表）。
+    const int timed = outer || tm;
+    const uint64_t t0 = timed ? now_ns() : 0;
     for (;;) {
         nvn_plat_safepoint();   // 一次提交可连续回放数秒：让平台的停世界事务在命令之间越过本线程（nvn_plat.h）
         op_hdr h; memcpy(&h, p, sizeof h);
-        if (rec_bad(h)) { nvn_unimpl("rec", "bad_record", p); return; }   // 按这条列表的 END 处理
+        if (rec_bad(h)) { nvn_unimpl("rec", "bad_record", p); break; }   // 按这条列表的 END 处理：走下面唯一的出口
         uint64_t t_cmd = tm ? now_ns() : 0;
         const void *a = p + 8;
         switch (h.op) {
-            case OP_END: __atomic_fetch_add(&g_fr_exec_ns, now_ns() - fr_t0, __ATOMIC_RELAXED); return;
+            case OP_END: goto out;   // 唯一出口：帧级账在那边按「是否最外层」累加一次
             case OP_JUMP: { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
             case OP_CALL: { uint64_t t; memcpy(&t, a, 8);
                 if (g_ret_n >= 64) { nvn_unimpl("rec", "call_depth_over_64", p); break; }
-                g_ret_n++; nvn_be_exec((const uint8_t *)(uintptr_t)t); g_ret_n--;
+                g_ret_n++; uint64_t sub = exec_list((const uint8_t *)(uintptr_t)t); g_ret_n--;
+                // 逐命令账：OP_CALL 只记这个记录自身的递归开销（取参数、压 / 弹一层），子列表里每条命令已经在子层各自记过；
+                // 记整段会把同一批命令算两遍（与帧级账那条是同一个毛病的两半）。t_cmd 在子列表开始前取、now 在它返回后取，
+                // 单调钟下 now - t_cmd 一定大于 sub，不会回绕。
+                if (tm) { uint64_t dns = now_ns() - t_cmd - sub;
+                    pf_add(RP_PERF_EXEC_OTHER_NS, dns); if (h.op < 64) __atomic_fetch_add(&g_op_ns[h.op], dns, __ATOMIC_RELAXED); }
                 break; }
             case OP_SIGNAL_EVENT: { volatile uint32_t *val; uint32_t m, v; memcpy(&val, a, 8); memcpy(&m, (const uint8_t *)a + 8, 4); memcpy(&v, (const uint8_t *)a + 12, 4);
                 if (m & NVN_EV_WAIT) nvn_unimpl("op", "OP_SIGNAL_EVENT+WAIT", p);   // GPU 侧等事件：跨队列顺序接上时做
@@ -518,14 +599,24 @@ void nvn_be_exec(const uint8_t *p) {
                 break;
         }
         if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) __atomic_fetch_add(&g_fr_draws, 1, __ATOMIC_RELAXED);   // 帧级账：这一帧画了多少笔
-        // OP_CALL 不记：它里面那批记录各自会记（记了就把同一段算两遍）
+        // OP_CALL 不在这里记：它只记递归自身的开销（见上面的 case），子列表各自记过
         if (tm && h.op != OP_CALL) {
             uint64_t dns = now_ns() - t_cmd;
             if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) pf_add(RP_PERF_EXEC_DRAW_NS, dns); else { pf_add(RP_PERF_EXEC_OTHER_NS, dns); if (h.op < 64) __atomic_fetch_add(&g_op_ns[h.op], dns, __ATOMIC_RELAXED); }
         }
         p += h.size;
     }
+out:
+    {
+        const uint64_t t1 = timed ? now_ns() : 0;
+        // 帧级账只由最外层累加一次：里层的时间已经包括在外层的墙钟里，再记一层就是重复统计。
+        if (outer) __atomic_fetch_add(&g_fr_exec_ns, t1 - t0, __ATOMIC_RELAXED);
+        return tm ? t1 - t0 : 0;   // 子列表耗时交给父层的 OP_CALL 账
+    }
 }
+
+// 前端（hle_nvn.c → nvn_be_submit）的唯一入口：每次提交的每条命令列表调一次，g_ret_n 为 0，也就是「最外层」。
+void nvn_be_exec(const uint8_t *p) { (void)exec_list(p); }
 
 // 一次 NVN 队列提交（hle_nvn.c nvnQueueSubmitCommands）。跨队列停靠（等别的队列还没回放的信号）未接：见 OP_SIGNAL_EVENT+WAIT。
 void nvn_be_submit(void *q, const uint64_t *h, int n) {

@@ -4,6 +4,7 @@
 #include "nvn_plat.h"
 #include "rp_exec.h"
 #include "direct/vk_device.h"
+#include "nvn/nvn_warm.h"   // 预热调度：会话 open 后起、Stop 前收（nvn_warm.h 合同）
 #include <android/log.h>
 #include <android/native_window.h>
 #include <pthread.h>
@@ -21,6 +22,9 @@ void nvk_session_request_stop(void) {
     uint64_t expected = 0, now = mono_ns();
     atomic_compare_exchange_strong_explicit(&g_stop_started, &expected, now, memory_order_acq_rel, memory_order_acquire);
     nvk_shader_stop();
+    // 预热线程在着色器准入关闭之后收：先请停再有界 join，然后后台静默 + 清单落盘。放在
+    // nvk_shader_stop 之后是硬要求：准入关了新工作才会被各 owner 拒绝；迟到的结果由 owner 丢弃。
+    nvk_warm_stop();
 }
 uint64_t nvk_session_stop_deadline(void) {
     uint64_t start = atomic_load_explicit(&g_stop_started, memory_order_acquire);
@@ -83,6 +87,9 @@ int nvk_session_open(struct s2a_vk_device *dev, const char *cache_dir, char *why
                         caps.name, caps.api_version, caps.caps,
                         (unsigned long long)caps.max_buf_bytes, (unsigned long long)caps.max_ssbo_range);
     pthread_mutex_unlock(&g_mu);
+    // 开局预热（iOS 蓝本：nvn_mtl.m warm_start 在 shader map 读完就起，后台把上一局清单建出来）。
+    // 放在解锁之后：预热线程会取会话缓存目录 / 后端锁，不在 g_mu 里起线程。
+    nvk_warm_start();
     return 0;
 }
 

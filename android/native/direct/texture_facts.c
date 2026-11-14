@@ -64,6 +64,12 @@ int s2a_nvn_texture_target_index(const char *name, uint8_t *out) {
     return -1;
 }
 
+int s2a_nvn_texture_target_at(uint8_t index, const char **name) {
+    if (index >= sizeof g_targets / sizeof g_targets[0]) return -1;
+    if (name) *name = g_targets[index].name;
+    return 0;
+}
+
 int s2a_nvn_texture_format_index(const char *name, uint16_t *out) {
     if (!name || !out) return -1;
     for (size_t i = 0; i < sizeof g_formats / sizeof g_formats[0]; i++)
