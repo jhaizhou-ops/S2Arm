@@ -1130,6 +1130,10 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
         time.sleep(0.5)
     step(f"旧版 pid {pid} 已退出，开始换目录")
     health = updates / "health.ok"
+    # 看门狗从旧版退出就开始计时，到换完目录为止：清旧副本、装回上次的副本、换目录，任何一步卡住都能收尾（#965 现场停在哪一步不知道）
+    watchdog = threading.Timer(SWAP_WATCHDOG, stuck_swap, (staged, install, backup, new, private, args, launch))
+    watchdog.daemon = True
+    watchdog.start()
     try:
         # A previous apply may have stopped between swap()'s two renames.
         # Restore the only old copy before treating any backup as disposable.
@@ -1148,15 +1152,11 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
                 remove_tree(bad)
         # 换目录之前清掉确认标记：此后出现的 health.ok 只能来自换上去的这一版
         health.unlink(missing_ok=True)
-        watchdog = threading.Timer(SWAP_WATCHDOG, stuck_swap, (staged, install, backup, new, private, args, launch))
-        watchdog.daemon = True
-        watchdog.start()
-        try:
-            swap(staged, install, backup, new)
-        finally:
-            watchdog.cancel()
+        swap(staged, install, backup, new)
+        watchdog.cancel()
         step("目录换好了，启动新版")
     except (OSError, shutil.Error):
+        watchdog.cancel()
         step(f"换目录失败：{traceback.format_exc().strip().splitlines()[-1]}")
         remove_tree(new) if new.exists() else None
         if not holds_copy(install):   # 失败句和盘上一致：安装目录里读不到旧版就不说「已保留」（审计 P1-157）
@@ -1192,7 +1192,12 @@ def _apply(staged, install, pid, private, args, launch, health_seconds, exit_sec
 def stuck_swap(staged, install, backup, new, private, args, launch):
     """换目录超过 SWAP_WATCHDOG 秒没完（写调用被系统挡住、一直不返回）：在看门狗线程里收尾——装回旧版、记原因、拉起旧版、退出整个进程
     （卡住的那个调用取消不了，进程退出它就跟着没了）。旧版能不能装回都照实记"""
-    step(f"换目录 {SWAP_WATCHDOG} 秒没完成，判定卡住：装回旧版")
+    step(f"换目录 {SWAP_WATCHDOG} 秒没完成，判定卡住：装回旧版。各线程停在：")
+    try:   # 卡在哪个调用照实记下（#965 现场只知道「停住了」，不知道停在哪）
+        import faulthandler
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    except (OSError, ValueError, AttributeError):
+        pass
     try:
         if not holds_copy(install) and holds_copy(backup):
             retry_rename(backup, install, seconds=10)
