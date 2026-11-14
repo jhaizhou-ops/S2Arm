@@ -111,6 +111,37 @@ class HiddenLookupTest(unittest.TestCase):
                 audit_module.hidden_runtime_lookups(lib, set(), set(), set())
 
 
+class WeakServiceReferenceTest(unittest.TestCase):
+    """#961：同库服务出口的弱引用从目标实际源码里找；期望集按源码手写，不取自扫描结果。"""
+
+    def scan(self, text):
+        with tempfile.TemporaryDirectory(prefix="s2a-weak-") as d:
+            source = Path(d) / "consumer.c"
+            source.write_text(text, encoding="utf-8")
+            return audit_module.weak_service_references([{"path": str(source)}])
+
+    def test_real_consumers_are_found(self):
+        root = HERE.parents[1]
+        sources = [{"path": str(root / rel)} for rel in
+                   ("runtime/src/direct_prompt.c", "graphics/nvn/gfx/nvn/hle_nvn.c", "runtime/src/thread.c")]
+        # thread.c 的弱声明是原生 s2a_capacity_*，不是托管服务出口
+        self.assertEqual(audit_module.weak_service_references(sources),
+                         {"S2A_SaveAtomicState": [sources[0]["path"]],
+                          "S2A_NvMapFromGuest": [sources[1]["path"]]})
+
+    def test_only_weak_declarations_of_service_exports_count(self):
+        found = self.scan(
+            "// extern int S2A_InComment(void) __attribute__((weak));\n"
+            "/* extern int S2A_InBlock(void) __attribute__((weak)); */\n"
+            "__attribute__((weak)) int S2A_WeakDefinition(void) { return 0; }\n"
+            "extern int S2A_StrongDeclaration(void);\n"
+            "extern void s2a_native_weak(void) __attribute__((weak));\n"
+            "#define S2A_CONSTANT_NAME 3\n"
+            "static void f(void) { extern int S2A_Scoped(int) __attribute__((weak)); (void)S2A_Scoped; }\n"
+            "int S2A_NoExtern(void) __attribute__((__weak__));\n")
+        self.assertEqual(sorted(found), ["S2A_NoExtern", "S2A_Scoped"])
+
+
 class CoreLinkAuditTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -357,6 +388,166 @@ class CoreLinkAuditTest(unittest.TestCase):
         report = self.run_audit(provider_role="game", source_list=self.game_sources, library=library)
         self.assertFalse(report["game_link_complete"])
         self.assertEqual(report["missing_direct_definitions"], ["s2a_handle_new"])
+
+    # #961：弱引用的托管服务出口要在归档与最终库里都有真实代码定义（不能只核弱引用存在）。
+    def weak_consumer_sources(self):
+        consumer = self.root / "runtime/src/direct_prompt.c"
+        consumer.parent.mkdir(parents=True, exist_ok=True)
+        consumer.write_text("extern int S2A_SaveAtomicState(void) __attribute__((weak));\n"
+                            "int s2a_save_atomic_poll(void) { return S2A_SaveAtomicState ? S2A_SaveAtomicState() : -1; }\n",
+                            encoding="utf-8")
+        sources = self.root / "weak-consumer-sources.txt"
+        sources.write_text(f"{self.stub}\n{consumer}\n", encoding="utf-8")
+        return sources
+
+    def service_archive(self, name, provider):
+        archive = self.root / f"{name}.a"
+        self.compile_archive("extern int s2a_handle_new(void);\n"
+                             "int invoke(void) { return s2a_handle_new(); }\n" + provider, archive)
+        return archive
+
+    def service_library(self, name, provider):
+        source = self.root / f"{name}.c"
+        source.write_text("int s2a_handle_new(void) { return 17; }\n" + provider, encoding="utf-8")
+        return self.compile_library(source, name)
+
+    CODE = "int S2A_SaveAtomicState(void) { return 2; }\n"
+
+    def service_entry(self, report):
+        self.assertEqual([e["name"] for e in report["weak_service_exports"]], ["S2A_SaveAtomicState"])
+        return report["weak_service_exports"][0]
+
+    def test_weak_service_export_with_real_definitions_passes(self):
+        report = self.run_audit(source_list=self.weak_consumer_sources(),
+                                archive=self.service_archive("svc-archive-code", self.CODE),
+                                library=self.service_library("svc-lib-code", self.CODE))
+        entry = self.service_entry(report)
+        self.assertTrue(report["diagnostic_link_complete"])
+        self.assertEqual(report["weak_service_export_failures"], [])
+        self.assertEqual((entry["archive_symbol_types"], entry["library_symbol_types"]), (["T"], ["T"]))
+        self.assertTrue(entry["archive_defined"] and entry["library_defined"])
+        self.assertFalse(entry["executed"])
+        self.assertFalse(report["game_ready"])
+
+    def test_archive_that_never_provides_the_export_fails(self):
+        # 修前的洞：归档从没提供，库里没有未解析引用，「归档定义 ∩ 库内未解析」为空
+        report = self.run_audit(source_list=self.weak_consumer_sources(),
+                                library=self.service_library("svc-lib-only", self.CODE))
+        self.assertFalse(report["diagnostic_link_complete"])
+        entry = self.service_entry(report)
+        self.assertFalse(entry["archive_defined"])
+        self.assertTrue(entry["library_defined"])
+        self.assertEqual(entry["archive_symbol_types"], [])
+        self.assertTrue(any("NativeAOT archive" in f for f in report["weak_service_export_failures"]))
+
+    def test_archive_data_symbol_is_not_a_real_definition(self):
+        report = self.run_audit(source_list=self.weak_consumer_sources(),
+                                archive=self.service_archive("svc-archive-data", "int S2A_SaveAtomicState = 2;\n"),
+                                library=self.service_library("svc-lib-code2", self.CODE))
+        self.assertFalse(report["diagnostic_link_complete"])
+        entry = self.service_entry(report)
+        self.assertFalse(entry["archive_defined"])
+        self.assertNotIn("T", entry["archive_symbol_types"])
+
+    def test_final_library_without_the_definition_fails(self):
+        report = self.run_audit(source_list=self.weak_consumer_sources(),
+                                archive=self.service_archive("svc-archive-code2", self.CODE),
+                                library=self.service_library("svc-lib-absent", ""))
+        self.assertFalse(report["diagnostic_link_complete"])
+        entry = self.service_entry(report)
+        self.assertTrue(entry["archive_defined"])
+        self.assertFalse(entry["library_defined"])
+        self.assertEqual(entry["library_symbol_types"], [])
+
+    def test_game_role_applies_the_same_check(self):
+        sources = self.root / "game-weak-sources.txt"
+        sources.write_text(self.game_sources.read_text() + self.weak_consumer_sources().read_text()
+                           .splitlines()[1] + "\n", encoding="utf-8")
+        report = self.run_audit(provider_role="game", source_list=sources, library=self.game_library)
+        self.assertFalse(report["game_link_complete"])
+        self.assertEqual(len(report["weak_service_export_failures"]), 2)
+
+    def test_target_without_weak_consumer_does_not_require_the_export(self):
+        # 目标里没有弱引用它的源（诊断缺席）：不要求、不报
+        report = self.run_audit(library=self.service_library("svc-lib-none", ""))
+        self.assertTrue(report["diagnostic_link_complete"])
+        self.assertEqual(report["weak_service_exports"], [])
+
+    @unittest.skipIf(sys.platform == "darwin", "Mach-O dylib needs -U for an unbound weak reference")
+    def test_weak_reference_left_unbound_in_final_library_fails(self):
+        # 弱引用照样链接成功、库里仍是 w：最终库没把它绑到定义上
+        sources = self.weak_consumer_sources()
+        source = self.root / "svc-unbound.c"
+        source.write_text("int s2a_handle_new(void) { return 17; }\n"
+                          + (self.root / "runtime/src/direct_prompt.c").read_text(), encoding="utf-8")
+        report = self.run_audit(source_list=sources, archive=self.service_archive("svc-archive-code3", self.CODE),
+                                library=self.compile_library(source, "svc-unbound"))
+        self.assertFalse(report["diagnostic_link_complete"])
+        self.assertEqual(self.service_entry(report)["library_symbol_types"], ["w"])
+
+    @unittest.skipIf(sys.platform == "darwin", "POSIX Mach-O nm does not expose weak-definition flags")
+    def test_weak_definitions_are_not_real_definitions(self):
+        weak = "__attribute__((weak)) int S2A_SaveAtomicState(void) { return 0; }\n"
+        report = self.run_audit(source_list=self.weak_consumer_sources(),
+                                archive=self.service_archive("svc-archive-weak", weak),
+                                library=self.service_library("svc-lib-weak", weak))
+        self.assertFalse(report["diagnostic_link_complete"])
+        entry = self.service_entry(report)
+        self.assertEqual((entry["archive_symbol_types"], entry["library_symbol_types"]), (["W"], ["W"]))
+        self.assertFalse(entry["archive_defined"] or entry["library_defined"])
+
+    @unittest.skipIf(sys.platform == "darwin", "ELF hidden-definition / strip fixture runs on Linux")
+    def test_hidden_definition_counts_only_while_unstripped(self):
+        # 生产单库 --exclude-libs,ALL 把它本地化（t）：符号表里在、动态表里不在；剥离后看不到
+        hidden = '__attribute__((visibility("hidden"))) ' + self.CODE
+        library = self.service_library("svc-lib-hidden", hidden)
+        archive = self.service_archive("svc-archive-code4", self.CODE)
+        report = self.run_audit(source_list=self.weak_consumer_sources(), archive=archive, library=library)
+        self.assertTrue(report["diagnostic_link_complete"])
+        self.assertEqual(self.service_entry(report)["library_symbol_types"], ["t"])
+        stripped = self.root / "svc-lib-stripped.so"
+        shutil.copy(library, stripped)
+        subprocess.run(["strip", "--strip-all", str(stripped)], check=True)
+        try:
+            report = self.run_audit(source_list=self.weak_consumer_sources(), archive=archive, library=stripped)
+        except audit_module.AuditError:
+            return
+        self.assertFalse(report["diagnostic_link_complete"])
+        self.assertFalse(self.service_entry(report)["library_defined"])
+
+    @unittest.skipIf(sys.platform == "darwin", "CLI needs the ELF NativeAOT startup fixture (Linux)")
+    def test_cli_reports_the_missing_service_definition_red(self):
+        # 与生产同形：归档 + 启动段 + 真实弱引用的消费者源链成一个库（-z defs 放行弱未定义）
+        sources = self.weak_consumer_sources()
+        consumer = self.root / "runtime/src/direct_prompt.c"
+        modules = self.root / "svc-modules.c"
+        modules.write_text('__attribute__((used, section("__modules"))) '
+                           'const void *module_pointer = (void *)1234;\n', encoding="utf-8")
+        report, library = self.root / "svc-report.json", self.root / "svc-cli.so"
+        def run(provider):
+            archive = self.root / "svc-cli.a"
+            archive.unlink(missing_ok=True)
+            self.compile_archive("extern char __start___modules[], __stop___modules[];\n"
+                                 "extern int s2a_handle_new(void);\n"
+                                 "long startup(void) { return __stop___modules - __start___modules"
+                                 " + s2a_handle_new(); }\n" + provider, archive)
+            inputs = self.root / "svc-link-inputs.txt"
+            inputs.write_text(str(archive.with_suffix(".o")) + "\n", encoding="utf-8")
+            subprocess.run([self.cc, "-shared", "-fPIC", str(archive.with_suffix(".o")), str(modules),
+                            str(self.stub), str(consumer), "-Wl,-z,defs", "-o", str(library)], check=True)
+            return subprocess.run([sys.executable, str(HERE / "audit.py"), "--archive", str(archive),
+                                   "--library", str(library), "--source-list", str(sources),
+                                   "--source-root", str(self.root), "--consumer-root", str(self.consumer),
+                                   "--nm", self.nm, "--report", str(report), "--link-input-list", str(inputs),
+                                   "--readelf", "readelf"], capture_output=True, text=True)
+        accepted = run(self.CODE)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        self.assertTrue(json.loads(report.read_text())["weak_service_exports"][0]["library_defined"])
+        rejected = run("")
+        self.assertEqual(rejected.returncode, 1)
+        self.assertIn("【红】 weakly referenced managed service export lacks a real definition: S2A_SaveAtomicState",
+                      rejected.stdout)
+        self.assertFalse(json.loads(report.read_text())["diagnostic_link_complete"])
 
     def test_unknown_provider_role_is_rejected(self):
         with self.assertRaisesRegex(audit_module.AuditError, "unknown provider role"):

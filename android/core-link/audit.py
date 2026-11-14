@@ -35,8 +35,8 @@ def android_build_id(readelf, library):
     return ids[0].lower()
 
 
-def symbols(nm, path, *, dynamic=False, include_local=False, include_all=False,
-            strong_only=False):
+def nm_records(nm, path, *, dynamic=False, include_local=False):
+    """(name, type letter) for every symbol record llvm-nm/nm prints in POSIX format."""
     command = [nm, "--format=posix"]
     if not include_local:
         command.append("--extern-only")
@@ -45,7 +45,7 @@ def symbols(nm, path, *, dynamic=False, include_local=False, include_all=False,
     result = subprocess.run(command + [str(path)], capture_output=True, text=True, check=False)
     if result.returncode:
         raise AuditError(f"nm failed for {path}: {result.stderr.strip()}")
-    defined, undefined = set(), set()
+    records = []
     for line in result.stdout.splitlines():
         # llvm-nm emits an archive/member heading ending in ':'. Its next lines
         # are POSIX symbol/type/value/size records. No guessed BSD column order.
@@ -61,7 +61,14 @@ def symbols(nm, path, *, dynamic=False, include_local=False, include_all=False,
                 break
         if record is None:
             raise AuditError(f"unrecognized nm output for {path}: {line}")
-        name, kind = record.groups()
+        records.append(record.groups())
+    return records
+
+
+def symbols(nm, path, *, dynamic=False, include_local=False, include_all=False,
+            strong_only=False):
+    defined, undefined = set(), set()
+    for name, kind in nm_records(nm, path, dynamic=dynamic, include_local=include_local):
         # Compare the exact binary names. Mach-O's C ABI underscore must not be
         # stripped from ELF names, where _s2a_x and s2a_x are distinct symbols.
         if not include_all and not name.startswith(("s2a_", "_s2a_")):
@@ -74,6 +81,71 @@ def symbols(nm, path, *, dynamic=False, include_local=False, include_all=False,
             if not strong_only or kind.upper() not in ("W", "V"):
                 defined.add(name)
     return defined, undefined
+
+
+# 托管服务出口的命名：C# [UnmanagedCallersOnly(EntryPoint = "S2A_Xxx")]，大写 S2A_ 后接驼峰；原生符号是小写 s2a_。
+SERVICE_EXPORT = re.compile(r"\bS2A_[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*\b")
+WEAK = re.compile(r"__attribute__\s*\(\(\s*(?:__)?weak(?:__)?\s*\)\)")
+
+
+def weak_service_references(sources):
+    """{托管服务出口名: [源文件]}：目标源码里以弱声明（只声明、不定义）引用的托管服务出口。
+
+    同库静态链入服务层时，原生侧按链接期弱引用取服务出口（#948：--exclude-libs,ALL 下 dlsym 取不到）。
+    弱引用缺定义照样链接成功、运行时是 NULL：归档根本没提供这条导出时，归档导入差集和
+    「归档定义 ∩ 库内未解析」都看不出来。这里从实际编进目标的源码找出这类引用，交给二进制核定义；
+    只认分号结尾的声明（函数定义在 { 前结束，不算），先去掉注释。"""
+    found = {}
+    for source in sources:
+        text = Path(source["path"]).read_text(encoding="utf-8", errors="replace")
+        if not WEAK.search(text):
+            continue
+        text = re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)
+        pieces = re.split(r"([;{}])", text)
+        # 按分隔符切开、只取以 ; 结尾的片段（线性；避免对长片段反复回溯）
+        for declaration, end in zip(pieces[::2], pieces[1::2]):
+            if end != ";" or not WEAK.search(declaration):
+                continue
+            for name in SERVICE_EXPORT.findall(declaration):
+                if re.search(r"\b" + name + r"\s*\(", declaration):
+                    sites = found.setdefault(name, [])
+                    if source["path"] not in sites:
+                        sites.append(source["path"])
+    return found
+
+
+def weak_service_exports(nm, archive, library, sources, is_macho):
+    """弱引用的服务出口必须在 NativeAOT 归档里有全局代码定义（T），并在最终未剥离库的符号表里
+    有代码定义（T / t：--exclude-libs 会把它本地化）。弱定义、绝对符号、数据符号、仍是 w / U、
+    或库被剥离看不到符号表，都不算真实定义。"""
+    references = weak_service_references(sources)
+    if not references:
+        return [], []
+    def kinds(records):
+        table = {}
+        for name, kind in records:
+            table.setdefault(name, set()).add(kind)
+        return table
+    archive_kinds = kinds(nm_records(nm, archive))
+    library_kinds = kinds(nm_records(nm, library, include_local=True))
+    entries, failures = [], []
+    for name, consumers in sorted(references.items()):
+        binary = ("_" + name) if is_macho else name
+        in_archive = sorted(archive_kinds.get(binary, ()))
+        in_library = sorted(library_kinds.get(binary, ()))
+        archive_defined = "T" in in_archive
+        library_defined = bool(in_library) and set(in_library) <= {"T", "t"}
+        entries.append({"name": name, "weak_references": consumers,
+                        "archive_symbol_types": in_archive, "library_symbol_types": in_library,
+                        "archive_defined": archive_defined, "library_defined": library_defined,
+                        "executed": False})
+        if not archive_defined:
+            failures.append(f"{name}: NativeAOT archive has no global code definition "
+                            f"(nm types {in_archive or 'none'})")
+        if not library_defined:
+            failures.append(f"{name}: final library symbol table has no code definition "
+                            f"(nm types {in_library or 'none'}; stripped library or weak reference left unbound)")
+    return entries, failures
 
 
 def elf_data_strings(library):
@@ -298,11 +370,13 @@ def audit(*, archive, library, source_list, source_root, consumer_root, nm, andr
         hidden_lookups = hidden_runtime_lookups(library, managed_all, local_defined, exported)
         # 原生对托管导出的弱引用（同库服务层的正确取法）必须在最终库里解析掉：归档定义了、库里还是 w / U，就是没链上
         hidden_lookups += sorted(f"{name} (unresolved reference)" for name in managed_all & local_undefined)
+    service_exports, service_failures = weak_service_exports(nm, archive, library, sources, is_macho)
     startup = startup_roots(nm, readelf, link_input_list, library, local_defined, local_undefined)
     native_identity = identity(library)
     if android_elf:
         native_identity["build_id"] = android_build_id(readelf, library)
-    link_complete = not missing and not unresolved and not startup["failures"] and not hidden_lookups
+    link_complete = (not missing and not unresolved and not startup["failures"] and not hidden_lookups
+                     and not service_failures)
     return {
         "schema_version": 1,
         "scope": f"{provider_role}-link-only",
@@ -326,6 +400,8 @@ def audit(*, archive, library, source_list, source_root, consumer_root, nm, andr
         "service_entrypoints": {"S2A_Init": {"defined": ("_S2A_Init" if is_macho else "S2A_Init") in local_defined,
                                              "exported": export_visible("S2A_Init"),
                                              "executed": False}},
+        "weak_service_exports": service_exports,
+        "weak_service_export_failures": service_failures,
         "diagnostic_link_complete": provider_role == "diagnostic" and link_complete,
         "game_link_complete": provider_role == "game" and link_complete,
         "provider_link_complete": link_complete,
@@ -372,6 +448,8 @@ def main():
             else:
                 print(f"  【红】 native runtime lookup of a hidden in-library managed export: {name} "
                       f"(--exclude-libs,ALL keeps it out of the dynamic table; dlsym gets NULL — reference it directly)")
+        for failure in report["weak_service_export_failures"]:
+            print(f"  【红】 weakly referenced managed service export lacks a real definition: {failure}")
         return 1
     print(f"Android {report['provider_role']} link complete ({len(report['required_direct_symbols'])} imports); "
           f"game_ready=false; report: {report_path}")
