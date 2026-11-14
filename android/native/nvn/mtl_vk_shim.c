@@ -682,6 +682,10 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 }
 
 // ---------------- 上屏 ----------------
+// This backend resolves and uploads the source in nvn_vk_session_present_tex
+// after shim_drain; it has no separate present-thread initialization to publish.
+void nvn_be_present_prepare(const tex_t *t) { (void)t; }
+
 // provider_vk.c 提供：会话激活早于窗口就绪时，这里再向 WSI lease 要一次窗口；窗口换代/
 // 尺寸变化（旋转）也在这里拆旧交换链后重建。返回值：0 = 已有可用窗口；1 = 当前没有窗口
 // （正常跳过 present）；-1 = 上一代呈现退休没有证明（必须失败，不能继续用旧 surface）。
