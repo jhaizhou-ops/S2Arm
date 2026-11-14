@@ -40,4 +40,12 @@ int rp_shader_prog_identity(const struct rp_prog *p, uint8_t out[32]);
 // 给预热后台线程按管线配方找程序用（建管线要拿程序阶段的着色器句柄）。
 // 线程：[后台]。生命周期：借用指针，到会话收尾（rp_shader_reset）前有效：取到之后不允许再等编译。
 int rp_shader_prog_by_identity(const uint8_t identity[32], const struct rp_prog **out);
+
+// 程序借用：后台消费者（管线预热、预取）从 rp_shader_prog_by_identity 拿到 rp_prog* 之后，整段使用期间
+// 必须持有借用。收尾（rp_shader_reset）与预热静默判据都等借用归零才允许释放程序记录：代际判断只能决定
+// 「迟到结果还能不能安装」，不能证明对象仍存活。
+//   1 = 借到（*out 有效，跨线程只读）；0 = 这个身份还没发布；-1 = 会话已停 / 参数问题。
+int rp_shader_prog_borrow(const uint8_t identity[32], const struct rp_prog **out);
+void rp_shader_prog_return(const uint8_t identity[32]);
+int  rp_shader_prog_borrowed(void);   // 当前未归还的借用数（静默 / 收尾判据）
 void rp_shader_reset(void);     // 会话收尾：放掉全部着色器

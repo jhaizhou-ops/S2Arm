@@ -20,7 +20,10 @@ extern "C" {
 #endif
 
 void nvk_warm_start(void);     // 幂等；会话 open 之后调用
-void nvk_warm_stop(void);      // 幂等；Stop / 收尾之前调用（有界，不会无界 join）
+// 幂等；Stop / 收尾之前调用。**有界**：交互调用方只在统一截止（≤500 ms）内等「静默 + 清单落盘完成」，
+// 落盘由预热线程自己执行，这里绝不做文件 IO、绝不等文件锁或慢盘。
+//   返回 0 = 已静默且落盘完成；1 = 预算内没完成（后台线程继续收尾，旧文件保留，迟到结果由各 owner 丢弃）。
+int  nvk_warm_stop(void);
 int  nvk_warm_active(void);    // 1 = 预热线程还活着
 
 // 验收读数：预热线程这一局做了多少、为什么退出。

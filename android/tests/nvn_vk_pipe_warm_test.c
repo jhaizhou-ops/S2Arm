@@ -6,6 +6,7 @@
 //   父进程建临时目录、按顺序子进程跑各模式；缓存目录经环境变量交给子进程。
 // 用法：nvn_vk_pipe_warm_test            （全部模式）
 //       nvn_vk_pipe_warm_test <模式名>   （单跑一个模式，交给父进程用）
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,19 @@ int rp_shader_prog_by_identity(const uint8_t identity[32], const struct rp_prog 
     if (out) *out = &g_prog;
     return 1;
 }
+// 程序借用（rp_shader.h）：管线预热整段使用期间必须持借用，桩里直接转发到上面的假程序表。
+static int g_borrow_n;
+static int g_borrow_fail;   // 用例：模拟「会话已停 / 借用表满」的拒绝
+int rp_shader_prog_borrow(const uint8_t identity[32], const struct rp_prog **out) {
+    if (out) *out = NULL;
+    if (g_borrow_fail) return -1;
+    if (memcmp(identity, g_prog.identity, 32) != 0) return 0;
+    if (out) *out = &g_prog;
+    g_borrow_n++;
+    return 1;
+}
+void rp_shader_prog_return(const uint8_t identity[32]) { (void)identity; if (g_borrow_n > 0) g_borrow_n--; }
+int rp_shader_prog_borrowed(void) { return g_borrow_n; }
 nvn_gpu_rc nvn_gpu_pipe_get(const nvn_gpu_pipe_desc *d, int mode, nvn_gpu_pipe *out, nvn_gpu_err *err) {
     (void)mode;
     (void)err;
@@ -226,6 +240,9 @@ static int mode_fields(void) {
         mutate(&send, k_muts[i].kind, k_muts[i].idx);
         nvk_pipe_warm_note(&send, id);
     }
+    // 本局预热集只来自载入：先落盘再载入，take 才是「这一局要预热的那批」（运行期 note 只影响下一局清单）。
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == NFIELDS, "fields: save+load must bring back %d recipes", NFIELDS);
     int pend = nvk_pipe_warm_pending();
     CHECK(pend == NFIELDS, "expected %d pending recipes, got %d", NFIELDS, pend);
 
@@ -271,6 +288,8 @@ static int mode_dedup(void) {
     nvk_pipe_warm_stats(&st);
     CHECK(st.recorded == 1, "three notes of one recipe must record 1 entry, got %llu", (unsigned long long)st.recorded);
     CHECK(st.rejected >= 1, "a recipe with nspec != 0 must be rejected, got %llu", (unsigned long long)st.rejected);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 1, "dedup: save+load must bring back the one recipe");
     CHECK(nvk_pipe_warm_pending() == 1, "pending must be 1, got %d", nvk_pipe_warm_pending());
     struct nvk_pipe_rec rec;
     CHECK(nvk_pipe_warm_take(&rec) == 1, "take must return the only entry");
@@ -302,6 +321,8 @@ static int mode_collide(void) {
     CHECK(memcmp(ra.desc, rb.desc, NVK_PW_DESC_BYTES) != 0, "the two recipes must differ in bytes");
     nvk_pipe_warm_note(&da, id);
     nvk_pipe_warm_note(&db, id);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 2, "collide: save+load must bring back both recipes");
     CHECK(nvk_pipe_warm_pending() == 2,
           "same hash + different bytes must NOT dedup (pending %d, want 2)", nvk_pipe_warm_pending());
     nvk_pipe_warm_note(&da, id);   // 同散列同字节：必须去重、只加 uses
@@ -326,6 +347,8 @@ static int mode_cap(void) {
         for (int k = 0; k <= i + 1; k++) nvk_pipe_warm_note(&others[i], id);   // uses = i+2
     }
     for (int k = 0; k < 20; k++) nvk_pipe_warm_note(&hot, id);                 // uses = 20，必须活下来
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 4, "cap: save+load must bring back exactly the capped set");
     int pend = nvk_pipe_warm_pending();
     CHECK(pend == 4, "cap=4 must keep 4 entries after 6 distinct recipes, got %d", pend);
     int found_hot = 0, found_cold = 0;
@@ -430,7 +453,108 @@ static int mode_badfile(const char *variant) {
 }
 
 // ---- 父进程：子进程跑各模式 ----
-static const char *k_modes[] = {"fields", "dedup", "collide", "cap", "save", "load"};
+// ---- 模式：程序借用（外部复核 P1「管线预热缺少程序寿命保护」的消费侧）----
+// 建管线必须持借用、且无论成功失败都要归还；借用被拒（会话已停 / 借用表满）时如实失败，不假装建过。
+static int mode_lease(void) {
+    uint8_t id[32];
+    ident_fill(id, 0x77);
+    prog_setup(0x77);
+    nvn_gpu_pipe_desc pd;
+    base_desc(&pd);
+    nvk_pipe_warm_note(&pd, id);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 1, "lease: one recipe must load");
+    struct nvk_pipe_rec rec;
+    CHECK(nvk_pipe_warm_take(&rec) == 1, "lease: take the recipe");
+    struct nvk_pipe_warm_stats st0, st1;
+    nvk_pipe_warm_stats(&st0);
+    g_borrow_fail = 1;
+    int rc = nvk_pipe_warm_build(&rec);
+    g_borrow_fail = 0;
+    nvk_pipe_warm_stats(&st1);
+    CHECK(rc == -1, "lease: a refused borrow must fail the build (-1), got %d", rc);
+    CHECK(st1.failed == st0.failed + 1, "lease: refused borrow counts as failed, not retried");
+    CHECK(rp_shader_prog_borrowed() == 0, "lease: no borrow leaked on the failure path");
+    rc = nvk_pipe_warm_build(&rec);
+    CHECK(rc == 0, "lease: build with a borrow succeeds, got %d", rc);
+    CHECK(rp_shader_prog_borrowed() == 0, "lease: the borrow is returned after the build (no leak)");
+    return g_fail;
+}
+
+// ---- 模式：并发保存（外部复核 P2「管线清单并发保存会损坏文件」的等价夹具）----
+// 4 个线程各自 note + save，然后在同一进程里重新载入：保存必须被串行化，最后发布的文件必须完整可读，
+// 且取出的是那条唯一集合（不出现重复、不出现半截条目）。负对照：去掉保存互斥 + 让写盘变慢 → 载入返回 0。
+static void *save_thread(void *arg) {
+    long k = (long)(intptr_t)arg;
+    uint8_t id[32];
+    ident_fill(id, (int)(0x70 + k));
+    prog_setup((unsigned)(0x70 + k));
+    for (int i = 0; i < 40; i++) {
+        nvn_gpu_pipe_desc d;
+        base_desc(&d);
+        d.stream[0].stride = (uint32_t)(100 + i * 7 + k * 1000);
+        nvk_pipe_warm_note(&d, id);
+        nvk_pipe_warm_save();
+    }
+    return NULL;
+}
+static int mode_save_race(void) {
+    enum { NTH = 4 };
+    pthread_t th[NTH];
+    for (long i = 0; i < NTH; i++) pthread_create(&th[i], NULL, save_thread, (void *)(intptr_t)i);
+    for (int i = 0; i < NTH; i++) pthread_join(th[i], NULL);
+    int n = nvk_pipe_warm_load();
+    CHECK(n == 160, "save race: a fresh load of the last published snapshot must return all 160 recipes, got %d", n);
+    int seen = 0, dup = 0;
+    struct nvk_pipe_rec got, seenr[160];
+    while (nvk_pipe_warm_take(&got)) {
+        for (int i = 0; i < seen; i++) if (!memcmp(seenr[i].desc, got.desc, NVK_PW_DESC_BYTES) && !memcmp(seenr[i].prog_identity, got.prog_identity, 32)) dup = 1;
+        if (seen < 160) seenr[seen] = got;
+        seen++;
+    }
+    CHECK(seen == 160 && !dup, "save race: the published set must be exactly 160 unique recipes (seen=%d dup=%d)", seen, dup);
+    return g_fail;
+}
+
+// ---- 模式：本局预热集冻结（外部复核 P1「冻结了数量，身份集合仍会变化」的 repro）----
+// 载入之后 take 的顺序与集合必须就是文件里那份；运行期的 note、热点重排（order 重建）、淘汰、周期 save
+// 都不许影响它——否则同一配方被取两次、另一个配方永远漏掉（复核复现的 A→A）。
+static int mode_frozen(void) {
+    uint8_t id[32];
+    ident_fill(id, 0x66);
+    prog_setup(0x66);
+    nvn_gpu_pipe_desc a, b, c, d;
+    base_desc(&a); b = a; b.prim = 7; c = a; c.prim = 8; d = a; d.prim = 9;
+    for (int i = 0; i < 10; i++) nvk_pipe_warm_note(&a, id);   // uses=10，最热
+    for (int i = 0; i < 5; i++) nvk_pipe_warm_note(&b, id);    // uses=5
+    nvk_pipe_warm_note(&c, id);                                // uses=1
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_load() == 3, "frozen: three recipes load");
+    struct nvk_pipe_rec got, ar, br, cr;
+    nvk_pipe_warm_rec_of(&a, id, &ar); nvk_pipe_warm_rec_of(&b, id, &br); nvk_pipe_warm_rec_of(&c, id, &cr);
+    CHECK(nvk_pipe_warm_take(&got) == 1 && !memcmp(got.desc, ar.desc, NVK_PW_DESC_BYTES), "frozen: first take = hottest A");
+    // 运行期搅动：B 变最热、插入新配方 D、立刻落盘（会重排 order）
+    for (int i = 0; i < 20; i++) nvk_pipe_warm_note(&b, id);
+    nvk_pipe_warm_note(&d, id);
+    nvk_pipe_warm_save();
+    CHECK(nvk_pipe_warm_take(&got) == 1 && !memcmp(got.desc, br.desc, NVK_PW_DESC_BYTES),
+          "frozen: second take must still be B from the loaded plan (not A again, not D)");
+    {   // 集合唯一性：剩下必须恰好是 C 一条，且全程没有重复
+        int ntake = 0, dup = 0;
+        struct nvk_pipe_rec seen[4];
+        int ns = 0;
+        while (nvk_pipe_warm_take(&got)) {
+            for (int i = 0; i < ns; i++) if (!memcmp(seen[i].desc, got.desc, NVK_PW_DESC_BYTES)) dup = 1;
+            if (ns < 4) seen[ns++] = got;
+            ntake++;
+        }
+        CHECK(ntake == 1 && !dup && !memcmp(seen[0].desc, cr.desc, NVK_PW_DESC_BYTES),
+              "frozen: exactly C left, no duplicates (ntake=%d dup=%d)", ntake, dup);
+    }
+    return g_fail;
+}
+
+static const char *k_modes[] = {"fields", "dedup", "collide", "cap", "frozen", "lease", "save", "load", "save_race"};
 static const char *k_bad[] = {"magic", "fmt", "descver", "entry", "count", "sum", "trunc", "payload"};
 
 static int run_child(const char *self, const char *a, const char *b) {
@@ -452,6 +576,8 @@ int main(int argc, char **argv) {
         const char *m = argv[1];
         int (*fn)(void) = !strcmp(m, "fields") ? mode_fields : !strcmp(m, "dedup") ? mode_dedup :
                           !strcmp(m, "collide") ? mode_collide : !strcmp(m, "cap") ? mode_cap :
+                          !strcmp(m, "frozen") ? mode_frozen : !strcmp(m, "lease") ? mode_lease :
+                          !strcmp(m, "save_race") ? mode_save_race :
                           !strcmp(m, "save") ? mode_save : !strcmp(m, "load") ? mode_load : NULL;
         if (!fn) { fprintf(stderr, "unknown mode %s\n", m); return 2; }
         return fn() ? 1 : 0;
@@ -476,6 +602,6 @@ int main(int argc, char **argv) {
         printf("bad/%-8s %s\n", k_bad[i], rc == 0 ? "ok" : "FAIL");
         if (rc != 0) fail = 1;
     }
-    printf("%s\n", fail ? "FAIL" : "PASS 主机管道：逐字段往返 / 去重 uses / 散列碰撞不去重 / 上限淘汰 / 跨会话清单 / 坏文件整份拒绝");
+    printf("%s\n", fail ? "FAIL" : "PASS 主机管道：逐字段往返 / 去重 uses / 散列碰撞不去重 / 上限淘汰 / 跨会话清单 / 坏文件整份拒绝 / 本局预热集冻结 / 程序借用不泄漏 / 并发保存不损坏");
     return fail;
 }

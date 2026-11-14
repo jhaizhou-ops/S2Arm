@@ -92,6 +92,8 @@ function(s2a_android_nvk_sources output)
         #   nvn_vk_pipe_once  「同一配方只有一份」的双检装载（提交线程与预热线程并发建管线）
         #   nvn_warm          一个有界后台线程按清单顺序喂上面两类工作（先程序后管线）
         native/nvn/nvn_vk_prog_warm.c native/nvn/nvn_vk_pipe_warm.c native/nvn/nvn_vk_pipe_once.c native/nvn/nvn_warm.c
+        #   nvn_pipe_flight  配方级在途表（纯逻辑）：同配方并发需求合并成一份创建，不同配方不互相排队（复核 P1-2）
+        native/nvn/nvn_pipe_flight.c
         # nvn_gpu_* 的 Vulkan 后端与它的零件
         native/nvn/backend_vulkan.c native/nvn/nvn_vk_format.c native/nvn/nvn_vk_bcdec.c
         native/nvn/nvn_vk_driver_cache.c   # 驱动管线缓存落盘文件层（backend_vulkan.c 的 plc_open / plc_close 用；SHA-256 用上面的 sha256.c）

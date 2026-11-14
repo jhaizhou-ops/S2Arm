@@ -153,6 +153,41 @@ int main(void) {
         CHECK(!memcmp(got.keys[1], a.keys[1], 8) && got.stage_mask == 3, "c1-less note keeps the recorded keys / stage mask");
     }
 
+    // 2c) 本局预热集冻结（外部复核 P1「冻结了数量，身份集合仍会变化」的 repro）：载入之后 take 的顺序与集合
+    //     必须就是文件里那份；运行期的 note、热点重排、淘汰、周期 save 都不许影响它，否则同一身份被取两次、
+    //     另一个身份永远漏掉（复核复现的 A→A）。
+    {
+        dir_reset();
+        struct nvk_prog_rec a = mkrec(1, 3), b = mkrec(2, 3), c = mkrec(3, 3);
+        for (int i = 0; i < 10; i++) nvk_prog_warm_note(&a);   // uses=10，最热
+        for (int i = 0; i < 5; i++) nvk_prog_warm_note(&b);    // uses=5
+        nvk_prog_warm_note(&c);                                // uses=1
+        nvk_prog_warm_save();
+        nvk_prog_warm_reset();
+        CHECK(load_now() == 3, "frozen: three identities load");
+        struct nvk_prog_rec got;
+        CHECK(nvk_prog_warm_take(&got) == 1 && rec_is(&got, 1), "frozen: first take = hottest A");
+        for (int i = 0; i < 20; i++) nvk_prog_warm_note(&b);   // 运行期：B 变最热
+        struct nvk_prog_rec d = mkrec(4, 3);
+        nvk_prog_warm_note(&d);                               // 运行期：插入新身份 D
+        nvk_prog_warm_save();                                 // 落盘（排序现在只排下标副本，不动实时表）
+        CHECK(nvk_prog_warm_take(&got) == 1 && rec_is(&got, 2),
+              "frozen: second take must still be B from the loaded plan (got A repeat=%d, D=%d)",
+              rec_is(&got, 1), rec_is(&got, 4));
+        {   // 集合唯一性：剩下必须恰好是 C 一条，且全程没有重复
+            int ntake = 0, dup = 0, ns = 0;
+            struct nvk_prog_rec seen[4];
+            while (nvk_prog_warm_take(&got)) {
+                for (int i = 0; i < ns; i++) if (!memcmp(seen[i].identity, got.identity, 32)) dup = 1;
+                if (ns < 4) seen[ns++] = got;
+                ntake++;
+            }
+            CHECK(ntake == 1 && !dup && ns == 1 && rec_is(&seen[0], 3),
+                  "frozen: exactly C left, no duplicates (ntake=%d dup=%d)", ntake, dup);
+        }
+        CHECK(nvk_prog_warm_contains(d.identity), "frozen: the run-time note still lands in the live table (next session)");
+    }
+
     // 3) 有界：上限 3 时淘汰最冷的一条（uses 最低，同 uses 最久没用），不拒绝新条目。
     {
         dir_reset();

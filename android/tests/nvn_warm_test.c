@@ -3,9 +3,16 @@
 //   1) 顺序：程序清单全部走完（含在途重试）之后才开始管线清单；
 //   2) 在途重试：build 返回 1 的条目会被重试，最终成功计入 built，不丢；
 //   3) 计数：失败条目计入 failed，不阻塞其它条目；
-//   4) Stop：请停后线程在有界时间内退出（nvk_warm_active 归 0），且 Stop 会调两个 save 与 quiesce；
-//   5) 开关：debug.s2a.nvk_warm=0 时不起线程。
-// 合同参考 graphics/nvn/gfx/nvn/nvn_mtl.m 的 warm_start（后台清单预热、不挡首帧）。
+//   4) Stop（快落盘）：返回 0、任务线程退出、两个 owner 的清单都落盘、后台静默被调用、耗时远小于统一截止；
+//   5) Stop（慢落盘 900 毫秒）：**返回 1 且不超过 500+50 毫秒**——落盘归预热线程（或一次性 saver），
+//      Stop 调用线程绝不做文件 IO；到点后后台继续把清单写完（旧文件在此之前保留）；
+//   6) 没有预热线程时（开关关闭 / 线程起不来 / 本局从未 start）由一次性 saver 落盘，Stop 同样有界；
+//   7) 开关：debug.s2a.nvk_warm=0 时不起线程。
+// 各场景各跑一个进程：平台开关在进程内不变（nvn_plat.h 契约），且 Stop 之后本模块不再起线程（g_retired）。
+//   NVK_WARM_OFF=1                     → 场景 7（+ 6 的快落盘）
+//   NVK_WARM_SLOW_SAVE_US=<微秒>       → 场景 5
+//   NVK_WARM_OFF=1 NVK_WARM_SLOW_SAVE_US=<微秒> → 场景 6（没有预热线程 + 慢落盘）
+// 合同参考 graphics/nvn/gfx/nvn/nvn_mtl.m 的 warm_start（后台清单预热、不挡首帧）与 nvn_warm.h 的 Stop 合同。
 #include <assert.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -31,8 +38,23 @@ static atomic_int g_retry_prog = 2;     // 前 2 次调用返回 1（在途）�
 static atomic_int g_prog_built, g_prog_failed, g_pipe_built, g_pipe_failed;
 static atomic_int g_saved, g_quiesced;
 
+// 落盘慢桩：NVK_WARM_SLOW_SAVE_US 设置程序清单的假 IO 时长（复核用 900 毫秒：远大于 Stop 的 500 毫秒截止）。
+static atomic_int g_save_delay_us;
+// Stop 的读数行与红行：落盘归属改到后台之后，「Stop 有没有超时」只能从这一行看出来，所以断言它。
+static char g_stop_line[512];
+static atomic_int g_red_seen;
+
 int nvn_plat_flag(const char *name, int dflt) { (void)dflt; return strcmp(name, "nvk_warm") == 0 ? g_flag : dflt; }
-void nvn_plat_log(int level, const char *cls, const char *text) { (void)level; (void)cls; (void)text; }
+void nvn_plat_log(int level, const char *cls, const char *text) {
+    (void)cls;
+    if (level == 2) atomic_store(&g_red_seen, 1);   // NVN_PLAT_LOG_RED = 2（graphics/nvn/replay/nvn_plat.h）
+    if (text && strstr(text, "停局：耗时")) snprintf(g_stop_line, sizeof g_stop_line, "%s", text);
+}
+static int64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 int nvk_prog_warm_load(void) { return g_prog_total; }
 int nvk_prog_warm_pending(void) { return g_prog_total - g_prog_taken; }
@@ -53,7 +75,11 @@ int nvk_prog_warm_build(const struct nvk_prog_rec *rec) {
     return 0;
 }
 void nvk_prog_warm_note(const struct nvk_prog_rec *rec) { (void)rec; }
-void nvk_prog_warm_save(void) { atomic_fetch_add(&g_saved, 1); }
+void nvk_prog_warm_save(void) {
+    int d = atomic_load(&g_save_delay_us);
+    if (d > 0) usleep((useconds_t)d);
+    atomic_fetch_add(&g_saved, 1);
+}
 int nvk_shader_warm_quiesce(uint32_t budget_ms) { (void)budget_ms; atomic_fetch_add(&g_quiesced, 1); return 0; }
 void nvk_prog_warm_stats(struct nvk_prog_warm_stats *o) {
     if (!o) return;
@@ -94,10 +120,65 @@ static void wait_idle(int ms) {
 }
 
 // 关掉开关：不起线程（进程内开关不变，只在本进程第一次 start 时读，所以单独一个进程跑）。
-static void t_disable(void) {
+// 没有预热线程时清单落盘归一次性 saver：快落盘必须返回 0（预算内写完）。
+static void t_disable(int delay_us) {
+    atomic_store(&g_save_delay_us, delay_us);
     nvk_warm_start();
     assert(!nvk_warm_active());
-    printf("t_disable ok（debug.s2a.nvk_warm=0 时不起线程）\n");
+    int64_t t0 = now_ms();
+    int rc = nvk_warm_stop();
+    int64_t dt = now_ms() - t0;
+    printf("无预热线程（快落盘）：Stop 耗时 %lld 毫秒、返回 %d\n", (long long)dt, rc);
+    assert(rc == 0);        // saver 在预算内把清单写完
+    assert(dt <= 500);
+    assert(atomic_load(&g_saved) >= 1);
+    assert(strstr(g_stop_line, "清单落盘 完成") != NULL);
+    printf("t_disable ok（debug.s2a.nvk_warm=0 时不起线程，落盘归一次性 saver）\n");
+}
+
+// 没有预热线程 + 慢落盘：Stop 起一次性 saver，自己仍不做文件 IO（复核的 900 毫秒不进交互路径）。
+static void t_stop_without_thread_slow(void) {
+    atomic_store(&g_save_delay_us, 900000);
+    nvk_warm_start();
+    assert(!nvk_warm_active());
+    int64_t t0 = now_ms();
+    int rc = nvk_warm_stop();
+    int64_t dt = now_ms() - t0;
+    printf("无预热线程 + 慢落盘：Stop 耗时 %lld 毫秒、返回 %d\n", (long long)dt, rc);
+    assert(rc == 1);        // 预算内没写完
+    assert(dt <= 550);      // 统一截止 500 + 50 毫秒抖动
+    assert(atomic_load(&g_saved) == 0);
+    assert(atomic_load(&g_red_seen) == 1);
+    assert(strstr(g_stop_line, "清单落盘 未完成") != NULL);
+    int waited = 0;
+    while (waited < 3000 && atomic_load(&g_saved) == 0) { usleep(1000); waited++; }
+    assert(atomic_load(&g_saved) >= 1);   // saver 在后台把它写完了（旧文件在此之前保留）
+    printf("t_stop_without_thread_slow ok（saver 在 %d 毫秒内写完清单）\n", waited);
+}
+
+// 慢落盘（900 毫秒）+ 有预热线程：落盘归预热线程的退出路径，Stop 只等标志 → 有界返回 1。
+// 这条用例就是复核 stop_budget_probe 的等价断言：修前 Stop 在调用线程上同步 save，实测 900–1050 毫秒。
+static void t_stop_budget_slow(void) {
+    atomic_store(&g_save_delay_us, 900000);
+    nvk_warm_start();
+    for (int i = 0; i < 2000 && !nvk_warm_active(); i++) usleep(1000);
+    assert(nvk_warm_active());
+    usleep(20000);   // 让载入/预热先跑起来，Stop 落在它工作期间
+    int64_t t0 = now_ms();
+    int rc = nvk_warm_stop();
+    int64_t dt = now_ms() - t0;
+    printf("慢落盘：Stop 耗时 %lld 毫秒、返回 %d\n", (long long)dt, rc);
+    assert(rc == 1);        // 预算内没完成
+    assert(dt <= 550);      // 统一截止 500 + 50 毫秒抖动
+    assert(atomic_load(&g_saved) == 0);   // 到点时 900 毫秒的写盘还没结束
+    assert(atomic_load(&g_red_seen) == 1);
+    assert(strstr(g_stop_line, "清单落盘 未完成") != NULL);
+    // 到期 detach 交还，后台继续收尾：预热线程退出前把清单写完，之后 active 归 0。
+    int waited = 0;
+    while (waited < 3000 && (atomic_load(&g_saved) == 0 || nvk_warm_active())) { usleep(1000); waited++; }
+    assert(atomic_load(&g_saved) >= 1);
+    assert(!nvk_warm_active());
+    printf("t_stop_budget_slow ok（后台在 %d 毫秒内写完清单并退出，旧文件在此之前保留）\n", waited);
 }
 
 // 本局预热集在开局冻结：预热进行中游戏继续产生新身份（g_*_total 增长）不得扩集，否则预热线程
@@ -138,21 +219,45 @@ static void t_order_and_counts(void) {
         if (!nvk_warm_active()) { while (waited < 3000) { usleep(1000); waited++; } }
         assert(nvk_warm_active() == 1);   // 清单完成后线程仍在（等 Stop + 定期落盘）
     }
-    // Stop 有界：清单早已跑完，stop 只做 join 检查 + 落盘 + quiesce，必须很快返回。
-    uint64_t t0 = (uint64_t)time(NULL);
-    nvk_warm_stop();
+    // Stop 有界：清单早已跑完，stop 只等线程退出 + 静默 + 等落盘完成（落盘在预热线程上做），必须很快返回。
+    int64_t t0 = now_ms();
+    int rc = nvk_warm_stop();
+    int64_t dt = now_ms() - t0;
+    assert(rc == 0);                             // 已静默且清单落盘完成
+    assert(dt <= 500);                           // 统一截止内（快落盘：正常个位数毫秒）
     assert(!nvk_warm_active());
     assert(atomic_load(&g_saved) >= 1);          // 两个 owner 的清单都落盘
     assert(atomic_load(&g_quiesced) >= 1);
-    assert((uint64_t)time(NULL) - t0 <= 2);      // 有界（含落盘与 quiesce）
+    assert(atomic_load(&g_red_seen) == 0);       // 快路径不打红
+    assert(strstr(g_stop_line, "清单落盘 完成") != NULL);
+    assert(strstr(g_stop_line, "detach 累计") != NULL);   // 读数行里有 detach 计数
+    // 幂等：收干净之后再调一次必须立刻返回 0（会话 request_stop 与 destroy 会各调一次）。
+    t0 = now_ms();
+    rc = nvk_warm_stop();
+    dt = now_ms() - t0;
+    assert(rc == 0);
+    assert(dt <= 20);
     printf("t_order_and_counts ok (prog %llu pipe %llu why %d)\n",
            (unsigned long long)tt.prog_built, (unsigned long long)tt.pipe_built, tt.why);
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);   // 断言跳 abort 时不丢读数行（负对照要看到真实的 Stop 耗时）
     const char *off = getenv("NVK_WARM_OFF");
+    const char *slow = getenv("NVK_WARM_SLOW_SAVE_US");
+    const int delay_us = slow && slow[0] ? atoi(slow) : 0;
     g_flag = off && off[0] == '1' ? 0 : 1;
-    if (!g_flag) { t_disable(); printf("nvk warm scheduler test: ok（关）\n"); return 0; }
+    if (!g_flag) {
+        // 没有预热线程：快落盘走 saver 断言返回 0；慢落盘断言有界返回 1（前台绝不写盘）。
+        if (delay_us > 0) t_stop_without_thread_slow(); else t_disable(0);
+        printf("nvk warm scheduler test: ok（关）\n");
+        return 0;
+    }
+    if (delay_us > 0) {
+        t_stop_budget_slow();
+        printf("nvk warm scheduler test: ok（慢落盘 900 毫秒）\n");
+        return 0;
+    }
     t_order_and_counts();
     printf("nvk warm scheduler test: ok\n");
     return 0;

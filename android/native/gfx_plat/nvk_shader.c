@@ -83,6 +83,43 @@ enum { INFLIGHT_MAX = 128 };
 struct inflight_ent { uint8_t identity[32]; uint8_t used, bg; };
 static struct inflight_ent g_inflight[INFLIGHT_MAX];
 static unsigned g_inflight_n, g_inflight_bg;   // bg：预热带认领、尚未结束的构建数（quiesce 等它）
+
+// ---------- 程序借用（rp_shader.h 的借用合同）----------
+// 谁用：后台消费者（管线预热，以后预取）拿到 rp_prog* 之后，整段使用期间必须持有借用。
+// 谁等：预热静默（nvk_shader_warm_quiesce）与收尾（rp_shader_reset）。代际 / 停局位只能决定
+//       「迟到的结果要不要安装」，不能证明对象还活着——所以释放 entry 之前必须等借用归零。
+// 表：身份 → 未归还次数，定长 256 格线性查（借用次数与「同时在建管线的条数」同量级）。满了如实
+// 返回 -1 并计数，不静默降级成裸指针（那正是这条合同要防的东西）。
+// 锁：只在 g_progs_mu 下读写——与「发布 / 查找 / 静默 / 收尾」同一把锁，借用与 reset 因此有唯一先后。
+enum { BORROW_SLOTS = 256 };
+struct borrow_ent { uint8_t identity[32]; unsigned n; };   // n == 0 = 空槽（identity 内容不作数）
+static struct borrow_ent g_borrow[BORROW_SLOTS];
+static unsigned g_borrowed;         // 当前未归还数（= 所有槽 n 之和）
+static unsigned g_borrow_peak;      // 上次成功收尾以来的峰值（读数）
+static uint64_t g_borrow_rejected;  // 借不到的次数：停局 / 参数错 / 借用表满（读数）
+static uint64_t g_borrow_unmatched; // 没有对应借用的归还（调用方 bug，读数）
+static uint64_t g_retained_progs;   // 收尾时借用未归零、改成泄漏到进程结束的程序记录总数（读数）
+static int g_borrow_full_said, g_borrow_unmatched_said;   // 这两类异常只报一次红（计数照常累加）
+// 借用读数快照（锁内取；借用表与计数器只在 g_progs_mu 下改）。
+struct borrow_snap { unsigned borrowed, peak; uint64_t rejected, unmatched, retained; };
+static void borrow_snap_take(struct borrow_snap *s) {
+    pthread_mutex_lock(&g_progs_mu);
+    s->borrowed = g_borrowed; s->peak = g_borrow_peak;
+    s->rejected = g_borrow_rejected; s->unmatched = g_borrow_unmatched; s->retained = g_retained_progs;
+    pthread_mutex_unlock(&g_progs_mu);
+}
+// 一行读数：「借用 N（峰值 M）/ 拒绝 k」。正常收尾用 INFO（借用为 0 也打一行，证明判据真的看过借用），
+// 收尾被拒绝时用 RED——未静默状态留在读数里，不只看一次性告警。
+static void borrow_log(int level, const char *phase, const struct borrow_snap *s) {
+    char b[256];
+    size_t off = (size_t)snprintf(b, sizeof b, "程序借用读数 phase=%s 借用 %u（峰值 %u）/ 拒绝 %llu",
+                                  phase, s->borrowed, s->peak, (unsigned long long)s->rejected);
+    if (off < sizeof b && s->unmatched)
+        off += (size_t)snprintf(b + off, sizeof b - off, " 无主归还 %llu", (unsigned long long)s->unmatched);
+    if (off < sizeof b && s->retained)
+        off += (size_t)snprintf(b + off, sizeof b - off, " 收尾保留 %llu 份（泄漏到进程结束）", (unsigned long long)s->retained);
+    nvn_plat_log(level, "shader", b);
+}
 static struct { uint64_t session, generation; uint8_t sha[32]; int ok; } g_profile;
 // 后台也会读/加：跨局缓存 / 离线库命中数（日志与统计用）。
 static _Atomic uint64_t g_n_offline, g_n_cache, g_n_compiled, g_n_failed;
@@ -242,6 +279,8 @@ static void pool_stats(const char *phase) {
         snprintf(line, sizeof line, "texture_pool_request_reject reason=other count=%llu", (unsigned long long)g_pool_request_other);
         nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", line);
     }
+    // 借用读数跟着同一份诊断走：管线预热在用程序时，「借用」非 0 就是收尾必须等的那部分。
+    { struct borrow_snap bs; borrow_snap_take(&bs); borrow_log(NVN_PLAT_LOG_INFO, phase, &bs); }
 }
 /* The normal Android process exit calls this after services/GPU stop. It does
  * not pass through rp_shader_reset, which belongs to session retirement. */
@@ -847,7 +886,8 @@ static uint64_t combined_fact_sig(int st) {
     c->rg = rg; c->base = (int)rp_S.tex_base; c->pn = (int)rp_S.tex_pool_n; c->ok = 1;
     return c->sig;
 }
-static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, uint32_t stages) {
+// with_tex_facts=0：不混入贴图槽事实——只给「身份粒度」诊断当分组键用（同一份着色器 = 同一组）。
+static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct_compile_context *pc, uint32_t stages, int with_tex_facts) {
     uint64_t h = 1469598103934665603ull;
     #define MIX(v) do { h ^= (uint64_t)(v); h *= 1099511628211ull; } while (0)
     // 来源登记冲突会毒化短键并推进代际；命中快表前也必须失效。
@@ -862,16 +902,77 @@ static uint64_t input_sig(const struct rp_shader_req *q, const struct s2a_direct
     MIX(rp_S.nattr); for (int i = 0; i < 16; i++) MIX(i < rp_S.nattr ? rp_S.attr[i].fmt : 0);
     for (int st = 0; st < 6; st++) { uint32_t m = 0; for (int i = 0; i < 16; i++) if (rp_S.ubo[st][i].size) m |= 1u << i; MIX(m); }
     MIX(rp_S.tex_pool_n); MIX(rp_S.samp_pool_n); MIX(rp_S.tf_on); MIX(rp_S.tex_base);
-    MIX(combined_fact_sig(0)); MIX(combined_fact_sig(1));
-    MIX(sep_fact_sig(0)); MIX(sep_fact_sig(1));
-    // 几何阶段（VS|FS|GS）在重场景里极少出现，不进上面那张小表：直接算这 32 格的摘要（省下每次比 32 个句柄）。
-    if (stages & 4u) MIX(rp_tex_fact_sig(rp_S.tex[2], 32, rp_S.tex_base, rp_S.tex_pool_n));
-    if (stages & 4u) MIX(sep_fact_sig(2));
+    if (with_tex_facts) {
+        MIX(combined_fact_sig(0)); MIX(combined_fact_sig(1));
+        MIX(sep_fact_sig(0)); MIX(sep_fact_sig(1));
+        // 几何阶段（VS|FS|GS）在重场景里极少出现，不进上面那张小表：直接算这 32 格的摘要（省下每次比 32 个句柄）。
+        if (stages & 4u) MIX(rp_tex_fact_sig(rp_S.tex[2], 32, rp_S.tex_base, rp_S.tex_pool_n));
+        if (stages & 4u) MIX(sep_fact_sig(2));
+    }
     #undef MIX
     return h;
 }
 static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **out, const struct s2a_direct_compile_context *pcp,
-                        uint32_t stages, int nst);
+                        uint32_t stages, int nst, uint64_t group);
+
+// ---------- 身份粒度诊断（开关 nvk_ident_diag，本轮测量包缺省 1；只读计数，不改变任何语义） ----------
+// 要回答的问题：同一份着色器（阶段键 + gfx 块 + 池级事实 + cbo 使用位，「同一组」）在本局被拆成了多少份
+// 程序身份？拆出来的每一份都要单独读盘/解析/编译，所以「身份数 / 组数」就是重复量。删诊断时整块删掉。
+static int g_ident_diag = -1;
+enum { IDG_SLOTS = 1024, IDG_SET = 16384 };
+static struct { uint64_t key; uint32_t compiles, loads; } g_idg[IDG_SLOTS];
+static uint64_t g_idg_set[IDG_SET];          // 身份集合（sha 折叠成 64 位；0 = 空）
+static uint64_t g_idg_groups, g_idg_idents, g_idg_resolves, g_idg_compiles, g_idg_loads, g_idg_multi;
+static uint64_t g_idg_last_ns;
+static int idg_on(void) { if (g_ident_diag < 0) g_ident_diag = nvn_plat_flag("nvk_ident_diag", 1); return g_ident_diag; }
+static void idg_work(uint64_t group, int compiled) {
+    if (!group) return;
+    if (compiled) g_idg_compiles++; else g_idg_loads++;
+    unsigned s = (unsigned)((group ^ (group >> 32)) & (IDG_SLOTS - 1));
+    for (unsigned k = 0; k < 8; k++) {
+        unsigned idx = (s + k) & (IDG_SLOTS - 1);
+        if (g_idg[idx].key == group) {
+            if (compiled) { if (g_idg[idx].compiles == 1) g_idg_multi++; g_idg[idx].compiles++; } else g_idg[idx].loads++;
+            return;
+        }
+        if (!g_idg[idx].key) { g_idg[idx].key = group; g_idg_groups++; if (compiled) g_idg[idx].compiles++; else g_idg[idx].loads++; return; }
+    }
+}
+// 这份身份第一次被用到（不管它后来是预热命中、读盘还是现场编）：算进「身份数 / 组数」。
+static void idg_note_ident(uint64_t group, const uint8_t sha[32]) {
+    if (!group) return;
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < 32; i++) { h ^= sha[i]; h *= 1099511628211ull; }
+    h |= 1ull;
+    g_idg_resolves++;
+    unsigned s = (unsigned)((h ^ (h >> 32)) & (IDG_SET - 1));
+    for (unsigned k = 0; k < 8; k++) {
+        unsigned idx = (s + k) & (IDG_SET - 1);
+        if (g_idg_set[idx] == h) break;
+        if (!g_idg_set[idx]) { g_idg_set[idx] = h; g_idg_idents++; break; }
+    }
+    // 分组也要先登记（第一份身份出现时组可能是新的）
+    s = (unsigned)((group ^ (group >> 32)) & (IDG_SLOTS - 1));
+    for (unsigned k = 0; k < 8; k++) {
+        unsigned idx = (s + k) & (IDG_SLOTS - 1);
+        if (g_idg[idx].key == group) return;
+        if (!g_idg[idx].key) { g_idg[idx].key = group; g_idg_groups++; return; }
+    }
+}
+static void idg_log(void) {
+    if (!idg_on()) return;
+    const uint64_t now = now_ns();
+    if (!g_idg_last_ns) { g_idg_last_ns = now; return; }
+    if (now - g_idg_last_ns < 5000000000ull) return;
+    g_idg_last_ns = now;
+    char b[256];
+    snprintf(b, sizeof b, "身份粒度：组 %llu、身份 %llu（身份/组 %llu‰）、慢路 %llu（读盘 %llu / 现场编 %llu）、编译≥2 的组 %llu",
+             (unsigned long long)g_idg_groups, (unsigned long long)g_idg_idents,
+             (unsigned long long)(g_idg_groups ? g_idg_idents * 1000 / g_idg_groups : 0),
+             (unsigned long long)g_idg_resolves, (unsigned long long)g_idg_loads,
+             (unsigned long long)g_idg_compiles, (unsigned long long)g_idg_multi);
+    nvn_plat_log(NVN_PLAT_LOG_INFO, "shader", b);
+}
 
 static int shader_resolve_graphics(const struct rp_shader_req *q, const struct rp_prog **out) {
     *out = NULL;
@@ -890,18 +991,19 @@ static int shader_resolve_graphics(const struct rp_shader_req *q, const struct r
     if (!shader_texture_pool_ready()) return -1;
     struct s2a_direct_compile_context pc; memset(&pc, 0, sizeof pc);
     if (s2a_direct_provider_compile_context(&pc) || !pc.profile_json || !pc.profile_bytes) { nvn_unimpl("shader", "no_compile_context", NULL); return -1; }
-    uint64_t key = input_sig(q, &pc, stages);
+    uint64_t key = input_sig(q, &pc, stages, 1);
+    uint64_t group = idg_on() ? input_sig(q, &pc, stages, 0) : 0;   // 身份粒度诊断：同一份着色器的分组键
     static int check = -1; if (check < 0) check = nvn_plat_flag("nvk_resolve_check", 0);
     g_cache_calls++;
     struct last_ent *le = last_find(key, pc.session, pc.generation);
     if (le) {
         *out = le->prog;   // 快路径不记 draw_hits：同一份程序会被画几千笔，计数口径是「份数」不是「笔数」
-        if (check) { const struct rp_prog *chk = NULL; int rc = resolve_slow(q, &chk, &pc, stages, nst); if (rc || chk != le->prog) red1("resolve_fast_path_mismatch", "快路径给的程序与慢路径不一致"); }
+        if (check) { const struct rp_prog *chk = NULL; int rc = resolve_slow(q, &chk, &pc, stages, nst, 0); if (rc || chk != le->prog) red1("resolve_fast_path_mismatch", "快路径给的程序与慢路径不一致"); }
         g_cache_hits++;
         if (g_cache_log) { g_cache_hit_ns += now_ns() - t0; if (!(g_cache_calls & 4095)) cache_log(); }
         return 0;
     }
-    int rc = resolve_slow(q, out, &pc, stages, nst);
+    int rc = resolve_slow(q, out, &pc, stages, nst, group);
     if (!rc) last_put(key, pc.session, pc.generation, *out);
     g_cache_misses++;
     if (g_cache_log) { g_cache_miss_ns += now_ns() - t0; if (!(g_cache_calls & 4095)) cache_log(); }
@@ -910,7 +1012,7 @@ static int shader_resolve_graphics(const struct rp_shader_req *q, const struct r
 
 // [提交线程] 三段式的第二、三段：先查已发布与在途（不重复准备），否则捕获快照 → 工作 → 发布。
 static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **out, const struct s2a_direct_compile_context *pcp,
-                        uint32_t stages, int nst) {
+                        uint32_t stages, int nst, uint64_t group) {
     struct s2a_direct_compile_context pc = *pcp;
     *out = NULL;
     if (!g_profile.ok || g_profile.session != pc.session || g_profile.generation != pc.generation) {
@@ -933,6 +1035,7 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     static uint8_t idbuf[S2A_INPUT_IDENTITY_MAX]; size_t idlen = 0; uint8_t sha[32];
     if (s2a_input_identity_encode(&id, idbuf, sizeof idbuf, &idlen)) { nvn_unimpl("shader", "identity_encode_failed", NULL); return -1; }
     sha256(idbuf, idlen, sha);
+    idg_note_ident(group, sha);   // 身份粒度诊断：这份身份第一次被用到（group=0 时空转）
 
     // 1) 已发布：直接命中。命中路径只多一次锁和一次热点 ++（不填快照、不 pin 源）。
     int e_failed = 0, e_adopted = 0;
@@ -991,12 +1094,15 @@ static int resolve_slow(const struct rp_shader_req *q, const struct rp_prog **ou
     rec.stage_mask = stages;
     for (int st = 0; st < nst; st++) memcpy(rec.keys[st], id.keys[st], 8);
     struct entry *ne = NULL;
+    const uint64_t dg_c0 = atomic_load(&g_n_compiled);
     struct work_snap *snap = snap_capture(&f, &id, sha, &pc, stages, nst);
     if (!snap || !(ne = work_run(snap, 0))) {
         snap_free(snap);
         if (claimed) inflight_abort(sha);
         return -1;
     }
+    idg_work(group, atomic_load(&g_n_compiled) > dg_c0);   // 身份粒度诊断：这份身份是现场编出来的还是读盘/离线库拿到的
+    idg_log();
     // 快照里的 c1 逐字节抄进记录：预热产品必须与这次真实解析的程序逐位一致（rp_draw 对 c1 不齐直接跳过绘制）。
     for (int st = 0; st < nst; st++)
         if (snap->views[st].c1 && snap->views[st].c1_bytes >= NVK_PROG_REC_C1_BYTES) {
@@ -1230,11 +1336,29 @@ void rp_shader_reset(void) {
     if (g_pool_programs || g_pool_request_rejected) pool_stats("reset");
     // 后台预热一律不得越过这一步进会话收尾：先有界静默（置位后后台不再发布），再释放。
     // Lead 的调度器在 Stop 时已经调过一次 nvk_shader_warm_quiesce（幂等）；这里再调是为了不依赖调用顺序。
-    if (nvk_shader_warm_quiesce(200)) nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】着色器收尾：预热带后台工作没在预算内静默（迟到结果按代际丢弃）");
+    // 静默判据现在同时含「程序借用」：借用方手里还握着 rp_prog*，这一步释放 entry 就是 UAF。
+    if (nvk_shader_warm_quiesce(200)) nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】着色器收尾：预热带后台工作 / 程序借用没在预算内静默（迟到结果按代际丢弃；程序记录按下面的借用判据处理）");
     nvk_prog_warm_reset();
     pthread_mutex_lock(&g_progs_mu);
+    // 收尾读数先取快照（正常收尾成功后计数清零，读数还得记在本局名下）。
+    struct borrow_snap bs;
+    bs.borrowed = g_borrowed; bs.peak = g_borrow_peak; bs.rejected = g_borrow_rejected;
+    bs.unmatched = g_borrow_unmatched; bs.retained = g_retained_progs;
     g_progs_epoch++;   // 换代：之后任何在途构建都不得再发布（预热带会释放自己那份 entry）
-    for (uint32_t i = 0; i < g_progs.cap; i++) entry_free((struct entry *)g_progs.vals[i]);
+    if (bs.borrowed) {
+        // 借用没归零：这些 entry 不能释放——借用方手里的 rp_prog* 指向它们，归还前仍要能读。
+        // 表结构照样换成空表：旧 entry 的 nvn_gpu_shader 属于本世代设备，下一局按身份命中它就是悬垂句柄。
+        // 旧 entry 整份泄漏到进程结束（只有「借用超时未归」这条异常路径会泄漏，每次收尾至多一批）；
+        // 宁可泄漏，也不 UAF——归还之后这里也不再回收，因为迟到归还与回收之间没有可证明的顺序。
+        uint64_t held = 0;
+        for (uint32_t i = 0; i < g_progs.cap; i++) if (g_progs.vals[i]) held++;
+        g_retained_progs += held;
+        bs.retained = g_retained_progs;
+    } else {
+        for (uint32_t i = 0; i < g_progs.cap; i++) entry_free((struct entry *)g_progs.vals[i]);
+        g_borrow_peak = 0; g_borrow_rejected = 0; g_borrow_unmatched = 0;
+        g_borrow_full_said = g_borrow_unmatched_said = 0;
+    }
     free(g_progs.keys); free(g_progs.vals); nvn_hm_init(&g_progs, 32);
     memset(g_inflight, 0, sizeof g_inflight);
     g_inflight_n = g_inflight_bg = 0;
@@ -1246,12 +1370,16 @@ void rp_shader_reset(void) {
     memset(g_comb_sig, 0, sizeof g_comb_sig);
     memset(g_csfast, 0, sizeof g_csfast); g_csfast_next = 0;   // 计算快路同样存 rp_prog*，跨会话必须清
     g_csfast_hits = g_csfast_misses = 0;
+    memset(g_idg, 0, sizeof g_idg); memset(g_idg_set, 0, sizeof g_idg_set);
+    g_idg_groups = g_idg_idents = g_idg_resolves = g_idg_compiles = g_idg_loads = g_idg_multi = 0; g_idg_last_ns = 0;
     g_cache_calls = g_cache_hits = g_cache_misses = g_cache_hit_ns = g_cache_miss_ns = 0; g_sig_recomp = 0;
     g_mark_calls = g_mark_hits = g_mark_misses = g_mark_hit_ns = g_mark_miss_ns = g_mark_sig = 0;
     g_texpool_logged = g_texpool_last_over_limit = g_texpool_diag = 0;
     g_pool_programs = g_pool_attempts = g_pool_compiled = g_pool_rejected = g_pool_unsupported = 0;
     g_pool_request_rejected = g_pool_request_facts = g_pool_request_other = 0;
     g_pool_reason_count = 0; memset(g_pool_reasons, 0, sizeof g_pool_reasons);
+    // 收尾读数：被拒绝时 RED（未静默状态留在读数里），正常收尾 INFO（借用 0 也打，证明判据看过借用）。
+    borrow_log(bs.borrowed ? NVN_PLAT_LOG_RED : NVN_PLAT_LOG_INFO, "reset", &bs);
 }
 
 // ---------- 对预热/管线配方的只读接口（rp_shader.h）----------
@@ -1271,6 +1399,68 @@ int rp_shader_prog_by_identity(const uint8_t identity[32], const struct rp_prog 
     if (e && !e->failed) *out = &e->prog;
     pthread_mutex_unlock(&g_progs_mu);
     return *out ? 1 : 0;
+}
+// 借用：把「这个身份正在被用」登记进 g_progs_mu 下的借用表。借到的 rp_prog* 在归还前不会被
+// rp_shader_reset 释放（收尾先等借用归零，超时就把记录改成进程级泄漏，见 rp_shader_reset）。
+//   1 = 借到（*out 有效，跨线程只读；必须配一次 rp_shader_prog_return 同一个身份）
+//   0 = 这个身份还没发布（含解析失败项：失败项不是可用程序，口径同 rp_shader_prog_by_identity）
+//  -1 = 会话已停 / 参数错 / 借用表满（表满如实失败并计数，绝不静默降级成裸指针）
+int rp_shader_prog_borrow(const uint8_t identity[32], const struct rp_prog **out) {
+    if (out) *out = NULL;
+    if (!identity || !out) {
+        pthread_mutex_lock(&g_progs_mu); g_borrow_rejected++; pthread_mutex_unlock(&g_progs_mu);
+        return -1;
+    }
+    pthread_mutex_lock(&g_progs_mu);
+    if (shader_stopped()) { g_borrow_rejected++; pthread_mutex_unlock(&g_progs_mu); return -1; }
+    struct entry *e = progs_get_locked(identity);
+    if (!e || e->failed) { pthread_mutex_unlock(&g_progs_mu); return 0; }
+    struct borrow_ent *slot = NULL;
+    for (unsigned i = 0; i < BORROW_SLOTS && !slot; i++)
+        if (g_borrow[i].n && !memcmp(g_borrow[i].identity, identity, 32)) slot = &g_borrow[i];
+    if (!slot) for (unsigned i = 0; i < BORROW_SLOTS; i++)
+        if (!g_borrow[i].n) { memset(&g_borrow[i], 0, sizeof g_borrow[i]); memcpy(g_borrow[i].identity, identity, 32); slot = &g_borrow[i]; break; }
+    if (!slot) {
+        g_borrow_rejected++;
+        int said = g_borrow_full_said; g_borrow_full_said = 1;
+        pthread_mutex_unlock(&g_progs_mu);
+        if (!said) nvn_plat_log(NVN_PLAT_LOG_RED, "shader", "【红】程序借用表满（256 格）：这次不交给调用方裸指针，按取不到处理（读数里记「拒绝」）");
+        return -1;
+    }
+    slot->n++;
+    g_borrowed++;
+    if (g_borrowed > g_borrow_peak) g_borrow_peak = g_borrowed;
+    *out = &e->prog;
+    pthread_mutex_unlock(&g_progs_mu);
+    return 1;
+}
+// 归还：与一次成功的借用一一对应（参数是同一个身份）。归零时广播：预热静默 / 收尾正在
+// g_progs_cv 上等「后台在途 + 借用」。没有对应借用的归还是调用方 bug：计数 + 报一次红，表不动。
+void rp_shader_prog_return(const uint8_t identity[32]) {
+    pthread_mutex_lock(&g_progs_mu);
+    struct borrow_ent *slot = NULL;
+    if (identity) for (unsigned i = 0; i < BORROW_SLOTS; i++)
+        if (g_borrow[i].n && !memcmp(g_borrow[i].identity, identity, 32)) { slot = &g_borrow[i]; break; }
+    if (!slot) {
+        g_borrow_unmatched++;
+        int said = g_borrow_unmatched_said; g_borrow_unmatched_said = 1;
+        pthread_mutex_unlock(&g_progs_mu);
+        if (!said) nvn_plat_log(NVN_PLAT_LOG_RED, "shader", "【红】程序借用：归还了一个没有对应借用的身份（调用方 bug，已计数；借用表不变）");
+        return;
+    }
+    slot->n--;
+    if (g_borrowed) g_borrowed--;
+    if (!slot->n) memset(slot, 0, sizeof *slot);   // 空槽：身份不作数，下次借用整格重写
+    // 归零这一下就是静默 / 收尾等的那个点；广播是幂等的，多叫醒几次无妨。
+    pthread_cond_broadcast(&g_progs_cv);
+    pthread_mutex_unlock(&g_progs_mu);
+}
+// 当前未归还借用数：[任意线程]。管线预热侧用它判断「现在收尾会不会被拒绝」。
+int rp_shader_prog_borrowed(void) {
+    pthread_mutex_lock(&g_progs_mu);
+    int n = (int)g_borrowed;
+    pthread_mutex_unlock(&g_progs_mu);
+    return n;
 }
 
 // ---------- 预热：按跨会话清单重建成已发布的程序对象 ----------
@@ -1326,11 +1516,15 @@ int nvk_prog_warm_build(const struct nvk_prog_rec *rec) {
 
 // [收尾线程] 预热线程退出后收拢后台在途构建：置静默（此后预热带一律不得发布），并最多等 budget_ms。
 // 返回 0 = 已静；1 = 预算内没静（如实返回，调用方按保留会话处理）。有界：绝不等编译服务。
+// 「静默」= 程序构建在途（g_inflight_bg）归零 **且** 程序借用归零：
+//   · 前者只说明没有后台构建还在发布（迟到结果由代际 / 静默位丢弃）；
+//   · 后者才说明没有消费者还握着 rp_prog*（rp_shader_reset 释放 entry 的前提）。
+// 只等前者就是这条 P1：管线预热在用程序时 quiesce 返回 0，随后 reset 释放 entry → UAF。
 int nvk_shader_warm_quiesce(uint32_t budget_ms) {
     uint64_t deadline = mono_ms() + budget_ms;
     pthread_mutex_lock(&g_progs_mu);
     g_warm_quiesced = 1;
-    while (g_inflight_bg > 0) {
+    while (g_inflight_bg > 0 || g_borrowed > 0) {
         uint64_t now = mono_ms();
         if (now >= deadline) break;
         uint64_t left = deadline - now;
@@ -1341,7 +1535,7 @@ int nvk_shader_warm_quiesce(uint32_t budget_ms) {
         while (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
         (void)pthread_cond_timedwait(&g_progs_cv, &g_progs_mu, &dl);
     }
-    int bg = (int)g_inflight_bg;
+    int busy = (int)(g_inflight_bg + g_borrowed);
     pthread_mutex_unlock(&g_progs_mu);
-    return bg == 0 ? 0 : 1;
+    return busy == 0 ? 0 : 1;
 }

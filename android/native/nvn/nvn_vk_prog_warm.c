@@ -53,7 +53,12 @@ struct slot {
 static struct {
     pthread_mutex_t mu;
     struct slot *v;
-    uint32_t n, cap, cursor;
+    uint32_t n, cap;
+    // 本局预热集：load 时冻结的一份不可变快照（身份 + 阶段键 + C1）。运行期的 note / 淘汰 / 热点排序只写 g.v、
+    // 只影响下一局清单，**绝不改这份快照**——否则 take 的游标会走在「正在被 qsort / 淘汰的数组」上，同一身份
+    // 被取两次、另一个身份永远漏掉（外部复核 prog_order_probe / pipe_order_probe 复现的 A→A）。
+    struct nvk_prog_rec *plan;
+    uint32_t plan_n, plan_i;
     uint32_t limit;
     int dirty;                    // 上次落盘以来有变化（save 的快路径）
     int have_facts;               // 载入过本局有效性事实（save 的头需要它）
@@ -99,7 +104,9 @@ static int rec_well_formed(const struct nvk_prog_rec *r) {
 static void stats_reset(void) { memset(&g.st, 0, sizeof g.st); }
 static void reset_locked(void) {
     free(g.v); g.v = NULL;
-    g.n = g.cap = g.cursor = 0;
+    free(g.plan); g.plan = NULL;
+    g.n = g.cap = 0;
+    g.plan_n = g.plan_i = 0;
     g.limit = 0;   // 下一局（或下一个 load）按当时的 flag 重读上限
     g.dirty = 0; g.have_facts = 0; g.max_ts = 0;
     memset(g.profile_sha, 0, sizeof g.profile_sha); memset(g.closure_sha, 0, sizeof g.closure_sha);
@@ -133,6 +140,15 @@ static uint32_t warm_limit(void) {
     return (uint32_t)v;
 }
 // uses 降序；同 uses 用 last_use 降序（谁最近用过谁先）；再同按 identity 升序，保证同一份清单两次落盘逐字节一致。
+// 落盘排序只排一份下标表，不动 g.v：本局实时表可能正被 note / 淘汰改（虽然都在锁里，就地 qsort 会让
+// 「这一份快照」和「take 看到的东西」分家，外部复核就是这个 repro 的根因之一）。
+static const struct slot *g_cmp_base;
+static int slot_cmp_idx(const void *pa, const void *pb) {
+    const struct slot *a = &g_cmp_base[*(const uint32_t *)pa], *b = &g_cmp_base[*(const uint32_t *)pb];
+    if (a->rec.uses != b->rec.uses) return a->rec.uses < b->rec.uses ? 1 : -1;
+    if (a->last_use_ms != b->last_use_ms) return a->last_use_ms < b->last_use_ms ? 1 : -1;
+    return memcmp(a->rec.identity, b->rec.identity, 32);
+}
 static int slot_cmp(const void *pa, const void *pb) {
     const struct slot *a = (const struct slot *)pa, *b = (const struct slot *)pb;
     if (a->rec.uses != b->rec.uses) return a->rec.uses < b->rec.uses ? 1 : -1;
@@ -259,9 +275,15 @@ int nvk_prog_warm_load(void) {
     }
     g.n = usable;
     qsort(g.v, g.n, sizeof g.v[0], slot_cmp);
+    // 冻结本局预热集：拿文件顺序（热点降序）的一份值拷贝。之后 g.v 怎么 note / 淘汰 / 重排都影响不到它。
+    free(g.plan); g.plan = NULL; g.plan_n = g.plan_i = 0;
+    if (g.n) {
+        g.plan = (struct nvk_prog_rec *)malloc((size_t)g.n * sizeof *g.plan);
+        if (g.plan) { for (uint32_t i = 0; i < g.n; i++) g.plan[i] = g.v[i].rec; g.plan_n = g.n; }
+        else nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】程序清单：本局预热集快照分配失败（本局不预热，清单照常记录）");
+    }
     g.st.loaded = g.n;
     g.st.rejected = filtered;
-    g.cursor = 0;
     g.dirty = 0;
     pthread_mutex_unlock(&g.mu);
     free(buf);
@@ -273,18 +295,20 @@ int nvk_prog_warm_load(void) {
     return (int)g.st.loaded;
 }
 
+// 只走开局冻结的快照：与 note / 淘汰 / 落盘排序完全解耦（快照不可变，所以这里不需要持锁读内容，
+// 只用锁保护游标）。返回 1 = 取到；0 = 本局快照取完。
 int nvk_prog_warm_take(struct nvk_prog_rec *out) {
     if (!out) return 0;
     pthread_mutex_lock(&g.mu);
-    int have = g.cursor < g.n;
-    if (have) { *out = g.v[g.cursor].rec; g.cursor++; }
+    int have = g.plan_i < g.plan_n;
+    if (have) { *out = g.plan[g.plan_i]; g.plan_i++; }
     pthread_mutex_unlock(&g.mu);
     return have;
 }
 
 int nvk_prog_warm_pending(void) {
     pthread_mutex_lock(&g.mu);
-    uint32_t pending = g.cursor < g.n ? g.n - g.cursor : 0;
+    uint32_t pending = g.plan_i < g.plan_n ? g.plan_n - g.plan_i : 0;
     pthread_mutex_unlock(&g.mu);
     return (int)pending;
 }
@@ -364,7 +388,7 @@ void nvk_prog_warm_stats(struct nvk_prog_warm_stats *out) {
     if (!out) return;
     pthread_mutex_lock(&g.mu);
     *out = g.st;
-    out->pending = g.cursor < g.n ? g.n - g.cursor : 0;
+    out->pending = g.plan_i < g.plan_n ? g.plan_n - g.plan_i : 0;
     pthread_mutex_unlock(&g.mu);
 }
 
@@ -432,7 +456,19 @@ void nvk_prog_warm_save(void) {
         len = (size_t)NVK_PROG_WARM_HDR_FIELDS + (size_t)g.n * NVK_PROG_WARM_ENTRY + NVK_PROG_WARM_SUM;
         buf = (uint8_t *)malloc(len);
         if (!buf) { pthread_mutex_unlock(&g.mu); pthread_mutex_unlock(&g_save_mu); nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】程序清单落盘：内存不足，本局不写"); return; }
-        qsort(g.v, g.n, sizeof g.v[0], slot_cmp);   // 落盘顺序 = 下局预热带顺序：uses 降序、同 uses 最近用过的先
+        // 落盘顺序 = 下局预热带顺序：uses 降序、同 uses 最近用过的先。排的是下标表（副本），不改 g.v。
+        uint32_t *idx = (uint32_t *)malloc((size_t)g.n * sizeof *idx);
+        if (!idx) {
+            free(buf);
+            pthread_mutex_unlock(&g.mu);
+            pthread_mutex_unlock(&g_save_mu);
+            nvn_plat_log(NVN_PLAT_LOG_RED, "warm", "【红】程序清单落盘：排序下标分配失败（保留旧文件，下次再写）");
+            return;
+        }
+        for (uint32_t i = 0; i < g.n; i++) idx[i] = i;
+        g_cmp_base = g.v;
+        qsort(idx, g.n, sizeof *idx, slot_cmp_idx);
+        g_cmp_base = NULL;
         uint8_t *p = buf;
         put_u32(&p, NVK_PROG_WARM_MAGIC);
         put_u32(&p, NVK_PROG_WARM_VERSION);
@@ -442,7 +478,7 @@ void nvk_prog_warm_save(void) {
         put_u32(&p, (uint32_t)g.direct_abi);
         memcpy(p, g.closure_sha, 8); p += 8;
         for (uint32_t i = 0; i < g.n; i++) {
-            const struct slot *s = &g.v[i];
+            const struct slot *s = &g.v[idx[i]];
             memcpy(p, s->rec.identity, 32); p += 32;
             put_u32(&p, s->rec.stage_mask);
             memcpy(p, s->rec.keys, sizeof s->rec.keys); p += sizeof s->rec.keys;
@@ -451,6 +487,7 @@ void nvk_prog_warm_save(void) {
             put_u32(&p, s->rec.uses);
             put_u64(&p, s->last_use_ms);
         }
+        free(idx);
         put_u64(&p, fnv1a64(buf, len - NVK_PROG_WARM_SUM));
         g.dirty = 0;   // 先清：写盘期间新的 note 会重新置 1，下一轮再写
         pthread_mutex_unlock(&g.mu);

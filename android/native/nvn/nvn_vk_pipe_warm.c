@@ -61,7 +61,11 @@ static struct pw_state {
     uint32_t cap;
     uint32_t nbucket;       // cap 向上取 2 的幂
     uint32_t count;
-    uint32_t cursor;        // take 游标（按 order 走）
+    // 本局预热集：load 时冻结的一份值拷贝（程序身份 + 紧凑配方），take 只走它。运行期的 note / 淘汰 /
+    // 热点重排（note_gen → order 重建）只写 g.recs / g.order，只影响下一局清单——否则 take 的游标会走在
+    // 正在被重排的 order 上：同一配方取两次、另一个配方永远漏掉（外部复核 pipe_order_probe 的 A→A）。
+    struct nvk_pipe_rec *plan;
+    uint32_t plan_n, plan_i;
     struct nvk_pipe_rec *recs;
     uint32_t *uses;         // 与 recs 平行：使用次数（落盘用）
     uint32_t *seen;         // 最近使用序号（同 uses 的淘汰顺序）
@@ -76,7 +80,11 @@ static struct pw_state {
     struct { uint64_t h; int32_t slot; } memo[NVK_PW_MEMO];
     struct nvk_pipe_warm_stats st;
     uint64_t save_ok, save_fail, save_skip;
+    uint64_t save_gen, published_gen;   // 快照代际：旧快照不许覆盖新快照（保存串行下的兜底断言）
 } g = { .mu = PTHREAD_MUTEX_INITIALIZER };
+// 落盘串行：周期保存与停局保存不并发（否则两个 writer 抢同一个 .tmp / rename 目标，新快照会被旧快照覆盖；
+// 外部复核 pipe_save_race_probe 复现：两条的文件被旧快照覆写后，新进程加载返回 0）。
+static pthread_mutex_t g_save_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void pw_log(int red, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void pw_log(int red, const char *fmt, ...) {
@@ -428,33 +436,44 @@ int nvk_pipe_warm_take(struct nvk_pipe_rec *out) {
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     pthread_mutex_lock(&g.mu);
-    if (!g.inited || g.cursor >= g.count) { pthread_mutex_unlock(&g.mu); return 0; }
-    if (g.order_gen != g.note_gen) pw_build_order_locked();
-    *out = g.recs[g.order[g.cursor++]];
+    if (g.plan_i >= g.plan_n) { pthread_mutex_unlock(&g.mu); return 0; }
+    *out = g.plan[g.plan_i++];   // 开局冻结快照，不可变：与 note / 淘汰 / 重排完全解耦
     pthread_mutex_unlock(&g.mu);
     return 1;
 }
 
 int nvk_pipe_warm_pending(void) {
     pthread_mutex_lock(&g.mu);
-    int n = g.inited && g.count > g.cursor ? (int)(g.count - g.cursor) : 0;
+    int n = g.plan_i < g.plan_n ? (int)(g.plan_n - g.plan_i) : 0;
     pthread_mutex_unlock(&g.mu);
     return n;
 }
 
 // ---- build（预热线程） ----
+// 管线预热（预热线程）：从程序身份借到程序，然后按记录里的紧凑配方建管线。
+// 寿命合同（外部复核 P1）：这里不是「查一下马上用」——整段 build（读 prog->sh[]、建管线、装缓存）都可能与
+// 会话收尾并发，所以必须先 rp_shader_prog_borrow 拿到正式借用；借用未归还前 rp_shader_reset 不会释放程序
+// 记录、预热静默判据也不会判静。裸指针（rp_shader_prog_by_identity）只能用于「借用表可用」的快速判断。
 int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec) {
     if (!rec || rec->bytes != NVK_PW_DESC_BYTES) return -1;
     const struct rp_prog *prog = NULL;
-    if (!rp_shader_prog_by_identity(rec->prog_identity, &prog) || !prog) {
+    int br = rp_shader_prog_borrow(rec->prog_identity, &prog);
+    if (br == 0) {
         __atomic_fetch_add(&g.st.retried, 1, __ATOMIC_RELAXED);
         return 1;   // 程序还没发布：预热线程隔几毫秒再试（不是失败）
     }
+    if (br < 0 || !prog) {
+        // 会话已停 / 借用表满：本局这条不建（如实计数，不假装建过）。
+        __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
+        pw_log(1, "管线预热：程序借用失败（停局 / 借用表满），整条跳过");
+        return -1;
+    }
+    int rc = -1;
     nvn_gpu_pipe_desc pd;
     if (!pw_desc_read(rec->desc, rec->bytes, &pd)) {
         __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
         pw_log(1, "管线预热：记录长度 %u 与描述版本 %u 不符，整条跳过", (unsigned)rec->bytes, (unsigned)NVK_PW_DESC_BYTES);
-        return -1;
+        goto out;
     }
     // 记录里记着哪些阶段（st[].sh 的存在位），必须和程序实际的阶段一致：对不上就是旧布局 / 别的层的
     // 记录，建出来的就不是这条配方——宁可不建，也不建一条「差不多」的。
@@ -464,12 +483,12 @@ int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec) {
         if (((want >> st) & 1) != have) {
             __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
             pw_log(1, "管线预热：记录的阶段位 %#x 与程序的阶段对不上（阶段 %d），整条跳过", (unsigned)want, st);
-            return -1;
+            goto out;
         }
     }
     if ((want & ~0x7u) != 0) {   // GS 以外的阶段（TCS / TES）本层不产生：有就是坏记录
         __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
-        return -1;
+        goto out;
     }
     for (int st = 0; st < 3; st++) pd.st[st].sh = prog->sh[st];
     if (nvn_gpu_pipe_warm_scope) nvn_gpu_pipe_warm_scope(1);
@@ -480,10 +499,13 @@ int nvk_pipe_warm_build(const struct nvk_pipe_rec *rec) {
     if (!nvn_gpu_ok(r)) {
         __atomic_fetch_add(&g.st.failed, 1, __ATOMIC_RELAXED);
         pw_log(1, "管线预热：nvn_gpu_pipe_get 失败（%d）：%s", (int)r.code, err.why);
-        return -1;
+        goto out;
     }
     __atomic_fetch_add(&g.st.built, 1, __ATOMIC_RELAXED);
-    return 0;
+    rc = 0;
+out:
+    rp_shader_prog_return(rec->prog_identity);   // 借用必须在整段使用（含建管线）之后才还
+    return rc;
 }
 
 // ---- 盘上文件：<缓存目录>/pipes-v<格式>-<描述版本>.bin ----
@@ -606,6 +628,11 @@ int nvk_pipe_warm_load(void) {
         return 0;
     }
     pthread_mutex_lock(&g.mu);
+    // 同一进程里第二次 load（测试 / 重新开局）要先清掉上一份的槽位与桶：哈希链是按槽位下标串的，
+    // 留着旧链会让新表指到上一份的条目上。
+    memset(g.used, 0, g.cap);
+    for (uint32_t i = 0; i < g.nbucket; i++) g.bucket[i] = -1;
+    for (uint32_t i = 0; i < g.cap; i++) g.next[i] = -1;
     for (uint32_t i = 0; i < cnt; i++) {
         const uint8_t *e = buf + NVK_PW_HDR + (size_t)i * NVK_PW_ENTRY;
         struct nvk_pipe_rec *r = &g.recs[i];
@@ -622,7 +649,13 @@ int nvk_pipe_warm_load(void) {
         g.bucket[b] = (int32_t)i;
     }
     g.count = cnt;
-    g.cursor = 0;
+    // 冻结本局预热集：文件顺序（uses 降序）= 热点优先的一份值拷贝，之后的 note / 淘汰 / 重排都影响不到它。
+    free(g.plan); g.plan = NULL; g.plan_n = g.plan_i = 0;
+    if (cnt) {
+        g.plan = (struct nvk_pipe_rec *)malloc((size_t)cnt * sizeof *g.plan);
+        if (g.plan) { for (uint32_t i = 0; i < cnt; i++) g.plan[i] = g.recs[i]; g.plan_n = cnt; }
+        else pw_log(1, "【红】管线预热清单：本局预热集快照分配失败（本局不预热，清单照常记录）");
+    }
     g.clock = cnt;
     g.loaded = 1;
     g.dirty = 0;
@@ -640,19 +673,28 @@ void nvk_pipe_warm_save(void) {
     uint8_t *buf = NULL;
     size_t bytes = 0;
     uint32_t cnt = 0;
+    uint64_t gen = 0;
+    // 保存串行（外部复核 P2）：周期保存与停局保存可能来自不同调用点，两份快照共用同一个 .tmp 与 rename
+    // 目标时，后发的旧快照会覆写先发的新快照。整段（取快照 → 写临时文件 → rename → 目录 fsync）只允许一个
+    // writer；快照代际只用于「不许旧快照覆盖新快照」的兜底断言。
+    pthread_mutex_lock(&g_save_mu);
     pthread_mutex_lock(&g.mu);
     if (!g.inited || !g.dirty || !pw_ensure_dir_locked() || g.count == 0) {
         g.save_skip++;   // 内容没变 / 没有目录 / 一条都没有：不写盘
         pthread_mutex_unlock(&g.mu);
+        pthread_mutex_unlock(&g_save_mu);
         return;
     }
+    gen = ++g.save_gen;
     if (g.order_gen != g.note_gen) pw_build_order_locked();
     cnt = g.count;
     bytes = NVK_PW_HDR + (size_t)cnt * NVK_PW_ENTRY;
     buf = malloc(bytes);
     if (!buf) {
         g.save_fail++;
+        g.save_gen--;   // 这份快照不存在了：代际不推进
         pthread_mutex_unlock(&g.mu);
+        pthread_mutex_unlock(&g_save_mu);
         return;
     }
     memset(buf, 0, NVK_PW_HDR);
@@ -680,9 +722,13 @@ void nvk_pipe_warm_save(void) {
     int rc = pw_write_atomic(path, buf, bytes);
     free(buf);
     pthread_mutex_lock(&g.mu);
-    if (rc == 0) g.save_ok++;
-    else { g.save_fail++; g.dirty = 1; }   // 写失败：留着脏位，下一次 save 再试（失败只计数）
+    if (rc == 0) {
+        if (gen > g.published_gen) g.published_gen = gen;          // 已发布的是最新快照
+        else pw_log(1, "【红】管线预热清单：旧快照代际 %llu 覆盖了新快照 %llu", (unsigned long long)gen, (unsigned long long)g.published_gen);
+        g.save_ok++;
+    } else { g.save_fail++; g.dirty = 1; }   // 写失败：留着脏位，下一次 save 再试（失败只计数）
     pthread_mutex_unlock(&g.mu);
+    pthread_mutex_unlock(&g_save_mu);
     if (rc != 0) pw_log(1, "管线预热清单写盘失败（%u 条，%zu 字节）：%s", (unsigned)cnt, bytes, path);
 }
 
@@ -691,7 +737,7 @@ void nvk_pipe_warm_stats(struct nvk_pipe_warm_stats *out) {
     memset(out, 0, sizeof *out);
     pthread_mutex_lock(&g.mu);
     *out = g.st;
-    out->pending = g.inited && g.count > g.cursor ? g.count - g.cursor : 0;
+    out->pending = g.plan_i < g.plan_n ? g.plan_n - g.plan_i : 0;
     out->rejected = g.st.rejected + g.save_fail;
     pthread_mutex_unlock(&g.mu);
     out->draw_hits = nvn_gpu_pipe_warm_hits ? nvn_gpu_pipe_warm_hits() : 0;   // 转发后端：真实 draw 命中预建对象

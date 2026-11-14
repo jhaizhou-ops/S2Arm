@@ -22,9 +22,15 @@ void nvk_session_request_stop(void) {
     uint64_t expected = 0, now = mono_ns();
     atomic_compare_exchange_strong_explicit(&g_stop_started, &expected, now, memory_order_acq_rel, memory_order_acquire);
     nvk_shader_stop();
-    // 预热线程在着色器准入关闭之后收：先请停再有界 join，然后后台静默 + 清单落盘。放在
-    // nvk_shader_stop 之后是硬要求：准入关了新工作才会被各 owner 拒绝；迟到的结果由 owner 丢弃。
-    nvk_warm_stop();
+    // 预热线程在着色器准入关闭之后收：放在 nvk_shader_stop 之后是硬要求——准入关了新工作才会被
+    // 各 owner 拒绝；迟到的结果由 owner 丢弃。
+    // nvk_warm_stop 有界（≤500 毫秒统一截止）且**不做文件 IO**：清单落盘归预热线程自己（没有预热线程时
+    // 归一次性 saver），这里只等「静默 + 落盘完成」。它占的是本会话 700 毫秒硬界限里的那一段，所以
+    // 非 0 必须在日志里点名，收尾超时的读数才归得了因。
+    if (nvk_warm_stop() != 0)
+        __android_log_print(ANDROID_LOG_ERROR, TAG,
+                            "【红】nvk stop: warm 预热的静默/清单落盘没在 500 毫秒统一截止内完成"
+                            "（本项超时；清单没写盘、旧文件保留；占的是会话 700 毫秒硬界限）");
 }
 uint64_t nvk_session_stop_deadline(void) {
     uint64_t start = atomic_load_explicit(&g_stop_started, memory_order_acquire);

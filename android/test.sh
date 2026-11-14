@@ -365,6 +365,9 @@ s2a_gate_step bash "$android_dir/tools/nvn_warm_test.sh"
 # 预热用的两个清单模块与「同一配方只有一份」的双检（纯逻辑）：往返一致、碰撞不去重、坏文件整份拒绝、
 # 4 线程并发建同一配方只装一份。
 s2a_gate_step bash "$android_dir/tools/nvk_warm_modules_test.sh"
+# 复核 P1-1 / P1-2：程序借用（ASan 下读收尾释放后的记录）与配方级在途表（同配方合并 / 不同配方不排队）
+s2a_gate_step bash "$android_dir/tools/nvk_pipe_flight_test.sh"
+s2a_gate_step bash "$android_dir/tools/nvk_shader_lease_test.sh"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_lifecycle_test.py"
 s2a_gate_step "$PY" "$android_dir/tests/w2_observation_adapter_test.py"
 # vk_record host regression links the real Linux Vulkan loader; the dispatch itself is mocked.
