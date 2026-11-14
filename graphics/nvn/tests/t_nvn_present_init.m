@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 S2Arm contributors
 // 首次使用就是上屏的交换链纹理也必须带入池的初始内容。
 // 公开 NVN 接口 → 独立上屏线程 → 整帧 GPU 回读；均匀灰色与块线性布局无关。
 #import <Foundation/Foundation.h>

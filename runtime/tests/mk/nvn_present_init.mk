@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 S2Arm contributors
 NATIVE_TEST_OWN += nvn_present_init
 ifeq ($(shell uname -s),Darwin)
 $(BUILD)/tests/t_nvn_present_init: graphics/nvn/tests/t_nvn_present_init.m graphics/nvn/tests/host_stubs.h $(NVN_TEST_LIB)
