@@ -917,6 +917,18 @@ class JobsTests(unittest.TestCase):
             self.assertIn("logs/t1-degrade.log", archive.namelist())
             self.assertEqual(json.loads(archive.read("manifest.json"))["degrade_summary"], {"t1": {"rewrite/x18": 30, "direct/lazy": 5}})
 
+    def test_diagnostics_player_note(self):
+        # 故障报修的可选文本框（11-13 维护者）：请求带 note 就原样（去首尾空白）进 manifest.json 的 note，收件服务与 iOS 同字段；不填 / 空白不写
+        import zipfile
+        for given, expect in (("  进游戏第二关就黑屏 C:\\Users\\玩家  ", "进游戏第二关就黑屏 C:\\Users\\玩家"), ("   ", None), (None, None)):
+            destination = self.root / "diag-note.zip"; destination.unlink(missing_ok=True); self.c.r["path"] = str(destination)
+            self.c.r.pop("note", None)
+            if given is not None:
+                self.c.r["note"] = given
+            library.diagnostics(self.c)
+            with zipfile.ZipFile(destination) as archive:
+                self.assertEqual(json.loads(archive.read("manifest.json")).get("note"), expect)
+
     def test_diagnostics_export_to_volume_whose_new_files_change_inode(self):
         # exFAT / FAT（macOS 驱动）：新文件写入数据、分到存储后 inode 号会变（本机 exFAT 镜像实测：mkstemp 后 18446744073709404714，写完 32987）。
         #   模拟这条规则：空文件的 fstat 给一个临时号，有数据后给真号。期望导出照常成功、诊断包在所选位置；

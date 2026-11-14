@@ -1313,6 +1313,8 @@
       {"id": "report.hint", "zh-Hans": "解决不了？点右上角「{button}」把诊断发给我们。", "en": "Still stuck? Click “{button}” at the top right to send us diagnostics."},
       {"id": "diag.upload.what", "zh-Hans": "会上传：最近几次运行和出包的日志、崩溃记录、这台电脑与 S2Arm 的版本信息。文件名和路径里的个人信息会先换掉。", "en": "Uploads: logs from recent runs and builds, crash records, and version info for this computer and S2Arm. Personal details in file names and paths are replaced first."},
       {"id": "diag.upload.not", "zh-Hans": "不会上传：存档、密钥、游戏文件。上传后最多保存 7 天，开发者看完即删。", "en": "Never uploaded: saves, keys, game files. Kept at most 7 days and deleted once the developers have read it."},
+      {"id": "diag.upload.noteLabel", "zh-Hans": "发生了什么？（选填）", "en": "What happened? (optional)"},
+      {"id": "diag.upload.notePlaceholder", "zh-Hans": "写一句就行，比如「过完开场动画就黑屏」「一打开地图就闪退」。不写也能传。", "en": "One line is enough, e.g. \"Black screen after the first cutscene\" or \"Crashes when I open the map\". You can leave it empty."},
       {"id": "diag.upload.send", "zh-Hans": "上传", "en": "Upload"},
       {"id": "diag.upload.cancel", "zh-Hans": "取消", "en": "Cancel"},
       {"id": "diag.upload.sending", "zh-Hans": "正在上传…", "en": "Uploading…"},

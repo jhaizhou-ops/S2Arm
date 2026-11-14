@@ -71,12 +71,17 @@ public sealed partial class EnvironmentWindow
                 return row;
             }
             var exported = false;
+            // 玩家写的一句「发生了什么」（选填，11-13 维护者，同 Mac UploadDiagnosticsSheet）：作业层写进 manifest.json 的 note，取件放在定位卡最上面；不填照样能传
+            var note = new TextBox { PlaceholderText = T("diag.upload.notePlaceholder"), AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 64, MaxHeight = 140 };
+            AutomationId(note, "diag.upload.note");
             void Confirm()
             {
                 body.Children.Clear();
                 body.Children.Add(Label(T("diag.upload.button"), 20));
                 body.Children.Add(Muted(T("diag.upload.what"), 14));
                 body.Children.Add(Muted(T("diag.upload.not"), 14));
+                body.Children.Add(Label(T("diag.upload.noteLabel"), 14));
+                body.Children.Add(note);
                 var cancel = Action("diag.upload.cancel", "diag.upload.cancel"); cancel.Click += (_, _) => dialog.Close();
                 var send = Action("diag.upload.send", "diag.upload.send", true); send.Click += async (_, _) => await Send();
                 body.Children.Add(Row(cancel, send));
@@ -95,6 +100,7 @@ public sealed partial class EnvironmentWindow
                 var fields = new Dictionary<string, object?> { ["extra"] = ReportExtra() };
                 if (gameId is not null) fields["gameId"] = gameId;
                 if (operations is not null) fields["operations"] = operations; else { var f = fallback(); if (!string.IsNullOrWhiteSpace(f)) fields["summary"] = f; }
+                if (!string.IsNullOrWhiteSpace(note.Text)) fields["note"] = note.Text.Trim();
                 string? code = null, why = null, issueUrl = null, repo = null;
                 try
                 {

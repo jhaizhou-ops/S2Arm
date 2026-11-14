@@ -1813,5 +1813,7 @@
   "s2arm.notice.clearCache.done": "Cleared the cache of {0}.",
   "s2arm.notice.clearCache.failed": "Couldn't clear the cache of {0}: {1}",
   "s2arm.notice.waitBusy.failed": "{1} is still running. Try {0} again after it finishes.",
-  "s2arm.space.sharedNote": "%@ is shared between the items above: deleting just one of them won't free it, only checking all of them will. Each size shows what deleting that item alone frees."
+  "s2arm.space.sharedNote": "%@ is shared between the items above: deleting just one of them won't free it, only checking all of them will. Each size shows what deleting that item alone frees.",
+  "s2arm.diagUpload.noteLabel": "What happened? (optional)",
+  "s2arm.diagUpload.notePlaceholder": "One line is enough, e.g. \"Black screen after the first cutscene\" or \"Crashes when I open the map\". You can leave it empty."
 }

@@ -410,6 +410,8 @@ struct UploadDiagnosticsSheet: View {
     enum Phase: Equatable { case confirm, uploading, done(S2ArmLauncherModel.DiagUploadReceipt), failed(String) }
     @State private var phase = Phase.confirm
     @State private var copied = false
+    /// 玩家写的一句「发生了什么」（选填，11-13 维护者）：随包进 manifest.json 的 note，取件放在定位卡最上面；不填照样能传
+    @State private var note = ""
     /// 正在打包 / 上传的那一次：「取消」把它停掉（外层 Task 取消 = 请作业停，JobClient.perform），退回导出
     @State private var work: Task<Void, Never>?
 
@@ -420,6 +422,12 @@ struct UploadDiagnosticsSheet: View {
             case .confirm:
                 Text(loc.t("s2arm.diagUpload.what")).font(.manrope(13)).fixedSize(horizontal: false, vertical: true)
                 Text(loc.t("s2arm.diagUpload.not")).font(.manrope(13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(loc.t("s2arm.diagUpload.noteLabel")).font(.manrope(13, .semibold))
+                    TextField(loc.t("s2arm.diagUpload.notePlaceholder"), text: $note, axis: .vertical)
+                        .lineLimit(3...6).textFieldStyle(.roundedBorder).font(.manrope(13))
+                        .accessibilityIdentifier("diag.upload.note")
+                }
                 HStack {
                     Spacer()
                     Button(loc.t("s2arm.diagUpload.cancel")) { close() }.buttonStyle(LauncherSecondaryButtonStyle()).keyboardShortcut(.cancelAction)
@@ -480,7 +488,7 @@ struct UploadDiagnosticsSheet: View {
         phase = .uploading
         work = Task {
             do {
-                let receipt = try await model.uploadDiagnostics(gameID: gameID, operations: operations, fallback: fallback)
+                let receipt = try await model.uploadDiagnostics(gameID: gameID, operations: operations, fallback: fallback, note: note)
                 if !Task.isCancelled { phase = .done(receipt) }
             } catch {
                 if !Task.isCancelled { phase = .failed(error.localizedDescription) }
