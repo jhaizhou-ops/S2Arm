@@ -7282,5 +7282,9 @@
  {
   "source": "要装的那台（{0}）这次没列出来；这台电脑现在看得到：{1}——在装机页选其中一台再装。",
   "en": "The chosen device ({0}) isn't listed right now. This computer can see: {1}. Pick one of them on the install page and install again."
+ },
+ {
+  "source": "这台电脑连不上 Impactor 签名要用的登录辅助服务器（mac-ani.jkcoxson.com，Impactor 内置、改不了），已自动重试过一次。检查这台电脑的网络：浏览器能打开这个地址就再点一次「装到 iPhone」；打不开就换个 DNS（如 223.5.5.5 或 1.1.1.1）或开 / 关代理后再装。手机、已装的 App 和存档都不受影响。",
+  "en": "This computer cannot reach the sign-in helper server Impactor needs for signing (mac-ani.jkcoxson.com, built into Impactor and not configurable); S2Arm already retried once. Check this computer's network: if a browser can open that address, click Install to iPhone again; if not, switch DNS (for example 223.5.5.5 or 1.1.1.1) or turn a proxy on or off, then install again. The iPhone, installed apps and saves are not affected."
  }
 ]

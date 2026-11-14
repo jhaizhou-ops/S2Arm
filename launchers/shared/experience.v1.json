@@ -490,6 +490,7 @@
        "title": {"zh-Hans": "这台 iPhone 的自签 App 装满了", "en": "Self-signed app limit reached on this iPhone"},
        "detail": {"zh-Hans": "免费 Apple ID 在每台设备上最多同时装 3 个自签 App。", "en": "A free Apple ID can have at most 3 self-signed apps installed on a device at the same time."},
        "next_action": {"from": "pack/jobs/errors.py"}},
+      {"code": "signing_server_unreachable", "severity": "error", "retryable": true, "recoverable": true, "title": {"zh-Hans": "连不上签名用的服务器", "en": "Cannot reach the signing server"}, "detail": {"zh-Hans": "Impactor 签名前要连登录辅助服务器 mac-ani.jkcoxson.com，这台电脑连不上（域名解析或连接失败）。", "en": "Before signing, Impactor contacts the sign-in helper server mac-ani.jkcoxson.com, and this computer cannot reach it (name lookup or connection failed)."}, "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "apple_session_expired", "severity": "error", "retryable": true, "recoverable": true, "title": {"zh-Hans": "Apple ID 登录已过期", "en": "Apple ID sign-in expired"}, "detail": {"zh-Hans": "保存的 Apple ID 登录过期了（Apple 错误 1100），要在 Impactor 里重新登录。", "en": "The saved Apple ID sign-in has expired (Apple error 1100). Sign in again in Impactor."}, "next_action": {"from": "pack/jobs/errors.py"}},
       {"code": "app_id_taken", "severity": "error", "retryable": false, "recoverable": true,
        "title": {"zh-Hans": "包名在苹果那边已被占用", "en": "App ID already taken"},

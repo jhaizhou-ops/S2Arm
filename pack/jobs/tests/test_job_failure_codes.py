@@ -435,6 +435,15 @@ class FreeAccountLimits(unittest.TestCase):
         self.assertIn("移除账号", RECOVERY["apple_session_expired"]); self.assertIn("添加账号", RECOVERY["apple_session_expired"])
         self.assertTrue(loc.get(RECOVERY["apple_session_expired"]) and spec["apple_session_expired"]["title"]["en"] and "apple_session_expired" in guide)
         self.assertEqual(ctl.AI_NEXT["apple_session_expired"][0], "human")
+        # signing_server_unreachable（#3fc02b 玩家原文，Windows 0.3.7）：认成连不上签名服务器、给查网络的办法，各处都登记；
+        #   同是 anisette 但不是网络的报错（-80046）仍归原码
+        raw = ("Error: Anisette error: Request Error error sending request for url (https://mac-ani.jkcoxson.com/v3/client_info)\n\nCaused by:\n"
+               "    2: client error (Connect)\n    3: dns error\n    4: 不知道这样的主机。 (os error 11001)")
+        self.assertEqual(impactor.explain(raw), "signing_server_unreachable")
+        self.assertIn("mac-ani.jkcoxson.com", RECOVERY["signing_server_unreachable"]); self.assertIn("DNS", RECOVERY["signing_server_unreachable"])
+        self.assertTrue(loc.get(RECOVERY["signing_server_unreachable"]) and spec["signing_server_unreachable"]["title"]["en"] and "signing_server_unreachable" in guide)
+        self.assertEqual(ctl.AI_NEXT["signing_server_unreachable"][0], "human")
+        self.assertEqual(impactor.explain("Anisette error: -80046 Apple rejected"), "login_identity_rejected")
         for other, code in (("Developer API error 9401: An App ID with Identifier 'x' is not available.", "app_id_taken"),
                             ("-21669 verification code", "two_factor_wrong"), ("-20101 entered incorrectly", "apple_id_wrong")):
             self.assertEqual(impactor.explain(other), code)
