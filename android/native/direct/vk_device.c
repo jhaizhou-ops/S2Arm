@@ -48,16 +48,35 @@ static int has_instance_extension(const char *name) {
     return found;
 }
 
+// 设备扩展查询：1 = 有，0 = 确实没有（枚举完整成功且不在表里），-1 = 能力未知（枚举失败；why 写原因）。
+//   第二次取数回 VK_INCOMPLETE（两次调用之间表变长）按新的数目重取，最多 4 轮；部分结果不拿来判「没有」
+static int device_extension_state(VkPhysicalDevice physical, const char *name, char *why, size_t why_n) {
+    for (int round = 1; round <= 4; round++) {
+        uint32_t count = 0;
+        VkResult r = vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL);
+        if (r != VK_SUCCESS) { snprintf(why, why_n, "取数目回 VkResult %d（第 %d 轮）", (int)r, round); return -1; }
+        VkExtensionProperties *ext = calloc(count ? count : 1, sizeof *ext);
+        if (!ext) { snprintf(why, why_n, "分配 %u 项失败（第 %d 轮）", count, round); return -1; }
+        uint32_t got = count;
+        r = vkEnumerateDeviceExtensionProperties(physical, NULL, &got, ext);
+        if (r == VK_INCOMPLETE) { free(ext); continue; }
+        if (r != VK_SUCCESS || got > count) {
+            free(ext); snprintf(why, why_n, "取表回 VkResult %d、%u / %u 项（第 %d 轮）", (int)r, got, count, round); return -1;
+        }
+        int found = 0;
+        for (uint32_t i = 0; i < got; i++) if (!strcmp(ext[i].extensionName, name)) { found = 1; break; }
+        free(ext);
+        return found;
+    }
+    snprintf(why, why_n, "连续 4 轮取表都回 VK_INCOMPLETE");
+    return -1;
+}
+// 启用判断只认「确实有」；能力未知时报红并按未启用处理（不当成「确实不支持」默默略过）
 static int has_device_extension(VkPhysicalDevice physical, const char *name) {
-    uint32_t count = 0;
-    if (vkEnumerateDeviceExtensionProperties(physical, NULL, &count, NULL) != VK_SUCCESS) return 0;
-    VkExtensionProperties *ext = calloc(count ? count : 1, sizeof *ext);
-    if (!ext) return 0;
-    vkEnumerateDeviceExtensionProperties(physical, NULL, &count, ext);
-    int found = 0;
-    for (uint32_t i = 0; i < count; i++) if (!strcmp(ext[i].extensionName, name)) { found = 1; break; }
-    free(ext);
-    return found;
+    char why[96] = "";
+    int st = device_extension_state(physical, name, why, sizeof why);
+    if (st < 0) S2A_DLOG("【红】vk 设备扩展 %s：枚举失败（%s），能力未知，按未启用处理\n", name, why);
+    return st > 0;
 }
 
 const char *const *nvn_plat_vk_instance_exts(uint32_t *n) __attribute__((weak));
