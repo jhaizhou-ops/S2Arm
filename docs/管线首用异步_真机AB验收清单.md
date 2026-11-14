@@ -51,7 +51,7 @@ bash build/measure/bench.sh 40 build/measure/ab-<组>-<轮>   # 每组 3 局取�
 `adb shell setprop debug.s2a.nvk_pipe_async 0`（Debug 包）或装回 OFF 包即回到现状；代码默认关，无需其他动作。
 ## 6. 首轮真机 A/B（2026-11-14，稳态窗口，非冷进场）
 
-设备 192.168.31.233:5555；TotK 0100F2C0115B6000；release 包；同路线同一段重场景 40 s 采集。
+设备 192.168.31.233:5555；游戏 0100F2C0115B6000；release 包；同路线同一段重场景 40 s 采集。
 测量版把 `nvn_vk_pipe_demand_on()` 临时改 `return 1`（绕过调试门、保留 release 性能），测完已还原默认关并重新部署。
 
 | 指标 | OFF（默认关） | ON（强制开） |
