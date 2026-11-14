@@ -1586,6 +1586,20 @@ static void t_storage_null_binding(void) {
     p_bind_buf *b = put(&missing, OP_BIND_SSBO, sizeof *b); b->stage = 0; b->index = 0; b->addr = 0x12340; b->size = 32;
     q_draw(&missing); end(&missing); submit1(&missing); fake_complete(NVN_GPU_DONE_OK);
     CHECK(g_gdraws == 2 && nvn_unimpl_count("draw", "storage_buffer_unresolved") == 1);
+    // 地址或长度只空一个，以及 UBO 指针来源，不能被合法空 SBUFP 路径接走。
+    for (int k = 0; k < 3; k++) {
+        stream invalid = {0}; q_env(&invalid);
+        g_fprog.nent[0] = 1; e = &g_fprog.ent[0][0];
+        e->cls = NVN_GPU_RES_SSBO; e->src_kind = k == 2 ? NVN_RB_UBOP : NVN_RB_SBUFP; e->src_reg = 0; e->access = NVN_GPU_ACC_R;
+        if (k < 2) {
+            b = put(&invalid, OP_BIND_SSBO, sizeof *b); b->stage = 0; b->index = 0;
+            b->addr = k == 0 ? 0x12340 : 0; b->size = k == 0 ? 0 : 32;
+        }
+        int draws = g_gdraws, allocated = g_buf_creates;
+        uint64_t unbound = nvn_unimpl_count("draw", "storage_buffer_unbound");
+        q_draw(&invalid); end(&invalid); submit1(&invalid); fake_complete(NVN_GPU_DONE_OK);
+        CHECK(g_gdraws == draws && nvn_unimpl_count("draw", "storage_buffer_unbound") == unbound + 1 && g_buf_creates == allocated);
+    }
     pass_fresh();
     CHECK(g_buf_releases == released + 1);
 }
