@@ -20,10 +20,15 @@
 #include "direct/jv.h"
 #include "tbuf_spirv_fixtures.h"
 
+// 实现在 nvk_shader.c，声明在 nvk_session.h。这里不包 nvk_session.h：nvk_compile_stop_test.py 拿本文件当夹具，
+// 会在同一个翻译单元里把 nvk_session_request_stop 等会话函数定义成 static，包了头就是「static 声明跟在非 static 声明后面」，编不过。
+uint64_t nvk_shader_cs_fast_hits(void);
+
 static int checks, failures, compiler_calls, diag_enabled, diag_lines, diag_queries;
 static unsigned fake_array_count;
 static int separate_fixture;
 static int fake_gs_success, fake_gs_result_mode, gs_loads[6], fake_geometry_enabled = 1;
+static int fake_cs_success, cs_loads;   // 1：编译器替身对计算请求回一份合法的计算程序（走「编成功之后进快路」的正向路径）
 int g_s2a_logfd = 2;
 static const char *fake_compile_error;
 static const char *fake_compile_file;
@@ -71,7 +76,8 @@ const prog_t *nvn_prog_snap_get(uint64_t serial, uint8_t keys[6][8], uint8_t *ok
 }
 void nvn_gpu_caps_get(nvn_gpu_caps *out) { memset(out, 0, sizeof *out); out->caps = fake_geometry_enabled ? NVN_GPU_CAP_GEOMETRY : 0; }
 int rp_tex_snap_by_id(int id, tex_t *t, view_t *v, int *h) {
-    if (!separate_fixture || (id != 77 && id != 78 && !(separate_fixture == 2 && id == 0))) return 0;
+    // 77：带视图（改目标为 RECTANGLE）；78 / 79：同一组格式 / 目标 / 深度的两个不同句柄（快路按事实认，不按句柄认）。
+    if (!separate_fixture || (id != 77 && id != 78 && id != 79 && !(separate_fixture == 2 && id == 0))) return 0;
     memset(t, 0, sizeof *t); memset(v, 0, sizeof *v); t->d.format = NVN_FORMAT_RGBA8; t->d.target = NVN_TEXTURE_TARGET_2D; t->d.depth = 1;
     if (separate_fixture == 3) t->d.target = NVN_TEXTURE_TARGET_BUFFER;
     *h = id == 77 && separate_fixture != 3; if (*h) { v->set_target = 1; v->target = NVN_TEXTURE_TARGET_RECTANGLE; } return 1;
@@ -131,6 +137,15 @@ static int32_t fake_compile(uint64_t session, uint64_t gen, s2a_direct_bytes req
         s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)n};
         return emit(sink, payload);
     }
+    if (fake_cs_success && strstr(captured, "\"program\":{\"kind\":\"compute\"")) {
+        // 合法的计算程序结果（形状同 nvn_vk_program_binding_cap_test.c 的 build_compute）：一个 cs 阶段、零个绑定。
+        static const char result[] = "{\"schema\":\"s2a-direct-program-v1\",\"content\":{"
+            "\"contract\":\"s2a-direct-program-content-v1\",\"kind\":\"compute\",\"hasUnalignedStorageBuffer\":false,\"c0Reads\":[],"
+            "\"stages\":[{\"stage\":\"cs\",\"spirv\":\"AwIjBwABAwAAAAAAAQAAAAAAAAA=\"}],\"bindings\":[],"
+            "\"supportLayout\":{\"requiredSize\":2608},\"supportReads\":[]}}";
+        s2a_direct_bytes payload = {(const uint8_t *)result, (uint64_t)(sizeof result - 1)};
+        return emit(sink, payload);
+    }
     if (fake_compile_error) {
         s2a_direct_bytes payload = {(const uint8_t *)fake_compile_error, (uint64_t)strlen(fake_compile_error)};
         (void)emit(sink, payload); return -1;
@@ -152,6 +167,7 @@ nvn_gpu_rc nvn_gpu_shader_load(const nvn_gpu_shader_src *s, nvn_gpu_shader *o, n
         gs_loads[s->stage]++; *o = (nvn_gpu_shader)(uintptr_t)(s->stage + 1); return (nvn_gpu_rc){NVN_GPU_OK};
     }
     if (fake_array_count) { *o = (nvn_gpu_shader)(uintptr_t)1; return (nvn_gpu_rc){NVN_GPU_OK}; }
+    if (fake_cs_success && s->stage == NVN_GPU_SH_CS) { cs_loads++; *o = (nvn_gpu_shader)(uintptr_t)7; return (nvn_gpu_rc){NVN_GPU_OK}; }
     CHECK(0, "unexpected shader load"); return (nvn_gpu_rc){NVN_GPU_E_UNSUPPORTED};
 }
 void nvn_gpu_shader_release(nvn_gpu_shader s) { (void)s; }
@@ -325,6 +341,76 @@ static void run_case(int compute, int pool, int want_called, const char *expecte
             CHECK(strstr(last_red, num) && strstr(last_red, "1048576"), "%s n=%d error states actual and limit: %s", compute ? "cs" : "gfx", pool, last_red);
         }
     }
+}
+// 计算程序快路：正向路径 + 负对照。夹具让编译器替身对计算请求回一份合法程序（零绑定），第一次派发编成，
+// 之后看「不再走完整请求」——两个证据：编译器没再被调用，且 nvk_shader_cs_fast_hits() 加一（只有快路命中才加）。
+// reg_changes=1 模拟真机：贴图登记代号每次读都推进（贴图每帧都在登记）；=0 登记表不动，事实摘要的缓存有效。两种都要对。
+static void cs_variant_source(unsigned variant, uint8_t digest[32]) {
+    uint8_t ctl[0x760] = {0}, code[16] = {1,2,3,4};
+    wr(ctl+0x20,0x760); wr(ctl+0x748,8); wr(ctl+0x74c,2); wr(ctl+0x750,1);
+    wr(ctl+0x754,17); wr(ctl+0x758,32); wr(ctl+0x700,4); wr(ctl+0x704,8); ctl[0x100] = (uint8_t)variant;
+    s2a_sha256 h; s2a_sha256_init(&h); s2a_sha256_update(&h,ctl,sizeof ctl); s2a_sha256_update(&h,code,sizeof code); s2a_sha256_final(&h,digest);
+    CHECK(!s2a_source_keep(digest, 0, code, sizeof code, ctl, sizeof ctl), "CS fixture source variant=%u", variant);
+}
+static void compute_fast_path_test(void) {
+    for (int rc_mode = 1; rc_mode >= 0; rc_mode--) {
+        const struct rp_prog *a = NULL, *b = NULL; uint8_t dig2[32];
+        rp_shader_reset(); s2a_source_clear(); rp_state_reset(); nvn_unimpl_reset(); source(); cs_variant_source(1, dig2);
+        fake_cs_success = 1; separate_fixture = 1; fake_reg_changes = rc_mode; compiler_calls = cs_loads = 0; captured[0] = last_red[0] = 0;
+        bind_pools(100);
+        rp_S.ubo[5][0].addr = 0x1000; rp_S.ubo[5][0].size = 64; rp_S.ssbo[5][0].addr = 0x10000; rp_S.ssbo[5][0].size = 256; rp_S.tex[5][0] = 78;
+        CHECK(rp_shader_resolve_compute(&a) == 0 && a && a->is_compute && compiler_calls == 1 && cs_loads == 1,
+              "CS first dispatch compiles and loads (reg_changes=%d) calls=%d loads=%d red=%s", rc_mode, compiler_calls, cs_loads, last_red);
+        if (!a) continue;
+        int calls = compiler_calls; uint64_t hits = nvk_shader_cs_fast_hits();
+        CHECK(hits == 0, "CS first dispatch is not a fast-path hit (reg_changes=%d)", rc_mode);
+        // 地址 / 长度 / 句柄变了，编译请求读的输入没变：请求与身份逐字节不变，必须直接复用。
+        rp_S.ubo[5][0].addr = 0x2000; rp_S.ubo[5][0].size = 128;      // 「有没有」不变
+        rp_S.ssbo[5][0].addr = 0x30000; rp_S.ssbo[5][0].size = 1024;  // 仍按 16 对齐
+        rp_S.ssbo[5][1].addr = 0x50000; rp_S.ssbo[5][1].size = 64;    // 多绑一个对齐的存储缓冲：不进请求
+        rp_S.tex[5][0] = 79;                                          // 另一个句柄，格式 / 目标 / 深度同 78
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1,
+              "CS new addresses and same-fact handles reuse the program without a request (reg_changes=%d)", rc_mode);
+        hits = nvk_shader_cs_fast_hits();
+#define CS_MISS(msg, setup, undo) do { \
+            setup; \
+            CHECK(rp_shader_resolve_compute(&b) == 0 && b && b != a && compiler_calls == calls + 1 && nvk_shader_cs_fast_hits() == hits, \
+                  msg " (reg_changes=%d) calls=%d expected=%d hits=%llu/%llu", rc_mode, compiler_calls, calls + 1, \
+                  (unsigned long long)nvk_shader_cs_fast_hits(), (unsigned long long)hits); \
+            calls = compiler_calls; \
+            undo; \
+            CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1, \
+                  "CS restored input hits the first entry again after: " msg " (reg_changes=%d)", rc_mode); \
+            hits = nvk_shader_cs_fast_hits(); \
+        } while (0)
+        // 编译请求读的输入，每一项变了都必须重新走请求（编译器被调用、拿到新程序、不算命中）。
+        CS_MISS("changed CS source key recompiles", memcpy(rp_S.skey[5], dig2, 8), memcpy(rp_S.skey[5], rp_S.skey[0], 8));
+        CS_MISS("changed CS constant-buffer use recompiles", (rp_S.ubo[5][1].addr = 0x6000, rp_S.ubo[5][1].size = 32), (rp_S.ubo[5][1].addr = 0, rp_S.ubo[5][1].size = 0));
+        CS_MISS("unaligned CS storage address recompiles", (rp_S.ssbo[5][2].addr = 0x70001, rp_S.ssbo[5][2].size = 16), (rp_S.ssbo[5][2].addr = 0, rp_S.ssbo[5][2].size = 0));
+        CS_MISS("CS pool size update recompiles", bind_pools(101), bind_pools(100));
+        CS_MISS("changed CS texture fact recompiles", rp_S.tex[5][3] = 77, rp_S.tex[5][3] = 0);
+        // 分离槽 100 的下标是 228：旧键只拷了 rp_S.tex[5] 的前 160 项，覆盖不到。
+        CS_MISS("changed CS separate texture fact recompiles", bind_separate(5, 100, 1, 78), bind_separate(5, 100, 1, 0));
+#undef CS_MISS
+        // 来源登记冲突会毒化短键并推进代际：同一份状态不能再命中推进之前存下的快路表项（慢路仍给同一个程序、不重编）。
+        { uint8_t wrong_code[16] = {9}, wrong_control[0x760] = {0};
+          CHECK(s2a_source_keep(dig2, 0, wrong_code, sizeof wrong_code, wrong_control, sizeof wrong_control) != 0,
+                "conflicting CS source rejected and key poisoned"); }
+        calls = compiler_calls; hits = nvk_shader_cs_fast_hits();
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits,
+              "CS source poison advances the epoch so the cached entry is not reused (reg_changes=%d)", rc_mode);
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b == a && compiler_calls == calls && nvk_shader_cs_fast_hits() == hits + 1,
+              "CS entry is stored again under the new epoch (reg_changes=%d)", rc_mode);
+        // 会话清空：快表与读数一并清掉，同样的状态必须重新编译（里面存的是 rp_prog*，不能跨会话留着）。
+        rp_shader_reset();
+        CHECK(nvk_shader_cs_fast_hits() == 0, "session reset clears the CS fast-path counter (reg_changes=%d)", rc_mode);
+        calls = compiler_calls;
+        CHECK(rp_shader_resolve_compute(&b) == 0 && b && compiler_calls == calls + 1 && nvk_shader_cs_fast_hits() == 0,
+              "after session reset the same CS state compiles again (reg_changes=%d)", rc_mode);
+    }
+    fake_cs_success = 0; separate_fixture = 0; fake_reg_changes = 1;
+    bind_separate(5, 100, 1, 0); memset(rp_S.ubo[5], 0, sizeof rp_S.ubo[5]); memset(rp_S.ssbo[5], 0, sizeof rp_S.ssbo[5]); memset(rp_S.tex[5], 0, sizeof rp_S.tex[5]);
+    rp_shader_reset();
 }
 static int emit_real_request(const char *profile_path, const char *closure, const char *dir, const char *output, int tbuf) {
     FILE *pf = fopen(profile_path, "rb"); if (!pf) return 1;
@@ -558,6 +644,7 @@ int main(int argc, char **argv) {
         separate_fixture = 0;
     }
     fake_array_count = 0; fake_compile_error = NULL;
+    compute_fast_path_test();
     gs_request_test();
     rp_shader_reset(); s2a_source_clear();
     fprintf(stderr, "nvk shader pool: %d checks, %d failures\n", checks, failures);

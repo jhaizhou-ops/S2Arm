@@ -2072,6 +2072,27 @@ class JobsTests(unittest.TestCase):
             self.assertNotIn("合成甲", json.dumps(m, ensure_ascii=False)); self.assertNotIn("U1", json.dumps(m))   # 不记设备名、设备号
             self.assertEqual(m["files"], 3); self.assertTrue(any(x.endswith("diag/blob.bin") for x in m["skipped"]))
 
+    def test_diagnostics_collect_recent_mac_crash_reports(self):
+        """诊断#43f7d3：宿主起局 1 秒内 SIGTRAP、没走到写日志，包里没现场。导出时收本机 ~/Library/Logs/DiagnosticReports 里我们进程的 .ips。
+        期望手写：收 s2arm-host / S2ArmApple 近 7 天的两份（脱敏）；8 天前的、别的 App 的不收；超 4 MB 的跳过并写名字；manifest 计数对"""
+        import unittest.mock as um, os, sys, time as t
+        rep = self.root / "DiagnosticReports"; rep.mkdir()
+        (rep / "s2arm-host-2026-11-14-101500.ips").write_text('{"exception": "EXC_BREAKPOINT", "path": "/Users/Synthetic/x", "mail": "synth@example.invalid"}')
+        (rep / "S2ArmApple-2026-11-14-101600.ips").write_text('{"app": "launcher"}')
+        old = rep / "s2arm-host-2026-11-01-090000.ips"; old.write_text("old"); os.utime(old, (t.time() - 8 * 86400, t.time() - 8 * 86400))
+        (rep / "Finder-2026-11-14-101700.ips").write_text("other app")
+        big = rep / "s2arm-host-2026-11-14-101800.ips"; big.write_bytes(b"x" * (library.MAC_CRASH_FILE_LIMIT + 1))
+        destination = self.root / "diagnostics.zip"; self.c.r["path"] = str(destination)
+        with um.patch.object(library, "MAC_CRASH_DIR", rep), um.patch.object(sys, "platform", "darwin"):
+            library.diagnostics(self.c)
+        with zipfile.ZipFile(destination) as archive:
+            crash = sorted(n for n in archive.namelist() if n.startswith("mac_crash/"))
+            self.assertEqual(crash, ["mac_crash/S2ArmApple-2026-11-14-101600.ips", "mac_crash/s2arm-host-2026-11-14-101500.ips"])
+            text = archive.read("mac_crash/s2arm-host-2026-11-14-101500.ips").decode()
+            self.assertIn("EXC_BREAKPOINT", text); self.assertNotIn("synth@example.invalid", text); self.assertNotIn("/Users/Synthetic", text)
+            m = json.loads(archive.read("manifest.json"))["mac_crash_reports"]
+            self.assertEqual((m["found"], m["files"], m["skipped"]), (3, 2, ["s2arm-host-2026-11-14-101800.ips"]))
+
     def test_diagnostic_manifest_and_every_member_are_redacted_without_truncation(self):
         import platform
         logs = self.c.logs; logs.mkdir(exist_ok=True)

@@ -851,14 +851,18 @@ static void cv_decode(cvdec *d, const cv_in *in, int gen) {
         }
         if (d->vt) {
             // 去掉时间分隔 OBU（ISOBMFF / Matroska 的 AV1 样本约定不带它）
-            uint8_t *s = malloc(in->n); size_t sn = 0; uint64_t t0 = now_ns();
+            // 同时看包里有没有帧数据（帧头 3、分块组 4、帧 6、冗余帧头 7）：只有时间分隔 / 填充 / 元数据的包本来就没有画面，
+            //   原先照样送 VideoToolbox，回 -12903（数据坏）并报红（诊断 #4ddff2：3 字节的包）。这种包直接跳过、不报红；解析不了的尾巴按有帧数据送去
+            uint8_t *s = malloc(in->n); size_t sn = 0; uint64_t t0 = now_ns(); int frame = 0;
             for (size_t o = 0; o < in->n;) {
-                uint8_t h = in->p[o]; size_t hl = 1 + (h >> 2 & 1); uint64_t sz = in->n - o - hl; int ll = 0;
+                uint8_t h = in->p[o]; size_t hl = 1 + (h >> 2 & 1); uint64_t sz = in->n - o - hl; int ll = 0, ty = h >> 3 & 15;
                 if (h >> 1 & 1) ll = leb128(in->p + o + hl, in->n - o - hl, &sz);
-                size_t e = o + hl + (size_t)ll + (size_t)sz; if (e > in->n || o + hl > in->n) { memcpy(s + sn, in->p + o, in->n - o); sn += in->n - o; break; }
-                if ((h >> 3 & 15) != 2) { memcpy(s + sn, in->p + o, e - o); sn += e - o; }
+                size_t e = o + hl + (size_t)ll + (size_t)sz; if (e > in->n || o + hl > in->n) { memcpy(s + sn, in->p + o, in->n - o); sn += in->n - o; frame = 1; break; }
+                if (ty != 2) { memcpy(s + sn, in->p + o, e - o); sn += e - o; }
+                if (ty == 3 || ty == 4 || ty == 6 || ty == 7) frame = 1;
                 o = e;
             }
+            if (!frame) { free(s); static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("Switch 2 视频：AV1 包里没有帧数据（%zu 字节，只有时间分隔 / 填充之类），跳过（本来就没有画面）", in->n); return; }
             CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
             OSStatus st = CMBlockBufferCreateWithMemoryBlock(NULL, s, sn, kCFAllocatorMalloc, NULL, 0, sn, 0, &bb);
             if (!st) { size_t ss = sn; CMSampleTimingInfo ti = { kCMTimeInvalid, CMTimeMake(in->pts_ns / 1000, 1000000), kCMTimeInvalid }; st = CMSampleBufferCreateReady(NULL, bb, d->vtfmt, 1, 1, &ti, 1, &ss, &sb); }

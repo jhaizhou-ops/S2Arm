@@ -307,6 +307,11 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
         { uint64_t ns = __atomic_exchange_n(&g_pl_ns, 0, __ATOMIC_RELAXED), n = __atomic_exchange_n(&g_pl_n, 0, __ATOMIC_RELAXED), st = __atomic_exchange_n(&g_pl_steps, 0, __ATOMIC_RELAXED);
           snprintf(b, sizeof b, "取管线查找（每帧，近 300 帧）：%.1f 次、共 %.0f 微秒、每次比 %.1f 条", n / 300.0, ns / 300.0 / 1000.0, n ? (double)st / (double)n : 0.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { uint64_t dn = __atomic_exchange_n(&g_dv_n, 0, __ATOMIC_RELAXED), dt = __atomic_exchange_n(&g_dv_ns[0], 0, __ATOMIC_RELAXED), dl = __atomic_exchange_n(&g_dv_ns[1], 0, __ATOMIC_RELAXED);
+          uint64_t gn = __atomic_exchange_n(&g_gmu_n, 0, __ATOMIC_RELAXED), gw = __atomic_exchange_n(&g_gmu_wait_n, 0, __ATOMIC_RELAXED), gwn = __atomic_exchange_n(&g_gmu_wait_ns, 0, __ATOMIC_RELAXED);
+          snprintf(b, sizeof b, "视图销毁与锁（每帧，近 300 帧）：销毁 %.1f 个、共 %.2f 毫秒（其中摘链 %.3f 毫秒）；回放线程取 g_mu %.0f 次、被占着要等的 %.1f 次、共等 %.2f 毫秒；开关 nvk_ulist=%d nvk_fbdrop=%d",
+              dn / 300.0, dt / 300.0 / 1e6, dl / 300.0 / 1e6, gn / 300.0, gw / 300.0, gwn / 300.0 / 1e6, view_ulist_on(), fbdrop_mode());
+          nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
         // 后端现存对象（显存涨在哪）。悬着 = 上层已放、还被引用着没销毁
         { uint64_t nt = 0, ntd = 0, tb = 0, tdb = 0, nb = 0, nbd = 0, bb = 0, nvw = 0, nq = 0;
           pthread_mutex_lock(&g_mu);

@@ -478,9 +478,23 @@ NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const
 NVN(nvnTexturePoolRegisterImage, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
     nvn_be_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
+// 采样器的缺省参数（nvnSamplerBuilderSetDefaults 与下面池初始化的保留项共用；与游戏自带驱动 SetDefaults 写的逐项一致）
+static void samp_defaults(samp_par *o) {
+    memset(o, 0, sizeof *o);
+    o->minf = NVN_MIN_FILTER_LINEAR; o->magf = NVN_MAG_FILTER_LINEAR;
+    o->ws = o->wt = o->wr = NVN_WRAP_MODE_REPEAT; o->cmp_func = NVN_COMPARE_FUNC_LESS;
+    o->lod_max = 1000.f; o->aniso = 1.f;
+}
+// 池的第 0、1 号：游戏自带的 NVN 驱动在 SamplerPoolInitialize 里自己往池内存写两个采样器描述符（本机 6 款 sdk 反汇编一致，SDK 最老到最新）：
+//   缺省参数、寻址 S / T / R 改 CLAMP_TO_EDGE，第 0 项各向异性 1.0、第 1 项 2.0；TexturePoolInitialize 不写任何描述符。游戏会直接拿采样器号 0 采样
+//   （11-14 安卓 8E 010045B018EC2000：句柄 贴图 2127 | 采样器 0，片元 OpImageSampleImplicitLod；不登记时一局跳过 5315 笔）。
+//   HLE 替换了驱动，就在这里照样登记；游戏之后自己登记这两个号照常覆盖（同真机上改写池内存）。容量不到的池只登记放得下的
 NVN(nvnSamplerPoolInitialize, NVNboolean, NVNsamplerPool *sp, const NVNmemoryPool *p, ptrdiff_t off, int n) {
     *(dpool_t *)sp = (dpool_t){(const pool_t *)p, off, n}; OLOG("SamplerPool n=%d", n);
     if (dpool_add(&g_spb, &g_cap_spb, &g_nspb, &g_snext, sp, n, "sampler") < 0) return 0;
+    int base = dpool_base(g_spb, g_nspb, sp);
+    samp_par r; samp_defaults(&r); r.ws = r.wt = r.wr = NVN_WRAP_MODE_CLAMP_TO_EDGE;
+    for (int id = 0; id < 2 && id < n; id++) { r.aniso = id ? 2.f : 1.f; nvn_be_reg_samp(base + id, &r); }
     return 1;
 }
 NVN(nvnSamplerPoolFinalize, void, NVNsamplerPool *sp) { dpool_finalize(g_spb, g_nspb, sp, 0); }
@@ -901,10 +915,7 @@ NVN(nvnTextureInvalidateTexels, void, const NVNtexture *t, const NVNtextureView 
 #define SB(b) (&((samp_builder_t *)(b))->p)
 NVN(nvnSamplerBuilderSetDefaults, void, NVNsamplerBuilder *b) {
     NVNdevice *dev = ((samp_builder_t *)b)->dev; memset(b, 0, sizeof(samp_builder_t)); ((samp_builder_t *)b)->dev = dev;
-    samp_par *o = SB(b);
-    o->minf = NVN_MIN_FILTER_LINEAR; o->magf = NVN_MAG_FILTER_LINEAR;
-    o->ws = o->wt = o->wr = NVN_WRAP_MODE_REPEAT; o->cmp_func = NVN_COMPARE_FUNC_LESS;
-    o->lod_max = 1000.f; o->aniso = 1.f;
+    samp_defaults(SB(b));
 }
 NVN(nvnSamplerBuilderSetDevice, void, NVNsamplerBuilder *b, NVNdevice *d) { ((samp_builder_t *)b)->dev = d; }
 NVN(nvnSamplerBuilderSetMinMagFilter, void, NVNsamplerBuilder *b, NVNminFilter mi, NVNmagFilter ma) { SB(b)->minf = mi; SB(b)->magf = ma; }
@@ -2465,10 +2476,12 @@ void dm_gfx_enter(void) { gfx_enter(); }   // the same gate for the Vulkan layer
 void dm_gfx_leave(void) { gfx_leave(); }
 __attribute__((weak)) void dm_vk_drain(void) {}   // dm/gfx/vk/hle_vk.m: wait for the Vulkan layer's queue (the graphics unit tests do not link it)
 __attribute__((weak)) void dm_gl_drain(void) {}   // dm/gfx/gl/hle_gl.m: the same for the GL layer
+__attribute__((weak)) void nvn_be_background_purge(int bg) { (void)bg; }   // nvn_mtl.m 切后台瘦身（图形单测不链）
 void (*dm_gfx_test_drain)(void);   // t_nvn_suspend: exercise the real gate / wait without acquiring a Metal device slot
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
+    if (!on) nvn_be_background_purge(0);   // 回前台：放开闸门前先把后台标成可清除的贴图标回来（被清掉的登记重新上传）
     if (!on) pthread_cond_broadcast(&g_susp_cv);
     pthread_mutex_unlock(&g_susp_mu);
     if (!on) LOG("[nvn] graphics resumed");
@@ -2482,6 +2495,7 @@ void dm_gfx_suspend_drain(void) {
     if (dm_gfx_test_drain) dm_gfx_test_drain();
     else { dm_vk_drain(); dm_gl_drain(); nvn_be_drain(); }   // Vulkan and GL first: presents on the NVN queue wait for their frames
     LOG("[nvn] graphics suspended: in-flight GPU work drained");
+    if (!dm_gfx_test_drain) nvn_be_background_purge(1);   // 切后台瘦身：GPU 已排空，把可重建的私有贴图标成可清除（nvn_mtl.m）
 }
 int dm_gfx_guest_start_hold(void) {
     pthread_mutex_lock(&g_susp_mu);

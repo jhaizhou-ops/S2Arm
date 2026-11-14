@@ -49,8 +49,12 @@ void nvn_plat_safepoint(void) {}
 static int g_plc_flag_off;   // C88：1 = 调试开关 nvk_pipe_cache 读成 0（管线缓存关）
 // C89（局中补写）：-1 = 用后端缺省；>= 0 = 把对应的调试开关读成这个值（后端在开会话时读一次，所以要在 open 之前设、open 之后撤）。
 static int g_plc_thr_new = -1, g_plc_thr_first_ms = -1, g_plc_thr_every_ms = -1;
+static int g_ulist_flag = -1, g_fbdrop_flag = -1;   // C201：nvk_ulist：-1 = 生产缺省，>= 0 = 读成这个值；nvk_fbdrop：-1 = 自检档（整套用例的默认），-2 = 生产缺省，>= 0 = 读成这个值（改完要让后端的开关缓存作废：nvn_vk_dbg_view_stat(5)）
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "display_timing") && g_shown_timing_test) return 1;
+    if (!strcmp(name, "nvk_ulist") && g_ulist_flag >= 0) return g_ulist_flag;
+    // 整套用例在 nvk_fbdrop=2（自检档）下跑：视图销毁走快路之后再全表扫一遍，扫到残留（反查表没记到的帧缓冲）就报红，main 末尾核「残留 0」。
+    if (!strcmp(name, "nvk_fbdrop") && g_fbdrop_flag != -2) return g_fbdrop_flag >= 0 ? g_fbdrop_flag : 2;   // -2 = 读成生产缺省（C201 核缺省档的行为）
     if (!strcmp(name, "nvk_pipe_cache") && g_plc_flag_off) return 0;
     if (!strcmp(name, "nvk_plc_new") && g_plc_thr_new >= 0) return g_plc_thr_new;
     if (!strcmp(name, "nvk_plc_first_ms") && g_plc_thr_first_ms >= 0) return g_plc_thr_first_ms;
@@ -4505,6 +4509,127 @@ static void c197_pass_cache(void) {
     nvn_gpu_view_release(ov2); nvn_gpu_tex_release(out);
 }
 
+// C201：视图销毁的两处线性代价（真机世界场景：现存视图 2.3 万个、每帧销毁 56 个，这两处合起来占去掉托底线程后全部 CPU 样本的 23.9%，全程持后端大锁）。
+// ① 全局视图链：创建时头插、销毁时摘。原先摘链从链头线性找自己；现在按反向指针 O(1) 摘。
+//    期望（手算）：同一张贴图上建 N=1500 个视图，按「最旧先拆」逐个销毁（最旧的在链尾，旧做法的最坏顺序）——
+//      旧做法（nvk_ulist=0，保留作对照）摘链走过的节点数 = (N-1)+(N-2)+…+1+0 = N(N-1)/2 = 1124250；缺省做法 = 0；
+//      两种做法每拆一个现存视图数减 1，链结构（前驱指针指回自己、后继的反向指针指回本节点）零违例。
+//    再按 k×773 mod N 的次序（773 与 1500 互质，每个下标恰好一次）拆一轮：链头 / 链中 / 链尾都摘到，链结构仍零违例。
+// ② 帧缓冲缓存的反查表：视图记着自己当过哪些帧缓冲的附件，销毁时只拆那几个。视图从没当过附件时，原先也退回扫整张 8192 项的表。
+//    期望（手算）：缺省档销毁「从没当过附件」的视图，全表扫次数 +0（旧做法 nvk_fbdrop=0：至少 +1）；
+//    销毁「当过附件」的视图，缓存里恰好少 1 个帧缓冲（只有一个帧缓冲含它），全表扫仍 +0；
+//    颜色 + 深度两个附件的通道：先销毁深度视图，帧缓冲少 1；再用新深度视图开同一个颜色视图（槽可能复用、代数不同）后销毁颜色视图，新帧缓冲也要拆掉。
+uint64_t nvn_vk_dbg_view_stat(int which);
+static void c201_set_flags(int ulist, int fbdrop) { g_ulist_flag = ulist; g_fbdrop_flag = fbdrop; (void)nvn_vk_dbg_view_stat(5); }
+static void c201_check_chain(const char *what, int upto) {
+    uint64_t bad = nvn_vk_dbg_view_stat(4);
+    CHECK(bad == 0, "C201 %s（已拆 %d 个）：视图链结构违例期望 0 → %llu", what, upto, (unsigned long long)bad);
+}
+static void c201_view_list(void) {
+    enum { N = 1500, STEP = 773 };
+    static nvn_gpu_view vs[N];
+    nvn_gpu_tex t = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    for (int arm = 0; arm < 2; arm++) {   // 0 = 旧做法（对照）、1 = 缺省
+        c201_set_flags(arm == 0 ? 0 : -1, -1);   // 臂 1 读生产缺省（不显式设值）：缺省被改掉时这里会红
+        const uint64_t live0 = nvn_vk_dbg_view_stat(0), steps0 = nvn_vk_dbg_view_stat(1);
+        for (int i = 0; i < N; i++) vs[i] = make_view(t);
+        CHECK(nvn_vk_dbg_view_stat(0) - live0 == N, "C201 臂 %d 建 %d 个视图：期望现存视图 +%d → +%llu", arm, N, N, (unsigned long long)(nvn_vk_dbg_view_stat(0) - live0));
+        c201_check_chain("建完", 0);
+        for (int i = 0; i < N; i++) {   // 最旧先拆
+            nvn_gpu_view_release(vs[i]);
+            if (i < 64 || i % 50 == 0) { c201_check_chain("最旧先拆", i + 1); if (nvn_vk_dbg_view_stat(4)) break; }
+        }
+        const uint64_t steps = nvn_vk_dbg_view_stat(1) - steps0, want = arm == 0 ? (uint64_t)N * (N - 1) / 2 : 0;
+        printf("C201 视图摘链（%s）：最旧先拆 %d 个，摘链走过 %llu 个节点（期望 %llu）\n", arm == 0 ? "旧做法 nvk_ulist=0" : "缺省", N, (unsigned long long)steps, (unsigned long long)want);
+        CHECK(steps == want, "C201 臂 %d 最旧先拆 %d 个：摘链走过的节点数期望 %llu → %llu", arm, N, (unsigned long long)want, (unsigned long long)steps);
+        CHECK(nvn_vk_dbg_view_stat(0) == live0, "C201 臂 %d 拆完：现存视图数期望回到 %llu → %llu", arm, (unsigned long long)live0, (unsigned long long)nvn_vk_dbg_view_stat(0));
+        for (int i = 0; i < N; i++) vs[i] = make_view(t);
+        for (int k = 0; k < N; k++) {   // 乱序拆
+            nvn_gpu_view_release(vs[(int)(((long)k * STEP) % N)]);
+            if (k < 64 || k % 50 == 0) { c201_check_chain("乱序拆", k + 1); if (nvn_vk_dbg_view_stat(4)) break; }
+            if (k == N / 2) CHECK(nvn_vk_dbg_view_stat(0) == live0 + (uint64_t)(N - (N / 2 + 1)), "C201 臂 %d 乱序拆一半：现存视图数期望 %llu → %llu", arm, (unsigned long long)(live0 + (uint64_t)(N - (N / 2 + 1))), (unsigned long long)nvn_vk_dbg_view_stat(0));
+        }
+        CHECK(nvn_vk_dbg_view_stat(0) == live0, "C201 臂 %d 乱序拆完：现存视图数期望回到 %llu → %llu", arm, (unsigned long long)live0, (unsigned long long)nvn_vk_dbg_view_stat(0));
+    }
+    c201_set_flags(-1, -1);
+    nvn_gpu_tex_release(t);
+}
+static void c201_commit_pass(const nvn_gpu_pass_desc *p) {
+    static uint64_t sig = 2000;   // 同一会话里先后跑两档：围栏号只增不减
+    const uint64_t signal = ++sig;
+    nvn_gpu_err e;
+    nvn_gpu_cmd c = begin_cmd();
+    nvn_gpu_pass_begin(c, p); nvn_gpu_pass_end(c);
+    nvn_gpu_rc r = nvn_gpu_cmd_commit(c, signal, on_done, NULL, &e); CHECK(OK(r), "C201 commit %llu：%d %s", (unsigned long long)signal, r.code, e.why);
+    r = nvn_gpu_fence_wait(signal, 5000000000ull, &e); CHECK(OK(r), "C201 wait %llu：%d %s", (unsigned long long)signal, r.code, e.why);
+}
+static void c201_wait_fb(uint64_t want) {   // 视图销毁可能要等完成线程摘掉段里的引用，轮询到帧缓冲数到位（最多 2 秒）
+    for (int i = 0; i < 2000 && nvn_vk_dbg_view_stat(2) != want; i++) nanosleep(&(struct timespec){0, 1000000}, NULL);
+}
+// selfcheck = 0：生产缺省档（核全表扫次数）；selfcheck = 1：自检档 nvk_fbdrop=2（核「视图销毁走快路之后全表扫不到残留」，不核扫描次数）。
+#define C201_SCAN_CHECK(cond, ...) do { if (!selfcheck) CHECK(cond, __VA_ARGS__); } while (0)
+static void c201_fb_scan(int selfcheck) {
+    const int fl = selfcheck ? 2 : -2;
+    const uint64_t resid0 = nvn_vk_dbg_view_stat(3);
+    nvn_gpu_tex out = make_tex(64, 64, NVN_FORMAT_RGBA8, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex dep = make_tex(64, 64, NVN_FORMAT_DEPTH32F, NVN_GPU_TEX_RENDER | NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_tex idle = make_tex(8, 8, NVN_FORMAT_RGBA8, NVN_GPU_TEX_SAMPLED);
+    nvn_gpu_view cv = make_view(out), dv = make_view(dep);
+    nvn_gpu_pass_desc p; memset(&p, 0, sizeof p);
+    p.ncolor = 1; p.color[0].view = cv; p.color[0].load = NVN_GPU_LOAD_CLEAR; p.color[0].store = NVN_GPU_STORE_STORE;
+    p.depth.view = dv; p.depth.load = NVN_GPU_LOAD_CLEAR; p.depth.store = NVN_GPU_STORE_STORE; p.clear_depth = 1.0f;
+    p.w = 64; p.h = 64; p.layers = 1;
+    c201_set_flags(-1, fl);   // 生产缺省档（不自检）
+    const uint64_t fb0 = nvn_vk_dbg_view_stat(2);
+    c201_commit_pass(&p);
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 开一个颜色 + 深度通道：缓存里帧缓冲期望 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    // ② 销毁从没当过附件的视图：缺省档不扫表；旧做法（nvk_fbdrop=0）要扫
+    nvn_gpu_view iv = make_view(idle);
+    uint64_t s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(iv);
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 缺省档销毁从没当过附件的视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 销毁无关视图后：帧缓冲数期望仍 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    c201_set_flags(-1, 0);
+    iv = make_view(idle);
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(iv);
+    CHECK(nvn_vk_dbg_view_stat(6) - s0 >= 1, "C201 旧做法（nvk_fbdrop=0）销毁从没当过附件的视图：全表扫次数期望 ≥ +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    c201_set_flags(-1, fl);
+    // 销毁当过附件的视图（深度）：帧缓冲 -1，不扫表
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(dv);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁深度视图：帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 销毁当过附件的视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    // 同一个颜色视图 + 新深度视图再开：新帧缓冲（槽可能复用、代数不同）；销毁颜色视图要把它拆掉，不能被颜色视图里残留的旧记录误导
+    nvn_gpu_view dv2 = make_view(dep);
+    p.depth.view = dv2;
+    c201_commit_pass(&p);
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 1, "C201 换新深度视图再开：帧缓冲期望 +1 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(cv);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁颜色视图：新帧缓冲也要拆，帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    C201_SCAN_CHECK(nvn_vk_dbg_view_stat(6) - s0 == 0, "C201 销毁颜色视图：全表扫次数期望 +0 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    // 同一个颜色视图用在 8 个不同的帧缓冲里（超过反查表容量 6，记录溢出）：销毁它要退回全表扫，8 个帧缓冲一个不剩
+    nvn_gpu_view cv2 = make_view(out), dvs[8];
+    p.color[0].view = cv2;
+    for (int i = 0; i < 8; i++) { dvs[i] = make_view(dep); p.depth.view = dvs[i]; c201_commit_pass(&p); }
+    CHECK(nvn_vk_dbg_view_stat(2) - fb0 == 8, "C201 同一个颜色视图配 8 个深度视图各开一次：帧缓冲期望 +8 → +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(2) - fb0));
+    s0 = nvn_vk_dbg_view_stat(6);
+    nvn_gpu_view_release(cv2);
+    c201_wait_fb(fb0);
+    CHECK(nvn_vk_dbg_view_stat(2) == fb0, "C201 销毁用在 8 个帧缓冲里的颜色视图（记录溢出）：帧缓冲数期望回到 %llu → %llu", (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2));
+    CHECK(nvn_vk_dbg_view_stat(6) - s0 >= 1, "C201 记录溢出时销毁视图：期望退回全表扫（≥ +1）→ +%llu", (unsigned long long)(nvn_vk_dbg_view_stat(6) - s0));
+    for (int i = 0; i < 8; i++) nvn_gpu_view_release(dvs[i]);
+    nvn_gpu_view_release(dv2);
+    nvn_gpu_tex_release(out); nvn_gpu_tex_release(dep); nvn_gpu_tex_release(idle);
+    c201_set_flags(-1, -1);
+    CHECK(nvn_vk_dbg_view_stat(3) == resid0, "C201 %s：视图销毁走快路之后全表扫到的残留期望 +0 → +%llu", selfcheck ? "自检档" : "缺省档", (unsigned long long)(nvn_vk_dbg_view_stat(3) - resid0));
+    printf("C201 帧缓冲缓存（%s）：起点 %llu 个帧缓冲，用例结束时 %llu 个；全表扫累计 %llu 次，残留 %llu（各步期望见上，不符会有 FAIL 行）\n", selfcheck ? "自检档" : "缺省档",
+           (unsigned long long)fb0, (unsigned long long)nvn_vk_dbg_view_stat(2), (unsigned long long)nvn_vk_dbg_view_stat(6), (unsigned long long)nvn_vk_dbg_view_stat(3));
+}
+
 static void c77_null_color_slot(const char *dir) {
     nvn_gpu_shader vs = NULL, fs = NULL; void *vm = NULL, *fm = NULL;
     if (!load_shader_pair(dir, "tri3.vert", "out1_green.frag", NULL, NULL, &vs, &fs, &vm, &fm)) { CHECK(0, "读不到 out1_green"); return; }
@@ -6786,6 +6911,17 @@ int main(int argc, char **argv) {
         s2a_vk_device_destroy(&g_dev, 1);
         return g_fail ? 1 : 0;
     }
+    if (getenv("S2A_TEST_C201_ONLY")) {   // 开发时只跑 C201（视图销毁的两处线性代价；run.sh 不设这个变量）
+        memset(&g_desc, 0, sizeof g_desc); g_desc.host_device = &g_dev; g_desc.app_label = "nvn-backend-vk-test";
+        if (!open_backend()) return 1;
+        c201_view_list();
+        c201_fb_scan(0);
+        c201_fb_scan(1);
+        nvn_gpu_err e201 = {0}; CHECK(OK(nvn_gpu_close(5000000000ull, &e201)), "C201 close：%d %s", e201.rc.code, e201.why);
+        printf("nvn_gpu Vulkan 后端 C201 单跑：%s（%d 处不符，自检残留 %llu）\n", g_fail ? "红" : "绿", g_fail, (unsigned long long)nvn_vk_dbg_view_stat(3));
+        s2a_vk_device_destroy(&g_dev, 1);
+        return g_fail ? 1 : 0;
+    }
     if (getenv("S2A_TEST_LOGICOP_ONLY")) {
         if(argc < 2) return 2;
         memset(&g_desc,0,sizeof g_desc);g_desc.host_device=&g_dev;g_desc.app_label="logic-only";
@@ -7152,6 +7288,11 @@ int main(int argc, char **argv) {
     if (!open_backend()) return 1;   // C197 自己一个会话：围栏号从这里重新算，和前后用例不相干
     c197_pass_cache();
     CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C197 close：%d %s", e18.rc.code, e18.why);
+    if (!open_backend()) return 1;   // C201 同样自己一个会话
+    c201_view_list();
+    c201_fb_scan(0);
+    c201_fb_scan(1);
+    CHECK(OK(nvn_gpu_close(5000000000ull, &e18)), "C201 close：%d %s", e18.rc.code, e18.why);
 
     for (int sw = 0; sw < 2; sw++) {
         if (!open_backend()) return 1;
@@ -7169,6 +7310,8 @@ int main(int argc, char **argv) {
     c89_midrun_save(argv[1]);  // 同上；还会起子进程（被 SIGKILL 的那一局）
     c658_suite(argv[1],0);   // Independently opens/closes; absent count capability is a negative control.
     c907_retained_flush(argv[1]);   // 停局保留会话时的管线缓存落盘（#907 合入补）
+    // C201：整套用例都在 nvk_fbdrop=2（自检档）下跑，视图销毁走快路之后每次再全表扫一遍；反查表漏记过的帧缓冲会在这里留下残留计数。
+    CHECK(nvn_vk_dbg_view_stat(3) == 0, "C201 整套用例在自检档下跑完：视图销毁后帧缓冲缓存里扫到的残留期望 0 → %llu", (unsigned long long)nvn_vk_dbg_view_stat(3));
 
     printf("nvn_gpu Vulkan 后端 C01–C08/C23/C25/C26/C27–C55/C56–C69/C74–C75/C88/C89 + 清屏/复制/深度/纹理三角形用例：%s（%d 处不符，done %d 次，retired %d 次）\n",
            g_fail ? "红" : "绿", g_fail, atomic_load(&g_ndone), atomic_load(&g_retired));

@@ -98,6 +98,8 @@ s2a_gate_step bash "$android_dir/tools/nvn_vk_frame_log_test.sh"
 s2a_gate_step bash "$android_dir/tools/nvn_vk_dt_test.sh"
 # WSI actual-present diagnostics: NDK declarations, partial batches and generation isolation.
 s2a_gate_step bash "$android_dir/tests/nvk_shown_timing_test.sh"
+# 调试开关读数的线程内缓存（宿主，确定性）：命中 / 过期 / 缺省 / 名字比较 / 名字上限，7 个负对照。
+s2a_gate_step bash "$android_dir/tests/nvk_flag_cache_test.sh"
 # 直连逐帧 TSV（宿主，确定性）：列掩码/差分/gpuq 账/开关与目录门。
 s2a_gate_step bash "$android_dir/tools/nvn_vk_frame_tsv_test.sh"
 s2a_gate_step bash "$android_dir/tools/generic_frame_trace_test.sh"

@@ -4668,6 +4668,53 @@ static void audit_probe_report(uint64_t frame);   // audit #1534 passive probes 
 // 我方按种类的字节（S2A_MEM_SPLIT 跳变行，ios/app.m 的 100 ms 采样线程调；任意线程可调）：驻留集里的对象逐个分类——
 //   私有贴图（游戏贴图的 Metal 副本、渲染目标）、私有缓冲（上传暂存块为主）、游戏内存池的零拷贝缓冲（按池表认，记虚拟长度和其中常驻 / 压缩页，含被驻留集钉住的未写页）、其它共享缓冲（每帧块、常量块等）。
 //   锁序同 pool_res（g_mu → g_res_mu）：先在 g_mu 里拷池缓冲与范围，放锁后再取 g_res_mu 拍驻留集快照（强引用），分类在锁外做
+// 切后台瘦身（11-13 维护者定，降低在后台被系统杀的概率）：进后台、GPU 排空后（hle_nvn.c dm_gfx_suspend_drain），把驻留集里我们自己分配的私有根贴图
+//   （打包贴图副本 + 渲染目标等，正式游戏约 1.7 GB）标成可清除（MTLPurgeableStateVolatile）：可清除内存不计进 phys_footprint
+//   （11-13 Duo 实测 1024 MB 共享缓冲：实占 1089 → 65 MB，标回 1089 MB、内容还在），系统缺内存时直接清掉这些、不用杀我们。
+//   回前台、放开闸门之前（dm_gfx_suspend(0)）标回不可清除：没被清的原样接着用；被清的登记进 g_up_lost——打包贴图下次取用整张从客体内存重新上传（同上传被丢的
+//   处理），渲染目标内容丢了、游戏下一帧重画（跨帧保留的花一两帧，好过进度没了）。不碰：零拷贝池缓冲（就是客体内存）、视图、缓冲背着的贴图、MTLHeap 分出来的（可清除按整堆算）、
+//   各种缓冲（参数表、转换缓存等跨帧保留，被清了会错）。S2A_BG_PURGE=0 关
+static NSMutableArray<id<MTLTexture>> *g_bg_purged;   // 只在挂起 / 恢复的那一刻碰（闸门关着，提交线程停在闸门外）
+static uint64_t bg_fp_mb(void) { task_vm_info_data_t v; mach_msg_type_number_t n = TASK_VM_INFO_COUNT; return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&v, &n) == KERN_SUCCESS ? v.phys_footprint >> 20 : 0; }
+void nvn_be_background_purge(int bg) {
+    static int off = -1; if (off < 0) { const char *e = getenv("S2A_BG_PURGE"); off = e && *e == '0'; }
+    if (!g_dev) return;
+    // 后台期间的实占：标完那一刻读不出差别（系统挂起进程时才结算可清除页），进程挂起后定时器也不跑，所以在回前台、标回之前读一次——
+    //   挂起期间实占不再变（除了被清），这个读数就是系统在后台看到的值；瘦身关（S2A_BG_PURGE=0）的局也记，好对照
+    static uint64_t bg_in;
+    if (bg) bg_in = bg_fp_mb();
+    else if (bg_in) { LOG("[nvn] 回前台那刻实占 %llu MB（进后台时 %llu MB，切后台瘦身%s）", (unsigned long long)bg_fp_mb(), (unsigned long long)bg_in, off ? "关" : "开"); bg_in = 0; }   // 起局时的放闸不算
+    if (off) return;
+    @autoreleasepool {
+        if (bg) {
+            uint64_t f0 = bg_fp_mb(), bytes = 0;
+            pthread_mutex_lock(&g_res_mu); NSArray *all = g_res_objects ? g_res_objects.allObjects : @[]; pthread_mutex_unlock(&g_res_mu);
+            NSMutableArray<id<MTLTexture>> *marked = [NSMutableArray array];
+            for (id o in all) {
+                if (![o conformsToProtocol:@protocol(MTLTexture)]) continue;
+                id<MTLTexture> t = o;
+                if (t.buffer || t.parentTexture || t.heap || t.storageMode != MTLStorageModePrivate) continue;
+                if ([t setPurgeableState:MTLPurgeableStateVolatile] != MTLPurgeableStateNonVolatile) continue;   // 已经可清除 / 已被清：不是这次标的
+                [marked addObject:t]; bytes += t.allocatedSize;
+            }
+            g_bg_purged = marked;
+            LOG("[nvn] 切后台瘦身：%lu 张贴图 %llu MB 标成可清除（系统缺内存时直接清掉、不计实占），实占 %llu → %llu MB",
+                (unsigned long)marked.count, (unsigned long long)(bytes >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+        } else if (g_bg_purged) {
+            uint64_t f0 = bg_fp_mb(), lost = 0, lost_b = 0;
+            NSMutableArray<id<MTLTexture>> *emptied = [NSMutableArray array];
+            for (id<MTLTexture> t in g_bg_purged) if ([t setPurgeableState:MTLPurgeableStateNonVolatile] == MTLPurgeableStateEmpty) { [emptied addObject:t]; lost++; lost_b += t.allocatedSize; }
+            if (lost) {
+                os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable];
+                for (id t in emptied) [g_up_lost addObject:t];
+                atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); os_unfair_lock_unlock(&g_up_lost_lk);
+            }
+            LOG("[nvn] 回前台：%lu 张贴图标回不可清除，其中 %llu 张 %llu MB 在后台被系统清掉（打包贴图下次取用整张重新上传、渲染目标下一帧重画），实占 %llu → %llu MB",
+                (unsigned long)g_bg_purged.count, (unsigned long long)lost, (unsigned long long)(lost_b >> 20), (unsigned long long)f0, (unsigned long long)bg_fp_mb());
+            g_bg_purged = nil;
+        }
+    }
+}
 void nvn_be_mem_kinds(uint64_t *priv_tex, uint64_t *priv_buf, uint64_t *pool_len, uint64_t *pool_touched, uint64_t *shared_other, uint64_t *objects) {
     *priv_tex = *priv_buf = *pool_len = *pool_touched = *shared_other = *objects = 0;
     if (!g_dev) return;

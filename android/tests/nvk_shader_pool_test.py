@@ -118,7 +118,7 @@ def main():
     if sys.argv[1:] == ['--withdraw']:
         text = original.read_text(encoding='utf-8')
         changes = [
-            ('gs-source-epoch', 'MIX(s2a_source_epoch());', '(void)s2a_source_epoch();', 1, 'poisoned GS source cannot hit fast cache'),
+            ('gs-source-epoch', 'MIX(s2a_source_epoch());\n    MIX(stages);', '(void)s2a_source_epoch();\n    MIX(stages);', 1, 'poisoned GS source cannot hit fast cache'),
             ('gs-slot', '(const char *const[]){"vs", "fs", "gs"}[st]',
              '(const char *const[]){"vs", "fs", "fs"}[st]', 3, 'GS production request reaches compiler'),
             ('gs-wrong-stage', 'src.stage = (nvn_gpu_stage)st;',
@@ -162,6 +162,24 @@ def main():
              'for (int slot = 0; slot < 0; slot++) {\n        uint64_t h = rp_S.tex[5][128 + slot];', 1, 'separate CS registered texture fact is sent'),
             ('drop-separate-fast-identity', 'MIX(sep_fact_sig(0));',
              '(void)rp_S.tex[0][128];', 1, 'separate texture rebind invalidates fast identity'),
+            # 计算程序快路：摘要里每一项各去掉一次，对应的负对照用例必须变红；快路本身关掉，「换地址仍复用」那条必须变红。
+            ('cs-fast-path-disabled', 'struct last_ent *le = fast ? last_find(key, pc.session, pc.generation) : NULL;',
+             'struct last_ent *le = (fast && 0) ? last_find(key, pc.session, pc.generation) : NULL;', 1,
+             'CS new addresses and same-fact handles reuse the program without a request'),
+            ('cs-epoch-omitted', 'MIX(0xC5C5C5C5C5C5C5C5ull); MIX(s2a_source_epoch());',
+             'MIX(0xC5C5C5C5C5C5C5C5ull); (void)s2a_source_epoch();', 1, 'CS source poison advances the epoch'),
+            ('cs-source-key-omitted', '{ uint64_t k; memcpy(&k, rp_S.skey[5], 8); MIX(k); }',
+             '{ (void)rp_S.skey[5]; }', 1, 'changed CS source key recompiles'),
+            ('cs-ubo-use-omitted', '{ uint32_t m = 0; for (int i = 0; i < 16; i++) if (rp_S.ubo[5][i].size) m |= 1u << i; MIX(m); }',
+             '{ (void)rp_S.ubo[5]; }', 1, 'changed CS constant-buffer use recompiles'),
+            ('cs-unaligned-omitted', 'rp_S.ssbo[5][i].addr % pc->storage_buffer_offset_alignment) un = 1; MIX(un);',
+             'rp_S.ssbo[5][i].addr % pc->storage_buffer_offset_alignment) un = 1; MIX(un & 0);', 1, 'unaligned CS storage address recompiles'),
+            ('cs-pool-omitted', 'MIX(rp_S.tex_pool_n); MIX(rp_S.samp_pool_n); MIX(rp_S.tex_base);',
+             'MIX(0);', 1, 'CS pool size update recompiles'),
+            ('cs-combined-omitted', 'MIX(combined_fact_sig(5));', '(void)0;', 1, 'changed CS texture fact recompiles'),
+            ('cs-separate-omitted', 'MIX(sep_fact_sig(5));', '(void)0;', 1, 'changed CS separate texture fact recompiles'),
+            ('cs-separate-generation-omitted', 'const uint64_t sg = rp_tex_sep_gen[st], rg = rp_tex_reg_gen();',
+             'const uint64_t sg = st == 5 ? 0 : rp_tex_sep_gen[st], rg = rp_tex_reg_gen();', 1, 'changed CS separate texture fact recompiles'),
         ]
         for name, before, after, count, expected in changes:
             assert text.count(before) == count, (name, 'mutation anchor')
