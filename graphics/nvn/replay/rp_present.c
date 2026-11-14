@@ -190,6 +190,11 @@ uint64_t nvn_be_present(const tex_t *t, double period_s, const int crop[4]) {
                     snprintf(b, sizeof b, "分时（写跟踪）：每帧缺页 %.0f 次、宿主写前解保护 %.0f 页、改保护 %.0f 次共 %.0f 页 %.1f 毫秒", (double)(fl - f0) / f, (double)(pr - p0) / f, (double)(mc - c0) / f, (double)(mpg - g0) / f, (double)(mns - n0) / 1e6 / f);
                     nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
                     f0 = fl; p0 = pr; c0 = mc; g0 = mpg; n0 = mns; }
+                {   // 线程内备忘（#974）：写跟踪取范围 / 池查找各命中多少；计数是调用线程自己的，这里读到的是打印这一行的线程（回放线程）的
+                    static uint64_t sh0, ss0, ph0, pl0; uint64_t sh = 0, ss = 0, ph = 0, pl = 0; nvn_dirty_span_memo_stats(&sh, &ss); rp_pool_memo_stats(&ph, &pl);
+                    snprintf(b, sizeof b, "分时（线程内备忘，每帧）：写跟踪取范围 命中 %.0f 次、线性扫 %.0f 次；池查找 备忘命中 %.0f 次 / 共 %.0f 次", (double)(sh - sh0) / f, (double)(ss - ss0) / f, (double)(ph - ph0) / f, (double)(pl - pl0) / f);
+                    nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                    sh0 = sh; ss0 = ss; ph0 = ph; pl0 = pl; }
                 t_last = now; n_last = g_n_shown + 1; d_last = nd;
             }
         }

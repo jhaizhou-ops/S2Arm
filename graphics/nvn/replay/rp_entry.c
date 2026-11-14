@@ -41,6 +41,38 @@ static volatile uint64_t g_pool_epoch = 1;
 // 只靠「代际 + 两个字段」会被撕裂读（新起点配旧长度）误判成命中，进而把地址解析到错的池上。
 static volatile uint64_t g_pool_lh_seq;
 static struct { uint64_t a, n, epoch; } g_pool_lh;
+// 线程内备忘（#974 问 3，维护者答「做」）：上面「上次命中的池」全局只有一格，而一笔绘制要在顶点池 / 常量缓冲池 / 索引池之间来回，
+// 那一格几乎总被别的池占着，多数查找仍然抢全局锁 + 二分（真机取样：rp_pool_find 占回放线程 2.6%，每帧约 4500 段）。
+// 每个线程多记 16 个池，命中时不抢锁、不碰任何共享的缓存行。
+// 键 = 地址区间 [a, lim)：池表按起点升序，二分的候选是「起点不超过地址的最后一个池」，区间内任何地址的候选都是这一个池；
+// 命中后「装不装得下」用与锁内二分逐字相同的算术判，装不下就不算命中、照旧走锁内——答案与锁内二分逐位一致，不改任何返回值。
+// 代际：与上面同一个 g_pool_epoch（加池 / 删池都会推进）；记录发生在锁内，读到的代际与表同时成立；代际一变整张作废。
+typedef struct { uint64_t a, n, lim, epoch; } pool_memo;   // 区间 [a, lim) 内的地址，二分候选都是起点 a、长 n 的这个池
+enum { POOL_MEMO_N = 16 };   // 2 的幂
+static _Thread_local pool_memo g_pool_memo[POOL_MEMO_N];
+static _Thread_local unsigned g_pool_memo_put, g_pool_memo_mru;
+static _Thread_local uint64_t g_pool_memo_hits, g_pool_memo_lookups;
+static int g_pool_memo_on = -1;   // nvn_plat_flag("nvk_pool_memo", 1)：缺省开；每 4096 次查找重读一次（release 包里直接是缺省）
+void rp_pool_memo_stats(uint64_t *hits, uint64_t *lookups) { *hits = g_pool_memo_hits; *lookups = g_pool_memo_lookups; }   // 调用线程自己的累计
+static int pool_find_memo(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
+    static _Thread_local unsigned tick;
+    int on = __atomic_load_n(&g_pool_memo_on, __ATOMIC_RELAXED);
+    if (on < 0 || !(++tick & 4095)) { on = nvn_plat_flag("nvk_pool_memo", 1) != 0; __atomic_store_n(&g_pool_memo_on, on, __ATOMIC_RELAXED); }
+    if (!on) return 0;
+    g_pool_memo_lookups++;
+    const uint64_t ep = __atomic_load_n(&g_pool_epoch, __ATOMIC_ACQUIRE);
+    for (unsigned j = 0; j < POOL_MEMO_N; j++) {
+        const unsigned i = (g_pool_memo_mru + j) & (POOL_MEMO_N - 1);   // 先看上次命中的那一项：相邻两次查找多半在同一个池
+        const pool_memo *m = &g_pool_memo[i];
+        if (m->epoch != ep || addr < m->a || addr >= m->lim) continue;
+        if (addr - m->a > m->n || len > m->n - (addr - m->a)) return 0;   // 候选是它但装不下：锁内二分同样判不命中，交给锁内
+        g_pool_memo_mru = i; g_pool_memo_hits++;
+        if (mem) *mem = (const uint8_t *)(uintptr_t)m->a;
+        if (size) *size = m->n;
+        return 1;
+    }
+    return 0;
+}
 static int pool_find_locked(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
     int lo = 0, hi = g_npool - 1, cand = -1;
     while (lo <= hi) { int mid = (lo + hi) / 2; if ((uint64_t)(uintptr_t)g_pool[mid].mem <= addr) { cand = mid; lo = mid + 1; } else hi = mid - 1; }
@@ -53,6 +85,8 @@ static int pool_find_locked(uint64_t addr, uint64_t len, const uint8_t **mem, ui
     __atomic_add_fetch(&g_pool_lh_seq, 1, __ATOMIC_RELEASE);   // 奇数：正在写
     g_pool_lh.a = b; g_pool_lh.n = sz; g_pool_lh.epoch = ep;
     __atomic_add_fetch(&g_pool_lh_seq, 1, __ATOMIC_RELEASE);   // 偶数：写完
+    if (__atomic_load_n(&g_pool_memo_on, __ATOMIC_RELAXED) > 0)   // 备忘开着才记（关着时行为与改动前完全一致）
+        g_pool_memo[g_pool_memo_put++ & (POOL_MEMO_N - 1)] = (pool_memo){b, sz, cand + 1 < g_npool ? (uint64_t)(uintptr_t)g_pool[cand + 1].mem : UINT64_MAX, ep};
     return 1;
 }
 static int pool_find_fast(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {   // 快路：不抢锁；代际一致才认
@@ -95,7 +129,7 @@ void nvn_be_pool_del(const void *mem) {
 }
 int nvn_be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     const uint8_t *mem = NULL; uint64_t size = 0;
-    int hit = pool_find_fast(addr, len, &mem, &size);
+    int hit = pool_find_memo(addr, len, &mem, &size) || pool_find_fast(addr, len, &mem, &size);
     if (!hit) {
         pthread_mutex_lock(&g_mu);
         hit = pool_find_locked(addr, len, &mem, &size);
@@ -105,7 +139,7 @@ int nvn_be_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     return hit;
 }
 int rp_pool_find(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size) {
-    if (pool_find_fast(addr, len, mem, size)) return 1;
+    if (pool_find_memo(addr, len, mem, size) || pool_find_fast(addr, len, mem, size)) return 1;
     pthread_mutex_lock(&g_mu);
     int hit = pool_find_locked(addr, len, mem, size);
     pthread_mutex_unlock(&g_mu);

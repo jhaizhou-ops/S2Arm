@@ -28,7 +28,9 @@ void nvn_plat_log(int level, const char *cls, const char *text) { (void)cls; if(
 static int g_flag_finish_lag;   // 用例设：开关 nvk_finish_lag 的值
 static int g_flag_sync_lag;     // 用例设：开关 nvk_sync_lag 的值（产品缺省 1＝允许一格在飞；用例固定 0，测的是「真等」这条契约）
 static int g_flag_state_keep = 1, g_flag_rt_cont = 1, g_flag_clear_park = 1, g_flag_pass_area = 1;   // 用例设：开关 nvk_state_keep / nvk_rt_cont / nvk_clear_park / nvk_pass_area 的值（缺省同产品：都开）
+static int g_flag_pool_memo = 1;   // 用例设：开关 nvk_pool_memo 的值（缺省同产品：开）；备忘每 4096 次查找才重读一次，换值后要用 pm_flag() 推一下
 int nvn_plat_flag(const char *name, int dflt) {
+    if (!strcmp(name, "nvk_pool_memo")) return g_flag_pool_memo;
     if (!strcmp(name, "nvk_finish_lag")) return g_flag_finish_lag;
     if (!strcmp(name, "nvk_sync_lag")) return g_flag_sync_lag;
     if (!strcmp(name, "nvk_state_keep")) return g_flag_state_keep;
@@ -114,6 +116,7 @@ void nvn_dirty_stats(uint64_t *f, uint64_t *p) { *f = 0; *p = 0; }
 static uint64_t g_dirty_map = 1; uint64_t nvn_dirty_mapping_generation(void) { return g_dirty_map; }
 int nvn_dirty_tracking_unreliable(void) { return 0; }
 void nvn_dirty_mp_stats(uint64_t *c, uint64_t *g, uint64_t *n) { *c = 0; *g = 0; *n = 0; }
+void nvn_dirty_span_memo_stats(uint64_t *h, uint64_t *s) { *h = 0; *s = 0; }
 uint64_t nvn_dirty_now(void) { return g_dirty_now; }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { (void)addr; (void)len; return g_dirty_written > stamp; }
 
@@ -502,6 +505,107 @@ static void t_pools(void) {
     CHECK(nvn_be_addr(b + 0xf00, 0x100, &buf, &off) == 1);    // 恰好到池尾
     nvn_be_pool_del(mem);
     CHECK(nvn_be_addr(b + 0x800, 0x100, &buf, &off) == 0 && rp_pool_count() == n0);
+}
+
+// ---------- 池查找的线程内备忘（rp_entry.c pool_find_memo，#974 问 3）----------
+// 契约：答案与「候选 = 起点不超过地址的最后一个池、装得下才算」逐位一致（rp_pool_find 与 nvn_be_addr 两个入口都对）；
+// 重复的查找真的命中备忘；池表一变（加池 / 删池 / 同起点换大小）旧记录整张作废；开关关着时不命中也不计数。
+// 参考答案由用例自己登记的池直接线性扫出，不经被测实现。池彼此不重叠（真实的 NVN 内存池在客户机地址空间里不会重叠）。
+int rp_pool_find(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size);   // rp_entry.c（rp_draw.c 也是就地声明）
+typedef struct { uint64_t a, n; int live; } pm_ref_t;
+enum { PM_SLOTS = 24 };
+static pm_ref_t g_pmr[PM_SLOTS]; static uint8_t g_pm_arena[0x10000];
+static int pm_ref_find(uint64_t addr, uint64_t len, uint64_t *a, uint64_t *n) {
+    int cand = -1;
+    for (int i = 0; i < PM_SLOTS; i++) if (g_pmr[i].live && g_pmr[i].a <= addr && (cand < 0 || g_pmr[i].a > g_pmr[cand].a)) cand = i;
+    if (cand < 0 || addr - g_pmr[cand].a > g_pmr[cand].n || len > g_pmr[cand].n - (addr - g_pmr[cand].a)) return 0;
+    *a = g_pmr[cand].a; *n = g_pmr[cand].n; return 1;
+}
+static void pm_add(int slot, uint64_t off, uint64_t size) { nvn_be_pool_add(g_pm_arena + off, size); g_pmr[slot] = (pm_ref_t){(uint64_t)(uintptr_t)(g_pm_arena + off), size, 1}; }
+static void pm_del(int slot) { nvn_be_pool_del((const void *)(uintptr_t)g_pmr[slot].a); g_pmr[slot].live = 0; }
+static uint64_t pm_hits(void) { uint64_t h, l; rp_pool_memo_stats(&h, &l); return h; }
+static uint64_t pm_lookups(void) { uint64_t h, l; rp_pool_memo_stats(&h, &l); return l; }
+static void pm_flag(int on) { g_flag_pool_memo = on; for (int i = 0; i < 4096; i++) rp_pool_find(1, 1, NULL, NULL); }   // 备忘每 4096 次查找重读一次开关
+static int pm_check(uint64_t addr, uint64_t len) {   // 一次查找（两个入口各一次）与参考答案逐位对照：1 = 一致
+    uint64_t ra = 0, rn = 0; int rh = pm_ref_find(addr, len, &ra, &rn);
+    const uint8_t *m = NULL; uint64_t n = 0; int h = rp_pool_find(addr, len, &m, &n);
+    if (h != rh || (h && ((uint64_t)(uintptr_t)m != ra || n != rn))) return 0;
+    void *buf = NULL; uint64_t off = 0; int h2 = nvn_be_addr(addr, len, &buf, &off);
+    return h2 == rh && (!h2 || ((uint64_t)(uintptr_t)buf == ra && off == addr - ra));
+}
+static uint32_t pm_rnd_state = 777;
+static uint32_t pm_rnd(void) { pm_rnd_state = pm_rnd_state * 1664525u + 1013904223u; return pm_rnd_state >> 8; }
+static void t_pool_memo(void) {
+    const uint64_t B = (uint64_t)(uintptr_t)g_pm_arena; int n0 = rp_pool_count();
+    memset(g_pmr, 0, sizeof g_pmr);
+    pm_flag(1);
+    // ⓪ 排满备忘（20 个池各问一次，环只有 16 项，别的用例留下的记录被全部挤掉），再把池整体删掉：旧记录一项都不能再用
+    enum { NP = 20 };
+    for (int i = 0; i < NP; i++) pm_add(i, 0x8000 + (uint64_t)i * 0x200, 0x100);
+    for (int i = 0; i < NP; i++) CHECK(pm_check(B + 0x8000 + (uint64_t)i * 0x200 + 8, 0x10) && rp_pool_find(B + 0x8000 + (uint64_t)i * 0x200 + 8, 0x10, NULL, NULL) == 1);
+    for (int i = 0; i < NP; i++) pm_del(i);
+    for (int i = 0; i < NP; i++) CHECK(pm_check(B + 0x8000 + (uint64_t)i * 0x200 + 0x10, 8) && rp_pool_find(B + 0x8000 + (uint64_t)i * 0x200 + 0x10, 8, NULL, NULL) == 0);
+    pm_add(0, 0x0000, 0x1000); pm_add(1, 0x2000, 0x1000); pm_add(2, 0x4000, 0x2000);
+    // ① 命中：第一次走锁内二分并记下，同池另一处再问就命中备忘（两个入口各一次）
+    CHECK(pm_check(B + 0x10, 0x20));
+    uint64_t h0 = pm_hits();
+    CHECK(pm_check(B + 0x800, 0x100));
+    CHECK(pm_hits() == h0 + 2);
+    CHECK(pm_check(B + 0x2100, 0x40));                       // 另一个池：第一问走锁内二分并记下
+    uint64_t h1 = pm_hits(); CHECK(pm_check(B + 0x2200, 0x40) && pm_hits() == h1 + 2);
+    // ② 装得下才算：越过池尾、池间空隙、恰好到池尾
+    CHECK(pm_check(B + 0xf80, 0x100));                       // 越过 P0 尾：没有
+    CHECK(pm_check(B + 0x1800, 0x10));                       // P0 与 P1 之间的空隙：候选是 P0、装不下：没有
+    CHECK(pm_check(B + 0xf00, 0x100));                       // 恰好到 P0 尾：有
+    CHECK(pm_check(B + 0x10, 0));                            // 零长度
+    // ③ 删池之后旧记录作废：删掉再问是「没有」
+    CHECK(pm_check(B + 0x4100, 0x40) && pm_check(B + 0x4200, 0x40));
+    pm_del(2);
+    CHECK(pm_check(B + 0x4100, 0x40) && pm_check(B + 0x4200, 0x40) && pm_check(B + 0x5ff0, 0x10));
+    uint64_t ra = 0, rn = 0; CHECK(!pm_ref_find(B + 0x4100, 0x40, &ra, &rn) && !rp_pool_find(B + 0x4100, 0x40, NULL, NULL));   // 确实没有（参考与实现各自说）
+    // ④ 同起点换大小：先 8 KB 后缩成 4 KB，后半必须变成「没有」，不能拿旧长度
+    pm_add(2, 0x4000, 0x2000);
+    CHECK(pm_check(B + 0x5800, 0x100) && pm_check(B + 0x5800, 0x100));
+    CHECK(rp_pool_find(B + 0x5800, 0x100, NULL, NULL) == 1);
+    pm_del(2); pm_add(2, 0x4000, 0x1000);
+    CHECK(pm_check(B + 0x5800, 0x100) && rp_pool_find(B + 0x5800, 0x100, NULL, NULL) == 0);
+    CHECK(pm_check(B + 0x4800, 0x100) && rp_pool_find(B + 0x4800, 0x100, NULL, NULL) == 1);
+    // ⑤ 加池：新池的地址马上查得到（旧的「没有」不残留）
+    CHECK(pm_check(B + 0x8100, 0x40) && rp_pool_find(B + 0x8100, 0x40, NULL, NULL) == 0);
+    pm_add(3, 0x8000, 0x800);
+    CHECK(pm_check(B + 0x8100, 0x40) && rp_pool_find(B + 0x8100, 0x40, NULL, NULL) == 1);
+    // ⑥ 开关关：不命中、不计数，答案照旧
+    pm_flag(0);
+    uint64_t hz = pm_hits(), lz = pm_lookups();
+    for (int i = 0; i < 64; i++) CHECK(pm_check(B + 0x10 + (uint64_t)i * 0x20, 0x20) && pm_check(B + 0x2100 + (uint64_t)i, 0x40));
+    CHECK(pm_hits() == hz && pm_lookups() == lz);
+    pm_flag(1);
+    // ⑦ 随机：加池 / 删池 / 同起点换大小，每步 16 问（一半是刚问过的键）；先开着、再关着各跑一遍，答案都与参考逐位一致
+    for (int i = 0; i < PM_SLOTS; i++) if (g_pmr[i].live) pm_del(i);
+    for (int pass = 1; pass >= 0; pass--) {
+        pm_flag(pass);
+        uint64_t hs = pm_hits(); unsigned bad = 0, ops = 0; uint64_t ka[4] = {0}, kl[4] = {0};
+        for (int step = 0; step < 3000; step++) {
+            int i = (int)(pm_rnd() % PM_SLOTS); unsigned op = pm_rnd() % 8;
+            if (op < 4 && !g_pmr[i].live) {                  // 加：起点是 0x400 的倍数，大小 0x100..0x1800，与现存的池不重叠
+                uint64_t off = (pm_rnd() % 60) * 0x400, size = 0x100 + (pm_rnd() % 0x18) * 0x100; int ok = off + size <= sizeof g_pm_arena;
+                for (int k = 0; k < PM_SLOTS && ok; k++) if (g_pmr[k].live) { uint64_t o = g_pmr[k].a - B; if (off < o + g_pmr[k].n && o < off + size) ok = 0; }
+                if (ok) { pm_add(i, off, size); ops++; }
+            } else if (op < 7 && g_pmr[i].live) { pm_del(i); ops++; }
+            for (int q = 0; q < 16; q++) {
+                uint64_t a, l;
+                if (q & 1) { a = ka[(q >> 1) & 3]; l = kl[(q >> 1) & 3]; }
+                else { a = B + pm_rnd() % sizeof g_pm_arena; l = pm_rnd() % 9 ? pm_rnd() % 0x1200 : 0; ka[(q >> 1) & 3] = a; kl[(q >> 1) & 3] = l; }
+                if (!pm_check(a, l)) bad++;
+            }
+        }
+        CHECK(bad == 0 && ops > 800);                        // 答案与参考不一致 0 次；表真的变了足够多次
+        if (pass) CHECK(pm_hits() > hs + 1000);              // 开着：确实在命中
+        else CHECK(pm_hits() == hs);                         // 关着：一次也不命中
+    }
+    for (int i = 0; i < PM_SLOTS; i++) if (g_pmr[i].live) pm_del(i);
+    pm_flag(1);
+    CHECK(rp_pool_count() == n0);
 }
 
 static pool_t g_tp; static uint8_t g_tmem[4 << 20];   // #936 的 128x64x64 RGBA8 三维贴图要 2 MiB，池子得放得下（原来是 1 MiB，读到池外段错误）
@@ -2799,6 +2903,7 @@ int main(int argc, char **argv) {
     t_program_bind_stages();
     // 一行一个调用：外部各支都往这里加用例，挤在一行时每两支必冲突
     t_pools();
+    t_pool_memo();
     t_tex_init_registers_only();
     t_alias();
     t_alias_take_over();

@@ -66,6 +66,7 @@ static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation
 // Range-table writers hold g_slot_mu and bracket publication/reuse with odd /
 // even epochs. Never reset this counter: other threads can retain negative
 // queries across sessions. Page protection and write generations are unrelated.
+// find_span's per-thread memo (below) trusts this epoch too: a writer that changes base / end / live without bracketing it leaves stale answers behind.
 static _Atomic uint64_t g_table_epoch = 2;
 typedef struct { uintptr_t addr; size_t len; uint64_t epoch; } prep_miss;
 static _Thread_local prep_miss g_prep_miss[64];
@@ -158,10 +159,43 @@ static int busy_wait(range_t *r, uintptr_t p) {
 }
 static int live_at(int i) { return atomic_load_explicit(&rg(i)->live, memory_order_acquire); }
 // The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
-static range_t *find_span(uintptr_t a, size_t len) {
+static range_t *find_span_scan(uintptr_t a, size_t len) {
     int n = atomic_load(&g_nr);
     for (int i = 0; i < n; i++) { range_t *r = rg(i); if (live_at(i) && a >= r->base && a + len <= r->end) return r; }
     return NULL;
+}
+// ---- find_span 的线程内备忘（#974 问 3，维护者答「做」）----
+// 上面是线性扫槽位表：世界场景里池有上千个，回放线程每个走慢路的缓冲解析、每次贴图内容检查都问一次（真机取样：占回放线程 8.4%）。
+// 表没变，同一个 (地址, 长度) 的答案就不会变——包括「没有」。每个线程记一张小表：键 = (地址, 长度)，值 = 当时扫出来的槽 + 当时的表代际，两路组相联。
+// 用法与 g_prep_miss 同款（偶数且前后没变才用）：只在代际是偶数（没有写者正在改表）、且扫完后代际没变时才记；用的时候代际也必须是偶数且与记录时相等。
+// 写者（add / remove / replace / reset）改表前后各加一次代际，表一变旧记录全部作废，所以返回值与线性扫逐位相同。
+// 不进信号路径：on_fault 自己扫，不走 find_span（线程内表在信号处理函数里不能碰：首次访问线程局部存储可能分配内存）。
+typedef struct { uintptr_t a; size_t len; uint64_t epoch; range_t *r; } span_memo;
+enum { SPAN_MEMO_LOG2 = 10, SPAN_MEMO_N = 1 << SPAN_MEMO_LOG2 };   // 每线程 1024 项 × 32 字节 = 32 KB
+static _Thread_local span_memo g_span_memo[SPAN_MEMO_N];
+static _Thread_local uint64_t g_span_hits, g_span_scans;
+static _Atomic unsigned g_span_memo_bits = SPAN_MEMO_LOG2;   // 0 = 关
+void nvn_dirty_set_span_memo(unsigned log2_entries) { atomic_store(&g_span_memo_bits, log2_entries > SPAN_MEMO_LOG2 ? (unsigned)SPAN_MEMO_LOG2 : log2_entries); }
+void nvn_dirty_span_memo_stats(uint64_t *hits, uint64_t *scans) { *hits = g_span_hits; *scans = g_span_scans; }
+static inline unsigned span_memo_k(uintptr_t a, size_t len, unsigned bits) {   // 键落在哪一组（单测按它挑键，让两个键必然同组）
+    return (unsigned)((((uint64_t)a ^ ((uint64_t)len * 0x9E3779B97F4A7C15ull)) * 0xD6E8FEB86659FD93ull) >> (64 - bits));
+}
+static range_t *find_span(uintptr_t a, size_t len) {
+    const unsigned bits = atomic_load_explicit(&g_span_memo_bits, memory_order_relaxed);
+    if (!bits || !len) { g_span_scans++; return find_span_scan(a, len); }   // 关着；零长度不记（nvn_dirty_tracked 会带 0 进来）
+    const uint64_t epoch = atomic_load_explicit(&g_table_epoch, memory_order_acquire);
+    const unsigned k = span_memo_k(a, len, bits);
+    span_memo *w0 = &g_span_memo[k], *w1 = &g_span_memo[k ^ 1];
+    if (!(epoch & 1)) {   // 奇数 = 有写者正在改表：不信备忘，也不记
+        if (w0->epoch == epoch && w0->a == a && w0->len == len) { g_span_hits++; return w0->r; }
+        if (w1->epoch == epoch && w1->a == a && w1->len == len) { g_span_hits++; return w1->r; }
+    }
+    range_t *r = find_span_scan(a, len);
+    g_span_scans++;
+    atomic_thread_fence(memory_order_acquire);   // 扫描里的读不能挪到下面这次代际复查之后
+    if (!(epoch & 1) && atomic_load_explicit(&g_table_epoch, memory_order_relaxed) == epoch)   // 整个扫描期间表没变：答案（含「没有」）在这个代际里一直成立
+        *(w0->epoch != epoch ? w0 : w1->epoch != epoch ? w1 : (g_span_scans & 1 ? w1 : w0)) = (span_memo){a, len, epoch, r};
+    return r;
 }
 // 分块边界：以所属映射（r->base）为基准，块内页号 c*CP..c*CP+CP-1，末块按映射长度截断。
 // 加保护、缺页解保护、宿主写前解除、范围销毁四条路径都必须用它，否则仍会制造页级碎片。
