@@ -100,6 +100,10 @@ def bundle_shell(engine_json, dest, env):
     shutil.copytree(cache, dest, symlinks=True)
 
 
+SPARKLE_FEED = "https://dl.s2arm.com/appcast/mac.xml"
+SPARKLE_PUBLIC_KEY = "WoZkGLOTuLU2zl0gsPX+4sTKRsIN9ahBEfj0ulkqOqc="   # 验签公钥（Ed25519）；对应私钥只在发版机，不进仓库
+
+
 def main():
     os.environ["MACOSX_DEPLOYMENT_TARGET"] = runtime_sources.deployment_target()   # clang、cmake、rustc 都读它：包内自己编的程序不能比声明的系统高
     parser = argparse.ArgumentParser(description=__doc__)
@@ -142,6 +146,13 @@ def main():
     macos.mkdir(parents=True)
     resources.mkdir()
     shutil.copy2(Path(bindir) / front["executable"], macos / front["executable"])
+    # 应用内更新（Sparkle 2，v0.3.10 起）：SwiftPM 把二进制包里的 Sparkle.framework 放在产物目录，原样（含符号链接）放进 Contents/Frameworks
+    sparkle = Path(bindir) / "Sparkle.framework"
+    if front["key"] == "apple":
+        if not sparkle.is_dir():
+            raise SystemExit(f"🔴 没找到 Sparkle.framework（{sparkle}）：swift build 没拉下 Sparkle 二进制包")
+        (app / "Contents/Frameworks").mkdir(parents=True)
+        shutil.copytree(sparkle, app / "Contents/Frameworks/Sparkle.framework", symlinks=True)
     # Switch 2 Pro 蓝牙连接由启动器旁的独立进程持有，游戏经本机通道读输入（docs/mac-switch2-pro.md）
     subprocess.run(["make", "-C", str(ROOT), "S2A_MAC_FRONTEND=1", "build/S2ArmNS2Connection"], env=env, check=True)
     shutil.copy2(ROOT / "build/S2ArmNS2Connection", macos / "S2ArmNS2Connection")
@@ -211,12 +222,21 @@ def main():
                 NSHighResolutionCapable=True, CFBundleDevelopmentRegion="en", CFBundleLocalizations=["en", "zh-Hans"],
                 NSBluetoothAlwaysUsageDescription="连接 Switch 2 Pro 手柄，接收按键与体感并发送游戏震动。",
                 **release_identity(resources / "Engine/engine.json"))
+    # Sparkle：appcast 地址、验签公钥（Ed25519，私钥只在发版机 ~/.s2arm/.secrets/sparkle_ed25519）；不开定时检查（查新版走启动时的公告 / 消息）
+    info.update(SUFeedURL=SPARKLE_FEED, SUPublicEDKey=SPARKLE_PUBLIC_KEY, SUEnableAutomaticChecks=False, SUAutomaticallyUpdate=False)
     info["UTExportedTypeDeclarations"] = [dict(UTTypeIdentifier="org.s2arm.save-backup", UTTypeDescription="S2Arm Save Backup",
         UTTypeConformsTo=["public.zip-archive"], UTTypeTagSpecification={"public.filename-extension": ["s2asave"]})]
     (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
     # 启动器本体同样去掉调试映射（见 bundle_engine.strip_debug_maps），再签整个 App
     subprocess.run(["xcrun", "strip", "-S", str(app / "Contents/MacOS" / front["executable"])], env=env, check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(macos / "S2ArmNS2Connection")], env=env, check=True)
+    # Sparkle 里面的程序由里往外签（发版签名 sign_release.sh 同样由里往外）：XPC 服务 / Updater.app / Autoupdate → 框架本身
+    fw = app / "Contents/Frameworks/Sparkle.framework"
+    if fw.is_dir():
+        inner = sorted(list((fw / "Versions/B/XPCServices").glob("*.xpc")) + [fw / "Versions/B/Updater.app", fw / "Versions/B/Autoupdate"],
+                       key=lambda p: -len(p.parts))
+        for p in [p for p in inner if p.exists()] + [fw]:
+            subprocess.run(["codesign", "--force", "--sign", "-", str(p)], env=env, check=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(app)], env=env, check=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], env=env, check=True)
     print("最低系统检查：", verify_minimum_macos(app, runtime_sources.deployment_target()), "个 Mach-O")

@@ -190,7 +190,10 @@ public final class S2ArmLauncherModel: ObservableObject {
     @Published var availableUpdate: [String: Any]?
     /// 点「现在更新并重启」时有局 / 任务在跑：先拦下说明（文案号 update.gate.playing / update.gate.busy）
     @Published var updateGate: String?
-    var updateReady: [String: Any]?
+    /// 更新失败时 Sparkle 给的原因（界面在错误码文案之外照原话显示，控制口 /state 的 update.reason）
+    @Published var updateFailure: String?
+    /// 应用内更新（Sparkle 2）：第一次用时起，起来后整个 App 生命周期只一份
+    lazy var sparkleUpdate = SparkleUpdate(model: self)
     @Published var showAddGames = false
     @Published var showKeys = false
     /// 选好了但缺密钥（作业层 keys_missing）：等放入密钥后接着导入。解包好的游戏不要密钥，不经过这里。
