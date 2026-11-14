@@ -145,7 +145,9 @@ src=("$repo/android/tests/vk/t_backend_vk.c"
      "$repo/graphics/nvn/gfx/nvn/nvn_fmt_expand.c"
      "$repo/android/native/nvn/nvn_vk_bcdec.c"
      "$repo/android/native/nvn/nvn_vk_driver_cache.c"
-     "$repo/android/native/direct/sha256.c")
+     "$repo/android/native/direct/sha256.c"
+     "$repo/android/native/nvn/nvn_pipe_flight.c"
+     "$repo/android/native/nvn/nvn_vk_pipe_once.c")
 bc_src=("$repo/android/tests/vk/t_bc_decode.c"
      "$repo/android/native/nvn/nvn_vk_bcdec.c"
      "$repo/android/native/direct/vk_device.c"
@@ -173,7 +175,9 @@ if [ "$mode" = "--gs-core" ]; then
          "$repo/android/native/direct/source_store.c" "$repo/android/native/direct/control.c" "$repo/android/native/direct/input_identity.c" "$repo/android/native/direct/texture_facts.c"
          "$repo/android/native/direct/sha256.c" "$repo/android/native/direct/json.c" "$repo/android/native/direct/jv.c" "$repo/android/native/direct/compile_request.c"
          "$repo/android/native/direct/offline_library.c" "$repo/android/native/direct/program_cache.c" "$repo/runtime/src/direct_host.c")
-    cflags+=(-ffunction-sections -fdata-sections -Wno-unused-function)
+    # offline_library.c / program_cache.c 用 realpath / openat 等 POSIX.1-2008 接口：glibc 在 -std=c11 下不暴露
+    # （与 android/tests/nvk_shader_pool_test.py 的说明同源），所以这一档必须带 _GNU_SOURCE。
+    cflags+=(-ffunction-sections -fdata-sections -Wno-unused-function -D_GNU_SOURCE)
 fi
 if [ "$mode" = "--separate-core" ] || [ "$mode" = "--separate-neg-sampler" ]; then
     src=("$repo/android/tests/vk/t_replay_separate.c" "$repo/graphics/nvn/replay/rp_draw.c" "$repo/graphics/nvn/replay/rp_state.c" "$repo/graphics/nvn/replay/nvn_unimpl.c"
