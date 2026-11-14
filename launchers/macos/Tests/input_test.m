@@ -659,16 +659,16 @@ static void test_profile_only_pad(void) {
     install_pad_handler(c);
     expect(c.physicalInputProfile.valueDidChangeHandler != nil && c.handlerQueue != nil && c.handlerQueue != dispatch_get_main_queue(), "profile handler installed on the dedicated pad queue");
     uint32_t buttons = 99; int32_t sticks[4];
-    sample_profile_state(c, &buttons, sticks);
+    sample_profile_state(c, config, &buttons, sticks);
     expect(buttons == 0, "nothing pressed: no buttons");
     [c.microGamepad.buttonA setValue:1];
-    sample_profile_state(c, &buttons, sticks);
+    sample_profile_state(c, config, &buttons, sticks);
     expect(buttons == 1, "unrecognized pad, automatic layout: profile button A maps to Switch A by its letter");
-    s2a_pad_layout_set(S2A_PAD_LAYOUT_SWITCH); sample_profile_state(c, &buttons, sticks);
+    s2a_pad_layout_set(S2A_PAD_LAYOUT_SWITCH); sample_profile_state(c, config, &buttons, sticks);
     expect(buttons == 2, "Switch layout: profile button A (south) maps to Switch B by position");
     s2a_pad_layout_set(S2A_PAD_LAYOUT_AUTO);
     [c.microGamepad.buttonA setValue:0]; [c.microGamepad.dpad setValueForXAxis:0 yAxis:1];
-    sample_profile_state(c, &buttons, sticks);
+    sample_profile_state(c, config, &buttons, sticks);
     expect(buttons == (1u << 13), "profile dpad up maps to Switch Up");
     puts("Mac profile-only pad: handler and standard-name reading passed");
 }
@@ -686,15 +686,43 @@ static void test_pad_layout(void) {
     uint32_t want_a[3] = {1, 2, 1}, want_y[3] = {8, 4, 8};
     for (int i = 0; i < 3; i++) {
         s2a_pad_layout_set(layouts[i]);
-        [pad.buttonA setValue:1]; sample_pad_state(pad, &buttons, sticks);
+        [pad.buttonA setValue:1]; sample_pad_state(pad, config, &buttons, sticks);
         expect(buttons == want_a[i], "pad layout: button A lands on the expected Switch button");
-        [pad.buttonA setValue:0]; [pad.buttonY setValue:1]; sample_pad_state(pad, &buttons, sticks);
+        [pad.buttonA setValue:0]; [pad.buttonY setValue:1]; sample_pad_state(pad, config, &buttons, sticks);
         expect(buttons == want_y[i], "pad layout: button Y lands on the expected Switch button");
         [pad.buttonY setValue:0];
     }
     s2a_pad_layout_set(S2A_PAD_LAYOUT_AUTO);
     puts("Mac pad layout: automatic / Switch / Xbox take effect on the next read passed");
 }
+
+// 分玩家键位（槽 i = 玩家 i+1，InputSettingsSheet 按玩家保存）：玩家 2–4 没给自己的映射（S2A_INPUT_CONFIG_P2..P4 没给 / 读不懂）
+//   就照玩家 1 的全局那份，行为与原来完全一致；给了就槽位各照各的采样。期望手算（虚拟手柄 buttonA 自动布局按「东」上报，
+//   默认配置目标 A ← 东键 → 按下读 Switch A 第 0 位）：玩家 2 的映射把目标 B 绑到东键（"B": "east"）→
+//   同一只手柄按同一个键，玩家 1 读到 Switch A（1）、玩家 2 读到 Switch B（2）
+static void test_per_player_config(void) {
+    config = default_config();
+    player_config_maps[0] = player_config_maps[1] = player_config_maps[2] = nil;
+    expect(slot_cfg(0) == config && slot_cfg(1) == config && slot_cfg(2) == config && slot_cfg(3) == config && slot_cfg(4) == config,
+        "no per-player maps: every slot uses the global config");
+    NSDictionary *p2 = @{@"gamepad": @{@"B": @"east"}, @"mouse": @{}, @"axes": @{}, @"deadzone": @0.15, @"mouseOptions": @{@"mode": @"camera"}};
+    player_config_maps[0] = p2;   // 玩家 2（槽 1）
+    expect(slot_cfg(0) == config, "slot 0 stays on the player 1 config");
+    expect(slot_cfg(1) == p2 && slot_cfg(2) == config && slot_cfg(3) == config, "slot 1 uses player 2's map, other slots fall back");
+    GCController *c = [GCController controllerWithExtendedGamepad];
+    GCExtendedGamepad *pad = c.extendedGamepad;
+    uint32_t buttons; int32_t sticks[4];
+    [pad.buttonA setValue:1];   // 东键（自动布局：buttonA 按东上报）
+    sample_pad_state(pad, config, &buttons, sticks);
+    expect(buttons == 1, "player 1 map: east button reads Switch A");
+    sample_pad_state(pad, p2, &buttons, sticks);
+    expect(buttons == 2, "player 2 map: east button reads Switch B through her own binding");
+    [pad.buttonA setValue:0];
+    player_config_maps[0] = nil;
+    expect(slot_cfg(1) == config, "cleared player 2 map: back to the global config");
+    puts("Mac per-player configs: slot_cfg routing and per-player sampling passed");
+}
+
 
 // 手柄事件回调（A2）：handlerQueue 挂专用串行队列、不再挂主队列（主线程被菜单动画 / 提示条占住时手柄事件不再排队，见 test_pad_fast_path）；
 //   没占到槽的回调直接跳过（快速路径不碰没排进槽位表的手柄），没有新事件时 120Hz 定时器仍是回退采样，长按不会因为「只发变化」而丢。
@@ -1284,6 +1312,7 @@ int main(int argc, const char **argv) {
         test_pad_fast_path();
         test_profile_only_pad();
     test_pad_layout();
+        test_per_player_config();
         test_save_atomic_warning();
         test_lan_warning();
         test_focus_suspend();

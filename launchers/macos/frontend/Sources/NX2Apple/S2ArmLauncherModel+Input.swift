@@ -1,7 +1,8 @@
 // S2Arm（不是上游文件）：键位设置（InputSettingsSheet）的数据与读写。键位格式同旧启动器 Models.swift 的 InputConfig
 // （作业层 pack/jobs/library.py validate_input 的契约：schema 1、keyboard / mouse / gamepad / axes / mouseOptions / deadzone），
-// 读：这款文件夹里的 input.json（catalog 给的文件夹）→ 私有目录 default-input.json → 标准键位（同起局 build.py 的取法）；
-// 写：saveInput 作业（作业层校验后原子写这款文件夹的 input.json），下次开始游戏时生效。
+// 按玩家保存（键位设置里选玩家 1–4）：玩家 1 读这款文件夹里的 input.json → 私有目录 default-input.json → 标准键位（同起局 build.py 的取法）；
+// 玩家 2–4 读这款文件夹里的 input-pN.json → 标准键位；写：saveInput 作业（作业层校验后原子写，起局时玩家 2–4 的经 S2A_INPUT_CONFIG_P2..P4
+// 交给宿主，front_mac.m 槽 i = 玩家 i+1 各照各的映射采样），下次开始游戏时生效。
 import Foundation
 import S2ArmAppleAdapter
 
@@ -97,26 +98,29 @@ struct InputConfig: Codable, Equatable {
 struct LoadedInput { let config: InputConfig; let problem: Bool }
 
 extension S2ArmLauncherModel {
-    /// 这款现在的键位：这款文件夹里的 input.json，没有就用私有目录的 default-input.json，再没有用标准键位。
+    /// 这款现在的键位：玩家 1 = 这款文件夹里的 input.json，没有就用私有目录的 default-input.json，再没有用标准键位（同起局 build.py 的取法）；
+    ///   玩家 2–4 = 这款文件夹里的 input-pN.json（键位设置按玩家保存），没有就用标准键位——不落回玩家 1 的键位，每位玩家自己的一份。
     /// 游戏库结构 v3 起键位在每款自己的文件夹（作业层 layout 把旧的 mappings/<号>.json 搬进去了）；原先还读 mappings/ 永远读不到，存过的键位重开显示成默认
-    func loadInput(gameID: String) -> LoadedInput {
+    func loadInput(gameID: String, player: Int = 1) -> LoadedInput {
         let env = provider.client.environment
         var problem = false
-        if let path = games.first(where: { $0.id == gameID })?.location.file("input.json") {
+        let file = player == 1 ? "input.json" : "input-p\(player).json"
+        if let path = games.first(where: { $0.id == gameID })?.location.file(file) {
             if let data = try? Data(contentsOf: path) {
                 if let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: false) }
                 problem = true
             }
         }
-        if let data = try? Data(contentsOf: env.privateRoot.appendingPathComponent("default-input.json")),
+        if player == 1, let data = try? Data(contentsOf: env.privateRoot.appendingPathComponent("default-input.json")),
            let config = try? JSONDecoder().decode(InputConfig.self, from: data) { return LoadedInput(config: config, problem: problem) }
         return LoadedInput(config: .standard, problem: problem)
     }
 
-    /// 存这款的键位（saveInput 作业）。没配游戏库不起作业；作业层拒收抛 JobFailure，message 是作业层原句。
-    func saveInput(_ config: InputConfig, gameID: String) async throws {
+    /// 存这款的键位（saveInput 作业，player 1–4：1 = input.json，2–4 = input-pN.json，作业层校验后原子写）。
+    /// 没配游戏库不起作业；作业层拒收抛 JobFailure，message 是作业层原句。
+    func saveInput(_ config: InputConfig, gameID: String, player: Int = 1) async throws {
         guard !provider.client.environment.library.isEmpty else { throw JobClientError(LibraryProvider.noLibraryMessage) }
         let object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config))
-        _ = try await provider.client.perform("saveInput", extra: ["config": object, "gameId": gameID])
+        _ = try await provider.client.perform("saveInput", extra: ["config": object, "gameId": gameID, "player": player])
     }
 }
