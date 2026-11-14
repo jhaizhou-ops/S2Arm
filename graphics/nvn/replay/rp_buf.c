@@ -39,6 +39,7 @@ static int g_mirror_cur;   // 现在用第几份；只在提交锁里改（Finis
 static pthread_mutex_t g_bmu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_shadow = {.klen = 8};   // 池起点 → struct shadow *
 static uint64_t g_sync_bytes, g_sync_runs;
+static nvn_gpu_buf g_null_storage;
 
 int rp_pool_find(uint64_t addr, uint64_t len, const uint8_t **mem, uint64_t *size);   // rp_entry.c
 
@@ -248,9 +249,28 @@ void rp_buf_pool_gone(const void *mem) {
     if (s) { if (s->landing > 0) s->dead = 1; else shadow_free(s); }   // 有拷贝在锁外进行：由收尾那边释放（见 rp_buf_gpu_write_land）
     pthread_mutex_unlock(&g_bmu);
 }
+nvn_gpu_buf rp_buf_for_null_storage(void) {
+    pthread_mutex_lock(&g_bmu);
+    if (!g_null_storage) {
+        // 对齐 Ryujinx DescriptorSetUpdater：不支持 nullDescriptor 时，未使用的缓冲绑定用 64 KiB 物理对象。
+        // 只初始化一次；着色器写入后不承诺内容仍为零，也不把写入落到任何 guest 地址。
+        void *zero = calloc(1, 0x10000);
+        nvn_gpu_err err = {0};
+        if (!zero || !nvn_gpu_ok(nvn_gpu_buf_create(0x10000, NVN_GPU_MEM_SHARED, zero, &g_null_storage, &err))) {
+            g_null_storage = NULL;
+            if (nvn_unimpl("gpu", "null_storage_create", NULL) == 1 && err.why[0]) nvn_plat_log(NVN_PLAT_LOG_RED, "gpu", err.why);
+        }
+        free(zero);
+    }
+    nvn_gpu_buf result = g_null_storage;
+    pthread_mutex_unlock(&g_bmu); return result;
+}
+
 void rp_buf_reset(void) {
     pthread_mutex_lock(&g_bmu);
     for (uint32_t i = 0; i < g_shadow.cap; i++) { struct shadow *s = g_shadow.vals[i]; if (s) shadow_free(s); }
+    if (g_null_storage) nvn_gpu_buf_release(g_null_storage, NULL, NULL);
+    g_null_storage = NULL;
     free(g_shadow.keys); free(g_shadow.vals); nvn_hm_init(&g_shadow, 8); g_mirror_cur = 0;
     pthread_mutex_unlock(&g_bmu);
 }
