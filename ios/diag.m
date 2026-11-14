@@ -450,7 +450,7 @@ void s2a_diag_report(void) {
     UIViewController *host = diag_host();
     if (g_exporting || !host) return;
     UIAlertController *a = [UIAlertController alertControllerWithTitle:S2AL(@"diag.report.title") message:S2AL(@"diag.report.message") preferredStyle:UIAlertControllerStyleAlert];
-    [a addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = S2AL(@"diag.report.placeholder"); f.clearButtonMode = UITextFieldViewModeWhileEditing; }];
+    [a addTextFieldWithConfigurationHandler:^(UITextField *f) { f.placeholder = S2AL(@"diag.report.placeholder"); f.clearButtonMode = UITextFieldViewModeWhileEditing; f.accessibilityIdentifier = @"diag.report.note"; }];
     __weak UIAlertController *wa = a;
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"common.cancel") style:UIAlertActionStyleCancel handler:nil]];
     [a addAction:[UIAlertAction actionWithTitle:S2AL(@"diag.upload.go") style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { (void)x;
