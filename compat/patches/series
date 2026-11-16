@@ -604,3 +604,5 @@
 20261115-1312-audio-diag-peak-nan.patch
 20261115-1505-macrojit-dynamic-code-guard.patch
 20261115-1712-hid-follow-sync-same-lock.patch
+20261116-1626-audio-dsp-datasource-drop-redundant-tofloat.patch
+20261116-1627-audio-dsp-device-sink-conditional-clear.patch

@@ -4,7 +4,9 @@
 //   ② 波形缓冲解码（DataSourceHelper.ProcessWaveBuffers）：32 KB 临时区 SkipLocalsInit，快路径只清会被读到的前段。
 //      判据：同一组输入跑两遍，每遍之前先把栈上那片内存填成不同的垃圾值；只要读到了没清的区域，两遍输出就不一样。
 //      填垃圾是否真落到那片内存由探针核（探针读不到垃圾值 = 判据失效，记红）。
-// 跑两遍：缺省（快路径开）与 S2A_AUDIO_DSP_FAST=0（关，两项都应平凡相同）。
+//   ③ 设备输出（DeviceSinkCommand.Process）：2/6 声道 SIMD 内核完整覆盖输出，只有逐声道回退布局靠整块清零；
+//      判据见 DeviceSinkTest.cs：每次运行前把池里的输出缓冲填满垃圾值（审计 P4-4）。
+// 跑两遍：缺省（快路径开）与 S2A_AUDIO_DSP_FAST=0（关，都应平凡相同）。
 using Ryujinx.Audio.Renderer.Common;
 using Ryujinx.Audio.Renderer.Dsp;
 using Ryujinx.Audio.Renderer.Dsp.State;
@@ -17,7 +19,7 @@ using Ryujinx.Audio;
 using Ryujinx.Audio.Common;
 using static Ryujinx.Audio.Renderer.Parameter.VoiceInParameter1;
 
-static class Program
+static partial class Program
 {
     static int fails, cases;
 
@@ -292,6 +294,7 @@ static class Program
         var r = new Random(630);
         TestBiquad(r);
         TestDataSource(r);
+        TestDeviceSink(r);
         Console.WriteLine(fails == 0 ? $"audio_dsp_fast: all green ({cases} comparisons, fast={fast})" : $"audio_dsp_fast: {fails} red of {cases} (fast={fast})");
         return fails == 0 ? 0 : 1;
     }

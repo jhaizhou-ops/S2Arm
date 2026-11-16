@@ -234,8 +234,6 @@ namespace Ryujinx.Audio.Renderer.Dsp
                         }
                     }
 
-                    Span<int> outputSpanInt = MemoryMarshal.Cast<float, int>(outputBuffer[i..]);
-
                     if ((info.DecodingBehaviour & DecodingBehaviour.SkipPitchAndSampleRateConversion) == DecodingBehaviour.SkipPitchAndSampleRateConversion)
                     {
                         for (int j = 0; j < y; j++)
@@ -249,8 +247,8 @@ namespace Ryujinx.Audio.Renderer.Dsp
 
                         tempSpan[..(sampleCountToDecode - y)].Clear();
 
-                        ToFloat(outputBuffer, outputSpanInt, sampleCountToProcess);
-
+                        // S2Arm: 原先这里先把 outputBuffer 里的 int 位型转成 float 再重采样，但 Resample 会逐样本覆盖
+                        //   outputBuffer[0..sampleCountToProcess]，转换结果从未被读取（审计 P4-1）。
                         ResamplerHelper.Resample(outputBuffer, tempBuffer, sampleRateRatio, ref fraction, sampleCountToProcess, info.SrcQuality, y != sourceSampleCountToProcess || info.Pitch != 1.0f);
 
                         tempBuffer.Slice(sampleCountToDecode, pitchMaxLength).CopyTo(voiceState.Pitch.AsSpan());
