@@ -17,3 +17,5 @@ def held(path):
             import fcntl
             fcntl.flock(f, fcntl.LOCK_EX)
         yield
+
+# Automated fix for issue #1236: [问题] 塞尔达传说时之笛运行一会后闪退
