@@ -31,6 +31,7 @@ static int g_arena_detail_lines; static char g_arena_detail[256]; static char g_
 static char g_ps_lines[8][320]; static int g_ps_n;   // 池统计行（cls "poolstats"）收下来给 t_pool_stats 核
 void nvn_plat_log(int level, const char *cls, const char *text) { if (cls && !strcmp(cls, "poolstats")) { if (g_ps_n < 8) snprintf(g_ps_lines[g_ps_n], 320, "%s", text); g_ps_n++; return; } if (strstr(text,"分时（回放缓冲块核查，本窗口）")) { g_block_log_count++; snprintf(g_block_log,sizeof g_block_log,"%s",text); } if(level == NVN_PLAT_LOG_RED && strstr(text,"后续不同原因详情省略（最多8）"))g_arena_truncated_lines++; if (level == NVN_PLAT_LOG_RED && strstr(text,"arena_alloc_failed rc=")) { if(g_arena_detail_lines<32)snprintf(g_arena697_lines[g_arena_detail_lines],256,"%s",text); g_arena_detail_lines++; snprintf(g_arena_detail,sizeof g_arena_detail,"%s",text); } if (level == NVN_PLAT_LOG_RED) { g_red_lines++; snprintf(g_last_red, sizeof g_last_red, "%s", text); } }
 static int g_flag_finish_lag;   // 用例设：开关 nvk_finish_lag 的值
+static int g_flag_spill = 1;    // 用例设：开关 nvk_spill（缺省同产品：开）
 static int g_flag_sync_lag;     // 用例设：开关 nvk_sync_lag 的值（产品缺省 1＝允许一格在飞；用例固定 0，测的是「真等」这条契约）
 static int g_flag_state_keep = 1, g_flag_rt_cont = 1, g_flag_clear_park = 1, g_flag_pass_area = 1;   // 用例设：开关 nvk_state_keep / nvk_rt_cont / nvk_clear_park / nvk_pass_area 的值（缺省同产品：都开）
 static int g_flag_pool_memo = 1;   // 用例设：开关 nvk_pool_memo 的值（缺省同产品：开）；备忘每 4096 次查找才重读一次，换值后要用 pm_flag() 推一下
@@ -40,6 +41,7 @@ static int g_flag_pool_stats;   // 用例设：开关 pool_stats（缺省同产�
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_buf_blocks")) return g_flag_buf_blocks;
     if (!strcmp(name, "pool_stats")) return g_flag_pool_stats;
+    if (!strcmp(name, "nvk_spill")) return g_flag_spill;
     if (!strcmp(name, "nvk_pool_memo")) return g_flag_pool_memo;
     if (!strcmp(name, "nvk_vf_key")) return g_flag_vf_key;
     if (!strcmp(name, "nvk_finish_lag")) return g_flag_finish_lag;
@@ -3553,6 +3555,13 @@ static void t_dispatch_spill(void) {
     dp = (p_dispatch){0}; dp.x = 1 << 20; dp.y = 1; dp.z = 1;   // 2^20 组 × 1024 = 1 GiB
     rp_dispatch(&g_fake_cmd, &dp, NULL);
     CHECK(g_ndisp == n + 2 && nvn_unimpl_count("draw", "compute_spill_too_large") == big0 + 1);
+    // 平台开关 nvk_spill = 0（真机 A/B）：spill 程序的派发报名跳过，不分配、不派发
+    uint64_t off0 = nvn_unimpl_count("draw", "compute_spill_disabled");
+    g_flag_spill = 0; rp_draw_reset();
+    dp = (p_dispatch){0}; dp.x = 4; dp.y = 2; dp.z = 1; rp_dispatch(&g_fake_cmd, &dp, NULL);
+    CHECK(g_ndisp == n + 2 && nvn_unimpl_count("draw", "compute_spill_disabled") == off0 + 1);
+    g_flag_spill = 1; rp_draw_reset();
+    rp_dispatch(&g_fake_cmd, &dp, NULL); CHECK(g_ndisp == n + 3 && g_cb[0].u.b.len == 8 * 1024);
     nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK); g_buf_cpu_fake = NULL; nvn_be_pool_del(g_pmem); pass_fresh();
 }
 
