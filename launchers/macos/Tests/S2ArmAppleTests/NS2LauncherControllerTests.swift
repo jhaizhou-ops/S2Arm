@@ -242,8 +242,8 @@ final class NS2LauncherControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testKeyboardRegistrationClearedOnLaunch() throws {
-        // 每次开 S2Arm 清掉键盘的登记（要经分配玩家再加入）；其他玩家照旧
+    func testKeyboardRegistrationKeptOnLaunch() throws {
+        // 登记过的键盘位重开仍在（玩家自己排的位置优先于缺省）
         let suite = "s2arm-kb-test-" + UUID().uuidString
         let store = try XCTUnwrap(UserDefaults(suiteName: suite))
         let order = FileManager.default.temporaryDirectory.appendingPathComponent(suite + ".json")
@@ -253,9 +253,9 @@ final class NS2LauncherControllerTests: XCTestCase {
         XCTAssertEqual(saved.units, [.keyboard])
         let controller = NS2LauncherController(socketURL: URL(fileURLWithPath: "/tmp/s2arm-controller-test.sock"), store: store, orderFile: order,
                                               systemControllers: { [] }, notifications: NotificationCenter())
-        XCTAssertFalse(controller.assignment.units.contains(.keyboard), "开启时键盘的登记清掉")
+        XCTAssertEqual(controller.assignment.units, [.keyboard], "重开后键盘位原样读回")
         let reread = try JSONDecoder().decode(PlayerAssignment.self, from: try XCTUnwrap(store.data(forKey: "S2AMacNS2PlayerAssignment")))
-        XCTAssertFalse(reread.units.contains(.keyboard), "存档也清掉")
+        XCTAssertTrue(reread.units.contains(.keyboard), "存档里的键盘位也还在")
     }
 
     func testTitleFollowsKind() {
