@@ -124,10 +124,11 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer(minLength: 24)
             journey.padding(.bottom, 34)
-            LauncherHeadingLine {
+            VStack(alignment: .leading, spacing: 10) {
                 Text(w("title")).font(.manrope(44, .heavy)).tracking(-1.4).help(w("title"))
-            } subtitle: {
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(w("lead")).font(.manrope(16)).foregroundStyle(.secondary).help(w("lead"))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text(w("soon")).font(.manrope(14, .semibold)).foregroundStyle(LauncherPalette.cream.opacity(0.75))
                 .padding(.top, 14)
