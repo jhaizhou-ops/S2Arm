@@ -29,6 +29,9 @@ if (settingsProbe) args = args[1..];
 // --report-probe <目录>：各页 / 各引导状态下顶栏最右都有「故障报修」键（11-13，ReportProbe.cs），每页存帧图
 var reportProbe = args.Length > 0 && args[0] == "--report-probe";
 if (reportProbe) args = args[1..];
+// --cover-io-probe: a blocked synthetic cover reader must not block launcher UI rendering.
+var coverIoProbe = args.Length > 0 && args[0] == "--cover-io-probe";
+if (coverIoProbe) args = args[1..];
 var outDir = args.Length > 0 ? args[0] : Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
     ".s2arm/run/s2arm/cmdr/evidence/launcher/win");
@@ -46,6 +49,7 @@ if (scrollProbe) { Environment.Exit(ScrollProbe.Run(outDir)); }
 if (flickerProbe) { Environment.Exit(FlickerProbe.Run(outDir)); }
 if (settingsProbe) { Environment.Exit(SettingsProbe.Run(outDir)); }
 if (reportProbe) { Environment.Exit(ReportProbe.Run(outDir)); }
+if (coverIoProbe) { Environment.Exit(CoverIoProbe.Run(outDir)); }
 
 // ── 统一夹具游戏（不用固定游戏名字符串以外的占位）────────────────────
 static LibraryGame MockGame(bool keysReady = true) => new(

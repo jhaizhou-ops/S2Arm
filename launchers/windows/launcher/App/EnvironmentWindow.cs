@@ -65,7 +65,7 @@ public sealed partial class EnvironmentWindow : Window
         Width = 1080; Height = 820; MinWidth = 760; MinHeight = 600;
         Background = Canvas; Foreground = Ink;
         FontFamily = new FontFamily("avares://S2Arm/Assets/Fonts#Manrope");
-        Closed += (_, _) => { CancelJob(JobKind.Environment); ClearCovers(); DisposeRetiredCovers(all: true); CloseControl(); };
+        Closed += (_, _) => { coverWindowClosed = true; CancelJob(JobKind.Environment); ClearCovers(); DisposeRetiredCovers(all: true); CloseControl(); };
         Opened += (_, _) =>
         {
             StartControl(); FinishPendingUpdate(); SyncInstalledVersion(); _ = LoadInboxAsync(); StartPhoneAutoUpdate();
