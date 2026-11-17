@@ -29,18 +29,20 @@ static class CoverIoProbe
                 return null;
             }));
             var game = new LibraryGame("absolum", "Absolum", "1.2.1", coverPath, false, [],
-                Location: new GameLocation("ok", "", folder, "", false));
+                Location: new GameLocation("ok", "", folder, "", false), Banner: Path.Combine(folder, "banner.jpg"));
 
             // The watchdog also lets the deliberate synchronous negative control finish so it can report red.
             _ = Task.Run(() => { if (entered.Wait(TimeSpan.FromSeconds(3))) { Thread.Sleep(1200); release.Set(); } });
             var timer = Stopwatch.StartNew();
+            CallHero(window, game);
+            CallHero(window, game);
             CallCover(window, game);
             CallCover(window, game);
             timer.Stop();
             if (timer.ElapsedMilliseconds >= 500)
-                throw new InvalidOperationException($"cover rendering blocked the UI for {timer.ElapsedMilliseconds} ms");
+                throw new InvalidOperationException($"cover/banner rendering blocked the UI for {timer.ElapsedMilliseconds} ms");
             if (!entered.Wait(TimeSpan.FromSeconds(2))) throw new InvalidOperationException("background cover reader did not start");
-            if (Volatile.Read(ref reads) != 1) throw new InvalidOperationException($"same cover queued {reads} reads instead of one");
+            if (Volatile.Read(ref reads) != 2) throw new InvalidOperationException($"cover/banner queued {reads} reads instead of two (one per path)");
 
             release.Set();
             var deadline = Stopwatch.StartNew();
@@ -53,7 +55,7 @@ static class CoverIoProbe
             if (GetW(window, "pendingCovers") is System.Collections.IDictionary remaining && remaining.Count != 0)
                 throw new InvalidOperationException("cover load did not settle after the reader was released");
 
-            Console.WriteLine("✓ Cover I/O probe: two renders < 500 ms, one background read, duplicate request coalesced");
+            Console.WriteLine("✓ Cover I/O probe: cover and banner renders < 500 ms, two background reads total, both duplicate requests coalesced");
             return 0;
         }
         catch (Exception error)
@@ -71,6 +73,10 @@ static class CoverIoProbe
     static void CallCover(EnvironmentWindow window, LibraryGame game)
         => (window.GetType().GetMethod("GameCoverImage", BindingFlags.NonPublic | BindingFlags.Instance)
             ?? throw new MissingMethodException("GameCoverImage")).Invoke(window, [game, 96]);
+
+    static void CallHero(EnvironmentWindow window, LibraryGame game)
+        => (window.GetType().GetMethod("HeroBanner", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingMethodException("HeroBanner")).Invoke(window, [game]);
 
     static void SetW(object obj, string field, object? value)
     {
