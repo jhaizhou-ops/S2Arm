@@ -2769,6 +2769,24 @@ class UpdatePrepareTests(unittest.TestCase):
         self.assertEqual(calls, [([self.A], ["program-" + self.A]), ([self.B], ["program-" + self.B])])
         self.assertEqual(r, {"prepared": [self.A, self.B], "updated": [self.B]})
 
+    def test_stops_when_foreground_install_holds_phone_lock(self):
+        # 11-17 #1450：前台装机类作业拿着手机锁时，后台准备更新不再拿程序锁跟它抢——做完手上这款就停，剩下的前台按正常优先级做
+        import contextlib, rewrite_refresh
+        with tempfile.TemporaryDirectory() as t:
+            lib = Path(t); (lib / "devices").mkdir()
+            (lib / "devices/UDID1.json").write_text(json.dumps({"games": {self.A: {}, self.B: {}}}))
+            calls, busy = [], []
+            @contextlib.contextmanager
+            def idle(name="execution"):
+                yield not (name == "phone" and busy)
+            c = jobcase.fake_context(lib.parent, library=lib, catalog=lambda: {"games": [{"id": self.A}, {"id": self.B}]}, begin=lambda *a: None, idle=idle)
+            def refresh(cc, games):
+                calls.append(list(games)); busy.append(1); return []   # 补完第一款时，前台装机作业进来拿了手机锁
+            with um.patch.object(rewrite_refresh, "refresh_ios", refresh):
+                r = install.update_prepare(c)
+        self.assertEqual(calls, [[self.A]])
+        self.assertEqual(r, {"prepared": [self.A], "updated": []})
+
     def test_operation_registered(self):
         import core
         src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")

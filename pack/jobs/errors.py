@@ -9,7 +9,7 @@ import stat
 
 
 RECOVERY = {
-    "ios_install_dir_unwritable": "重试没用：先在游戏菜单「存档管理」里导出存档（存到 S2Arm 文件夹以外，比如 iCloud 云盘），再删除并重新安装 S2Arm，装好后导回存档。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
+    "ios_install_dir_unwritable": "重试没用，要删掉 iPhone 上的 S2Arm App 再重装：①先在游戏菜单「存档管理」里导出存档，存到 S2Arm 文件夹以外（比如 iCloud 云盘）；②在 iPhone 桌面长按 S2Arm，删除 App；③在电脑上的 S2Arm 里对这款游戏再点一次「装到 iPhone」；④装好后在「存档管理」里导回存档。电脑上的游戏和 S2Arm 都不用删。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_no_space": "清出空间后点「重试」。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_img_format": "更新 iPhone 上的 S2Arm，再打开这款游戏。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）
     "ios_install_img_corrupt": "从电脑重新装到 iPhone，会接着已传的部分续传。",   # iOS 端装机 / 导入失败：手机上的 S2Arm 报码、按码显示（11-11 维护者「补上说人话的原因」）

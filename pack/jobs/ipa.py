@@ -464,10 +464,15 @@ PROGRAM_LOCK_WAIT_S, PHONE_LOCK_WAIT_S = 1800, 7200
 
 @contextlib.contextmanager
 def program_locks(c, games):
+    from core import trace
+    want = sorted({str(g).upper() for g in games if g})
     with contextlib.ExitStack() as stack:
-        for g in sorted({str(g).upper() for g in games if g}):
+        for g in want:
+            trace(c, f"拿程序锁 {g}…")
             stack.enter_context(c.lock("program-" + g, wait=PROGRAM_LOCK_WAIT_S))
+            trace(c, f"拿到程序锁 {g}")
         yield
+        if want: trace(c, "放程序锁 " + " ".join(want))  # 非玩家句
 
 
 def phone_lock(c):
@@ -761,6 +766,8 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None)
     # 横图取游戏库那份（导入时作业层抓好，library.store_meta）：组装不联网，Mac / iPhone / Windows 读同一份
     banners = {g: layout.path(c, g, "banner.jpg", create=False) for g in roots}
     banner_args = [x for g, b in banners.items() if b.is_file() for x in ("--banner", f"{g}={b}")]
+    from core import trace
+    trace(c, f"组容器开始：{len(roots)} 款（{' '.join(sorted(roots))}）")
     try:
         c.run([os.sys.executable, "-X", "utf8", "-B", c.engine / "pack/ship_ext.py", "container", "--shell", shell, "--out", app, "--bundle-id", CONTAINER_BUNDLE,
                "--icon", icon, "--sign", "none", "--custom", out / "custom.json", "--host-abi", str(host_update.HOST_ABI),
@@ -773,6 +780,7 @@ def assemble(c, gid, others=(), *, failed=(), root=None, dest=None, agreed=None)
         raise
     finish_container(c, app, log)
     write_container_ipa(c, app, ipa, log)
+    trace(c, "组容器结束")
     games = [g["title_id"] for g in json.loads((app / "s2a_catalogue.json").read_text(encoding="utf-8"))["games"]]
     if gid and gid not in games:
         # 程序文件（main.npdm 的程序号）和游戏包（导入时 CNMT 的发行号）对不上：游戏文件被改过、或混进了别的游戏的程序

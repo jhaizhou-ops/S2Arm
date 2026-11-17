@@ -119,6 +119,8 @@ namespace Ryujinx.Audio.Backends.Apple
         private static int _watchdogStarted;
         private long _lastCallbackTicks;
         private long _lastHealTicks;
+        // S2Arm (#1384): 已处理过的客机冻结次数（S2AGuestFreeze.Seq）。建会话时取当前值，之前的冻结不算
+        private long _thawSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq);
         private int _heals;
         private bool _testStallDone;
         // 测试钩子：S2A_AUDIO_TEST_PRODUCER_STALL_AT=<秒>:<毫秒> —— 开播后到点在送声音的入口（QueueBuffer）睡一次，模拟 GC 停顿卡住生产方、吃光缓冲垫
@@ -324,6 +326,23 @@ namespace Ryujinx.Audio.Backends.Apple
                 _timeline.Reset();
 
                 return;
+            }
+
+            // S2Arm (#1384): 客机冻结（失焦暂停）放开后，macOS 也重置时间轴、重启一次输出队列。11-13 的前提「macOS 队列自己恢复」在部分外接输出上不成立：
+            //   玩家外接 DP 显示器（48 kHz）失焦暂停切回后画面恢复、一直无声；他在解冻时重置时间轴 + 重启输出队列，同机两轮都好了。
+            //   每次冻结只做一次，在解冻后第一次检查时做；iOS / tvOS 照旧走下面的时间轴自愈
+            long freezeSeq = Interlocked.Read(ref Ryujinx.Audio.Integration.S2AGuestFreeze.Seq);
+            if (freezeSeq != _thawSeq && Ryujinx.Audio.Integration.S2AGuestFreeze.Frozen == 0)
+            {
+                _thawSeq = freezeSeq;
+
+                if (OperatingSystem.IsMacOS())   // 平台例外：苹果后端内部，iOS / tvOS 解冻由下面的时间轴自愈接住
+                {
+                    _timeline.Reset();
+                    S2ARecover($"客机解冻（失焦暂停放开，第 {freezeSeq} 次）：重置时间轴、重启输出队列", false, now, false);
+
+                    return;
+                }
             }
 
             // S2Arm (11-13 断音): iOS only. A macOS queue recovers by itself (QueueTimelineWatch), and its criterion cannot tell a timeline

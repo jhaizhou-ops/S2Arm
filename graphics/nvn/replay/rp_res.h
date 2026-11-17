@@ -29,6 +29,9 @@ void rp_view_pin_begin(void);
 void rp_view_pin_end(void);
 // 贴图号 → 登记时的贴图 / 视图快照（不建图）。1 = 这个号登记过。
 int rp_tex_snap_by_id(int id, tex_t *t, view_t *v, int *has_v);
+// 存储图像的 sRGB 别名：后端置了 NVN_GPU_CAP_STORAGE_SRGB_ALIAS、格式 f 本身不能当存储、同位宽 UNORM 能，返回那个 UNORM 格式；否则 0。
+//   NVN 的图像存储按原始字节写，不做 sRGB 编码，所以按 UNORM 视图写进 sRGB 贴图是同一份字节。
+uint32_t rp_storage_srgb_alias(uint32_t f);
 // 采样器号 → 后端采样器（首次取用时建）。没登记 → NULL。线程：[提交]。
 nvn_gpu_samp rp_samp_by_id(int id);
 // #1072：同上，但贴图 tid 的有效格式不能线性过滤时给同参数的最近点采样器（具名记账）。

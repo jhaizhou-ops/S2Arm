@@ -1035,7 +1035,7 @@ print(op + " 8 字节 → " + sys.argv[3])
         with self.assertRaises(push.Fail) as cm:
             dev.put(self.pk / "a", "Library/S2Arm/games/G/资源包/game.img")
         self.assertEqual(ops.read_text().split(), ["put", "rm"])
-        self.assertIn("Permission denied", str(cm.exception)); self.assertIn("删除并重新安装 S2Arm", str(cm.exception))
+        self.assertIn("Permission denied", str(cm.exception)); self.assertIn("删掉 iPhone 上的 S2Arm App 再重装", str(cm.exception))
         self.assertEqual(push.push_reason(str(cm.exception)), "手机上这个文件 App 写不进（Permission denied）")
 
     def test_denied_again_after_remove_reports_reinstall(self):
@@ -1045,7 +1045,7 @@ print(op + " 8 字节 → " + sys.argv[3])
             dev.put(self.pk / "a", "Library/S2Arm/games/G/资源包/game.img")
         self.assertEqual(ops.read_text().split(), ["put", "rm", "put"])
         self.assertIsInstance(cm.exception, push.DirUnwritable)
-        self.assertIn("Permission denied", str(cm.exception)); self.assertIn("删除并重新安装 S2Arm", str(cm.exception))
+        self.assertIn("Permission denied", str(cm.exception)); self.assertIn("删掉 iPhone 上的 S2Arm App 再重装", str(cm.exception))
         self.assertEqual(push.push_reason(str(cm.exception)), "手机上这个文件 App 写不进（Permission denied）")
 
     def image_plan(self):
@@ -1066,13 +1066,13 @@ print(op + " 8 字节 → " + sys.argv[3])
         # 期望（手写，D-CY3B）：目录 App 写不进（DirUnwritable）→ 不原地再试、不说「重新装会续传 / 从头传」，原样抛出，码 ios_install_dir_unwritable
         self.image_plan(); dev = Fake({}); tries = []
         def put_big(*args):
-            tries.append(1); raise push.DirUnwritable("手机上的 x 删掉重写也写不进（afc error: Permission denied）：它所在的文件夹 App 写不进。" + push.REINSTALL_STEP)
+            tries.append(1); raise push.DirUnwritable("iPhone 上的 S2Arm 写不进 x：删掉旧文件重写也被系统拒绝（afc error: Permission denied），它所在的文件夹 S2Arm 写不进。" + push.REINSTALL_STEP)
         dev.put_big = put_big
         with self.assertRaises(push.DirUnwritable) as cm:
             push.send(dev, self.pk, self.w)
         self.assertEqual(len(tries), 1)
         self.assertEqual(cm.exception.code, "ios_install_dir_unwritable")
-        self.assertNotIn("续传", str(cm.exception)); self.assertNotIn("从头传", str(cm.exception)); self.assertIn("删除并重新安装 S2Arm", str(cm.exception))
+        self.assertNotIn("续传", str(cm.exception)); self.assertNotIn("从头传", str(cm.exception)); self.assertIn("删掉 iPhone 上的 S2Arm App 再重装", str(cm.exception))
 
     def test_partial_image_failure_never_reports_completion(self):
         self.image_plan(); dev = Fake({}); calls = []

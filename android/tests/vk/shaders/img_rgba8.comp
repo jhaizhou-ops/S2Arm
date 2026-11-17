@@ -1,0 +1,9 @@
+#version 450
+// C61s：rgba8（UNORM）存储视图写进 RGBA8_SRGB 贴图。写入值都是 k/255 的精确字节，读回必须逐字节相同（不做 sRGB 编码）。
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 1) in;
+layout(rgba8, set = 0, binding = 0) writeonly uniform image2D im;
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    uint k = p.x + p.y * 4u;
+    imageStore(im, ivec2(p), vec4(float(k * 16u) / 255.0, 128.0 / 255.0, float(255u - k) / 255.0, 1.0));
+}

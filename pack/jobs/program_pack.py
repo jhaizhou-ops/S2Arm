@@ -32,7 +32,7 @@ SCHEMA = 1
 #   S2A_UNIVERSAL_SHELL=1 / 0 覆盖缺省；0.6.0 切版本时把 ON_BY_DEFAULT 翻成 True
 ON_BY_DEFAULT = False
 PACKAGE, SIGNED, CATALOGUE, KEY, META = "package", "signed", "catalogue.json", ".key", "meta.json"
-REASONS = ("missing", "abi", "rewriter", "sha", "team", "cert")   # need() 可能给的原因
+REASONS = ("missing", "abi", "rewriter", "sha", "team", "cert", "look")   # need() 可能给的原因；look = 玩家在启动器里改的游戏名 / 封面变了（只重推清单与图标）
 
 
 def image_name(gid):
@@ -152,7 +152,8 @@ def sign(c, gid, team, bundle, signer, *, pkg=None):
 
 def need(c, gid, phone, team, cert=None, *, want=None):
     """这台手机上这款的程序包要不要推 → 原因集合（REASONS 的子集；空 = 不用动）。
-    phone = 设备记录里这款的 program 记录 {sha, team, cert, host_abi, rewriter_id}（没推过 = None）；want = 本次要推的包的 catalogue（缺省按缓存现算）"""
+    phone = 设备记录里这款的 program 记录 {sha, team, cert, host_abi, rewriter_id, look}（没推过 = None）；want = 本次要推的包的 catalogue（缺省按缓存现算），
+    可带 look（启动器里改的名字 / 封面的指纹，install.push_programs 算）"""
     if not phone:
         return {"missing"}
     want = want or {}
@@ -167,6 +168,8 @@ def need(c, gid, phone, team, cert=None, *, want=None):
         got.add("team")
     if cert and phone.get("cert") and phone.get("cert") != cert:
         got.add("cert")
+    if want.get("look") is not None and phone.get("look") != want.get("look"):
+        got.add("look")
     return got
 
 

@@ -560,8 +560,11 @@ def _refresh_code_ios(c, games):
     for i, g in enumerate(todo, 1):
         # 逐款一行（#1132：升级后第一次导出，库里每款都在这一步重核，整体进度停在 0%，玩家看着像卡死）
         c.emit("message", f"核对程序 {i}/{len(todo)}：{names.get(g.upper(), g)}")
+        from core import trace
+        trace(c, f"改写核对开始 {g}（{i}/{len(todo)}）")
         try:
             r = check_and_update(c, g, layout.ios_kit(c, g), "ios", rid)
+            trace(c, f"改写核对结束 {g}：{r}")
             if r == "updated":
                 updated.append(g)
             elif r == "unavailable":

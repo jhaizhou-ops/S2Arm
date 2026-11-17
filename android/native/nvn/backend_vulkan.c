@@ -85,6 +85,7 @@ struct nvn_gpu_tex_s {
     int array_compatible;
     int cube_compatible;   // P0-6：二维数组建图时带了 CUBE_COMPATIBLE（方形、≥6 层、单采样、设备收这个格式 / 用途 / 标志），可以建立方体（数组）视图
     int view_fmt, released, refs, bc_decoded;
+    uint8_t ext_usage;   // 建图带了 EXTENDED_USAGE（存储用途配本身不能存储的格式，见 NVN_GPU_CAP_STORAGE_SRGB_ALIAS）：每个视图按自己的格式剥用途
     VkBuffer bc_sbuf; VkDeviceMemory bc_smem;   // bc_decoded 贴图的压缩原数据影子（GPU 缓冲，按级、按层 / 3D 切片、行紧排；见 bc_shadow_layout）
     uint8_t fb_sample;   // 同一通道里既当附件又被采样过（反馈环）：这张图以后当附件一律 GENERAL（见「图像布局」）
     uint16_t swz;   // 存储自带的通道映射（tex_builder_t.swz 打包法，0 = 恒等）：视图没自己设映射时用它
@@ -1418,6 +1419,7 @@ static void fill_caps(struct nvn_gpu_vk *vk, const nvn_gpu_open_desc *d) {
     // 本段没有实现或没实测生效，一律不置位（契约：后端不做近似）。
 
     if (vk->report_calibrate) c->caps |= NVN_GPU_CAP_REPORT_TIMESTAMP;
+    if (vk->dev->properties.apiVersion >= VK_API_VERSION_1_1) c->caps |= NVN_GPU_CAP_STORAGE_SRGB_ALIAS;   // EXTENDED_USAGE / VkImageViewUsageCreateInfo 是 1.1 核心
     if (d->caps_record && d->caps_record_bytes) {
         caps_digest(d->caps_record, d->caps_record_bytes, c->caps_id);
     } else {
@@ -4027,6 +4029,18 @@ nvn_gpu_rc nvn_gpu_cpipe_get(const nvn_gpu_stage_desc *cs, int mode, nvn_gpu_pip
     return rc(NVN_GPU_OK);
 }
 
+// EXTENDED_USAGE 建的图：视图默认继承整张图的用途，sRGB 的采样 / 附件视图带着存储用途会被拒（格式不支持存储），
+//   按视图自己的格式剥掉存储用途。不是这种图返回 NULL（pNext 不挂）。
+static const void *view_usage_next(const struct nvn_gpu_tex_s *t, VkFormat vf, VkImageViewUsageCreateInfo *u) {
+    if (!t->ext_usage) return NULL;
+    VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g.phys, vf, &fp);
+    memset(u, 0, sizeof *u);
+    u->sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+    u->usage = t->usage;
+    if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) u->usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_STORAGE_BIT;
+    return u;
+}
+
 // 附件形态的视图：一级一层的 2D 视图，深度模板格式两个面都在（对照 nvn_mtl.m attach @4928：附件 = 基底 + 视图设了才取的
 // level / slice，没设就是首级首层）。采样用的视图可以是多级 / 多层 / 立方体 / 只取深度面，都不能直接挂到帧缓冲上：
 // 第一次当附件时另建一个，随视图销毁。建不出来回空。
@@ -4044,6 +4058,7 @@ static VkImageView view_attachment(struct nvn_gpu_view_s *v) {
         ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
         ci.format = v->format ? v->format : t->format;
         ci.subresourceRange = (VkImageSubresourceRange){t->aspect, v->base_level, 1, image3d ? v->att_layer : v->base_layer, 1};
+        VkImageViewUsageCreateInfo vu; ci.pNext = view_usage_next(t, ci.format, &vu);
         OC(OC_VIEW);
         { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->att) != VK_SUCCESS) v->att = VK_NULL_HANDLE; LIFE_ADD(4); }
     }
@@ -4066,6 +4081,7 @@ static VkImageView view_image_form(struct nvn_gpu_view_s *v) {
         ci.viewType = v->type;
         ci.format = v->format;
         ci.subresourceRange = (VkImageSubresourceRange){v->aspect, v->base_level, v->levels, v->base_layer, v->layers};
+        VkImageViewUsageCreateInfo vu; ci.pNext = view_usage_next(v->tex, ci.format, &vu);
         OC(OC_VIEW);
         { LIFE_T0; if (vkCreateImageView(g.d, &ci, NULL, &v->img) != VK_SUCCESS) v->img = VK_NULL_HANDLE; LIFE_ADD(4); }
     }
@@ -5661,6 +5677,13 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
 
     // P0-6：方形、≥6 层的二维数组可能被着色器当立方体读（同 iOS tex_fit 对二维数组底图建立方体视图）。Vulkan 的立方体视图要求
     // 建图时带 CUBE_COMPATIBLE（宽 = 高、≥6 层）；先问设备这个格式 / 用途收不收这个标志，不收就不加（立方体视图照旧被拒、核心记账）。
+    // 存储用途配上本身不能当存储的格式（核心按 sRGB 别名要来的，见 NVN_GPU_CAP_STORAGE_SRGB_ALIAS）：建图带 EXTENDED_USAGE，
+    //   由各视图的格式判能不能存储（view_usage_next）。EXTENDED_USAGE 要求可改格式，核心建图一律带 VIEW_FMT。
+    int ext_usage = 0;
+    if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) && (d->usage & NVN_GPU_TEX_VIEW_FMT)) {
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g.phys, fmt, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) { iflags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; ext_usage = 1; }
+    }
     int cube_compat = 0;
     if (target == NVN_TEXTURE_TARGET_2D_ARRAY && layers >= 6 && d->d.width == d->d.height && samples == 1 && !bc_decoded) {
         VkImageFormatProperties ip = {0};
@@ -5688,6 +5711,7 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     t->samples = samples;
     t->nvn_format = (uint32_t)d->d.format;
     t->view_fmt = (d->usage & NVN_GPU_TEX_VIEW_FMT) != 0;
+    t->ext_usage = (uint8_t)ext_usage;
     t->swz = d->swz;
     t->layout = VK_IMAGE_LAYOUT_GENERAL;   // 实际转换在创建后的第一次提交里（待转表）
 
@@ -5738,6 +5762,7 @@ nvn_gpu_rc nvn_gpu_tex_create(const nvn_gpu_tex_desc *d, nvn_gpu_tex *out, nvn_g
     vi.image = t->image;
     vi.viewType = vtype;
     vi.format = sample_fmt;
+    VkImageViewUsageCreateInfo vu; vi.pNext = view_usage_next(t, sample_fmt, &vu);
     vi.subresourceRange = (VkImageSubresourceRange){(t->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : t->aspect, 0, levels, 0, itype == VK_IMAGE_TYPE_3D ? 1 : layers};   // 深度模板格式：采样只取深度面
     if (vkCreateImageView(g.d, &vi, NULL, &t->view) != VK_SUCCESS) {
         vkFreeMemory(g.d, t->memory, NULL);
@@ -5889,6 +5914,7 @@ nvn_gpu_rc nvn_gpu_view_create(nvn_gpu_tex th, const view_t *v, nvn_gpu_view *ou
         }
         if (!o->swizzled) memset(&ci.components, 0, sizeof ci.components);   // 恒等：留 IDENTITY，附件可用
     }
+    VkImageViewUsageCreateInfo vu; ci.pNext = view_usage_next(t, ci.format, &vu);
     OC(OC_VIEW);
     if (vkCreateImageView(g.d, &ci, NULL, &o->view) != VK_SUCCESS) {
         free(o);

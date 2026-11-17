@@ -227,7 +227,7 @@ class PushProgramTests(JobCase):
                                     ("get", f"{P}/catalogue.json"),
                                     ("put", "catalogue.json", f"{P}/catalogue.json.pc.tmp"), ("mv", f"{P}/catalogue.json.pc.tmp", f"{P}/catalogue.json")])   # 第一次推：没有旧清单，不删
         self.assertEqual(json.loads(cl.puts[f"{P}/catalogue.json.pc.tmp"])["dir"], "v-0123456789abcdef-pc")
-        self.assertEqual(got, dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-pc"))
+        self.assertEqual(got, dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-pc", look=self.install.look_of(None)))
 
     def test_resume_skips_complete_files(self):
         V = self.V
@@ -252,14 +252,39 @@ class PushProgramTests(JobCase):
         self.install.push_program(cl, GID, self.pkg, self.pr)
         self.assertEqual([c for c in cl.calls if c[0] == "rm"], [], "清单里不是版本目录名：不删")
 
+    def test_custom_name_and_cover(self):
+        # 只有壳的 App 不带各款条目：启动器里改的名字写进清单、封面盖到版本目录的 Games/<号>/icon.jpg（在随行文件之后、清单之前）
+        cover = self.root / "my.jpg"; cover.write_bytes(b"JPGmine")
+        cl = FakeClient()
+        got = self.install.push_program(cl, GID, self.pkg, self.pr, custom=dict(custom=True, name="我的名字", cover=str(cover)))
+        puts = [c for c in cl.calls if c[0] == "put"]
+        self.assertEqual(puts[-2], ("put", "my.jpg", f"{self.V}/Games/{GID}/icon.jpg"))
+        shown = json.loads(cl.puts[f"{self.P}/catalogue.json.pc.tmp"])
+        self.assertEqual((shown["name"], shown["icon"]), ("我的名字", f"Games/{GID}/icon.jpg"))
+        self.assertEqual(got["look"], self.install.look_of(dict(name="我的名字", cover=str(cover))))
+        self.assertNotEqual(got["look"], self.install.look_of(None), "改了名字封面指纹要变")
+
+    def test_look_change_triggers_push(self):
+        import ipa
+        from unittest import mock
+        same = dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-pc", look=self.install.look_of(None))
+        with mock.patch.object(program_pack, "sign", lambda c, g, team, bundle, signer: self.pkg), \
+             mock.patch.object(ipa, "container_custom", lambda c: {GID: dict(custom=True, name="新名字", cover="")}):
+            cl = FakeClient()
+            got = self.install.push_programs(self.c, cl, [GID], dict(games={GID: dict(program=same)}), "T", "io.b", None, {GID: self.pr})
+        self.assertEqual(cl.calls[-1][0], "mv", "只改了名字：照推（程序文件续推会跳过）")
+        self.assertEqual(json.loads(cl.puts[f"{self.P}/catalogue.json.pc.tmp"])["name"], "新名字")
+        self.assertNotEqual(got[GID]["look"], same["look"])
+
     def test_mv_failure_raises(self):
         with self.assertRaises(self.install.Failure):
             self.install.push_program(FakeClient(mv_ok=False), GID, self.pkg, self.pr)
 
     def test_push_programs_skips_matching_record(self):
         from unittest import mock
-        same = dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-pc")
-        with mock.patch.object(program_pack, "sign", lambda c, g, team, bundle, signer: self.pkg):
+        import ipa
+        same = dict(sha="0123456789abcdef" + "f" * 48, team="T", host_abi=7, rewriter_id="rw", dir="v-0123456789abcdef-pc", look=self.install.look_of(None))
+        with mock.patch.object(program_pack, "sign", lambda c, g, team, bundle, signer: self.pkg), mock.patch.object(ipa, "container_custom", lambda c: {}):
             cl = FakeClient()
             got = self.install.push_programs(self.c, cl, [GID], dict(games={GID: dict(program=same)}), "T", "io.b", None, {GID: self.pr})
             self.assertEqual((cl.calls, got), ([], {GID: same}), "对得上：一个文件都不推")

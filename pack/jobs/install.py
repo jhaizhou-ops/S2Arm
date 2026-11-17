@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import datetime
 import hashlib
@@ -2114,9 +2115,26 @@ def dir_missing(out):
     return bool(re.search(r"no such file|object\s*not\s*found", out or "", re.I))
 
 
+PREEMPT_OPERATIONS = ("installUpdatePrepare", "sgradeMac")   # 前台装机让它们先停的后台自动作业：同 main.AUTO_HEAVY（单测锁住两处一致；main 是入口脚本，这里不 import 它）
+
+
+@contextlib.contextmanager
 def packer_phone_lock(c):
+    """装机类作业（装到 iPhone / 更新 / 装回上一版 / 从手机删 / 推导出包）一次一个（ipa.phone_lock）。拿锁前先取消正在跑的后台自动作业
+    （core.preempt_jobs，11-17 #1450：玩家点的优先，不在降到最低优先级的后台改写后面排队）"""
     import ipa as packer
-    return packer.phone_lock(c)
+    from core import preempt_jobs
+    preempt_jobs(c, PREEMPT_OPERATIONS, say=lambda t: trace(c, t))
+    trace(c, "拿手机锁…")
+    with packer.phone_lock(c):
+        trace(c, "拿到手机锁")
+        yield
+
+
+def trace(c, text):
+    """装机过程记进本任务日志（core.trace，进诊断包）：进锁前后、各款改写、组容器的起止（11-17 #1450：原先只看得到停在第几步）"""
+    from core import trace as _trace
+    _trace(c, text)
 
 
 def phone_bid(ph):
@@ -2352,7 +2370,17 @@ def program_root(pack_root):
 PROGRAM_WRITER = "pc"   # 写入方名（版本目录 v-<sha16>-<写入方>/、临时清单 catalogue.json.<写入方>.tmp）；手机上的导入是 import
 
 
-def push_program(cl, gid, pkg, pack_root, keep_old=False):
+def look_of(custom):
+    """启动器里改的游戏名 / 封面（ipa.container_custom 的一项）→ 指纹（名字 + 封面内容摘要；没改 = 原名原图同样有指纹，变了才重推）"""
+    custom = custom or {}
+    cover = Path(custom["cover"]) if custom.get("cover") else None
+    h = hashlib.sha256((custom.get("name") or "").encode("utf-8"))
+    if cover is not None and cover.is_file():
+        h.update(hashlib.sha256(cover.read_bytes()).digest())
+    return h.hexdigest()[:16]
+
+
+def push_program(cl, gid, pkg, pack_root, keep_old=False, custom=None):
     """签好的程序包（program_pack.sign 的目录）推进手机。写入规则（通用壳方案「写入规则」，11-17 与 iOS 加载侧定稿；来源 D-YGEC：
     电脑推送与手机导入同时写同一款，清单和本体成了两版）：同一款各写入方各写自己的版本目录，用一次原子改名换上，后换上的为准，不靠「看见谁在写就让路」：
       ① 整份写进 <program>/v-<image_sha256 前 16 位>-pc/（dylib、Games/<号>/）——同一份续推时机上已完整的文件（长度与开头一页都对）跳过，只补没写完的；
@@ -2385,8 +2413,15 @@ def push_program(cl, gid, pkg, pack_root, keep_old=False):
                     old = json.loads(prev.read_text(encoding="utf-8")).get("dir")
                 except ValueError:
                     old = None
+            # 启动器里改的名字 / 封面（只有壳的 App 不再带各款条目，游戏库从这份清单拼）：名字写进清单，封面盖到版本目录的 Games/<号>/icon.jpg
+            shown = dict(cat, dir=vdir)
+            if custom and custom.get("name"):
+                shown["name"] = custom["name"]
+            if custom and custom.get("cover") and Path(custom["cover"]).is_file():
+                cl.put(Path(custom["cover"]), f"{root}/{vdir}/Games/{gid}/icon.jpg")
+                shown["icon"] = f"Games/{gid}/icon.jpg"
             tmp = Path(w) / "catalogue.json"
-            tmp.write_text(json.dumps(dict(cat, dir=vdir), ensure_ascii=False, indent=1), encoding="utf-8")
+            tmp.write_text(json.dumps(shown, ensure_ascii=False, indent=1), encoding="utf-8")
             cl.put(tmp, f"{root}/catalogue.json.{PROGRAM_WRITER}.tmp")
     except Exception as e:   # push_pack.Fail：已是给玩家的话
         if isinstance(e, Failure):
@@ -2397,24 +2432,27 @@ def push_program(cl, gid, pkg, pack_root, keep_old=False):
         raise Failure(f"{gid} 的程序清单在手机上就不了位（{(out.splitlines() or [''])[-1]}）：再试一次；还不行请更新电脑上的 S2Arm。", code="resource_transfer_failed")
     if not keep_old and isinstance(old, str) and old.startswith("v-") and "/" not in old and old != vdir:
         cl.rm(f"{root}/{old}")   # 删不掉不算失败：没被指着，App 启动时清
-    return dict(sha=cat["image_sha256"], team=cat["team"], host_abi=cat["host_abi"], rewriter_id=cat.get("rewriter_id", ""), dir=vdir)
+    return dict(sha=cat["image_sha256"], team=cat["team"], host_abi=cat["host_abi"], rewriter_id=cat.get("rewriter_id", ""), dir=vdir, look=look_of(custom))
 
 
 def push_programs(c, cl, games, rec, team, bundle, signer, pack_roots, keep_old=False):
     """通用壳装机（program_pack.enabled）：每款按设备记录判要不要推（program_pack.need），要推的出包、按这台的团队签、推进 program/。
     rec = 设备记录；pack_roots = {游戏号: 手机上资源包根}；keep_old = 手机上 App 开着 / 判不清（旧版本目录留给 App 清，见 push_program ③）。→ {游戏号: program 记录}（没推的照旧记录原样带回）；推到一半失败照抛，已推好的由调用方记下"""
     import program_pack
+    import ipa as packer
+    looks = packer.container_custom(c)
     out = {}
     for g in games:
         old = (rec.get("games", {}).get(g) or {}).get("program")
         pkg = program_pack.sign(c, g, team, bundle, signer)
-        want = json.loads((Path(pkg) / "catalogue.json").read_text(encoding="utf-8"))
+        custom = next((v for k, v in looks.items() if k.upper() == g.upper()), None)
+        want = dict(json.loads((Path(pkg) / "catalogue.json").read_text(encoding="utf-8")), look=look_of(custom))
         why = program_pack.need(c, g, old, team, want=want)
         if not why:
             out[g] = old
             continue
         note(c, f"{g} 的程序推进手机（{'、'.join(sorted(why))}）")  # 非玩家句
-        out[g] = push_program(cl, g, pkg, pack_roots[g], keep_old=keep_old)
+        out[g] = push_program(cl, g, pkg, pack_roots[g], keep_old=keep_old, custom=custom)
     return out
 
 
@@ -2719,10 +2757,18 @@ def update_prepare(c):
     games = sorted({str(g).upper() for _, rec in layout.devices(c) if isinstance(rec, dict) for g in (rec.get("games") or {}) if str(g).upper() in have})
     c.begin("准备更新 iPhone 上的 S2Arm", 1, 1)
     updated = []
+    done = []
     for g in games:
+        # 前台装机类作业在跑（拿着手机锁）：不再拿程序锁跟它抢（11-17 #1450：后台降到最低优先级，前台排在它后面就是倒置）——停下，剩下的前台自己做
+        with c.idle("phone") as free:
+            pass
+        if not free:
+            trace(c, "前台装机作业在跑：准备更新先停，剩下的由它按正常优先级做")
+            break
         with packer.program_locks(c, [g]):
             updated += refresh_ios(c, [g])
-    return dict(prepared=games, updated=sorted(set(updated)))
+        done.append(g)
+    return dict(prepared=done, updated=sorted(set(updated)))
 
 
 def update_phone(c):
@@ -2748,11 +2794,15 @@ def _update_phone(c):
     import program_pack
     if program_pack.enabled(c):   # 通用壳（0.6.0，缺省关）：「更新 S2Arm」只装壳，不碰各款
         return install_shell(c, ph)
+    trace(c, "认出手机：" + str(ph.info.get("deviceKind") or "") + "；读手机上有哪几款…")   # 11-17 #1450 第 5 次卡在第 1 步：分步记，下次分得出卡在哪  # 非玩家句
     rec = layout.load_device(c, ph.key)
     others = container_others(c, ph, rec)
+    trace(c, f"手机上有 {len(others)} 款；核壳新旧…")
     sid = packer.current_shell_id(c)
     st = shell_outdated(c, rec, sid, others)
+    trace(c, "收回手机上留下的 NRO…")
     ph.pull_kept(others)   # 机上留下的 NRO（#8be819）先收回：有新的就照样重组容器补上（sgrade_pending 认）
+    trace(c, "核要不要补 S 级优化…")
     if st is None and (c.r.get("sgradeUpgrade") is True or sgrade_pending(c, others)):
         # 壳已是本版、但有款要补 S 级优化（「S 级优化升级」页；补丁库更新了 / 电脑上导入了要改游戏代码的金手指，11-14）：照样重组容器，
         #   游戏程序在 put_game → refresh_ios 里补上，资源包照旧不推。Windows「更新 iPhone 上的 S2Arm」同走这里

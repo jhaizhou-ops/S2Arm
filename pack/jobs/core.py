@@ -1678,6 +1678,66 @@ def reap_session(sid, grace=2.0):
     return [name for _, name in first]
 
 
+def trace(c, text):
+    """作业过程记一行进本任务日志 <任务>-decisions.log（同 install.note，进诊断包）：等锁、各款改写、组容器的起止（11-17 #1450）"""
+    line = time.strftime("%H:%M:%S ") + text
+    try:
+        c.logs.mkdir(parents=True, exist_ok=True)
+        with open(c.logs / f"{c.task}-decisions.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except (OSError, AttributeError, TypeError):
+        pass
+    print("[s2a] " + text, file=sys.stderr, flush=True)  # 非玩家句
+
+
+PREEMPT_WAIT_S = 120   # 前台作业等被取消的后台自动作业退出（放锁）的上限：它在收尾（停掉子进程、写终态）通常几秒
+
+
+def preempt_jobs(c, operations, wait=PREEMPT_WAIT_S, say=None):
+    """前台作业让路的反面（11-17 #1450）：取消正在跑的这几类后台自动作业（main.AUTO_HEAVY：installUpdatePrepare / sgradeMac），等它们真退出、放了锁
+    再往下走。后台按设计降到最低优先级（nice 19 + 后台档），前台若排在它拿着的程序锁后面，就是前台等一个故意让着前台的作业（优先级倒置）：
+    0.5.2 实例里「更新 iPhone」等「准备更新」改写阿尔宙斯，10 分钟没等到、玩家取消、下次从头来。取消走玩家在界面上点取消同一条路（cancel：
+    核过 pid 仍是那个作业才发 SIGTERM），被取消的作业照常收尾；它做到一半的活由前台按正常优先级重做（各步按记号判做没做完，见 rewrite_refresh）。
+    → 取消了的任务号。say(句子)：记进本任务日志（等多久、取消了谁）"""
+    import layout
+    say = say or (lambda text: None)
+    hits = []
+    for d in _job_dirs(c.private):
+        if not d.is_dir():
+            continue
+        for path in layout.entries(d, "*.json"):
+            if path.name.endswith(".request.json"):
+                continue
+            record, reason = _scan_job_record(path)
+            if reason or not isinstance(record, dict) or record.get("id") == c.task or record.get("operation") not in operations:
+                continue
+            if record.get("state") in TERMINAL_STATES or record.get("ended") or not pid_alive(record.get("pid")):
+                continue
+            hits.append(record)
+    done = []
+    for r in hits:
+        try:
+            got = cancel(c.private, r["id"])
+        except Failure as e:   # pid 已复用 / 不是本用户的：不碰，照常往下（最坏退回原来的排队）
+            say(f"没取消后台任务 {r.get('operation')}（{r['id']}）：{e}")  # 非玩家句
+            continue
+        if got.get("cancelled"):
+            done.append(r)
+            say(f"前台要用手机和程序：取消正在跑的后台任务 {r.get('operation')}（{r['id']}，进程 {got.get('pid')}）")  # 非玩家句
+    end = time.monotonic() + wait
+    left = list(done)
+    while left and time.monotonic() < end:
+        c.check()
+        left = [r for r in left if pid_alive(r.get("pid")) and (not r.get("pidStart") or pid_start(r["pid"]) == r["pidStart"])]
+        if left:
+            time.sleep(0.2)
+    if left:
+        say("后台任务 " + "、".join(str(r["id"]) for r in left) + f" 取消后 {wait:g} 秒还没退出：照常排队等锁")  # 非玩家句
+    elif done:
+        say("后台任务已退出、锁已放")  # 非玩家句
+    return [r["id"] for r in done]
+
+
 def cancel(private, task, sig="TERM"):
     """Signal the worker the journal recorded, after checking that the pid is still that worker (a reused pid is refused, not killed)."""
     record = journal(private, task)
