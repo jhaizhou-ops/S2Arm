@@ -611,7 +611,8 @@
       "tools/diag_default.env",
       "tools/toolchain.env",
       "graphics/widen/tables/*/来源.txt",
-      "graphics/widen/tables/*/source.txt"
+      "graphics/widen/tables/*/source.txt",
+      "pack/jobs/tests/fixtures/extract_hash_mismatch_*.log"
     ],
     "payload_globs": [
       "*.nsp",
