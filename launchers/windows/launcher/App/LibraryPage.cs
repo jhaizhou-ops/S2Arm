@@ -8,6 +8,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using S2Arm.Launcher.Protocol;
 
@@ -25,6 +26,12 @@ public sealed partial class EnvironmentWindow
     private Task? libraryOperation;
     private TextBox libraryFolderBox = new();
     private readonly Dictionary<string, Bitmap> covers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<Bitmap?>> pendingCovers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<WeakReference<Image>>> pendingCoverTargets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> failedCovers = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly SemaphoreSlim coverLoadGate = new(2, 2);
+    private Func<string, int, Bitmap?> coverBitmapReader = ReadCoverBitmap;
+    private bool coverWindowClosed;
     private readonly string privateRoot = ResolvePrivateRoot();
 
     private void Navigate(string destination)
@@ -51,6 +58,8 @@ public sealed partial class EnvironmentWindow
     /// </summary>
     private void ClearCovers()
     {
+        failedCovers.Clear();
+        pendingCoverTargets.Clear();
         if (covers.Count == 0) return;
         retiredCovers.Add((Content, covers.Values.ToList()));
         covers.Clear();
@@ -86,23 +95,14 @@ public sealed partial class EnvironmentWindow
         Background = Surface, CornerRadius = new CornerRadius(12), Padding = new Thickness(padding), Child = content
     };
 
-    /// <summary>顶部大图：只认这款文件夹里的商店横图（LibraryGame.BannerFile），按 1600 宽解码（铺满整条也不糊）；读不出就 null、退回封面卡片</summary>
-    private Bitmap? HeroBanner(LibraryGame game)
+    /// <summary>顶部商店横图异步加载；渲染线程只创建占位 Image，不查询网络盘元数据或打开文件。</summary>
+    private Image? HeroBanner(LibraryGame game)
     {
         if (connectedFolder is null || game.BannerFile() is not { } path) return null;
-        try
-        {
-            if (new FileInfo(path).Length > 16 * 1024 * 1024) return null;
-            // 缓存键另起：没有自带图标的款 cover 也指向 banner.jpg，封面卡片按 240 宽解码的那份不能拿来铺大图
-            if (!covers.TryGetValue(path + "#hero", out var image))
-            {
-                using var file = File.OpenRead(path);
-                image = Bitmap.DecodeToWidth(file, 1600);
-                covers.Add(path + "#hero", image);
-            }
-            return image;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+        var image = new Image { Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Center };
+        QueueCoverLoad(path + "#hero", path, 1600, image);
+        return image;
     }
 
     /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
@@ -121,28 +121,90 @@ public sealed partial class EnvironmentWindow
     private Control GameCoverImage(LibraryGame game, int size)
     {
         // Only a backend-provided local cover in this library is considered; never load a remote URL.
-        try
+        // File metadata, reads and image decoding run off the Avalonia render thread: a stalled NAS/virtual
+        // drive must not freeze progress pages or the rest of the launcher.
+        if (connectedFolder is not null && game.CoverFile() is { } path)
         {
-            // 只认这款自己文件夹里的封面（LibraryGame.CoverFile：按 catalog 给的文件夹认，英文名文件夹也行，#330）
-            if (connectedFolder is not null && game.CoverFile() is { } path && new FileInfo(path).Length <= 16 * 1024 * 1024)
-            {
-                if (!covers.TryGetValue(path, out var image))
-                {
-                    using var file = File.OpenRead(path);
-                    image = Bitmap.DecodeToWidth(file, 240);
-                    covers.Add(path, image);
-                }
-                return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
-            }
+            var image = new Image { Width = size, Height = size, Stretch = Stretch.UniformToFill };
+            QueueCoverLoad(path, path, 240, image);
+            return new Panel { Width = size, Height = size, Children = { CoverPlaceholder(size), image } };
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
-        return new Border { Width = size, Height = size, CornerRadius = new CornerRadius(8),
+        return CoverPlaceholder(size);
+    }
+
+    private Border CoverPlaceholder(int size) => new() { Width = size, Height = size, CornerRadius = new CornerRadius(8),
             Background = Brush.Parse("#303035"), Padding = new Thickness(size / 8),
             Child = new Image
             {
                 Source = LoadWordmark(),
                 Stretch = Stretch.Uniform
             } };
+
+    private static Bitmap? ReadCoverBitmap(string path, int width)
+    {
+        try
+        {
+            using var file = File.OpenRead(path);
+            if (file.Length > 16 * 1024 * 1024) return null;
+            return Bitmap.DecodeToWidth(file, width);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
+                                           NotSupportedException or System.Security.SecurityException)
+        {
+            return null;
+        }
+    }
+
+    private void QueueCoverLoad(string cacheKey, string path, int width, Image target)
+    {
+        if (covers.TryGetValue(cacheKey, out var cached))
+        {
+            target.Source = cached;
+            return;
+        }
+        if (coverWindowClosed || failedCovers.Contains(cacheKey)) return;
+
+        if (!pendingCoverTargets.TryGetValue(cacheKey, out var targets))
+            pendingCoverTargets[cacheKey] = targets = [];
+        if (!targets.Any(reference => reference.TryGetTarget(out var existing) && ReferenceEquals(existing, target)))
+            targets.Add(new WeakReference<Image>(target));
+        if (pendingCovers.ContainsKey(cacheKey)) return;
+
+        var task = LoadCoverAsync(path, width);
+        pendingCovers[cacheKey] = task;
+        _ = task.ContinueWith(completed => Dispatcher.UIThread.Post(() => FinishCoverLoad(cacheKey, completed)),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    private async Task<Bitmap?> LoadCoverAsync(string path, int width)
+    {
+        await coverLoadGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var reader = coverBitmapReader;
+            return await Task.Run(() => reader(path, width)).ConfigureAwait(false);
+        }
+        finally { coverLoadGate.Release(); }
+    }
+
+    private void FinishCoverLoad(string cacheKey, Task<Bitmap?> completed)
+    {
+        pendingCovers.Remove(cacheKey);
+        pendingCoverTargets.Remove(cacheKey, out var targets);
+        var bitmap = completed.Status == TaskStatus.RanToCompletion ? completed.Result : null;
+        if (coverWindowClosed)
+        {
+            bitmap?.Dispose();
+            return;
+        }
+        if (bitmap is null)
+        {
+            failedCovers.Add(cacheKey);
+            return;
+        }
+        covers[cacheKey] = bitmap;
+        foreach (var reference in targets ?? [])
+            if (reference.TryGetTarget(out var target)) target.Source = bitmap;
     }
 
     private Bitmap? wordmarkBitmap;
@@ -216,7 +278,8 @@ public sealed partial class EnvironmentWindow
         {
             // 顶部大图（11-14 维护者：「换成用 banner」）：商店横图 1920×1080 铺满整条，标题压在底部渐变上；没有横图的款退回下面的封面卡片
             var art = new Grid { Height = 280 };
-            art.Children.Add(new Image { Source = heroBanner, Stretch = Stretch.UniformToFill, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center });
+            art.Children.Add(new Border { Background = Brush.Parse("#242428") });
+            art.Children.Add(heroBanner);
             art.Children.Add(new Border { Background = new LinearGradientBrush { StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
                 GradientStops = { new GradientStop(Color.Parse("#000E0E10"), 0.35), new GradientStop(Color.Parse("#E60E0E10"), 1) } } });
             var overlay = new StackPanel { Spacing = 6, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(28, 0, 28, 22) };

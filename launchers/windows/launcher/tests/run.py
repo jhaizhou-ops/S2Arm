@@ -72,6 +72,11 @@ def main():
                        "--report-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
             if "✓ 各页顶栏故障报修键" not in out.stdout:
                 raise RuntimeError("report probe did not report success")
+        with tempfile.TemporaryDirectory(prefix="s2arm-cover-io-probe-") as temporary:
+            out = run([dotnet, "run", "--project", str(probe), "--no-build", "--configuration", "Release", "--",
+                       "--cover-io-probe", str(Path(temporary) / "out"), "--data-root=" + str(Path(temporary) / "data")], env)
+            if "Cover I/O probe" not in out.stdout:
+                raise RuntimeError("cover I/O probe did not report success")
         if args.negative_controls:
             with tempfile.TemporaryDirectory(prefix="s2arm-ui-negative-") as temporary:
                 target = Path(temporary).resolve()
