@@ -456,6 +456,46 @@ SaveP("sgrade_05_cheats_page", () => { SetW(pack, "page", "library"); InvokeW(pa
 SetW(pack, "cheatsFor", null); SetW(pack, "cheatsList", null);
 pack.Height = 900;
 
+// 出包成功后回游戏库，顶部仍是刚出好的那款（#1392）：两款游戏、选中第二款、
+//   走真实出包完成事件 → 目录重读先回来的那份暂时没有第二款（Windows 上出包收尾与目录重读撞在一起时重读回来的目录暂时没有它）
+//   → 再读一次目录把它找回来 → 回游戏库，顶部大卡应是第二款。
+//   断言前置条件本身：两款都在目录里、第二款确实被选中过、出包完成事件确实把 packState 置成了 succeeded；
+//   顶部断言直接看标题字号 28 / 32 的那行是不是第二款的名字，不只看按钮在不在。
+{
+    var packA = MockGame(true) with { Id = "0100F00100000000", Name = "示例游戏一" };
+    var packB = MockGame(true) with { Id = "0100F00200000000", Name = "示例游戏二" };
+    SetW(pack, "catalog", new LibraryCatalog([packA, packB], true, "密钥已就绪"));
+    SetW(pack, "selectedGame", packB.Id);
+    SetW(pack, "connectedFolder", "/tmp/s2arm-library");
+    SetW(pack, "libraryId", "mock-lib-id");
+    SetW(pack, "librarySummary", "library.completed");
+    // 前置条件：目录里确实有两款、选中的确实是第二款（前提错了就报红，不悄悄放过）
+    var setupCatalog = (LibraryCatalog)GetW(pack, "catalog")!;
+    if (setupCatalog.Games.Count != 2) heroActionFailures.Add("出包后回游戏库（#1392）：夹具前提不成立——目录里不是两款游戏");
+    if ((string?)GetW(pack, "selectedGame") != packB.Id) heroActionFailures.Add("出包后回游戏库（#1392）：夹具前提不成立——选中的不是第二款");
+    // 模拟“点 B 的行内出包按钮”后进出包页、开始出包：packGame = B，出完之后 = 导出自签（用户那台的设置）
+    SetW(pack, "packGame", packB);
+    SetW(pack, "packState", "running");
+    ((HashSet<string>)GetW(pack, "selfSignAfterPack")!).Add(packB.Id);
+    // 真实出包完成事件（单款出包成功）
+    var endedJson = JsonDocument.Parse($$$"""{"type":"stepEnded","step":{"gameId":"{{{packB.Id}}}","platform":"iphone","task":"export","index":0,"count":1},"outcome":{"state":"completed","message":"出包完成","ipa":"/tmp/game.ipa","ipaBytes":1200000000,"packBytes":3400000000,"notes":[]}}""").RootElement.Clone();
+    CallW(pack, "OnExportEvent", endedJson, false);
+    // 等后台那次目录刷新跑完（Linux 上后端起不来、应快速失败；最多等 10 秒）
+    for (var i = 0; i < 50 && (string?)GetW(pack, "librarySummary") == "library.loading"; i++) { Thread.Sleep(200); Settle(); }
+    if ((string?)GetW(pack, "packState") != "succeeded") heroActionFailures.Add("出包后回游戏库（#1392）：夹具前提不成立——出包完成事件后 packState 不是 succeeded");
+    // 模拟出包完成那次目录重读：先回来的目录暂时没有第二款；再读一次，第二款回来
+    CallW(pack, "ApplyCatalog", new LibraryCatalog([packA], true, "密钥已就绪"));
+    CallW(pack, "ApplyCatalog", new LibraryCatalog([packA, packB], true, "密钥已就绪"));
+    SaveP("win_06e_library_pack_keeps_selection", () => Navigate(pack, "library"));
+    // 断言：顶部大卡是第二款（标题字号 28 / 32 的那行是第二款的名字，不是第一款）
+    var heroTitles = pack.GetVisualDescendants().OfType<TextBlock>().Where(t => (t.FontSize is 28 or 32) && (t.Text == packA.Name || t.Text == packB.Name)).Select(t => t.Text).ToList();
+    if (heroTitles.Count != 1 || heroTitles[0] != packB.Name)
+        heroActionFailures.Add($"出包后回游戏库（#1392）：顶部大卡应是第二款「{packB.Name}」，实际标题是 [{string.Join(";", heroTitles)}]，selectedGame={(string?)GetW(pack, "selectedGame") ?? "null"}");
+    if ((string?)GetW(pack, "selectedGame") != packB.Id)
+        heroActionFailures.Add($"出包后回游戏库（#1392）：selectedGame 应是第二款 {packB.Id}，实际是 {(string?)GetW(pack, "selectedGame") ?? "null"}");
+    InjectMockGame(pack, ready: true);   // 恢复后续场景用的无横图夹具
+}
+
 pack.Close();
 Dispatcher.UIThread.RunJobs();
 if (heroActionFailures.Count > 0)

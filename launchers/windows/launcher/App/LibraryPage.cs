@@ -787,6 +787,25 @@ public sealed partial class EnvironmentWindow
         return libraryOperation = RunLibraryAsync("catalog", null);
     }
 
+    /// <summary>把刚读到的游戏目录落到界面状态：换目录、清封面缓存；选中的那款若不在新目录里（删了 / 藏了），
+    /// 选中清空、顶部回退到第一款。只落状态、不跑作业——夹具直接调它模拟“目录重读回来了”。
+    /// 例外：正在出包或刚出好包的那款不清空——出包成功后重读目录时它若暂时不在列表里，选中丢了就回不来了（#1392）。
+    /// 守卫触发时记一行诊断日志（library.select.clear），供真机读数用，留在 PR 里。</summary>
+    private void ApplyCatalog(LibraryCatalog fresh)
+    {
+        catalog = fresh; ClearCovers();
+        if (selectedGame is not null && !catalog.Games.Any(g => g.Id == selectedGame && !g.Hidden))
+        {
+            // #1392 真机读数：守卫要清空选中之前，把当时的情况记一行（logs/launcher-crash.log）。
+            //   记 selectedGame、这一款是缺席还是 Hidden、目录总款数、当时的 packGame / packState、最后是清空了还是被豁免保住了。
+            var present = catalog.Games.FirstOrDefault(g => g.Id == selectedGame);
+            var exempted = packGame is { } packed && packState is "running" or "succeeded" && selectedGame == packed.Id;
+            LauncherCrash.Log(null, $"library.select.clear selected={selectedGame} state={(present is null ? "absent" : "hidden")} catalog={catalog.Games.Count} pack={packGame?.Id ?? "null"}/{packState ?? "null"} result={(exempted ? "kept-by-pack-exemption" : "cleared")}");
+            if (!exempted) selectedGame = null;
+        }
+        librarySummary = "library.completed";
+    }
+
     private async Task RunLibraryAsync(string operation, string[]? selectedPaths)
     {
         if (libraryBusy) { if (operation == "catalog") catalogAgain = true; return; }
@@ -819,9 +838,7 @@ public sealed partial class EnvironmentWindow
             var listing = await LibraryJobClient.RunAsync(paths, privateRoot, connectedFolder!, libraryId, "catalog", null, front.Token, jobId: front.Next(), startup: TakeStartupCatalog());
             DisplayJob(listing);
             if (!listing.Report.Succeeded) { librarySummary = "library.failed"; return; }
-            catalog = LibraryCatalog.Parse(listing.Report.Result); ClearCovers();
-            if (!catalog.Games.Any(g => g.Id == selectedGame && !g.Hidden)) selectedGame = null;
-            librarySummary = "library.completed";
+            ApplyCatalog(LibraryCatalog.Parse(listing.Report.Result));
             _ = PreparePhoneUpdateAsync();   // 新版启动器头一次读到要更新的手机：后台准备 iPhone App 更新（PhoneAutoUpdate.cs）
         }
         catch (LibraryProtocolException error)
