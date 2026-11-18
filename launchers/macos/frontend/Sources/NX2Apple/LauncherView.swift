@@ -115,19 +115,7 @@ struct LauncherView: View {
             if showingHome {
                 HomeBackdrop(game: homeSelected, covers: covers).ignoresSafeArea()
             } else if let backdropGame {
-                ZStack {
-                    HomeBackdrop(game: backdropGame, covers: covers)
-                        .blur(radius: 36, opaque: true)
-                    LinearGradient(
-                        colors: [
-                            LauncherPalette.background.opacity(0.60),
-                            LauncherPalette.background.opacity(0.76)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                }
-                .ignoresSafeArea()
+                HomeBackdrop(game: backdropGame, covers: covers, frosted: true).ignoresSafeArea()
             } else {
                 LauncherWindowMaterial().ignoresSafeArea()
             }

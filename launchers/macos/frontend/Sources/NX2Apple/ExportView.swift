@@ -219,7 +219,7 @@ struct ExportView: View {
             .padding(16).frame(maxWidth: .infinity, minHeight: 126, maxHeight: .infinity, alignment: .topLeading)
             .background {
                 RoundedRectangle(cornerRadius: 14)
-                    .fill(LauncherPalette.surface.opacity(on ? 0.94 : (open ? (hovered ? 0.88 : 0.72) : 0.4)))
+                    .fill(LauncherPalette.surface.opacity(on ? 0.90 : (open ? (hovered ? 0.68 : 0.54) : 0.32)))
                     .overlay {
                         if on {
                             RoundedRectangle(cornerRadius: 14)

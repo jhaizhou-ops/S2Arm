@@ -8,27 +8,41 @@ import S2ArmAppleAdapter
 struct HomeBackdrop: View {
     let game: GameSummary?
     @ObservedObject var covers: CoverCache
+    var frosted: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 LauncherPalette.background
-                artwork(size: geometry.size)
-                    .id(game?.id)
-                    .transition(.opacity)
-                LinearGradient(stops: [
-                    .init(color: .black.opacity(0.65), location: 0),
-                    .init(color: .black.opacity(0.28), location: 0.38),
-                    .init(color: .clear, location: 0.75)
-                ], startPoint: .leading, endPoint: .trailing)
-                LinearGradient(stops: [
-                    .init(color: .black.opacity(0.62), location: 0),
-                    .init(color: .black.opacity(0.32), location: 0.18),
-                    .init(color: .black.opacity(0.08), location: 0.42),
-                    .init(color: .black.opacity(0.30), location: 0.62),
-                    .init(color: .black.opacity(0.88), location: 1)
-                ], startPoint: .top, endPoint: .bottom)
+                if frosted {
+                    artwork(size: geometry.size)
+                        .id(game?.id)
+                        .transition(.opacity)
+                        .blur(radius: 42, opaque: true)
+                    Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.46)
+                    LinearGradient(stops: [
+                        .init(color: Color(red: 0.10, green: 0.10, blue: 0.11).opacity(0.24), location: 0),
+                        .init(color: Color(red: 0.08, green: 0.08, blue: 0.09).opacity(0.08), location: 0.45),
+                        .init(color: Color(red: 0.08, green: 0.08, blue: 0.09).opacity(0.32), location: 1)
+                    ], startPoint: .top, endPoint: .bottom)
+                } else {
+                    artwork(size: geometry.size)
+                        .id(game?.id)
+                        .transition(.opacity)
+                    LinearGradient(stops: [
+                        .init(color: .black.opacity(0.65), location: 0),
+                        .init(color: .black.opacity(0.28), location: 0.38),
+                        .init(color: .clear, location: 0.75)
+                    ], startPoint: .leading, endPoint: .trailing)
+                    LinearGradient(stops: [
+                        .init(color: .black.opacity(0.62), location: 0),
+                        .init(color: .black.opacity(0.32), location: 0.18),
+                        .init(color: .black.opacity(0.08), location: 0.42),
+                        .init(color: .black.opacity(0.30), location: 0.62),
+                        .init(color: .black.opacity(0.88), location: 1)
+                    ], startPoint: .top, endPoint: .bottom)
+                }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
