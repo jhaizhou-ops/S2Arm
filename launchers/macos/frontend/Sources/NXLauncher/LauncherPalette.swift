@@ -8,6 +8,7 @@ package enum LauncherPalette {
     package static let building = Color(red: 1, green: 0.78, blue: 0.24)
     package static let unbuilt = Color(red: 0.57, green: 0.58, blue: 0.61)
     package static let danger = Color(red: 1, green: 0.42, blue: 0.40)
+    package static let favorite = Color(red: 1, green: 0.43, blue: 0.51)
 }
 
 /// 卡片行打头的图标（出包页「存放位置」、设备行、安装方式、证书……）：固定宽度的一列，图标在列里居中。

@@ -112,8 +112,25 @@ struct LauncherView: View {
         .launcherDropdownHost()
         .ignoresSafeArea(.container, edges: .top)
         .background {
-            if showingHome { HomeBackdrop(game: homeSelected, covers: covers).ignoresSafeArea() }
-            else { LauncherWindowMaterial().ignoresSafeArea() }
+            if showingHome {
+                HomeBackdrop(game: homeSelected, covers: covers).ignoresSafeArea()
+            } else if let backdropGame {
+                ZStack {
+                    HomeBackdrop(game: backdropGame, covers: covers)
+                        .blur(radius: 36, opaque: true)
+                    LinearGradient(
+                        colors: [
+                            LauncherPalette.background.opacity(0.60),
+                            LauncherPalette.background.opacity(0.76)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+                .ignoresSafeArea()
+            } else {
+                LauncherWindowMaterial().ignoresSafeArea()
+            }
         }
         .background(LauncherWindowChrome())
         .background(LauncherPadHost(navigation: navigation, update: configurePadNavigation))
@@ -283,6 +300,17 @@ struct LauncherView: View {
         text.append(shen)
         return text
     }()
+
+    /// 非首页（出包页、批量出包、游玩/作业进度与结果页）复用当前游戏的高斯模糊背景，保持与首页一致的磨砂质感。
+    private var backdropGame: GameSummary? {
+        let id: String?
+        if model.batchShown { id = model.batchSeed }
+        else if let result = model.viewingResult, result.export != nil { id = result.gameID }
+        else if let session = model.session, !model.sessionHidden, !model.isInline(session) { id = session.gameID }
+        else if let idExport = model.exportFor { id = idExport }
+        else { id = nil }
+        return id.flatMap { gid in model.games.first { $0.id == gid } } ?? homeSelected
+    }
 
     private var topBar: some View { topBarRow.onChange(of: model.showInstallFor) { id in if let id { installFor = id; model.showInstallFor = nil } } }   // 控制口 /show install（单独一层：挂在 body 长链上编译器类型检查超时）
 

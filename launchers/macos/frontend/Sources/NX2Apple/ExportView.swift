@@ -217,8 +217,18 @@ struct ExportView: View {
                 Spacer(minLength: 0)
             }
             .padding(16).frame(maxWidth: .infinity, minHeight: 126, maxHeight: .infinity, alignment: .topLeading)
-            .background(on ? LauncherPalette.cream.opacity(hovered ? 0.08 : 0.05) : LauncherPalette.surface.opacity(open ? (hovered ? 0.9 : 0.75) : 0.4), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(on ? LauncherPalette.cream.opacity(hovered ? 0.85 : 0.7) : (hovered ? Color.white.opacity(0.18) : LauncherTheme.Colors.border), lineWidth: on ? 1.5 : 1))
+            .background {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(LauncherPalette.surface.opacity(on ? 0.94 : (open ? (hovered ? 0.88 : 0.72) : 0.4)))
+                    .overlay {
+                        if on {
+                            RoundedRectangle(cornerRadius: 14)
+                                .fill(LauncherPalette.cream.opacity(hovered ? 0.13 : 0.08))
+                        }
+                    }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(on ? LauncherPalette.cream.opacity(hovered ? 0.95 : 0.82) : (hovered ? Color.white.opacity(0.20) : LauncherTheme.Colors.border), lineWidth: on ? 1.5 : 1))
+            .shadow(color: on ? LauncherPalette.cream.opacity(0.10) : .clear, radius: 10, y: 2)
             .contentShape(RoundedRectangle(cornerRadius: 14))
             .opacity(open ? 1 : 0.5)
         }

@@ -135,12 +135,17 @@ extension LauncherView {
                     .controllerButtonStyle(ConsoleIconButtonStyle(size: 52)).controllerID("hero.more")
                     .help(loc.t("home.details")).accessibilityLabel(loc.t("home.details"))
                     .popover(isPresented: Binding(get: { moreFor == game.id }, set: { if !$0 { moreFor = nil } }), arrowEdge: .bottom) { moreMenu(game) }
+                let favorited = home.favorites.contains(game.id)
                 Button { home.toggleFavorite(game.id) } label: {
-                    Image(systemName: home.favorites.contains(game.id) ? "heart.fill" : "heart")
-                }.controllerButtonStyle(ConsoleIconButtonStyle(size: 52)).controllerID("hero.favorite")
-                    .help(loc.t(home.favorites.contains(game.id) ? "home.unfavorite" : "home.favorite"))
-                    .accessibilityLabel(loc.t(home.favorites.contains(game.id) ? "home.unfavorite" : "home.favorite"))
-                    .accessibilityAddTraits(home.favorites.contains(game.id) ? .isSelected : [])
+                    Image(systemName: favorited ? "heart.fill" : "heart")
+                        .scaleEffect(favorited ? 1.04 : 1)
+                }
+                .controllerButtonStyle(ConsoleIconButtonStyle(size: 52, accent: favorited ? LauncherPalette.favorite : nil))
+                .controllerID("hero.favorite")
+                .animation(.spring(response: 0.26, dampingFraction: 0.72), value: favorited)
+                .help(loc.t(favorited ? "home.unfavorite" : "home.favorite"))
+                .accessibilityLabel(loc.t(favorited ? "home.unfavorite" : "home.favorite"))
+                .accessibilityAddTraits(favorited ? .isSelected : [])
             }.padding(.top, compact ? 4 : 10)
         }
         .frame(maxWidth: min(920, size.width * 0.78), alignment: .leading)
@@ -273,7 +278,13 @@ extension LauncherView {
                                     .accessibilityIdentifier("card.updateHint." + game.id)
                             }
                             if home.favorites.contains(game.id) {
-                                Image(systemName: "heart.fill").font(.system(size: 10)).padding(6).background(.black.opacity(0.6), in: Circle())
+                                Image(systemName: "heart.fill")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(LauncherPalette.favorite)
+                                    .padding(6.5)
+                                    .background(.black.opacity(0.58), in: Circle())
+                                    .overlay(Circle().strokeBorder(LauncherPalette.favorite.opacity(0.38), lineWidth: 0.75))
+                                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
                             }
                         }.padding(8)
                     }
