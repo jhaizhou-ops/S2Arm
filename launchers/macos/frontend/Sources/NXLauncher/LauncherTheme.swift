@@ -94,13 +94,20 @@ extension View {
 private struct LauncherSheetPresentation: ViewModifier {
     let size: LauncherSheetSize
     let height: CGFloat?
+    @State private var parentHeight: CGFloat?
+
     func body(content: Content) -> some View {
         let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
         let dimensions = size.fitted(to: screen, height: height)
+        // AppKit beginSheet 在弹窗高度 <= 父窗口高度 - 136 pt 时才会以父窗口中心垂直居中（留出顶栏 + 对称底边距）；
+        // 若只按屏幕高度裁剪，在常见 630~750 pt 外窗口上会把弹窗顶到最底边。
+        let maxWindowHeight = parentHeight.map { max(360, $0 - 136) } ?? (screen.height - 100)
+        let fittedHeight = dimensions.height.map { min($0, maxWindowHeight) }
         let page = content
-            .frame(width: dimensions.width, height: dimensions.height)
-            .frame(maxHeight: screen.height - 100)
+            .frame(width: dimensions.width, height: fittedHeight)
+            .frame(maxHeight: min(screen.height - 100, maxWindowHeight))
             .background(.regularMaterial)
+            .background(SheetParentTracker(parentHeight: $parentHeight))
             .font(LauncherTheme.TypeStyle.detail)
             .foregroundStyle(LauncherTheme.Colors.text)
             .preferredColorScheme(.dark)
@@ -115,10 +122,117 @@ private struct LauncherSheetPresentation: ViewModifier {
     }
 }
 
+/// 追踪弹窗所在的父窗口高度，并在父窗口大小变化或刚挂上时让弹窗保持垂直居中、不贴底边。
+private struct SheetParentTracker: NSViewRepresentable {
+    @Binding var parentHeight: CGFloat?
+
+    func makeCoordinator() -> Coordinator { Coordinator(parentHeight: $parentHeight) }
+    func makeNSView(context: Context) -> Host {
+        let host = Host()
+        host.onWindowChange = { [weak coordinator = context.coordinator] window in
+            coordinator?.attach(to: window)
+        }
+        return host
+    }
+    func updateNSView(_ view: Host, context: Context) {
+        context.coordinator.parentHeight = $parentHeight
+        context.coordinator.attach(to: view.window)
+    }
+
+    final class Host: NSView {
+        var onWindowChange: ((NSWindow?) -> Void)?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func isAccessibilityElement() -> Bool { false }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange?(window)
+        }
+    }
+
+    @MainActor final class Coordinator {
+        var parentHeight: Binding<CGFloat?>
+        private weak var trackedParent: NSWindow?
+        private weak var trackedSheet: NSWindow?
+        private var observer: NSObjectProtocol?
+
+        init(parentHeight: Binding<CGFloat?>) {
+            self.parentHeight = parentHeight
+        }
+
+        func attach(to sheet: NSWindow?) {
+            guard let sheet else { return }
+            guard let parent = sheet.sheetParent, parent !== sheet else {
+                // SwiftUI 的 sheet host 可能在 beginSheet 绑定 sheetParent 前先进入窗口层级，下一主线程周期再检查一次。
+                DispatchQueue.main.async { [weak self, weak sheet] in
+                    guard let self, let sheet, let parent = sheet.sheetParent, parent !== sheet else { return }
+                    self.bind(sheet: sheet, parent: parent)
+                }
+                return
+            }
+            bind(sheet: sheet, parent: parent)
+        }
+
+        private func bind(sheet: NSWindow, parent: NSWindow) {
+            trackedSheet = sheet
+            if trackedParent !== parent {
+                if let observer { NotificationCenter.default.removeObserver(observer) }
+                trackedParent = parent
+                observer = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: parent, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.sync() }
+                }
+            }
+            sync()
+        }
+
+        private func sync() {
+            guard let parent = trackedParent else { return }
+            let h = parent.frame.height
+            if abs((parentHeight.wrappedValue ?? 0) - h) > 0.5 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.parentHeight.wrappedValue = h
+                    self?.centerSheet()
+                }
+            } else {
+                centerSheet()
+            }
+        }
+
+        private func centerSheet() {
+            guard let parent = trackedParent, let sheet = trackedSheet else { return }
+            guard sheet.frame.height <= parent.frame.height - 20 else { return }
+            let targetOrigin = NSPoint(
+                x: round(parent.frame.midX - sheet.frame.width / 2),
+                y: round(parent.frame.midY - sheet.frame.height / 2)
+            )
+            if abs(sheet.frame.origin.y - targetOrigin.y) > 1 || abs(sheet.frame.origin.x - targetOrigin.x) > 1 {
+                sheet.setFrameOrigin(targetOrigin)
+            }
+        }
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
+    }
+}
+
 /// A standard, accessible material respects Reduce Transparency and Increase Contrast.
+/// 叠一层深黑曜石底色渐变，避免在浅色桌面壁纸/窗口上方 `.regularMaterial` 透灰泛白，影响卡片与次要文字对比度。
 package struct LauncherWindowMaterial: View {
     package init() {}
-    package var body: some View { Rectangle().fill(.regularMaterial).ignoresSafeArea() }
+    package var body: some View {
+        ZStack {
+            Rectangle().fill(.regularMaterial)
+            LinearGradient(
+                colors: [
+                    LauncherPalette.background.opacity(0.76),
+                    LauncherPalette.background.opacity(0.88)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .ignoresSafeArea()
+    }
 }
 
 /// Window and page subtitles follow their title on one shared text baseline.

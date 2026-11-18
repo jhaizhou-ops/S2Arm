@@ -231,6 +231,8 @@ import S2ArmAppleAdapter
                     }
                 }
             }
+            navigation.focus("settings.tab.iphone"); navigation.handle(.confirm)
+            try await Task.sleep(for: .milliseconds(80))
             navigation.focus("export.sign.mode")
             for step in 0..<14 {
                 navigation.handle(.scrollDown)
@@ -1804,6 +1806,68 @@ import S2ArmAppleAdapter
                 window.close()
             }
         }
+    }
+
+    func testSettingsTabsExposeCategorizedControlsWithinBounds() async throws {
+        let fixture = try SettingsFixture()
+        defer { fixture.remove() }
+        for language in [Lang.zh, .en] {
+            let (host, window) = try await render(AnyView(EnvironmentView(model: fixture.model)), fixture: fixture, language: language)
+            fixture.navigation.source.controllers = { [] }
+            fixture.navigation.attach(window)
+            defer { fixture.navigation.detach(); window.close() }
+            let expected: [(tab: String, controls: [String])] = [
+                ("settings.tab.general", ["settings.language", "settings.library.open", "settings.keys.import"]),
+                ("settings.tab.iphone", ["export.sign.mode", "env.cloud.choose"]),
+                ("settings.tab.environment", ["settings.tab.environment"]),
+                ("settings.tab.updates", ["settings.updates.check", "env.aiControl"]),
+            ]
+            for entry in expected {
+                fixture.navigation.focus(entry.tab); fixture.navigation.handle(.confirm)
+                try await Task.sleep(for: .milliseconds(80))
+                let bounds = window.convertToScreen(host.bounds)
+                for id in entry.controls {
+                    fixture.navigation.focus(id)
+                    try await Task.sleep(for: .milliseconds(50))
+                    let targets = fixture.navigation.controlTargets(in: window)
+                    XCTAssertTrue(targets.contains { $0.id == id }, "\(language.code)/\(entry.tab): 缺少控件 \(id)")
+                }
+                for target in fixture.navigation.controlTargets(in: window) {
+                    XCTAssertTrue(bounds.insetBy(dx: -1, dy: -1).contains(target.frame),
+                                  "\(language.code)/\(entry.tab): 控件越界 \(target.id) \(target.frame) vs \(bounds)")
+                }
+            }
+        }
+    }
+
+    func testSettingsSheetCentersVerticallyInsideParentWindow() async throws {
+        let fixture = try SettingsFixture()
+        defer { fixture.remove() }
+        let host = NSHostingView(rootView: Text("Parent").frame(width: 1120, height: 630)
+            .sheet(isPresented: .constant(true)) {
+                EnvironmentView(model: fixture.model)
+                    .environmentObject(Localizer(.zh))
+            })
+        let parent = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 1120, height: 630),
+                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        parent.isReleasedWhenClosed = false
+        parent.toolbar = NSToolbar(identifier: "settings.center.test")
+        parent.toolbarStyle = .unified
+        parent.contentView = host
+        parent.orderBack(nil)
+        defer { parent.close() }
+        for _ in 0..<40 where parent.attachedSheet == nil { try await Task.sleep(for: .milliseconds(25)) }
+        let sheet = try XCTUnwrap(parent.attachedSheet, "设置页必须作为 sheet 挂到父窗口")
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(30))
+            if abs((parent.frame.maxY - sheet.frame.maxY) - (sheet.frame.minY - parent.frame.minY)) <= 2 { break }
+        }
+        let topGap = parent.frame.maxY - sheet.frame.maxY
+        let bottomGap = sheet.frame.minY - parent.frame.minY
+        print("settings-sheet parent=\(parent.frame) sheet=\(sheet.frame) topGap=\(topGap) bottomGap=\(bottomGap)")
+        XCTAssertGreaterThanOrEqual(bottomGap, 60, "设置弹窗底部不能贴着外窗口底边")
+        XCTAssertEqual(topGap, bottomGap, accuracy: 2, "设置弹窗应在外窗口中垂直居中")
     }
 
     private func exportArtworkBounds(_ host: NSView) throws -> CGRect {
