@@ -109,6 +109,16 @@ import XCTest
         XCTAssertEqual(r?["mode"] as? String, "export")
         XCTAssertNil(runner.requests.first { $0["operation"] as? String == "install" }, "旧格式不直接发导出（会失败）")
     }
+
+    func testCancelledSelfSignDoesNotPublishFailurePill() async throws {
+        runner.overrideInstallState = "cancelled"
+        let game = try XCTUnwrap(model.games.first { $0.id == "0100A" })
+        model.exportSelfSign(game)
+        _ = await waitFor("install")
+        for _ in 0..<300 where model.lastPhoneSession == nil { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.lastPhoneSession?.phase, .finished(.cancelled))
+        XCTAssertNil(model.phoneResult, "用户手动取消导出自签包，顶部不能出未完成失败胶囊")
+    }
 }
 
 /// 替身作业：记下每个请求；catalog 回两款（一款出过 iPhone 包、一款没出过），其余一律成功、结果为空
@@ -116,25 +126,28 @@ private final class RecordingRunner: JobProcessRunner {
     final class Handle: JobProcessHandle { func terminate() {} }
     private let lock = NSLock()
     private var seen: [[String: Any]] = []
+    var overrideInstallState: String?
     var requests: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return seen }
     func start(executable: URL, arguments: [String], environment: [String: String],
                onLine: @escaping (Data) -> Void, onStderr: @escaping (Data) -> Void,
                onExit: @escaping (Int32) -> Void) throws -> JobProcessHandle {
-        var result: [String: Any] = [:]; var taskId = ""; var failed = false
+        var result: [String: Any] = [:]; var taskId = ""; var failed = false; var op = ""
         if let last = arguments.last, last.hasSuffix(".json"), let data = try? Data(contentsOf: URL(fileURLWithPath: last)),
            let request = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             taskId = request["taskId"] as? String ?? ""
+            op = request["operation"] as? String ?? ""
             lock.lock(); seen.append(request); lock.unlock()
             let items = ((request["plan"] as? [String: Any])?["items"] as? [[String: Any]]) ?? []
-            failed = request["operation"] as? String == "export" && items.first?["gameId"] as? String == "0100D"   // 丁：出包失败
-            if request["operation"] as? String == "catalog" {
+            failed = op == "export" && items.first?["gameId"] as? String == "0100D"   // 丁：出包失败
+            if op == "catalog" {
                 result = ["games": [["id": "0100A", "name": "甲", "ready": true, "missing": [], "display": "1.0.0", "iphoneReady": true, "iphoneExportable": true],
                                     ["id": "0100C", "name": "丙", "ready": true, "missing": [], "display": "1.0.0", "iphoneReady": true, "iphoneExportable": false],
                                     ["id": "0100D", "name": "丁", "ready": true, "missing": [], "display": "1.0.0"],
                                     ["id": "0100B", "name": "乙", "ready": true, "missing": [], "display": "1.0.0"]], "keys": [:]]
             }
         }
-        let event: [String: Any] = ["schema": 1, "taskId": taskId, "type": "result", "state": failed ? "failed" : "succeeded", "result": result, "message": failed ? "出包失败（替身）" : ""]
+        let state = (op == "install" ? overrideInstallState : nil) ?? (failed ? "failed" : "succeeded")
+        let event: [String: Any] = ["schema": 1, "taskId": taskId, "type": "result", "state": state, "result": result, "message": failed ? "出包失败（替身）" : ""]
         DispatchQueue.main.async { onLine(try! JSONSerialization.data(withJSONObject: event)); onExit(0) }
         return Handle()
     }

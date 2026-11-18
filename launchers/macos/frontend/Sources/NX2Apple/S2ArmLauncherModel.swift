@@ -1710,7 +1710,8 @@ public final class S2ArmLauncherModel: ObservableObject {
             libraryNotice = LibraryNotice(kind: state == .completed ? .done : .failed, key: n.key, name: n.name,
                                           detail: state == .completed ? "" : (session.message.isEmpty ? JobOutcome.interruptedMessage : session.message))
         }
-        if Self.phoneKinds.contains(session.kind), let id = session.gameID { phoneResult = (id, session.name, state == .completed) }
+        // 用户手动取消不提示失败胶囊（只有真的成了 / 失败才在顶栏显示）
+        if Self.phoneKinds.contains(session.kind), let id = session.gameID, state != .cancelled { phoneResult = (id, session.name, state == .completed) }
         // 一局结束：开了 iCloud 存档就上传这局的进度（失败写在出包页错误行上，本地存档不动）
         if session.kind == .play, let id = session.gameID, cloudFolder != nil {
             cloudSyncing = true
