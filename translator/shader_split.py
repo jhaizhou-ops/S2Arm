@@ -1455,6 +1455,8 @@ def scan_file(args):
     if head[:8] in (IDRK, PDRK):   # PDRK: Pokopia's .fdata, 'PDRK0000' + u64 0x10 before its IDRK entries
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'MDB1':   # Media.Vision 的 MVGL 归档（时空异客 / Cyber Sleuth）：条目由 S2Arm 抽取（nxsh_extract 的 mdb1_visit）逐个解出、
+        return rel, {}, set(), {}   # 相邻对在那边配；这里不按裸字节扫——ounce64（Switch 2 版着色器变体）裸扫会配出控制段与代码区对不上的假键（直连库全数「NVN2 控制段长度不合」）
     if len(args) > 2 and head[:8] == ONEPACK:   # a range of Trinity packs (trpfs_jobs)
         trinity_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees

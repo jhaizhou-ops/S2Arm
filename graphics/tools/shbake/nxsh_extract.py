@@ -12,6 +12,7 @@ import nxfmt
 # 仓库里唯一的 RomFS 遍历（graphics/nvn/tools/romfs_list.py：walk 同 os.walk，heads 给清单里的文件头，同一份 RomFS 只读一次）
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'nvn', 'tools'))); import romfs_list
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))); from pool_workers import process_pool_size   # 进程池路数（Windows 至多 61，#1332）
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'translator'))); import mdb1   # Media.Vision 的 MVGL（MDB1）归档逐条目解出（时空异客等）
 _NXFMT_SRC = 'graphics/tools/nxfmt.py'  # 字面路径给 pack/stage_inputs.py 收进抽取 / 直连库的源码键
 if os.path.basename(nxfmt.__file__) != os.path.basename(_NXFMT_SRC):
     raise ImportError(_NXFMT_SRC)
@@ -134,6 +135,28 @@ def scan_bahs(path, data, rows, blobs, stat):
         rows.append((key, st, f'{path}@bahs{x:#x}', 0)); n += 1; owned.add(c)
         if key not in blobs: blobs[key] = (code, ctl)
     stat['BAHS 归档'] += 1; stat['BAHS 着色器'] += n
+    return owned
+def scan_nxfs(path, data, rows, blobs, stat):
+    """NXFS 容器（时空异客 app_0 / 补丁归档里的着色器条目变体）：0x40 头里记录偏移，控制段与机器码
+    之间隔着 0x80 的间隙（反射区），相邻扫描够不着。头布局（对着时空异客 entry112960 实样定的）：
+      +0x00 'NXFS'  +0x04 总长  +0x0c 控制段偏移  +0x14 机器码偏移  +0x18 机器码长
+    控制段长读控制段自己的 +0x20；阶段从机器码 SPH（+0x30 的 10..13 位）。头或记录对不上就不认
+    （返回空集，退回相邻扫描），不猜。返回认领的控制段偏移。"""
+    owned = set()
+    if len(data) < 0x40 or data[:4] != b'NXFS': return owned
+    co = struct.unpack_from('<I', data, 0x0c)[0]
+    do, dn = struct.unpack_from('<I', data, 0x14)[0], struct.unpack_from('<I', data, 0x18)[0]
+    if not (0x40 <= co < do < len(data)) or co + 0x708 > do or do + dn > len(data): return owned
+    if data[co:co + 8] != bytes.fromhex('3412769801000000'): return owned
+    cn = struct.unpack_from('<I', data, co + 0x20)[0]
+    if not 0x708 <= cn <= do - co or data[do:do + 16] != bytes.fromhex('78563412') + bytes(12): return owned
+    ctl, code = data[co:co + cn], data[do:do + dn]
+    st = {1: 'vs', 2: 'hs', 3: 'ds', 4: 'gs', 5: 'ps'}.get(struct.unpack_from('<I', code, 0x30)[0] >> 10 & 0xf)
+    key = key_of(ctl, code)
+    if not st or not key: return owned
+    rows.append((key, st, f'{path}@nxfs{co:#x}', 0)); owned.add(co)
+    if key not in blobs: blobs[key] = (code, ctl)
+    stat['NXFS 容器'] += 1; stat['NXFS 着色器'] += 1
     return owned
 def scan_offhdr(path, data, rows, blobs, stat):
     """NVN SDK 自带的着色器文件（nn::font / PrimitiveRenderer 的 *_nvn_shader.bin，动森 System/Font 与 System/PrimitiveRenderer 下）：
@@ -541,6 +564,7 @@ def _scan_blob(path, data, rows, blobs, stat):
     owned = set()   # 容器按结构认领的控制段（文件内偏移）：先解容器，相邻扫描最后跑、跳过它们
     if data[:4] == b'BAHS' and len(data) > 0x20: owned |= scan_bahs(path, data, rows, blobs, stat)
     if data[:4] == b'SDF\0': owned |= scan_sdf(path, data, rows, blobs, stat)
+    owned |= scan_nxfs(path, data, rows, blobs, stat)
     owned |= scan_offhdr(path, data, rows, blobs, stat)
     # SPCH 不先判 `b'HCPS' in data`：大文件按 mmap 传进来（work 的 big_split），mmap 不支持子串 in（逐个取单字节和整串比），永远判不中，
     #   4.7 GB 的 0100F43008C44000 arc/data.trpfs 上还白走 30 秒；scan_spch 自己就按魔数 finditer，没有就是一遍扫描。RAW 的判断同理改 find
@@ -902,6 +926,10 @@ def visit(path, data, rows, blobs, stat, depth=0, zl=True, in_pkz=False):
         except Exception: stat['SARC 失败'] += 1; return
         for f in arc.get_files(): visit(path + '//' + f.name, bytes(f.data), rows, blobs, stat, depth + 1, in_pkz=in_pkz)
         return
+    if magic == b'MDB1' and depth < 6:   # 嵌套 / 小的 MVGL 归档（大归档在 work 里流式走，到不了这里）
+        try: arc = mdb1.Archive(_BufView(data))
+        except ValueError: pass
+        else: mdb1_visit(path, arc, rows, blobs, stat, depth); return
     stat['叶子文件'] += 1; scan_blob(path, data, rows, blobs, stat)
     if b'LSLGS' in data: scan_ue(path, data, rows, blobs, stat)
     # 内嵌压缩流只在没被整文件解开的顶层文件里搜：gzip / xz / LZ4（10-22 量：15 款 0 命中；塞尔达 4 万个整文件 Yaz0 里盲搜 10.5 GB、CPU +20%），
@@ -940,13 +968,40 @@ def big_split(p):   # 要分段扫 zlib 的大文件：顶层不是 zstd / Yaz0 
     except OSError: return False
     return m[:4] not in (b'\x28\xb5\x2f\xfd', b'Yaz0', b'SARC', b'pkzl') and not _vendor(m)   # 厂商归档（Telltale 465 MB 的 ttarch2）整读后按成员 visit
 READ_RED, READ_RED_SHOW = '【红】文件读不了', 3   # 每个工作分片逐条打前 3 个（带路径与原因），总数在收尾的红行与降级表
+class _BufView:
+    """mdb1.Archive 要 seek / read 的文件接口；对已整读进内存的 bytes / mmap 给个不复制的小视图"""
+    def __init__(self, b): self.b = b; self.p = 0
+    def seek(self, p): self.p = p
+    def read(self, n): r = self.b[self.p:self.p + n]; self.p += len(r); return bytes(r)
+def mdb1_visit(path, arc, rows, blobs, stat, depth=0):
+    """MVGL（MDB1）归档按条目解出逐个 visit（条目里是控制段 + 机器码背靠背的着色器条目、模型 / 贴图 / 脚本包，
+    scan_blob 的相邻扫描照常配对）。大归档（时空异客 app_0 6.2 GB、17.7 万条目）整读进内存吃不消：
+    调用方给 romfs_list.open_file 流式读，条目逐个解、逐个扫，不整份落内存"""
+    try: entries = list(arc.entries())
+    except Exception as e:
+        stat['【红】MDB1 条目解不出'] += 1
+        print(f'【红】MDB1 归档条目解不出：{path}（{type(e).__name__}：{e}）', file=sys.stderr, flush=True); return
+    n0 = len(rows)
+    for did, nm, blob in entries:
+        if not blob: continue
+        visit(f'{path}//{nm or f"entry{did}"}', blob, rows, blobs, stat, depth + 1)
+    stat['MDB1 归档'] += 1; stat['MDB1 着色器条目'] += len(rows) - n0
 def work(args):
     root, files, outdir = args; rows, blobs, stat = [], {}, collections.Counter()
     for p in files:
         if skip_wwise(root, p, stat): continue
         try:
             # 读内容按路径经 romfs_list（目录形态同 open / mmap；RomFS 不落散文件、只有镜像时从镜像读）
-            with romfs_list.open_file(p) as f: pk = f.read(4) == b'pkzl'
+            with romfs_list.open_file(p) as f: head4 = f.read(4)
+            pk = head4 == b'pkzl'
+            if head4 == b'MDB1':   # MVGL 归档：条目逐个解出逐个 visit（不整读大归档，见 mdb1_visit）
+                stat['顶层文件'] += 1
+                try: arc = mdb1.Archive(romfs_list.open_file(p))
+                except ValueError as e:
+                    stat['【红】MDB1 解析失败'] += 1
+                    print(f'【红】MDB1 归档解析失败：{_rel(p, root)}（{e}）', file=sys.stderr, flush=True); continue
+                mdb1_visit(_rel(p, root), arc, rows, blobs, stat)
+                continue
             if pk:   # 按索引逐成员解压；不整读大 PKZ，也不排盲扫分段作业
                 with romfs_list.map_file(p) as data:
                     stat['顶层文件'] += 1; visit(_rel(p, root), data, rows, blobs, stat)

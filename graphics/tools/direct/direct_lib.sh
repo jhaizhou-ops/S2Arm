@@ -176,7 +176,9 @@ W=$C/work.stage.$$ MS=$C/mac.stage.$$ OS=$OUT.stage.$$; DONE=0
 # 成功：临时目录换进来的是旧版本，删；失败：只删库，work 留着看日志（下次起跑时清）
 trap 'rm -rf "$MS" "$OS"; [ -n "${BTX:-}" ] && rm -rf "$BTX"; [ "$DONE" = 1 ] && rm -rf "$W"' EXIT
 # 输出目录里原有的东西（旧链版本的容器、表）克隆进临时输出目录；逐键产物不跨次保留，每次由 dmsh_build 从内容寻址仓恢复（命中的键只是写回几个文件）
-"$PY" "$R/tools/clonedir.py" "$OUT" "$OS" || { say "🔴 建临时输出目录失败"; exit 1; }
+#   跳过同链号的旧容器 b-$V：dsh_batch 要全量重打这份容器，克隆进来的旧 lib.idx 会触发 LibPack「已有 lib.idx（打过包了）」拒绝打包
+#   （只在「链号没变、重新出库」时撞：换进位的原子性靠 swap 整目录，旧容器本就要被新容器整份替换）
+"$PY" "$R/tools/clonedir.py" "$OUT" "$OS" "b-$V" || { say "🔴 建临时输出目录失败"; exit 1; }
 mkdir -p "$W/profile/$TID" "$W/pkg" "$MS"
 cp "$PROF/"* "$W/profile/$TID/" || { say "🔴 配置档复制失败"; exit 1; }
 # L3 判定结果表（fps_l3_results.tsv，名单线产出）拷进配置档，随包带给宿主运行时（host_adapt.m fps_l3_override）
