@@ -89,7 +89,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
         // GetOperationMode() -> u8
         public ResultCode GetOperationMode(ServiceCtx context)
         {
-            OperationMode mode = context.Device.System.State.DockedMode
+            OperationMode mode = context.Device.System.DockedOperationMode
                 ? OperationMode.Docked
                 : OperationMode.Handheld;
 

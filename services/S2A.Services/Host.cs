@@ -23,8 +23,7 @@ namespace S2A.Services
     // 起 Ryujinx 的 Switch 侧（HLE / Horizon / 声音 / 显卡逻辑），不建 Ryujinx 的游戏进程：游戏由原生层原生执行。
     public static class Host
     {
-        // 主机 / 掌机档（维护者 10-20 晚：「那就把开关调回掌机档吧，不让咱们被困在这里无法推进」；主机档保留作可选项）。
-        //   缺省掌机：DockedMode 假（apm 性能模式 / 操作模式 / 变更事件都由 Ryujinx 按它回答）；外接手柄样式独立由 InputPump 配置。S2A_DOCKED=1 只切主机档及初始手柄配置。
+        // 主机 / 掌机档影响性能、显示参数与手柄样式。苹果宿主的 AM 运行模式独立于这个档位。
         private static Lazy<bool> LegacyDocked = new(() => Environment.GetEnvironmentVariable("S2A_DOCKED") == "1");
         private static Lazy<SystemLanguage> LegacyLanguage = new(PickLanguage);
         internal static void ResumeAudioForShutdown()
@@ -753,7 +752,7 @@ namespace S2A.Services
                 Language,                         // 缺省跟设备系统首选语言（SystemLocale.cs）；带存档 / 对真值时 S2A_SYSTEM_LANGUAGE 与存档语言一致（如01006F8002326000存档 Japanese）
                 configuration?.Region ?? EnvEnum("S2A_REGION", RegionCode.USA),
                 VSyncMode.Switch,
-                enableDockedMode: Docked,         // 缺省掌机档（维护者 10-20 晚）；S2A_DOCKED=1 切主机（以后做成玩家设置）
+                enableDockedMode: Docked,
                 enablePtc: false,                 // 不用 Ryujinx 的 CPU 翻译缓存
                 ITickSource.RealityTickScalar,
                 enableInternetAccess: false,
@@ -775,7 +774,9 @@ namespace S2A.Services
                 gdbStubPort: 0,
                 debuggerSuspendOnStart: false,
                 customVSyncInterval: 60)
-                .Configure(vfs, libHac, content, account, channel, renderer, audio, configuration?.UserInterface ?? new HostUi());
+            {
+                ForceDockedOperationMode = OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsTvOS(), // 平台例外：苹果宿主的两种性能档均支持本地多人，AM 始终回主机模式。
+            }.Configure(vfs, libHac, content, account, channel, renderer, audio, configuration?.UserInterface ?? new HostUi());
 
             // Horizon 新框架服务在 Switch 构造时启动：挂钩要先装（服务改由我方线程以原生系统调用启动）
             GuestMemory memory = new();

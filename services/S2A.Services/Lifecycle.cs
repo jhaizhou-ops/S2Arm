@@ -58,7 +58,7 @@ namespace S2A.Services
                 if (mode >= 0)
                 {
                     system.ChangeDockedModeState(mode == 1);
-                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.ServiceAm, $"S2Arm 生命周期：运行中切到{(mode == 1 ? "主机" : "掌机")}模式");
+                    Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.ServiceAm, $"S2Arm 生命周期：运行中切到{(mode == 1 ? "主机" : "掌机")}档");
                 }
             }
         }

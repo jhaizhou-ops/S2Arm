@@ -134,7 +134,7 @@ namespace S2A.Services.Tests
                 }
             });
 
-            // ---- IApplicationFunctions 210：Switch 2 进程交模式刷新事件（掌机 / 主机切换即触发）；Switch 1 进程交的事件不触发 ----
+            // ---- IApplicationFunctions 210：游戏可见的运行模式变化才触发刷新事件 ----
             Section("IApplicationFunctions 210", () =>
             {
                 {
@@ -163,7 +163,8 @@ namespace S2A.Services.Tests
 
                     (bool b2, bool a2) = Mode210(true);
                     (bool b1, bool a1) = Mode210(false);
-                    Check("IApplicationFunctions 210：Switch 2 切模式前未触发 → 切后触发；Switch 1（负对照）切后仍未触发", "否→是、否→否",
+                    bool apple = OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsTvOS(); // 平台例外：按测试宿主验证刷新事件。
+                    Check("IApplicationFunctions 210：切换性能档前后，应用的运行模式刷新事件状态", apple ? "否→否、否→否" : "否→是、否→否",
                         $"{(b2 ? "是" : "否")}→{(a2 ? "是" : "否")}、{(b1 ? "是" : "否")}→{(a1 ? "是" : "否")}");
                 }
             });

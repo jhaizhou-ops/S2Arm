@@ -98,6 +98,9 @@ namespace Ryujinx.HLE
         /// </summary>
         internal readonly bool EnableDockedMode;
 
+        // S2Arm: hosts with local multiplayer available in either profile can keep the AM operation mode docked.
+        public bool ForceDockedOperationMode { get; init; }
+
         /// <summary>
         /// Control if the Profiled Translation Cache (PTC) should be used.
         /// </summary>

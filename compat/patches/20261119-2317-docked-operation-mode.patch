@@ -1,0 +1,60 @@
+diff --git a/src/Ryujinx.HLE/HOS/Horizon.cs b/src/Ryujinx.HLE/HOS/Horizon.cs
+index 895859bdcfccd48794351bb8e15b6329e4ad5481..3816c3fc3fb78d654a48df69e543df7e27e463d7 100644
+--- a/src/Ryujinx.HLE/HOS/Horizon.cs
++++ b/src/Ryujinx.HLE/HOS/Horizon.cs
+@@ -326,18 +326,24 @@ namespace Ryujinx.HLE.HOS
+             return ProcessLoaderHelper.LoadKip(KernelContext, new KipExecutable(in kipFile));
+         }
+
++        internal bool DockedOperationMode => Device.Configuration.ForceDockedOperationMode || State.DockedMode;
++
+         public void ChangeDockedModeState(bool newState)
+         {
+             if (newState != State.DockedMode)
+             {
++                bool wasDockedOperationMode = DockedOperationMode;
+                 State.DockedMode = newState;
+                 PerformanceState.PerformanceMode = State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
+
+                 // S2Arm：游戏显式关了哪条通知就不发那条（缺省都发，与原行为一致）
+-                if (AppletState.OperationModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
+-                if (AppletState.PerformanceModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
+-                AppletState.MessageEvent.ReadableEvent.Signal();
+-                AppletState.OperationModeRefreshEvent.ReadableEvent.Signal();   // S2Arm：Switch 2 的 210（AppletStateMgr 注释）
++                bool operationModeChanged = wasDockedOperationMode != DockedOperationMode;
++                bool notifyOperationMode = operationModeChanged && AppletState.OperationModeChangedNotification;
++                bool notifyPerformanceMode = AppletState.PerformanceModeChangedNotification;
++                if (notifyOperationMode) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
++                if (notifyPerformanceMode) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
++                if (notifyOperationMode || notifyPerformanceMode) AppletState.MessageEvent.ReadableEvent.Signal();
++                if (operationModeChanged) AppletState.OperationModeRefreshEvent.ReadableEvent.Signal();
+
+                 SignalDisplayResolutionChange();
+
+diff --git a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+index e588a04122a71974a4e63fca7ce8ebc0dcc005c9..40ebc7bbe1cabeba98f531b375a2909ada655bb6 100644
+--- a/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
++++ b/src/Ryujinx.HLE/HOS/Services/Am/AppletAE/AllSystemAppletProxiesService/SystemAppletProxy/ICommonStateGetter.cs
+@@ -89,7 +89,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.Sys
+         // GetOperationMode() -> u8
+         public ResultCode GetOperationMode(ServiceCtx context)
+         {
+-            OperationMode mode = context.Device.System.State.DockedMode
++            OperationMode mode = context.Device.System.DockedOperationMode
+                 ? OperationMode.Docked
+                 : OperationMode.Handheld;
+
+diff --git a/src/Ryujinx.HLE/HleConfiguration.cs b/src/Ryujinx.HLE/HleConfiguration.cs
+index e2f95ede78021490d973daaf521f0e93a5623cc9..338af6d66e87ca816f73829e32e3d6835050179d 100644
+--- a/src/Ryujinx.HLE/HleConfiguration.cs
++++ b/src/Ryujinx.HLE/HleConfiguration.cs
+@@ -98,6 +98,9 @@ namespace Ryujinx.HLE
+         /// </summary>
+         internal readonly bool EnableDockedMode;
+
++        // S2Arm: hosts with local multiplayer available in either profile can keep the AM operation mode docked.
++        public bool ForceDockedOperationMode { get; init; }
++
+         /// <summary>
+         /// Control if the Profiled Translation Cache (PTC) should be used.
+         /// </summary>

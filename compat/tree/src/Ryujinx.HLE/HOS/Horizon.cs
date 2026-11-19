@@ -326,18 +326,24 @@ namespace Ryujinx.HLE.HOS
             return ProcessLoaderHelper.LoadKip(KernelContext, new KipExecutable(in kipFile));
         }
 
+        internal bool DockedOperationMode => Device.Configuration.ForceDockedOperationMode || State.DockedMode;
+
         public void ChangeDockedModeState(bool newState)
         {
             if (newState != State.DockedMode)
             {
+                bool wasDockedOperationMode = DockedOperationMode;
                 State.DockedMode = newState;
                 PerformanceState.PerformanceMode = State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
 
                 // S2Arm：游戏显式关了哪条通知就不发那条（缺省都发，与原行为一致）
-                if (AppletState.OperationModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
-                if (AppletState.PerformanceModeChangedNotification) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
-                AppletState.MessageEvent.ReadableEvent.Signal();
-                AppletState.OperationModeRefreshEvent.ReadableEvent.Signal();   // S2Arm：Switch 2 的 210（AppletStateMgr 注释）
+                bool operationModeChanged = wasDockedOperationMode != DockedOperationMode;
+                bool notifyOperationMode = operationModeChanged && AppletState.OperationModeChangedNotification;
+                bool notifyPerformanceMode = AppletState.PerformanceModeChangedNotification;
+                if (notifyOperationMode) AppletState.Messages.Enqueue(AppletMessage.OperationModeChanged);
+                if (notifyPerformanceMode) AppletState.Messages.Enqueue(AppletMessage.PerformanceModeChanged);
+                if (notifyOperationMode || notifyPerformanceMode) AppletState.MessageEvent.ReadableEvent.Signal();
+                if (operationModeChanged) AppletState.OperationModeRefreshEvent.ReadableEvent.Signal();
 
                 SignalDisplayResolutionChange();
 

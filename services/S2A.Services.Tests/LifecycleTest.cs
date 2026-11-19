@@ -5,7 +5,7 @@ namespace S2A.Services.Tests
     // 前后台 / 焦点 / 底座 / 睡眠（缺口扫描族 1 / 2，11-01 体验线）：走真实 IPC 看游戏收到什么。期望按 am / psc 语义手写：
     //   ① 游戏 SetOutOfFocusSuspendingEnabled(false) → 原生层收到 0（平台壳据此不冻结）
     //   ② 平台壳报失焦 → 游戏 ReceiveMessage 读到 FocusStateChanged(15)、GetCurrentFocusState = OutOfFocus(2)；回前台 → 只有 15、InFocus(1)（应用程序不收 ChangeIntoForeground，Eden lifecycle_manager）
-    //   ③ 平台壳切主机 → OperationModeChanged(30) + PerformanceModeChanged(31)；游戏先关了操作模式通知 → 只有 31
+    //   ③ 平台壳切性能档 → PerformanceModeChanged(31)；运行模式随档位变化的平台才收 OperationModeChanged(30)
     //   ④ psc:m 模块初始化后 GetRequest = FullAwake(0)；平台壳报睡眠 → 事件点亮、GetRequest = SleepReady(2)；Acknowledge 后回 FullAwake
     //   ⑤⑥⑦ 焦点处理模式（P2-37）：第一个标志关通知、第三个标志与失焦暂停合成 am 的三种模式（参照 libnx appletSetFocusHandlingMode 与 yuzu 系 LifecycleManager）
     //   ⑧ psc 确认看状态（P2-38）：状态与队首不符失败且不出队，没初始化回 NotInitialized；
@@ -42,6 +42,11 @@ namespace S2A.Services.Tests
                 return string.Join(",", got);
             }
             byte Focus() => *Domain(Msg.Cmif(9), common).Data;      // GetCurrentFocusState
+            byte Operation() => *Domain(Msg.Cmif(5), common).Data;
+            uint Performance() => *(uint*)Domain(Msg.Cmif(6), common).Data;
+            uint Height() => ((uint*)Domain(Msg.Cmif(60), common).Data)[1];
+            bool apple = OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsTvOS(); // 平台例外：按测试宿主验证实际启用的兼容策略。
+            system.ChangeDockedModeState(false);
             Drain();   // 起局时的焦点消息
 
             Domain(Msg.Cmif(16, Bytes((byte)0)), self);            // SetOutOfFocusSuspendingEnabled(false)
@@ -78,11 +83,14 @@ namespace S2A.Services.Tests
             _lcFocus = 1; Lifecycle.Tick(system);
             Check("⑦ NoSuspend 回前台 → 消息 / 焦点状态", "15 / 1", $"{Drain()} / {Focus()}");
 
+            Check("③ 掌机档 → 运行模式 / 性能模式 / 显示高度", apple ? "1 / 0 / 720" : "0 / 0 / 720", $"{Operation()} / {Performance()} / {Height()}");
             _lcMode = 1; Lifecycle.Tick(system);
-            Check("③ 切主机 → 消息", "30,31", Drain());
+            Check("③ 切主机档 → 消息 / 运行模式 / 性能模式 / 显示高度", apple ? "31 / 1 / 1 / 1080" : "30,31 / 1 / 1 / 1080",
+                $"{Drain()} / {Operation()} / {Performance()} / {Height()}");
             Domain(Msg.Cmif(11, Bytes((byte)0)), self);            // SetOperationModeChangedNotification(false)
             _lcMode = 0; Lifecycle.Tick(system);
-            Check("③ 游戏关了操作模式通知后切掌机 → 消息", "31", Drain());
+            Check("③ 游戏关了操作模式通知后切掌机档 → 消息 / 运行模式 / 性能模式 / 显示高度", apple ? "31 / 1 / 0 / 720" : "31 / 0 / 0 / 720",
+                $"{Drain()} / {Operation()} / {Performance()} / {Height()}");
 
             Reply pm = Call(sm, Msg.Cmif(1, Name8("psc:m")));
             uint pms = pm.Move.Count == 1 ? pm.Move[0] : 0;
