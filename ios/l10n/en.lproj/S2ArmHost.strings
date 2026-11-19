@@ -397,6 +397,8 @@
 "gfx.fpsLimit" = "Frame rate limit";
 "gfx.fpsLimit.none" = "Unlimited";
 "gfx.resolution" = "Render resolution";
+"gfx.brightness" = "Brightness";
+"gfx.brightness.system" = "Follow system";
 "iml.lost.body" = "Large games may run out of memory and quit or slow down. Fix it the way you installed S2Arm:\n· S2Arm on your computer (free or paid Apple ID): click “Install on iPhone” for this game to reinstall. If you still see this message afterwards, add the permission with GetMoreRam below, then click “Install on iPhone” again.\n· Your own developer certificate (.p12 + provisioning profile): on the Apple Developer website, turn on “Increased Memory Limit” for S2Arm’s App ID (the identity Apple registers for each app), regenerate the provisioning profile, then re-sign and install with the new profile.\n· AltStore: reinstall (not refresh) with AltStore Classic 2.2 or later.\n· SideStore 0.7.0: its signing drops this permission; add it with GetMoreRam below, then reinstall in SideStore.\n· Sideloadly: not supported for now; it doesn’t say it keeps this permission with a free Apple ID, and custom entitlements need a paid Apple Developer account.\n· GetMoreRam: sideload it with the same Apple ID you used for S2Arm (it takes one of a free account’s app slots; delete it afterwards), sign in, open App IDs, tap Refresh, choose S2Arm, tap “Add Increased Memory Limit”, then reinstall S2Arm the way you did before.";
 "iml.lost.short" = "Large games may run out of memory and close. Tap “Learn more” to see how to sign S2Arm again with this permission.";
 "iml.lost.title" = "This install lost the “Increased Memory Limit” permission";

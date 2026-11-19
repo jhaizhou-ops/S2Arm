@@ -367,6 +367,8 @@
 "gfx.fpsLimit" = "幀率上限";
 "gfx.fpsLimit.none" = "不限";
 "gfx.resolution" = "渲染解析度";
+"gfx.brightness" = "畫面亮度";
+"gfx.brightness.system" = "跟隨系統";
 "iml.lost.body" = "大型遊戲可能會記憶體不足而閃退或變慢。依你安裝 S2Arm 的方式補上：\n· 電腦上的 S2Arm（免費或付費 Apple ID）：對這款遊戲點「裝到 iPhone」重裝一次；重裝後還看到這則提示，就用下面的 GetMoreRam 補上，再點一次「裝到 iPhone」。\n· 自己的開發者憑證（.p12 + 描述檔）：在蘋果開發者網站替 S2Arm 的 App ID（蘋果替每個 App 登記的身分）開啟「Increased Memory Limit」，重新產生描述檔，用新描述檔重簽再裝。\n· AltStore：用 AltStore Classic 2.2 或更新版重新安裝（不是重新整理）。\n· SideStore 0.7.0：簽署會遺失這項權限，用下面的 GetMoreRam 補上後，在 SideStore 裡重新安裝。\n· Sideloadly：暫不支援，它沒說免費帳號會保留這項權限，自訂權限要付費開發者帳號。\n· GetMoreRam：用安裝 S2Arm 的同一個 Apple ID 把它自簽裝到手機（佔免費帳號一個 App 名額，用完可刪），登入後開啟 App IDs、點重新整理、選 S2Arm、點「Add Increased Memory Limit」，再用原來的方式重裝 S2Arm。";
 "iml.lost.short" = "大型遊戲可能會記憶體不足而閃退。點「了解詳情」看怎麼重新簽署帶上這項權限。";
 "iml.lost.title" = "這次安裝遺失了「提高記憶體上限」權限";

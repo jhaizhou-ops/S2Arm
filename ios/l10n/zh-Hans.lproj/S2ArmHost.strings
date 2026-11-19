@@ -397,6 +397,8 @@
 "gfx.fpsLimit" = "帧率上限";
 "gfx.fpsLimit.none" = "不限";
 "gfx.resolution" = "渲染分辨率";
+"gfx.brightness" = "画面亮度";
+"gfx.brightness.system" = "跟随系统";
 "iml.lost.body" = "大游戏可能内存不够闪退或变慢。按你装 S2Arm 的方式补上：\n· 电脑上的 S2Arm（免费或付费 Apple ID）：对这款游戏点「装到 iPhone」重装一次；重装后还看到这条提示，就用下面的 GetMoreRam 补上，再点一次「装到 iPhone」。\n· 自己的开发者证书（.p12 + 描述文件）：在苹果开发者网站给 S2Arm 的 App ID（苹果给每个 App 登记的身份）打开「Increased Memory Limit」，重新生成描述文件，用新描述文件重签再装。\n· AltStore：用 AltStore Classic 2.2 或更新版重装（不是刷新）。\n· SideStore 0.7.0：签名会丢这项权限，用下面的 GetMoreRam 补上后，在 SideStore 里重装。\n· Sideloadly：暂不支持，它没说免费账号会保留这项权限，自定义权限要付费开发者账号。\n· GetMoreRam：用装 S2Arm 的同一个 Apple ID 把它自签装到手机（占免费账号一个 App 名额，用完可删），登录后打开 App IDs、点刷新、选 S2Arm、点「Add Increased Memory Limit」，再用原来的方式重装 S2Arm。";
 "iml.lost.short" = "大游戏可能内存不够闪退。点「了解详情」看怎么重新签名带上这项权限。";
 "iml.lost.title" = "这次安装丢了「提高内存上限」权限";
