@@ -60,6 +60,7 @@ from cs_pipelines import container, lib_functions, tt_command, tt_suffix, run_tt
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from pool_workers import cores   # 核数 / 进程池路数唯一来源（tools/pool_workers.py，#1332）
+from progress import Ticker   # 出包进度（S2A_PROGRESS）：这段原先没有计数，界面停在「刷新各阶段 n/11 · 剩 0 秒」（一款体育游戏 6000 对单路二十多分钟）
 
 FORMAT = 'base-pipelines 2'   # 改了产物形状（描述、文件名、脚本格式、压缩）就加一，旧缓存全部不中（2：iPhone 逐对 lzfse，缓存存压过的）
 K_B, K_JSON, K_BP = 0, 1, 55   # 库容器种类：库段、反射、拉取式顶点库（graphics/nvn/lib_pack_core.inc）
@@ -345,6 +346,7 @@ def main():
                 used = sum(x.stat().st_size for x in warm_files)
         # 按组装填（见文件头「预算」）：一批若干整组并行编，编完逐组按真实字节累计，装不下的那组起本批余下的组删掉、停
         gi, nb, bb = 0, 0, 0   # 下一个组号；已编出文件的对数与字节（估下一批对数用）
+        tk = Ticker('直连库·拉取基础管线', len(jobs))   # 按对计；预算装满提前停时收尾补满（后面的对不编）
         with ThreadPoolExecutor(max(1, a.j)) as ex:
             while gi < len(groups):
                 rem = budget - used
@@ -353,7 +355,7 @@ def main():
                 while gi < len(groups) and n < want:
                     batch.append(groups[gi]); n += len(groups[gi][1]); gi += 1
                 todo = [job for g in batch for job in g[1]]
-                for job, r in zip(todo, ex.map(one, todo)): res[job] = r
+                for job, r in zip(todo, ex.map(one, todo)): res[job] = r; tk.step()
                 sizes = [sum(size(job) for job in g[1]) for g in batch]
                 nb += sum(1 for job in todo if not isinstance(res[job][0], tuple)); bb += sum(sizes)
                 stop = None
@@ -366,6 +368,7 @@ def main():
                             trimmed += 1 if not isinstance(res[job][0], tuple) else 0
                             path(job).unlink(missing_ok=True)
                     break
+        tk.step(tk.total - tk.done)
         if jobs and not packed:   # 一组都装不下：预热对也不带（没有可查的对，它查中了也没用）
             for x in warm_files: x.unlink(missing_ok=True)
             used, warm = 0, '没带（一组都装不下）'

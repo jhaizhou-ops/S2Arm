@@ -40,6 +40,7 @@ from repair_compute import Library   # 直连库容器（lib.idx + lib.NNN.pak�
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from pool_workers import cores   # 核数 / 进程池路数唯一来源（tools/pool_workers.py，#1332）
+from progress import Ticker   # 出包进度（S2A_PROGRESS）：这段原先没有计数，界面停在「刷新各阶段 n/11 · 剩 0 秒」
 
 FORMAT = 'cs-pipelines 1'   # 改了产物形状（描述、文件名、脚本格式）就加一，旧缓存全部不中
 REPO = Path(__file__).resolve().parents[3]
@@ -220,8 +221,9 @@ def main():
                 cf.parent.mkdir(parents=True, exist_ok=True); clone(tmp, cf)
             os.replace(tmp, dst); note('built', 1)
 
+        tk = Ticker('直连库·计算管线', len(jobs))
         with ThreadPoolExecutor(max(1, a.j)) as ex:
-            list(ex.map(one, jobs))
+            for _ in ex.map(one, jobs): tk.step()
     finally:
         shutil.rmtree(work, ignore_errors=True)
     files = [a.out / f'{ckey(k)}.metalarchive' for k in keys]
