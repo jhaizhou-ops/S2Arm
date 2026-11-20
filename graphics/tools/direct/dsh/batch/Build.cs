@@ -756,6 +756,42 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Phase("客体输入");
     }
 
+    // ---------------- 变体两段的编译路数 ----------------
+    //   -j 是出包开头按「dsh 主进程 1.7 GB + 1 个 metal 峰值 + (J − 1) × metal p90」从当时的空闲内存反推的（tools/cores.sh S2A_DIRECT_J），
+    //   玩家机开着别的程序时常常只剩 1 路，且整次出库都按它。到 _se / _vp 这两段，主进程早已缩回（实测 0.2 GB），只剩逐键的 metal 进程：
+    //   按此刻空闲内存重算同一公式（主进程已算在「已用」里，不再扣），上限本单核数 S2A_JOBS，下限 -j。
+    //   实测（16 GB / 8 核、开头空闲 5.8 GB → -j 1）：1 万多键的 _se 单核二十多分钟，此刻空闲 5.4 GB 重算是 4 路。读不到空闲内存（Windows 等）照旧 -j
+    static int VariantLanes(string phase)
+    {
+        static int Env(string n, int d) => int.TryParse(Environment.GetEnvironmentVariable(n), out var v) && v > 0 ? v : d;
+        long avail = AvailMb();
+        if (avail <= 0) return NJ;
+        int jobs = Env("S2A_JOBS", Environment.ProcessorCount), peak = Env("S2A_DIRECT_METAL_PEAK_MB", 1065), p90 = Env("S2A_DIRECT_METAL_P90_MB", 420);
+        int lanes = Math.Max(NJ, (int)Math.Min(jobs, 1 + Math.Max(0, avail / 2 - peak) / p90));
+        Say($"{phase}：{lanes} 路编（-j {NJ}；此刻空闲内存 {avail} MB 的一半按 metal 峰值 {peak} MB + 每路 p90 {p90} MB 重算，上限本单 {jobs} 核）");
+        return lanes;
+    }
+    static long AvailMb()   // 此刻空闲内存（MB），同 tools/cores.sh s2a_avail_mb：S2A_MEM_AVAIL_MB 覆盖 > macOS vm_stat 空闲 + 非活跃 + 预读 + 可清除 > Linux MemAvailable；读不到 0
+    {
+        if (long.TryParse(Environment.GetEnvironmentVariable("S2A_MEM_AVAIL_MB"), out var o) && o > 0) return o;
+        try
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo("/usr/bin/vm_stat") { RedirectStandardOutput = true, UseShellExecute = false };
+                using var p = System.Diagnostics.Process.Start(psi); var text = p.StandardOutput.ReadToEnd(); p.WaitForExit();
+                var ps = System.Text.RegularExpressions.Regex.Match(text, @"page size of (\d+)");
+                long pages = System.Text.RegularExpressions.Regex.Matches(text, @"^Pages (free|inactive|speculative|purgeable):\s+(\d+)", System.Text.RegularExpressions.RegexOptions.Multiline)
+                    .Sum(m => long.Parse(m.Groups[2].Value));
+                return ps.Success ? pages * long.Parse(ps.Groups[1].Value) / 1048576 : 0;
+            }
+            if (OperatingSystem.IsLinux() && File.ReadLines("/proc/meminfo").FirstOrDefault(l => l.StartsWith("MemAvailable:", StringComparison.Ordinal)) is { } l)
+                return long.Parse(l.Split(' ', StringSplitOptions.RemoveEmptyEntries)[1]) / 1024;
+        }
+        catch (Exception e) when (e is IOException || e is System.ComponentModel.Win32Exception || e is FormatException || e is InvalidOperationException) { }
+        return 0;
+    }
+
     // ---------------- 采样模拟变体（缺口族 31，种类 51） ----------------
     //   0.6.0 出包着色器全覆盖（11-17）：原先只预编跑局见过的键（se_want.tsv），没见过的要到设备首遇才现编（编好前这对绘制照旧用 main0、采样走样）。
     //   现在库里每个键都试：FsRd 改不动的（没有要模拟的采样）不出库；se_want.tsv 只用来报覆盖（见过的里有几个出了）
@@ -768,7 +804,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("se tried", all.Count);
         // 进度：这一段在「编批库」计数满了之后才跑，每个要模拟的键单独编一次 Metal，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）
         using var tk = new Ticker("直连库·采样模拟变体", all.Count);
-        Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
+        int lanes = VariantLanes("采样模拟变体"); using var wide = Metal.Widen(lanes);
+        Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { SeOne(k, want); } finally { tk.Step(); }
         });
@@ -803,7 +840,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("vp vertex shaders", vs.Count);
         if (union == 0) return;
         using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，逐键编、在编批库之后
-        Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
+        int lanes = VariantLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes);
+        Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { VpOne(k, union, Bits); } finally { tk.Step(); }
         });
@@ -1030,13 +1068,13 @@ sealed class CompileTimeout : CompileError { public CompileTimeout(string m) : b
 static class Metal
 {
     static readonly Dictionary<string, (string[] Cmd, string Sdk, byte[] Ident)> T = new();
-    static string Work; static SemaphoreSlim Gate;
+    static string Work; static SemaphoreSlim Gate; static int Cap;
     static readonly ConcurrentDictionary<string, long> St = new();
     static readonly ConcurrentBag<(double S, string Target, int Bytes)> Times = new();
     /// <summary>→ null 正常；编译工具用不了 → 一行【红】原因（调用方打出来、整次停，不再逐支翻译编译）</summary>
     public static string Init((string[] Cmd, string Rec, string Sdk)? mac, (string[] Cmd, string Rec, string Sdk)? ios, string work, int jobs)
     {
-        Work = work; Gate = new SemaphoreSlim(jobs);
+        Work = work; Gate = new SemaphoreSlim(jobs); Cap = jobs;
         foreach (var (name, t) in new[] { ("mac", mac), ("ios", ios) })
             if (t is { } v)
             {
@@ -1129,6 +1167,13 @@ static class Metal
     }
     // name：源文件名（不带 .metal），按它编。有全局构造函数的源码，库里嵌着文件名（_GLOBAL__sub_I_<name>.metal）：这种库按「名 + 源码」缓存，
     //   其余（库里没有文件名）按源码缓存、同源的键共用；查时先源码键、再名键
+    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.VariantLanes）；Dispose 收回到 -j。不比 -j 宽就什么都不做（返回 null，using 照常可用）</summary>
+    public static IDisposable Widen(int lanes)
+    {
+        int extra = lanes - Cap; if (extra <= 0) return null;
+        Gate.Release(extra); return new Narrow(extra);
+    }
+    sealed class Narrow(int extra) : IDisposable { public void Dispose() { for (int i = 0; i < extra; i++) Gate.Wait(); } }
     public static byte[] Compile(string target, string msl, string name) => Compile(target, msl, name, out _);
     /// <summary>编译身份（编译约定 + 编译器版本）的十六进制：批成员索引按它分键，换编译器不拿旧库</summary>
     public static string IdentHex(string target) => Convert.ToHexString(T[target].Ident).ToLowerInvariant()[..16];

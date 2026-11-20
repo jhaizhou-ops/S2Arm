@@ -233,6 +233,13 @@ for tb in ('c1_full.tsv', 'cb_extent.tsv'):
     p = os.path.join(P, tb); head = open(p).readline().rstrip('\n') if os.path.exists(p) else None
     check(head is not None and head.startswith(f'# chain b-{chain} inputs '), f'⑪ {tb} 在、首行 {head!r}（期望以「# chain b-{chain} inputs 」开头）')
 
+# ⑬ 变体两段（_se / _vp）按此刻空闲内存重算编译路数（Build.cs VariantLanes）：-j 2，空闲 6000 MB / 本单 8 核 → 1 + (3000 − 1065) ÷ 420 = 5 路；
+#    空闲 1000 MB 算出来不到 -j → 照旧 2 路（只放宽、不收窄）；本单 3 核 → 封顶 3 路
+for avail, jobs, want in (('6000', '8', 5), ('1000', '8', 2), ('6000', '3', 3)):
+    rc, o, _, _, _, _ = build(f'lanes{avail}_{jobs}', 'cas_lanes', env_add={'S2A_MEM_AVAIL_MB': avail, 'S2A_JOBS': jobs})
+    m = re.search(r'采样模拟变体：(\d+) 路编', o)
+    check(rc == 0 and m is not None and int(m.group(1)) == want, f'⑬ 空闲 {avail} MB、本单 {jobs} 核：采样模拟变体 {m.group(1) if m else "没打"} 路（期望 {want}），退出 {rc}')
+
 shutil.rmtree(t, ignore_errors=True)
 print(f't_dmsh_reuse：{"全符" if not fails else f"{len(fails)} 例不符"}')
 sys.exit(1 if fails else 0)
