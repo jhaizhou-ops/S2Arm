@@ -6400,6 +6400,14 @@
   "en": "Direct library · translate and finish {0}"
  },
  {
+  "source": "直连库·采样模拟变体 {0}",
+  "en": "Direct library · sampler emulation variants {0}"
+ },
+ {
+  "source": "直连库·顶点补齐变体 {0}",
+  "en": "Direct library · padded vertex variants {0}"
+ },
+ {
   "source": "直连库·直连抽取 {0}",
   "en": "Direct library · direct extract {0}"
  },

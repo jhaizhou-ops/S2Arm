@@ -2824,6 +2824,8 @@
   "直连库·整份出库与收尾 {0}": "Bibliothèque directe · construction complète et finalisation {0}",
   "直连库·编批库（MB） {0}": "Bibliothèque directe · bibliothèques par lot (Mo) {0}",
   "直连库·翻译与收尾 {0}": "Bibliothèque directe · traduction et finalisation {0}",
+  "直连库·采样模拟变体 {0}": "Bibliothèque directe · variantes d'émulation d'échantillonnage {0}",
+  "直连库·顶点补齐变体 {0}": "Bibliothèque directe · variantes de sommets complétées {0}",
   "直连库·直连抽取 {0}": "Bibliothèque directe · extraction directe {0}",
   "抽取 {0}": "Extraire {0}",
   "出包 {0}": "Générer {0}",

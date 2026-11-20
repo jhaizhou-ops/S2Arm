@@ -766,16 +766,22 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("se wanted", want.Count);
         var all = Keys.Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("se tried", all.Count);
+        // 进度：这一段在「编批库」计数满了之后才跑，每个要模拟的键单独编一次 Metal，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）
+        using var tk = new Ticker("直连库·采样模拟变体", all.Count);
         Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
         {
-            string s0 = MAC.Text(k + "_b.metal"), v;
-            try { v = DshCompiler.FsRd(s0); }
-            catch (Exception e) { Count("se failed"); Say($"[RED] {k}: no sampler-emulation variant (S2A.Dsh FsRd: {e.GetType().Name}: {e.Message.Split('\n')[0]}): the device compiles it at first use"); return; }
-            if (v == s0) { Count("se nothing to emulate"); return; }
-            var e2 = VarLib(k, "_se", v);
-            if (e2 != null) { Count("se failed"); Say($"[RED] {k}: the sampler-emulation variant does not compile ({Trunc(e2, 120)}): the device compiles it at first use"); }
-            else { Count("se built"); if (want.Contains(k)) Count("se wanted built"); }
+            try { SeOne(k, want); } finally { tk.Step(); }
         });
+    }
+    static void SeOne(string k, HashSet<string> want)
+    {
+        string s0 = MAC.Text(k + "_b.metal"), v;
+        try { v = DshCompiler.FsRd(s0); }
+        catch (Exception e) { Count("se failed"); Say($"[RED] {k}: no sampler-emulation variant (S2A.Dsh FsRd: {e.GetType().Name}: {e.Message.Split('\n')[0]}): the device compiles it at first use"); return; }
+        if (v == s0) { Count("se nothing to emulate"); return; }
+        var e2 = VarLib(k, "_se", v);
+        if (e2 != null) { Count("se failed"); Say($"[RED] {k}: the sampler-emulation variant does not compile ({Trunc(e2, 120)}): the device compiles it at first use"); }
+        else { Count("se built"); if (want.Contains(k)) Count("se wanted built"); }
     }
 
     // ---------------- 顶点补齐变体（0.6.0 出包着色器全覆盖，种类 54） ----------------
@@ -796,20 +802,25 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var vs = stage.Where(x => x.Value == "vs").Select(x => x.Key).Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("vp vertex shaders", vs.Count);
         if (union == 0) return;
+        using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，逐键编、在编批库之后
         Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, k =>
         {
-            string s0 = MAC.Text(k + "_b.metal");
-            uint have = Bits(DshCompiler.UserLocs(s0, "vs"));
-            uint mask = union & ~have;
-            if (mask == 0) { Count("vp nothing to pad"); return; }
-            var (v, added) = DshCompiler.VsPadMask(s0, mask);
-            if (added.Count == 0) { Count("vp nothing to pad"); return; }
-            uint got = 0; foreach (long l in added) got |= 1u << (int)l;
-            v += $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n";   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack）
-            var e = VarLib(k, "_vp", v);
-            if (e != null) { Count("vp failed"); Say($"[RED] {k}: the padded vertex variant (user(locn) mask {got:#x}) does not compile ({Trunc(e, 120)}): the device makes one per pair at first use"); }
-            else { Count("vp built"); Count("vp padded outputs", added.Count); }
+            try { VpOne(k, union, Bits); } finally { tk.Step(); }
         });
+    }
+    static void VpOne(string k, uint union, Func<List<object>, uint> Bits)
+    {
+        string s0 = MAC.Text(k + "_b.metal");
+        uint have = Bits(DshCompiler.UserLocs(s0, "vs"));
+        uint mask = union & ~have;
+        if (mask == 0) { Count("vp nothing to pad"); return; }
+        var (v, added) = DshCompiler.VsPadMask(s0, mask);
+        if (added.Count == 0) { Count("vp nothing to pad"); return; }
+        uint got = 0; foreach (long l in added) got |= 1u << (int)l;
+        v += $"\nvertex float4 dm_vp_mask_{got:x}() {{ return float4(0.0); }}\n";   // 掩码随库带：宿主从函数名读（nvn_mtl.m vp_pack）
+        var e = VarLib(k, "_vp", v);
+        if (e != null) { Count("vp failed"); Say($"[RED] {k}: the padded vertex variant (user(locn) mask {got:#x}) does not compile ({Trunc(e, 120)}): the device makes one per pair at first use"); }
+        else { Count("vp built"); Count("vp padded outputs", added.Count); }
     }
 
     // ---------------- 汇总 ----------------

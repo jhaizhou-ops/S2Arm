@@ -139,7 +139,7 @@ rl = subprocess.run([*CMD, 'build', '--pkg', PKG, '--profile', P, '--game', TID,
                      '--lock', os.path.join(t, 'no_such.lock')], capture_output=True, text=True)
 check(rl.returncode != 0 and '[RED] --lock' in rl.stdout + rl.stderr, f'①′ --lock 指向不存在的文件：退出 {rl.returncode}（期望非 0）、报 [RED] --lock')
 rows = [l.rstrip('\n').split('\t') for l in open(progress)] if os.path.exists(progress) else []
-for stg, total in (('直连库·翻译与收尾', 3), ('直连库·编批库（MB）', None)):
+for stg, total in (('直连库·翻译与收尾', 3), ('直连库·编批库（MB）', None), ('直连库·采样模拟变体', 3)):   # 采样模拟变体在编批库满了之后逐键编：要有自己的计数，界面才不停在 100%
     v = [(int(x[2]), int(x[3])) for x in rows if len(x) == 4 and x[1] == stg]
     check(bool(v) and v[0][0] == 0 and v[-1][0] == v[-1][1] and all(a <= b for (a, _), (b, _) in zip(v, v[1:])) and (total is None or v[-1][1] == total),
           f'① 进度 {stg} 从 0 到完成：{v}')
