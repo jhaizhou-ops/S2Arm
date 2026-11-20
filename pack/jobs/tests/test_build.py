@@ -25,6 +25,7 @@ class BuildTests(JobCase):
                             "import os; print(os.getenv('S2A_IPHONE_VA', 'unset'))"],
                            env=env, on_line=lines.append)
                 self.assertEqual(lines, ["0"])
+                self.assertEqual(env["S2A_LDN_MITM"], "1")
                 self.assertEqual(os.environ.get("S2A_IPHONE_VA"), inherited)
                 self.assertNotIn("S2A_IPHONE_VA", self.c.env())
 

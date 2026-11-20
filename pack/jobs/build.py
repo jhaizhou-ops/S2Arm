@@ -171,6 +171,7 @@ def runtime_env(c, game, runtime, input_ok=True):
         raise Failure("游戏语言代码无效。")
     env = c.env()
     env["S2A_IPHONE_VA"] = "0"   # 玩家起局不用 iPhone 地址模拟；开发 / 普查保留原生缺省（#1530）。
+    env["S2A_LDN_MITM"] = "1"   # Mac 与 Switch 走 ldn_mitm 的 UDP/TCP 11452 局域网协议
     env.pop("S2A_VAMM_LAYOUT", None)
     env.pop("S2A_PATCH_DIR", None)   # 补丁只在出包时读（随包 patch.tsv 在游戏数据目录里，宿主自己找）；玩家导入的在 <S2A_DOCS>/S2A/patches
     save = contained(layout.root_of(c, game["id"]), layout.path(c, game["id"], "saves"))
