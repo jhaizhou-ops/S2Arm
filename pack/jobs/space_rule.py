@@ -38,12 +38,20 @@ PACK_SMALL_BYTES, DIRECT_SMALL_BYTES, DIRECT_LARGE_BYTES = int(3e9), int(5e9), i
 def selected_packages(game):
     bases = [p for p in game["packages"] if p["type"] == "base"]
     updates = [p for p in game["packages"] if p["type"] == "update"]
-    result = ([max(bases, key=lambda p: p["version"])] if bases else [])
+    # Integrated packages can leave duplicate version=0 records after an old
+    # source is moved or removed. Prefer a source that still exists so a stale
+    # first entry cannot pin the build to the wrong game version.
+    def rank(package):
+        path = package["path"]
+        available = os.path.exists(path) if os.path.isabs(path) else True
+        return package["version"], available
+
+    result = ([max(bases, key=rank)] if bases else [])
     if updates:
-        result.append(max(updates, key=lambda p: p["version"]))
+        result.append(max(updates, key=rank))
     dlc = {}
     for p in game["packages"]:
-        if p["type"] == "dlc" and (p["titleId"] not in dlc or dlc[p["titleId"]]["version"] < p["version"]):
+        if p["type"] == "dlc" and (p["titleId"] not in dlc or rank(dlc[p["titleId"]]) < rank(p)):
             dlc[p["titleId"]] = p
     return result + [dlc[k] for k in sorted(dlc)]
 

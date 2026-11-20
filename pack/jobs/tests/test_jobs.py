@@ -1587,6 +1587,19 @@ class JobsTests(unittest.TestCase):
         packages[2]["sha256"] = "b" * 64
         self.assertNotEqual(identity, library.input_identity(game))
 
+    def test_duplicate_same_version_prefers_source_that_still_exists(self):
+        old_base = self.package(sha="a" * 64)
+        old_dlc = self.package("dlc", tid="0100000000001001", sha="b" * 64)
+        new_base = self.package(sha="c" * 64)
+        new_dlc = self.package("dlc", tid="0100000000001001", sha="d" * 64)
+        update = self.package("update", 1, sha="e" * 64)
+        for stale in (old_base, old_dlc):
+            stale["path"] = str(self.root / "moved-away.xci")
+
+        selected = library.selected_packages(self.game(packages=[old_base, old_dlc, new_base, new_dlc, update]))
+        self.assertEqual([p["sha256"] for p in selected], ["c" * 64, "e" * 64, "d" * 64])
+        self.assertEqual(library.requirements(self.c, self.game(packages=[old_base, old_dlc, new_base, new_dlc, update])), [])
+
     def test_catalog_marks_games_recorded_on_a_phone(self):
         # 删除确认框据 onPhone 多写一句「下次往这台手机装游戏时，手机上的这款会打不开」：哪台设备记录里有这款就是 True，没有的 False
         on, off = self.game(tid="0100000000AA0000", packages=[self.package(tid="0100000000AA0000")]), self.game(tid="0100000000BB0000", packages=[self.package(tid="0100000000BB0000")])
