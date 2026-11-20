@@ -52,7 +52,7 @@ import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -355,7 +355,8 @@ def main():
                 while gi < len(groups) and n < want:
                     batch.append(groups[gi]); n += len(groups[gi][1]); gi += 1
                 todo = [job for g in batch for job in g[1]]
-                for job, r in zip(todo, ex.map(one, todo)): res[job] = r; tk.step()
+                fut = {ex.submit(one, job): job for job in todo}
+                for f in as_completed(fut): res[fut[f]] = f.result(); tk.step()   # 按完成先后计：一对编一分多钟时，按提交顺序取会让计数停在它前面（界面看着像卡住）
                 sizes = [sum(size(job) for job in g[1]) for g in batch]
                 nb += sum(1 for job in todo if not isinstance(res[job][0], tuple)); bb += sum(sizes)
                 stop = None
