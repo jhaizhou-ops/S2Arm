@@ -389,6 +389,7 @@
 "gfx.filter.metalfx.note" = "El escalado nítido (MetalFX) añade un poco de trabajo de GPU en cada fotograma, por lo que la tasa de fotogramas y el consumo de batería pueden verse ligeramente afectados.";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR tampoco está disponible.";
+"gfx.hdrUpscaleBypass.note" = "Con HDR activado (S2A_HDR): las ventanas HDR omiten el antialiasing en pantalla, el filtro de escalado (MetalFX / FSR) y la interpolación de fotogramas: el escalado perceptual de 8 bits no encaja con valores de código PQ (limitación del producto); las ventanas SDR no se ven afectadas.";
 "gfx.filter.nearest" = "Para juegos 2D";
 "gfx.fpsLimit" = "Límite de velocidad de fotogramas";
 "gfx.fpsLimit.none" = "Sin límite";

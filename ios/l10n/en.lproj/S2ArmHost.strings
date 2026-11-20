@@ -394,6 +394,7 @@
 "gfx.filter.metalfx.note" = "Sharp upscaling (MetalFX) adds a little GPU time every frame, so frame rate and battery use may be slightly affected.";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR isn't available either.";
+"gfx.hdrUpscaleBypass.note" = "HDR is on (S2A_HDR): HDR windows bypass on-screen anti-aliasing, upscaling (MetalFX / FSR) and frame interpolation — 8-bit perceptual scaling doesn't fit PQ code values (a product limitation); SDR windows are unaffected.";
 "gfx.filter.nearest" = "For 2D games";
 "gfx.fpsLimit" = "Frame rate limit";
 "gfx.fpsLimit.none" = "Unlimited";

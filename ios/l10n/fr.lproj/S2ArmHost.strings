@@ -389,6 +389,7 @@
 "gfx.filter.metalfx.note" = "L'agrandissement net (MetalFX) ajoute un peu de travail GPU à chaque image : la fréquence d'images et l'autonomie peuvent en être légèrement affectées.";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR n'est pas disponible non plus.";
+"gfx.hdrUpscaleBypass.note" = "HDR activé (S2A_HDR) : les fenêtres HDR contournent l'anticrénelage à l'écran, le filtre de mise à l'échelle (MetalFX / FSR) et l'interpolation d'images — la mise à l'échelle perceptuelle 8 bits ne convient pas aux valeurs de code PQ (limitation du produit) ; les fenêtres SDR ne sont pas concernées.";
 "gfx.filter.nearest" = "Pour les jeux 2D";
 "gfx.fpsLimit" = "Limite de fréquence d'images";
 "gfx.fpsLimit.none" = "Illimitée";

@@ -285,6 +285,16 @@ NSArray<NSDictionary *> *s2a_ios_graphics_options(void) {
     ];
 }
 
+// HDR 开关联动（PR3d，照 nxnative Upscaling 行 needs=DM_HDR=0 形态映射到本仓设置页）：HDR 管线接手（S2A_HDR=auto/on，
+//   启动环境开关、无设置页行）时，上屏增强一族（抗锯齿 / 缩放滤镜 MetalFX·FSR / 补帧）对 HDR 窗口旁路——8 位感知缩放
+//   不适配 PQ 码值（graphics/nvn/gfx/nvn/nvn_hdr_policy.h hdr_bypass_upscale；产品限制写入 docs/画面设置.md，不静默降画质）。
+//   设置页时刻读不到「下次启动」的环境（开关无持久键，页面内行内置灰会误导）——联动落在两处：设置 → 环境的应用通道
+//   （s2a_ios_apply_graphics_settings 记一行）与设置页两行下的提示（app_settings.m 按此谓词显示）。
+BOOL s2a_ios_hdr_upscale_bypassed(void) {
+    const char *v = getenv("S2A_HDR");
+    return v && (!strcmp(v, "auto") || !strcmp(v, "on"));
+}
+
 NSInteger s2a_ios_settings_docked_change(NSDictionary *entry, NSDictionary *now, BOOL *restart) {
     NSMutableDictionary *a = [entry mutableCopy] ?: [NSMutableDictionary new], *b = [now mutableCopy] ?: [NSMutableDictionary new];
     NSNumber *was = a[@"S2ADockedMode"], *is = b[@"S2ADockedMode"];
@@ -354,6 +364,10 @@ void s2a_ios_apply_graphics_settings(NSUserDefaults *defaults) {
         apply_environment(options[i].env, value);
         fprintf(stderr, "[S2A 画面设置] %s=%s（本 App 设置）\n", options[i].env, [value UTF8String]);
     }
+    // HDR 开关联动（PR3d，照 nxnative Upscaling 行 needs=DM_HDR=0 形态）：HDR 管线接手时上屏增强对 HDR 窗口旁路——
+    //   抗锯齿 / 缩放滤镜两行照存照传（SDR 窗口照常用它），这里只声明产品限制（不静默降画质，docs/画面设置.md）
+    if (s2a_ios_hdr_upscale_bypassed())
+        fprintf(stderr, "[S2A 画面设置] S2A_HDR=%s：HDR 窗口（RGB10A2 PQ 码值）旁路上屏抗锯齿 / 缩放滤镜（MetalFX / FSR）/ 补帧——8 位感知缩放不适配 PQ 码值（产品限制，SDR 窗口照常；docs/画面设置.md）\n", getenv("S2A_HDR"));
     // Switch 档位：与服务层 Host.Docked、直连 dm_opmode 和宽屏表共用；缺省掌机，下次启动生效。
     const char *docked = getenv("S2A_DOCKED");
     if (docked) fprintf(stderr, "[S2A 画面设置] S2A_DOCKED=%s（启动环境）\n", docked);

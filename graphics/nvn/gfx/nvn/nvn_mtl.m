@@ -18804,6 +18804,24 @@ static void present_hdr_uv(float p[8], id<MTLTexture> src, id<MTLTexture> dst, B
     if (!screen) return;
     nvn2_hdr_present(p, present_hdr_pf(src.pixelFormat), present_hdr_pt(dst.pixelFormat));
 }
+// PR3d：HDR 窗口（RGB10A2 PQ 码值）旁路上屏增强（评审稿 v3 §2.5 开关矩阵 / §3 A3 行 / §4 PR3d）：直连上屏增强一族
+//   （上屏抗锯齿 nvn_present_aa.inc / MetalFX 空间放大 nvn_present_fx.inc / FSR nvn_present_fsr.inc——与 MetalFX 同属
+//   S2A_SCALING_FILTER、同为 8 位 sRGB 感知中间图 / 出图补帧 nvn_present_fi.inc）的中间图与 MetalFX 纹理全是
+//   BGRA8Unorm，对 PQ 码值不适配——PQ 1.0 = 10000 nit，感知锐化在高光无界过冲。HDR 窗口跳过这一族、上屏直通
+//   （present 六态照选：PQ 层 mode 0/4、SDR 目标 mode 1——截图槽 3 同旁路，PQ 码值不过 8 位感知缩放）；
+//   SDR 窗口照常（层在 PQ 态的排空帧先缩放后 mode 2 转换）。一次性提示：旁路是产品限制（docs/画面设置.md），不静默降画质。
+static void present_hdr_bypass_note(void) {
+    static int said;
+    if (said) return;
+    said = 1;
+    MLOG("直连：HDR 窗口（RGB10A2 PQ 码值）旁路上屏增强（抗锯齿 / MetalFX / FSR / 补帧）——8 位感知缩放不适配 PQ 码值，"
+         "HDR 帧按直通上屏（产品限制，SDR 窗口照常；docs/画面设置.md）");
+}
+static int present_hdr_bypassed(id<MTLTexture> src) {
+    int byp = nvn2_hdr_bypass_upscale(present_hdr_pf(src.pixelFormat));   // 判定 = nvn_hdr_policy.h hdr_bypass_upscale（窗口格式 × 开关 × vi 答过 latch），读已算好的结果
+    if (byp) present_hdr_bypass_note();
+    return byp;
+}
 static int present_blit(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], BOOL flip, int screen) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -18901,6 +18919,7 @@ static const int *rs_aa_crop(id<MTLTexture> src, id<MTLTexture> dst, const int c
 static int present_encode_slot(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int slot) {
     present_options();
     BOOL flip = present_ll() != 0;   // the presented window's origin (see g_present_ll)
+    if (present_hdr_bypassed(src)) return present_blit(cb, src, dst, crop, flip, 1);   // PR3d：HDR 窗口（PQ 码值）旁路 FSR / 抗锯齿 / MetalFX，直通上屏（同「!aa ∧ !fx」出口）
     if (g_present_fsr && slot != 3) { int fr = present_fsr_encode(cb, src, dst, crop, slot, flip, NO, g_present_aa, nil, nil, nil); if (fr >= 0) return fr; }   // FSR 1；3 号槽（截图 / 抓图）不过 FSR；-1 = 做不了（已报红），照下面的原路径双线性
     NvPresentFX *fx = present_fx_for(slot, src, dst, crop, NO);
     if (!g_present_aa && !fx) return present_blit(cb, src, dst, crop, flip, 1);
@@ -18930,6 +18949,7 @@ API_AVAILABLE(macos(26.0), ios(26.0))
 static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4], int slot) {
     present_options();
     BOOL flip = present_ll() != 0;   // the presented window's origin (see g_present_ll)
+    if (present_hdr_bypassed(src)) return present_blit_m4(cb, src, dst, crop, g_present_uv[slot], g_present_args, flip, 1);   // PR3d：HDR 窗口（PQ 码值）旁路 FSR / 抗锯齿 / MetalFX，直通上屏（同「!aa ∧ !fx」出口）
     if (g_present_fsr) { int fr = present_fsr_encode(cb, src, dst, crop, slot, flip, YES, g_present_aa, g_present_uv[slot], g_present_args, nil); if (fr >= 0) return fr; }   // FSR 1；-1 = 做不了（已报红），照下面的原路径双线性
     NvPresentFX *fx = present_fx_for(slot, src, dst, crop, YES);
     if (!g_present_aa && !fx) return present_blit_m4(cb, src, dst, crop, g_present_uv[slot], g_present_args, flip, 1);
@@ -19099,7 +19119,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         nvn2_hdr_tick_frame(nvn2_hdr_switch(), src.pixelFormat == MTLPixelFormatRGB10A2Unorm);
     fit_geom(layer.drawableSize.width, layer.drawableSize.height, pcw, pch);   // game units (was the crop / source size read here)
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize, ticket);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
-    if (fi_wanted() && !supplied) { if (@available(macOS 26.0, iOS 26.0, *)) { int fr = fi_frame(src, crop, layer, period, ticket); if (fr >= 0) return fr; } }   // 实验：出图补帧接手这一帧
+    // PR3d：HDR 窗口（PQ 码值）不出图补帧（nvn_present_fi.inc 同 8 位 sRGB 假设——输入缩拷 / 补出帧画布全 BGRA8Unorm）；SDR 帧照常交给补帧（旁路逐帧判，不碰补帧自己的开关状态）
+    int hdr_byp = present_hdr_bypassed(src);
+    if (!hdr_byp && fi_wanted() && !supplied) { if (@available(macOS 26.0, iOS 26.0, *)) { int fr = fi_frame(src, crop, layer, period, ticket); if (fr >= 0) return fr; } }   // 实验：出图补帧接手这一帧
     uint64_t dt0 = now_ns();
     id<CAMetalDrawable> dr = supplied ? supplied : [layer nextDrawable];
     if (!supplied) g_drawable_ns += now_ns() - dt0;

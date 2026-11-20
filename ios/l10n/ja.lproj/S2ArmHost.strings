@@ -389,6 +389,7 @@
 "gfx.filter.metalfx.note" = "シャープ拡大（MetalFX）は毎フレーム GPU の処理が少し増えるため、フレームレートと消費電力にわずかに影響します。";
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR も利用できません。";
+"gfx.hdrUpscaleBypass.note" = "HDR オン（S2A_HDR）の場合、HDR ウィンドウ（RGB10A2 PQ コード値）ではアンチエイリアス、スケーリングフィルター（MetalFX / FSR）、フレーム補間をバイパスします——8 ビットの知覚的スケーリングは PQ コード値に適合しないためです（製品上の制限）。SDR ウィンドウには影響しません。";
 "gfx.filter.nearest" = "2D ゲーム向け";
 "gfx.fpsLimit" = "フレームレート上限";
 "gfx.fpsLimit.none" = "無制限";

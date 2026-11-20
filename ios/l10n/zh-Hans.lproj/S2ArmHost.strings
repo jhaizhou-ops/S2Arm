@@ -394,6 +394,7 @@
 "gfx.filter.metalfx.note" = "锐利放大（MetalFX）会每帧多花一点显卡时间，帧率和能耗会略有影响。";
 "gfx.filter.fsr" = "FSR 锐化放大";
 "gfx.filter.fsr.noDirect" = "FSR 锐化放大也用不了。";
+"gfx.hdrUpscaleBypass.note" = "HDR 开（S2A_HDR）：HDR 窗口（RGB10A2 PQ 码值）旁路上屏抗锯齿、缩放滤镜（MetalFX / FSR）与补帧——8 位感知缩放不适配 PQ 码值（产品限制）；SDR 窗口照常。";
 "gfx.filter.nearest" = "2D 游戏专用";
 "gfx.fpsLimit" = "帧率上限";
 "gfx.fpsLimit.none" = "不限";
