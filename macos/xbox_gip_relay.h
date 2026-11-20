@@ -59,6 +59,66 @@ static inline int s2a_xbox_gip_is_device(int vid, int pid) {
     }
 }
 
+static inline int s2a_xbox_gip_is_announce(const uint8_t *r, size_t n) {
+    return r && n >= 4 && r[0] == 0x02;
+}
+
+static inline uint8_t s2a_xbox_gip_next_seq(uint8_t *seq) {
+    if (!seq) return 1;
+    uint8_t next = (uint8_t)(*seq + 1u);
+    if (next == 0) next = 1;
+    *seq = next;
+    return next;
+}
+
+static inline void s2a_xbox_gip_build_power(uint8_t seq, uint8_t out[5]) {
+    out[0] = 0x05;
+    out[1] = 0x20;
+    out[2] = seq;
+    out[3] = 0x01;
+    out[4] = 0x00;
+}
+
+static inline void s2a_xbox_gip_build_wake(uint8_t seq, uint8_t out[5]) {
+    out[0] = 0x05;
+    out[1] = 0x20;
+    out[2] = seq;
+    out[3] = 0x0f;
+    out[4] = 0x06;
+}
+
+enum {
+    S2A_XBOX_GIP_IO_OK = 0,
+    S2A_XBOX_GIP_IO_RECOVER = 1,
+    S2A_XBOX_GIP_IO_FATAL = 2,
+};
+
+/* 归类 USB 管道读错误：可恢复错误（pipe stall / overrun / timeout）在上限内走清 stall + 重唤醒，超限或设备拔出走致命退出 */
+static inline int s2a_xbox_gip_classify_io_error(uint32_t kr, uint32_t *consecutive_recoverable, uint32_t max_recoverable) {
+    if (kr == 0) {
+        if (consecutive_recoverable) *consecutive_recoverable = 0;
+        return S2A_XBOX_GIP_IO_OK;
+    }
+    /* kIOUSBPipeStalled (0xe000404f), kIOReturnOverrun (0xe00002ed),
+       kIOUSBTransactionTimeout (0xe0004051), kIOReturnTimeout (0xe00002d6) */
+    int recoverable = (kr == 0xe000404fu) || (kr == 0xe00002edu) ||
+                      (kr == 0xe0004051u) || (kr == 0xe00002d6u);
+    if (!recoverable) return S2A_XBOX_GIP_IO_FATAL;
+    if (consecutive_recoverable) {
+        (*consecutive_recoverable)++;
+        if (*consecutive_recoverable > max_recoverable) return S2A_XBOX_GIP_IO_FATAL;
+    }
+    return S2A_XBOX_GIP_IO_RECOVER;
+}
+
+/* 长时间未收到任何 USB 报文时，按节流周期发一次 GIP 电源保活 / 重唤醒，防止手柄内部软复位后静默失联 */
+static inline int s2a_xbox_gip_idle_should_rewake(uint64_t now_ms, uint64_t last_rx_ms, uint64_t last_rewake_ms,
+                                                  uint64_t idle_threshold_ms, uint64_t rewake_interval_ms) {
+    if (now_ms < last_rx_ms || now_ms - last_rx_ms < idle_threshold_ms) return 0;
+    if (last_rewake_ms > 0 && now_ms >= last_rewake_ms && now_ms - last_rewake_ms < rewake_interval_ms) return 0;
+    return 1;
+}
+
 static inline int s2a_xbox_gip_build_ack(const uint8_t *r, size_t n, uint8_t ack[13]) {
     if (!r || !ack || n < 3 || !(r[1] & 0x10)) return 0;
     ack[0] = 0x01;

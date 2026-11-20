@@ -428,6 +428,21 @@ final class NS2LauncherControllerTests: XCTestCase {
         XCTAssertEqual(recvB.withUnsafeBytes { $0.load(fromByteOffset: 24, as: Int16.self) }, -16000)
         close(gameB)
     }
+
+    func testXboxGipRelayWritesDiagnosticLogFile() throws {
+        // 中继日志落盘：启动器 GUI 进程 stderr 不可见，设置 log_path 后必须写入带时间戳的启动记录（供诊断包与排查读取）。
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("s2arm-xbox-log-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logURL = dir.appendingPathComponent("xbox-gip-relay.log")
+        let sockPath = "/tmp/s2arm-xbox-relay-logtest-\(getpid()).sock"
+        s2a_xbox_gip_relay_set_log_path(logURL.path)
+        defer { s2a_xbox_gip_relay_set_log_path(nil) }
+        XCTAssertEqual(s2a_xbox_gip_relay_start_ex(sockPath, 0, nil, nil), 0)
+        defer { s2a_xbox_gip_relay_stop() }
+        let text = try String(contentsOf: logURL, encoding: .utf8)
+        XCTAssertTrue(text.contains("[输入] Xbox GIP 中继服务已启动：\(sockPath)"), "中继启动日志必须落盘到指定文件")
+    }
 }
 
 private final class BareSystemController: GCController {

@@ -404,11 +404,16 @@ static void *s2a_xbox_gip_thread(void *arg) {
         goto cleanup_slot;
     }
 
+    uint8_t gip_seq = 0;
     if (outPipe > 0) {
-        static const uint8_t init_power[] = { 0x05, 0x20, 0x00, 0x01, 0x00 };
-        static const uint8_t init_wake[]  = { 0x05, 0x20, 0x00, 0x0f, 0x06 };
-        (*intf)->WritePipe(intf, outPipe, (void *)init_power, sizeof(init_power));
-        (*intf)->WritePipe(intf, outPipe, (void *)init_wake, sizeof(init_wake));
+        uint8_t init_power[5], init_wake[5];
+        s2a_xbox_gip_build_power(s2a_xbox_gip_next_seq(&gip_seq), init_power);
+        s2a_xbox_gip_build_wake(s2a_xbox_gip_next_seq(&gip_seq), init_wake);
+        IOReturn w1 = (*intf)->WritePipe(intf, outPipe, init_power, sizeof(init_power));
+        IOReturn w2 = (*intf)->WritePipe(intf, outPipe, init_wake, sizeof(init_wake));
+        if (w1 != kIOReturnSuccess || w2 != kIOReturnSuccess) {
+            fprintf(stderr, "[输入] 兜底手柄 %s：GIP 唤醒写包异常（power=0x%08x wake=0x%08x）\n", d->name, w1, w2);
+        }
     }
 
     fprintf(stderr, "[输入] 兜底手柄 %s（厂商 / 产品号 0x%04x / 0x%04x）：有线 Xbox 手柄接上，GIP 唤醒成功，直读按键与摇杆\n",
@@ -416,15 +421,45 @@ static void *s2a_xbox_gip_thread(void *arg) {
 
     uint8_t report[64];
     UInt32 size = sizeof(report);
+    uint32_t recoverable_errs = 0;
     while (d->is_xbox) {
         size = sizeof(report);
         kr = (*intf)->ReadPipe(intf, inPipe > 0 ? inPipe : 1, report, &size);
-        if (kr != kIOReturnSuccess) break;
+        int action = s2a_xbox_gip_classify_io_error((uint32_t)kr, &recoverable_errs, 5);
+        if (action == S2A_XBOX_GIP_IO_FATAL) {
+            fprintf(stderr, "[输入] 兜底手柄 %s：USB ReadPipe 结束 0x%08x\n", d->name, kr);
+            break;
+        }
+        if (action == S2A_XBOX_GIP_IO_RECOVER) {
+            fprintf(stderr, "[输入] 兜底手柄 %s：USB ReadPipe 可恢复错误 0x%08x（第 %u 次），清理 stall 并重发 GIP 唤醒\n",
+                    d->name, kr, recoverable_errs);
+            (*intf)->ClearPipeStall(intf, inPipe > 0 ? inPipe : 1);
+            if (outPipe > 0) {
+                uint8_t init_power[5], init_wake[5];
+                s2a_xbox_gip_build_power(s2a_xbox_gip_next_seq(&gip_seq), init_power);
+                s2a_xbox_gip_build_wake(s2a_xbox_gip_next_seq(&gip_seq), init_wake);
+                (*intf)->WritePipe(intf, outPipe, init_power, sizeof(init_power));
+                (*intf)->WritePipe(intf, outPipe, init_wake, sizeof(init_wake));
+            }
+            continue;
+        }
 
         uint8_t ack[13];
         int ack_len = s2a_gip_ack(report, size, ack);
         if (ack_len > 0 && outPipe > 0) {
-            (*intf)->WritePipe(intf, outPipe, ack, ack_len);
+            IOReturn wkr = (*intf)->WritePipe(intf, outPipe, ack, ack_len);
+            if (wkr == kIOUSBPipeStalled) {
+                (*intf)->ClearPipeStall(intf, outPipe);
+                (*intf)->WritePipe(intf, outPipe, ack, ack_len);
+            }
+        }
+        if (s2a_xbox_gip_is_announce(report, size) && outPipe > 0) {
+            fprintf(stderr, "[输入] 兜底手柄 %s：收到手柄重通告 0x02，重新发送 GIP 唤醒包\n", d->name);
+            uint8_t init_power[5], init_wake[5];
+            s2a_xbox_gip_build_power(s2a_xbox_gip_next_seq(&gip_seq), init_power);
+            s2a_xbox_gip_build_wake(s2a_xbox_gip_next_seq(&gip_seq), init_wake);
+            (*intf)->WritePipe(intf, outPipe, init_power, sizeof(init_power));
+            (*intf)->WritePipe(intf, outPipe, init_wake, sizeof(init_wake));
         }
 
         uint32_t bt = 0;

@@ -1416,6 +1416,33 @@ int main(int argc, const char **argv) {
             for (int i = 0; i < hp_n; i++) if (!strcmp(hp_out[i].name, "Xbox Relay Test")) found_relay = 1;
             expect(!found_relay, "Xbox GIP relay: EOF clears relay slot cleanly");
         }
+
+        // Xbox GIP 异常自愈与重唤醒纯函数验证（重通告 0x02、递增 seq、IO 错误分类、空闲保活节流）
+        const uint8_t ann_pkt[4] = {0x02, 0x20, 0x01, 0x1c};
+        expect(s2a_xbox_gip_is_announce(ann_pkt, sizeof ann_pkt) == 1, "Xbox GIP: 0x02 packet recognized as announce");
+        expect(s2a_xbox_gip_is_announce(gip_rep, sizeof gip_rep) == 0, "Xbox GIP: 0x20 input report is not announce");
+        expect(s2a_xbox_gip_is_announce(ann_pkt, 3) == 0, "Xbox GIP: truncated 0x02 packet rejected");
+
+        uint8_t seq = 254;
+        expect(s2a_xbox_gip_next_seq(&seq) == 255 && seq == 255, "Xbox GIP seq: 254 -> 255");
+        expect(s2a_xbox_gip_next_seq(&seq) == 1 && seq == 1, "Xbox GIP seq: 255 wraps to 1 (skips 0)");
+        uint8_t pwr[5] = {0}, wak[5] = {0};
+        s2a_xbox_gip_build_power(7, pwr);
+        s2a_xbox_gip_build_wake(8, wak);
+        expect(pwr[0] == 0x05 && pwr[1] == 0x20 && pwr[2] == 7 && pwr[3] == 0x01 && pwr[4] == 0x00, "Xbox GIP build_power packet");
+        expect(wak[0] == 0x05 && wak[1] == 0x20 && wak[2] == 8 && wak[3] == 0x0f && wak[4] == 0x06, "Xbox GIP build_wake packet");
+
+        uint32_t rec_errs = 0;
+        expect(s2a_xbox_gip_classify_io_error(0xe000404fu, &rec_errs, 2) == S2A_XBOX_GIP_IO_RECOVER && rec_errs == 1, "Xbox GIP IO: 1st pipe stall recoverable");
+        expect(s2a_xbox_gip_classify_io_error(0xe00002edu, &rec_errs, 2) == S2A_XBOX_GIP_IO_RECOVER && rec_errs == 2, "Xbox GIP IO: 2nd overrun recoverable");
+        expect(s2a_xbox_gip_classify_io_error(0xe0004051u, &rec_errs, 2) == S2A_XBOX_GIP_IO_FATAL && rec_errs == 3, "Xbox GIP IO: exceeding max_recoverable turns fatal");
+        expect(s2a_xbox_gip_classify_io_error(0, &rec_errs, 2) == S2A_XBOX_GIP_IO_OK && rec_errs == 0, "Xbox GIP IO: success resets recoverable error count");
+        expect(s2a_xbox_gip_classify_io_error(0xe00002c0u, &rec_errs, 2) == S2A_XBOX_GIP_IO_FATAL, "Xbox GIP IO: kIOReturnNoDevice is immediately fatal");
+
+        expect(s2a_xbox_gip_idle_should_rewake(5000, 1000, 1000, 10000, 10000) == 0, "Xbox GIP idle: below threshold does not rewake");
+        expect(s2a_xbox_gip_idle_should_rewake(11000, 1000, 0, 10000, 10000) == 1, "Xbox GIP idle: past threshold triggers rewake");
+        expect(s2a_xbox_gip_idle_should_rewake(15000, 1000, 11000, 10000, 10000) == 0, "Xbox GIP idle: throttled within rewake_interval");
+        expect(s2a_xbox_gip_idle_should_rewake(21000, 1000, 11000, 10000, 10000) == 1, "Xbox GIP idle: triggers again after rewake_interval");
     }
     char relayPath[96];
     snprintf(relayPath, sizeof relayPath, "/tmp/s2arm-motion-%d.sock", getpid());

@@ -13,6 +13,7 @@
 #include "../../../../../macos/xbox_gip_relay.h"
 #include <errno.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +21,11 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 enum { S2A_XBOX_RELAY_MAX_CLIENTS = 4 };
+enum { S2A_XBOX_RELAY_LOG_MAX_BYTES = 256 * 1024 };
 
 typedef struct {
     int active;
@@ -32,17 +35,19 @@ typedef struct {
     uint32_t buttons;
     int16_t ax[4];
     char name[96];
-    IOUSBInterfaceInterface **intf;
+    IOUSBInterfaceInterface190 **intf;
     int in_pipe;
 } relay_slot;
 
 static pthread_mutex_t g_relay_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_send_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_running = 0;
 static int g_usb_enabled = 0;
 static int g_listen_fd = -1;
 static int g_clients[S2A_XBOX_RELAY_MAX_CLIENTS];
 static char g_socket_path[104];
+static char g_log_path[512];
 static relay_slot g_slots[S2A_XBOX_GIP_RELAY_MAX];
 static s2a_xbox_gip_status_cb g_status_cb = NULL;
 static void *g_status_ctx = NULL;
@@ -51,6 +56,93 @@ static int g_accept_th_valid = 0;
 static pthread_t g_usb_th;
 static int g_usb_th_valid = 0;
 static CFRunLoopRef g_usb_rl = NULL;
+
+void s2a_xbox_gip_relay_set_log_path(const char *log_path) {
+    pthread_mutex_lock(&g_log_mu);
+    if (log_path && log_path[0]) {
+        strlcpy(g_log_path, log_path, sizeof(g_log_path));
+    } else {
+        g_log_path[0] = '\0';
+    }
+    pthread_mutex_unlock(&g_log_mu);
+}
+
+static void relay_log(const char *fmt, ...) {
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    fprintf(stderr, "%s\n", msg);
+
+    pthread_mutex_lock(&g_log_mu);
+    if (g_log_path[0]) {
+        struct stat st;
+        const char *mode = (stat(g_log_path, &st) == 0 && st.st_size > S2A_XBOX_RELAY_LOG_MAX_BYTES) ? "w" : "a";
+        FILE *fp = fopen(g_log_path, mode);
+        if (fp) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            struct tm tm_buf;
+            localtime_r(&tv.tv_sec, &tm_buf);
+            char ts[32];
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            fprintf(fp, "[%s.%03d] %s\n", ts, (int)(tv.tv_usec / 1000), msg);
+            fclose(fp);
+        }
+    }
+    pthread_mutex_unlock(&g_log_mu);
+}
+
+static uint64_t xbox_now_ms(void) {
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000ull;
+}
+
+static void xbox_clear_pipe_stall(IOUSBInterfaceInterface190 **intf, int has_190, int pipe) {
+    if (!intf || pipe <= 0) return;
+    if (has_190) {
+        (*intf)->ClearPipeStallBothEnds(intf, (UInt8)pipe);
+    } else {
+        (*intf)->ClearPipeStall(intf, (UInt8)pipe);
+    }
+}
+
+static IOReturn xbox_write_pipe_retry(IOUSBInterfaceInterface190 **intf, int has_190, int outPipe, const void *buf, UInt32 len) {
+    if (!intf || outPipe <= 0) return kIOReturnBadArgument;
+    IOReturn kr = (*intf)->WritePipe(intf, (UInt8)outPipe, (void *)buf, len);
+    if (kr == kIOUSBPipeStalled) {
+        xbox_clear_pipe_stall(intf, has_190, outPipe);
+        kr = (*intf)->WritePipe(intf, (UInt8)outPipe, (void *)buf, len);
+    }
+    return kr;
+}
+
+static IOReturn xbox_send_gip_wake(IOUSBInterfaceInterface190 **intf, int has_190, int outPipe, uint8_t *seq) {
+    uint8_t power[5], wake[5];
+    s2a_xbox_gip_build_power(s2a_xbox_gip_next_seq(seq), power);
+    s2a_xbox_gip_build_wake(s2a_xbox_gip_next_seq(seq), wake);
+    IOReturn kr1 = xbox_write_pipe_retry(intf, has_190, outPipe, power, sizeof(power));
+    IOReturn kr2 = xbox_write_pipe_retry(intf, has_190, outPipe, wake, sizeof(wake));
+    return kr1 != kIOReturnSuccess ? kr1 : kr2;
+}
+
+typedef struct {
+    uint8_t report[64];
+    int completed;
+    IOReturn kr;
+    UInt32 size;
+    CFRunLoopRef rl;
+} xbox_async_rx;
+
+static void xbox_read_pipe_cb(void *refcon, IOReturn result, void *arg0) {
+    xbox_async_rx *rx = (xbox_async_rx *)refcon;
+    if (!rx) return;
+    rx->kr = result;
+    rx->size = (UInt32)(uintptr_t)arg0;
+    rx->completed = 1;
+    if (rx->rl) CFRunLoopStop(rx->rl);
+}
 
 static void notify_status(const char *name, int connected, const char *blocked_by) {
     pthread_mutex_lock(&g_relay_mu);
@@ -133,7 +225,7 @@ static void *xbox_relay_usb_worker(void *arg) {
     pthread_mutex_unlock(&g_relay_mu);
 
     if (s2a_xbox_usb_has_hid_child(dev) || xbox_is_gc_listed()) {
-        fprintf(stderr, "[输入] Xbox GIP 中继 %s：系统已识别该手柄（HID / GameController），不独占抢占\n", name);
+        relay_log("[输入] Xbox GIP 中继 %s：系统已识别该手柄（HID / GameController），不独占抢占", name);
         goto cleanup_slot;
     }
 
@@ -141,7 +233,7 @@ static void *xbox_relay_usb_worker(void *arg) {
     SInt32 score = 0;
     kern_return_t kr = IOCreatePlugInInterfaceForService(dev, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID, &plug, &score);
     if (kr != KERN_SUCCESS || !plug) {
-        fprintf(stderr, "[输入] Xbox GIP 中继 %s：IOCreatePlugInInterfaceForService 失败 0x%x\n", name, kr);
+        relay_log("[输入] Xbox GIP 中继 %s：IOCreatePlugInInterfaceForService 失败 0x%x", name, kr);
         goto cleanup_slot;
     }
 
@@ -149,7 +241,7 @@ static void *xbox_relay_usb_worker(void *arg) {
     (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), (LPVOID *)&devIntf);
     (*plug)->Release(plug);
     if (!devIntf) {
-        fprintf(stderr, "[输入] Xbox GIP 中继 %s：QueryInterface kIOUSBDeviceInterfaceID 失败\n", name);
+        relay_log("[输入] Xbox GIP 中继 %s：QueryInterface kIOUSBDeviceInterfaceID 失败", name);
         goto cleanup_slot;
     }
 
@@ -163,7 +255,7 @@ static void *xbox_relay_usb_worker(void *arg) {
         if (!run) break;
 
         if (s2a_xbox_usb_has_hid_child(dev) || xbox_is_gc_listed()) {
-            fprintf(stderr, "[输入] Xbox GIP 中继 %s：系统已识别该手柄（HID / GameController），放弃独占\n", name);
+            relay_log("[输入] Xbox GIP 中继 %s：系统已识别该手柄（HID / GameController），放弃独占", name);
             kr = kIOReturnSuccess;
             break;
         }
@@ -179,9 +271,9 @@ static void *xbox_relay_usb_worker(void *arg) {
             s2a_xbox_usb_exclusive_owner(dev, owner, sizeof(owner));
             if (!logged_busy || strcmp(owner, last_owner) != 0) {
                 if (owner[0]) {
-                    fprintf(stderr, "[输入] Xbox GIP 中继 %s：USB 接口正被 %s 占用，等待释放（关闭该进程后自动接管）...\n", name, owner);
+                    relay_log("[输入] Xbox GIP 中继 %s：USB 接口正被 %s 占用，等待释放（关闭该进程后自动接管）...", name, owner);
                 } else {
-                    fprintf(stderr, "[输入] Xbox GIP 中继 %s：USB 接口被外部进程占用，等待释放...\n", name);
+                    relay_log("[输入] Xbox GIP 中继 %s：USB 接口被外部进程占用，等待释放...", name);
                 }
                 strlcpy(last_owner, owner, sizeof(last_owner));
                 logged_busy = 1;
@@ -200,7 +292,7 @@ static void *xbox_relay_usb_worker(void *arg) {
 
     if (!opened) {
         if (kr != kIOReturnSuccess) {
-            fprintf(stderr, "[输入] Xbox GIP 中继 %s：打开 USB 设备失败 0x%08x\n", name, kr);
+            relay_log("[输入] Xbox GIP 中继 %s：打开 USB 设备失败 0x%08x", name, kr);
         }
         (*devIntf)->Release(devIntf);
         goto cleanup_slot;
@@ -223,7 +315,8 @@ static void *xbox_relay_usb_worker(void *arg) {
     }
 
     io_service_t intfService = 0;
-    IOUSBInterfaceInterface **intf = NULL;
+    IOUSBInterfaceInterface190 **intf = NULL;
+    int has_190 = 0;
     int inPipe = -1, outPipe = -1;
     while ((intfService = IOIteratorNext(intfIter)) != 0) {
         IOCFPlugInInterface **intfPlug = NULL;
@@ -231,8 +324,13 @@ static void *xbox_relay_usb_worker(void *arg) {
         IOObjectRelease(intfService);
         if (kr != KERN_SUCCESS || !intfPlug) continue;
 
-        IOUSBInterfaceInterface **candidate = NULL;
-        (*intfPlug)->QueryInterface(intfPlug, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID), (LPVOID *)&candidate);
+        IOUSBInterfaceInterface190 **candidate = NULL;
+        int cand_190 = 0;
+        if ((*intfPlug)->QueryInterface(intfPlug, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID190), (LPVOID *)&candidate) == S_OK && candidate) {
+            cand_190 = 1;
+        } else {
+            (*intfPlug)->QueryInterface(intfPlug, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID), (LPVOID *)&candidate);
+        }
         (*intfPlug)->Release(intfPlug);
         if (!candidate) continue;
 
@@ -255,6 +353,7 @@ static void *xbox_relay_usb_worker(void *arg) {
 
         if (curIn > 0 && curOut > 0) {
             intf = candidate;
+            has_190 = cand_190;
             inPipe = curIn;
             outPipe = curOut;
             break;
@@ -265,17 +364,18 @@ static void *xbox_relay_usb_worker(void *arg) {
     IOObjectRelease(intfIter);
 
     if (!intf) {
-        fprintf(stderr, "[输入] Xbox GIP 中继 %s：未找到匹配 GIP (0xFF/0x47/0xD0) 且具备端点的接口\n", name);
+        relay_log("[输入] Xbox GIP 中继 %s：未找到匹配 GIP (0xFF/0x47/0xD0) 且具备端点的接口", name);
         (*devIntf)->USBDeviceClose(devIntf);
         (*devIntf)->Release(devIntf);
         goto cleanup_slot;
     }
 
+    uint8_t gip_seq = 0;
     if (outPipe > 0) {
-        static const uint8_t init_power[] = { 0x05, 0x20, 0x00, 0x01, 0x00 };
-        static const uint8_t init_wake[]  = { 0x05, 0x20, 0x00, 0x0f, 0x06 };
-        (*intf)->WritePipe(intf, outPipe, (void *)init_power, sizeof(init_power));
-        (*intf)->WritePipe(intf, outPipe, (void *)init_wake, sizeof(init_wake));
+        IOReturn wkr = xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+        if (wkr != kIOReturnSuccess) {
+            relay_log("[输入] Xbox GIP 中继 %s：首次 GIP 唤醒写包返回 0x%08x", name, wkr);
+        }
     }
 
     s2a_xbox_gip_relay_packet online_pkt;
@@ -286,38 +386,204 @@ static void *xbox_relay_usb_worker(void *arg) {
     online_pkt = make_slot_packet(slot, &g_slots[slot], 1);
     pthread_mutex_unlock(&g_relay_mu);
 
-    fprintf(stderr, "[输入] Xbox GIP 中继 %s（厂商 / 产品号 0x%04x / 0x%04x）：已由 S2Arm 独占接管并完成 GIP 唤醒，切换游戏不释放 USB\n",
-            name, vid, pid);
+    relay_log("[输入] Xbox GIP 中继 %s（厂商 / 产品号 0x%04x / 0x%04x）：已由 S2Arm 独占接管并完成 GIP 唤醒，切换游戏不释放 USB",
+              name, vid, pid);
     broadcast_packet(&online_pkt);
     notify_status(name, 1, "");
 
-    uint8_t report[64];
-    for (;;) {
-        pthread_mutex_lock(&g_relay_mu);
-        int run = g_running;
-        pthread_mutex_unlock(&g_relay_mu);
-        if (!run) break;
+    CFRunLoopRef worker_rl = CFRunLoopGetCurrent();
+    CFRunLoopSourceRef async_src = NULL;
+    IOReturn src_kr = (*intf)->CreateInterfaceAsyncEventSource(intf, &async_src);
+    if (src_kr == kIOReturnSuccess && async_src) {
+        CFRunLoopAddSource(worker_rl, async_src, kCFRunLoopDefaultMode);
+        xbox_async_rx rx;
+        memset(&rx, 0, sizeof(rx));
+        rx.rl = worker_rl;
+        int pending = 0;
+        uint32_t recoverable_errs = 0;
+        uint64_t last_rx_ms = xbox_now_ms();
+        uint64_t last_rewake_ms = last_rx_ms;
+        UInt8 pipe_ref = (UInt8)(inPipe > 0 ? inPipe : 1);
 
-        UInt32 size = sizeof(report);
-        kr = (*intf)->ReadPipe(intf, inPipe > 0 ? inPipe : 1, report, &size);
-        if (kr != kIOReturnSuccess) break;
+        for (;;) {
+            pthread_mutex_lock(&g_relay_mu);
+            int run = g_running;
+            pthread_mutex_unlock(&g_relay_mu);
+            if (!run) break;
 
-        uint8_t ack[13];
-        int ack_len = s2a_xbox_gip_build_ack(report, size, ack);
-        if (ack_len > 0 && outPipe > 0) {
-            (*intf)->WritePipe(intf, outPipe, ack, (UInt32)ack_len);
+            if (!pending) {
+                rx.completed = 0;
+                rx.kr = kIOReturnSuccess;
+                rx.size = 0;
+                IOReturn rkr = (*intf)->ReadPipeAsync(intf, pipe_ref, rx.report, sizeof(rx.report), xbox_read_pipe_cb, &rx);
+                if (rkr != kIOReturnSuccess) {
+                    int action = s2a_xbox_gip_classify_io_error((uint32_t)rkr, &recoverable_errs, 5);
+                    if (action == S2A_XBOX_GIP_IO_RECOVER) {
+                        relay_log("[输入] Xbox GIP 中继 %s：ReadPipeAsync 提交返回可恢复错误 0x%08x（第 %u 次），清理 stall 并重发 GIP 唤醒",
+                                  name, rkr, recoverable_errs);
+                        xbox_clear_pipe_stall(intf, has_190, inPipe);
+                        if (outPipe > 0) {
+                            IOReturn wkr = xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+                            if (wkr != kIOReturnSuccess) {
+                                relay_log("[输入] Xbox GIP 中继 %s：恢复唤醒写包失败 0x%08x", name, wkr);
+                                break;
+                            }
+                            last_rewake_ms = xbox_now_ms();
+                        }
+                        continue;
+                    }
+                    relay_log("[输入] Xbox GIP 中继 %s：ReadPipeAsync 提交失败 0x%08x", name, rkr);
+                    break;
+                }
+                pending = 1;
+            }
+
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 2.0, true);
+
+            if (rx.completed) {
+                pending = 0;
+                rx.completed = 0;
+                int action = s2a_xbox_gip_classify_io_error((uint32_t)rx.kr, &recoverable_errs, 5);
+                if (action == S2A_XBOX_GIP_IO_FATAL) {
+                    relay_log("[输入] Xbox GIP 中继 %s：ReadPipeAsync 结束 0x%08x", name, rx.kr);
+                    break;
+                }
+                if (action == S2A_XBOX_GIP_IO_RECOVER) {
+                    relay_log("[输入] Xbox GIP 中继 %s：ReadPipeAsync 可恢复错误 0x%08x（第 %u 次），清理 stall 并重发 GIP 唤醒",
+                              name, rx.kr, recoverable_errs);
+                    xbox_clear_pipe_stall(intf, has_190, inPipe);
+                    if (outPipe > 0) {
+                        IOReturn wkr = xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+                        if (wkr != kIOReturnSuccess) {
+                            relay_log("[输入] Xbox GIP 中继 %s：恢复唤醒写包失败 0x%08x", name, wkr);
+                            break;
+                        }
+                        last_rewake_ms = xbox_now_ms();
+                    }
+                    continue;
+                }
+
+                last_rx_ms = xbox_now_ms();
+
+                uint8_t ack[13];
+                int ack_len = s2a_xbox_gip_build_ack(rx.report, rx.size, ack);
+                if (ack_len > 0 && outPipe > 0) {
+                    IOReturn wkr = xbox_write_pipe_retry(intf, has_190, outPipe, ack, (UInt32)ack_len);
+                    if (wkr != kIOReturnSuccess) {
+                        relay_log("[输入] Xbox GIP 中继 %s：发送 GIP ACK 失败 0x%08x", name, wkr);
+                    }
+                }
+
+                if (s2a_xbox_gip_is_announce(rx.report, rx.size) && outPipe > 0) {
+                    relay_log("[输入] Xbox GIP 中继 %s：收到手柄重通告 0x02，重新发送 GIP 唤醒包", name);
+                    IOReturn wkr = xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+                    if (wkr != kIOReturnSuccess) {
+                        relay_log("[输入] Xbox GIP 中继 %s：重通告唤醒写包失败 0x%08x", name, wkr);
+                        break;
+                    }
+                    last_rewake_ms = xbox_now_ms();
+                }
+
+                uint32_t bt = 0;
+                int16_t ax[4] = {0};
+                if (s2a_xbox_gip_parse_report(rx.report, rx.size, &bt, ax)) {
+                    s2a_xbox_gip_relay_packet pkt;
+                    pthread_mutex_lock(&g_relay_mu);
+                    g_slots[slot].buttons = bt;
+                    memcpy(g_slots[slot].ax, ax, sizeof(g_slots[slot].ax));
+                    pkt = make_slot_packet(slot, &g_slots[slot], 1);
+                    pthread_mutex_unlock(&g_relay_mu);
+                    broadcast_packet(&pkt);
+                }
+            } else {
+                uint64_t check_entry = 0;
+                if (IORegistryEntryGetRegistryEntryID(dev, &check_entry) != KERN_SUCCESS) {
+                    relay_log("[输入] Xbox GIP 中继 %s：USB 设备已从 IORegistry 移除", name);
+                    break;
+                }
+                IOReturn pstat = (*intf)->GetPipeStatus(intf, pipe_ref);
+                if (pstat == kIOUSBPipeStalled) {
+                    relay_log("[输入] Xbox GIP 中继 %s：巡检发现 IN 管道处于 stall，执行清理并重唤醒", name);
+                    (*intf)->AbortPipe(intf, pipe_ref);
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+                    pending = 0;
+                    xbox_clear_pipe_stall(intf, has_190, inPipe);
+                    if (outPipe > 0) {
+                        IOReturn wkr = xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+                        if (wkr != kIOReturnSuccess) {
+                            relay_log("[输入] Xbox GIP 中继 %s：stall 清理后重唤醒失败 0x%08x", name, wkr);
+                            break;
+                        }
+                        last_rewake_ms = xbox_now_ms();
+                    }
+                    continue;
+                }
+                uint64_t now_ms = xbox_now_ms();
+                if (outPipe > 0 && s2a_xbox_gip_idle_should_rewake(now_ms, last_rx_ms, last_rewake_ms, 10000, 10000)) {
+                    uint8_t power[5];
+                    s2a_xbox_gip_build_power(s2a_xbox_gip_next_seq(&gip_seq), power);
+                    IOReturn wkr = xbox_write_pipe_retry(intf, has_190, outPipe, power, sizeof(power));
+                    last_rewake_ms = now_ms;
+                    if (wkr != kIOReturnSuccess) {
+                        relay_log("[输入] Xbox GIP 中继 %s：空闲保活写包失败 0x%08x，断开以等待重连", name, wkr);
+                        break;
+                    }
+                }
+            }
         }
 
-        uint32_t bt = 0;
-        int16_t ax[4] = {0};
-        if (s2a_xbox_gip_parse_report(report, size, &bt, ax)) {
-            s2a_xbox_gip_relay_packet pkt;
+        if (pending) {
+            (*intf)->AbortPipe(intf, pipe_ref);
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.2, true);
+        }
+        CFRunLoopRemoveSource(worker_rl, async_src, kCFRunLoopDefaultMode);
+        CFRelease(async_src);
+    } else {
+        relay_log("[输入] Xbox GIP 中继 %s：CreateInterfaceAsyncEventSource 失败 0x%08x，退回同步 ReadPipe", name, src_kr);
+        uint8_t report[64];
+        uint32_t recoverable_errs = 0;
+        for (;;) {
             pthread_mutex_lock(&g_relay_mu);
-            g_slots[slot].buttons = bt;
-            memcpy(g_slots[slot].ax, ax, sizeof(g_slots[slot].ax));
-            pkt = make_slot_packet(slot, &g_slots[slot], 1);
+            int run = g_running;
             pthread_mutex_unlock(&g_relay_mu);
-            broadcast_packet(&pkt);
+            if (!run) break;
+
+            UInt32 size = sizeof(report);
+            kr = (*intf)->ReadPipe(intf, inPipe > 0 ? inPipe : 1, report, &size);
+            int action = s2a_xbox_gip_classify_io_error((uint32_t)kr, &recoverable_errs, 5);
+            if (action == S2A_XBOX_GIP_IO_FATAL) {
+                relay_log("[输入] Xbox GIP 中继 %s：ReadPipe 结束 0x%08x", name, kr);
+                break;
+            }
+            if (action == S2A_XBOX_GIP_IO_RECOVER) {
+                relay_log("[输入] Xbox GIP 中继 %s：ReadPipe 可恢复错误 0x%08x（第 %u 次），清理 stall 并重发 GIP 唤醒",
+                          name, kr, recoverable_errs);
+                xbox_clear_pipe_stall(intf, has_190, inPipe);
+                if (outPipe > 0) xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+                continue;
+            }
+
+            uint8_t ack[13];
+            int ack_len = s2a_xbox_gip_build_ack(report, size, ack);
+            if (ack_len > 0 && outPipe > 0) {
+                xbox_write_pipe_retry(intf, has_190, outPipe, ack, (UInt32)ack_len);
+            }
+            if (s2a_xbox_gip_is_announce(report, size) && outPipe > 0) {
+                relay_log("[输入] Xbox GIP 中继 %s：收到手柄重通告 0x02，重新发送 GIP 唤醒包", name);
+                xbox_send_gip_wake(intf, has_190, outPipe, &gip_seq);
+            }
+
+            uint32_t bt = 0;
+            int16_t ax[4] = {0};
+            if (s2a_xbox_gip_parse_report(report, size, &bt, ax)) {
+                s2a_xbox_gip_relay_packet pkt;
+                pthread_mutex_lock(&g_relay_mu);
+                g_slots[slot].buttons = bt;
+                memcpy(g_slots[slot].ax, ax, sizeof(g_slots[slot].ax));
+                pkt = make_slot_packet(slot, &g_slots[slot], 1);
+                pthread_mutex_unlock(&g_relay_mu);
+                broadcast_packet(&pkt);
+            }
         }
     }
 
@@ -329,7 +595,7 @@ static void *xbox_relay_usb_worker(void *arg) {
     off_pkt = make_slot_packet(slot, &g_slots[slot], 0);
     pthread_mutex_unlock(&g_relay_mu);
 
-    fprintf(stderr, "[输入] Xbox GIP 中继：断开 %s\n", name);
+    relay_log("[输入] Xbox GIP 中继：断开 %s", name);
     broadcast_packet(&off_pkt);
     notify_status(name, 0, "");
 
@@ -361,7 +627,7 @@ static void xbox_relay_device_matched(void *refcon, io_iterator_t iterator) {
             continue;
         }
         if (s2a_xbox_usb_has_hid_child(dev) || xbox_is_gc_listed()) {
-            fprintf(stderr, "[输入] Xbox GIP 中继：发现 Xbox 手柄（0x%04x:0x%04x），系统已有 HID / GameController 驱动挂载，交由原生路径\n", vid, pid);
+            relay_log("[输入] Xbox GIP 中继：发现 Xbox 手柄（0x%04x:0x%04x），系统已有 HID / GameController 驱动挂载，交由原生路径", vid, pid);
             IOObjectRelease(dev);
             continue;
         }
@@ -573,7 +839,7 @@ int s2a_xbox_gip_relay_start_ex(const char *socket_path, int enable_usb, s2a_xbo
             g_usb_th_valid = 1;
         }
     }
-    fprintf(stderr, "[输入] Xbox GIP 中继服务已启动：%s\n", socket_path);
+    relay_log("[输入] Xbox GIP 中继服务已启动：%s", socket_path);
     return 0;
 }
 

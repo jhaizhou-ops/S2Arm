@@ -1419,6 +1419,9 @@ public final class S2ArmLauncherModel: ObservableObject {
         guard !xboxGipRelayStarted,
               env["XCTestConfigurationFilePath"] == nil, NSClassFromString("XCTestCase") == nil,
               env["S2ARM_CONTROL"] != "1" else { return }
+        let logsDir = provider.client.environment.privateRoot.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        s2a_xbox_gip_relay_set_log_path(logsDir.appendingPathComponent("xbox-gip-relay.log").path)
         if s2a_xbox_gip_relay_start(xboxGipSocketURL.path, nil, nil) == 0 {
             xboxGipRelayStarted = true
         }
