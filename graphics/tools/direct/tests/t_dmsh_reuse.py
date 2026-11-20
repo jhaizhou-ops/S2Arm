@@ -236,7 +236,11 @@ for tb in ('c1_full.tsv', 'cb_extent.tsv'):
 # ⑬ 编 Metal 的几段（编批库 / _se / _vp）按此刻空闲内存重算编译路数（Build.cs LiveLanes）：-j 2，空闲 6000 MB / 本单 8 核 → 1 + (3000 − 1065) ÷ 420 = 5 路；
 #    空闲 1000 MB 算出来不到 -j → 照旧 2 路（只放宽、不收窄）；本单 3 核 → 封顶 3 路
 for avail, jobs, want in (('6000', '8', 5), ('1000', '8', 2), ('6000', '3', 3)):
-    rc, o, _, _, _, _ = build(f'lanes{avail}_{jobs}', 'cas_lanes', env_add={'S2A_MEM_AVAIL_MB': avail, 'S2A_JOBS': jobs})
+    lp = os.path.join(t, f'lanes{avail}_{jobs}.progress.tsv')
+    rc, o, _, _, _, _ = build(f'lanes{avail}_{jobs}', 'cas_lanes', progress=lp, env_add={'S2A_MEM_AVAIL_MB': avail, 'S2A_JOBS': jobs})
+    acts = [json.loads(l.split('\t', 1)[1]) for l in open(lp, encoding='utf-8') if l.startswith('#dsh_activity\t')] if os.path.exists(lp) else []
+    se = [(x['target'], x['pool']) for x in acts if x['stage'] == '直连库·采样模拟变体' and x['state'] == 'active']
+    check(se == [(want, want * 2)], f'⑬ 空闲 {avail} MB、本单 {jobs} 核：采样模拟变体的活动记录报放宽后的路数 目标 / 任务池 {se}（期望 [({want}, {want * 2})]）')
     m = re.search(r'采样模拟变体：(\d+) 路编', o)
     check(rc == 0 and m is not None and int(m.group(1)) == want, f'⑬ 空闲 {avail} MB、本单 {jobs} 核：采样模拟变体 {m.group(1) if m else "没打"} 路（期望 {want}），退出 {rc}')
     u = re.search(r'编批库：(\d+) 路编', o)   # 只有第一次冷编有批要编；后两次批全拿缓存，这段不读内存、不打行

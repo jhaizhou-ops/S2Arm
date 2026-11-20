@@ -638,8 +638,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         int Mb(long n) => (int)Math.Max(1, (n + (1 << 20) - 1) >> 20);
         var jobs = reuse.Values.Select(h => (Run: (Action)(() => Reused(h, false)), Mb: 0)).Concat(vinReuse.Values.Select(h => (Run: (Action)(() => Reused(h, true)), Mb: 0)))
             .Concat(units.Select(b => (Run: (Action)(() => OneBatch(b)), Mb: Mb(b.Sum(k => plan.Len[k]))))).Concat(vinPlanOrder.Select(b => (Run: (Action)(() => VinOne(b)), Mb: Mb(b.Sum(k => Unity.PyLen(vinSrc[k])))))).ToList();
+        int lanes = jobs.Any(j => j.Mb > 0) ? LiveLanes("编批库") : NJ; using var wide = Metal.Widen(lanes);   // 全拿缓存（没有要编的批）不读内存、不打行；先于 Ticker：活动记录报放宽后的路数
         using var tk = new Ticker("直连库·编批库（MB）", jobs.Sum(j => j.Mb));
-        int lanes = jobs.Any(j => j.Mb > 0) ? LiveLanes("编批库") : NJ; using var wide = Metal.Widen(lanes);   // 全拿缓存（没有要编的批）不读内存、不打行
         Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
         var vinOrder = vinPlanOrder;
         if (!failed.IsEmpty)
@@ -804,8 +804,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var all = Keys.Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("se tried", all.Count);
         // 进度：这一段在「编批库」计数满了之后才跑，每个要模拟的键单独编一次 Metal，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）
-        using var tk = new Ticker("直连库·采样模拟变体", all.Count);
         int lanes = LiveLanes("采样模拟变体"); using var wide = Metal.Widen(lanes);
+        using var tk = new Ticker("直连库·采样模拟变体", all.Count);
         Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { SeOne(k, want); } finally { tk.Step(); }
@@ -840,8 +840,8 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var vs = stage.Where(x => x.Value == "vs").Select(x => x.Key).Where(k => MAC.Has(k + "_b.metal")).ToList();
         Count("vp vertex shaders", vs.Count);
         if (union == 0) return;
-        using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，逐键编、在编批库之后
         int lanes = LiveLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes);
+        using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，逐键编、在编批库之后
         Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { VpOne(k, union, Bits); } finally { tk.Step(); }
@@ -905,7 +905,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
     }
     internal static string TableHead(string lib) => $"# chain {Path.GetFileName(Path.TrimEndingDirectorySeparator(lib))} inputs {ReadStamp(lib).GetValueOrDefault("inputs", "none")}";
     internal static string OutDir => Out; internal static string IosOutDir => IosOut; internal static string PublishSide => Publish; internal static bool IosLibOn => IosLib; internal static bool NoMacOn => NoMac;
-    internal static int Jobs => NJ; internal static string ProfileTable(string n) => Table(n); internal static string ChainV => Chain;
+    internal static int Jobs => Metal.Cur > 0 ? Metal.Cur : NJ;   // 放宽期间报实际路数（Ticker 的活动记录「目标 / 任务池」），否则 -j internal static string ProfileTable(string n) => Table(n); internal static string ChainV => Chain;
 }
 
 /// <summary>出库的一侧（Mac / iOS）：文件名 → 字节，只在内存（同原 dmsh_out.Side）</summary>
@@ -1070,6 +1070,7 @@ static class Metal
 {
     static readonly Dictionary<string, (string[] Cmd, string Sdk, byte[] Ident)> T = new();
     static string Work; static SemaphoreSlim Gate; static int Cap;
+    internal static int Cur;   // 当前放宽到的路数（Widen 期间；0 = 没放宽）：Build.Jobs 报给界面的「目标 / 任务池」
     static readonly ConcurrentDictionary<string, long> St = new();
     static readonly ConcurrentBag<(double S, string Target, int Bytes)> Times = new();
     /// <summary>→ null 正常；编译工具用不了 → 一行【红】原因（调用方打出来、整次停，不再逐支翻译编译）</summary>
@@ -1168,13 +1169,14 @@ static class Metal
     }
     // name：源文件名（不带 .metal），按它编。有全局构造函数的源码，库里嵌着文件名（_GLOBAL__sub_I_<name>.metal）：这种库按「名 + 源码」缓存，
     //   其余（库里没有文件名）按源码缓存、同源的键共用；查时先源码键、再名键
-    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.LiveLanes）；Dispose 收回到 -j。不比 -j 宽就什么都不做（返回 null，using 照常可用）</summary>
+    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.LiveLanes）；Dispose 收回到 -j。期间 Cur = 实际路数（不比 -j 宽时就是 -j）</summary>
     public static IDisposable Widen(int lanes)
     {
-        int extra = lanes - Cap; if (extra <= 0) return null;
-        Gate.Release(extra); return new Narrow(extra);
+        int extra = Math.Max(0, lanes - Cap); Cur = Cap + extra;
+        if (extra > 0) Gate.Release(extra);
+        return new Narrow(extra);
     }
-    sealed class Narrow(int extra) : IDisposable { public void Dispose() { for (int i = 0; i < extra; i++) Gate.Wait(); } }
+    sealed class Narrow(int extra) : IDisposable { public void Dispose() { for (int i = 0; i < extra; i++) Gate.Wait(); Cur = 0; } }
     public static byte[] Compile(string target, string msl, string name) => Compile(target, msl, name, out _);
     /// <summary>编译身份（编译约定 + 编译器版本）的十六进制：批成员索引按它分键，换编译器不拿旧库</summary>
     public static string IdentHex(string target) => Convert.ToHexString(T[target].Ident).ToLowerInvariant()[..16];
