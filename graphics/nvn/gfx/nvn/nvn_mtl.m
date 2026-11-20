@@ -18385,6 +18385,7 @@ void dm_gfx_shot_at(long k, const char *path) {
 }
 // DM_NVN_SHOT_OUT=WIDTHxHEIGHT (for picture quality metrics): the present-frame screenshot instead captures the result "upscaled to this resolution by present_encode", i.e. the picture the player sees on screen; screen=0 (texture dump) is unaffected
 static id<MTLTexture> present_raw_src(id<MTLTexture> src);   // shot reads an enlarged sRGB window texture through it
+static int present_hdr_pf(MTLPixelFormat pf);   // PR6：present 族旁的格式归类（present_hdr_pf 定义处）——截图分支只引分类，非 8 位窗才进离屏编码
 static void shot(id<MTLTexture> src, const char *path, int screen, const int crop[4]) {
     static int out_w = -1, out_h;
     if (out_w < 0) {
@@ -18393,11 +18394,25 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
         if (e && sscanf(e, "%d%c%d%c", &w, &sep, &h, &extra) == 3 && sep == 'x' && w > 0 && h > 0) { out_w = w; out_h = h; }
     }
     id<MTLTexture> read = src;
-    if (out_w && screen) {
-        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:out_w height:out_h mipmapped:NO];
+    // PR6（评审稿 v3 §4 PR6 / §3 A9、B8）：截图/判定/录像走与 present 相同的 mode 1 副本——非 8 位窗（HDR10 / float 类，present_hdr_pf
+    //   分类）的屏幕截图经 present_encode 同一离屏编码出 BGRA8 再写 PNG：vi 答过的 HDR10 窗即 mode 1 副本（先 BT.2020→BT.709 矩阵、
+    //   负值截断在矩阵后，再肩部压缩到 SDR 白、SDR gamma 编码——保高光层次与色相，与 present 屏上同一张画）；未答过的 10 位窗 /
+    //   float 窗与 present 同为平凡直通。下面的 8 位 PNG 通路只认 RGBA8/BGRA8：10 位 PQ 码值原样读回既是红失败、也不是玩家看到的画面。
+    //   尺寸 = 画面尺寸（放大的窗口贴图按游戏尺寸，同下面 8 位路径存 PNG 的口径）；DM_NVN_SHOT_OUT 给了显式尺寸仍照它优先。
+    //   8 位源（现状全部真实路径）不进这里，字节照旧——off 不变量。判定/录像（自动玩家截图）走 grab_present，PR3b 已在同一
+    //   present_encode 出口上选过模式，本分支补齐的是写 PNG 的截图一路。
+    int shots_m1 = 0;
+    if (screen && !out_w) { int c = present_hdr_pf(src.pixelFormat); shots_m1 = c == HDR_PF_HDR10 || c == HDR_PF_FLOAT; }
+    if (screen && (out_w || shots_m1)) {
+        NSUInteger sw = out_w, sh = out_h;
+        if (shots_m1) {   // 画面尺寸：放大的窗口贴图按游戏尺寸（rs_cw / rs_ch），同下面 8 位路径存 PNG 的口径
+            sw = src.width; sh = src.height;
+            if (rs_up_on() && rs_state(src) == RS_SCALED) { sw = rs_cw(src); sh = rs_ch(src); }
+        }
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:sw height:sh mipmapped:NO];
         d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead; d.storageMode = MTLStorageModePrivate;
         id<MTLTexture> out = [g_dev newTextureWithDescriptor:d];
-        if (!out) { MLOG("【红】 cannot create the screenshot output texture %dx%d", out_w, out_h); return; }
+        if (!out) { MLOG("【红】 cannot create the screenshot output texture %lux%lu", (unsigned long)sw, (unsigned long)sh); return; }
         id<MTLCommandBuffer> cb = q_cb();
         if (!present_encode(cb, src, out, crop) || !cb_run(cb)) return;
         read = out;
