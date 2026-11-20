@@ -639,14 +639,15 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         var jobs = reuse.Values.Select(h => (Run: (Action)(() => Reused(h, false)), Mb: 0)).Concat(vinReuse.Values.Select(h => (Run: (Action)(() => Reused(h, true)), Mb: 0)))
             .Concat(units.Select(b => (Run: (Action)(() => OneBatch(b)), Mb: Mb(b.Sum(k => plan.Len[k]))))).Concat(vinPlanOrder.Select(b => (Run: (Action)(() => VinOne(b)), Mb: Mb(b.Sum(k => Unity.PyLen(vinSrc[k])))))).ToList();
         using var tk = new Ticker("直连库·编批库（MB）", jobs.Sum(j => j.Mb));
-        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
+        int lanes = jobs.Any(j => j.Mb > 0) ? LiveLanes("编批库") : NJ; using var wide = Metal.Widen(lanes);   // 全拿缓存（没有要编的批）不读内存、不打行
+        Parallel.ForEach(InOrder(jobs), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, j => { j.Run(); tk.Step(j.Mb); });   // 大的先编；拼源码与回填在多出的那些线程里做，Metal 不断粮
         var vinOrder = vinPlanOrder;
         if (!failed.IsEmpty)
         {
             var fs = new HashSet<string>(failed.Keys, StringComparer.Ordinal);
             var (_, order) = Unity.VinPlan(vinReps, Hot, UNITY, Dg, vinSrc, vinCap, fs);
             foreach (var m in fs) foreach (var sd in dirs) sd.Drop(m + "_bv.metallib");
-            Parallel.ForEach(InOrder(order.Where(b => !vinBuilt.ContainsKey(string.Join(',', b)))), new ParallelOptions { MaxDegreeOfParallelism = NJ * 2 }, VinOne);
+            Parallel.ForEach(InOrder(order.Where(b => !vinBuilt.ContainsKey(string.Join(',', b)))), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, VinOne);
             vinOrder = order;
         }
         Count("vin batches", vinOrder.Count(b => vinBuilt.GetValueOrDefault(string.Join(',', b))) + vinReuse.Values.Count(h => vinBuilt.GetValueOrDefault(string.Join(',', h.Keys))));
@@ -756,12 +757,12 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Phase("客体输入");
     }
 
-    // ---------------- 变体两段的编译路数 ----------------
+    // ---------------- 编 Metal 的几段（编批库、_se、_vp）按此刻空闲内存定路数 ----------------
     //   -j 是出包开头按「dsh 主进程 1.7 GB + 1 个 metal 峰值 + (J − 1) × metal p90」从当时的空闲内存反推的（tools/cores.sh S2A_DIRECT_J），
-    //   玩家机开着别的程序时常常只剩 1 路，且整次出库都按它。到 _se / _vp 这两段，主进程早已缩回（实测 0.2 GB），只剩逐键的 metal 进程：
-    //   按此刻空闲内存重算同一公式（主进程已算在「已用」里，不再扣），上限本单核数 S2A_JOBS，下限 -j。
-    //   实测（16 GB / 8 核、开头空闲 5.8 GB → -j 1）：1 万多键的 _se 单核二十多分钟，此刻空闲 5.4 GB 重算是 4 路。读不到空闲内存（Windows 等）照旧 -j
-    static int VariantLanes(string phase)
+    //   玩家机开着别的程序时常常只剩 1 路，且整次出库都按它。到这几段开头，主进程已经在跑、它的内存已算在「已用」里：
+    //   按此刻空闲内存重算同一公式（不再扣主进程），上限本单核数 S2A_JOBS，下限 -j。读不到空闲内存（Windows 等）照旧 -j。
+    //   实测（16 GB / 8 核、开头空闲 4.8–5.8 GB → -j 1）：编批库单核约 16 分钟、1 万多键的 _se 单核二十多分钟；到这两段时空闲 5.4–5.6 GB，重算是 4 路
+    static int LiveLanes(string phase)
     {
         static int Env(string n, int d) => int.TryParse(Environment.GetEnvironmentVariable(n), out var v) && v > 0 ? v : d;
         long avail = AvailMb();
@@ -804,7 +805,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("se tried", all.Count);
         // 进度：这一段在「编批库」计数满了之后才跑，每个要模拟的键单独编一次 Metal，没计数器时界面停在 100% 像卡住（0.6.0 实测 1 万多键单核十几分钟）
         using var tk = new Ticker("直连库·采样模拟变体", all.Count);
-        int lanes = VariantLanes("采样模拟变体"); using var wide = Metal.Widen(lanes);
+        int lanes = LiveLanes("采样模拟变体"); using var wide = Metal.Widen(lanes);
         Parallel.ForEach(InOrder(all), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { SeOne(k, want); } finally { tk.Step(); }
@@ -840,7 +841,7 @@ static partial class Build   // 影响翻译产物的那段（包记录切片、
         Count("vp vertex shaders", vs.Count);
         if (union == 0) return;
         using var tk = new Ticker("直连库·顶点补齐变体", vs.Count);   // 进度：同 SeFinish，逐键编、在编批库之后
-        int lanes = VariantLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes);
+        int lanes = LiveLanes("顶点补齐变体"); using var wide = Metal.Widen(lanes);
         Parallel.ForEach(InOrder(vs), new ParallelOptions { MaxDegreeOfParallelism = lanes * 2 }, k =>
         {
             try { VpOne(k, union, Bits); } finally { tk.Step(); }
@@ -1167,7 +1168,7 @@ static class Metal
     }
     // name：源文件名（不带 .metal），按它编。有全局构造函数的源码，库里嵌着文件名（_GLOBAL__sub_I_<name>.metal）：这种库按「名 + 源码」缓存，
     //   其余（库里没有文件名）按源码缓存、同源的键共用；查时先源码键、再名键
-    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.VariantLanes）；Dispose 收回到 -j。不比 -j 宽就什么都不做（返回 null，using 照常可用）</summary>
+    /// <summary>同时编译的 metal 进程临时放宽到 lanes 路（Build.LiveLanes）；Dispose 收回到 -j。不比 -j 宽就什么都不做（返回 null，using 照常可用）</summary>
     public static IDisposable Widen(int lanes)
     {
         int extra = lanes - Cap; if (extra <= 0) return null;
