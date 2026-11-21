@@ -74,6 +74,8 @@ static void display_focus_publish_ex(BOOL active, BOOL may_freeze) {
 }
 static void display_focus_publish(BOOL active) { display_focus_publish_ex(active, YES); }
 // 游戏窗口对游戏算不算前台（#279）：我们自己挂在游戏窗口上的系统输入框是 key window 时照旧算前台，否则游戏收到失焦会把输入当取消
+// Logical pad state before game-focus muting, for navigation in the player sheet.
+void s2a_mac_player_sheet_sample(uint32_t buttons);
 int s2a_text_input_mac_is_input_window(NSWindow *w);   // macos/textinput_mac.m
 static BOOL game_window_focused(NSWindow *game) {
     NSWindow *key = NSApp.keyWindow;
@@ -1416,6 +1418,7 @@ static void sample_input(void) {
             live_ctrls[j].vendorName.UTF8String ?: "?", live_ctrls[j].productCategory.UTF8String ?: "?");
     }
     logged_mix = mix;
+    uint32_t sheet_buttons = 0;
     int slot_of[S2A_LIVE_MAX];
     // 面板里登记成第几位就是游戏里的第几位（#1264：中途连上 DualSense、面板 P1 是它，宿主却照「已在玩的留原位」把玩家 1 留给原手柄，
     //   原手柄关掉后 DualSense 还在二号位，单人游戏读不到）；没登记的手柄照旧留原槽
@@ -1447,6 +1450,9 @@ static void sample_input(void) {
                 : live_hid[j] ? live_hid[j]->buttons
                 : live_ble[j] >= 0 ? ble[live_ble[j]].buttons : gen1_state[gen1_of(live_ids[j]) - g_gen1].buttons;
             slot_buttons[s] = mapped_face_buttons(live_ctrls[j], raw, slot_buttons[s]);
+            sheet_buttons |= slot_buttons[s];
+            if (slot_sticks[s][1] > 18000) sheet_buttons |= 1u << 13;
+            if (slot_sticks[s][1] < -18000) sheet_buttons |= 1u << 15;
             if (s == 0) {
                 primary_available = YES;
                 GCPhysicalInputProfile *profile = live_ctrls[j].physicalInputProfile;
@@ -1456,6 +1462,7 @@ static void sample_input(void) {
             }
         }
     }
+    s2a_mac_player_sheet_sample(sheet_buttons);
     int ns2_style[NS2_RELAY_PLAYERS] = {0};   // 玩家 2 起的单只 Joy-Con 照它占的那一格的样式整形（下一拍读时用；没占格 = 转横握）
     for (int i = 0; i < S2A_MAX_PADS; i++) for (int p = 0; p < NS2_RELAY_PLAYERS; p++) if (pad_id[i] == &ns2_slot_id[p]) ns2_style[p] = atomic_load(&g_slot_style[i]);
     for (int p = 0; p < NS2_RELAY_PLAYERS; p++) s2a_mac_ns2_set_player_style(p, ns2_style[p]);   // 玩家 0 没占格（0）时照游戏给 P1 的样式
@@ -2251,4 +2258,10 @@ void s2a_mac_gpu_stuck(const char *why) {
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ s2a_host_shutdown("GPU 卡住，玩家选退出"); });
         }
     });
+}
+
+#include "../ios/local_player_prefs.h"
+__attribute__((visibility("default"), used)) int s2a_local_player_persist(const char *uid, const char *name, const char *folder) {
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:@"org.s2arm.macos.nx2apple"];
+    return s2a_store_local_player(defaults, uid, name, folder);
 }

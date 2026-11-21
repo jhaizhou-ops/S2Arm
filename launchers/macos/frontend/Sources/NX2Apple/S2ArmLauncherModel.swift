@@ -1457,6 +1457,9 @@ public final class S2ArmLauncherModel: ObservableObject {
             controllerArguments["playerName"] = player.name
             controllerArguments["playerFolder"] = player.folder
         }
+        if let listJSON = Self.localPlayersJSON() {
+            controllerArguments["localPlayers"] = listJSON
+        }
         controllerGameStarted = false
         do {
             let sink = EventSink { [weak self] event in self?.ingest(event, slot: .game) }
@@ -1498,6 +1501,15 @@ public final class S2ArmLauncherModel: ObservableObject {
     /// 作业请求里的 player 字段（起局 pack/jobs/build.py、导入社区存档 saves.py 都按 saves.requested_player 校验）；没建过玩家 = nil
     static func playerRequest(_ defaults: UserDefaults = .standard) -> [String: String]? {
         launchPlayer(defaults).map { ["user": $0.serviceUser, "name": $0.name, "folder": $0.folder] }
+    }
+    /// 全部本地玩家的 JSON 数组串，供多人手柄起局时同步进 Switch AccountManager（与 NS 多用户行为一致）
+    static func localPlayersJSON(_ defaults: UserDefaults = .standard) -> String? {
+        let items = playerStore(defaults: defaults).all.map {
+            ["user": $0.serviceUser, "name": $0.name, "folder": $0.folder]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: items, options: []),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        return str
     }
     func shutdownControllerConnection() {
         controller.shutdown()

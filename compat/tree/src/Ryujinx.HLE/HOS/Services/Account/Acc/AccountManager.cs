@@ -24,6 +24,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
         private readonly HorizonClient _horizonClient;
 
         private readonly ConcurrentDictionary<string, UserProfile> _profiles;
+        private string[] _userOrder = [];
         private UserProfile[] _storedOpenedUsers;
 
         public UserProfile LastOpenedUser { get; private set; }
@@ -219,7 +220,7 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         internal int GetUserCount()
         {
-            return _profiles.Count;
+            return GetAllUsers().Count();
         }
 
         internal bool TryGetUser(UserId userId, out UserProfile profile)
@@ -229,7 +230,14 @@ namespace Ryujinx.HLE.HOS.Services.Account.Acc
 
         public IEnumerable<UserProfile> GetAllUsers()
         {
-            return _profiles.Values;
+            if (_userOrder.Length == 0) return _profiles.Values;
+            return _userOrder.Select(key => _profiles.TryGetValue(key, out var user) ? user : null)
+                .Where(user => user != null);
+        }
+
+        public void SetUserOrder(IEnumerable<UserId> orderedUsers)
+        {
+            _userOrder = orderedUsers.Select(id => id.ToString()).Distinct().ToArray();
         }
 
         internal IEnumerable<UserProfile> GetOpenedUsers()

@@ -24,6 +24,8 @@ namespace S2A.Services.Tests
             var users = system.AccountManager;
             UserId current = users.LastOpenedUser.UserId;
 
+            long prompt = 0;
+            string answer = null;
             (string Result, UserId Uid) Psel(params UserId[] invalid)
             {
                 var normal = new AppletSession();
@@ -38,7 +40,13 @@ namespace S2A.Services.Tests
                 }
                 game.Push(ui);
                 new PlayerSelectApplet(system).Start(normal, new AppletSession());
-                if (!game.TryPop(out byte[] r) || r.Length < 0x18) return ("无完整回包", UserId.Null);
+                if (prompt != 0)
+                {
+                    TextInput.Answer(prompt, answer != null, answer);
+                    prompt = 0;
+                }
+                byte[] r = null;
+                if (!System.Threading.SpinWait.SpinUntil(() => game.TryPop(out r), 2000) || r.Length < 0x18) return ("无完整回包", UserId.Null);
                 return ($"长 0x{r.Length:X}、结果 0x{BitConverter.ToUInt64(r, 0):X}", new UserId(r[8..0x18]));
             }
             string Who(UserId id, params (string Name, UserId Id)[] known)
@@ -69,6 +77,61 @@ namespace S2A.Services.Tests
             var n2 = Psel(a.Uid);
             Check("负对照：名单不含当前用户 → 当前用户", "长 0x18、结果 0x0、当前用户", $"{n2.Result}、{Who(n2.Uid, ("当前用户", current))}");
             Check("负对照不建用户", "+2", $"+{users.GetAllUsers().Count() - before}");
+
+            // The launcher roster is authoritative even when the title already has legacy profiles.
+            const string second = "123456789abcdef0123456789abcdef0";
+            string roster = """[{"user":"first","name":"One","folder":"SaveData"},{"user":"123456789abcdef0123456789abcdef0","name":"Two","folder":"SaveData-Two"}]""";
+            Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS", roster);
+            Environment.SetEnvironmentVariable("S2A_PLAYER_USER", "first");
+            LocalPlayer.Select(Host.Device, 1);
+            TextInput.BeginHook = (_, _) => 0; // Headless host.
+            var chosen = Psel(current);
+            Check("第二位玩家使用启动器已有用户号", second, chosen.Uid.ToString());
+            string[] offered = null;
+            TextInput.BeginHook = (id, json) =>
+            {
+                using var request = System.Text.Json.JsonDocument.Parse(json);
+                offered = request.RootElement.GetProperty("localPlayers").EnumerateArray().Select(n => n.GetString()).ToArray();
+                prompt = id;
+                return 1;
+            };
+            answer = "0";
+            Check("唯一可选的已有用户仍在列表中", second, Psel(current).Uid.ToString());
+            Check("列表过滤已在玩的用户", "Two", string.Join(",", offered));
+            answer = "1";
+            Check("可手动选择第二个已有用户", second, Psel().Uid.ToString());
+            answer = null;
+            Check("取消创建得到 NS 的取消结果", "长 0x18、结果 0x27C", Psel(current, chosen.Uid).Result);
+            Check("无可选用户直接进入创建", "0", offered.Length.ToString());
+            answer = "new:Three";
+            string stored = null;
+            var store = LocalPlayer.StorePlayer;
+            LocalPlayer.StorePlayer = (uid, nickname, folder) => stored = uid;
+            try
+            {
+                var created = Psel(current);
+                Check("列表还有已有用户时可以选择创建，返回持久化的 UID", "True",
+                    (!created.Uid.IsNull && created.Uid.ToString() == stored).ToString());
+                string next = roster[..^1] + ",{\"user\":\"" + stored + "\",\"name\":\"Three\",\"folder\":\"SaveData-Three\"}]";
+                Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS", next);
+                LocalPlayer.Select(Host.Device, 1);
+                answer = "0";
+                Check("再次起局，按同一排除名单取回原来的 UID", stored, Psel(current, chosen.Uid).Uid.ToString());
+                Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS", """[{"user":"first","name":"One","folder":"SaveData"}]""");
+                LocalPlayer.Select(Host.Device, 1);
+                answer = null;
+                Check("只有一个 S2Arm 用户时取消直接新建", "长 0x18、结果 0x27C", Psel().Result);
+                Check("只有一个 S2Arm 用户时跳过选择列表", "0", offered.Length.ToString());
+                Check("多人加入后主用户身份", current.ToString(), users.LastOpenedUser.UserId.ToString());
+            }
+            finally
+            {
+                TextInput.BeginHook = null;
+                LocalPlayer.StorePlayer = store;
+                LocalPlayer.ResetSession();
+                Environment.SetEnvironmentVariable("S2A_PLAYER_USER", null);
+                Environment.SetEnvironmentVariable("S2A_LOCAL_PLAYERS", null);
+            }
 
             while (system.AppletState.Messages.TryDequeue(out _)) { }
         }

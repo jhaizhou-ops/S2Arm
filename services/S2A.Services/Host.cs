@@ -365,6 +365,7 @@ namespace S2A.Services
             HorizonHost.Reset();
             GuestMemory.ResetSession();
             Application.Reset();
+            LocalPlayer.ResetSession();
             Aoc.Reset();
             SystemDataSeen.Clear();
             Ryujinx.HLE.S2ASessionState.End();
