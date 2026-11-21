@@ -236,8 +236,16 @@ void nvn_gpu_pool_release(nvn_gpu_pool_table t) {
     pthread_mutex_unlock(&g_mu);
 }
 
-static int pool_set_mask(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, int compute, uint32_t *mask) {
-    *mask = 0;
+// 整池组的备忘键里「这个池绑定」那一项：（绑定号, 池快照指针）混成 64 位。每组各项相加（与阶段顺序无关）。
+static inline uint64_t pool_key_mix(uint32_t binding, nvn_gpu_pool_table t) {
+    uint64_t x = (uint64_t)(uintptr_t)t * 0x9E3779B97F4A7C15ull + binding + 1u;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull; x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+// 本笔哪些组带整池数组（mask），以及每组的备忘键（key[set] = 该组各池绑定 pool_key_mix 之和；组内同一池绑定被多个阶段共用只算一次）。
+static int pool_set_mask(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, int compute, uint32_t *mask, uint64_t *key) {
+    *mask = 0; key[0] = key[1] = key[2] = key[3] = 0;
     nvn_gpu_pool_table seen[4][32] = {{0}}; uint32_t bind[4][32] = {{0}}, n[4] = {0};
     for (int st = compute ? NVN_GPU_SH_CS : 0; st < (compute ? NVN_GPU_SH_CS + 1 : 5); st++) {
         for (uint32_t i = 0; i < 64; i++) {
@@ -252,6 +260,7 @@ static int pool_set_mask(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p
             if (k == n[e->set]) {
                 if (k == 32) { set_sticky(c, NVN_GPU_E_LAYOUT, "too many pool bindings"); return 0; }
                 bind[e->set][k] = e->binding; seen[e->set][k] = t; n[e->set]++;
+                key[e->set] += pool_key_mix(e->binding, t);
             } else if (seen[e->set][k] != t) { set_sticky(c, NVN_GPU_E_LAYOUT, "shared pool binding differs across stages"); return 0; }
             *mask |= 1u << e->set;
         }
@@ -260,6 +269,7 @@ static int pool_set_mask(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p
 }
 
 static int pool_alloc_set(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, uint32_t set, VkDescriptorSet *out) {
+    const int tm = g_draw_tm; const uint64_t t0 = tm ? now_ns() : 0;   // 读数：建池 + 分组用多久（nvk_gputime 开着才计）
     const struct dset_lay *l = p->dlay[set]; VkDescriptorPoolSize sizes[32] = {{0}}; uint32_t ns = 0;
     if (!l) { set_sticky(c, NVN_GPU_E_LAYOUT, "pool set layout missing"); return 0; }
     for (uint32_t i = 0; i < l->nb; i++) {
@@ -283,11 +293,13 @@ static int pool_alloc_set(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *
     ai.descriptorPool = dp; ai.descriptorSetCount = 1; ai.pSetLayouts = &p->dsl[set];
     vr = vkAllocateDescriptorSets(g.d, &ai, out);
     if (vr != VK_SUCCESS) { set_sticky(c, NVN_GPU_E_OOM, "pool vkAllocateDescriptorSets failed %d", vr); return 0; }
+    __atomic_fetch_add(&g_pool_n[PN_NEW], 1, __ATOMIC_RELAXED);
+    if (tm) __atomic_fetch_add(&g_pool_ns[0], now_ns() - t0, __ATOMIC_RELAXED);
     return 1;
 }
 
 static int pool_write_sets(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s *p, int compute, uint32_t dirty) {
-    VkWriteDescriptorSet writes[6 * 64]; uint32_t n = 0;
+    VkWriteDescriptorSet writes[6 * 64]; uint32_t n = 0; uint64_t elems = 0;   // elems：这一次整池写入的描述符项数（读数）
     VkDescriptorImageInfo *copies[6 * 64] = {0};
     for (int st = compute ? NVN_GPU_SH_CS : 0; st < (compute ? NVN_GPU_SH_CS + 1 : 5); st++) {
         for (uint32_t i = 0; i < 64; i++) {
@@ -309,10 +321,16 @@ static int pool_write_sets(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe_s 
                 for (uint32_t k = 0; k <= t->count; k++) images[k].imageView = feedback_view(c, t->objects[k]);
                 copies[n] = images; w.pImageInfo = images;
             }
+            elems += w.descriptorCount;
             writes[n++] = w;
         }
     }
-    if (n) vkUpdateDescriptorSets(g.d, n, writes, 0, NULL);
+    if (n) {
+        const int tm = g_draw_tm; const uint64_t t0 = tm ? now_ns() : 0;
+        vkUpdateDescriptorSets(g.d, n, writes, 0, NULL);
+        if (tm) __atomic_fetch_add(&g_pool_ns[1], now_ns() - t0, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_pool_n[PN_ELEMS], elems, __ATOMIC_RELAXED);
+    }
     for (uint32_t k = 0; k < n; k++) free(copies[k]);
     return 1;
 }
@@ -334,6 +352,9 @@ static int pool_check_layouts(struct nvn_gpu_cmd_s *c, const struct nvn_gpu_pipe
 }
 
 #ifdef S2A_NVK_POOL_HOST_TEST
+// 用例读整池组读数（只增不清零，用例自取前后差）：0 要的组数 1 备忘命中 2 新建 3 因反馈拷贝在用而绕开备忘 4 整池写入的描述符项数。
+uint64_t nvn_gpu_vk_test_pool_sets(int which) { return which >= 0 && which < PN_N ? __atomic_load_n(&g_pool_n[which], __ATOMIC_RELAXED) : 0; }
+void nvn_gpu_vk_test_pool_memo_refresh(void) { g_pmemo_cur = -1; }   // 用例改了 nvk_pool_memo 的读值后，让后端下一笔绑定就重读，不等 256 次
 int nvn_gpu_vk_test_pool_refs(nvn_gpu_pool_table t) {
     pthread_mutex_lock(&g_mu);
     struct nvn_gpu_pool_table_s *p = g.pools;

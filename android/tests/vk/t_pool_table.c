@@ -8,6 +8,8 @@
 extern int nvn_gpu_vk_test_pool_live(nvn_gpu_pool_table);
 extern int nvn_gpu_vk_test_pool_refs(nvn_gpu_pool_table);
 extern void nvn_gpu_vk_test_pool_hook(void (*)(nvn_gpu_pool_table));
+extern uint64_t nvn_gpu_vk_test_pool_sets(int which);   // 整池组读数（只增不清零）：0 要的组数 1 备忘命中 2 新建 3 因反馈拷贝在用绕开备忘 4 整池写入的描述符项数
+extern void nvn_gpu_vk_test_pool_memo_refresh(void);    // 改了 nvk_pool_memo 的读值后，让后端下一笔绑定就重读
 static void release_in_bind(nvn_gpu_pool_table t) { nvn_gpu_pool_release(t); }
 // 让真 GPU 停在「已提交、围栏未到」：被测那次提交先扣在主机侧，放行时才真正交给驱动。
 // 不用「命令缓冲开头等事件、主机再 vkSetEvent」——命令缓冲在途时主机设它正在等的事件违反
@@ -59,6 +61,48 @@ static VkResult pool_hold_release(void) {
     VkResult r = __real_vkQueueSubmit(pool_hold_queue, pool_hold_count, pool_hold_submits, pool_test_fence);
     __atomic_store_n(&pool_test_held, 0, __ATOMIC_RELEASE);
     return r;
+}
+
+// 整池组备忘用例：同一段里连画两笔（两笔的差别见 mode），提交、等完，返回这一段的读数差，并核输出缓冲里的像素（来自第二笔用的那一组描述符）。
+//   mode 0：两笔之间只把同样的池快照再绑一遍（回放每笔都这么做）→ 备忘开着时第二笔直接用第一笔写好的组；
+//   mode 1：第二笔前把贴图池换成另一张快照（指针不同、第 64 项内容不同）→ 必须新建 + 重写，第二笔读到的是新快照；
+//   mode 2：第二笔前把普通绑定（输出缓冲）换成另一块 → 必须新建，两块输出各是各自那一笔的像素。
+// d 返回读数差：0 要的组数 1 备忘命中 2 新建 3 绕开备忘 4 整池写入的描述符项数。
+static uint64_t g_pool_memo_ticket = 100;
+static void pool_memo_seg(nvn_gpu_pipe pipe, int mode, nvn_gpu_buf out, nvn_gpu_buf out_b, nvn_gpu_pool_table t0, nvn_gpu_pool_table t1,
+                          nvn_gpu_pool_table smp, uint64_t d[5], const float *want, const float *want_b, const char *what) {
+    nvn_gpu_err err = {0}; uint64_t s0[5];
+    for (int i = 0; i < 5; i++) s0[i] = nvn_gpu_vk_test_pool_sets(i);
+    nvn_gpu_cmd c = begin_cmd(); nvn_gpu_set_pipe(c, pipe);
+    nvn_gpu_binding b = {.ent=2, .cls=NVN_GPU_RES_SSBO}; b.u.b.buf = out; b.u.b.len = 7 * 16;
+    nvn_gpu_bind(c, NVN_GPU_SH_CS, &b, 1);
+    nvn_gpu_rc r = nvn_gpu_pool_bind(c, NVN_GPU_SH_CS, 0, t0, &err);
+    CHECK(nvn_gpu_ok(r), "%s: pool image bind: rc=%d %s", what, r.code, err.why);
+    r = nvn_gpu_pool_bind(c, NVN_GPU_SH_CS, 1, smp, &err);
+    CHECK(nvn_gpu_ok(r), "%s: pool sampler bind: rc=%d %s", what, r.code, err.why);
+    nvn_gpu_dispatch(c, pipe, 7, 1, 1, NULL, 0);
+    if (mode == 0) {
+        r = nvn_gpu_pool_bind(c, NVN_GPU_SH_CS, 0, t0, &err); CHECK(nvn_gpu_ok(r), "%s: rebind image: rc=%d %s", what, r.code, err.why);
+        r = nvn_gpu_pool_bind(c, NVN_GPU_SH_CS, 1, smp, &err); CHECK(nvn_gpu_ok(r), "%s: rebind sampler: rc=%d %s", what, r.code, err.why);
+    } else if (mode == 1) {
+        r = nvn_gpu_pool_bind(c, NVN_GPU_SH_CS, 0, t1, &err); CHECK(nvn_gpu_ok(r), "%s: replace image table: rc=%d %s", what, r.code, err.why);
+    } else {
+        b.u.b.buf = out_b; nvn_gpu_bind(c, NVN_GPU_SH_CS, &b, 1);
+    }
+    nvn_gpu_dispatch(c, pipe, 7, 1, 1, NULL, 0);
+    const uint64_t ticket = g_pool_memo_ticket++;
+    r = nvn_gpu_cmd_commit(c, ticket, on_done, NULL, &err);
+    CHECK(nvn_gpu_ok(r), "%s: commit: rc=%d %s", what, r.code, err.why);
+    if (nvn_gpu_ok(r)) {
+        r = nvn_gpu_fence_wait(ticket, 5000000000ull, &err);
+        CHECK(nvn_gpu_ok(r), "%s: fence: rc=%d %s", what, r.code, err.why);
+        const float *got = (const float *)buf_cpu(out), *got_b = out_b ? (const float *)buf_cpu(out_b) : NULL;
+        for (unsigned i = 0; i < 28; i++) {
+            CHECK(got[i] >= want[i] - .01f && got[i] <= want[i] + .01f, "%s output[%u]: expected %.2f got %.2f", what, i, want[i], got[i]);
+            if (mode == 2 && got_b) CHECK(got_b[i] >= want_b[i] - .01f && got_b[i] <= want_b[i] + .01f, "%s second output[%u]: expected %.2f got %.2f", what, i, want_b[i], got_b[i]);
+        }
+    }
+    for (int i = 0; i < 5; i++) d[i] = nvn_gpu_vk_test_pool_sets(i) - s0[i];
 }
 
 int main(int argc, char **argv) {
@@ -234,6 +278,57 @@ gpu_done:
             pool_test_hold = 0;
             if (pool_test_held) (void)pool_hold_release();   // 中途失败也要把扣住的提交交出去，围栏才会到
             g_fence_held = NULL;
+        }
+        // ---- 整池数组组备忘（nvk_pool_memo）：同一段里「布局 + 普通绑定 + 池快照」都相同的整池组只建一次、只写一次整张表 ----
+        // 修前每一笔绘制 / 派发都新建一个只装它的描述符池、分一组、把整张表重写一遍；修后键相同的第二笔直接用第一笔写好的组。
+        // 键里有池快照的指针和普通绑定：换了快照或换了输出缓冲，必须重新建 + 重写（读到的是各自的内容）。
+        if (pipe && tex && blue && view && dv && samp && linear) {
+            nvn_gpu_view bluev = make_view(blue);
+            nvn_gpu_pool_item mi[65] = {{0}}, ms[65] = {{0}};
+            nvn_gpu_pool_desc mid = {.kind=NVN_GPU_POOL_IMAGE, .count=65, .items=mi}, msd = {.kind=NVN_GPU_POOL_SAMPLER, .count=65, .items=ms};
+            mid.dummy.view = dv; msd.dummy.samp = samp;
+            mi[0].state = NVN_GPU_POOL_READY; mi[0].resource.view = view;
+            mi[64].state = NVN_GPU_POOL_READY; mi[64].resource.view = bluev;
+            ms[0].state = NVN_GPU_POOL_READY; ms[0].resource.samp = samp;
+            ms[64].state = NVN_GPU_POOL_READY; ms[64].resource.samp = linear;
+            nvn_gpu_pool_table tx = NULL, ty = NULL, ts = NULL;   // X：第 64 项是蓝；Y：第 64 项是渐变图（和 X 只差这一项）；ts：采样器表
+            r = nvn_gpu_pool_create(&mid, &tx, &err); CHECK(nvn_gpu_ok(r) && tx, "pool memo table X create: rc=%d %s", r.code, err.why);
+            mi[64].resource.view = view;
+            r = nvn_gpu_pool_create(&mid, &ty, &err); CHECK(nvn_gpu_ok(r) && ty, "pool memo table Y create: rc=%d %s", r.code, err.why);
+            r = nvn_gpu_pool_create(&msd, &ts, &err); CHECK(nvn_gpu_ok(r) && ts, "pool memo sampler table create: rc=%d %s", r.code, err.why);
+            if (bluev) nvn_gpu_view_release(bluev);   // 表 X 自己持有一份
+            nvn_gpu_buf mo[6]; for (int i = 0; i < 6; i++) mo[i] = make_buf(sizeof output_initial, NVN_GPU_MEM_SHARED, output_initial);   // 每段各用各的输出缓冲，前一段的像素不会遮住后一段的错
+            const float want_x[28] = {0,1,0,1, .5f,.5f,0,1, 0,0,1,1, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+            const float want_y[28] = {0,1,0,1, .5f,.5f,0,1, 0,1,0,1, 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0};
+            uint64_t d[5];
+            if (tx && ty && ts && mo[0] && mo[1] && mo[2] && mo[3] && mo[4] && mo[5]) {
+#define POOL_MEMO_EXPECT(what, e0, e1, e2, e4) \
+                CHECK(d[0] == (e0) && d[1] == (e1) && d[2] == (e2) && d[4] == (e4), \
+                      what ": need/hit/made/elems expected %d/%d/%d/%d, got %llu/%llu/%llu/%llu", (e0), (e1), (e2), (e4), \
+                      (unsigned long long)d[0], (unsigned long long)d[1], (unsigned long long)d[2], (unsigned long long)d[4])
+                // 两笔之间只重绑同样的池快照：要 2 组、命中 1 组、新建 1 组，整池只写一次（66 张贴图 + 66 个采样器 = 132 项）
+                pool_memo_seg(pipe, 0, mo[0], NULL, tx, NULL, ts, d, want_x, NULL, "pool memo same key");
+                POOL_MEMO_EXPECT("pool memo same key", 2, 1, 1, 132);
+                // 第二笔换了贴图池快照（只有第 64 项不同）：不得命中，必须读到新快照里的内容（输出第 2 个像素的蓝变绿）
+                pool_memo_seg(pipe, 1, mo[1], NULL, tx, ty, ts, d, want_y, NULL, "pool memo table change");
+                POOL_MEMO_EXPECT("pool memo table change", 2, 0, 2, 264);
+                // 第二笔换了普通绑定（输出缓冲）：不得命中
+                pool_memo_seg(pipe, 2, mo[2], mo[3], tx, NULL, ts, d, want_x, want_x, "pool memo binding change");
+                POOL_MEMO_EXPECT("pool memo binding change", 2, 0, 2, 264);
+                // 开关 nvk_pool_memo=0：回到每笔都新建 + 整池重写；再开回来恢复命中
+                g_pool_memo_flag = 0; nvn_gpu_vk_test_pool_memo_refresh();
+                pool_memo_seg(pipe, 0, mo[4], NULL, tx, NULL, ts, d, want_x, NULL, "pool memo off");
+                POOL_MEMO_EXPECT("pool memo off", 2, 0, 2, 264);
+                g_pool_memo_flag = -1; nvn_gpu_vk_test_pool_memo_refresh();
+                pool_memo_seg(pipe, 0, mo[5], NULL, tx, NULL, ts, d, want_x, NULL, "pool memo back on");
+                POOL_MEMO_EXPECT("pool memo back on", 2, 1, 1, 132);
+#undef POOL_MEMO_EXPECT
+            }
+            g_pool_memo_flag = -1; nvn_gpu_vk_test_pool_memo_refresh();
+            for (int i = 0; i < 6; i++) if (mo[i]) nvn_gpu_buf_release(mo[i], NULL, NULL);
+            if (tx) nvn_gpu_pool_release(tx);
+            if (ty) nvn_gpu_pool_release(ty);
+            if (ts) nvn_gpu_pool_release(ts);
         }
         if (newer) nvn_gpu_pool_release(newer);
         if (output2) nvn_gpu_buf_release(output2, NULL, NULL);

@@ -83,9 +83,9 @@ src=(android/tests/vk/t_pool_table.c android/native/nvn/backend_vulkan.c android
 for i in "${!src[@]}"; do src[$i]="$repo/${src[$i]}"; done
 if [ -n "$mode" ]; then
     cp "$repo/android/native/nvn/backend_vulkan.c" "$out/mutant.c"
-    python3 - "$repo/android/native/nvn/backend_vulkan_pool.inc" "$out/backend_vulkan_pool.inc" "$mode" <<'PYMUT'
+    python3 - "$repo/android/native/nvn/backend_vulkan_pool.inc" "$out/backend_vulkan_pool.inc" "$mode" "$out/mutant.c" <<'PYMUT'
 import pathlib, sys
-src, dst, mode = sys.argv[1:]
+src, dst, mode, cpath = sys.argv[1:]
 s = pathlib.Path(src).read_text()
 mutations = {
  '-neg-image': ('t->images[i].imageView = v->view;', 't->images[i].imageView = (i == 64 ? dv : v)->view;'),
@@ -102,11 +102,29 @@ mutations = {
  '-neg-aggregate': ('if (limit) { pool_cmd_unref(c, t); return pool_bind_error(c, err, NVN_GPU_E_UNSUPPORTED, limit); }', 'if (0 && limit) { pool_cmd_unref(c, t); return pool_bind_error(c, err, NVN_GPU_E_UNSUPPORTED, limit); }'),
  '-neg-sampler-resource': ('d->kind == NVN_GPU_POOL_IMAGE && (uint64_t)d->count + 1 > l->maxPerStageResources', '(uint64_t)d->count + 1 > l->maxPerStageResources'),
  '-neg-preflight': ('if (pool_shader_source(compute)) return pool_pipeline_limit(p, graphics);', 'if (0 && pool_shader_source(compute)) return pool_pipeline_limit(p, graphics);'),
+ # 整池组备忘（nvk_pool_memo）：键里不放池快照指针 → 换了快照却命中旧组
+ '-neg-memo-key': ('key[e->set] += pool_key_mix(e->binding, t);', 'key[e->set] += pool_key_mix(e->binding, NULL);'),
 }
-if mode not in mutations: raise SystemExit('unknown pool mutation: ' + mode)
-a, b = mutations[mode]
-if s.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
-pathlib.Path(dst).write_text(s.replace(a, b))
+# 下面几条改的是 backend_vulkan.c（已拷成 mutant.c），.inc 原样放过去
+cmutations = {
+ # 整池组永不命中 = 修前的行为：同键第二笔还是新建 + 整池重写
+ '-neg-memo-miss': ('if (m->h1 == h1[set] && m->h2 == h2[set] && m->dsl == p->dsl[set])', 'if (!(pool_dirty >> set & 1) && m->h1 == h1[set] && m->h2 == h2[set] && m->dsl == p->dsl[set])'),
+ # 开关 nvk_pool_memo=0 不起作用
+ '-neg-memo-flag': ('(g_pmemo_cur && !pool_fb)', '(1 && !pool_fb)'),
+ # 整池组的键里不放这一笔的普通绑定 → 换了输出缓冲却命中旧组，第二块输出缓冲没人写
+ '-neg-memo-binding': ('for (int k = 0; k < 5; k++) { h1[set] = (h1[set] ^ v[k])', 'for (int k = 0; k < 5 && !(pool_dirty >> set & 1); k++) { h1[set] = (h1[set] ^ v[k])'),
+}
+if mode not in mutations and mode not in cmutations: raise SystemExit('unknown pool mutation: ' + mode)
+if mode in mutations:
+    a, b = mutations[mode]
+    if s.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
+    pathlib.Path(dst).write_text(s.replace(a, b))
+else:
+    a, b = cmutations[mode]
+    cs = pathlib.Path(cpath).read_text()
+    if cs.count(a) != 1: raise SystemExit('pool mutation anchor changed: ' + mode)
+    pathlib.Path(cpath).write_text(cs.replace(a, b))
+    pathlib.Path(dst).write_text(s)
 PYMUT
     src[1]="$out/mutant.c"
 fi
@@ -132,6 +150,10 @@ if [ -n "$mode" ]; then
         -neg-aggregate) expected='aggregate stage resources 66 images' ;;
         -neg-sampler-resource) expected='samplers must not count against maxPerStageResources' ;;
         -neg-preflight) expected='small pool pipeline aggregate 64 images'  ;;
+        -neg-memo-key) expected='pool memo table change output\[10\]' ;;
+        -neg-memo-miss) expected='pool memo same key: need/hit/made/elems expected 2/1/1/132' ;;
+        -neg-memo-flag) expected='pool memo off: need/hit/made/elems expected 2/0/2/264' ;;
+        -neg-memo-binding) expected='pool memo binding change second output\[0\]' ;;
         *) exit 2 ;;
     esac
     grep -q "FAIL .*${expected}" "$out/run.log" || { echo "mutation $mode failed somewhere else" >&2; exit 1; }

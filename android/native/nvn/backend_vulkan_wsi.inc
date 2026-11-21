@@ -505,6 +505,14 @@ nvn_gpu_rc nvn_gpu_present(nvn_gpu_surface s, const nvn_gpu_drawable *dr, const 
           snprintf(b, sizeof b, "描述符细分（每帧毫秒，近 300 帧）：分配 %.2f、构造写入项 %.2f、写入 %.2f、绑定 %.2f；每帧重写 %.0f 组（其中备忘命中 %.0f 组）、写 %.0f 条描述符",
               v4[0] / 300.0 / 1e6, v4[1] / 300.0 / 1e6, v4[2] / 300.0 / 1e6, v4[3] / 300.0 / 1e6, nst / 300.0, diag_delta(&g_desc_hit, &l_hit) / 300.0, nwt / 300.0);
           nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b); }
+        { static uint64_t l_pn[PN_N], l_pns[2]; uint64_t pn[PN_N], pns[2];   // 整池数组组（贴图池 / 采样器池整表一个绑定）：没有这类组时不打
+          for (int i = 0; i < PN_N; i++) pn[i] = diag_delta(&g_pool_n[i], &l_pn[i]);
+          for (int i = 0; i < 2; i++) pns[i] = diag_delta(&g_pool_ns[i], &l_pns[i]);
+          if (pn[PN_NEED]) {
+              snprintf(b, sizeof b, "整池数组组（每帧，近 300 帧）：要 %.1f 组、备忘命中 %.1f 组、新建 %.1f 组（因反馈拷贝在用绕开备忘 %.1f 组）；整池写入 %.0f 项；新建（建池 + 分组）%.2f 毫秒、整池写入 %.2f 毫秒；nvk_pool_memo=%d",
+                  pn[PN_NEED] / 300.0, pn[PN_HIT] / 300.0, pn[PN_NEW] / 300.0, pn[PN_FB] / 300.0, pn[PN_ELEMS] / 300.0, pns[0] / 300.0 / 1e6, pns[1] / 300.0 / 1e6, pool_memo_flag());
+              nvn_plat_log(NVN_PLAT_LOG_INFO, "gpu", b);
+          } }
         { static uint64_t l_rb; const double rb = (double)diag_delta(&g_dyn_rebind, &l_rb) / 300.0;   // 动态 UBO 偏移（#1233）读数
           snprintf(b, sizeof b, "动态 UBO 偏移（每帧，近 300 帧）：只换偏移、不重写组、只重绑 %.0f 次；用动态偏移的管线 %llu 条（建过带 UBO 的管线 %llu 条）；设备动态 UBO 上限 %u；nvk_desc_memo=%d",
               rb, (unsigned long long)__atomic_load_n(&g_dyn_pipes[0], __ATOMIC_RELAXED), (unsigned long long)__atomic_load_n(&g_dyn_pipes[1], __ATOMIC_RELAXED), g_max_dyn_ubo, desc_memo_flag());
