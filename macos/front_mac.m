@@ -192,6 +192,7 @@ static BOOL ble_raw_source;   // 这一拍的输入来自报原始方向的单�
 //   系统手柄先连上占了槽 0 时这几样走系统手柄那一路（同 #282 只有玩家 1 有体感 / 震动）。sample_input 写，任意线程读；缺省 1 = 同改前
 // P1（槽 0）是哪一位通道玩家（#520：分配玩家 / 拆开后 P1 不一定是通道玩家 0）；不是 NS2 手柄为 -1。P1 的体感 / 鼠标 / 震动跟它走
 static _Atomic int g_slot0_ns2 = 1, g_slot0_player = 0;
+static _Atomic int g_slot0_system_joycon_pair;
 static BOOL ns2_leads(void) { return s2a_mac_ns2_status() == NS2_STATUS_READY && atomic_load(&g_slot0_ns2); }
 static int ns2_lead_player(void) { return atomic_load(&g_slot0_player); }
 // 事件驱动输入（A2）：同一份前端状态同时写进 runtime/src/pad.c，InputPump 找到 s2a_vpad_read_ex 后就等
@@ -1135,7 +1136,8 @@ __attribute__((visibility("default"), used)) int s2a_pad_read_mouse_slot(int slo
     return 0;
 }
 // 每一格的实体手柄是什么样式（#520，同原机：手柄号的样式由连着的那只手柄定）：服务层 InputPump 多手柄时照它配每一格（游戏收就用，不收照旧）。
-//   Ryujinx ControllerType：Pro 1、一对 4、左只 8、右只 16；系统手柄 / 键盘 / 没人回 0（照服务层原来的配法）
+//   Ryujinx ControllerType：Pro 1、一对 4、左只 8、右只 16；GameController 合并的一代双 Joy-Con 同样报一对。
+//   其余系统手柄 / 键盘 / 没人回 0（照服务层原来的配法）。
 __attribute__((visibility("default"), used)) int s2a_vpad_slot_style(int slot) {
     if (slot < 0 || slot >= S2A_MAX_PADS) return 0;
     const void *owner = pad_id[slot];
@@ -1152,7 +1154,7 @@ __attribute__((visibility("default"), used)) int s2a_vpad_slot_style(int slot) {
         s2a_joycon_info jc[16]; int n = s2a_joycon_list(jc, 16);
         for (int i = 0; i < n; i++) if (!strcmp(jc[i].id, left)) return jc[i].pid == 0x2006 ? 1 << 3 : jc[i].pid == 0x2007 ? 1 << 4 : 0;
     }
-    return 0;
+    return slot == 0 && atomic_load(&g_slot0_system_joycon_pair) ? 1 << 2 : 0;
 }
 // 分配玩家的顺序表（#520 E）：启动器写 ~/Library/Application Support/S2Arm/pad-order.json（launchers PlayerAssignment.orderFile），
 //   这里约每秒看一次修改时间，变了就重读、清掉槽位表照新顺序重排（s2a_slot_plan 之后照常「留原槽」）。读不到 / 读不懂就照连接顺序（同改前）
@@ -1459,6 +1461,8 @@ static void sample_input(void) {
     int ns2_style[NS2_RELAY_PLAYERS] = {0};   // 玩家 2 起的单只 Joy-Con 照它占的那一格的样式整形（下一拍读时用；没占格 = 转横握）
     for (int i = 0; i < S2A_MAX_PADS; i++) for (int p = 0; p < NS2_RELAY_PLAYERS; p++) if (pad_id[i] == &ns2_slot_id[p]) ns2_style[p] = atomic_load(&g_slot_style[i]);
     for (int p = 0; p < NS2_RELAY_PLAYERS; p++) s2a_mac_ns2_set_player_style(p, ns2_style[p]);   // 玩家 0 没占格（0）时照游戏给 P1 的样式
+    if (pad_owner[0] != owner_before[0])
+        atomic_store(&g_slot0_system_joycon_pair, gen1_rumble_mask(pad_owner[0]) == 3);
     for (int i = 0; i < S2A_MAX_PADS; i++)   // 槽位换了手柄（或清空）：重新起算「接上多久」
         if (pad_owner[i] != owner_before[i]) atomic_store(&pad_owner_since[i], pad_owner[i] ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0);
     sample_slot_motion(owner_before);
