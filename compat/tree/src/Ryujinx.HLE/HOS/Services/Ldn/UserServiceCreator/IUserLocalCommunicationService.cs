@@ -30,6 +30,34 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
         private const string DefaultSubnetMask = "255.255.255.0";
         private const bool IsDevelopment = false;
 
+        private static bool LdnAutoRequested =>
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal) &&
+            string.IsNullOrEmpty(Environment.GetEnvironmentVariable("S2A_LDN_SERVER")) &&
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
+
+        internal static MultiplayerMode SelectAutoMode(MultiplayerMode mode, Func<bool> switchRoomFound)
+        {
+            if (!LdnAutoRequested || mode == MultiplayerMode.LdnMitm)
+            {
+                return mode;
+            }
+
+            if (mode == MultiplayerMode.Disabled)
+            {
+                return MultiplayerMode.LdnMitm;
+            }
+
+            try
+            {
+                return switchRoomFound() ? MultiplayerMode.LdnMitm : mode;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.ServiceLdn, $"Auto LDN Switch probe failed, keeping RyuLDN: {ex.Message}");
+                return mode;
+            }
+        }
+
         private readonly KEvent _stateChangeEvent;
         private int _stateChangeEventHandle;
 
@@ -214,7 +242,13 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                 if (config.ProxyIp == 0)
                 {
-                    (_, UnicastIPAddressInformation unicastAddress) = NetworkHelpers.GetLocalInterface(context.Device.Configuration.MultiplayerLanInterfaceId);
+                    // ldn_mitm advertises a real LAN address. Use the same address the control
+                    // channel selected, otherwise a second enumeration can hand the game en0 while
+                    // the room TCP connection is bound to en8.
+                    IPAddress ldnAddress = (NetworkClient as LdnMitmClient)?.LocalAddress;
+                    (_, UnicastIPAddressInformation unicastAddress) = NetworkHelpers.GetLocalInterfaceForTarget(
+                        context.Device.Configuration.MultiplayerLanInterfaceId,
+                        ldnAddress);
 
                     if (unicastAddress == null)
                     {
@@ -1247,7 +1281,8 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                     // S2Arm: with multiplayer disabled the service reports unavailable without touching
                     // the network, so the host's interfaces are not queried either
-                    if (mode == MultiplayerMode.Disabled || System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
+                    if ((mode == MultiplayerMode.Disabled && !LdnAutoRequested) ||
+                        System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable())
                     {
                         Logger.Info?.PrintMsg(LogClass.ServiceLdn, $"Initializing with multiplayer mode: {mode}");
 
@@ -1278,6 +1313,27 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
         private ResultCode CreateNetworkClient(ServiceCtx context, MultiplayerMode mode)
         {
             S2ANetworkClientServer = null;
+
+            // 自动模式的协议选择：
+            //   1. 平台没有局域网 provider（Mac / Windows 常见）→ 直接用 ldn_mitm，既能连 Switch，
+            //      也让同样更新过的 Mac / Windows 走同一条局域网协议；
+            //   2. 平台已有 RyuLDN / Bonjour 路径 → 先探测 Switch 房间，发现才切换，
+            //      没发现时逐字保留原有 Mac / PC / iPhone 行为。
+            if (LdnAutoRequested && mode != MultiplayerMode.LdnMitm)
+            {
+                mode = SelectAutoMode(mode, () =>
+                {
+                    using LdnMitmClient probe = new(context.Device.Configuration);
+                    return probe.Scan(0, default).Length != 0;
+                });
+
+                if (mode == MultiplayerMode.LdnMitm)
+                {
+                    context.Device.Configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
+                    context.Device.Configuration.MultiplayerLdnServer = string.Empty;
+                    Logger.Info?.Print(LogClass.ServiceLdn, "Auto LDN selected the Switch-compatible ldn_mitm path");
+                }
+            }
 
             if (mode == MultiplayerMode.Disabled)
             {
@@ -1326,7 +1382,16 @@ namespace Ryujinx.HLE.HOS.Services.Ldn.UserServiceCreator
 
                     break;
                 case MultiplayerMode.LdnMitm:
-                    NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                    try
+                    {
+                        NetworkClient = new LdnMitmClient(context.Device.Configuration);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Error?.Print(LogClass.ServiceLdn, $"Could not initialize ldn_mitm: {ex.Message}");
+                        S2AHooks.Red?.Invoke($"ldn: ldn_mitm unavailable, {ex.Message}");
+                        return ResultCode.DeviceNotAvailable;
+                    }
                     break;
             }
 

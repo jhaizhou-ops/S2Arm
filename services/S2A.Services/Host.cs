@@ -112,6 +112,13 @@ namespace S2A.Services
         // need the native provider that Mac hosts do not register.
         internal static bool LdnMitmRequested =>
             string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal);
+        // 自动模式：先保留平台 / RyuLDN 路径，服务层发现 Switch 房间时再切 ldn_mitm；
+        // 没有平台局域网 provider 的 Mac / Windows 由服务层直接选用 ldn_mitm。
+        // 设置页缺省就是「自动」，所以没写开关时也按自动解释；显式中继地址仍然整套优先。
+        internal static bool LdnAutoRequested =>
+            !LdnMitmRequested &&
+            LdnServer == null &&
+            !string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO"), "0", StringComparison.Ordinal);
 
         // 游戏初始化 ldn:u：按需启动已登记的平台发现；显式中继地址不自动发现。
         internal static void OnLdnInitializing()
@@ -124,6 +131,12 @@ namespace S2A.Services
                     Logger.SetEnable(LogLevel.NetLog, true);
                     Console.Error.WriteLine("[S2A 联机] 游戏初始化 ldn:u：使用 Switch ldn_mitm 局域网协议（UDP/TCP 11452）");
                     return;
+                }
+
+                if (LdnAutoRequested)
+                {
+                    Logger.SetEnable(LogLevel.NetLog, true);
+                    Console.Error.WriteLine("[S2A 联机] 游戏初始化 ldn:u：自动模式，先探测 Switch ldn_mitm 房间，否则保留原有局域网 / RyuLDN 路径");
                 }
 
                 if (_lanSessionStopped || LdnAutoTried || LdnServer != null)
@@ -241,7 +254,8 @@ namespace S2A.Services
             lock (_ldnSelectionLock)
             {
                 if (Device == null) return;
-                if (LdnMitmRequested)
+                if (LdnMitmRequested ||
+                    (LdnAutoRequested && Device.Configuration.MultiplayerMode == MultiplayerMode.LdnMitm))
                 {
                     Device.Configuration.MultiplayerMode = MultiplayerMode.LdnMitm;
                     Device.Configuration.MultiplayerLdnServer = string.Empty;
@@ -682,7 +696,7 @@ namespace S2A.Services
             Logger.SetEnable(LogLevel.Debug, false);
             Logger.SetEnable(LogLevel.Stub, true);   // 上游 Logger 缺省不建 Stub 级（Logger.Stub 为 null），不开就一条桩都收不到、汇总行假空
             Logger.SetEnable(LogLevel.Guest, true);  // 游戏经 lm 写的日志（八方2 SDK 初始化自退的原因就写在里面），排查常要，量小
-            Logger.SetEnable(LogLevel.NetLog, LdnMitmRequested || LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
+            Logger.SetEnable(LogLevel.NetLog, LdnMitmRequested || LdnAutoRequested || LdnServer != null);   // 开了联机才打：RyuLdn 客户端连上 / 断开 / 出错只在这一级（排查中继连不上、扫描没结果）
             if (!_loggerInstalled)
             {
                 Logger.Updated += static (_, e) =>
