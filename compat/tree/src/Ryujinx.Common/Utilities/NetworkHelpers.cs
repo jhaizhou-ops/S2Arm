@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -98,7 +99,8 @@ namespace Ryujinx.Common.Utilities
                 if (source != null)
                 {
                     var routed = FindInterfaceByAddress(source);
-                    if (routed.properties != null)
+                    NetworkInterface routedAdapter = FindAdapterByAddress(source);
+                    if (routed.properties != null && (!IsLocalTarget(remoteAddress) || !IsTunnel(routedAdapter)))
                     {
                         return routed;
                     }
@@ -116,10 +118,26 @@ namespace Ryujinx.Common.Utilities
                 return (preferred.GetIPProperties(), preferredAddress);
             }
 
-            // A default-route probe resolves the usual "which adapter wins?" ambiguity without
-            // sending traffic. Tunnel results are rejected when a physical LAN adapter exists.
-            IPAddress probeTarget = remoteAddress ?? new IPAddress(new byte[] { 192, 0, 2, 1 });
-            IPAddress defaultSource = ProbeRouteSource(probeTarget, null);
+            // A route probe resolves the usual "which adapter wins?" ambiguity without sending
+            // traffic. Before a peer is known, the system default route is the strongest signal,
+            // but a VPN source must be rejected for a LAN room. If there is no usable default
+            // route, score every physical gateway source instead of trusting enumeration order.
+            IPAddress defaultSource = null;
+            if (remoteAddress == null)
+            {
+                IPAddress routedSource = ProbeRouteSource(DefaultRouteProbeTarget, null);
+                if (!IsTunnel(FindAdapterByAddress(routedSource)))
+                {
+                    defaultSource = routedSource;
+                }
+
+                defaultSource ??= ProbeLanGatewaySource(interfaces);
+            }
+            else
+            {
+                defaultSource = ProbeRouteSource(remoteAddress, null);
+            }
+
             if (defaultSource != null)
             {
                 var routed = FindInterfaceByAddress(defaultSource);
@@ -136,7 +154,63 @@ namespace Ryujinx.Common.Utilities
             return SelectBestLocalInterface(interfaces, remoteAddress, preferredAddress?.Address);
         }
 
-        private static IPAddress ProbeRouteSource(IPAddress remoteAddress, IPAddress preferredSource)
+        // macOS rejects connect() on a UDP socket whose destination port is 0 (EADDRNOTAVAIL), so a
+        // port-0 probe returned null there and selection silently fell back to enumeration order —
+        // precisely the multi-homed machines this helper exists for. Any non-zero port performs the
+        // same route lookup without sending a packet.
+        private const int RouteProbePort = 9;
+        private static readonly IPAddress DefaultRouteProbeTarget = new(new byte[] { 192, 0, 2, 1 });
+
+        internal readonly record struct LanRouteCandidate(
+            IPAddress Source,
+            bool IsUp,
+            bool IsTunnel,
+            bool IsPhysical,
+            bool IsWired,
+            bool SharesGatewaySubnet,
+            bool IsLinkLocal);
+
+        // Rank every discovered source deterministically. A machine can have an arbitrary number
+        // of wired, wireless, virtual and tunnel adapters; the first one enumerated is not a
+        // reliable answer. The default-route probe remains authoritative when it yields a LAN
+        // adapter, while this score handles machines whose default route is a VPN.
+        internal static IPAddress SelectBestLanRouteCandidate(IReadOnlyList<LanRouteCandidate> candidates)
+        {
+            LanRouteCandidate best = default;
+            int bestScore = int.MinValue;
+            bool hasBest = false;
+
+            foreach (LanRouteCandidate candidate in candidates)
+            {
+                if (candidate.Source == null ||
+                    candidate.Source.Equals(IPAddress.Any) ||
+                    candidate.Source.Equals(IPAddress.None))
+                {
+                    continue;
+                }
+
+                int score = 0;
+                score += candidate.IsUp ? 1000 : -10000;
+                score += candidate.IsTunnel ? -5000 : 0;
+                score += candidate.IsPhysical ? 100 : 0;
+                score += candidate.IsWired ? 20 : 0;
+                score += candidate.SharesGatewaySubnet ? 400 : 0;
+                score += candidate.IsLinkLocal ? -2000 : 0;
+
+                if (!hasBest ||
+                    score > bestScore ||
+                    (score == bestScore && CompareIpv4(candidate.Source, best.Source) < 0))
+                {
+                    best = candidate;
+                    bestScore = score;
+                    hasBest = true;
+                }
+            }
+
+            return hasBest && best.IsUp && !best.IsTunnel ? best.Source : null;
+        }
+
+        public static IPAddress ProbeRouteSource(IPAddress remoteAddress, IPAddress preferredSource)
         {
             if (remoteAddress == null ||
                 remoteAddress.Equals(IPAddress.Any) ||
@@ -154,7 +228,7 @@ namespace Ryujinx.Common.Utilities
                     socket.Bind(new IPEndPoint(preferredSource, 0));
                 }
 
-                socket.Connect(remoteAddress, 0);
+                socket.Connect(remoteAddress, RouteProbePort);
 
                 return socket.LocalEndPoint is IPEndPoint endpoint ? endpoint.Address : null;
             }
@@ -168,6 +242,62 @@ namespace Ryujinx.Common.Utilities
             }
         }
 
+        // The OS route to a LAN gateway says which adapter carries local traffic while no peer
+        // address is known yet. Collect and rank all candidates so the result does not depend on
+        // the number of adapters or the order NetworkInterface happens to enumerate them in.
+        private static IPAddress ProbeLanGatewaySource(NetworkInterface[] interfaces)
+        {
+            List<LanRouteCandidate> candidates = [];
+
+            foreach (NetworkInterface adapter in interfaces)
+            {
+                if (adapter.OperationalStatus != OperationalStatus.Up ||
+                    adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                    IsTunnel(adapter))
+                {
+                    continue;
+                }
+
+                foreach (GatewayIPAddressInformation gatewayInfo in adapter.GetIPProperties().GatewayAddresses)
+                {
+                    IPAddress gateway = gatewayInfo.Address;
+                    if (gateway.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(gateway))
+                    {
+                        continue;
+                    }
+
+                    IPAddress source = ProbeRouteSource(gateway, null);
+                    if (source == null)
+                    {
+                        continue;
+                    }
+
+                    NetworkInterface sourceAdapter = FindAdapterByAddress(source);
+                    UnicastIPAddressInformation sourceAddress = FindIpv4Unicast(sourceAdapter, source);
+                    if (sourceAddress == null)
+                    {
+                        continue;
+                    }
+
+                    NetworkInterfaceType type = sourceAdapter.NetworkInterfaceType;
+                    bool isPhysical = IsPhysicalLanAdapter(type);
+                    bool isWired = type is NetworkInterfaceType.Ethernet or
+                        NetworkInterfaceType.GigabitEthernet;
+
+                    candidates.Add(new LanRouteCandidate(
+                        source,
+                        sourceAdapter.OperationalStatus == OperationalStatus.Up,
+                        IsTunnel(sourceAdapter),
+                        isPhysical,
+                        isWired,
+                        IsSameSubnet(sourceAddress, gateway),
+                        sourceAddress.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal)));
+                }
+            }
+
+            return SelectBestLanRouteCandidate(candidates);
+        }
+
         private static (IPInterfaceProperties properties, UnicastIPAddressInformation address) FindInterfaceByAddress(IPAddress address)
         {
             if (address == null)
@@ -177,8 +307,8 @@ namespace Ryujinx.Common.Utilities
 
             foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
             {
-                UnicastIPAddressInformation unicast = GetIpv4Unicast(adapter);
-                if (unicast != null && unicast.Address.Equals(address))
+                UnicastIPAddressInformation unicast = FindIpv4Unicast(adapter, address);
+                if (unicast != null)
                 {
                     return (adapter.GetIPProperties(), unicast);
                 }
@@ -196,10 +326,27 @@ namespace Ryujinx.Common.Utilities
 
             foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
             {
-                UnicastIPAddressInformation unicast = GetIpv4Unicast(adapter);
-                if (unicast != null && unicast.Address.Equals(address))
+                if (FindIpv4Unicast(adapter, address) != null)
                 {
                     return adapter;
+                }
+            }
+
+            return null;
+        }
+
+        private static UnicastIPAddressInformation FindIpv4Unicast(NetworkInterface adapter, IPAddress address)
+        {
+            if (adapter == null || address == null || !adapter.Supports(NetworkInterfaceComponent.IPv4))
+            {
+                return null;
+            }
+
+            foreach (UnicastIPAddressInformation info in adapter.GetIPProperties().UnicastAddresses)
+            {
+                if (info.Address.AddressFamily == AddressFamily.InterNetwork && info.Address.Equals(address))
+                {
+                    return info;
                 }
             }
 
@@ -252,7 +399,7 @@ namespace Ryujinx.Common.Utilities
                 if (adapter.OperationalStatus == OperationalStatus.Up) score += 100;
                 if (properties.GatewayAddresses.Count > 0) score += 40;
                 if (properties.DnsAddresses.Count > 0) score += 10;
-                if (adapter.NetworkInterfaceType is NetworkInterfaceType.Ethernet or NetworkInterfaceType.Wireless80211) score += 80;
+                if (IsPhysicalLanAdapter(adapter.NetworkInterfaceType)) score += 80;
                 if (IsTunnel(adapter)) score -= 500;
                 if (address.Address.Equals(preferredAddress)) score += 10000;
 
@@ -297,6 +444,30 @@ namespace Ryujinx.Common.Utilities
             }
 
             return true;
+        }
+
+        private static bool IsPhysicalLanAdapter(NetworkInterfaceType type)
+        {
+            return type is NetworkInterfaceType.Ethernet or
+                NetworkInterfaceType.GigabitEthernet or
+                NetworkInterfaceType.Wireless80211;
+        }
+
+        private static int CompareIpv4(IPAddress left, IPAddress right)
+        {
+            byte[] leftBytes = left.GetAddressBytes();
+            byte[] rightBytes = right.GetAddressBytes();
+
+            for (int i = 0; i < leftBytes.Length; i++)
+            {
+                int comparison = leftBytes[i].CompareTo(rightBytes[i]);
+                if (comparison != 0)
+                {
+                    return comparison;
+                }
+            }
+
+            return 0;
         }
 
         private static bool IsTunnel(NetworkInterface adapter)

@@ -661,3 +661,4 @@
 20261120-1021-spirv-declare-used-caps.patch
 20261120-1330-nifm-offline-submit-onhold.patch
 20261121-1628-ldn-target-route-selection.patch
+20261121-2131-ldn-route-candidate-selection.patch
