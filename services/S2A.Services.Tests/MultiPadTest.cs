@@ -64,7 +64,18 @@ namespace S2A.Services.Tests
             InputPump.FillPadStates(states, 1, PlayerIndex.Player2, &FakePadRead, 0);
             Row("回到 1 格只剩槽 0", "1", states.Count.ToString());
 
-            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} 多手柄输入单测：14 项，不符 {bad}");
+            // ⑦ 稀疏玩家槽位图：P1 断开时 P2（槽 1）与 P8（槽 7）保持原位，只把在线槽位送进 Npads
+            Row("位图上限裁剪（2 人上限）", "2", InputPump.ClampMask(0b1000_0010, 2).ToString());
+            Row("位图最高槽位（P2 + P8）", "8", InputPump.HighestSlotCount(0b1000_0010).ToString());
+            states = new List<GamepadInput> { new() { PlayerId = PlayerIndex.Player1 } };
+            InputPump.FillPadStates(states, 8, PlayerIndex.Player2, &FakePadRead, 0);
+            var connected = new List<GamepadInput>(8);
+            InputPump.FilterConnectedStates(states, connected, 0b1000_0010);
+            Row("稀疏位图只保留 P2 与 P8", "Player2 Player8", string.Join(" ", connected.ConvertAll(s => s.PlayerId.ToString())));
+            InputPump.FilterConnectedStates(states, connected, 0b1000_0011);
+            Row("P1 重连后恢复 P1 + P2 + P8", "Player1 Player2 Player8", string.Join(" ", connected.ConvertAll(s => s.PlayerId.ToString())));
+
+            Console.WriteLine($"{(bad == 0 ? "🟢" : "🔴")} 多手柄输入单测：18 项，不符 {bad}");
             return bad == 0 ? 0 : 1;
         }
     }

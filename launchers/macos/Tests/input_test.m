@@ -720,6 +720,13 @@ static void test_pad_slot_pin(void) {
     const void *only_c[1] = {c}; int rank_c[1] = {1};
     s2a_slot_pin(owners3, only_c, rank_c, 1, 4);
     expect(s2a_slot_plan(owners3, only_c, 1, 4, slot_of) == 2 && slot_of[0] == 1, "a listed P2 stays in slot 1 when P1 is absent");
+    // 顺序表槽 0 是 S2A_PAD_ORDER_EMPTY（P1 暂时断开）、槽 1 是 Xbox：Xbox 仍拿 rank 1、不匹配 empty
+    s2a_pad_order sparse = {0};
+    sparse.count = 2;
+    sparse.entry[0].ns2_player = S2A_PAD_ORDER_EMPTY;
+    sparse.entry[1].ns2_player = -1; snprintf(sparse.entry[1].name, sizeof sparse.entry[1].name, "Xbox"); sparse.entry[1].index = 0;
+    expect(s2a_pad_order_rank(&sparse, -1, "Xbox", 0) == 1, "empty slot 0 preserves rank 1 for P2");
+    expect(s2a_pad_order_rank(&sparse, -1, "", 0) == S2A_PAD_ORDER_UNLISTED, "empty slot entry does not match any live controller");
 }
 
 // 只有通用物理描述的手柄（没有扩展手柄档）：按标准键名从 physicalInputProfile 读、回调装在 valueDidChangeHandler 上。

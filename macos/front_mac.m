@@ -823,6 +823,7 @@ _Static_assert(S2A_MAX_PADS == sizeof g_slot_style / sizeof g_slot_style[0], "g_
 static _Atomic uint32_t pad_buttons[S2A_MAX_PADS];
 static _Atomic int32_t pad_sticks[S2A_MAX_PADS][4];
 static _Atomic int pad_live = 1;   // 本次采样占到的最高槽位 + 1（键盘 / 鼠标 / 触屏也算一位）
+static _Atomic int pad_mask = 1;   // 实际在线的槽位位图（位 i = 槽 i 有在线手柄；全断时为 1，槽 0 留给键盘 / 鼠标）
 // 槽位身份（分槽用）与系统手柄的强引用：手柄蓝牙休眠 / 断开时系统会释放 GCController，只存裸指针会变悬空，
 //   下一次比较身份时就是野指针。强引用后对象不会提前释放，断开时靠整表重建清槽，置 nil 才真正释放。只在主线程读写。
 static const void *pad_id[S2A_MAX_PADS];
@@ -1184,9 +1185,9 @@ static BOOL pad_order_refresh(void) {
         for (NSDictionary *e in [list isKindOfClass:NSArray.class] ? list : @[]) {
             if (*count >= S2A_PAD_ORDER_MAX || ![e isKindOfClass:NSDictionary.class]) break;
             s2a_pad_order_entry *x = &out[(*count)++];
-            BOOL ns2 = [e[@"type"] isEqual:@"ns2"], keyboard = [e[@"type"] isEqual:@"keyboard"], gen1 = [e[@"type"] isEqual:@"gen1"], gen1pair = [e[@"type"] isEqual:@"gen1pair"];
-            x->ns2_player = keyboard ? S2A_PAD_ORDER_KEYBOARD : gen1 ? S2A_PAD_ORDER_GEN1 : gen1pair ? S2A_PAD_ORDER_GEN1_PAIR : ns2 ? [e[@"player"] intValue] : -1;
-            if (keyboard) continue;
+            BOOL ns2 = [e[@"type"] isEqual:@"ns2"], keyboard = [e[@"type"] isEqual:@"keyboard"], gen1 = [e[@"type"] isEqual:@"gen1"], gen1pair = [e[@"type"] isEqual:@"gen1pair"], empty = [e[@"type"] isEqual:@"empty"];
+            x->ns2_player = empty ? S2A_PAD_ORDER_EMPTY : keyboard ? S2A_PAD_ORDER_KEYBOARD : gen1 ? S2A_PAD_ORDER_GEN1 : gen1pair ? S2A_PAD_ORDER_GEN1_PAIR : ns2 ? [e[@"player"] intValue] : -1;
+            if (empty || keyboard) continue;
             if (gen1 || gen1pair) {   // 一代按设备：单只 id、一对「左 id|右 id」
                 NSString *key = gen1 ? [e[@"id"] description] : [NSString stringWithFormat:@"%@|%@", e[@"left"], e[@"right"]];
                 [key getCString:x->name maxLength:sizeof x->name encoding:NSUTF8StringEncoding];
@@ -1496,6 +1497,10 @@ static void sample_input(void) {
     }
     for (int s = 0; s < S2A_MAX_PADS; s++)
         for (int i = 0; i < 4; i++) slot_sticks[s][i] = MAX(-32767, MIN(32767, slot_sticks[s][i]));
+    int mask = 0;
+    for (int s = 0; s < S2A_MAX_PADS; s++) if (pad_id[s]) mask |= 1 << s;
+    if (!mask) mask = 1;   // 没有实体手柄时槽 0 留给键盘 / 鼠标
+    atomic_store(&pad_mask, mask);
     atomic_store(&pad_live, live);
     static int logged_live;   // 诊断：接上手柄 / 拔掉时打一行
     if (live != logged_live) { logged_live = live; fprintf(stderr, "[s2a] 手柄槽位：%d 个（含键盘 / 鼠标）\n", live); }
@@ -1525,6 +1530,7 @@ void s2a_mac_ns2_input_changed(void) {
 }
 // 多手柄槽位（服务层 InputPump 按符号查；没导出时退回旧的单手柄 ABI）
 __attribute__((visibility("default"), used)) int s2a_vpad_pad_count(void) { return atomic_load(&pad_live); }
+__attribute__((visibility("default"), used)) int s2a_vpad_player_mask(void) { return atomic_load(&pad_mask); }
 __attribute__((visibility("default"), used)) uint32_t s2a_vpad_read_pad(int index, int32_t *sticks) {
     if (index < 0 || index >= S2A_MAX_PADS) { for (int i = 0; i < 4; i++) sticks[i] = 0; return 0; }
     uint32_t buttons = atomic_load_explicit(&pad_buttons[index], memory_order_seq_cst);
