@@ -54,10 +54,10 @@ def main():
     base += ['-I'+str(p) for p in inc]
     original = native/'gfx_plat/nvk_shader.c'
 
-    def run(name, source, extra_libs=None, args=(), env=None):
+    def run(name, source, extra_libs=None, args=(), env=None, flags=()):
         exe = out/name
         src = [ROOT/'android/tests/nvk_shader_pool_test.c', source, *(extra_libs if extra_libs is not None else libs)]
-        host_link.run(base + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
+        host_link.run(base + list(flags) + [str(p) for p in src] + [strip, '-lm', '-o', str(exe)], check=True, timeout=60)
         return subprocess.run([str(exe), *args], capture_output=True, text=True, timeout=30, env=env)
 
     live_modes = ('--live-compile-thread', '--live-compile-pending', '--live-compile-stop', '--cs-libpack')
@@ -66,6 +66,19 @@ def main():
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode
+
+    if sys.argv[1:] == ['--binary-libpack']:
+        first = run('binary-stages', original, args=('--cs-libpack',), flags=['-DS2A_LIBPACK_PACKER'],
+                    env=dict(os.environ, S2A_TEST_BINARY_STAGE='valid'))
+        sys.stdout.write(first.stdout)
+        sys.stderr.write(first.stderr)
+        if first.returncode:
+            return first.returncode
+        for mode, case in (('--cs-libpack', 'bad-version'), ('--gs-libpack', 'valid'),
+                           ('--gs-libpack', 'missing-varying')):
+            subprocess.run([str(out/'binary-stages'), mode], check=True, timeout=30,
+                           env=dict(os.environ, S2A_TEST_BINARY_STAGE=case))
+        return 0
 
     if sys.argv[1:] == ['--live-compile-mutants']:
         text = original.read_text()
@@ -96,8 +109,8 @@ def main():
              '    rec.lp_ok = unaligned ? 0 : 2;\n    (void)rec;', '--compute-warm', 'compute program must be recorded in warm manifest'),
             ('wrong-stage', 'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 32;',
              'memcpy(rec.identity, p->identity, 32); rec.stage_mask = 1;', '--compute-warm', 'persisted compute manifest retains identity'),
-            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0], 0) : build(bytes, len, views, nst, rec->identity, 0);',
-             'struct entry *e = build(bytes, len, views, nst, rec->identity, 0);', '--compute-warm', 'compute program warm builds from prior cache'),
+            ('wrong-build', 'struct entry *e = compute ? build_compute(bytes, len, &views[0], rec->identity, rec->keys[0], 0, NULL) : build(bytes, len, views, nst, rec->identity, 0, NULL);',
+             'struct entry *e = build(bytes, len, views, nst, rec->identity, 0, NULL);', '--compute-warm', 'compute program warm builds from prior cache'),
             ('flag-ignored', 'if (!nvn_plat_flag("nvk_compute_warm", 0)) return;',
              '(void)nvn_plat_flag("nvk_compute_warm", 0);', '--compute-warm-off', 'compute warm off must not record programs'),
         ]
