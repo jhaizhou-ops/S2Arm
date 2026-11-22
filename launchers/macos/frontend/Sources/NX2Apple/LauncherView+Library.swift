@@ -110,6 +110,7 @@ extension LauncherView {
             moreRow(txt("game.delete"), "trash", danger: true) { deleteFor = game }
         }
         .padding(8).frame(width: 220).font(.manrope(13.5, .semibold)).preferredColorScheme(.dark)
+        .controllerBackAction("home.more.close") { moreFor = nil }
     }
 
     private func moreRow(_ title: String, _ symbol: String, danger: Bool = false, action: @escaping () -> Void) -> some View {
@@ -119,6 +120,7 @@ extension LauncherView {
         }
         .buttonStyle(.plain)
         .controllerControl(activate: activate)
+        .controllerRingRadius(LauncherTheme.Focus.rowRadius)
     }
 
     /// 游戏卡片右键菜单（游戏库结构 v3）：开始游戏、出包、启动设置、在访达中显示、移动到其他位置、清除缓存、删除
@@ -200,7 +202,7 @@ extension LauncherView {
                 Label(txt("sgrade.upgrade.incomplete"), systemImage: "exclamationmark.arrow.circlepath")
                     .font(.manrope(12, .medium)).foregroundStyle(SGradeCardView.gold).fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.plain).accessibilityIdentifier("sgrade.incomplete." + game.id)
+            .controllerButtonStyle(.plain).controllerID("sgrade.incomplete." + game.id)
         }
         }
         .accessibilityElement(children: .contain)
