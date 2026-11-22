@@ -84,6 +84,49 @@ int main(void) {
               d1 == d0, d2 == d0, (unsigned long long)(g_alias_orph_rw - rw6), (unsigned long long)(g_alias_orph_valve - v6));
         nvn_be_unreg_tex_range(10, 1); idle(); alias_orphan_pass(); settle();
         CHECK(g_alias_orph_rw == rw6 + 1, "⑥ 反证：注销贴图 ID 后再回收 → 放 +%llu（期望 +1）", (unsigned long long)(g_alias_orph_rw - rw6));
+        // ⑦ #674：低区腾退释放 GPU 写过的无人引用共享贴图（260×260 RG8 多级 mip，模拟地形法线贴图）前，必须把像素写回客体池存储并清 gpw 陈旧标记；
+        //   原 Metal 贴图仍被释放（保 #357 低区腾退），之后在同存储重建新贴图能从池内存完整取回全部 mip 级，不再全黑
+        static tex_t G, G2;
+        memset(&G, 0, sizeof G); G.magic = MAGIC('T', 'E', 'X', 0); G.serial = nvn_new_serial();
+        G.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RG8, .width = 260, .height = 260, .depth = 1, .levels = 3, .flags = NVN_TEXTURE_FLAGS_COMPRESSIBLE};
+        G.pool = g_tp; G.off = 20 << 20; G.mem = g_mem + G.off; nvn_tex_layout(&G.d, &G.L); nvn_be_tex_init(&G);
+        __weak id<MTLTexture> wg;
+        @autoreleasepool {
+            id<MTLTexture> mg = tex_mtl(&G); REQUIRE(mg); wg = mg;
+            const uint8_t pat[3][2] = {{0x84, 0x6f}, {0x42, 0x35}, {0x21, 0x19}};
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            for (unsigned lv = 0; lv < 3; lv++) {
+                uint32_t lw = MAX(260u >> lv, 1u), lh = MAX(260u >> lv, 1u); size_t nb = (size_t)lw * lh * 2;
+                id<MTLBuffer> sb = [g_dev newBufferWithLength:nb options:MTLResourceStorageModeShared];
+                uint8_t *p = sb.contents; for (size_t i = 0; i < nb; i += 2) { p[i] = pat[lv][0]; p[i + 1] = pat[lv][1]; }
+                [bl copyFromBuffer:sb sourceOffset:0 sourceBytesPerRow:(size_t)lw * 2 sourceBytesPerImage:nb sourceSize:MTLSizeMake(lw, lh, 1) toTexture:mg destinationSlice:0 destinationLevel:lv destinationOrigin:MTLOriginMake(0, 0, 0)];
+                gpw_mark(&G, lv, 0, 1, 0, 0, 0, 0);
+            }
+            [bl endEncoding]; REQUIRE(cb_run(cb));
+        }
+        submit(); nvn_be_tex_release(&G); idle();
+        alias_orphan_pass(); uint64_t v7 = g_alias_orph_valve;
+        uint64_t freed7 = alias_orph_evict(NULL, UINT64_MAX); settle();
+        CHECK(g_alias_orph_valve == v7 + 1 && freed7 > 0 && wg == nil,
+              "⑦ 低区腾退释放原 Metal 贴图（v+%llu freed=%llu wg=%p）", (unsigned long long)(g_alias_orph_valve - v7), (unsigned long long)freed7, (__bridge void *)wg);
+        memset(&G2, 0, sizeof G2); G2.magic = MAGIC('T', 'E', 'X', 0); G2.serial = nvn_new_serial();
+        G2.d = G.d; G2.pool = g_tp; G2.off = G.off; G2.mem = G.mem; G2.L = G.L; nvn_be_tex_init(&G2);
+        id<MTLTexture> m2 = tex_mtl(&G2); submit();
+        const uint8_t pat[3][2] = {{0x84, 0x6f}, {0x42, 0x35}, {0x21, 0x19}};
+        int ok7 = (m2 != nil);
+        for (unsigned lv = 0; lv < 3 && ok7; lv++) {
+            uint32_t lw = MAX(260u >> lv, 1u), lh = MAX(260u >> lv, 1u); size_t nb = (size_t)lw * lh * 2;
+            id<MTLBuffer> rb = [g_dev newBufferWithLength:nb options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+            [bl copyFromTexture:m2 sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(lw, lh, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:(size_t)lw * 2 destinationBytesPerImage:nb];
+            [bl endEncoding]; REQUIRE(cb_run(cb));
+            const uint8_t *q = rb.contents;
+            if (q[0] != pat[lv][0] || q[1] != pat[lv][1] || q[nb - 2] != pat[lv][0] || q[nb - 1] != pat[lv][1]) {
+                printf("  ⑦ lv%u mismatch: got (%#x,%#x)..(%#x,%#x) want (%#x,%#x)\n", lv, q[0], q[1], q[nb - 2], q[nb - 1], pat[lv][0], pat[lv][1]);
+                ok7 = 0;
+            }
+        }
+        CHECK(ok7, "⑦ 低区腾退后同存储重建贴图：全部 3 级 mip 保留 GPU 写入内容（不再全黑）");
         printf("%s t_nvn_alias_orphan: %u checks %u failures; backend Metal%d\n", failures ? "✗" : "✓", checks, failures, g_m3 ? 3 : 4);
         return failures != 0;
     }
