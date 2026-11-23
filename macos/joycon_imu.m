@@ -25,6 +25,11 @@ typedef struct {
     char id[64];              // 设备 id（序列号 = 蓝牙地址；启动器 Gen1HIDWatcher.deviceID 同一套），跨进程认同一只
     s2a_pad_motion sample;
     int known;
+    // 补满采样（体感手感）：0x30 标准全报告一次带 3 组 IMU（相隔 5 ms）。真机三组全部送进 hid，
+    // 改前只取最后一组，游戏六轴只拿到约 1/3 的样本、时间轴也短了 3 倍。这里按采样时刻全部入队，
+    // 服务层一拍一次取走，逐笔写进游戏（NpadDevices.UpdateSixAxis 每条 5 ms）。环形满了丢最旧。
+    s2a_pad_motion burst[12];
+    int burst_head, burst_len;
     int vib_on;               // 发过「开震动」子命令 0x48（#520 E 一代手柄 HID 震动）
     uint64_t rumble_gen;      // 每发一包加一：1 秒后还是这一包就补中性停下
     uint32_t pad_buttons;     // D2：这一只自己的按键 / 摇杆（s2a_joycon1_decode；两只被 macOS 合成一个时也各算一位玩家）
@@ -131,12 +136,26 @@ static void apply_report(jc_dev *d, IOHIDDeviceRef source, uint32_t report_id, c
     if (report_id != 0x30) return;
     int off = (len > 0 && report[0] == 0x30) ? 1 : 0;
     if (len - off < 48) return;
-    // 标准全报告带 3 组 IMU（5 ms 间隔）；取最后一组
-    const uint8_t *s = report + off + 36;
-    s2a_pad_motion m = {0};
-    decode_imu(slot, pid, s, &m);
+    // 标准全报告一次带 3 组 IMU（相隔 5 ms）。真机三组全部送进 hid；改前只取最后一组，
+    //   服务层一拍（约 16 ms）才拿到一笔，而游戏每条六轴记录的 DeltaTime 固定 5 ms —— 时间轴被压成 1/3，
+    //   体感瞄准的幅度明显偏小、微调也不跟手。三组按采样时刻（最新一组 = 收到报告的时刻）全部入队，
+    //   由服务层一拍取走、逐笔写进游戏（每笔 5 ms），对齐真机 200 Hz。
+    uint64_t recv_us = now_us();
+    s2a_pad_motion m[3];
+    for (int i = 0; i < 3; i++) {
+        decode_imu(slot, pid, report + off + 12 + i * 12, &m[i]);
+        m[i].host_timestamp_us = recv_us - (uint64_t)(2 - i) * 5000;
+    }
     pthread_mutex_lock(&g_mu);
-    if (d->device == source) { d->sample = m; d->known = 1; }
+    if (d->device == source) {
+        d->sample = m[2];
+        d->known = 1;
+        for (int i = 0; i < 3; i++) {
+            d->burst[(d->burst_head + d->burst_len) % 12] = m[i];
+            if (d->burst_len < 12) d->burst_len++;
+            else d->burst_head = (d->burst_head + 1) % 12;   // 满了丢最旧，保证读到的都是最近一拍
+        }
+    }
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -328,6 +347,46 @@ void s2a_joycon_imu_set_enabled(int enabled) {
     pthread_mutex_unlock(&g_mu);
     if (on) fprintf(stderr, "[输入] Joy-Con HID 六轴：开启（GameController 无 motion 时的回退）\n");
     else fprintf(stderr, "[输入] Joy-Con HID 六轴：关闭\n");
+}
+
+// 一拍取走累积的 IMU 样本（消费式，时间升序）。返回条数；0 = 这一拍没有新样本。
+//   单笔接口 s2a_joycon_imu_read* 仍读 d->sample（最新一份），不受影响：服务层二选一，不会同时消费。
+static int burst_drain_locked(jc_dev *d, s2a_pad_motion *out, int max) {
+    int n = 0;
+    while (n < max && d->burst_len > 0) {
+        out[n++] = d->burst[d->burst_head];
+        d->burst_head = (d->burst_head + 1) % 12;
+        d->burst_len--;
+    }
+    return n;
+}
+
+// 按左 / 右（Pro 算右）取最先接上的那一只，与 s2a_joycon_imu_read 的选设备规则一致。
+//   返回：>=0 条数；-1 = 这一侧没有可用的 HID 体感设备（调用方据此换下一条来源）。
+int s2a_joycon_imu_read_burst(int side, s2a_pad_motion *out, int max) {
+    if (!out || max <= 0 || (side != JC_L && side != JC_R)) return 0;
+    int n = -1;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < JC_N; i++) {
+        jc_dev *d = &g_dev[i];
+        if (!d->device || !d->known || d->slot != side || !atomic_load(&g_want) ||
+            now_us() - d->sample.host_timestamp_us > 250000) continue;
+        n = burst_drain_locked(d, out, max);
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return n;
+}
+
+// 按设备 id（gen1 单元左右各一只）：给 s2a_pad_read_motion_burst 按槽位取。返回 >=0 条数，-1 = 没这只设备。
+int s2a_joycon_imu_read_id_burst(const char *id, s2a_pad_motion *out, int max) {
+    if (!out || max <= 0 || !id) return 0;
+    pthread_mutex_lock(&g_mu);
+    jc_dev *d = find_id_locked(id);
+    int n = !d ? -1 : (d->known && atomic_load(&g_want) && now_us() - d->sample.host_timestamp_us <= 250000
+        ? burst_drain_locked(d, out, max) : 0);
+    pthread_mutex_unlock(&g_mu);
+    return n;
 }
 
 int s2a_joycon_imu_read(s2a_pad_motion *out_l, s2a_pad_motion *out_r) {
