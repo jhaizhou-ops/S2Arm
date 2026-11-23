@@ -38,6 +38,7 @@ int  nvn_vk_pipe_demand_test_lock_lifecycle(void);
 void nvn_vk_pipe_demand_test_unlock_lifecycle(void);
 #endif
 int  nvn_vk_pipe_demand_on(void);
+int  nvn_vk_pipe_demand_workers_configured(void);   // 本配置应有的 worker 条数（debug.s2a.nvk_pipe_workers，夹 1..4；用例与 start 共用）
 
 int  nvn_vk_pipe_demand_kick(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32], nvn_gpu_pipe *cached);
 int  nvn_vk_pipe_demand_state(const nvn_gpu_pipe_desc *d, const uint8_t prog_identity[32], nvn_gpu_pipe *cached);
@@ -49,7 +50,7 @@ uint32_t nvk_fu_item_ms(void);
 uint32_t nvk_fu_frame_ms(void);
 uint32_t nvk_fu_unsafe_ms(void);
 
-struct nvn_pipe_demand_stats { uint64_t kicked, dedup, built, failed, timeouts, full, published; };   // published：结果已发布进待取表、前台看得见（built 在发布之前计）
+struct nvn_pipe_demand_stats { uint64_t kicked, dedup, built, failed, timeouts, full, published, prioritized; };   // published：结果已发布进待取表、前台看得见（built 在发布之前计）
 void nvn_vk_pipe_demand_stats(struct nvn_pipe_demand_stats *out);
 
 #ifdef __cplusplus
