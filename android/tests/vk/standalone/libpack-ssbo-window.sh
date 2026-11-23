@@ -21,6 +21,7 @@ glslc_bin=${GLSLC:-glslc}
 for f in libpack_window libpack_window_real; do
     "$glslc_bin" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/$f.frag" -o "$out/shaders/$f.frag.spv"
 done
+"$glslc_bin" --target-env=vulkan1.1 "$repo/android/tests/vk/shaders/libpack_full.vert" -o "$out/shaders/libpack_full.vert.spv"
 # 可选的私有真实程序料（只放工作树的 build/ 下、不入仓；格式同 stages：window_vs.key + <键>_b.json / _b.spv）：有就多跑一档真实顶点段的颜色比对
 real="${S2A_SSBO_WINDOW_REAL_STAGES:-$repo/build/libpack-ssbo-window/real-stages}"
 real_arg=(); if [ -f "$real/window_vs.key" ]; then real_arg=("$real"); echo "真实程序档：$real"; fi
