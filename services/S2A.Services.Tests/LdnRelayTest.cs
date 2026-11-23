@@ -120,7 +120,8 @@ namespace S2A.Services.Tests
         }
 
         // 本地联机按需自动开（10-28 双人成行：玩家不该先去设置里找开关）：没给 S2A_LDN_SERVER、缺省离线 → 游戏第一次初始化 ldn:u 时
-        //   ① 原生层没有局域网发现（Mac，弱符号回 0）：自动模式回退到 ldn_mitm，让 Mac 也能连 Switch；
+        //   ⓪ Mac 宿主（有 provider 也一样）：自动模式走 ldn_mitm（#2134 双协议，Switch 能搜能进），不起平台发现；
+        //   ① iOS 宿主的 provider 起不来：自动模式回退到 ldn_mitm；
         //   ② 有（iOS ldn_lan.m）：局域网发现被调（程序号 = 游戏的）、联机模式切 LdnRyu、中继先指本机 127.0.0.1、本进程托管中继（全部网卡，产品 30456、单测临时端口）；
         //   ③ 之后局域网选举改指（S2A_LdnSetServer）→ 建房（OpenAccessPoint）时客户端换到新中继，不等下一次 Initialize；
         //   ④ 本机中继建房 / 解散 → 原生层收到「有房间」标记 1 / 0（Bonjour 发布名加 / 去「!」，选举优先有房间的中继）。
@@ -180,7 +181,22 @@ namespace S2A.Services.Tests
             var service = (Dispatcher.Instance.GetSession(FakeNative.CookieOf(svc)) as HleTarget)?.Service as IUserLocalCommunicationService;
             Msg Init() { Msg m = Msg.Cmif(402, Bytes(0u, 0u)); m.SendPid = true; return m; }   // Initialize(ip, mask, pid)
 
-            // ① Mac：没有局域网发现
+            // ⓪ Mac 宿主：登记了 Bonjour provider（launchers/macos/build.mk 链 ios/ldn_lan.m）且可用，但宿主声明要双协议：
+            //   切 LdnMitm、平台发现不被调（#2134 作者 Mac 实测：按「有没有 provider」分流时 Mac 被带进 RyuLDN，Switch 搜不到）
+            Environment.SetEnvironmentVariable("S2A_LDN_AUTO_DUAL", "1");   // Mac 宿主在平台层设（macos/lan_permission.m）
+            FakeNative.LdnLanAvailable = 1;
+            int starts0 = FakeNative.LdnLanStarts;
+            Reply i0 = Call(svc, Init());
+            Check("联机自动开：Mac 宿主（有 provider、可用）→ 自动模式走 ldn_mitm、平台发现不被调",
+                "0x0、LdnMitm、+0 次",
+                $"0x{i0.Result:X}、{cfg.MultiplayerMode}、+{FakeNative.LdnLanStarts - starts0} 次");
+            Call(svc, Msg.Cmif(401));   // Finalize
+            Host.LdnAutoTried = false; cfg.MultiplayerMode = Ryujinx.Common.Configuration.Multiplayer.MultiplayerMode.Disabled;
+            svc = Call(ldnu, Msg.Cmif(0)).Move[0];
+            service = (Dispatcher.Instance.GetSession(FakeNative.CookieOf(svc)) as HleTarget)?.Service as IUserLocalCommunicationService;
+            Environment.SetEnvironmentVariable("S2A_LDN_AUTO_DUAL", null);   // 以下 ①–④ 模拟 iOS 宿主（不设，自动模式走平台发现）
+
+            // ① iOS：provider 起不来
             FakeNative.LdnLanAvailable = 0;
             long red0 = Red.Total;
             Reply i1 = Call(svc, Init());

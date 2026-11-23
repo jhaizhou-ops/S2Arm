@@ -109,9 +109,13 @@ namespace S2A.Services
         internal static int LanUnavailable => System.Threading.Volatile.Read(ref _lanUnavailable);
         private static int _lanUnavailable;
         // Switch-compatible local wireless: ldn_mitm uses UDP/TCP 11452 and does not
-        // need the native provider that Mac hosts do not register.
+        // need the native platform discovery provider.
         internal static bool LdnMitmRequested =>
             string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_MITM"), "1", StringComparison.Ordinal);
+        // 自动模式要双协议（见 OnLdnInitializing）：Mac 宿主在平台层声明（macos/lan_permission.m 起进程时设 S2A_LDN_AUTO_DUAL=1），
+        //   iOS 不设、照旧走平台发现
+        internal static bool AutoDualRequested =>
+            string.Equals(Environment.GetEnvironmentVariable("S2A_LDN_AUTO_DUAL"), "1", StringComparison.Ordinal);
         internal static bool LdnAutoRequested =>
             !LdnMitmRequested &&
             LdnServer == null &&
@@ -130,12 +134,13 @@ namespace S2A.Services
                     return;
                 }
 
-                // 自动模式（#2134 起缺省开）：宿主有平台局域网发现（iOS 登记了 provider）时照旧「发现 → RyuLDN 中继」，iPhone 之间的局域网联机走这条；
-                //   没有平台发现（Mac 不登记 provider）、或发现起不来时才用 Switch ldn_mitm 协议。#2134 原先自动模式一律 ldn_mitm，
-                //   iOS 的发现 / 选举 / 托管中继整条不走了（services/gate.sh LdnRelayTest 8 项不符）
-                if (LdnAutoRequested && Native.LanDiscovery == null)
+                // 自动模式（#2134 起缺省开）：iOS 照旧「平台发现 → RyuLDN 中继」，iPhone 之间的局域网联机走这条；
+                //   宿主声明要双协议（Mac）、没有平台发现、或发现起不来时用 #2134 的双协议（Switch ldn_mitm，Switch 能搜能进）。
+                //   不按有没有 provider 分：Mac 宿主也登记了同一份 Bonjour provider（launchers/macos/build.mk 链 ios/ldn_lan.m，
+                //   手动局域网模式下 Mac 与 iPhone 互搜），按 provider 分时 Mac 的自动模式被带进 RyuLDN、ldn_mitm 不起，Switch 搜不到（#2134 作者 Mac 实测）
+                if (LdnAutoRequested && (AutoDualRequested || Native.LanDiscovery == null))
                 {
-                    UseAutoMitm("宿主没有平台局域网发现");
+                    UseAutoMitm(AutoDualRequested ? "宿主要求双协议（S2A_LDN_AUTO_DUAL）" : "宿主没有平台局域网发现");
                     return;
                 }
 

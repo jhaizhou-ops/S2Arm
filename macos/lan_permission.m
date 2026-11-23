@@ -10,6 +10,10 @@
 
 int s2a_ui_zh(void);   // front_mac.m：界面跟系统首选语言，中文出中文，其余英文
 
+// ③ 联机自动模式要双协议（#2134：Switch 能搜能进）：Mac 宿主也链了 ios/ldn_lan.m 的 Bonjour provider（上面 ①②，手动局域网模式下与 iPhone 互搜），
+//   服务层不能按「有没有 provider」认 Mac，由这里在进程起来时声明（services/S2A.Services/Host.cs AutoDualRequested）；外面显式给了就不覆盖
+__attribute__((constructor)) static void lan_auto_dual(void) { setenv("S2A_LDN_AUTO_DUAL", "1", 0); }
+
 void s2a_lan_permission_then(int dev_mode, void (^go)(void)) {
     (void)dev_mode;
     go();
