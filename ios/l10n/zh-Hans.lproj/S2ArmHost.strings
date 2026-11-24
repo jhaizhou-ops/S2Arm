@@ -117,6 +117,7 @@
 "settings.patchNote" = "社区补丁接管";
 "settings.fullscreen.patchNote" = "社区满屏补丁接管";
 "game.fps.note" = "游戏支持时以 60 帧运行；跑不动会自动降回原帧率。下次进游戏生效";
+"game.hdrSdrMap.note" = "把普通画面提亮成 HDR 效果；需要 HDR 屏幕；画面里的白色文字也会变亮；下次进游戏生效。对所有游戏都按普通画面提亮；想用游戏自带的 HDR，请关掉这一项。";
 "game.fullscreen.note" = "按这台设备的屏幕比例铺满；画面被拉伸会自动退回 16:9。下次进游戏生效";
 "vpad.a11y.locked" = "已锁定";
 "vpad.a11y.selected" = "已选";
@@ -412,6 +413,7 @@
 "gfx.filter.fsr" = "FSR 锐化放大";
 "gfx.filter.fsr.noDirect" = "FSR 锐化放大也用不了。";
 "gfx.hdrUpscaleBypass.note" = "HDR 开（S2A_HDR）：HDR 窗口（RGB10A2 PQ 码值）旁路上屏抗锯齿、缩放滤镜（MetalFX / FSR）与补帧——8 位感知缩放不适配 PQ 码值（产品限制）；SDR 窗口照常。";
+"gfx.hdrSdrMap" = "SDR 转 HDR";
 "gfx.filter.nearest" = "2D 游戏专用";
 "gfx.fpsLimit" = "帧率上限";
 "gfx.fpsLimit.none" = "不限";

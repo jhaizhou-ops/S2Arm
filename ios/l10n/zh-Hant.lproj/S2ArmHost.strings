@@ -382,6 +382,7 @@
 "gfx.filter.fsr" = "FSR 銳化放大";
 "gfx.filter.fsr.noDirect" = "FSR 銳化放大也用不了。";
 "gfx.hdrUpscaleBypass.note" = "HDR 開（S2A_HDR）：HDR 視窗（RGB10A2 PQ 碼值）旁路上屏抗鋸齒、縮放濾鏡（MetalFX / FSR）與補幀——8 位感知縮放不適配 PQ 碼值（產品限制）；SDR 視窗照常。";
+"gfx.hdrSdrMap" = "SDR 轉 HDR";
 "gfx.filter.nearest" = "2D 遊戲專用";
 "gfx.fpsLimit" = "幀率上限";
 "gfx.fpsLimit.none" = "不限";
@@ -576,6 +577,7 @@
 "settings.patchNote" = "社區補丁接管";
 "settings.fullscreen.patchNote" = "社區滿屏補丁接管";
 "game.fps.note" = "遊戲支援時以 60 幀執行；跑不動會自動降回原幀率。下次進遊戲生效";
+"game.hdrSdrMap.note" = "把普通畫面提亮成 HDR 效果；需要 HDR 螢幕；畫面裡的白色文字也會變亮；下次進遊戲生效。對所有遊戲都按普通畫面提亮；想用遊戲自帶的 HDR，請關掉這一項。";
 "game.fullscreen.note" = "按這臺裝置的螢幕比例鋪滿；畫面被拉伸會自動退回 16:9。下次進遊戲生效";
 "settings.toggle.fullscreen" = "滿屏";
 "vpad.menu.settings" = "設定…";

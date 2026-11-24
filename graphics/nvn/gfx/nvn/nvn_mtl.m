@@ -20243,7 +20243,7 @@ static void present_prewarm(void) {
     done = 1;
     present_options();
     uint32_t cand[2] = { (uint32_t)MTLPixelFormatBGRA8Unorm, (uint32_t)MTLPixelFormatRGB10A2Unorm };
-    int n = nvn2_hdr_switch() == HDR_OFF ? 1 : 2;   // off 缺省：只热基线（off ⇒ 层恒 S0，PQ 层目标用不上）
+    int n = nvn2_hdr_layer_sw() == HDR_OFF ? 1 : 2;   // 缺省（玩家 off 且 S4 关）：只热基线（层恒 S0，PQ 层目标用不上）。PR-B 终稿：读层视角开关——S4 开而玩家 off 时层可持 PQ，PQ 候选也热（否则首次切 PQ 层冷编 PSO，T11 >100ms 卡顿）
     pf_pso_warm(&g_blit_psos, cand, n, present_pso_warm_one, NULL);
     MLOG("直连：出图管线预热 %d 槽（BGRA8Unorm%s）", n, n == 2 ? "、RGB10A2Unorm" : "");   // T11 的预热命中日志（预热命中断言：t_present_pso ⑤）
 }
@@ -20612,7 +20612,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     //   PQ 窗口 = 游戏出图源是 RGB10A2（HDR10 窗）：排空途中又见 PQ 窗口清零重等——无 HDR 帧落进 SDR 层；want 期间（can 持稳 ∧ s1_ready）非 PQ 帧也不排空。
     //   层格式切换帧不崩：present_blit(_m4) 对真实 drawable 的格式再查一次 present_pipeline（下方 blit 自己调），本帧 PSO 与 drawable 恒同格式。
     if (layer.pixelFormat == MTLPixelFormatRGB10A2Unorm)
-        nvn2_hdr_tick_frame(nvn2_hdr_switch(), src.pixelFormat == MTLPixelFormatRGB10A2Unorm);
+        nvn2_hdr_tick_frame(nvn2_hdr_layer_sw(), src.pixelFormat == MTLPixelFormatRGB10A2Unorm);   // sw = 层视角开关（PR-B 终稿）：S4 开而玩家 off 时 want 期间不排空——层由 S4 持住（喂玩家开关会把 SDR 帧两帧排空、层掉回 S0，S4 失载体）
     fit_geom(layer.drawableSize.width, layer.drawableSize.height, pcw, pch);   // game units (was the crop / source size read here)
     if (g_grab_cb) grab_present(src, crop, layer.drawableSize, ticket);   // Game picture needed by the whole-window screenshot (peek without the lock first; the real take locks inside the function)
     // PR3d：HDR 窗口（PQ 码值）不出图补帧（nvn_present_fi.inc 同 8 位 sRGB 假设——输入缩拷 / 补出帧画布全 BGRA8Unorm）；SDR 帧照常交给补帧（旁路逐帧判，不碰补帧自己的开关状态）

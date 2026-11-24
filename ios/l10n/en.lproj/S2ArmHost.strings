@@ -117,6 +117,7 @@
 "settings.patchNote" = "Community patch";
 "settings.fullscreen.patchNote" = "Community full-screen patch";
 "game.fps.note" = "Runs at 60 FPS when the game supports it and falls back when it can’t keep up. Takes effect next time you start the game";
+"game.hdrSdrMap.note" = "Brightens the plain picture into an HDR look; needs an HDR screen; white text in the picture also gets brighter; takes effect next time you start the game. Applies this brightening to every game's plain picture; to use a game's own HDR, turn this off";
 "game.fullscreen.note" = "Fills this device’s screen at its own aspect ratio, and falls back to 16:9 if the picture stretches. Takes effect next time you start the game";
 "vpad.a11y.locked" = "Locked";
 "vpad.a11y.selected" = "Selected";
@@ -412,6 +413,7 @@
 "gfx.filter.fsr" = "FSR";
 "gfx.filter.fsr.noDirect" = "FSR isn't available either.";
 "gfx.hdrUpscaleBypass.note" = "HDR is on (S2A_HDR): HDR windows bypass on-screen anti-aliasing, upscaling (MetalFX / FSR) and frame interpolation — 8-bit perceptual scaling doesn't fit PQ code values (a product limitation); SDR windows are unaffected.";
+"gfx.hdrSdrMap" = "SDR to HDR";
 "gfx.filter.nearest" = "For 2D games";
 "gfx.fpsLimit" = "Frame rate limit";
 "gfx.fpsLimit.none" = "Unlimited";
