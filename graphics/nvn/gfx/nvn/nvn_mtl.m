@@ -8000,6 +8000,7 @@ static void shmap_load_once(void) {
     NSString *posb; NSArray *posu; NSData *pos; int8_t pos_st;   // S2Arm widen geometry (11-06): json pos_slice (base64 SpirvPosSlice.Packed, decoded on first use into pos; pos_st 1 ok / -1 bad) and pos_ubo [[SPIR-V binding, uniform register]]
     NSString *cbu; int32_t wsh;   // S2Arm widen: which vec4 of each uniform register the shader reads (json cbuf_use, dmsh_xlate CbufUseText) and its widen core handle (wd_sh: registered on first draw, -1 = refused)
     int fragc;   // S2Arm widen: the fragment shader reads the fragment position (json frag_coord, dmsh_build.py): the translator divides it by support render_scale[0] (wd_rscale)
+    int fragz;   // the fragment shader reads gl_FragCoord.z itself (json frag_z, Dsh.cs FragZ; frag_coord is set for .xy reads too): see the depth bias in draw_pass_state
     int push;   // S2Arm widen: the shader's rasterizing entry points read s2a_push (reflection s2a_push, dmsh_build.py vs_push); the widen core pushes only such vertex shaders
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     // S2Arm tessellation (dmsh_build.py tess_finish)
@@ -8658,6 +8659,7 @@ static NvShader *shader_build(NSString *pc, int stage, int layer, int depth_zero
     }
     o->push = [j[@"s2a_push"] boolValue];   // S2Arm widen (see NvShader.push)
     o->fragc = [j[@"frag_coord"] boolValue];   // S2Arm widen (see NvShader.fragc)
+    o->fragz = [j[@"frag_z"] boolValue];   // see NvShader.fragz
     if ([j[@"cbuf_use"] isKindOfClass:[NSString class]]) o->cbu = j[@"cbuf_use"];   // S2Arm widen (see NvShader.cbu)
     if ([j[@"pos_slice"] isKindOfClass:[NSString class]]) { o->posb = j[@"pos_slice"]; if ([j[@"pos_ubo"] isKindOfClass:[NSArray class]]) o->posu = j[@"pos_ubo"]; }   // S2Arm widen geometry (see NvShader.posb)
     o->exact = j[@"scale_exact"] ? (int8_t)[j[@"scale_exact"] boolValue] : -1;   // S2Arm widen (see NvShader.ts)
@@ -17033,6 +17035,30 @@ static void alpha_ref_bind(id en, NvShader *fs) {
     __unsafe_unretained id<MTLBuffer> b; size_t o = arena_alloc_u(sizeof S.alpha_ref, &b); memcpy((uint8_t *)b.contents + o, &S.alpha_ref, sizeof S.alpha_ref);
     enc_r_args(en, MTLRenderStageFragment, b.gpuAddress + o, 30);
 }
+// Fragment depth vs a stored depth: a fragment shader that reads gl_FragCoord.z (json frag_z, component level) and samples a depth texture can compare the two
+//   (self-peel style "z > depth an earlier pass wrote from the same geometry → drop"). On NVIDIA both come from one interpolator and match exactly; on Apple GPUs the
+//   [[position]].z the fragment sees can be 1 ULP farther than what the fixed-function depth stored for the same triangle (~3% of pixels, a 2-pixel beat pattern along
+//   the depth slope), so a zero-tolerance compare drops front-surface pixels and leaves a grid of isolated holes (measured: ~1300 of ~50k fog pixels). setDepthBias
+//   moves [[position]].z too on Apple GPUs, so 1 unit toward passing restores the tie (measured: ~1300 → ~60, see the PR).
+//   Scope: only draws that test but do not write depth (no depth buffer content changes), and only LESS / LEQUAL. Measured on Apple M1 (tests/t_nvn_fragz_bias.m):
+//   every pixel moves at least 1 ULP of its own depth and at most one unit 2^(e - 23), e the exponent of the primitive's largest depth, so pixels in that top
+//   binade move 1 ULP (2 if the triangle reaches exactly 1.0) and pixels far below it more ULPs (up to ~256 at z 0.002). With LESS / LEQUAL small z is near the
+//   camera, where that is a negligible distance; with GREATER / GEQUAL (reverse Z) small z is far away and the same amount could show through, so those get none.
+//   DM_NVN_FRAGZ_BIAS=<units> changes the amount, 0 turns it off.
+static float fragz_bias_units(int fragz, int dt, int dw, int df, int has_depth, int samples_depth, const char *key) {
+    static float fzb = -1e9f; if (fzb == -1e9f) { const char *e = getenv("DM_NVN_FRAGZ_BIAS"); fzb = e ? (float)atof(e) : 1.0f; if (e) MLOG("DM_NVN_FRAGZ_BIAS=%g: depth-test-only LESS / LEQUAL draws whose fragment shader reads gl_FragCoord.z and samples a depth texture get %g units of depth bias toward passing", fzb, fzb); }
+    if (!fzb || !fragz || !dt || dw || !has_depth || !samples_depth || (df != NVN_DEPTH_FUNC_LESS && df != NVN_DEPTH_FUNC_LEQUAL)) return 0;
+    static int once; if (!once) { once = 1; MLOG("fragment depth bias: first depth-test-only draw whose fragment shader reads gl_FragCoord.z and samples a depth texture (fs %s, func %d) gets %g units toward passing", key ? key : "?", df, fzb); }
+    return -fzb;
+}
+// Does this draw's fragment shader have a depth-format texture bound (DEPTH16 .. DEPTH32F_STENCIL8; fmt_depth also counts STENCIL8)? For fragz_bias_units
+static int fs_samples_depth(const NvShader *fs) {
+    for (int i = 0; i < fs->rf.nb; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
+        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff);
+        os_unfair_lock_lock(&g_rmu); int f = tid < g_ntreg && g_treg[tid].ok ? (int)g_treg[tid].t.d.format : 0; os_unfair_lock_unlock(&g_rmu);
+        if (f >= NVN_FORMAT_DEPTH16 && f <= NVN_FORMAT_DEPTH32F_STENCIL8) return 1; }
+    return 0;
+}
 static int draw_pass_state(id en, NvShader *fs) {   // en: the render encoder (typed id: enc_r_dss and friends take the Metal 4 type; naming it here would add an unguarded Metal 4 symbol, tools/avail_count.sh)
     static id<MTLDepthStencilState> cur_ds; static uint64_t cur_ds_pass;
     // Diagnostic DM_NVN_DEPTHOVR=fragment shader key prefix,...: those draws compare depth with ALWAYS, which tells "the depth test rejects every fragment" from "nothing rasterizes" (with DM_NVN_HILITE); unset = unchanged
@@ -17082,17 +17108,7 @@ static int draw_pass_state(id en, NvShader *fs) {   // en: the render encoder (t
       int wi = (S.poly.front == NVN_FRONT_FACE_CCW) != (s2a_nvn_rast_flip != 0) ? MTLWindingCounterClockwise : MTLWindingClockwise;
       int fi = S.poly.mode == NVN_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill, cl = !S.depth_clamp;   // depth clip off = SetDepthClamp
       float bi[3] = {0, 0, 0}; if (S.poly.offset_en & 4) { bi[0] = S.po.units; bi[1] = S.po.factor; bi[2] = S.po.clamp; }
-      // Fragment depth vs the depth buffer: a fragment shader that reads its own position can compare gl_FragCoord.z with a depth texture an earlier pass wrote from the
-      //   same geometry (self-peel / soft-particle style "z > stored depth → drop"). On NVIDIA both come from one interpolator and match exactly; on Apple GPUs the
-      //   [[position]].z the fragment sees can be 1 ULP farther than what the fixed-function depth stored for the same triangle (~3% of pixels, in a 2-pixel beat
-      //   pattern), so a zero-tolerance compare drops front-surface pixels and leaves a grid of isolated holes. Measured: a full-screen volume layer lost 1343 of
-      //   ~50k pixels this way; 2 units of depth bias toward passing (setDepthBias moves [[position]].z too on Apple GPUs) left 45. Only draws that test but do
-      //   not write depth get it, so no depth buffer content changes; the cost is passing the hardware test within 2 ULP of a tie.
-      //   DM_NVN_FRAGZ_BIAS=<units> changes the amount, 0 turns it off.
-      { static float fzb = -1e9f; if (fzb == -1e9f) { const char *e = getenv("DM_NVN_FRAGZ_BIAS"); fzb = e ? (float)atof(e) : 2.0f; if (e) MLOG("DM_NVN_FRAGZ_BIAS=%g: depth-test-only draws whose fragment shader reads its position get %g units of depth bias toward passing", fzb, fzb); }
-        if (fzb && fs && fs->fragc && S.ds.dt && !S.ds.dw && R.rt.depth) {
-            int df = (int)S.ds.df, dir = df == NVN_DEPTH_FUNC_LESS || df == NVN_DEPTH_FUNC_LEQUAL ? -1 : df == NVN_DEPTH_FUNC_GREATER || df == NVN_DEPTH_FUNC_GEQUAL ? 1 : 0;
-            if (dir) { bi[0] += dir * fzb; static int once; if (!once) { once = 1; MLOG("fragment-position depth bias: first depth-test-only draw whose fragment shader reads its position (fs %s, func %d) gets %g units toward passing", fs->key, df, fzb); } } } }
+      if (fs && fs->fragz && S.ds.dt && !S.ds.dw) bi[0] += fragz_bias_units(1, 1, 0, (int)S.ds.df, R.rt.depth != NULL, fs_samples_depth(fs), fs->key);   // see fragz_bias_units
       if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
       if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
       if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
