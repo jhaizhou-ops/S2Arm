@@ -9,6 +9,7 @@
 //      逐图元输出 / 写视口号 / 写层号 / 读图元号的源码不改写。
 //   ④ mxd_patch：改写后编得过，同一组输入下 main0_md 与 main0_mc 的顶点记录、索引逐字相同。反证：阶段内存片区压到顶点区上，必须对不上。
 //   ⑤ 网格连段入段条件：宿主阶段读贴图 / 图像 / 纹素缓冲 / 原始内存池表的不入段，只读常量 / 存储缓冲的入段。
+//   ⑥ mxd_fits：设备内存那份每组多占一片阶段内存，交换缓冲上限内放得下的组数比线程组那份少时改回 main0_mc。反证：照旧换的话一笔少画的组数。
 #include "../gfx/nvn/nvn_mtl.m"
 
 static unsigned failures, checks;
@@ -258,6 +259,13 @@ int main(void) {
           static const int kinds[] = {NVN_RB_TEXU, NVN_RB_IMG, NVN_RB_IMGU, NVN_RB_TBUF, NVN_RB_GMEM}; int all = 1;
           for (size_t i = 0; i < sizeof kinds / sizeof *kinds; i++) { b->rf.b[1].kind = (uint8_t)kinds[i]; all &= mesh_stage_reads_images(b); }
           VERIFY(all, "⑤ 读图像 / 纹素缓冲 / 原始内存池表的同样不入段"); }
+        // ⑥
+        { const uint64_t B = 32ull << 20, p0 = 10000; const uint32_t dsw = 1504;   // 32 MB 上限，每组 10000 字节，阶段内存一片 1504 字：线程组那份放得下 3355 组，设备内存那份 2095 组
+          VERIFY(mxd_fits(100, B, p0, dsw) && mxd_fits(2095, B, p0, dsw), "⑥ 组数在设备内存那份的上限内：用 main0_md");
+          VERIFY(!mxd_fits(3000, B, p0, dsw) && !mxd_fits(5000, B, p0, dsw), "⑥ 设备内存那份放不下、线程组那份放得下（或放得多）：改回 main0_mc");
+          VERIFY(mxd_fits(5000, B, p0, 0), "⑥ 没有阶段内存片：照用");
+          uint64_t lost = MIN(3000ull, B / p0) - MIN(3000ull, B / (p0 + dsw * 4ull));
+          VERIFY(lost == 905, "⑥ 反证：照旧换 main0_md，3000 组的一笔只画得出 2095 组（少 %llu 组）", (unsigned long long)lost); }
 
         if (failures) printf("✗ t_nvn_mesh_emu：%u 项，%u 项不过\n", checks, failures); else printf("✓ t_nvn_mesh_emu：%u 项全过\n", checks);
         return failures ? 1 : 0;

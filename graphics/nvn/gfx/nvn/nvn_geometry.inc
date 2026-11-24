@@ -295,6 +295,11 @@ static NSString *mxc_patch(NSString *src, const char *key) {
 //   改写不成（没有线程组阶段内存、源码对不上）就照旧用 main0_mc。g_mxd_sw：键 → 一片的字数。DM_NVN_MESH_DEV=1 开（默认关）
 static NSMutableDictionary *g_mxd_sw;
 static int mxd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_DEV"); v = e && *e == '1'; if (v) MLOG("DM_NVN_MESH_DEV=1: mesh host stages keep their stage memory in device memory"); } return v; }
+// 设备内存那份每组多占一片阶段内存（dsw 字）：交换缓冲有上限（budget 字节），本笔能放的网格组数因此比线程组那份（每组 p0 字节）少时，本笔改回 main0_mc。
+//   原先照样换成 main0_md，多出的组被截掉不画（11-25 帧回放：蕨类网格整丛不画、画面泛白，全关逐像素差均值 30）
+static int mxd_fits(uint64_t cap, uint64_t budget, uint64_t p0, uint32_t dsw) {
+    return MIN(cap, budget / (p0 + (uint64_t)dsw * 4)) >= MIN(cap, budget / p0);
+}
 static NSString *mxd_patch(NSString *src, const char *key) {
     static NSRegularExpression *rx, *rt; static dispatch_once_t once;
     dispatch_once(&once, ^{ rx = [NSRegularExpression regularExpressionWithPattern:@"\n    threadgroup spvUnsafeArray<uint, (\\d+)> (\\w+);\n" options:0 error:nil];
@@ -491,7 +496,7 @@ static int mtk_emu_prep(const p_draw *dw, NvShader *ts, NvShader *ms, uint64_t i
     if (!mtk_emu_ready(ts, ms)) return 0;
     int z = [ms->ventry hasSuffix:@"_z"];
     id<MTLComputePipelineState> tp = ts ? mtk_emu_get(ts, 4, @"main0_tc") : nil, mp = mtk_emu_get(ms, 5, z ? @"main0_mc_z" : @"main0_mc");
-    uint32_t dsw = 0;   // 阶段内存在设备内存的那份（mxd_patch）：一组一片 dsw 字
+    id<MTLComputePipelineState> mp0 = mp; uint32_t dsw = 0;   // 阶段内存在设备内存的那份（mxd_patch）：一组一片 dsw 字；mp0 = 线程组那份
     if (!ms->mesh_relay && mxd_on()) { id<MTLComputePipelineState> dp = mtk_emu_get(ms, 5 | 0x100, z ? @"main0_md_z" : @"main0_md");
         os_unfair_lock_lock(&g_mxl_lock); dsw = [g_mxd_sw[@(ms->key)] unsignedIntValue]; os_unfair_lock_unlock(&g_mxl_lock);
         if (dp && dsw) mp = dp; else dsw = 0; }
@@ -504,6 +509,7 @@ static int mtk_emu_prep(const p_draw *dw, NvShader *ts, NvShader *ms, uint64_t i
     uint32_t capT = !ts ? 0 : ind ? MIN(MAX(sawT + sawT / 4 + 16, 64u), MXE_TASK_CAP) : (uint32_t)MIN((uint32_t)dw->count, 65536u), pw = ts ? MAX(((uint32_t)ts->mesh_payload + 3) / 4, 1u) : 0;
     uint32_t capM = ts ? MIN(capT * 32u, MAX(sawM + sawM / 4 + 32, 64u))   // a task workgroup derives at most its thread count of mesh workgroups in these games (ballot + popcount); more were seen: sawM says
                        : ind ? MAX(sawM + sawM / 4 + 32, 64u) : (uint32_t)MAX(MIN((uint32_t)dw->count, 65536u), 1u);
+    if (dsw && !mxd_fits(capM, budget, (uint64_t)maxv * vs + (uint64_t)maxp * 12, dsw)) { dsw = 0; mp = mp0; }
     uint64_t sw = ms->mesh_relay ? ms->mesh_relay_sw : dsw;   // relayed payload: one stage-memory slice a mesh workgroup (its stage memory is past Metal's 32 KB of threadgroup memory)
     uint64_t per = (uint64_t)maxv * vs + (uint64_t)maxp * 12 + sw * 4; capM = (uint32_t)MAX(1, MIN((uint64_t)capM, budget / per));
     uint64_t w0 = MXE_HEAD + capT + (uint64_t)capT * pw + capM, vbo = (w0 + 3) & ~3ull, ibo = vbo + (uint64_t)capM * maxv * (vs / 4), sl = (ibo + (uint64_t)capM * maxp * 3 + 3) & ~3ull,
