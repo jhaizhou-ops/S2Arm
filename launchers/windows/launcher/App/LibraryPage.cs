@@ -35,6 +35,7 @@ public sealed partial class EnvironmentWindow
     private Task? libraryOperation;
     private TextBox libraryFolderBox = new();
     private readonly Dictionary<string, Bitmap> covers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> badImages = new(StringComparer.OrdinalIgnoreCase);   // 解不开的图（CachedImage）
     private readonly string privateRoot = ResolvePrivateRoot();
 
     private void Navigate(string destination)
@@ -62,6 +63,7 @@ public sealed partial class EnvironmentWindow
     /// </summary>
     private void ClearCovers()
     {
+        badImages.Clear();
         if (covers.Count == 0) return;
         retiredCovers.Add((Content, covers.Values.ToList()));
         covers.Clear();
@@ -105,15 +107,31 @@ public sealed partial class EnvironmentWindow
         {
             if (new FileInfo(path).Length > 16 * 1024 * 1024) return null;
             // 缓存键另起：没有自带图标的款 cover 也指向 banner.jpg，封面卡片按 240 宽解码的那份不能拿来铺大图
-            if (!covers.TryGetValue(path + "#hero", out var image))
-            {
-                using var file = File.OpenRead(path);
-                image = Bitmap.DecodeToWidth(file, 1600);
-                covers.Add(path + "#hero", image);
-            }
-            return image;
+            return CachedImage(path + "#hero", path, 1600);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return null; }
+    }
+
+    /// <summary>解码这款文件夹里的一张图并缓存（键 key）；解不开 → null，并记下这个键，之后的重画不再解它（重新连库 / 刷新时 ClearCovers 一并清掉再试）。
+    /// 坏图（空文件、截断、不是图片）Skia 解出空图，Avalonia ImmutableBitmap 构造里抛 NullReferenceException，不在 IO 类异常里：原先一路抛出 RenderLibrary，
+    /// 整页重画中断、出错后的重画又炸，界面停在上一页（D-97FT：Windows 0.6.9 一分钟 15 次 NullReferenceException）。一张图解不开只该让那一格用占位图</summary>
+    private Bitmap? CachedImage(string key, string path, int width)
+    {
+        if (covers.TryGetValue(key, out var image)) return image;
+        if (badImages.Contains(key)) return null;
+        try
+        {
+            using var file = File.OpenRead(path);
+            image = Bitmap.DecodeToWidth(file, width);
+        }
+        catch (Exception error)   // noqa：玩家文件夹里的图，任何解码失败都只回落占位图，不能拖垮整页
+        {
+            badImages.Add(key);
+            LauncherCrash.Log(null, $"图片解不开，用占位图：{path}（{error.GetType().Name}: {error.Message}）");
+            return null;
+        }
+        covers.Add(key, image);
+        return image;
     }
 
     /// <summary>封面 + 已打上 S 级优化的左上角金色 S（同 Mac LauncherView+Library SGradeBadge：只有 S、没有框和底色，叠三层更实、加投影）</summary>
@@ -160,13 +178,8 @@ public sealed partial class EnvironmentWindow
             // 只认这款自己文件夹里的封面（LibraryGame.CoverFile：按 catalog 给的文件夹认，英文名文件夹也行，#330）
             if (connectedFolder is not null && game.CoverFile() is { } path && new FileInfo(path).Length <= 16 * 1024 * 1024)
             {
-                if (!covers.TryGetValue(path, out var image))
-                {
-                    using var file = File.OpenRead(path);
-                    image = Bitmap.DecodeToWidth(file, 240);
-                    covers.Add(path, image);
-                }
-                return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
+                if (CachedImage(path, path, 240) is { } image)
+                    return new Image { Source = image, Width = size, Height = size, Stretch = Stretch.UniformToFill };
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
