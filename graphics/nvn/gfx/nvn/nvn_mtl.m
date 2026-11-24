@@ -9071,7 +9071,8 @@ static void *prog_get_ptr(const prog_t *cp) {   // Called only on the submit thr
         unsigned nh = 0, nsq = 0, nsrgb = 0;
         if (st == 5) {
             const void *ctl = p->sd[i].control; uint32_t ncode = 0;
-            if (ctl && (uintptr_t)ctl < (1ull << 47) && nvn2_on() && nvn2_ctl(ctl)) { memcpy(&ncode, (const uint8_t *)ctl + 0x44, 4); if (p->sd[i].data && ncode && ncode < (1u << 24)) nh = nvn2_hmma_count((const void *)(uintptr_t)p->sd[i].data, ncode); }
+            // 帧回放放回的程序不经 ProgramSetShaders，控制段可能是录时的宿主指针（已失效，见 dm_shader_miss_late）：读不到就不读（原先 SIGSEGV）
+            if (ctl && (uintptr_t)ctl < (1ull << 47) && nvn2_on() && span_readable(ctl, 0x48) && nvn2_ctl(ctl)) { memcpy(&ncode, (const uint8_t *)ctl + 0x44, 4); if (p->sd[i].data && ncode && ncode < (1u << 24)) nh = nvn2_hmma_count((const void *)(uintptr_t)p->sd[i].data, ncode); }
             if (nh) { nsq = nvn2_hsq_count((const void *)(uintptr_t)p->sd[i].data, ncode); nsrgb = nvn2_srgb_count((const void *)(uintptr_t)p->sd[i].data, ncode); }   // the network's output domain (nvn_tensor.inc)
         }
         t_refl_only = nh > 0;
