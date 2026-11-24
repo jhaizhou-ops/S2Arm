@@ -801,7 +801,7 @@ static void pidx_removing(int i) {   // before g_pools[i] = g_pools[--g_npool]: 
 //   块之间重叠，GPU 地址跨块不连续，所以查找要说读多远；不知道（长度 1：间接绘制的索引缓冲、原始存储地址）给 BIG_UNKNOWN。原始全局内存表（着色器自己查池表）要整池：big_full（gmem_map）。
 //   只为 CPU 读（addr_cpu）或只问在不在（pool_known）的查询不建块：块是 GPU 用的
 enum { BIG_MIN = 512u << 20, BIG_S = 16u << 20, BIG_UNKNOWN = 64u << 20, BIG_MAX = 32 };
-typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; uint64_t dead; uint64_t made; int nofull; } big_pool;   // made：给这个池建过的零拷贝缓冲长度合计（块、加长替下的旧块都算：都活到池走）；nofull：整池缓冲建不出来过，不再试   // dead：游戏已释放、到这次提交序号才回收（同池条目的 dead，pool_reap）   // chunk：步长 → g_pools 下标 + 1；full：整池那条 + 1；old：被加长替换下来的缓冲，随池走
+typedef struct { uintptr_t lo, hi, a, b; const void *mem; int *chunk, full; NSMutableArray *old; uint64_t dead; } big_pool;   // dead：游戏已释放、到这次提交序号才回收（同池条目的 dead，pool_reap）   // chunk：步长 → g_pools 下标 + 1；full：整池那条 + 1；old：被加长替换下来的缓冲，随池走
 static big_pool g_big[BIG_MAX]; static int g_nbig; static uint64_t g_big_chunks;   // g_big_chunks：建过的块（读数）
 // 池表删一条时（gone 走、末尾那条 from 改名为 gone）大池块表里的下标跟着改：块表记的是池表下标，别的池被删、挪进空位的若是某个大池的块，
 //   不改就指着别人的条目（GPU 地址落到别的缓冲上）；走的若正是块，块表那格清掉（下次查到再包）。调用方持 g_mu
@@ -1360,7 +1360,7 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end) {   /
     g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
     g_pools[g_npool++] = (pool_ent){lo < b->lo ? b->lo : lo, end > b->hi ? b->hi : end, lo, buf, buf.gpuAddress, b->mem, 0, lo}; pidx_added();   // hi = 缓冲真盖到的地方（别的查找照常按它判装不装得下）
     g_pools[g_npool - 1].dead = b->dead;   // 释放后、回收前包出的块随池一起到期
-    [g_keep addObject:buf]; g_big_chunks++; b->made += end - lo;
+    [g_keep addObject:buf]; g_big_chunks++;
     (void)hi; return g_npool - 1;
 }
 // 大池里 [addr, addr + len) 的条目：所在步长的块，没有就建、不够长就加长（加长：旧块已经编进去的命令照用，旧缓冲随池走）；超出池尾 -1。调用方持 g_mu
@@ -1371,17 +1371,6 @@ static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     uint64_t want = len > 1 ? len : BIG_UNKNOWN; uintptr_t end = (addr + want + BIG_S - 1) & ~(uintptr_t)(BIG_S - 1); end += BIG_S; if (end > b->b || end < lo) end = b->b;
     int i = b->chunk[k] - 1;
     if (i >= 0 && (g_pools[i].hi >= b->hi || g_pools[i].hi >= addr + want)) return i;
-    // 一个大池的缓冲合计有上限。块互相重叠（每块盖到要读的末尾再多一个步长，不知道读多远的给 64 MB：一块 32～96 MB，步长才 16 MB），加长替下的旧块也活到池走；
-    //   设备的 GPU 已分配对每个缓冲按整块长度记，重叠的部分记多次。896 MB 的池 56 个步长各查一次（长度 1）记 5136 MB；同一步长读 16、32 … 480 MB 记 3840 MB（t_nvn_big_pool ㉒ ㉓）。
-    //   iPad Pro M4（建议上限 5461 MB）读档后玩 520 秒，驻留的内存池 1249 → 3979 MB、GPU 已分配 2381 → 5353 MB（98%），下一条命令缓冲报内存不足、整局安全停。
-    //   再建这一块就超过池长的一半时，改包整池一个缓冲（同 gmem_map 那条 full）：之后所有查找都落到它，不再建块。合计 ≤ 池长的 1.5 倍。
-    //   不改的三种：整池超过单个缓冲上限（包不住）；游戏已释放、等回收的池（至多再活两次提交）；整池缓冲建不出来过（只试一次，记一条红，之后照旧建块、没有上限）
-    if (!b->nofull && !b->dead && b->made + (end - lo) > (uint64_t)(b->b - b->a) / 2 && (uint64_t)(b->b - b->a) <= ((uint64_t)g_dev.maxBufferLength & ~(uint64_t)(getpagesize() - 1))) {
-        uint64_t had = b->made; int w = big_new(b, b->a, b->b, b->b);
-        if (w >= 0) { b->full = w + 1; MLOG("memory pool %p+%llu MB: its chunks came to %llu MB (they overlap and each counts in full), one buffer over the whole pool from here on", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20)); return w; }
-        b->nofull = 1;
-        MLOG("【红】 memory pool %p+%llu MB: its chunks came to %llu MB and the one buffer over the whole pool could not be made: chunks go on without a cap (GPU allocated counts each of them in full)", b->mem, (unsigned long long)((b->hi - b->lo) >> 20), (unsigned long long)(had >> 20));
-    }
     int n = big_new(b, lo, lo + BIG_S, end); if (n < 0) return i >= 0 && addr + len <= g_pools[i].hi ? i : -1;
     if (i >= 0) {   // 加长：新条目挪进旧位（地址起点不变，下标索引仍有序），旧缓冲留到池走
         [b->old addObject:g_pools[i].buf]; [g_keep removeObject:g_pools[i].buf]; int gs = g_pools[i].gslot; if (g_pools[i].res) g_pool_res_n--;   // 旧缓冲仍在驻留集里，随池走时放
@@ -6657,16 +6646,6 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
         MLOG("residency set by kind up to frame %llu: textures %llu, %llu MB; GPU-private buffers %llu, %llu MB; shared buffers (mostly zero-copy memory pools: the game's own memory) %llu, %llu MB; other %llu, %llu MB",
              frame, (unsigned long long)k[0], (unsigned long long)(k[1] >> 20), (unsigned long long)k[2], (unsigned long long)(k[3] >> 20),
              (unsigned long long)k[4], (unsigned long long)(k[5] >> 20), (unsigned long long)k[6], (unsigned long long)(k[7] >> 20)); }
-    {   // 大池的块互相重叠，各自整块记进 GPU 已分配：每个大池报块数、块长合计、其中驻留的、块盖住的不重复范围、加长替下还活着的旧缓冲
-        pthread_mutex_lock(&g_mu);
-        for (int q = 0; q < g_nbig; q++) { big_pool *b = &g_big[q]; size_t nk = ((b->b - b->a) >> 24) + 1; uint64_t sum = 0, rs = 0, uni = 0, ob = 0; uintptr_t top = b->a; int nc = 0;
-            for (size_t k = 0; k < nk; k++) { int i = b->chunk[k] - 1; if (i < 0 || i >= g_npool) continue; pool_ent *e = &g_pools[i]; uint64_t sz = e->hi - e->lo; nc++; sum += sz; if (e->res) rs += sz;
-                uintptr_t from = e->lo > top ? e->lo : top; if (e->hi > from) { uni += e->hi - from; top = e->hi; } }
-            for (id<MTLBuffer> o in b->old) ob += o.length;
-            int fi = b->full - 1; const char *fs = fi < 0 || fi >= g_npool ? (b->nofull ? "refused" : "no") : g_pools[fi].res ? "yes, resident" : "yes, not resident";
-            MLOG("big pool %#lx+%llu MB up to frame %llu: %d chunks, %llu MB in all (%llu MB resident) over %llu MB of the pool; whole-pool buffer %s; replaced chunk buffers still alive %lu, %llu MB; buffers made for it so far %llu MB", (unsigned long)b->lo, (unsigned long long)((b->hi - b->lo) >> 20), frame, nc,
-                 (unsigned long long)(sum >> 20), (unsigned long long)(rs >> 20), (unsigned long long)(uni >> 20), fs, (unsigned long)b->old.count, (unsigned long long)(ob >> 20), (unsigned long long)(b->made >> 20)); }
-        pthread_mutex_unlock(&g_mu); }
     {   // What the memory pools put in the residency set (on a phone: wired), and the uploads read from pools that hold only textures without putting them there (up_tex_src)
         uint64_t pall = 0, pres_b = 0; int pn = 0;
         pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) { uint64_t sz = g_pools[i].hi - g_pools[i].lo; pall += sz; if (g_pools[i].res) pres_b += sz; } pn = g_npool; pthread_mutex_unlock(&g_mu);
