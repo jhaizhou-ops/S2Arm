@@ -209,12 +209,28 @@ static id<MTLComputePipelineState> mxe_scan_pso(void) { return mxe_pso(MXE_SCAN)
 static NSMutableDictionary *g_mxl, *g_mxp; static os_unfair_lock g_mxl_lock = OS_UNFAIR_LOCK_INIT;
 static NSMutableSet *g_mxl_listed; static _Atomic uint64_t g_mxl_wait_ns, g_mxl_hits, g_mxl_built_bg;
 static NSString *mxl_list_path(void) { NSString *p = pso_user_path(); return p ? [p.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"mesh_emu.tsv"] : nil; }
-// 网格计算核写索引前在 GPU 上剔三角形：三个角都在同一裁剪面外 / 都在眼后 / 屏幕面积为 0；目标单采样、视口为整像素时再剔包围盒不含任何像素中心的（子像素）。
-//   宿主现编时改写 main0_mc / main0_mc_z 的索引循环（只改非展开的；逐图元展开的不动），视口与开关经交换缓冲头 [24..28] 传进去；剔完先于顶点循环，整组剔光就不写顶点记录、不动索引计数。
-//   这些三角形本来就画不出像素，只省网格核的写入与之后的顶点 / 光栅工作（一款动作冒险游戏 M1 Pro：草地网格绘制）。DM_NVN_MESH_CULL=0 关、=1 不剔子像素
-static int mxc_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_MESH_CULL"); m = e && *e ? atoi(e) : 2;
-    if (m != 2) MLOG("DM_NVN_MESH_CULL=%d: mesh host stages %s", m, m ? "cull triangles outside the clip volume and of zero area (not sub-pixel ones)" : "do not cull triangles"); } return m; }
+// 网格计算核写索引时在 GPU 上剔三角形（DM_NVN_MESH_CULL=1 开，默认关）：只剔一定画不出任何采样点的——三个顶点号有相同的（零面积）、三个角都在同一裁剪面外或都在眼后、
+//   目标单采样且视口为整像素时包围盒（两边各放宽 1/256 像素）里没有像素中心。被剔的三角形原位写成退化三角形（三个索引都是它第一个角），本组索引的个数、顺序不变；
+//   整组都被剔时不写顶点记录、不占索引。宿主现编时改写 main0_mc / main0_mc_z 的索引循环；网格源码有逐图元输出（dm_prim_t / dm_xvertex_t）、写视口号或层号时不改写。
+//   判据在 k_mxc_keep_msl（单测 t_nvn_mesh_emu 用同一段源码在 GPU 上跑，和 CPU 复刻逐条比）；视口与开关经交换缓冲头 [24..28] 传进去
+static int mxc_mode(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_MESH_CULL"); m = e && *e == '1';
+    if (m) MLOG("DM_NVN_MESH_CULL=1: mesh host stages turn triangles that cover no sample into degenerate ones"); } return m; }
+static const char k_mxc_keep_msl[] =
+"static inline bool dm_cull_keep(float4 a, float4 b, float4 c, uint ia, uint ib, uint ic, float4 cv, uint cf) {\n"
+"    if (!(cf & 1u)) return true;\n"
+"    if (ia == ib || ib == ic || ia == ic) return false;\n"
+"    if ((a.w <= 0.0 && b.w <= 0.0 && c.w <= 0.0) || (a.x < -a.w && b.x < -b.w && c.x < -c.w) || (a.x > a.w && b.x > b.w && c.x > c.w)\n"
+"        || (a.y < -a.w && b.y < -b.w && c.y < -c.w) || (a.y > a.w && b.y > b.w && c.y > c.w)) return false;\n"
+"    if ((cf & 2u) && a.w > 0.0 && b.w > 0.0 && c.w > 0.0) {\n"
+"        float2 hs = cv.zw * 0.5, s0 = cv.xy + hs + a.xy / a.w * hs, s1 = cv.xy + hs + b.xy / b.w * hs, s2 = cv.xy + hs + c.xy / c.w * hs;\n"
+"        float2 lo = min(s0, min(s1, s2)) - 1.0 / 256.0, hi = max(s0, max(s1, s2)) + 1.0 / 256.0;\n"
+"        if (any(ceil(lo - 0.5) > floor(hi - 0.5))) return false;\n"
+"    }\n"
+"    return true;\n"
+"}\n";
 static NSString *mxc_patch(NSString *src, const char *key) {
+    for (NSString *x in @[@"dm_prim_t", @"dm_xvertex_t", @"[[viewport_array_index]]", @"[[render_target_array_index]]", @"[[primitive_id]]"])
+        if ([src containsString:x]) return src;   // 逐图元输出、多视口 / 分层：不剔
     static NSRegularExpression *rx; static dispatch_once_t once;
     dispatch_once(&once, ^{ rx = [NSRegularExpression regularExpressionWithPattern:
         @"    threadgroup uint dm_ibase;\n    if \\((\\w+) == 0u\\) dm_ibase = atomic_fetch_add_explicit\\(\\(device atomic_uint\\*\\)\\(dm_xo \\+ 13\\), np \\* 3u, memory_order_relaxed\\);\n"
@@ -241,51 +257,44 @@ static NSString *mxc_patch(NSString *src, const char *key) {
         NSString *npline = [src substringWithRange:nl];
         NSRange mp = [npline rangeOfString:@", " options:NSBackwardsSearch]; NSString *maxp = mp.location == NSNotFound ? @"256" : [[npline substringFromIndex:mp.location + 2] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"u);\n "]];
         if (maxp.intValue <= 0 || maxp.intValue > 1024) continue;
-        NSString *rep = [NSString stringWithFormat:
-            @"    threadgroup uint dm_ibase, dm_kc; threadgroup ushort dm_kl[%@]; threadgroup uchar dm_kf[%@];\n"
+        // 剔：每个三角形按三个角的位置（同顶点循环的算法）判一次，记进 dm_kf；留下的个数 dm_kn 为 0 就整组返回
+        NSString *cull = [NSString stringWithFormat:
+            @"    threadgroup uchar dm_kf[%@]; threadgroup atomic_uint dm_kn;\n"
              "    const float4 dm_cv = as_type<float4>(uint4(dm_xo[24], dm_xo[25], dm_xo[26], dm_xo[27])); const uint dm_cf = dm_xo[28];\n"
+             "    if (%@ == 0u) atomic_store_explicit(&dm_kn, 0u, memory_order_relaxed);\n"
+             "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
              "    for (uint p = %@; p < np; p += %@u)\n    {\n"
-             "        float4 dm_q[3];\n"
-             "        for (uint k = 0u; k < 3u; k++) { uint at = %@u + p * 3u + k; uint dm_c = min((%@[at >> 2] >> ((at & 3u) * 8u)) & 0xffu, %@u); uint b = %@; dm_q[k] = %@; }\n"
-             "        bool keep = true;\n"
-             "        if (dm_cf & 1u) {\n"
-             "            float4 a = dm_q[0], c = dm_q[1], d = dm_q[2];\n"
-             "            if ((a.w <= 0.0 && c.w <= 0.0 && d.w <= 0.0) || (a.x < -a.w && c.x < -c.w && d.x < -d.w) || (a.x > a.w && c.x > c.w && d.x > d.w)\n"
-             "                || (a.y < -a.w && c.y < -c.w && d.y < -d.w) || (a.y > a.w && c.y > c.w && d.y > d.w)) keep = false;\n"
-             "            else if (a.w > 0.0 && c.w > 0.0 && d.w > 0.0) {\n"
-             "                float2 hs = dm_cv.zw * 0.5, s0 = dm_cv.xy + hs + a.xy / a.w * hs, s1 = dm_cv.xy + hs + c.xy / c.w * hs, s2 = dm_cv.xy + hs + d.xy / d.w * hs;\n"
-             "                float2 e1 = s1 - s0, e2 = s2 - s0;\n"
-             "                if (e1.x * e2.y - e1.y * e2.x == 0.0) keep = false;\n"
-             "                else if (dm_cf & 2u) { float2 lo = min(s0, min(s1, s2)), hi = max(s0, max(s1, s2)); if (any(round(lo) == round(hi))) keep = false; }\n"
-             "            }\n"
-             "        }\n"
+             "        float4 dm_q[3]; uint dm_ci[3];\n"
+             "        for (uint k = 0u; k < 3u; k++) { uint at = %@u + p * 3u + k; uint dm_c = min((%@[at >> 2] >> ((at & 3u) * 8u)) & 0xffu, %@u); dm_ci[k] = dm_c; uint b = %@; dm_q[k] = %@; }\n"
+             "        bool keep = dm_cull_keep(dm_q[0], dm_q[1], dm_q[2], dm_ci[0], dm_ci[1], dm_ci[2], dm_cv, dm_cf);\n"
              "        dm_kf[p] = keep ? 1 : 0;\n"
+             "        if (keep) atomic_fetch_add_explicit(&dm_kn, 1u, memory_order_relaxed);\n"
              "    }\n"
              "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-             "    if (%@ == 0u) { uint c = 0u; for (uint p = 0u; p < np; p++) if (dm_kf[p]) dm_kl[c++] = (ushort)p; dm_kc = c;\n"
-             "        if (c) dm_ibase = atomic_fetch_add_explicit((device atomic_uint*)(dm_xo + 13), c * 3u, memory_order_relaxed); }\n"
-             "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-             "    if (dm_kc == 0u) return;\n"
-             "@@SPLIT@@"
-             "    device uint* dm_ib = dm_xo + dm_xo[12] + dm_ibase; uint dm_v0 = %@ * %@u;\n"
-             "    for (uint n = %@; n < dm_kc * 3u; n += %@u)\n    {\n        uint at = %@u + (uint)dm_kl[n / 3u] * 3u + n %% 3u;\n"
+             "    if (np == 0u || atomic_load_explicit(&dm_kn, memory_order_relaxed) == 0u) return;\n",
+            maxp, lid, lid, thr, prim, mem, maxv1, bexp, pexp];
+        // 写索引：被剔的三角形三个索引都写成它第一个角（退化），其余照原样
+        NSString *wr = [NSString stringWithFormat:
+            @"    threadgroup uint dm_ibase;\n    if (%@ == 0u) dm_ibase = atomic_fetch_add_explicit((device atomic_uint*)(dm_xo + 13), np * 3u, memory_order_relaxed);\n"
+             "    threadgroup_barrier(mem_flags::mem_threadgroup);\n    device uint* dm_ib = dm_xo + dm_xo[12] + dm_ibase; uint dm_v0 = %@ * %@u;\n"
+             "    for (uint n = %@; n < np * 3u; n += %@u)\n    {\n        uint at = %@u + (dm_kf[n / 3u] ? n : n / 3u * 3u);\n"
              "        dm_ib[n] = dm_v0 + min((%@[at >> 2] >> ((at & 3u) * 8u)) & 0xffu, %@u);\n    }\n",
-            maxp, maxp, lid, thr, prim, mem, maxv1, bexp, pexp, lid, tg, maxv, lid, thr, prim, mem, maxv1];
-        NSRange sp = [rep rangeOfString:@"@@SPLIT@@"]; if (sp.location == NSNotFound) continue;
-        NSString *cull = [rep substringToIndex:sp.location], *wr = [rep substringFromIndex:sp.location + sp.length];
+            lid, tg, maxv, lid, thr, prim, mem, maxv1];
         [out replaceCharactersInRange:m.range withString:wr];
-        // 先剔再写顶点：整组没有图元或剔光时直接返回（各线程一致），不写顶点记录
-        [out insertString:[@"    if (np == 0u) return;\n" stringByAppendingString:cull] atIndex:nl.location + nl.length];
+        [out insertString:cull atIndex:nl.location + nl.length];
         done++;
     }
-    return done ? out : src;
+    if (!done) return src;
+    NSRange k = [out rangeOfString:@"kernel void main0_mc("]; if (k.location == NSNotFound) return src;
+    [out insertString:@(k_mxc_keep_msl) atIndex:k.location];   // 判据定义放在第一个宿主入口前（同在 S2A_MESH_EMU 段里）
+    return out;
 }
 // 网格阶段内存放设备内存：main0_mc 的阶段内存（一款动作冒险游戏的草地网格 11–13 KB）占满 M1 每核 32 KB 线程组内存，一核只驻 2 个工作组。
 //   同中转载荷的做法（MeshStage startEmu）整段改放交换缓冲 [23] 起的片区，一组一片，线程组内存只剩几百字节（同一局 GPU p50 −1.7 ms）。
 //   另出一份库（阶段号带 0x100），入口改名 main0_md / main0_md_z，驱动的 [[mesh]] 入口不编；用过的同样记进 mesh_emu.tsv 开局预建。
-//   改写不成（没有线程组阶段内存、源码对不上）就照旧用 main0_mc。g_mxd_sw：键 → 一片的字数。DM_NVN_MESH_DEV=0 关
+//   改写不成（没有线程组阶段内存、源码对不上）就照旧用 main0_mc。g_mxd_sw：键 → 一片的字数。DM_NVN_MESH_DEV=1 开（默认关）
 static NSMutableDictionary *g_mxd_sw;
-static int mxd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_DEV"); v = !(e && *e == '0'); if (!v) MLOG("DM_NVN_MESH_DEV=0: mesh host stages keep their stage memory in threadgroup memory"); } return v; }
+static int mxd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_DEV"); v = e && *e == '1'; if (v) MLOG("DM_NVN_MESH_DEV=1: mesh host stages keep their stage memory in device memory"); } return v; }
 static NSString *mxd_patch(NSString *src, const char *key) {
     static NSRegularExpression *rx, *rt; static dispatch_once_t once;
     dispatch_once(&once, ^{ rx = [NSRegularExpression regularExpressionWithPattern:@"\n    threadgroup spvUnsafeArray<uint, (\\d+)> (\\w+);\n" options:0 error:nil];
@@ -386,7 +395,7 @@ static void mtk_emu_prebuild(void) {
         dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
         if (!dm_gfx_session_stopping()) {
             char why[300] = ""; const char *key = [c[0] UTF8String]; int st = [c[1] intValue]; NSString *entry = c[2];
-            NSArray *r = mxl_get(key, st, why, sizeof why, 1);
+            NSArray *r = (st & 0x100) && !mxd_on() ? nil : mxl_get(key, st, why, sizeof why, 1);   // main0_md 的行只在开着设备内存时预建
             if (r) { atomic_fetch_add(&nlib, 1);
                 if (st == 4 || [entry hasPrefix:@"main0_mc"] || [entry hasPrefix:@"main0_md"]) { id<MTLFunction> f = lib_entry(r[0], entry); NSError *e = nil;
                     id<MTLComputePipelineState> ps = f ? [g_dev newComputePipelineStateWithFunction:f error:&e] : nil;
@@ -441,9 +450,9 @@ typedef struct { __unsafe_unretained id<MTLComputePipelineState> tp, mp; uint64_
 // Exchange buffer sizes from what this pair needed before (the scan's raw counts read back on completion): the buffer is frame scratch, and sizing every draw for the worst case
 //   (8 MB a draw, 155 mesh draws a frame in one busy scene) made the arena take ~1 GB a frame: 5 fps. Too small once = that draw loses its later mesh groups that frame (counted, not drawn),
 //   and the next draw of the pair is sized from it
-// 网格绘制入几何连段（mesh_run_ok）。DM_NVN_MESH_RUN=0 关
-static int mesh_run_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_RUN"); v = !(e && *e == '0');
-        if (!v) MLOG("DM_NVN_MESH_RUN=0: each task / mesh draw ends the geometry run and gets its own compute pass"); } return v; }
+// 网格绘制入几何连段（mesh_run_ok）。DM_NVN_MESH_RUN=1 开（默认关）
+static int mesh_run_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_MESH_RUN"); v = e && *e == '1';
+        if (v) MLOG("DM_NVN_MESH_RUN=1: consecutive task / mesh draws share a geometry run (host stages in its compute lane, draws in its main pass)"); } return v; }
 static NSMutableDictionary *g_mxe_need; static os_unfair_lock g_mxe_need_lock = OS_UNFAIR_LOCK_INIT; static _Atomic uint64_t g_mxe_short;
 static void mtk_emu_need(NSString *k, uint32_t *tasks, uint32_t *meshes) {
     os_unfair_lock_lock(&g_mxe_need_lock); NSArray *v = g_mxe_need[k]; os_unfair_lock_unlock(&g_mxe_need_lock);
@@ -508,7 +517,7 @@ static int mtk_emu_prep(const p_draw *dw, NvShader *ts, NvShader *ms, uint64_t i
         double rs = t ? rs_of(tex_mtl(t)) : 1.0; float v[4];
         if (S.has_vp) { v[0] = S.vp[0][0]; v[1] = S.vp[0][1]; v[2] = S.vp[0][2]; v[3] = S.vp[0][3]; } else { v[0] = v[1] = 0; v[2] = t ? (float)MAX(t->d.width >> lv, 1u) : 1; v[3] = t ? (float)MAX(t->d.height >> lv, 1u) : 1; }
         if (rs != 1.0) for (int i = 0; i < 4; i++) v[i] = (float)(v[i] * rs);
-        int px = mxc_mode() >= 2 && t && t->d.samples <= 1 && g_wd <= 0 && v[2] > 0 && v[3] > 0;
+        int px = t && t->d.samples <= 1 && g_wd <= 0 && v[2] > 0 && v[3] > 0;
         for (int i = 0; i < 4 && px; i++) px = v[i] == floorf(v[i]);
         memcpy(h + 24, v, 16); h[28] = 1u | (px ? 2u : 0u); }
     if (!ts && !ind) { h[8] = MIN((uint32_t)dw->count, capM); h[9] = h[10] = 1; h[14] = 1; h[18] = (uint32_t)dw->count; }   // a direct mesh draw without a task stage: its groups and draw arguments, as mxe_monly writes them for an indirect one
@@ -551,11 +560,19 @@ static void mtk_emu_flush(id ce, const mxe_job *jb, int n) {
 //   段里已有几何核写过东西时先结束段（宿主阶段可能读到）；入段后把段的片元读记成「列举不全」，之后的几何核有写就先结束段
 static uint64_t g_mr_draws, g_mr_runs_started;
 static int mesh_stage_writes(NvShader *sh) { if (sh) for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw) return 1; return 0; }
+// 宿主阶段整段挪到这一段的绘制之前跑：读贴图 / 图像 / 纹素缓冲 / 原始内存池表的不入段（可能读到这一段前面的绘制刚画的附件，挪前就读到旧的）。只读常量 / 存储缓冲的才入段
+static int mesh_stage_reads_images(NvShader *sh) {
+    if (sh) for (int i = 0; i < sh->rf.nb; i++) switch (sh->rf.b[i].kind) {
+        case NVN_RB_TEX: case NVN_RB_TEXU: case NVN_RB_TEXD: case NVN_RB_TEXA: case NVN_RB_TEXP: case NVN_RB_IMG: case NVN_RB_IMGU: case NVN_RB_IMGA:
+        case NVN_RB_TBUF: case NVN_RB_TBUFU: case NVN_RB_TBLEAD: case NVN_RB_GMEM: case NVN_RB_GMEML: return 1;
+        default: break; }
+    return 0;
+}
 static int geo_fs_writes(NvShader *fs);
 static int mesh_run_ok(NvShader *ts, NvShader *ms) {
     __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil;
     return mesh_run_on() && !g_m3 && rec_on() && g_cb && !S.rast_discard && !g_nubd && !defer_has_active() && !g_hoist_n && !g_fz.active
-        && pr && !geo_fs_writes(pr->sh[1]) && !mesh_stage_writes(ts) && !mesh_stage_writes(ms);
+        && pr && !geo_fs_writes(pr->sh[1]) && !mesh_stage_writes(ts) && !mesh_stage_writes(ms) && !mesh_stage_reads_images(ts) && !mesh_stage_reads_images(ms);
 }
 static int g_mtk_in_run;   // mesh_tasks_draw: this draw's main-pass draw goes into lane 2
 static int mesh_run_enter(int run);   // after the geometry run code (below): ends / keeps the run; 1 = the run stays open for this draw
@@ -1050,8 +1067,6 @@ static int geo_run_keeps(uint32_t op) {
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
         case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_PRIM_RESTART: case OP_ALPHA_REF:
         case OP_JUMP: case OP_CALL: case OP_END: return 1;
-        case OP_PUSH_CONST: case OP_PUSH_CONST_PTR: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: return mesh_run_on();   // 网格连段：只改状态
-        case OP_BARRIER: return mesh_run_on() && !(g_enc && g_pass_swrite);   // 网格连段：段里没有着色器写，屏障只记到下一遍（不分遍）
         default: return 0;
     }
 }

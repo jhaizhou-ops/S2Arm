@@ -19135,8 +19135,7 @@ void nvn_be_exec(const uint8_t *p) {
         //   before every geometry draw: once reports and signals stayed in the run, these ended 4,295,710 runs of 1.008 draws in a 17,100-frame Mac run
         if (g_gr.active && !geo_run_keeps(h.op) && !((h.op == OP_REPORT_COUNTER || (h.op == OP_RESET_COUNTER && !(g_enc && !g_enc_has_vis)))
                                                       && h.size >= 16 && *(const uint64_t *)a == NVN_COUNTER_TYPE_SAMPLES_PASSED)
-            && !(h.op == OP_SIGNAL_EVENT && h.size >= 24 && !(*(const uint32_t *)((const uint8_t *)a + 8) & NVN_EV_WAIT))
-            && !(h.op == OP_RENDER_COND && mesh_run_on())) {   // 网格连段：条件渲染只在 CPU 上定后面的绘制跳不跳（g_rc_skip），不编
+            && !(h.op == OP_SIGNAL_EVENT && h.size >= 24 && !(*(const uint32_t *)((const uint8_t *)a + 8) & NVN_EV_WAIT))) {
             g_gr_why = GEO_END_OP; g_gr_why_op = (int)h.op; geo_run_flush(); }   // only state settings, draws, occlusion reports / resets and event signals stay inside a geometry run (nvn_geometry.inc ①)
         switch (h.op) {
             case OP_END: g_exec_cur = NULL;
