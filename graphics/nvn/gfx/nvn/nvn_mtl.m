@@ -1016,9 +1016,9 @@ void mtl_init(void) {
             res_add(g_present_uv[i]);
         }
     }
-    g_half_masks = [g_dev newBufferWithLength:256 * sizeof(uint32_t) options:MTLResourceStorageModeShared];
+    g_half_masks = [g_dev newBufferWithLength:65536 * sizeof(uint32_t) options:MTLResourceStorageModeShared];
     if (!g_half_masks) MDIE("failed to create the half color rounding table");
-    for (unsigned i = 0; i < 256; i++) ((uint32_t *)g_half_masks.contents)[i] = i;
+    for (unsigned i = 0; i < 65536; i++) ((uint32_t *)g_half_masks.contents)[i] = i;
     res_add(g_half_masks);
     g_ev = [g_dev newSharedEvent];
     g_keep = [NSMutableArray array];
@@ -2159,7 +2159,7 @@ static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint
 static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) {
     if (s == MTLRenderStageVertex) enc_r_vbuf(e, i, gpu); else if (rec_on() && !g_m3) rec_table_op(RO_T_ADDR, g_ft, gpu, i); else tab_addr(g_ft, gpu, i);
 }
-static inline void enc_r_half_mask(id e, uint8_t mask) {
+static inline void enc_r_half_mask(id e, uint16_t mask) {
     if (g_half_mask_sent == mask) return;
     enc_r_args(e, MTLRenderStageFragment, g_half_masks.gpuAddress + (NSUInteger)mask * sizeof(uint32_t), NVN_HALF_SLOT);
     g_half_mask_sent = mask;
@@ -10293,15 +10293,24 @@ static uint32_t pso_fout_need(const pso_key *k, NvShader *fs, int merged) { retu
 // Compute beside the selected key, then cache beside each draw path's cur_ps.
 // lmap maps physical attachments to logical shader outputs; the shader's RTZ
 // calls affect only float4 source-0 outputs, including typed mixed-output entries.
-static uint8_t pso_color_round_mask(const pso_key *k, NvShader *fs, int merged) {
-    if (!fs || k->a2c) return 0;
-    uint8_t mask = 0;
+// Bits 0..7: non-blended FP16 targets needing RTZ quantization (s2a_half_rtz).
+// Bits 8..15: floating-point targets blended with SRC_ALPHA as src_rgb (Maxwell ROP treats 0 * NaN/Inf as 0,
+//   whereas Metal's hardware blender propagates IEEE-754 0 * NaN = NaN into the framebuffer, #674).
+static uint16_t pso_color_round_mask(const pso_key *k, NvShader *fs, int merged) {
+    if (!fs) return 0;
+    uint16_t mask = 0;
     for (int i = 0; i < 8; i++) {
         int l = merged ? k->lmap[i] : i;
         if (l > 7 || (fs->rf.color_known && !(fs->rf.color_mask >> l & 1)) ||
-            (k->blend_en >> l & 1) || !((k->chmask >> (4 * l)) & 15u)) continue;
+            !((k->chmask >> (4 * l)) & 15u)) continue;
         MTLPixelFormat f = (MTLPixelFormat)k->cfmt[i];
-        if (f == MTLPixelFormatR16Float || f == MTLPixelFormatRG16Float || f == MTLPixelFormatRGBA16Float) mask |= 1u << l;
+        int is_half = (f == MTLPixelFormatR16Float || f == MTLPixelFormatRG16Float || f == MTLPixelFormatRGBA16Float);
+        int is_flt  = is_half || f == MTLPixelFormatRG11B10Float || f == MTLPixelFormatR32Float || f == MTLPixelFormatRG32Float || f == MTLPixelFormatRGBA32Float;
+        if (!(k->blend_en >> l & 1)) {
+            if (!k->a2c && is_half) mask |= (uint16_t)(1u << l);
+        } else if (is_flt && k->blend[l].src_rgb == NVN_BLEND_FUNC_SRC_ALPHA) {
+            mask |= (uint16_t)(256u << l);
+        }
     }
     return mask;
 }
@@ -11019,7 +11028,7 @@ static void *pso_get_ptr_(NvProg *pr, MTLRenderPassDescriptor *unused) { (void)u
 static char g_pso_why[200];
 // Submit-thread only: pso_get_ (normal/GS final draw) and tess_draw are the two
 // callers. Background prewarm builds descriptors directly, without this state.
-static uint8_t g_pso_color_round;
+static uint16_t g_pso_color_round;
 #define PSO_WHY(...) snprintf(g_pso_why, sizeof g_pso_why, __VA_ARGS__)
 static void *pso_get_vs_ptr(NvProg *pr, NvShader *vs) {   // borrowed: g_pso holds what it returns
     __unsafe_unretained NvShader *fs = pr->sh[1]; g_pso_why[0] = 0;
@@ -16460,7 +16469,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     // 渲染管线：顶点阶段是域着色器 pr->sh[4]（不是 sh[0] 的游戏原顶点着色器）。取 sh[0] 会拿曲面前段那支去配读域输出（user(locn)）的片元着色器，
     //   pso_pair_ok 判它不写片元读的位置，管线永远建不出来（巫师3 8 次曲面绘制全跳过，w3tess6b 10-28）
     //   S2Arm #800：片元着色器的归约模拟位同 draw 逐笔取（se_want），换了就换管线、绘制前绑表（se_bind）
-    static id<MTLRenderPipelineState> cur_tess_ps; static NvProg *cur_tess_pr; static NvShader *cur_tess_ds; static uint64_t cur_tess_pass; static int cur_tess_fc; static uint8_t cur_tess_round;
+    static id<MTLRenderPipelineState> cur_tess_ps; static NvProg *cur_tess_pr; static NvShader *cur_tess_ds; static uint64_t cur_tess_pass; static int cur_tess_fc; static uint16_t cur_tess_round;
     int fc = se_want(pr->gp, fs, 1);
     if (g_pso_dirty || pr != cur_tess_pr || ds != cur_tess_ds || cur_tess_pass != g_pass.serial || fc != cur_tess_fc) {
         g_pso_fc = fc; cur_tess_ps = pso_get_vs(pr, ds); cur_tess_round = g_pso_color_round; g_pso_fc = 0; cur_tess_pr = pr; cur_tess_ds = ds; cur_tess_pass = g_pass.serial; cur_tess_fc = fc; g_pso_dirty = !cur_tess_ps; }
@@ -16738,7 +16747,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     if (defer_q_draw) defer_replay();
     if (skip_d) { g_stat_ds_omit++; if (mode == 3) g_stat_s_only++; else if (mode == 4) g_stat_d_only++; }
     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
-    static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_ps_fc; static uint8_t cur_ps_round; static int cur_pull;   // cur_pull: cur_ps 是拉取管线（nvn_hybrid.inc）
+    static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_ps_fc; static uint16_t cur_ps_round; static int cur_pull;   // cur_pull: cur_ps 是拉取管线（nvn_hybrid.inc）
     if (g_fz.active && !g_defer_replaying) { g_pso_lmap = g_fz.phase == 1 ? g_fz.lmap1 : g_fz.lmap2; g_pso_fsfn = g_fz.phase == 1 ? nil : fz_fn; g_pso_fz = g_fz.phase == 1 ? (pso_fz_desc){0} : g_fz_desc; g_pso_dirty = 1; }
     else if (g_fbt.on && g_enc && !g_defer_replaying) {   // ⑤ 遍内自采样片上读取：本笔用可读瓦片版（输出不搬位置）
         g_pso_lmap = g_fbt.lmap; g_pso_fsfn = g_fbt.fn; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_fz.kind = 1; g_pso_fz.fbmask = g_fbt.fbmask;

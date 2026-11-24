@@ -38,6 +38,10 @@ static const char k_half_round[] =
 "static inline float4 s2a_half_rtz(float4 x) {\n"
 "    return float4(s2a_half_rtz(x.x), s2a_half_rtz(x.y), s2a_half_rtz(x.z), s2a_half_rtz(x.w));\n"
 "}\n"
+"static inline float4 s2a_blend_zero_rgb(float4 x) {\n"
+"    if (x.w == 0.0f) x.xyz = select(x.xyz, float3(0.0f), (as_type<uint3>(x.xyz) & 0x7f800000u) == 0x7f800000u);\n"
+"    return x;\n"
+"}\n"
 "#endif\n";
 const char *gal_color_round_helpers(void) { return k_half_round; }
 
@@ -196,6 +200,9 @@ char *gal_color_round_msl(const char *msl, const char *entry, char *why) {
             const ldecl *c = &colors[i];
             lput(&o, line, indentation);
             lfmt(&o, "    if (s2a_half_mask & %uu) %.*s.%.*s = s2a_half_rtz(%.*s.%.*s);\n", 1u << i,
+                 (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, (int)(ve - v), v, (int)(c->ne - c->nb), c->nb);
+            lput(&o, line, indentation);
+            lfmt(&o, "    if (s2a_half_mask & %uu) %.*s.%.*s = s2a_blend_zero_rgb(%.*s.%.*s);\n", 256u << i,
                  (int)(ve - v), v, (int)(c->ne - c->nb), c->nb, (int)(ve - v), v, (int)(c->ne - c->nb), c->nb);
         }
         lput(&o, line, indentation); lstr(&o, "    "); lput(&o, q, (size_t)(se + 1 - q));
