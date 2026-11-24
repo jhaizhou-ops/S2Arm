@@ -82,6 +82,10 @@ int s2a_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, s2a_pro_cal *rc, u
     return 1;
 }
 uint8_t s2a_pro_player_lights(int slot) { return slot < 0 ? 0x1 : slot >= 3 ? 0xF : (uint8_t)((1u << (slot + 1)) - 1); }
+void s2a_pro_rumble_packet(const s2a_pad_vibration pair[2], uint8_t seq, uint8_t out[49]) {
+    memset(out, 0, 49); out[0] = 0x01; out[1] = seq & 0x0f;
+    s2a_joycon1_rumble_encode(pair[0], out + 2); s2a_joycon1_rumble_encode(pair[1], out + 6);
+}
 
 // ---- Xbox 有线手柄 GIP 协议（#1406，实现收敛在 xbox_gip_relay.h 与启动器中继共用）----
 int s2a_is_xbox_gip(int vid, int pid) { return s2a_xbox_gip_is_device(vid, pid); }
@@ -94,7 +98,9 @@ typedef struct { IOHIDDeviceRef dev; uint32_t buttons, hat; int16_t ax[4]; char 
     int betop_ns, betop_left_logged; int16_t betop_left[2]; uint64_t betop_left_us;
     s2a_pad_motion motion; uint64_t motion_us; int imu_said; uint32_t logged;
     s2a_imu_burst burst;   // 补满采样：0x30 报告一包 3 组 IMU 按记账时钟入队（macos/imu_burst.h），服务层一拍取走逐笔写进游戏
-} hp_dev;   // motion：0x30 报告里的最后一组 IMU（motion_us = 收到时刻，0 = 没有）   // full：已收到 0x30 报告（之后不再用 HID 元素那一路）；cnt：子命令包序号
+    uint64_t rumble_log_us;
+    int rumble_said;   // 每设备首包成功只记一次
+} hp_dev;
 static hp_dev g_dev[S2A_HID_PAD_MAX];
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
@@ -200,6 +206,33 @@ static void report_cb(void *ctx, IOReturn r, void *sender, IOHIDReportType type,
             if (!d->imu_said) { d->imu_said = 1; fprintf(stderr, "[输入] 兜底手柄 %s：报告里有六轴（陀螺仪 / 加速度）；交不交给游戏看体感开关（现在%s）\n", d->name, atomic_load(&g_motion_enabled) ? "开" : "关"); } }
     }
     pthread_mutex_unlock(&g_mu);
+}
+static hp_dev *pro_by_name_locked(const char *name) {
+    if (!name || !name[0]) return NULL;
+    for (int i = 0; i < S2A_HID_PAD_MAX; i++) if (g_dev[i].dev && g_dev[i].pro && !strcmp(g_dev[i].name, name)) return &g_dev[i];
+    return NULL;
+}
+int s2a_mac_hid_pad_has_pro(const char *name) {
+    pthread_mutex_lock(&g_mu); int found = pro_by_name_locked(name) != NULL; pthread_mutex_unlock(&g_mu); return found;
+}
+int s2a_mac_hid_pad_rumble(const char *name, const s2a_pad_vibration pair[2]) {
+    pthread_mutex_lock(&g_mu); hp_dev *d = pro_by_name_locked(name);
+    IOHIDDeviceRef dev = d ? (IOHIDDeviceRef)CFRetain(d->dev) : NULL; uint8_t seq = d ? d->cnt++ : 0; pthread_mutex_unlock(&g_mu);
+    if (!dev) return 0;
+    uint8_t report[49]; s2a_pro_rumble_packet(pair, seq, report);
+    IOReturn rc = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x01, report, sizeof report);
+    if (rc != kIOReturnSuccess) {
+        pthread_mutex_lock(&g_mu); uint64_t now = hp_now_us(); hp_dev *live = pro_by_name_locked(name);
+        if (live && now - live->rumble_log_us >= 1000000) { live->rumble_log_us = now;
+            fprintf(stderr, "【红】手柄震动：第三方 Pro HID %s SetReport 失败 0x%x（标准 Pro 震动报告）\n", name, rc); }
+        pthread_mutex_unlock(&g_mu);
+    } else {
+        pthread_mutex_lock(&g_mu); hp_dev *live = pro_by_name_locked(name);
+        if (live && !live->rumble_said) { live->rumble_said = 1;
+            fprintf(stderr, "[输入] 第三方 Pro HID 震动：首包已发 %s\n", live->name); }
+        pthread_mutex_unlock(&g_mu);
+    }
+    CFRelease(dev); return 1;
 }
 // Switch Pro 子命令：输出报告 0x01 = [0x01, 序号, 8 字节空振动, 子命令号, 参数…]（49 字节），delay_ms 后在主线程发
 static void pro_subcmd_later(hp_dev *d, IOHIDDeviceRef dev, uint8_t cmd, const uint8_t *arg, size_t n, int delay_ms) {

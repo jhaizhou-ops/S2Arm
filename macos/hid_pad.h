@@ -55,6 +55,11 @@ int16_t s2a_pro_axis_grow(int v, int center, uint16_t *above, uint16_t *below); 
 int s2a_pro_parse(const uint8_t *r, size_t n, s2a_pro_cal *l, s2a_pro_cal *rc, uint32_t *buttons, int16_t ax[4]);   // l / rc 的行程随读数扩大（s2a_pro_axis_grow）
 // 纯函数（单测用）：第 slot 个玩家（0 起）的玩家灯参数：点前 slot + 1 盏
 uint8_t s2a_pro_player_lights(int slot);
+// 纯函数（单测用）：49 字节 Switch Pro HID 输出报告，左 / 右马达各 4 字节；seq 取低 4 位
+void s2a_pro_rumble_packet(const s2a_pad_vibration pair[2], uint8_t seq, uint8_t out[49]);
+// 按 HID 产品名找已接上的第三方 Pro；有则建立反馈会话，并把标准 Pro 震动报告写给它
+int s2a_mac_hid_pad_has_pro(const char *name);
+int s2a_mac_hid_pad_rumble(const char *name, const s2a_pad_vibration pair[2]);
 // ---- Xbox 有线手柄 GIP 协议 ----
 // 纯函数（单测用）：一条 0x20 GIP 输入报告（含报告号）→ buttons 位（同 s2a_hid_pad 的位序）与四个摇杆值（-32768..32767，上/右为正）；不是 GIP 输入报告回 0
 int s2a_gip_parse(const uint8_t *r, size_t n, uint32_t *buttons, int16_t ax[4]);

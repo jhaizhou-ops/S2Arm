@@ -4,7 +4,9 @@
 // 期望值不跑被测实现即可算：公式 1.25·sqrt(a)·(3 − 2·a^0.15) 封顶 1，下面的数是手算 / Python 算的。
 // 用法：t_mac_rumble <front_mac.m 路径>
 #include "haptic_retry.h"
+#include "../macos/rumble_session.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -43,6 +45,24 @@ int main(int argc, char **argv) {
     check(after(source, "static void rumble_select", "[S2ARumbler new]"), "换手柄后重新试循环播放器（新的 S2ARumbler，plainOnly 从零开始）");
     check(after(source, "!r->loops[k] && now - r->startedNs[k] > MAC_RUMBLE_RESTART_NS", "r->playing[k] = NO;"), "普通播放器不能循环：连着震到期限就重起一轮");
     check(count_in(source, "loopEnabled = YES") == 1, "循环只对循环播放器开");
+    check(after(source, "if (!r->device.haptics)", "s2a_mac_hid_pad_rumble"), "无 CoreHaptics 的第三方 Pro 走 HID 震动出口");
+    check(after(source, "static void rumble_select", "s2a_mac_hid_pad_has_pro"), "第三方 Pro 有 HID 震动出口时建立反馈会话");
+    check(after(source, "static uint64_t rumble_session", "s2a_mac_hid_pad_has_pro"), "HID 晚于 GameController 接入时补建反馈会话");
+    check(after(source, "static uint64_t rumble_session", "if (rumble_off()) return 0"), "关闭震动时 rumble_session 直接回 0");
+    check(count_in(source, "++g_rumble_counter") == 0 && count_in(source, "atomic_fetch_add_explicit(&g_rumble_counter") == 1 &&
+          count_in(source, "s2a_mac_rumble_claim_epoch") == 1,
+          "震动会话计数器原子递增，服务线程补建走同一原子 helper");
+    check(after(source, "s2a_mac_rumble_claim_epoch", "has_pro, rumble_off())"),
+          "rumble_session 调用点把关闭状态原样传给 helper，不反传");
+
+    // ---- 补建会话的行为判据 ----
+    _Atomic uint64_t epoch = 0, counter = 0;
+    check(s2a_mac_rumble_claim_epoch(&epoch, &counter, 1, 1) == 0 && atomic_load(&epoch) == 0 && atomic_load(&counter) == 0,
+          "关闭震动：即使有第三方 Pro 也不建会话、不递增计数器");
+    check(s2a_mac_rumble_claim_epoch(&epoch, &counter, 1, 0) == 1 && atomic_load(&epoch) == 1 && atomic_load(&counter) == 1,
+          "开启震动：第三方 Pro 补建会话 1");
+    check(s2a_mac_rumble_claim_epoch(&epoch, &counter, 1, 0) == 1 && atomic_load(&epoch) == 1 && atomic_load(&counter) == 1,
+          "已有会话：重复查询不新建、不递增计数器");
 
     if (failures) { fprintf(stderr, "t_mac_rumble：%d/%d 项不符\n", failures, checks); return 1; }
     printf("✓ t_mac_rumble：%d 项（振幅换算 0.064→0.53 / 0.191→0.79 / 封顶 1 / 单调；循环播放器失败退普通播放器并重起）\n", checks);
