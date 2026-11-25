@@ -267,6 +267,13 @@ int main(void) {
           uint64_t lost = MIN(3000ull, B / p0) - MIN(3000ull, B / (p0 + dsw * 4ull));
           VERIFY(lost == 905, "⑥ 反证：照旧换 main0_md，3000 组的一笔只画得出 2095 组（少 %llu 组）", (unsigned long long)lost); }
 
+        // ⑦ 条件渲染在几何连段里（DM_NVN_MESH_RCOND=1）：只放行 OP_RENDER_COND；屏障、复制、计数器以外的状态照旧结束连段
+        { setenv("DM_NVN_MESH_RCOND", "1", 1);
+          VERIFY(geo_run_keeps(OP_RENDER_COND), "⑦ 开关开：条件渲染不结束连段");
+          VERIFY(!geo_run_keeps(OP_BARRIER) && !geo_run_keeps(OP_COPY_B2B) && !geo_run_keeps(OP_UPDATE_UB) && !geo_run_keeps(OP_DISPATCH) && !geo_run_keeps(OP_SET_TEX_POOL),
+                 "⑦ 反证：屏障 / 缓冲复制 / 内联统一更新 / 计算派发 / 换贴图池照旧结束连段");
+          VERIFY(geo_run_keeps(OP_DRAW) && geo_run_keeps(OP_BIND_PROGRAM), "⑦ 绘制与普通状态照旧留在段里"); }
+
         if (failures) printf("✗ t_nvn_mesh_emu：%u 项，%u 项不过\n", checks, failures); else printf("✓ t_nvn_mesh_emu：%u 项全过\n", checks);
         return failures ? 1 : 0;
     }

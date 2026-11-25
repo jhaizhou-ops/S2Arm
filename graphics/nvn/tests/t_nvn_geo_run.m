@@ -28,6 +28,8 @@
 //      收尾后事件按写值落地（提交完成后由 CPU 写）；[等事件][结束] 照旧结束段、原因记操作码 4。反证：执行循环去掉信号例外 → ⑮ 第一条红
 //   ⑯ 段内遮挡查询重置（#1449 主线 11-22 尼尔 Mac 局：⑭⑮ 之后每笔几何绘制前的 SAMPLES_PASSED 重置断段，429 万段每段 1.008 笔）：[重置 SAMPLES_PASSED][结束] 段不结束、
 //      开始计数；[重置 时间戳][结束] 照旧结束段、原因记操作码 36。反证：执行循环去掉重置例外 → ⑯ 第一条红
+//   ⑰ 段内条件渲染（DM_NVN_MESH_RCOND，缺省关）：开关开时 [条件渲染] 不结束段；画不画（g_rc_skip）段里与没有段逐条相同（两数相等 / 不等 × 两种比较、显式开关画、同提交先上报）。
+//      反证：执行循环对条件渲染改成「段开着就当作画」→ 两条不同，红
 //   ⑨ 直通几何快路选择（geo_pt_pick）：几何核标直通（json geometry.passthrough）、单实例、单次调用、三角 → 换成 <键>_bgs3 与 <键>_bgc；
 //      没标直通 → 不走、一次表都不查；两实例 / 邻接三角（拓扑 4）/ 开变换反馈 / 几何核两次调用 / DM_NVN_GEO_PT=0 → 不走；缺 _bgc → 不走、几何核与读取器保持原样
 #include "../gfx/nvn/nvn_mtl.m"
@@ -123,6 +125,39 @@ int main(void) { @autoreleasepool {
         g_on = 0; put(OP_REPORT_COUNTER, rt, sizeof rt); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
         int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_REPORT_COUNTER] - e_rc == 1; finish();
         CHECK(ended && why, "⑭ [上报 时间戳][结束] 照旧结束段（%d，期望 1），原因记「状态之外的操作」操作码 5（%d，期望 1）", ended, why); }
+
+    // ⑰ 段内条件渲染（DM_NVN_MESH_RCOND）：画不画在 CPU 执行到这条时就定（rc_value 读客体内存 / 本提交内还没完成的上报），跟段开不开无关。
+    //   同一条命令流在「段开着」与「没有段」各跑一次，g_rc_skip 必须相同：两计数相等 / 不等 × 「相等才画 / 不等才画」、显式关画、本提交里刚上报过的地址。
+    //   开关关（缺省）：照旧结束段、原因记操作码 40；开：段不结束。反证：执行循环对条件渲染改成「段开着就当作画」→ 「相等才画、两数不等」「不等才画、两数相等」两条 skip 不同，红（11-25 实测）
+    {   uint64_t *cv = (uint64_t *)(mem + 0x9000); const p_blend_color bc17 = {{0, 0, 0, 1}};
+        struct { int32_t mode; uint64_t a, b; int pre_report; const char *what; } cs17[] = {
+            {0, 5, 5, 0, "相等才画、两数相等"}, {0, 5, 6, 0, "相等才画、两数不等"}, {1, 5, 5, 0, "不等才画、两数相等"}, {1, 5, 6, 0, "不等才画、两数不等"},
+            {3, 0, 0, 0, "显式关画"}, {2, 0, 0, 0, "显式开画"}, {0, 5, 6, 1, "本提交先上报 SAMPLES_PASSED 到同一地址"} };
+        g_geo_rcond = 0;
+        reset_mem(); nvn_be_sub_begin(); geo_run_begin(); lane_kernel(1);
+        uint64_t e_op = g_gr_end[GEO_END_OP], e_rc = g_gr_end_op[OP_RENDER_COND];
+        p_render_cond rc0 = {.mode = 0, .addr = (uint64_t)(uintptr_t)cv};
+        g_on = 0; put(OP_RENDER_COND, &rc0, sizeof rc0); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+        int ended = !g_gr.active, why = g_gr_end[GEO_END_OP] - e_op == 1 && g_gr_end_op[OP_RENDER_COND] - e_rc == 1; finish();
+        CHECK(ended && why, "⑰ 开关关（缺省）：[条件渲染][结束] 照旧结束段（%d），原因记操作码 40（%d）", ended, why);
+        g_geo_rcond = 1; int same = 1, kept_all = 1;
+        for (size_t k = 0; k < sizeof cs17 / sizeof *cs17; k++) {
+            int skip[2];
+            for (int run = 0; run < 2; run++) {
+                cv[0] = cs17[k].a; cv[2] = cs17[k].b;
+                reset_mem(); nvn_be_sub_begin(); if (run) { geo_run_begin(); lane_kernel(1); }
+                p_render_cond rc = {.mode = cs17[k].mode, .addr = (uint64_t)(uintptr_t)cv};
+                uint64_t rq[2] = {NVN_COUNTER_TYPE_SAMPLES_PASSED, (uint64_t)(uintptr_t)cv};
+                g_on = 0; if (cs17[k].pre_report) put(OP_REPORT_COUNTER, rq, sizeof rq);
+                put(OP_RENDER_COND, &rc, sizeof rc); put(OP_BLEND_COLOR, &bc17, sizeof bc17); put(OP_END, NULL, 0); nvn_be_exec(g_ops);
+                skip[run] = g_rc_skip; if (run) kept_all &= g_gr.active; finish();
+            }
+            same &= skip[0] == skip[1];
+            printf("    ⑰ %s：没有段 skip=%d，段里 skip=%d\n", cs17[k].what, skip[0], skip[1]);
+        }
+        CHECK(kept_all, "⑰ 开关开：[条件渲染] 之后段仍开着（7 种都开着：%d）", kept_all);
+        CHECK(same, "⑰ 开关开：画不画跟段开不开无关（7 种 g_rc_skip 段里 = 没有段：%d）", same);
+        g_geo_rcond = -1; }
 
     // ⑮ 段内事件信号 / 写值：不结束段、完成后照写；等事件照旧结束段
     {   static volatile uint32_t ev15; ev15 = 7; volatile uint32_t *evp = &ev15;

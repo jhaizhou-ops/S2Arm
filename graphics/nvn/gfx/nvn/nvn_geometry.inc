@@ -1066,8 +1066,14 @@ static void geo_scratch_cut(int run, uint64_t total) {
     if (run && g_gr.active) { g_gr_why = GEO_END_CUT; geo_run_flush(); rp_end(); g_gr.cut++; }
     sub_cut();
 }
+// DM_NVN_MESH_RCOND=1 (default off): a conditional-render op (OP_RENDER_COND) keeps the run open. Whether the draws after it are drawn is decided here on the CPU, as the op is
+//   executed (rc_value: the counter's guest memory, a report still pending on the GPU reads as 0 / unknown → drawn), and a skipped draw is not recorded at all; a run only moves
+//   when recorded GPU work runs, so the decision and the draws it lets through are the same with or without the run. Reports and resets of counters still end the run
+static int g_geo_rcond = -1;   // -1: not read yet (t_nvn_geo_run sets it directly)
+static int geo_run_rcond_on(void) { if (g_geo_rcond < 0) { const char *e = getenv("DM_NVN_MESH_RCOND"); g_geo_rcond = e && *e == '1'; MLOG("geometry runs: a conditional-render op %s (DM_NVN_MESH_RCOND)", g_geo_rcond ? "keeps the run open" : "ends the run"); } return g_geo_rcond; }
 // Exec loop: the ops a run lets through (state only; draws decide in draw())
 static int geo_run_keeps(uint32_t op) {
+    if (op == OP_RENDER_COND) return geo_run_rcond_on();
     switch (op) {
         case OP_DRAW: case OP_DRAW_IDX: case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
         case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
