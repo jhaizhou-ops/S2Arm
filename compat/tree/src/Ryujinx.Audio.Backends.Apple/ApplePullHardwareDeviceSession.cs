@@ -23,7 +23,7 @@ namespace Ryujinx.Audio.Backends.Apple
     //   不调系统 API（只 memcpy + 计时 + 事件置位）。
     [SupportedOSPlatform("macos")]
     [SupportedOSPlatform("ios")]
-    class ApplePullHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth
+    class ApplePullHardwareDeviceSession : HardwareDeviceSessionOutputBase, Ryujinx.Audio.Integration.IS2AOutputDepth, Ryujinx.Audio.Integration.IS2AIOAwareDepth
     {
         // 静默机制（§5.1）: pace 线程的「AudioSampleQueue.Read(含客机内存读)→下混/音量→写环」整段持 _writeLock,
         //   对齐泵锁覆盖 Samples.Read 的结构(DeviceBufferPump.Pump 持锁覆盖 Samples.Read, DeviceBufferPump.cs:211-266);
@@ -41,16 +41,23 @@ namespace Ryujinx.Audio.Backends.Apple
         //   是维护方单变量 A/B 诊断通道(对齐 S2A_AUDIO_RENDERER_PRIME_MS 先例,原 AudioQueue 会话的 ParsePrime 同款)
         private static readonly int _primeMs = ParsePullPrime(Environment.GetEnvironmentVariable("S2A_AUDIO_PULL_PRIME_MS"));
         private const long StartFallbackMilliseconds = 100;   // 仅 prime>0 时启用(原 AudioQueue 会话同款)
-        // 拉取环(§3.2/§4.2): 主机侧定长数组环,容量固定 RingFrames 帧 × bytesPerFrame(1024 帧 ≈ 21.3 ms @48k,与测试夹具
-        //   块长一致;不再有 S2A_AUDIO_PULL_RING_FRAMES 开关)。寻址为帧域:RingFrames 是 2 的幂,_ringRead/_ringWrite 是
-        //   单调递增的帧偏移,掩码 RingFrames-1 作用于帧下标,字节落点 = 帧下标 × _bytesPerFrame——字节域掩码在
-        //   6ch PCM16(12 B/帧,非 2 的幂)上必错位,帧域寻址根治(§4.2 必改)。
+        // 拉取环(§3.2/§4.2): 主机侧定长数组环,容量 _ringFrames 帧 × bytesPerFrame。寻址为帧域:_ringFrames 是 2 的幂,
+        //   _ringRead/_ringWrite 是单调递增的帧偏移,掩码 _ringMask(_ringFrames-1)作用于帧下标,字节落点 = 帧下标 ×
+        //   _bytesPerFrame——字节域掩码在 6ch PCM16(12 B/帧,非 2 的幂)上必错位,帧域寻址根治(§4.2 必改)。
         //   SPSC:唯一写者 = pace 线程(先写字节、再 Volatile.Write 发布 _ringWrite);唯一读者 = render 回调
         //   (先 Volatile.Read 得可见量、再读环数组、消费完才发布 _ringRead)。环内存为托管 byte[],回调每次进入重新取
         //   字段引用转 Span,不跨调用持有非固定指针(GC compact 对其透明)
-        private const int RingFrames = 1024;
-        private readonly byte[] _ring;
-        private readonly int _ringMask;   // 帧域掩码(RingFrames-1),作用于帧下标
+        // S2Arm (#2157 评审 #15,玩家 #1308 诊断 D-BEKN,Mac M4 内置扬声器): 容量/配速水位按设备实际 IO 周期取——
+        //   固定 1024 帧(≈21.3 ms @48k)在 IO 周期 4096 帧(≈85 ms)的设备上,一次回调要 4096 帧、环里只有 1024 帧,
+        //   每拍欠载出爆音。容量 = 下一 2 的幂 ≥ max(1024, IO周期×2)(IO ≤ 512 帧的设备恰为 1024,行为与固定 1024 时
+        //   逐字节一致);配速水位 = min(容量, IO周期 + 1/4 周期 + 1024)(见 S2AIODepthFrames,AudioProcessor 拿它抬高
+        //   自己的 30 ms 地板)。路由切换换了设备时重读 IO 周期、只增不减地换环(S2ARecover 恢复序列内,环账目已结清、
+        //   回调已静止、pace 被 _suspended 挡住,三字段成组换)。测试钩子 S2A_AUDIO_TEST_DEVICE_FRAMES=<帧> 只改「读到的
+        //   IO 周期」;派生是纯函数(services 侧单测)。iOS / tvOS 没有 HAL 设备属性,读不到按 0(= 不抬高,维持 1024)。
+        private int _ringFrames;   // 2 的幂,≥ 1024,≥ 设备 IO 周期 × 2(ctor 按探测值定,S2ARecover 恢复序列内可只增不减地换)
+        private byte[] _ring;
+        private int _ringMask;   // 帧域掩码(_ringFrames-1),作用于帧下标;与 _ring/_ringFrames 成组换(见上)
+        private int _deviceIOFrames;   // 设备实际 IO 周期帧数(ctor 探测;0 = 读不到/iOS。S2A_AUDIO_TEST_DEVICE_FRAMES 测试覆写)
         private long _ringRead, _ringWrite;   // 单调递增帧偏移(读写永不回绕出界);pace 写 _ringWrite、回调写 _ringRead
         private long _ringSampleWritten;      // 已写环的排队样本字节(pace 单写者;喂 PlaybackCredit.Take,对应 _pump.SubmittedSampleBytes)
         private long _virtualSampleWritten;   // 无设备播放已读出的排队样本字节(Interlocked;喂 PlaybackCredit.Take——信用判据「已提交才可算播完」的提交含虚拟读出,见 S2AVirtualSubmit)
@@ -148,6 +155,9 @@ namespace Ryujinx.Audio.Backends.Apple
         private int _testSlowTick, _testSlowSaid;
         private static readonly int _testStallAtS = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_STALL_AT"), out int s) ? s : 0;
         private bool _testStallDone;
+        // 测试钩子:S2A_AUDIO_TEST_DEVICE_FRAMES=<帧> —— 只改「读到的设备 IO 周期」(#2157 评审 #15 的「IO 4096 帧不欠载」
+        //   用例用它在本机伪装大 IO 周期设备;真实设备不会被改,环/水位按伪装值自适应)
+        private static readonly int _testDeviceFrames = int.TryParse(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_DEVICE_FRAMES"), out int df) ? df : 0;
         private static readonly (int AtS, int Ms) _testProdStall = ParseProdStall(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_PRODUCER_STALL_AT"));
         private bool _testProdStallDone;
         private static readonly (int AtS, int Ms) _testNote = ParseNote(Environment.GetEnvironmentVariable("S2A_AUDIO_TEST_NOTE_AT"));
@@ -282,10 +292,15 @@ namespace Ryujinx.Audio.Backends.Apple
             //   (RemoteIO 输出总线缺省即开,不需要 EnableIO;收音不走本单元——收音是独立 AudioQueue 会话)
 
             _bytesPerFrame = BackendHelper.GetSampleSize(requestedSampleFormat) * _deviceChannelCount;
-            _ring = new byte[(long)RingFrames * _bytesPerFrame];
-            _ringMask = RingFrames - 1;   // 帧域掩码:RingFrames 固定 2 的幂,任意声道数(12 B/帧 6ch)下掩码安全
+            _deviceIOFrames = S2AProbeDeviceIOFrames();
+            _ringFrames = S2ADeriveRingFrames(_deviceIOFrames);
+            _ring = new byte[(long)_ringFrames * _bytesPerFrame];
+            _ringMask = _ringFrames - 1;   // 帧域掩码:_ringFrames 固定 2 的幂,任意声道数(12 B/帧 6ch)下掩码安全
             _fill = new byte[Math.Min(_ring.Length, 4096)];   // 一次性分配的中间缓冲(§3.2,约 4 KB;不足整帧的字节不进环)
             _diag = S2AOutputDiag.Create(_bytesPerFrame, _deviceChannelCount, (int)requestedSampleRate, BackendHelper.GetSampleSize(requestedSampleFormat) * 8);
+            Console.Error.WriteLine(_deviceIOFrames > 0
+                ? $"[声] 输出 #{_diag.Index}：设备 IO 周期 {_deviceIOFrames} 帧 ≈ {_deviceIOFrames * 1000.0 / requestedSampleRate:F1} ms → 拉取环 {_ringFrames} 帧 ≈ {_ringFrames * 1000.0 / requestedSampleRate:F1} ms、配速水位 {S2ADeriveDepthFrames(_deviceIOFrames, _ringFrames)} 帧（S2Arm #2157 评审 #15）"
+                : $"[声] 输出 #{_diag.Index}：设备 IO 周期读不到（iOS / tvOS 无 HAL 属性 / 读取失败）→ 拉取环按缺省 {_ringFrames} 帧");
             _convertingReader = _processor != null ? new ConvertingReader(this, _processor) : null;
 
             _gcHandle = GCHandle.Alloc(this, GCHandleType.Normal);
@@ -367,8 +382,10 @@ namespace Ryujinx.Audio.Backends.Apple
                         s.S2APrimeFallback();   // 仅 prime>0 时启用(S2A_AUDIO_PULL_PRIME_MS 语义,§4.3)
                     }
 
-                    // 主路径:系统通知。中断结束 → 重新激活 + 重启;媒体服务重置 → 重建器件。
-                    //   路由切换(Route)只记不动作,真停摆由下面的 200 ms 兜底接住(§4.4)
+                    // 主路径:系统通知。中断结束 → 重新激活 + 重启;媒体服务重置 → 重建器件;路由切换(Route)换了输出
+                    //   设备、IO 周期可能变大——环不够就走恢复序列换环(#2157 评审 #15,S2ARecover 内重读 IO 周期并
+                    //   只增不减地换;环够就只更新读数,水位随 S2AIODepthFrames 自动跟随);其余路由停摆与平时一样
+                    //   由下面的 200 ms 兜底接住(§4.4)
                     if ((notes & (S2AAudioNotes.Ended | S2AAudioNotes.Reset)) != 0)
                     {
                         s.S2ARecover((notes & S2AAudioNotes.Reset) != 0 ? "系统通知：媒体服务重置" : "系统通知：中断结束", (notes & S2AAudioNotes.Reset) != 0, now, false);
@@ -376,6 +393,15 @@ namespace Ryujinx.Audio.Backends.Apple
                     else if ((notes & S2AAudioNotes.Began) != 0)
                     {
                         s.S2AEnterVirtual("系统通知：中断开始");
+                    }
+                    else if ((notes & S2AAudioNotes.Route) != 0)
+                    {
+                        int routeIO = S2AProbeDeviceIOFrames();
+
+                        if (routeIO > 0 && S2ADeriveRingFrames(routeIO) > Volatile.Read(ref s._ringFrames))
+                        {
+                            s.S2ARecover($"路由切换后设备 IO 周期 {routeIO} 帧(环 {s._ringFrames} 帧不够)", false, now, false);
+                        }
                     }
                     else if (Volatile.Read(ref s._virtual))
                     {
@@ -690,6 +716,11 @@ namespace Ryujinx.Audio.Backends.Apple
                         {
                             reclaimed += S2AResetRingLocked(now);   // += :环内收回并进虚拟槽收回(上面 wasVirtual 分支),日志与 S2ACredit 一次结清
 
+                            // S2Arm (#2157 评审 #15): 恢复序列里重读设备 IO 周期,环要不够就只增不减地换(S2ARingAdaptToIO,安全
+                            //   前提见该方法);路由切换(换了输出设备)后 IO 周期变大的入口见 S2AWatchdogLoop 的 Route 分派。
+                            //   CreateUnit 的 MaximumFramesPerSlice 与 ASQ 容量都按新 _ringFrames 取
+                            S2ARingAdaptToIO(S2AProbeDeviceIOFrames());
+
                             if (rebuild)
                             {
                                 AudioUnitInterop.AudioComponentInstanceDispose(_unit);
@@ -799,7 +830,7 @@ namespace Ryujinx.Audio.Backends.Apple
             // S2Arm (§4.2 ASQ 容量耦合修复): AudioSampleQueue 容量取 max(环字节, 4 × RingFrames × bytesPerFrame)——
             //   audout 深度上限 4 块、块长 = 测试夹具口径;原先「ASQ 容量 = 环字节」(≈21.3 ms)把多块 flush 的
             //   Release 拷入与渲染器深度截断成静音(AudioSampleQueue 超容量按静音播),max 后消除截断
-            _samples = new AudioSampleQueue(Math.Max(_ring.Length, 4 * RingFrames * _bytesPerFrame));
+            _samples = new AudioSampleQueue(Math.Max(_ring.Length, 4 * _ringFrames * _bytesPerFrame));
             _credit = new PlaybackCredit(_bytesPerFrame, (long)_bytesPerFrame * RequestedSampleRate,
                                          (long)_bytesPerFrame * RequestedSampleRate * CreditMaxLeadMilliseconds / 1000,
                                          Stopwatch.Frequency * CreditBurstGapMicroseconds / 1_000_000);
@@ -893,7 +924,7 @@ namespace Ryujinx.Audio.Backends.Apple
             }
 
             // AUHAL 拍大小可被系统 / 其他进程改动(#1066 实测设备 bsiz 会被保持):设为环容量帧数,防设备拍变大时回调超量
-            uint maxFrames = (uint)RingFrames;
+            uint maxFrames = (uint)_ringFrames;
 
             result = AudioUnitInterop.AudioUnitSetProperty(_unit, AudioUnitInterop.kAudioUnitProperty_MaximumFramesPerSlice, AudioUnitInterop.kAudioUnitScope_Global, 0,
                 &maxFrames, sizeof(uint));
@@ -957,6 +988,101 @@ namespace Ryujinx.Audio.Backends.Apple
             }
 
             Console.Error.WriteLine($"[声] 输出 #{_diag.Index}：设备缓冲请求 {frames} 帧，设备实给 {granted} 帧 ≈ {granted * 1000.0 / RequestedSampleRate:F1} ms（只作用于本进程，其他 App 不受影响）");
+
+            // S2Arm (#2157 评审 #15): 请求落地后按实给值自适应环——建器件序列里的探测(S2AProbeDeviceIOFrames)发生在
+            //   请求之前,请求把 IO 周期改大时环要跟着大(此刻仍在建立序列单线程段,pace 尚未启动,成组换安全)
+            S2ARingAdaptToIO((int)granted);
+        }
+
+        // S2Arm (#2157 评审 #15): 读系统默认输出设备的实际 IO 周期帧数(只读,不改设备;仅 macOS HAL,iOS / tvOS 无此
+        //   属性)。读不到 / 非 macOS = 0(= 不自适应,维持 1024)。测试钩子 S2A_AUDIO_TEST_DEVICE_FRAMES 覆写返回值。
+        private static int S2AProbeDeviceIOFrames()
+        {
+            if (_testDeviceFrames > 0)
+            {
+                return _testDeviceFrames;
+            }
+
+            if (!OperatingSystem.IsMacOS())   // 平台例外:HAL 设备属性只有 macOS
+            {
+                return 0;
+            }
+
+            AudioObjectPropertyAddress defaultOut = new()
+            {
+                Selector = kAudioHardwarePropertyDefaultOutputDevice,
+                Scope = kAudioObjectPropertyScopeGlobal,
+                Element = kAudioObjectPropertyElementMain
+            };
+            uint device = 0, deviceSize = sizeof(uint);
+
+            if (AudioObjectGetPropertyData(kAudioObjectSystemObject, ref defaultOut, 0, nint.Zero, ref deviceSize, ref device) != 0 || device == 0)
+            {
+                return 0;
+            }
+
+            AudioObjectPropertyAddress io = new()
+            {
+                Selector = kAudioDevicePropertyBufferFrameSize,
+                Scope = kAudioObjectPropertyScopeGlobal,
+                Element = kAudioObjectPropertyElementMain
+            };
+            uint frames = 0, framesSize = sizeof(uint);
+
+            return AudioObjectGetPropertyData(device, ref io, 0, nint.Zero, ref framesSize, ref frames) == 0 && frames > 0 ? (int)frames : 0;
+        }
+
+        // S2Arm (#2157 评审 #15): IO 周期 → 环容量 / 配速水位(纯函数,services 侧单测)。环容量 = 下一 2 的幂 ≥
+        //   max(1024, IO×2):IO ≤ 512 的设备恰为 1024(与固定 1024 时逐字节一致);配速水位 = min(环容量, IO + 1/4 IO +
+        //   1024)(一次回调拿走一个 IO 周期后还留 1/4 周期 + 1024 帧余量;AudioProcessor 拿它与自己的 30 ms 地板取大)
+        internal static int S2ADeriveRingFrames(int ioFrames)
+        {
+            long need = (long)Math.Max(ioFrames, 512) * 2;
+            int ring = 1024;
+
+            while (ring < need)
+            {
+                ring <<= 1;
+            }
+
+            return ring;
+        }
+
+        internal static int S2ADeriveDepthFrames(int ioFrames, int ringFrames)
+        {
+            if (ioFrames <= 0)
+            {
+                return 0;   // 读不到:不抬高,AudioProcessor 用自己的 30 ms 地板
+            }
+
+            long target = (long)ioFrames + ioFrames / 4 + 1024;
+
+            return (int)Math.Min(target, ringFrames);
+        }
+
+        // S2Arm (#2157 评审 #15): 按读到的设备 IO 周期自适应环(只增不减)。调用点都在安全临界段——S2ARecover 的
+        //   _writeLock + _suspended 内(环账目已结清、回调已静止、pace 被挡)与 SetupAudioUnit 建立序列单线程段
+        //   (pace 尚未启动):环三字段成组换
+        private void S2ARingAdaptToIO(int ioFrames)
+        {
+            if (ioFrames <= 0)
+            {
+                return;
+            }
+
+            if (S2ADeriveRingFrames(ioFrames) > _ringFrames)
+            {
+                int old = _ringFrames;
+                Console.Error.WriteLine($"[声] 输出 #{_diag.Index}：设备 IO 周期 {_deviceIOFrames} → {ioFrames} 帧,拉取环 {old} → {S2ADeriveRingFrames(ioFrames)} 帧(只增不减地换,#2157 评审 #15)");
+                _deviceIOFrames = ioFrames;
+                _ringFrames = S2ADeriveRingFrames(ioFrames);
+                _ring = new byte[(long)_ringFrames * _bytesPerFrame];
+                _ringMask = _ringFrames - 1;
+            }
+            else if (ioFrames != _deviceIOFrames)
+            {
+                _deviceIOFrames = ioFrames;   // IO 周期变了但环够:只更新读数,配速水位随 S2AIODepthFrames 自动跟随
+            }
         }
 
         // S2Arm (11-16 声音诊断 → 拉取档平移 AppleHardwareDeviceSession.cs:932-975): 建器件时记一行系统默认输出
@@ -1048,7 +1174,7 @@ namespace Ryujinx.Audio.Backends.Apple
                         while (off < take)   // 环回绕:帧粒度两段拷贝(段长 = 到环尾的整帧数)
                         {
                             int fIdx = (int)((read + off / _bytesPerFrame) & mask);
-                            int n = Math.Min((RingFrames - fIdx) * _bytesPerFrame, take - off);
+                            int n = Math.Min((_ringFrames - fIdx) * _bytesPerFrame, take - off);
                             new Span<byte>(ring, fIdx * _bytesPerFrame, n).CopyTo(new Span<byte>((byte*)buffer->Data + off, n));
                             off += n;
                         }
@@ -1207,7 +1333,7 @@ namespace Ryujinx.Audio.Backends.Apple
                 {
                     long write = Volatile.Read(ref _ringWrite);
                     long read = Volatile.Read(ref _ringRead);
-                    long freeFrames = RingFrames - (write - read);   // 写者读指针只取可见量(保守:宁可少写,不越未读)
+                    long freeFrames = _ringFrames - (write - read);   // 写者读指针只取可见量(保守:宁可少写,不越未读)
 
                     if (freeFrames <= 0)
                     {
@@ -1237,7 +1363,7 @@ namespace Ryujinx.Audio.Backends.Apple
                     while (off < bytes)   // 环回绕:帧粒度两段拷贝(§4.2,字节落点 = (帧下标 & mask) × _bytesPerFrame)
                     {
                         int fIdx = (int)((write + off / _bytesPerFrame) & _ringMask);
-                        int c = Math.Min((RingFrames - fIdx) * _bytesPerFrame, bytes - off);
+                        int c = Math.Min((_ringFrames - fIdx) * _bytesPerFrame, bytes - off);
                         Buffer.BlockCopy(_fill, off, _ring, fIdx * _bytesPerFrame, c);
                         off += c;
                     }
@@ -1595,6 +1721,10 @@ namespace Ryujinx.Audio.Backends.Apple
         public long S2ABufferedFrames => Volatile.Read(ref _unitRunning) && !Volatile.Read(ref _disposed)
             ? (RingBytes + _samples.Length) / _bytesPerFrame
             : -1;
+
+        // S2Arm (#2157 评审 #15,IS2AIOAwareDepth): 本输出的配速水位——设备 IO 周期 + 1/4 周期 + 1024 帧,上限环容量
+        //   (超出环容量的水位无意义);AudioProcessor 把它与自己的 30 ms 地板取大。读不到设备 IO 周期 = 0(不抬高)
+        public long S2AIODepthFrames => S2ADeriveDepthFrames(_deviceIOFrames, _ringFrames);
 
         public override void PrepareToClose() { }
         // S2Arm: the buffer goes back to the game (Stop / FlushBuffers / Dispose) possibly before it was played: keep what it

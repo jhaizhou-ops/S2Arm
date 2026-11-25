@@ -17,6 +17,9 @@ namespace Ryujinx.Audio.Integration
         /// <summary>S2Arm: frames given to the output and not handed back by it yet; -1 when the backend cannot tell (or is not playing).</summary>
         public long S2ABufferedFrames => _session is IS2AOutputDepth d ? d.S2ABufferedFrames : -1;
 
+        // S2Arm (#2157 评审 #15): IO 周期配速水位(旧会话不实现 IS2AIOAwareDepth → -1 → 处理器用自己的 30 ms 地板,行为不变)
+        public long S2AIODepthFrames => _session is IS2AIOAwareDepth d ? d.S2AIODepthFrames : -1;
+
         private readonly byte[] _buffer;
 
         // S2Arm: one AudioBuffer per tag, reused every 4 rounds (was a new one per round); all fields are re-set before queueing
@@ -94,6 +97,17 @@ namespace Ryujinx.Audio.Integration
     public interface IS2AOutputDepth
     {
         long S2ABufferedFrames { get; }
+    }
+
+    /// <summary>
+    /// S2Arm (#2157 评审 #15,玩家 #1308 诊断 D-BEKN): an output session whose pacing floor follows its device's actual
+    /// IO period (the frames the device pulls per callback). The render loop raises its own depth floor to this value;
+    /// sessions that cannot tell (older implementations, or no device property to read) simply don't implement it.
+    /// </summary>
+    public interface IS2AIOAwareDepth
+    {
+        /// <summary>Pacing floor in frames for this output; 0 = nothing to add (the processor keeps its own floor).</summary>
+        long S2AIODepthFrames { get; }
     }
 
     /// <summary>
