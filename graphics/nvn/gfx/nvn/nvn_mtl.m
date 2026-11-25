@@ -7993,7 +7993,7 @@ static void shmap_load_once(void) {
     id<MTLLibrary> at_lib; NSString *at_main, *at_u; NSMutableDictionary<NSNumber *, id<MTLFunction>> *at_fns; uint8_t has_atms, fout_fc; uint8_t pb_av, pb_av_done, pb_bad;   // gap families 34 / 37: a fragment main0 declaring S2A_AT / S2A_MSOFF (Dsh.cs FsAlphaMs): its library and entry names, specialized per (u, at, msoff, output types) on demand (fs_atms_fn); fout_fc: main0 also declares S2A_FU / S2A_FS (Dsh.cs FsFout), its output types are constants too
     int load_depth_zero;   // captured with the identity, also used by its layer variant
     uint8_t u_mask;   // S2Arm gap 2 A: the colour outputs fn_u returns as uint, bit n = color(n) (json u_mask; dmsh_build.py fs_uint turns only the integer-bit writers)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; uint8_t t3d /* 0 not looked at, 1 no 3D texture slot, 2 has one (tex3d_prepare) */; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; uint8_t t3d /* 0 not looked at, 1 no 3D texture slot, 2 has one (tex3d_prepare) */, fb_tex /* 0 not looked at, 1 no NVN_RB_TEX < NTEX, 2 has one (fb_prepare) */; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     // NVN2 task / mesh shader (json msl_entry_kind object / mesh, at stage 3 / 4; nvn_geometry.inc mesh_tasks_draw): mesh_kind 1 object 2 mesh (0 = neither); its workgroup's threads,
     //   the payload's bytes (task), a task shader feeds it (mesh), the most vertices / primitives a mesh workgroup emits (Switch2 line's interface contract, item 6)
@@ -16353,16 +16353,34 @@ static void fb_prepare(NvProg *pr) {
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
     tex3d_prepare(pr);   // #674: 3D copies of the 2D textures this draw's fragment shader reads through 3D slots
     if (!pr || !pr->sh[1] || !R.rt.n || g_fz.active || g_defer_replaying) return;
-    __unsafe_unretained NvShader *fs = pr->sh[1]; int listed = fb_want(fs->key); if (g_fb_off) return;   // the program holds it
+    __unsafe_unretained NvShader *fs = pr->sh[1]; if (g_fb_off) return;   // the program holds it
+    if (!fs->fb_tex) { int any = 0; for (int i = 0; i < fs->rf.nb; i++) any |= fs->rf.b[i].kind == NVN_RB_TEX && fs->rf.b[i].reg < NTEX; fs->fb_tex = any ? 2 : 1; }
+    if (fs->fb_tex != 2) return;
+    // Fast single-lock pre-scan: take g_rmu ONCE per draw (instead of once per texture binding) and only compute alias_key_of when a bound texture actually shares a serial or (pool, off) with a current attachment.
+    struct { int idx, tid; uint64_t ser; alias_key sampled; } hits[32]; int nhits = 0;
+    uint64_t dser = R.rt.depth ? R.rt.depth->serial : 0;
+    os_unfair_lock_lock(&g_rmu);
+    for (int i = 0; i < fs->rf.nb && nhits < 32; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
+        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff);
+        if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) continue;
+        const tex_t *st = &g_treg[tid].t; uint64_t ser = st->serial; if (!ser) continue;
+        int match = (dser && dser == ser);
+        if (!match) {
+            uint64_t sp = (uint64_t)(uintptr_t)st->pool, so = st->off;
+            for (int k = 0; k < R.rt.n && k < 8; k++) { const tex_t *att = R.rt.color[k]; if (!att) continue;
+                if (att->serial == ser || (sp && sp == (uint64_t)(uintptr_t)att->pool && so == att->off)) { match = 1; break; } }
+        }
+        if (!match) continue;
+        hits[nhits].idx = i; hits[nhits].tid = tid; hits[nhits].ser = ser; alias_key_of(&hits[nhits].sampled, st); nhits++;
+    }
+    os_unfair_lock_unlock(&g_rmu);
+    if (!nhits) return;
+    int listed = fb_want(fs->key);
     id<MTLTexture> cbase[4] = {nil}, csnap[4] = {nil}; NSUInteger ckey[4][4]; int ncopy = 0, settled = 0;   // ④ copies of this draw by real subresource (base, levels, slices); clears landed
     // 贴图槽表是 0..NTEX-1（256）：原先只查 128 号以下，从 128 号以上读自己附件的绘制（#839：一款动作游戏的 FXAA 从 128 号槽读正在写的场景图）不换快照、原地边读边写，
     //   Metal 下读到写到一半的块，NaN / Inf 进场景，经泛光扩散、色调映射查表后整屏发绿带黑块
-    for (int i = 0; i < fs->rf.nb && g_fb_n < 4; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (b->kind != NVN_RB_TEX || b->reg >= NTEX) continue;
-        int tid = (int)(tex_slot_h(S.tex[1], S.img[1], b->reg) & 0xfffff);
-        alias_key sampled;
-        os_unfair_lock_lock(&g_rmu); uint64_t ser = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t.serial : 0;
-        if (ser) alias_key_of(&sampled, &g_treg[tid].t); os_unfair_lock_unlock(&g_rmu);
-        if (!ser) continue;
+    for (int hi = 0; hi < nhits && g_fb_n < 4; hi++) { const nvn_rbind *b = &fs->rf.b[hits[hi].idx];
+        int tid = hits[hi].tid; uint64_t ser = hits[hi].ser; alias_key sampled = hits[hi].sampled;
         // #387 the pass's own depth attachment sampled in the same pass. NVN reads the depth buffer as it is in memory (legal, and unchanged while depth writes are off);
         //   Metal leaves sampling a texture that is an attachment of the open pass undefined: a long pass stores tiles back mid-pass (partial renders) while later draws read them.
         //   The colour checks below never looked at the depth attachment, so these draws read it in place (Diablo III's street-lamp halos, 1600x900 Depth32Float_Stencil8:
