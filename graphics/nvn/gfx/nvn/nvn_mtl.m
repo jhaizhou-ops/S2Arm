@@ -9495,6 +9495,7 @@ static uint64_t g_stat_tex_null; static int g_tid0_reg;
 //   (upstream reference implementation (MIT) the reference port b1d7c707: Ocarina of Time registers about 33,000 IDs and reads about 300, about 1 GB). Under g_rmu
 enum { POOL_SEEN_WORDS = (1u << 20) / 32 };
 static __strong id<MTLBuffer> g_seen_buf; static uint32_t g_seen_done[POOL_SEEN_WORDS], g_seen_todo[POOL_SEEN_WORDS]; static uint64_t g_seen_sub = ~0ull;
+static uint16_t g_seen_words[POOL_SEEN_WORDS]; static uint32_t g_seen_listed[POOL_SEEN_WORDS / 32], g_nseen_words;   // compact list of non-zero g_seen_done words for fast recheck scans
 static inline int pool_seen(int id_) { return id_ >= 0 && id_ < (int)(POOL_SEEN_WORDS * 32) && (g_seen_done[(unsigned)id_ >> 5] >> (id_ & 31) & 1); }
 static void pool_seen_clear(int id_) {   // an ID given another texture has not been read as that texture
     if (id_ < 0 || id_ >= (int)(POOL_SEEN_WORDS * 32)) return;
@@ -12689,7 +12690,7 @@ static void unpin_prune(void) {   // g_pin_mu held
     }
     g_unpin_next = g_unpin.n * 2 + 1024;
 }
-static void **g_pin_new; static uint32_t g_pin_nnew, g_pin_cnew;   // retired while pinned since the last pool_gpu
+static void **g_pin_new; static uint32_t g_pin_nnew, g_pin_cnew; static _Atomic uint32_t g_pin_has_new;   // retired while pinned since the last pool_gpu
 static int pool_pin_keys(void *o, void *k[4]) {   // the allocations a table entry naming o keeps (always the same for the same object: a view's parent and buffer never change)
     int n = 0; k[n++] = o;
     id x = (__bridge id)o;
@@ -12729,6 +12730,7 @@ static int pool_pin_retire(void *r) {   // res_remove (g_res_mu held): 1 = pinne
         nvn_hm_put(&g_pin_ret, &r, (void *)1);
         if (g_pin_nnew == g_pin_cnew) { uint32_t c = g_pin_cnew ? g_pin_cnew * 2 : 64; void **g = realloc(g_pin_new, c * sizeof *g); if (!g) MDIE("pool pins: out of memory"); g_pin_new = g; g_pin_cnew = c; }
         g_pin_new[g_pin_nnew++] = r;
+        atomic_store_explicit(&g_pin_has_new, 1, memory_order_release);
     }
     pthread_mutex_unlock(&g_pin_mu);
     if (late) { defer_obj_release((__bridge id)r); atomic_fetch_add_explicit(&g_unpin_late, 1, memory_order_relaxed); }   // g_res_mu held: defer_obj_release only takes g_deferred_mu, which nothing holds while taking another lock
@@ -12852,29 +12854,49 @@ static void pool_dirty(int samp, int id_) { if (atomic_load_explicit(&g_ptab_any
 // while its old one stays alive elsewhere, a target first written) or guest memory did (a CPU-written texture is checked against guest writes only when it is looked up, tex_by_id
 // view_pkg): what nothing retires or registers still reaches what shaders read within a submission. Shaders read a few hundred of the tens of thousands of IDs
 static uint64_t g_seen_dirty = ~0ull, g_seen_ser = ~0ull;
+static void pool_seen_word(unsigned i, int recheck, int sg_chg, uint64_t sg) {
+    for (uint32_t bits = g_seen_todo[i]; bits; bits &= bits - 1) {
+        int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;
+        if (id_ <= 0 || id_ >= g_ntreg || !g_treg[id_].ok || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_]))) { g_seen_todo[i] &= ~(1u << b); continue; }
+        if (!g_treg[id_].view && pool_unwritten_target(&g_treg[id_].t)) continue;   // waits for a pass to write it
+        if (!g_treg[id_].view && !tex_get(g_treg[id_].t.serial)) { if (g_walk_req >= POOL_REQ_BYTES) break; }
+        g_seen_todo[i] &= ~(1u << b);
+        pool_tex_update(id_, 0); g_pool_upd_seen++;
+    }
+    if (recheck) for (uint32_t bits = g_seen_done[i] & ~g_seen_todo[i]; bits; bits &= bits - 1) {
+        int id_ = (int)i * 32 + __builtin_ctz(bits);
+        if (id_ < g_ntreg && g_treg[id_].ok) {
+            const treg_t *r = &g_treg[id_];
+            if (!sg_chg && r->view && r->view_ser == sg && !r->view_pkg) continue;   // guest-memory dirty bumps only affect CPU-written (view_pkg) textures
+            pool_tex_update(id_, 0); g_pool_upd_seen++;
+        }
+    }
+}
 static void pool_seen_scan(void) {
     if (!g_seen_buf) return;
     uint64_t dg = nvn_dirty_now(), sg = g_ser_gen;
     int new_sub = (g_seen_sub != g_sub_serial);
-    int recheck = (dg != g_seen_dirty || sg != g_seen_ser);
+    int dg_chg = (dg != g_seen_dirty), sg_chg = (sg != g_seen_ser);
+    int recheck = (dg_chg || sg_chg);
     if (!new_sub && !recheck) return;
     g_seen_sub = g_sub_serial; g_seen_dirty = dg; g_seen_ser = sg;
-    if (new_sub) pool_walk_frame();
-    const uint32_t *w = (const uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
-    for (unsigned i = 0; i < words; i++) {
-        uint32_t fresh = w[i] & ~g_seen_done[i];
-        if (fresh) { g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh; }
-        for (uint32_t bits = g_seen_todo[i]; bits; bits &= bits - 1) {
-            int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;
-            if (id_ <= 0 || id_ >= g_ntreg || !g_treg[id_].ok || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_]))) { g_seen_todo[i] &= ~(1u << b); continue; }
-            if (!g_treg[id_].view && pool_unwritten_target(&g_treg[id_].t)) continue;   // waits for a pass to write it
-            if (!g_treg[id_].view && !tex_get(g_treg[id_].t.serial)) { if (g_walk_req >= POOL_REQ_BYTES) break; }
-            g_seen_todo[i] &= ~(1u << b);
-            pool_tex_update(id_, 0); g_pool_upd_seen++;
+    if (new_sub) {
+        pool_walk_frame();
+        const uint32_t *w = (const uint32_t *)g_seen_buf.contents; unsigned words = MIN((unsigned)g_ntreg / 32 + 1, (unsigned)POOL_SEEN_WORDS);
+        for (unsigned i = 0; i < words; i++) {
+            uint32_t fresh = w[i] & ~g_seen_done[i];
+            if (fresh) {
+                g_seen_done[i] |= fresh; g_seen_todo[i] |= fresh;
+                if (!(g_seen_listed[i >> 5] & (1u << (i & 31)))) { g_seen_listed[i >> 5] |= 1u << (i & 31); g_seen_words[g_nseen_words++] = (uint16_t)i; }
+            }
+            if (g_seen_todo[i] || (recheck && g_seen_done[i])) pool_seen_word(i, recheck, sg_chg, sg);
         }
-        if (recheck) for (uint32_t bits = g_seen_done[i] & ~g_seen_todo[i]; bits; bits &= bits - 1) {
-            int id_ = (int)i * 32 + __builtin_ctz(bits);
-            if (id_ < g_ntreg && g_treg[id_].ok) { pool_tex_update(id_, 0); g_pool_upd_seen++; }
+    } else {
+        for (uint32_t k = 0; k < g_nseen_words; ) {
+            unsigned i = g_seen_words[k];
+            if (!g_seen_done[i]) { g_seen_listed[i >> 5] &= ~(1u << (i & 31)); g_seen_words[k] = g_seen_words[--g_nseen_words]; continue; }
+            k++;
+            pool_seen_word(i, 1, sg_chg, sg);
         }
     }
 }
@@ -12977,14 +12999,16 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int rw, int base, __unsafe_
     if (atomic_load_explicit(&g_ptab_any, memory_order_relaxed)) {
         for (int k = 0; k < POOL_TABS; k++) if (g_ptab[k].used) { int n = (g_ptab[k].samp ? g_nsreg : g_ntreg) - g_ptab[k].base; if (n > (int)g_ptab[k].n) pool_tab_put_n(&g_ptab[k], (uint32_t)n); }
         // retired while pinned: their entries are looked up again (the lookup finds what replaced them), which unpins them
-        pthread_mutex_lock(&g_pin_mu); uint32_t nr = g_pin_nnew; void **rs = nr ? malloc(nr * sizeof *rs) : NULL; if (rs) memcpy(rs, g_pin_new, nr * sizeof *rs); else nr = 0; g_pin_nnew = 0; pthread_mutex_unlock(&g_pin_mu);
-        for (uint32_t j = 0; j < nr; j++) {
-            pthread_mutex_lock(&g_pin_mu); pin_list *l = nvn_hm_get(&g_pin, &rs[j]); uint32_t m = l ? l->n : 0; uint32_t *codes = m ? malloc(m * 4) : NULL; if (codes) memcpy(codes, l->e, m * 4); else m = 0; pthread_mutex_unlock(&g_pin_mu);
-            for (uint32_t q = 0; q < m; q++) { const pool_tab *t = &g_ptab[codes[q] >> 20]; uint32_t i = codes[q] & 0xfffff; if (!t->used || i >= t->n) continue;
-                g_pool_upd_ret++; if (t->samp) pool_samp_update(t->base + (int)i); else pool_tex_update(t->base + (int)i, pool_room()); }
-            free(codes);
+        if (atomic_load_explicit(&g_pin_has_new, memory_order_acquire)) {
+            pthread_mutex_lock(&g_pin_mu); uint32_t nr = g_pin_nnew; void **rs = nr ? malloc(nr * sizeof *rs) : NULL; if (rs) memcpy(rs, g_pin_new, nr * sizeof *rs); else nr = 0; g_pin_nnew = 0; atomic_store_explicit(&g_pin_has_new, 0, memory_order_relaxed); pthread_mutex_unlock(&g_pin_mu);
+            for (uint32_t j = 0; j < nr; j++) {
+                pthread_mutex_lock(&g_pin_mu); pin_list *l = nvn_hm_get(&g_pin, &rs[j]); uint32_t m = l ? l->n : 0; uint32_t *codes = m ? malloc(m * 4) : NULL; if (codes) memcpy(codes, l->e, m * 4); else m = 0; pthread_mutex_unlock(&g_pin_mu);
+                for (uint32_t q = 0; q < m; q++) { const pool_tab *t = &g_ptab[codes[q] >> 20]; uint32_t i = codes[q] & 0xfffff; if (!t->used || i >= t->n) continue;
+                    g_pool_upd_ret++; if (t->samp) pool_samp_update(t->base + (int)i); else pool_tex_update(t->base + (int)i, pool_room()); }
+                free(codes);
+            }
+            free(rs);
         }
-        free(rs);
         for (int s = 0; s < 2; s++) if (g_pdirty[s].n) {
             uint32_t m = g_pdirty[s].n; uint32_t *ids = malloc(m * sizeof *ids); if (!ids) break;
             memcpy(ids, g_pdirty[s].list, m * sizeof *ids); pool_dset_clear(&g_pdirty[s]);
@@ -13016,13 +13040,13 @@ static void pool_session_reset(void) {
         free(t->obj); res_remove(t->buf); *t = (pool_tab){0}; }
     pthread_mutex_lock(&g_pin_mu);
     for (uint32_t i = 0; i < g_pin.cap; i++) if (g_pin.vals[i]) free(g_pin.vals[i]);
-    nvn_hm_clear(&g_pin, NULL); nvn_hm_clear(&g_pin_ret, NULL); nvn_hm_clear(&g_unpin, NULL); g_pin_nnew = 0;
+    nvn_hm_clear(&g_pin, NULL); nvn_hm_clear(&g_pin_ret, NULL); nvn_hm_clear(&g_unpin, NULL); g_pin_nnew = 0; atomic_store_explicit(&g_pin_has_new, 0, memory_order_relaxed);
     pthread_mutex_unlock(&g_pin_mu);
     atomic_store(&g_ptab_any, 0);
     for (int s = 0; s < 2; s++) pool_dset_clear(&g_pdirty[s]);
     pool_dset_clear(&g_pleft);
     pool_dset_clear(&g_punwritten); g_punwritten_ser = ~0ull;
-    memset(g_seen_done, 0, sizeof g_seen_done); memset(g_seen_todo, 0, sizeof g_seen_todo); g_seen_sub = ~0ull;
+    memset(g_seen_done, 0, sizeof g_seen_done); memset(g_seen_todo, 0, sizeof g_seen_todo); memset(g_seen_listed, 0, sizeof g_seen_listed); g_nseen_words = 0; g_seen_sub = ~0ull;
     if (g_seen_buf) memset(g_seen_buf.contents, 0, POOL_SEEN_WORDS * 4);
     g_psnap_gen++;
 }
