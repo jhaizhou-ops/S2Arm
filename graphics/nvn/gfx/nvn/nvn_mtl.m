@@ -13767,6 +13767,57 @@ static int args_ubo_patchable(NvShader *sh) {
     sh->ab_patch = ok && cb ? 1 : 2;
     return sh->ab_patch == 1;
 }
+typedef struct { uint64_t gen, gpu; __unsafe_unretained id<MTLBuffer> buf; int base; uint32_t binst; p_bind_buf ssbo[16]; } drv0_last;
+typedef struct { uint64_t gen, gpu; __unsafe_unretained id<MTLBuffer> buf; int dyn, tb, sb; uint64_t tex[NTEX], img[C2_IMG_SLOTS], samp[128]; } drv2_last;
+static drv0_last g_drv0_cache[6];
+static drv2_last g_drv2_cache[6];
+static uint64_t g_drv_cache_hits;
+// Arena-generation-keyed cache for DRV0 (graphics stages only; compute writes g_c0_dim_buf/off patched in-place by dispatch) and DRV2:
+// avoids allocating & zeroing DRV_SIZE (2.5 KB) + filling 305 handle slots on every encode_args when SSBO / handle tables did not change.
+static uint64_t drv0_fill(int nvn_stage, int mesh_kind, __unsafe_unretained id<MTLBuffer> *out_buf) {
+    int base = c0_ssbo_base(nvn_stage, mesh_kind);
+    if (nvn_stage != 5) {
+        drv0_last *c = &g_drv0_cache[nvn_stage < 6 ? nvn_stage : 0];
+        if (c->gpu && c->gen == g_arena_gen && c->base == base && c->binst == g_draw_binst && !memcmp(c->ssbo, S.ssbo[nvn_stage], sizeof c->ssbo)) {
+            g_drv_cache_hits++; *out_buf = c->buf; return c->gpu;
+        }
+    }
+    __unsafe_unretained id<MTLBuffer> db; size_t doff = arena_alloc_u(DRV_SIZE, &db); uint8_t *d = g_cur_arena->cpu + doff; memset(d, 0, DRV_SIZE);
+    if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
+    else for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + 16 * r, &a, 8); memcpy(d + base + 16 * r + 8, &n, 4); }
+    if (nvn_stage != 5) {
+        const float max_point = 2047.0f; memcpy(d + 0x610, &max_point, 4);
+        memcpy(d + 0x644, &g_draw_binst, 4);
+        uint64_t gpu = g_cur_arena->gpu + doff;
+        drv0_last *c = &g_drv0_cache[nvn_stage < 6 ? nvn_stage : 0];
+        c->gen = g_arena_gen; c->gpu = gpu; c->buf = db; c->base = base; c->binst = g_draw_binst; memcpy(c->ssbo, S.ssbo[nvn_stage], sizeof c->ssbo);
+        *out_buf = db; return gpu;
+    }
+    memcpy(d + 0x200, g_dispatch_dim, 12); g_c0_dim_buf = db; g_c0_dim_off = doff + 0x200;
+    for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
+    *out_buf = db; return g_cur_arena->gpu + doff;
+}
+static uint64_t drv2_fill(int nvn_stage, int dyn, int tb, int sb, __unsafe_unretained id<MTLBuffer> *out_buf) {
+    const uint64_t *tx = S.tex[nvn_stage], *im = S.img[nvn_stage], *sm = S.samp[nvn_stage];
+    drv2_last *c = &g_drv2_cache[nvn_stage < 6 ? nvn_stage : 5];
+    if (c->gpu && c->gen == g_arena_gen && c->dyn == dyn && c->tb == tb && c->sb == sb &&
+        !memcmp(c->tex, tx, sizeof c->tex) && !memcmp(c->img, im, sizeof c->img) && !memcmp(c->samp, sm, sizeof c->samp)) {
+        g_drv_cache_hits++; *out_buf = c->buf; return c->gpu;
+    }
+    __unsafe_unretained id<MTLBuffer> db; size_t doff = arena_alloc_u(DRV_SIZE, &db); uint8_t *d = g_cur_arena->cpu + doff; memset(d, 0, DRV_SIZE);
+    #define C2_LOCAL(h) ((uint32_t)((((h) & 0xfffff) ? ((h) & 0xfffff) - (uint64_t)tb : 0) | ((((h) >> 20) & 0xfff) ? ((((h) >> 20) & 0xfff) - (uint64_t)sb) << 20 : 0)))
+    for (int r = 0; r < C2_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)im[r]; memcpy(d + C2_IMG + 8 * r, &ih, 4); }
+    for (int r = 0; r < C2_TEX_SLOTS; r++) {
+        if (r >= 32 && (!tx[r] || (r - 32 < C2_IMG_SLOTS && im[r - 32]))) continue;
+        uint32_t v = !dyn ? C2_LOCAL(tx[r]) : !tx[r] ? 0 : (uint32_t)r | (tx[r] >> 20 ? (uint32_t)r << 20 : 0); memcpy(d + C2_TEX + 8 * r, &v, 4); }
+    for (int r = 0; r < 128; r++) { uint64_t h = tx[NVN_SEPTEX_SLOT0 + r]; uint32_t v = !dyn ? C2_LOCAL(h) : h ? (uint32_t)r : 0; memcpy(d + C2_SEPTEX + 8 * r, &v, 4); }
+    for (int r = 0; r < 128; r++) { uint64_t h = sm[r]; uint32_t v = !dyn ? C2_LOCAL(h) : h ? (uint32_t)r << 20 : 0; memcpy(d + C2_SAMP + 8 * r, &v, 4); }
+    #undef C2_LOCAL
+    uint64_t gpu = g_cur_arena->gpu + doff;
+    c->gen = g_arena_gen; c->gpu = gpu; c->buf = db; c->dyn = dyn; c->tb = tb; c->sb = sb;
+    memcpy(c->tex, tx, sizeof c->tex); memcpy(c->img, im, sizeof c->img); memcpy(c->samp, sm, sizeof c->samp);
+    *out_buf = db; return gpu;
+}
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) { if (g_handle_read_failed) return 0; AP_B; int r = encode_args_(en, sh, nvn_stage, metal_vertex); AP_E(3); return r; }
 static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
@@ -14054,50 +14105,14 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = nvn_stage == 1 && rs_on() ? rs_support(sh) : g_wd > 0 && nvn_stage == 1 && g_wd_rs_gpu ? g_wd_rs_gpu : support_gpu();   // S2Arm widen: this draw's copy with render_scale[0] = the fragment position scale (widen_glue.inc wd_rscale); internal resolution: rs_support
             USE(support_buf(), MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
-            // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
-            // c2 = the handle tables (C2_*), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time
+            // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are cached per stage in the current arena generation (drv0_fill / drv2_fill)
             int bank = b->kind == NVN_RB_DRV2 ? 2 : 0;
             if (!sh->rf.drv_read[bank]) { slots[aid] = zero_bank_gpu(); USE(zero_bank(), MTLResourceUsageRead); }
             else {
-                __unsafe_unretained id<MTLBuffer> db; size_t doff = arena_alloc_u(DRV_SIZE, &db); uint8_t *d = g_cur_arena->cpu + doff; memset(d, 0, DRV_SIZE);
-                if (bank == 0) {
-                    int base = c0_ssbo_base(nvn_stage, sh->mesh_kind);
-                    if (base < 0) RED_ONCE(45, "stage %d shader reads driver segment c0; the storage buffer table base was never measured", nvn_stage);
-                    else for (int r = 0; r < 16; r++) { uint64_t a = S.ssbo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ssbo[nvn_stage][r].size; memcpy(d + base + 16 * r, &a, 8); memcpy(d + base + 16 * r + 8, &n, 4); }
-                    // Compute also has the dispatch size at 0x200 (x, y, z) and the uniform buffer table at 0x210 + 16 r (address 64 bits, size 32 bits), ending where the storage buffer table
-                    // starts (0x310). Measured on Link's Awakening's light culling (light_culling_compute.bfsha): tile index = workgroup y × c0[0x200] + workgroup x, and c0[0x280] is
-                    // the address of uniform buffer 7 (the light parameters, 144 bytes per light); Breath of the Wild's compute shaders read 0x280 / 0x290 / 0x2d0 of the same table
-                    // Graphics stages: 0x610, right after the pixel stage's storage buffer table, holds the largest point size, to which GLSLC clamps a shader-written
-                    // gl_PointSize (Super Mario Odyssey's agl point sprites, alPointSpriteShader: gl_PointSize = min(size attribute, c0[0x610])). It is not SetPointSize: the game
-                    // sets that to 1 and sizes its sprites itself (the fog splats ask for 3-18 px). Left at 0, every sprite had size 0, so the splats that push the Cap Kingdom
-                    // fog aside never reached its velocity fields and the fog did not part around Mario. 2047 is Maxwell's point size limit (Metal clamps to its own)
-                    if (nvn_stage != 5) { const float max_point = 2047.0f; memcpy(d + 0x610, &max_point, 4); }
-                    // Graphics stages: 0x644 holds the draw's base instance. Maxwell's instance ID leaves it out (GL's gl_InstanceID), and GLSLC adds this word where a shader needs the
-                    // absolute instance (gl_InstanceID + gl_BaseInstance): Pokémon Legends: Z-A's occlusion boxes (a793f436dcabd350, one box per draw at base instance 61, 62, …) pick their
-                    // transform this way, and 1,550 reads in 793 of its vertex shaders. Left at 0, every box was box 0: all six queries came back empty, and the game, taking its characters for
-                    // hidden, posed their legs straight back from the hips. 0x640 (read by 58 shaders, added to the vertex ID) stays 0: what the driver puts there is not established
-                    if (nvn_stage != 5) memcpy(d + 0x644, &g_draw_binst, 4);
-                    if (nvn_stage == 5) {
-                        memcpy(d + 0x200, g_dispatch_dim, 12); g_c0_dim_buf = db; g_c0_dim_off = doff + 0x200;
-                        for (int r = 0; r < 16; r++) { uint64_t a = S.ubo[5][r].addr; uint32_t n = (uint32_t)S.ubo[5][r].size; memcpy(d + 0x210 + 16 * r, &a, 8); memcpy(d + 0x210 + 16 * r + 8, &n, 4); }
-                    }
-                } else {
-                    // A shader with dynamic handle arrays (TEXD / SAMPD, profile key tex_dyn_slots) picks a table slot at run time and ORs a texture word with a sampler word into a handle,
-                    // whose texture / sampler IDs index the arrays. For it the tables hold slot indices instead of handles (texture slot r → r, and r << 20 when a combined handle carries
-                    // a sampler; sampler slot r → r << 20), and the arrays hold the bound slots, so the shader's own arithmetic picks the binding (Octopath Traveler 0: separate texture slots 0-10, samplers 0-4)
-                    // A shader with pools (TEXP / SAMPP, pool_gpu) indexes them with the IDs it reads, which in the game's own memory are the bound pool's: pool_gpu adds that pool's base. Its
-                    // tables therefore hold the handles as the game bound them, without the base bind_rec / bh_fresh added (nvn_obj.h), so a handle taken from c2 lands on the same entry
-                    const uint64_t *tx = S.tex[nvn_stage], *im = S.img[nvn_stage]; int dyn = sh->rf.dyn, tb = sh->rf.pool ? S.tex_base : 0, sb = sh->rf.pool ? S.samp_base : 0;
-                    #define C2_LOCAL(h) ((uint32_t)((((h) & 0xfffff) ? ((h) & 0xfffff) - (uint64_t)tb : 0) | ((((h) >> 20) & 0xfff) ? ((((h) >> 20) & 0xfff) - (uint64_t)sb) << 20 : 0)))
-                    for (int r = 0; r < C2_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)im[r]; memcpy(d + C2_IMG + 8 * r, &ih, 4); }
-                    for (int r = 0; r < C2_TEX_SLOTS; r++) {   // a combined slot past 31 is written when it is bound and the image slot it shares is not (Hades II binds texture slot 34, no image)
-                        if (r >= 32 && (!tx[r] || (r - 32 < C2_IMG_SLOTS && im[r - 32]))) continue;
-                        uint32_t v = !dyn ? C2_LOCAL(tx[r]) : !tx[r] ? 0 : (uint32_t)r | (tx[r] >> 20 ? (uint32_t)r << 20 : 0); memcpy(d + C2_TEX + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128; r++) { uint64_t h = tx[NVN_SEPTEX_SLOT0 + r]; uint32_t v = !dyn ? C2_LOCAL(h) : h ? (uint32_t)r : 0; memcpy(d + C2_SEPTEX + 8 * r, &v, 4); }
-                    for (int r = 0; r < 128; r++) { uint64_t h = S.samp[nvn_stage][r]; uint32_t v = !dyn ? C2_LOCAL(h) : h ? (uint32_t)r << 20 : 0; memcpy(d + C2_SAMP + 8 * r, &v, 4); }
-                    #undef C2_LOCAL
-                }
-                slots[aid] = g_cur_arena->gpu + doff;
+                __unsafe_unretained id<MTLBuffer> db = nil;
+                slots[aid] = bank == 0
+                    ? drv0_fill(nvn_stage, sh->mesh_kind, &db)
+                    : drv2_fill(nvn_stage, sh->rf.dyn, sh->rf.pool ? S.tex_base : 0, sh->rf.pool ? S.samp_base : 0, &db);
                 USE(db, MTLResourceUsageRead);
             }
         } else if (b->kind == NVN_RB_PUSH) {   // NVN2 push constants, slot reg (c[24 + reg]): the 256 bytes pushed last before this draw / dispatch
