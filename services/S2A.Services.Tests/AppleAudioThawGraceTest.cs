@@ -6,7 +6,7 @@ using System;
 namespace S2A.Services.Tests
 {
     // D-HTHG（11-22）：iOS 局回前台时看门狗把后台时间当「设备没有回调」、把系统重新激活会话时一次 500 ms 的交设备当「输出队列卡死」，各重启一次输出队列。
-    //   判定 AppleHardwareDeviceSession.S2AThawGraceStep（宽限 1500 ms）。期望按语义手算，时钟频率取 1000（1 tick = 1 ms）：
+    //   判定 ApplePullHardwareDeviceSession.S2AThawGraceStep（宽限 1500 ms；#2157 只留拉取一种传输后随输出会话迁进本类）。期望按语义手算，时钟频率取 1000（1 tick = 1 ms）：
     // ① 从没冻结过（seq 不变、thaw 0）：不在宽限、不刷新起算点
     // ② 冻结中（frozen）：在宽限、刷新起算点（被挂起的那段不算停播）；记下的解冻时刻不动
     // ③ 解冻后第一拍（seq 从 0 变 1，now 10000）：刷新起算点、在宽限、记下解冻时刻 10000、记下 seq 1
@@ -15,7 +15,7 @@ namespace S2A.Services.Tests
     static class AppleAudioThawGraceTest
     {
         private static bool Step(bool frozen, long seq, ref long graceSeq, ref long thawTicks, long now, long freq, out bool rebase) =>
-            AppleHardwareDeviceSession.S2AThawGraceStep(frozen, seq, ref graceSeq, ref thawTicks, now, freq, out rebase);   // 平台例外：苹果音频后端的解冻宽限判定（纯函数）
+            ApplePullHardwareDeviceSession.S2AThawGraceStep(frozen, seq, ref graceSeq, ref thawTicks, now, freq, out rebase);   // 平台例外：苹果音频后端的解冻宽限判定（纯函数）
 
         [SoloTest("--apple-audio-thaw-grace")]
         private static int Check()
