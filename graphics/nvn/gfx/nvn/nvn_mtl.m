@@ -2565,16 +2565,25 @@ static int gw_live(uint64_t lo, uint64_t hi) { return gw_pending_fence(lo, hi, N
 //   The CPU knows these bytes (they are copied from the update ring), so they are kept here with their fence, and the shadow lays them over memory oldest first
 //   (memory read at any time while they land holds old or new bytes; the overlay is the newest either way). Copies, fills, storage writes and larger updates stay in the page table.
 //   Kept by 4 KB page bucket, newest first; a chain stops at the first completed or recycled entry (fences only grow along it). DM_NVN_UBP_INFLIGHT=0 turns it off
-enum { IFW_N = 1 << 16, IFW_HB = 1 << 14, IFW_MAXB = 64, IFW_HITS = 256 };
+enum { IFW_N = 1 << 16, IFW_HB = 1 << 14, IFW_MAXB = 64, IFW_MAX_UPDATE = 1024, IFW_HITS = 256 };
 typedef struct { uint64_t seq, lo, hi, fence, next; uint8_t b[IFW_MAXB]; } ifw_ent;   // next: seq of the next older entry in the bucket (0 none); b: the bytes, [lo, hi) within one page
 static ifw_ent *g_ifw; static uint64_t g_ifw_seq, g_ifw_head[IFW_HB];
 static int ifw_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_UBP_INFLIGHT"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UBP_INFLIGHT=0: inline uniform updates of a running submission refuse partial shadows as before"); } return v; }
 static inline unsigned ifw_bucket(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> (64 - __builtin_ctz(IFW_HB))); }
 static int ifw_put(uint64_t lo, uint64_t hi, const uint8_t *src, uint64_t fence, uint64_t done) {   // 0: no room (the caller puts it in the page table)
+    if (hi <= lo || hi - lo > IFW_MAX_UPDATE) return 0;
     if (!g_ifw && !(g_ifw = calloc(IFW_N, sizeof *g_ifw))) return 0;
-    for (uint64_t a = lo; a < hi; ) {   // one entry per page piece
-        uint64_t b = MIN(hi, (a & ~4095ull) + 4096); if (b - a > IFW_MAXB) return 0;
-        ifw_ent *x = &g_ifw[(g_ifw_seq + 1) % IFW_N]; if (x->seq && x->fence > done) return 0;   // the slot still holds a running submission's update
+    // Split updates larger than IFW_MAXB (e.g. 128–1024 B matrix/lighting blocks) into <=IFW_MAXB page-contained chunks.
+    // Pre-check slot availability so an update is either recorded whole or rejected cleanly without partial entries.
+    uint64_t need = 0;
+    for (uint64_t a = lo; a < hi; ) { uint64_t b = MIN(hi, MIN((a & ~4095ull) + 4096, a + IFW_MAXB)); need++; a = b; }
+    for (uint64_t i = 1; i <= need; i++) {
+        ifw_ent *x = &g_ifw[(g_ifw_seq + i) % IFW_N];
+        if (x->seq && x->fence > done) return 0;   // the slot still holds a running submission's update
+    }
+    for (uint64_t a = lo; a < hi; ) {
+        uint64_t b = MIN(hi, MIN((a & ~4095ull) + 4096, a + IFW_MAXB));
+        ifw_ent *x = &g_ifw[(g_ifw_seq + 1) % IFW_N];
         unsigned h = ifw_bucket(a >> 12); uint64_t s = ++g_ifw_seq;
         x->seq = s; x->lo = a; x->hi = b; x->fence = fence; x->next = g_ifw_head[h]; memcpy(x->b, src + (a - lo), (size_t)(b - a)); g_ifw_head[h] = s;
         a = b; }
