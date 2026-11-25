@@ -37,6 +37,10 @@ int nvn_gpu_pipe_lookup(const nvn_gpu_pipe_desc *d, nvn_gpu_pipe *out);
 static int g_item_ms = 20, g_frame_ms = 100, g_unsafe_ms = 300;
 int nvn_plat_flag(const char *name, int dflt) {
     if (!strcmp(name, "nvk_pipe_async")) return 1;
+    // 这个文件的闸模型是「按第 k 次后台构建放行」，用例的相继断言都建立在「一次只建一条、按顺序进闸」上：
+    // 多条 worker 并行编会让第 k 次的归属与先后都不确定，所以这里把池压到 1 条（被测的池行为由
+    // nvn_vk_pipe_demand_test.c 的多 worker 用例覆盖）。
+    if (!strcmp(name, "nvk_pipe_workers")) return 1;
     if (!strcmp(name, "fu_item_ms")) return g_item_ms;
     if (!strcmp(name, "fu_frame_ms")) return g_frame_ms;
     if (!strcmp(name, "fu_unsafe_ms")) return g_unsafe_ms;
@@ -137,7 +141,7 @@ static void session_begin(void) {
     pass_fresh(); g_gdraws = 0; g_bad_draw = 0; g_last_set = NULL; gate_reset();
     pthread_mutex_lock(&g_bmu); g_session++; pthread_mutex_unlock(&g_bmu);
     nvn_vk_pipe_demand_start();
-    CHECK(nvn_vk_pipe_demand_worker_count() == 1);   // 前提：本局后台 worker 真起来了（没起来时被测的笔会走前台同步建，后面的断言全错位）
+    CHECK(nvn_vk_pipe_demand_worker_count() == nvn_vk_pipe_demand_workers_configured());   // 前提：本局后台 worker 真起来了（条数取本配置应有的值；没起来时被测的笔会走前台同步建，后面的断言全错位）
 }
 // 停局 + 放开所有闸 + 按事件等旧 worker 真退出：产品的 stop 只有界等 worker（卡在闸里的那条要等放闸后才退出），
 //   不等它退出就进下一个用例，下一局 start 会因旧 worker 还在跑而不启动（负载高时 11-21 车道偶发红在用例 6）
