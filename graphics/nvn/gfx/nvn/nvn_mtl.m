@@ -12824,6 +12824,30 @@ static uint64_t pool_room(void) {   // what may still be made up front this fram
     uint64_t left = g_walk_spent < POOL_FRAME_BYTES ? POOL_FRAME_BYTES - g_walk_spent : 0;
     return room < left ? room : left;
 }
+// Small batches of newly registered textures during live streaming (g_pdirty[0]) are almost always sampled on the
+// same frame. When pool_room() is 0 (currentAllocatedSize >= recommendedMaxWorkingSetSize / 20), refusing them
+// leaves the dummy texture in the pool table for 1 frame (black flash on newly streamed surfaces) only for
+// pool_seen_scan() to upload them anyway on the next submission. Allow up to POOL_FRAME_BYTES/frame for live small
+// batches (batch_n <= 256) when real GPU allocation is below half of recommendedMaxWorkingSetSize and iOS memory
+// headroom (when known) stays above mem_margin(), keeping pool_tab_new() and pool_left_scan() on strict pool_room().
+enum { POOL_DIRTY_BATCH_MAX = 256 };
+static uint64_t pool_dirty_room_calc(uint64_t base_room, uint32_t batch_n, uint64_t gpu_alloc, uint64_t ws_max,
+                                     uint64_t spent, int has_avail, uint64_t avail, uint64_t margin) {
+    if (base_room) return base_room;
+    if (batch_n > POOL_DIRTY_BATCH_MAX) return 0;
+    if (has_avail && avail <= margin) return 0;
+    uint64_t cap = ws_max / 2;
+    if (gpu_alloc >= cap) return 0;
+    uint64_t head = cap - gpu_alloc;
+    uint64_t left = spent < POOL_FRAME_BYTES ? POOL_FRAME_BYTES - spent : 0;
+    return head < left ? head : left;
+}
+static uint64_t pool_dirty_room(uint32_t batch_n) {
+    uint64_t avail = 0;
+    int has_avail = mem_avail(&avail);
+    return pool_dirty_room_calc(pool_room(), batch_n, s2a_gpu_alloc_bytes(), (uint64_t)g_dev.recommendedMaxWorkingSetSize,
+                                g_walk_spent, has_avail, avail, mem_margin());
+}
 // A render target no pass has written holds nothing to read, and a pass makes its texture when it renders. Made for a read, one that only registers next frame's target took three times the
 // textures and 17 GB allocated on Ocarina of Time (upstream): the game re-registers its IDs with transient targets, whose IDs a shader read as the previous texture
 //   "No pass has written" is about the storage, not the object: an NVN texture object is a description, its content is the memory. A game that draws through one object and registers
@@ -13221,8 +13245,7 @@ static uint64_t pool_gpu(int samp, int dtt, int dpf, int rw, int base, __unsafe_
         for (int s = 0; s < 2; s++) if (g_pdirty[s].n) {
             uint32_t m = g_pdirty[s].n; uint32_t *ids = malloc(m * sizeof *ids); if (!ids) break;
             memcpy(ids, g_pdirty[s].list, m * sizeof *ids); pool_dset_clear(&g_pdirty[s]);
-            uint64_t room = s ? 0 : pool_room();
-            for (uint32_t j = 0; j < m; j++) { g_pool_upd_dirty++; if (s) pool_samp_update((int)ids[j]); else { int lr = pool_tex_update((int)ids[j], room); if (lr == 1) pool_dset_add(&g_pleft, (int)ids[j]); else if (lr == 2) pool_dset_add(&g_punwritten, (int)ids[j]); } }
+            for (uint32_t j = 0; j < m; j++) { g_pool_upd_dirty++; if (s) pool_samp_update((int)ids[j]); else { uint64_t room = pool_dirty_room(m); int lr = pool_tex_update((int)ids[j], room); if (lr == 1) pool_dset_add(&g_pleft, (int)ids[j]); else if (lr == 2) pool_dset_add(&g_punwritten, (int)ids[j]); } }
             free(ids);
         }
         pool_unwritten_scan();
