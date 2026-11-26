@@ -13761,7 +13761,7 @@ static int args_ubo_patchable(NvShader *sh) {
     for (int i = 0; i < sh->rf.nb && ok; i++) switch (sh->rf.b[i].kind) {
         case NVN_RB_CBUF: case NVN_RB_UBOLEN: cb = 1; break;
         case NVN_RB_SAMP: case NVN_RB_SAMPT: case NVN_RB_SAMPI: case NVN_RB_TEX: case NVN_RB_IMG: case NVN_RB_TBUF: case NVN_RB_SBUFP: case NVN_RB_SUPPORT: case NVN_RB_C1:
-        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_GEOMETRY: break;
+        case NVN_RB_DRV0: case NVN_RB_DRV2: case NVN_RB_GEOMETRY: case NVN_RB_PUSH: case NVN_RB_TEXP: case NVN_RB_SAMPP: break;
         default: ok = 0;
     }
     sh->ab_patch = ok && cb ? 1 : 2;
@@ -13780,7 +13780,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
         g_stat_args_reuse++;
         return 1;
     }
-    if (reusable && args_ubo_patchable(sh)) {   // only what the uniform slots point at changed since this block: copy it, write the uniform slots and the bounds table again
+    if (reusable && args_ubo_patchable(sh) && (!sh->rf.pool || ((!g_seen_buf || (g_seen_sub == g_sub_serial && g_seen_ser == g_ser_gen)) && (!g_punwritten.n || g_punwritten_ser == g_ser_gen) && !g_pdirty[0].n && !g_pdirty[1].n))) {   // only what the uniform slots point at changed since this block: copy it, write the uniform slots and the bounds table again
         NSUInteger len = sh->arg_len; __unsafe_unretained id<MTLBuffer> ab; size_t off = arena_alloc_u(len, &ab);
         // The block's addresses are taken now: cbuf_slot (ubd_shadow / ubp_get) and len_fill below allocate from the arena too, and when that starts a new block,
         //   g_cur_arena->gpu + off named the new block at this block's offset (the table written here, the GPU pointed elsewhere: GPU page faults; same fix as nxnative 44d67fbe)
@@ -14581,8 +14581,11 @@ static int state_op(uint32_t op, const void *a, uint32_t size) {
         case OP_PUSH_CONST: case OP_PUSH_CONST_PTR: { const p_push_const *pc = a; int c = pc->compute ? 1 : 0;
             const void *src = op == OP_PUSH_CONST ? (const void *)(pc + 1) : (const void *)(uintptr_t)((const p_push_const_ptr *)a)->data;
             if (pc->offset + pc->size > NVN2_PUSH_BYTES || !src) break;
-            memcpy(S.push[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] + pc->offset, src, pc->size); S.push_ver[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] = ++g_push_seq;
-            if (c) g_args_dirty[5] = 1; else memset(g_args_dirty, 1, 5);
+            uint8_t *dst = S.push[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] + pc->offset;
+            if (memcmp(dst, src, pc->size)) {
+                memcpy(dst, src, pc->size); S.push_ver[c][pc->slot & (NVN2_PUSH_SLOTS - 1)] = ++g_push_seq;
+                if (c) g_args_dirty[5] = 1; else memset(g_args_dirty, 1, 5);
+            }
             break; }
         case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: { int tex = op == OP_SET_TEX_POOL, b = nvn_dpool_base(((const p_set_pool *)a)->pool, tex);
             if (b != (tex ? S.tex_base : S.samp_base)) { if (tex) S.tex_base = b; else S.samp_base = b; args_dirty_all(); }
