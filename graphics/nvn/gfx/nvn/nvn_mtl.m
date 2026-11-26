@@ -7993,7 +7993,7 @@ static void shmap_load_once(void) {
     id<MTLLibrary> at_lib; NSString *at_main, *at_u; NSMutableDictionary<NSNumber *, id<MTLFunction>> *at_fns; uint8_t has_atms, fout_fc; uint8_t pb_av, pb_av_done, pb_bad;   // gap families 34 / 37: a fragment main0 declaring S2A_AT / S2A_MSOFF (Dsh.cs FsAlphaMs): its library and entry names, specialized per (u, at, msoff, output types) on demand (fs_atms_fn); fout_fc: main0 also declares S2A_FU / S2A_FS (Dsh.cs FsFout), its output types are constants too
     int load_depth_zero;   // captured with the identity, also used by its layer variant
     uint8_t u_mask;   // S2Arm gap 2 A: the colour outputs fn_u returns as uint, bit n = color(n) (json u_mask; dmsh_build.py fs_uint turns only the integer-bit writers)
-    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; uint8_t t3d /* 0 not looked at, 1 no 3D texture slot, 2 has one (tex3d_prepare) */; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
+    uint16_t tf_stride[4]; uint32_t cb_ext[16], sb_ro; nvn_refl rf; uint8_t t3d /* 0 not looked at, 1 no 3D texture slot, 2 has one (tex3d_prepare) */, has_img /* 0 not looked at, 1 no NVN_RB_IMG/IMGU, 2 has one (img_wr_prescan) */; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro, afr, layer_out; const char *builtin; uint64_t logged; char key[24]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off;
     uint32_t geo_vertices, geo_invocations, geo_output, geo_stride, geo_index_stride;
     // NVN2 task / mesh shader (json msl_entry_kind object / mesh, at stage 3 / 4; nvn_geometry.inc mesh_tasks_draw): mesh_kind 1 object 2 mesh (0 = neither); its workgroup's threads,
     //   the payload's bytes (task), a task shader feeds it (mesh), the most vertices / primitives a mesh workgroup emits (Switch2 line's interface contract, item 6)
@@ -9962,6 +9962,7 @@ static id<MTLTexture> tex_float_fit(int tid, id<MTLTexture> t, uint64_t *rid) {
 // st: the NVN stage whose bindings these are (S.img / S.ubo of that stage). IMG and IMGU (handle in a uniform buffer) both: the texture ID as encode_args binds it (img_tid);
 //   11-07 No Man's Sky's spot light lists and depth reprojection make their atomics on IMGU images (before that the translator refused them, see Dsh.cs Reflect)
 static int img_tid(const nvn_rbind *b, int st);
+static void img_wr_prescan(NvShader *sh, int nvn_stage);
 static int img_atomic_prepare(NvShader *sh, int st) {
     if (!sh || !sh->rf.has_atomic_image) return 1;
     int ok = 1;
@@ -17567,6 +17568,14 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     __unsafe_unretained NvProg *pr = g_geo_program ? g_geo_program : prog_get(S.prog);
     qf_note(pr);   // GPU error attribution: this commit's in-flight programs (qf_put)
     for (int stage = 0; stage < 5; stage++) if (!img_atomic_prepare(pr->sh[stage], stage)) return;
+    if (!g_defer_replaying && !g_fbc.forcing && !g_fz.active) {
+        for (int stage = 0; stage < 5; stage++) if (pr->sh[stage]) img_wr_prescan(pr->sh[stage], stage);
+        if (g_imwr_npend || g_imfit_npend) {
+            lc_land(); rp_flush();
+            if (g_imwr_npend) img_wr_upgrade();
+            if (g_imfit_npend) img_fit_upgrade();
+        }
+    }
     draw_gs_check(pr);   // a geometry stage left with no function (see prog_fold_gs)
     if (S.rast_discard) { if (!S.tf_on && sx_draw(pr, dw, di)) return; tf_draw(pr, dw, di); return; }   // the vertex stage only: transform feedback capture, a vertex shader's storage writes (sx_draw), or nothing (tf_draw)
     if (g_nubd && (g_enc || ubd_lazy()) && ubd_conflict(pr, dw, di)) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // land the deferred inline updates before this draw (see ubd_conflict)
@@ -18011,6 +18020,9 @@ static id<MTL4ComputeCommandEncoder> dispatch_enc(const disp_rng *rg) {
 //   queued so they are upgraded before its encoder opens. Draws get both upgrades when their pass opens; a dispatch has no such point after its slots resolve, and img_fit left the
 //   format-view case for the next draw pass: the dispatch wrote into the dummy image, and a kernel run once (a precomputed table) lost its output for good (#768)
 static void img_wr_prescan(NvShader *sh, int nvn_stage) {
+    if (!sh) return;
+    if (!sh->has_img) { int any = 0; for (int i = 0; i < sh->rf.nb; i++) { int k = sh->rf.b[i].kind; any |= k == NVN_RB_IMGU || (k == NVN_RB_IMG && sh->rf.b[i].reg < 32); } sh->has_img = any ? 2 : 1; }
+    if (sh->has_img != 2) return;
     os_unfair_lock_lock(&g_rmu);
     for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
         if (b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32)) continue;
@@ -18020,7 +18032,10 @@ static void img_wr_prescan(NvShader *sh, int nvn_stage) {
         id<MTLTexture> t = tex_mtl(&g_treg[tid].t); if (t.parentTexture) t = t.parentTexture;
         if (t && !(t.usage & MTLTextureUsageShaderWrite) && !mtl_fmt_depth(t.pixelFormat)) img_wr_note(tid);
         size_t n = t ? mtl_pf_bytes(t.pixelFormat) : 0;   // the class views img_fit makes: same texel size, 1 / 2 / 4 / 8 / 16 bytes
-        if (t && b->dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != b->dpf && !(t.usage & MTLTextureUsagePixelFormatView) && (n == 1 || n == 2 || n == 4 || n == 8 || n == 16)) img_fit_note(tid); }
+        int need_pfv = t && !(t.usage & MTLTextureUsagePixelFormatView) && (t.textureType != MTLTextureTypeTextureBuffer || !t.buffer) &&
+                       ((b->dpf != NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != b->dpf && (n == 1 || n == 2 || n == 4 || n == 8 || n == 16)) ||
+                        (b->dpf == NVN_DPF_FLOAT && pf_int32_to_float(t.pixelFormat) != MTLPixelFormatInvalid));
+        if (need_pfv) img_fit_note(tid); }
     os_unfair_lock_unlock(&g_rmu);
 }
 static void tensor_standin(NvShader *cs);   // nvn_tensor.inc
@@ -18109,10 +18124,10 @@ static void dispatch(const p_dispatch *dp) {
         mtl_sub_fill(u->addr + at, 4, cs->rf.first[i].value);
     }
     if (g_nubd && ubd_conflict_cs(cs, dp->ind)) { g_ubd_conflicts++; ubd_land(); }   // see ubd_conflict_cs
+    rp_flush();   // a full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch (and before any tex_upgrade copy below)
     if (!img_atomic_prepare(cs, 5)) return;
     img_wr_prescan(cs, 5); if (g_imwr_npend) img_wr_upgrade();   // image textures made without shader writes: upgraded before this dispatch's encoder opens (img_wr_note)
     if (g_imfit_npend) img_fit_upgrade();   // and those its image slots read through a view of another class (img_fit)
-    rp_flush();   // a full clear with no draw after it waits for the next pass on its targets, but it comes before this dispatch, which may read or write them as images: land it first, as copy_t2t does (upstream reference implementation, MIT)
     rs_pre_compute(cs);   // S2Arm internal resolution: scaled textures this dispatch reads / writes go back to 1 first (nvn_rscale_ops.inc)
     tba_prepare(cs, nil, nil, nil, nil, 1);   // #309: as for draws (see tba_ent)
     uint32_t gx = (uint32_t)dp->x, gy = (uint32_t)dp->y; wd_dispatch(cs, &gx, &gy, dp->ind != 0);   // S2Arm widen: images it writes widened, X groups to the widened width, compute constants rewritten (widen_glue.inc)
