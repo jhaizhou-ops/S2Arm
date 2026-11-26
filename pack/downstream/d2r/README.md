@@ -30,8 +30,5 @@ S2Arm 新接入代码使用 Apache-2.0。运行后端在本机构建自 D2R-Mobi
 ## 存档回归检查
 
 ```sh
-d=ios/d2r
-xcrun --sdk macosx clang -Wall -Wextra -Werror -fobjc-arc -framework Foundation \
-  "$d/d2r_saves.m" "$d/t_local_saves.m" -o /tmp/s2arm-test-d2r-saves
-/tmp/s2arm-test-d2r-saves
+make native-test-d2r_saves
 ```

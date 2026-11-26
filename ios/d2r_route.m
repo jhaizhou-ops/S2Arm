@@ -2,8 +2,10 @@
 // Copyright 2026 S2Arm contributors
 
 #import "d2r_route.h"
+#import "s2a_l10n.h"
 #include <dlfcn.h>
 #include <string.h>
+#include "s2a_docs.h"
 
 static void *backendImage;
 static const S2AD2RBackend *activeBackend;
@@ -26,28 +28,34 @@ static const S2AD2RBackend *load_backend(NSString **reason) {
         if (!backendImage) {
             const char *error = dlerror();
             NSLog(@"S2Arm D2R framework load: %s", error ?: "unknown");
-            *reason = @"无法载入暗黑2触屏后端。请检查安装包是否包含同一团队签名的 S2AD2R 框架。";
+            *reason = S2AL(@"d2r.load");
             return NULL;
         }
         S2AD2RBackendEntry entry = (S2AD2RBackendEntry)dlsym(backendImage, "s2a_d2r_backend");
         const S2AD2RBackend *backend = entry ? entry() : NULL;
         if (backend && backend->version == S2A_D2R_BACKEND_ABI &&
             backend->prepare && backend->start && backend->focus && backend->stop) return backend;
-        *reason = @"暗黑2触屏后端与当前 S2Arm 壳的版本不匹配。";
+        *reason = S2AL(@"d2r.abi");
         return NULL;
     }
-    *reason = @"这版暗黑2触屏后端需要 iPadOS 26 或更新版本。";
+    *reason = S2AL(@"d2r.os");
     return NULL;
 }
 
 BOOL s2a_d2r_open(UIWindow *window, NSString **reason) {
     const S2AD2RBackend *backend = load_backend(reason);
     if (!backend) return NO;
-    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    char path[4096];
+    int length = s2a_container_docs(path, sizeof path);
+    if (length < 0 || length >= (int)sizeof path) {
+        *reason = S2AL(@"d2r.docs");
+        return NO;
+    }
+    NSURL *documents = [NSURL fileURLWithPath:@(path) isDirectory:YES];
     NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *romfs = [documents stringByAppendingPathComponent:@"D2R Mobile"];
+    NSString *romfs = [documents.path stringByAppendingPathComponent:@"D2R Mobile"];
     NSString *state = [support stringByAppendingPathComponent:@"S2Arm/D2R Mobile"];
-    UIViewController *view = backend->prepare(romfs, state, window.bounds, reason);
+    UIViewController *view = backend->prepare(documents, romfs, state, window.bounds, reason);
     if (!view) return NO;
     activeBackend = backend;
     window.rootViewController = view;

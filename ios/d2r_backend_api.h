@@ -5,12 +5,12 @@
 
 #import <UIKit/UIKit.h>
 
-#define S2A_D2R_BACKEND_ABI 1
+#define S2A_D2R_BACKEND_ABI 2
 
 typedef struct {
     unsigned version;
     // All calls into this interface come from the main thread.
-    UIViewController *(*prepare)(NSString *romfs, NSString *sessionRoot,
+    UIViewController *(*prepare)(NSURL *documents, NSString *romfs, NSString *sessionRoot,
                                  CGRect bounds, NSString **reason);
     void (*start)(void);
     void (*focus)(int event);

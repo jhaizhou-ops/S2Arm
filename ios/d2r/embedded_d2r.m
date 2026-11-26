@@ -2,6 +2,7 @@
 // Copyright 2026 S2Arm contributors
 
 #import "d2r_backend_api.h"
+#import "../s2a_l10n.h"
 #import "d2r_save_manager.h"
 #import "d2r_saves.h"
 static NSString *g_embedded_docs;
@@ -19,12 +20,12 @@ static UIViewController *embedded_prepare_game(NSString *romfs, NSString *sessio
                                                CGRect bounds, NSString **reason) {
 #if !TARGET_OS_SIMULATOR
     if (g_host_up) {
-        *reason = @"这次已启动暗黑2。请保存退出后重新打开 S2Arm。";
+        *reason = S2AL(@"d2r.reopen");
         return nil;
     }
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     if (![device supportsFamily:MTLGPUFamilyMetal4] || !device.supportsBCTextureCompression) {
-        *reason = @"这版暗黑2后端需要支持 Metal 4 和 BC 纹理的设备。";
+        *reason = S2AL(@"d2r.gpu");
         return nil;
     }
     NSString *integrityError = pack_check();
@@ -34,7 +35,7 @@ static UIViewController *embedded_prepare_game(NSString *romfs, NSString *sessio
     }
     NSString *data = [romfs stringByAppendingPathComponent:@"data"];
     if (!dm_romfs_validate(data.fileSystemRepresentation, g_romfs_why, sizeof g_romfs_why)) {
-        *reason = [NSString stringWithFormat:@"请将暗黑2资源目录放入 S2Arm 的 D2R Mobile 文件夹。\n\n%s", g_romfs_why];
+        *reason = [NSString stringWithFormat:S2AL(@"d2r.resources"), g_romfs_why];
         return nil;
     }
     NSError *error = nil;
@@ -50,7 +51,7 @@ static UIViewController *embedded_prepare_game(NSString *romfs, NSString *sessio
     DmGameVC *controller = [DmGameVC new];
     controller.view = front_ios_view(bounds);
     if (!front_metal_layer()) {
-        *reason = @"暗黑2触屏视图未能创建 Metal 图层。";
+        *reason = S2AL(@"d2r.metal");
         return nil;
     }
     // The simulator only verifies UI wiring. It cannot start the iOS guest.
@@ -61,16 +62,14 @@ static UIViewController *embedded_prepare_game(NSString *romfs, NSString *sessio
     return controller;
 }
 
-static UIViewController *embedded_prepare(NSString *romfs, NSString *sessionRoot,
+static UIViewController *embedded_prepare(NSURL *documents, NSString *romfs, NSString *sessionRoot,
                                           CGRect bounds, NSString **reason) {
 #if TARGET_OS_SIMULATOR
     if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"S2AD2RViewProbe"] boolValue]) {
-        *reason = @"模拟器只用于核对触屏视图接线。";
+        *reason = S2AL(@"d2r.simulator");
         return nil;
     }
 #endif
-    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory
-                                                            inDomains:NSUserDomainMask].firstObject;
     NSError *error = nil;
     NSURL *save = S2AD2ROpenSave(documents, [NSURL fileURLWithPath:sessionRoot isDirectory:YES], &error);
     if (!save) {
@@ -89,9 +88,9 @@ static UIViewController *embedded_prepare(NSString *romfs, NSString *sessionRoot
         NSString *message = nil;
         UIViewController *game = embedded_prepare_game(romfs, sessionRoot, save, window.bounds, &message);
         if (!game) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"暗黑2"
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:S2AL(@"d2r.title")
                 message:message preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]];
             [manager presentViewController:alert animated:YES completion:nil];
             return;
         }

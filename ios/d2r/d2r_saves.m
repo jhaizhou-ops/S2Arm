@@ -2,6 +2,7 @@
 // Copyright 2026 S2Arm contributors
 
 #import "d2r_saves.h"
+#import "../s2a_l10n.h"
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,7 +20,7 @@ static BOOL directory_status(NSURL *url, BOOL *exists, NSError **error) {
     if (lstat(url.fileSystemRepresentation, &status) == 0) {
         *exists = YES;
         if (S_ISDIR(status.st_mode)) return YES;
-        if (error) *error = save_error(@"存档位置需要是普通文件夹。");
+        if (error) *error = save_error(S2AL(@"d2r.directory"));
         return NO;
     }
     int code = errno;
@@ -39,13 +40,13 @@ static BOOL plain_tree(NSURL *root, NSError **error) {
                failure = reason;
                return NO;
            }];
-    if (!iter) failure = save_error(@"读不到存档文件夹。");
+    if (!iter) failure = save_error(S2AL(@"d2r.unreadable"));
     for (NSURL *url in iter) {
         NSDictionary *values = [url resourceValuesForKeys:keys error:&failure];
         if (!values) break;
         if ([values[NSURLIsSymbolicLinkKey] boolValue] ||
             (![values[NSURLIsRegularFileKey] boolValue] && ![values[NSURLIsDirectoryKey] boolValue])) {
-            failure = save_error(@"存档里含有链接或特殊文件。");
+            failure = save_error(S2AL(@"d2r.special"));
             break;
         }
     }
@@ -83,7 +84,7 @@ NSURL *S2AD2ROpenSave(NSURL *documents, NSURL *state, NSError **error) {
     if (!directory_status(save, &exists, error)) return nil;
     if ([fm fileExistsAtPath:marker.path]) {
         if (!exists) {
-            if (error) *error = save_error(@"找不到「文件」里的暗黑2 save 文件夹。把存档备份放回原位置后再打开。");
+            if (error) *error = save_error(S2AL(@"d2r.missing"));
             return nil;
         }
         return save;
@@ -95,7 +96,7 @@ NSURL *S2AD2ROpenSave(NSURL *documents, NSURL *state, NSError **error) {
     if (exists) {
         if (oldExists && (![fm contentsEqualAtPath:legacy.path andPath:save.path] ||
                           !plain_tree(save, error))) {
-            if (error) *error = save_error(@"旧位置和新位置都有不同的暗黑2存档，请先分别备份并核对。");
+            if (error) *error = save_error(S2AL(@"d2r.conflict"));
             return nil;
         }
     } else {
@@ -148,7 +149,7 @@ BOOL S2AD2RImportCharacter(NSURL *character, NSURL *save, NSError **error) {
     NSString *name = character.lastPathComponent;
     if (!directory_status(character, &exists, error)) return NO;
     if (!exists || !valid_character(character, name)) {
-        if (error) *error = save_error(@"请选择角色本人的文件夹，里面应有同名的 .d2s 存档。");
+        if (error) *error = save_error(S2AL(@"d2r.character"));
         return NO;
     }
     if (!plain_tree(character, error)) return NO;
@@ -156,7 +157,7 @@ BOOL S2AD2RImportCharacter(NSURL *character, NSURL *save, NSError **error) {
     if (!entries) return NO;
     for (NSString *entry in entries) {
         if ([entry caseInsensitiveCompare:name] != NSOrderedSame) continue;
-        if (error) *error = save_error(@"已有同名角色，原存档保持原样。");
+        if (error) *error = save_error(S2AL(@"d2r.duplicate"));
         return NO;
     }
     return install_directory(character, [save URLByAppendingPathComponent:name isDirectory:YES], error);

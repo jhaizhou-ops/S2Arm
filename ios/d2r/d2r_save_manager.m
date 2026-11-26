@@ -2,12 +2,9 @@
 // Copyright 2026 S2Arm contributors
 
 #import "d2r_save_manager.h"
+#import "../s2a_l10n.h"
 #import "d2r_saves.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-
-static NSString *word(NSString *zh, NSString *en) {
-    return [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"] ? zh : en;
-}
 
 @interface D2RSaveManager : UIViewController <UIDocumentPickerDelegate>
 @property(nonatomic) NSURL *save;
@@ -49,7 +46,7 @@ static NSString *word(NSString *zh, NSString *en) {
     title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle1];
     title.adjustsFontForContentSizeCategory = YES;
     title.numberOfLines = 0;
-    title.text = word(@"暗黑2存档管理", @"Diablo II Save Management");
+    title.text = S2AL(@"d2r.manage");
     title.accessibilityTraits = UIAccessibilityTraitHeader;
     [stack addArrangedSubview:title];
 
@@ -65,7 +62,7 @@ static NSString *word(NSString *zh, NSString *en) {
     location.adjustsFontForContentSizeCategory = YES;
     location.textColor = UIColor.secondaryLabelColor;
     location.numberOfLines = 0;
-    location.text = [word(@"文件 → 我的 iPad → S2Arm", @"Files → On My iPad → S2Arm")
+    location.text = [S2AL(@"d2r.location")
         stringByAppendingFormat:@"\n%@", S2AD2RSaveLocation];
     [stack addArrangedSubview:location];
 
@@ -73,9 +70,9 @@ static NSString *word(NSString *zh, NSString *en) {
     self.actions.axis = UILayoutConstraintAxisVertical;
     self.actions.spacing = 10;
     [stack addArrangedSubview:self.actions];
-    [self addButton:word(@"导入角色文件夹…", @"Import Character Folder…") action:@selector(importCharacter) primary:NO];
-    [self addButton:word(@"导出存档文件夹…", @"Export Save Folder…") action:@selector(exportSave) primary:NO];
-    [self addButton:word(@"开始游戏", @"Play") action:@selector(startGame) primary:YES];
+    [self addButton:S2AL(@"d2r.import") action:@selector(importCharacter) primary:NO];
+    [self addButton:S2AL(@"d2r.export") action:@selector(exportSave) primary:NO];
+    [self addButton:S2AL(@"d2r.play") action:@selector(startGame) primary:YES];
 }
 
 - (void)addButton:(NSString *)title action:(SEL)action primary:(BOOL)primary {
@@ -92,13 +89,13 @@ static NSString *word(NSString *zh, NSString *en) {
     NSError *error = nil;
     NSArray<NSString *> *names = S2AD2RCharacterNames(self.save, &error);
     self.characters.text = error ? error.localizedDescription : names.count ?
-        [names componentsJoinedByString:@"、"] : word(@"暂无角色", @"No characters");
+        [names componentsJoinedByString:@"\n"] : S2AL(@"d2r.empty");
 }
 
 - (void)show:(NSString *)message {
-    UIAlertController *notice = [UIAlertController alertControllerWithTitle:word(@"暗黑2存档", @"Diablo II Saves")
+    UIAlertController *notice = [UIAlertController alertControllerWithTitle:S2AL(@"d2r.saves")
                                                                      message:message preferredStyle:UIAlertControllerStyleAlert];
-    [notice addAction:[UIAlertAction actionWithTitle:word(@"好", @"OK") style:UIAlertActionStyleDefault handler:nil]];
+    [notice addAction:[UIAlertAction actionWithTitle:S2AL(@"common.ok") style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:notice animated:YES completion:nil];
 }
 
@@ -137,8 +134,8 @@ static NSString *word(NSString *zh, NSString *en) {
         dispatch_async(dispatch_get_main_queue(), ^{
             for (UIButton *button in self.actions.arrangedSubviews) button.enabled = YES;
             [self refreshCharacters];
-            [self show:added ? word(@"已新增角色。", @"Character added.") :
-                (importError ?: coordinationError).localizedDescription ?: word(@"导入失败。", @"Import failed.")];
+            [self show:added ? S2AL(@"d2r.added") :
+                (importError ?: coordinationError).localizedDescription ?: S2AL(@"d2r.failed")];
         });
     });
 }
