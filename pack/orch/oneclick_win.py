@@ -28,6 +28,7 @@ import argparse, glob, json, ntpath, os, re, shutil, stat, subprocess, sys, temp
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from pack.orch import shortroot   # noqa: E402
+from pack.multi_program import programs_of   # noqa: E402
 
 R = Path(__file__).resolve().parents[2]
 PY = sys.executable
@@ -708,13 +709,6 @@ def product(run, cur, dlib, w=None):
     (w / 'shaders').mkdir()
     if dlib: junction(w / 'shaders' / 'direct', dlib)
     return w
-
-
-def programs_of(x):
-    """解包目录里记的支数（nx_unpack 只给多程序合集写 programs 行；没有 = 1 支）"""
-    for l in (x / 'unpack.tsv').read_text(encoding='utf-8').splitlines():
-        if l.startswith('programs\t'): return int(l.split('\t', 1)[1])
-    return 1
 
 
 def sub_programs(run, a, x, w, src_dir):
