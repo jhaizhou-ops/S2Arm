@@ -462,6 +462,26 @@ int main(void) { @autoreleasepool {
         VERIFY(gpu_seen > 0 && nw > 0 && (int)du_dg == pkg_seen && (int)du_sg == total_seen,
                "⑰ pool_seen_scan 紧凑重查：active_words=%u，dg-only 重查 %llu（期望仅 view_pkg=%d，跳过 gpu_only=%d），sg 重查 %llu（期望全量=%d）",
                nw, (unsigned long long)du_dg, pkg_seen, gpu_seen, (unsigned long long)du_sg, total_seen);
+        // ⑱ pool_dirty_room：实时流式小批次放行单帧 32 MB 预算、大批量与低余量受拦，且新登记贴图首查即入池表不落哑图
+        {
+            const uint64_t ws = 28ull << 30, gpu_ok = 5ull << 30, gpu_hi = 15ull << 30, margin = 1ull << 30;
+            uint64_t r_live   = pool_dirty_room_calc(0, 12, gpu_ok, ws, 0, 0, 0, margin);
+            uint64_t r_spent  = pool_dirty_room_calc(0, 12, gpu_ok, ws, POOL_FRAME_BYTES - (4u << 20), 0, 0, margin);
+            uint64_t r_full   = pool_dirty_room_calc(0, 12, gpu_ok, ws, POOL_FRAME_BYTES, 0, 0, margin);
+            uint64_t r_bulk   = pool_dirty_room_calc(0, POOL_DIRTY_BATCH_MAX + 1, gpu_ok, ws, 0, 0, 0, margin);
+            uint64_t r_gpu_hi = pool_dirty_room_calc(0, 12, gpu_hi, ws, 0, 0, 0, margin);
+            uint64_t r_ios_lo = pool_dirty_room_calc(0, 12, gpu_ok, ws, 0, 1, margin, margin);
+            uint64_t r_ios_ok = pool_dirty_room_calc(0, 12, gpu_ok, ws, 0, 1, margin + (256u << 20), margin);
+            texture(164, 4, 4, 0);
+            uint64_t e164 = table_entry(164, 0, NULL);
+            VERIFY(r_live == POOL_FRAME_BYTES && r_spent == (4u << 20) && r_full == 0 &&
+                   r_bulk == 0 && r_gpu_hi == 0 && r_ios_lo == 0 && r_ios_ok == POOL_FRAME_BYTES &&
+                   e164 != dum,
+                   "⑱ pool_dirty_room：live=%lluMB spent=%lluMB full=%llu bulk=%llu gpu_hi=%llu ios_lo=%llu ios_ok=%lluMB e164=%#llx(dum=%#llx)",
+                   (unsigned long long)(r_live >> 20), (unsigned long long)(r_spent >> 20), (unsigned long long)r_full,
+                   (unsigned long long)r_bulk, (unsigned long long)r_gpu_hi, (unsigned long long)r_ios_lo,
+                   (unsigned long long)(r_ios_ok >> 20), (unsigned long long)e164, (unsigned long long)dum);
+        }
     }
     printf("%s t_nvn_pool_tex：%u 项，%u 项失败（追不到槽的句柄按编号读池：池表 + 已读位图 + 未写渲染目标不建 + 小贴图预建 + 表复用）\n", fails ? "✗" : "✓", checks, fails);
     return fails != 0;
