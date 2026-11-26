@@ -1626,6 +1626,31 @@ typedef struct seg_clk seg_clk; static seg_clk *g_sclk; static void seg_clk_put(
 // (that happens when the GPU completes): a timestamp one counts with its known counter 0; a samples-passed result (an occlusion query, written from the visibility buffers) is
 // unknown, and a condition on it keeps drawing, as before (occlusion culling only saves work). Inside a block evaluated false, draws and clears are dropped
 static int g_rc_skip;   // a render-enable block evaluated false is active
+// 追帧略过绘制（DM_FRAME_SKIP，hle_nvn.c fskip_decide 在上屏时定下一帧）：这一帧落后真实时间、不画——游戏逻辑、计算、同步、拷贝照跑，
+//   只略过「每帧都画」的渲染目标上的绘制和清屏（目标留着上一真画帧的内容，时间性缓冲不会吃到清空的图）；这一帧也不上屏。
+static _Atomic int g_fskip;
+static uint64_t g_lframe;       // 逻辑帧号（每次上屏 +1）
+static int g_pass_keep;         // 当前 pass 有不是每帧都画的目标：照画
+static _Atomic uint64_t g_fskip_draws; static uint64_t g_fskip_kept;   // 统计：略过的绘制数、略过帧里照画的 pass 数
+static int g_fskip_used;         // 开过（hle_nvn.c 每次上屏调 nvn_be_frame_skip_set）：没开的游戏不记目标表
+void nvn_be_frame_skip_set(int on) { atomic_store(&g_fskip, on); g_lframe++; g_fskip_used = 1; }
+uint64_t nvn_be_frame_skip_draws(void) { return atomic_load(&g_fskip_draws); }
+uint64_t nvn_be_frame_skip_kept(void) { return g_fskip_kept; }
+// 目标按存储位置认（游戏可能每帧为同一块存储新建贴图对象，按对象认就永远是新目标）。前 4 个逻辑帧里绑过 ≥ 3 帧才算每帧都画；
+//   偶尔才画的（字幕贴图、缓存、新建的目标）照画：游戏只在内容变了时画一次，略过了就一直是空的
+static uint64_t rt_key(const tex_t *t) { return t->mem ? (uint64_t)(uintptr_t)t->mem : ((uint64_t)(uintptr_t)t->pool * 0x100000001b3ull) ^ (uint64_t)t->off ^ 1; }
+typedef struct { uint64_t key, frame; uint8_t mask; } rtf_t; static rtf_t g_rtf[4096];   // mask 第 0 位 = 本帧，第 i 位 = i 帧前
+static int rt_frequent(uint64_t key) {
+    uint64_t f = g_lframe; uint32_t i = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 52);
+    for (int k = 0; k < 4096; k++, i = (i + 1) & 4095) { rtf_t *e = &g_rtf[i];
+        if (e->key != key && e->key && f - e->frame < 64) continue;   // 别的目标（64 帧内用过）
+        if (e->key != key) { e->key = key; e->frame = f; e->mask = 0; }   // 空格或过期格：接手
+        uint64_t d = f - e->frame; if (d) { e->mask = d >= 8 ? 0 : (uint8_t)(e->mask << d); e->frame = f; }
+        int prev = __builtin_popcount(e->mask & 0x1E); e->mask |= 1; return prev >= 3; }
+    return 0;   // 表满：当成不是每帧都画，照画
+}
+#define FSKIP_ON() (atomic_load_explicit(&g_fskip, memory_order_relaxed) && !g_pass_keep)
+#define FSKIP() (FSKIP_ON() ? (atomic_fetch_add_explicit(&g_fskip_draws, 1, memory_order_relaxed), 1) : 0)
 // Neither table may drop an entry: a timestamp report forgotten leaves the condition reading the 1 the CPU wrote, so the clear runs again. They held 256 reports a submission of
 // both kinds; Ocarina of Time (Switch 2) reports about 600 occlusion queries in a frame it walks in (320 standing), the table filled, the timestamp reports after them were
 // forgotten, the conditional depth clears ran 3 more times before the lit materials' EQUAL depth test, and the frame came out white (half the frames while walking).
@@ -2864,7 +2889,7 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 static void post(post_op o) {
     // 计数器 / 时间戳报告写回的地址换不成 CPU 地址（游戏给的 GPU 地址不在任何池里，hle_nvn.c nvn_ga2ca 原样交过来）：宿主上没映射，完成回调写它必崩
     //   （D-BSX8：0.6.3 iPad 一款每局开局 2 秒崩在这里写 0xc01d4afff0）。写不了就不写：这个地址游戏自己也读不到，报红计数
-    if ((o.kind == 2 || o.kind == 3) && nvn_ga_unmapped(o.addr)) {
+    if ((o.kind == 2 || o.kind == 3 || o.kind == 4) && nvn_ga_unmapped(o.addr)) {
         if (o.kind == 3 && o.vis) { vis_list *l = o.vis; for (int k = 0; k < l->n; k++) CFRelease(l->s[k].buf); free(l); }
         static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
         if (k <= 4 || !(k & (k - 1))) MLOG("【红】 counter report to GPU address %#llx that maps to no pool (type %u): not written (the address has no host mapping), %llu so far", (unsigned long long)o.addr, o.type, (unsigned long long)k);
@@ -3310,6 +3335,8 @@ uint64_t nvn_be_sub_commit(void) {
                 for (int k = 0; k < l->n; k++) { sum += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
                 free(l); uint64_t rec[2] = {sum, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec);
             }
+            else if (ops[i].kind == 4) {   // 追帧略过帧的遮挡查询：报看得见。值一路递增——游戏比相邻两笔（之前 / 之后各报一次）的差，写同一个值会被当成「没有样本通过」
+                static _Atomic uint64_t fake = 1u << 20; uint64_t rec[2] = {atomic_fetch_add(&fake, 1u << 20) + (1u << 20), gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
             else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {(ops[i].type == 0 || ops[i].type == 0x10) && !DM_GAME_RENDER_COND ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // render_cond: a timestamp report's counter field is 0, as on the GPU (see rc_value)
         }
         free(ops); seg_clk_put(sc);
@@ -19545,6 +19572,8 @@ void nvn_be_exec(const uint8_t *p) {
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, (const uint8_t *)a + 8, 8); g_cnt_report[t & 31]++;
                 PD("Q report type=%llu cmd=%p dst=%#llx", (unsigned long long)t, p, (unsigned long long)ad);
                 if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : 2);
+                // 略过帧没画东西，遮挡查询照实是 0：游戏会把物件当成被挡住、下一帧不画（模型消失）。改报「看得见」（kind 4），宁可多画
+                if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED && atomic_load_explicit(&g_fskip, memory_order_relaxed)) { post((post_op){4, NULL, 0, 0, ad, (uint32_t)t, NULL}); g_vis_cur = -1; break; }
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, vis_snapshot()}); g_vis_cur = -1; }
                 else mtl_sub_counter(ad, (uint32_t)t);
                 break; }
@@ -19579,6 +19608,9 @@ void nvn_be_exec(const uint8_t *p) {
                    n >= 4 ? ((const float *)((const uint8_t *)a + 16))[0] : 0.f, n >= 8 ? ((const float *)((const uint8_t *)a + 16))[1] : 0.f, n >= 12 ? ((const float *)((const uint8_t *)a + 16))[2] : 0.f, n >= 16 ? ((const float *)((const uint8_t *)a + 16))[3] : 0.f); mtl_sub_update((const uint8_t *)a + 16, d, n); break; }
             case OP_SET_RT: {
                 p_set_rt rb; const p_set_rt *r = set_rt_rec(a, h.size, &rb);
+                if (g_fskip_used) { int keep = 0; for (int i = 0; i < r->n && i < 8; i++) if (r->color[i] && !rt_frequent(rt_key(r->color[i]))) keep = 1;   // 追帧略过绘制：不是每帧都画的目标照画
+                  if (r->depth && !rt_frequent(rt_key(r->depth))) keep = 1;
+                  g_pass_keep = keep; if (keep && atomic_load_explicit(&g_fskip, memory_order_relaxed)) g_fskip_kept++; }
                 if (g_dsnap.valid) for (int i = 0; i < r->n && i < 8; i++) if (r->color[i]) dsnap_stale_tex(r->color[i]);
                 if (defer_begin_q(p)) break;
                 int pend = R.clear_d || R.clear_s; for (int i = 0; i < 8; i++) pend |= R.clear_c[i];
@@ -19600,7 +19632,7 @@ void nvn_be_exec(const uint8_t *p) {
             }
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;
-                if (g_rc_skip) { PD("c %llu color clear skipped by conditional rendering slot%d", g_stat_pass, c->index); break; }
+                if (g_rc_skip || FSKIP_ON()) { PD("c %llu color clear skipped by conditional rendering slot%d", g_stat_pass, c->index); break; }
                 if (g_wd > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]) { s2a_widen_target_cleared((uint32_t)R.rt.color[c->index]->serial); if (!R.has_sc) { pthread_mutex_lock(&g_wd_mu); wd_s3d_cleared(R.rt.color[c->index]->serial); pthread_mutex_unlock(&g_wd_mu); } }   // S2Arm widen: the target's screen-copy origin is void (WidenRenderer.Clear → Frame.OnTargetCleared)
                 // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
                 int p2w = g_wd > 0 && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index] && wd_p2_is_world(R.rt.color[c->index]->serial);   // S2Arm widen: per-path clear counts on the fallback world target (status line, widen_glue.inc)
@@ -19621,7 +19653,7 @@ void nvn_be_exec(const uint8_t *p) {
             }
             case OP_CLEAR_DS: {
                 const p_clear_ds *c = a;
-                if (g_rc_skip) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
+                if (g_rc_skip || FSKIP_ON()) { PD("c %llu depth-stencil clear skipped by conditional rendering", g_stat_pass); break; }
                 if (R.rt.depth && (c->depth_mask || ((c->stencil_mask & 0xff) && g_dsnap.stencil))) dsnap_stale_tex(R.rt.depth);
                 if (g_rt_merged) rp_end();
                 // Load-action clears cannot express a partial rectangle or a
@@ -19640,15 +19672,15 @@ void nvn_be_exec(const uint8_t *p) {
                 PD("c %llu depth-stencil clear recorded ser=%llu depth=%g depth_mask=%d stencil=%d stencil_mask=%#x", g_stat_pass, R.rt.depth ? (unsigned long long)R.rt.depth->serial : 0ull, c->depth, c->depth_mask, c->stencil, c->stencil_mask);
                 break;
             }
-            case OP_DRAW: { if (g_rc_skip) break; sub_cut_pass(); p_draw t; g_exec_cur = p; g_exec_next = p + h.size; const p_draw *d = draw_rec(a, h.size, &t);
+            case OP_DRAW: { if (g_rc_skip || FSKIP()) break; sub_cut_pass(); p_draw t; g_exec_cur = p; g_exec_next = p + h.size; const p_draw *d = draw_rec(a, h.size, &t);
                 if (d->tfc) { g_tfd_args = tfd_args(d); if (g_tfd_args) draw(d, NULL); g_tfd_args = 0; } else draw_top(d, NULL); g_exec_next = NULL; break; }   // Lookahead start point
-            case OP_DRAW_IDX: { if (g_rc_skip) break; sub_cut_pass(); p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw_top(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
+            case OP_DRAW_IDX: { if (g_rc_skip || FSKIP()) break; sub_cut_pass(); p_draw_idx t; g_exec_cur = p; g_exec_next = p + h.size; draw_top(NULL, draw_idx_rec(a, h.size, &t)); g_exec_next = NULL; break; }
             case OP_MULTI_DRAW:   // a lookahead from outside the range stops at it (fz_next), including scans for inline writes to its arguments: masked copies made before it are not used past it
                 g_mdx_epoch++; g_mdx_stop = NULL;
-                if (!g_rc_skip && h.size >= 8 + sizeof(p_multi_draw)) { g_exec_cur = p; g_exec_next = NULL; draw_multi(a); }
+                if (!g_rc_skip && !FSKIP() && h.size >= 8 + sizeof(p_multi_draw)) { g_exec_cur = p; g_exec_next = NULL; draw_multi(a); }
                 g_mdx_epoch++;
                 break;
-            case OP_DRAW_TEX: if (!g_rc_skip) draw_tex(a); break;
+            case OP_DRAW_TEX: if (!g_rc_skip && !FSKIP()) draw_tex(a); break;
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF:
             case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:

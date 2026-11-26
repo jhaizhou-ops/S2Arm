@@ -4328,6 +4328,49 @@ static void fstep_tick(const win_t *o) {
         t0 = t; v0 = vs; memset(held, 0, sizeof held);
     }
 }
+// 追帧略过绘制（缺省开，DM_FRAME_SKIP=0 关）：有的游戏每帧按测得的帧间隔推进、但单帧推进量有上限，画不动时游戏时间就落后真实时间
+//   （过场慢动作，配乐按真实时间放 → 声音跑在画面前面）。这里记欠账 = Σ(实际帧时 − 上屏周期)，落后时让接下来几帧只跑逻辑不画
+//   （nvn_mtl.m g_fskip），每真实秒多跑几个逻辑帧、追上真实时间；机器跑得满帧就不会落后、不会触发。
+//   上屏周期按游戏自设的交换间隔（设 30 fps 的游戏是 33.3 ms）。单帧 > 250 ms（读取、切后台）不记账；欠账封顶 250 ms。
+//   截图门的确定性时钟（DM_DETCLOCK）下、没有屏上窗口时不开：帧数与画面要确定。不逐帧估算（画的帧的 GPU 工作会拖进下一帧，单帧量不准），看结果：每秒量一次真实速度
+//     r = 逻辑帧数 × 周期 ÷ 墙钟；落后时试着每画一帧多略过一帧，下一秒 r 高了 3% 以上就留着，否则退回、20 秒内不再试；
+//     追上了（这一秒几乎没欠账）就少略过一帧换回流畅度。屏上帧率 ≈ 逻辑帧率 ÷ (略过数 + 1) 不低于 FSKIP_MIN_FPS；最多连续略过 4 帧。每 300 次上屏记一行
+#define FSKIP_MIN_FPS 10
+void nvn_be_frame_skip_set(int on); uint64_t nvn_be_frame_skip_draws(void); uint64_t nvn_be_frame_skip_kept(void);
+static int fskip_decide(const win_t *o) {
+    static int on = -1; static int cur, consec, k; static uint64_t last, n, nskip, w0; static double debt;
+    static uint64_t sw0; static unsigned sn, hold; static int trying; static double r_prev, behind_n;
+    if (on < 0) { const char *e = getenv("DM_FRAME_SKIP"); on = !(e && *e == '0') && !dm_detclock_enabled();
+        LOG("[nvn] 追帧略过绘制%s：落后真实时间时略过绘制，按实测速度增减连续略过数，屏上不低于 %d fps", on ? "开（DM_FRAME_SKIP=0 关）" : "关", FSKIP_MIN_FPS); }
+    if (!on) return 0;
+    if (!nvn_be_has_window()) { if (cur) { cur = 0; pthread_mutex_lock(&g_sub_mu); nvn_be_frame_skip_set(0); pthread_mutex_unlock(&g_sub_mu); } return 0; }   // 没有屏上窗口（无头单测、跑分）：照画每帧
+    int was = cur; uint64_t t = now_ns(); static double tdraw, tskip; static unsigned ndraw, nsk;
+    double step = (double)present_period(o);
+    if (last) { double dt = (double)(t - last);
+        if (dt <= 250e6) { if (was) { tskip += dt; nsk++; } else { tdraw += dt; ndraw++; } }
+        if (step > 0) { if (dt > 250e6) dt = step; debt += dt - step; if (debt < 0) debt = 0; if (debt > 250e6) debt = 250e6; } }
+    last = t; n++; nskip += was; if (!w0) w0 = t; if (!sw0) sw0 = t;
+    if (step > 0) {
+        sn++; if (debt > step) behind_n++;
+        if (sn >= 15 && t - sw0 >= 1000000000ull) {   // 每秒评估一次（不按帧数：30 fps 的游戏 60 帧要 2 秒）
+            double wall = (double)(t - sw0), r = sn * step / wall, lfps = sn * 1e9 / wall;
+            if (trying) { if (r < r_prev * 1.03) { k--; hold = 20; } trying = 0; }   // 多略过没换到速度：退回
+            else if (behind_n < sn * 0.1) { if (k > 0) k--; }                        // 追上了：还流畅度
+            else if (hold) hold--;
+            else if (k < 4 && lfps / (k + 2) >= FSKIP_MIN_FPS) { k++; trying = 1; }         // 落后：试多略过一帧
+            r_prev = r; sn = 0; behind_n = 0; sw0 = t;
+        }
+    }
+    cur = step > 0 && debt > step && consec < k; consec = cur ? consec + 1 : 0;
+    pthread_mutex_lock(&g_sub_mu); nvn_be_frame_skip_set(cur); pthread_mutex_unlock(&g_sub_mu);
+    if (n % 300 == 0) { double wall = (t - w0) / 1e9; static uint64_t d0; uint64_t d = nvn_be_frame_skip_draws();
+        LOG("[nvn] 追帧略过绘制：近 300 帧略过 %llu 帧、略过绘制 %llu 次；墙钟 %.2f s（%.1f 逻辑帧/秒，按周期 %.2f ms 为 %.2fx 真实速度；屏上约 %.1f fps）；欠账 %.1f ms；"
+            "画的帧平均 %.1f ms、略过帧平均 %.1f ms；连续略过上限 %d；略过帧里照画的非每帧 pass 累计 %llu",
+            (unsigned long long)nskip, (unsigned long long)(d - d0), wall, 300 / wall, step / 1e6, 300 * step / 1e9 / wall, (300 - nskip) / wall, debt / 1e6,
+            ndraw ? tdraw / ndraw / 1e6 : 0.0, nsk ? tskip / nsk / 1e6 : 0.0, k, (unsigned long long)nvn_be_frame_skip_kept());
+        d0 = d; nskip = 0; w0 = t; tdraw = tskip = 0; ndraw = nsk = 0; }
+    return was;
+}
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (dm_gfx_session_stopping()) return;
     win_t *o = (win_t *)w; o->presents++; nat_itv_sync(o);
@@ -4376,8 +4419,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         pthread_mutex_unlock(&g_sub_mu);
     }
     nvn_be_present_target(o->interval, atomic_load(&g_itv_set_ns));   // 游戏此刻申请的交换间隔（只给「分时」分段记账，不改上屏节拍）
+    if (fskip_decide(o)) { if (idx >= 0 && idx < 4) o->ticket[idx] = 0; }   // 追帧略过的帧不上屏：屏上留着上一张画好的（这张直接归还，取图不用等它）
+    else {
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = nvn_be_present(CTX(o->tex[idx]), present_period(o) / 1e9, crop);   // enqueue only, return immediately
     if (idx >= 0 && idx < o->ntex) __atomic_store_n(&o->shown, idx + 1, __ATOMIC_RELAXED);   // 屏上换成这张：上一张归还（AcquireTexture 的 #141 报红看它）
+    }
     pthread_mutex_lock(&g_flip_mu); acq_lease_release_locked(o, idx); pthread_cond_broadcast(&g_flip_cv); pthread_mutex_unlock(&g_flip_mu);   // 撞上还在屏上那张的取图（#141）等这次呈现翻走；每帧一次锁内广播，无等者时开销可不计
     gfx_leave();
     atomic_fetch_add(&g_nvn_ns, now_ns() - t0);
