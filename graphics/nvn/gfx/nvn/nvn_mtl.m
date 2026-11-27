@@ -13029,6 +13029,195 @@ static int pool_unwritten_target(const tex_t *t) {   // caller holds g_rmu (g_sm
     return !shared;
 }
 static int pool_unmade(int id_) { return id_ > 0 && id_ < g_ntreg && g_treg[id_].ok && !g_treg[id_].gone && !g_treg[id_].view && !tex_get(g_treg[id_].t.serial); }
+// Hot pool-texture prewarm (#2269 follow-up: avoid the 1-frame dummy flash on first use at load while keeping cold textures limit=0):
+//   Any registered pool texture a shader reads after pool_tab_new left it out (g_pool_seen_late, or refreshed from earlier runs) is fingerprinted
+//   via tp_fp_u and persisted to pool_hot.tsv alongside tex_pre.tsv (capped at POOL_HOT_MAX_BYTES / POOL_HOT_MAX_ENTRIES).
+//   On later runs, pool_tab_new prebuilds ONLY textures matching pool_hot.tsv (cold textures keep limit=0), and obeys the same memory headroom
+//   (pool_avail_floor) and ws/2 limit so iPhone headroom is never squeezed.
+enum { POOL_HOT_MAX_BYTES = 128u << 20, POOL_HOT_MAX_ENTRIES = 1024 };
+static os_unfair_lock g_ph_lk = OS_UNFAIR_LOCK_INIT;
+static const char *g_ph_path_test;   // unit-test override
+static nvn_hmap g_ph_want = {.klen = sizeof(tp_kf)}, g_ph_keys = {.klen = sizeof(tp_kf)}, g_ph_rec_ser = {.klen = 8};
+static tp_ent *g_ph_prev; static uint32_t g_ph_nprev;
+static tp_kf *g_ph_run; static uint32_t g_ph_nrun, g_ph_runcap;
+static int g_ph_loaded, g_ph_on, g_ph_dirty;
+static uint64_t g_ph_spent, g_ph_hit_n, g_ph_last_save_frame;
+static uint32_t *g_ph_pre_bits; static uint32_t g_ph_pre_words;
+
+static NSString *ph_file_path(void) {
+    if (g_ph_path_test) return [NSString stringWithUTF8String:g_ph_path_test];
+    const char *env = getenv("DM_POOL_HOT_PATH");
+    if (env && *env) return [NSString stringWithUTF8String:env];
+    NSString *p = pso_user_path();
+    return p ? [[p stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"pool_hot.tsv"] : nil;
+}
+static uint64_t ph_fp(const tex_t *t) {
+    if (!t->mem || !t->pool || nvn_sparse_pool(t->pool)) return 0;
+    uint64_t len = tex_rd_size(t); if (!len) return 0;
+    int ut = 0; uint64_t fp = tp_fp_u(t, &ut);
+    if (!fp) return 0;
+    if (ut) {   // skip all-zero untouched pages so uninitialized storage cannot match unrelated cold textures
+        uint8_t zero[2 * TP_FP_SPAN]; memset(zero, 0, sizeof zero);
+        size_t o = len > TP_FP_SPAN ? 2 * TP_FP_SPAN : (size_t)len;
+        if (fp == (span_hash(zero, o) ^ len)) return 0;
+    }
+    return fp;
+}
+static void ph_pre_set(int id_) {
+    if (id_ <= 0 || id_ >= (1 << 20)) return;
+    uint32_t w = (uint32_t)id_ >> 5;
+    if (w >= g_ph_pre_words) {
+        uint32_t nw = w + 64;
+        uint32_t *nb = realloc(g_ph_pre_bits, nw * 4); if (!nb) return;
+        memset(nb + g_ph_pre_words, 0, (nw - g_ph_pre_words) * 4);
+        g_ph_pre_bits = nb; g_ph_pre_words = nw;
+    }
+    g_ph_pre_bits[w] |= 1u << (id_ & 31);
+}
+static int ph_pre_take(int id_) {
+    if (id_ <= 0) return 0;
+    uint32_t w = (uint32_t)id_ >> 5;
+    if (w >= g_ph_pre_words) return 0;
+    uint32_t b = 1u << (id_ & 31);
+    int was = (g_ph_pre_bits[w] & b) != 0;
+    g_ph_pre_bits[w] &= ~b;
+    return was;
+}
+static void ph_load_locked(void) {
+    g_ph_loaded = 1;
+    const char *e = getenv("DM_POOL_HOT");
+    if (e && !strcmp(e, "0")) return;
+    NSString *p = ph_file_path(); if (!p) return;
+    FILE *f = fopen(p.fileSystemRepresentation, "r"); if (!f) return;
+    char ln[256];
+    if (!fgets(ln, sizeof ln, f) || strncmp(ln, "# pool_hot v1", 13)) { fclose(f); return; }
+    while (fgets(ln, sizeof ln, f)) {
+        tp_ent ent; memset(&ent, 0, sizeof ent); unsigned long long by, fp;
+        if (ln[0] == '#' || sscanf(ln, "%x %u %u %u %u %u %x %llu %llx %d",
+            &ent.k.fmt, &ent.k.w, &ent.k.h, &ent.k.dep, &ent.k.lv, &ent.k.tgt, &ent.k.fl, &by, &fp, &ent.age) != 10) continue;
+        ent.k.bytes = by; ent.k.fp = fp;
+        if (g_ph_nprev % 256 == 0) {
+            tp_ent *q = realloc(g_ph_prev, (g_ph_nprev + 256) * sizeof *q); if (!q) break; g_ph_prev = q;
+        }
+        g_ph_prev[g_ph_nprev++] = ent;
+        nvn_hm_put(&g_ph_want, &ent.k, (void *)((uintptr_t)nvn_hm_get(&g_ph_want, &ent.k) + 1));
+        tp_kf mk = ent.k; mk.fp = 0; nvn_hm_put(&g_ph_keys, &mk, (void *)1);
+    }
+    fclose(f);
+    g_ph_on = g_ph_nprev > 0;
+    if (g_ph_on) MLOG("[poolhot] hot list %s: %u entries loaded", p.UTF8String, g_ph_nprev);
+}
+static void ph_save_maybe(int sync_write, int force) {
+    os_unfair_lock_lock(&g_ph_lk);
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (!g_ph_dirty || (!force && f < g_ph_last_save_frame + 180)) { os_unfair_lock_unlock(&g_ph_lk); return; }
+    const char *e = getenv("DM_POOL_HOT");
+    NSString *p = (e && !strcmp(e, "0")) ? nil : ph_file_path();
+    if (!p) { g_ph_dirty = 0; os_unfair_lock_unlock(&g_ph_lk); return; }
+    g_ph_dirty = 0; g_ph_last_save_frame = f;
+    nvn_hmap seen = {.klen = sizeof(tp_kf)};
+    size_t cap = (size_t)(g_ph_nrun + g_ph_nprev) * 96 + 96;
+    char *buf = malloc(cap);
+    if (!buf) { os_unfair_lock_unlock(&g_ph_lk); return; }
+    size_t o = 0;
+    o += snprintf(buf + o, cap - o, "# pool_hot v1: format w h depth levels target flags bytes fingerprint age\n");
+    for (uint32_t i = 0; i < g_ph_nrun; i++) {
+        const tp_kf *k = &g_ph_run[i];
+        nvn_hm_put(&seen, k, (void *)((uintptr_t)nvn_hm_get(&seen, k) + 1));
+        o += snprintf(buf + o, cap - o, "%x %u %u %u %u %u %x %llu %016llx 0\n",
+                      k->fmt, k->w, k->h, k->dep, k->lv, k->tgt, k->fl, (unsigned long long)k->bytes, (unsigned long long)k->fp);
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < g_ph_nprev; i++) {
+        const tp_ent *ent = &g_ph_prev[i];
+        uintptr_t c = (uintptr_t)nvn_hm_get(&seen, &ent->k);
+        if (c) { nvn_hm_put(&seen, &ent->k, (void *)(c - 1)); if (c == 1) nvn_hm_del(&seen, &ent->k); continue; }
+        if (ent->age + 1 >= 3) continue;
+        kept++;
+        o += snprintf(buf + o, cap - o, "%x %u %u %u %u %u %x %llu %016llx %d\n",
+                      ent->k.fmt, ent->k.w, ent->k.h, ent->k.dep, ent->k.lv, ent->k.tgt, ent->k.fl,
+                      (unsigned long long)ent->k.bytes, (unsigned long long)ent->k.fp, ent->age + 1);
+    }
+    nvn_hm_clear(&seen, NULL); free(seen.keys); free(seen.vals);
+    uint32_t nrun = g_ph_nrun;
+    os_unfair_lock_unlock(&g_ph_lk);
+    NSData *d = [NSData dataWithBytesNoCopy:buf length:o freeWhenDone:YES];
+    if (sync_write) {
+        NSString *tmp = [p stringByAppendingString:@".tmp"];
+        if ([d writeToFile:tmp atomically:NO]) rename(tmp.fileSystemRepresentation, p.fileSystemRepresentation);
+    } else {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            NSString *tmp = [p stringByAppendingString:@".tmp"];
+            if ([d writeToFile:tmp atomically:NO] && !rename(tmp.fileSystemRepresentation, p.fileSystemRepresentation))
+                MLOG("[poolhot] hot list written: %u from this run, %u kept from earlier runs", nrun, kept);
+        });
+    }
+}
+static void ph_session_reset(void) {
+    ph_save_maybe(1, 1);
+    os_unfair_lock_lock(&g_ph_lk);
+    nvn_hm_clear(&g_ph_want, NULL); nvn_hm_clear(&g_ph_keys, NULL); nvn_hm_clear(&g_ph_rec_ser, NULL);
+    free(g_ph_prev); g_ph_prev = NULL; g_ph_nprev = 0;
+    free(g_ph_run); g_ph_run = NULL; g_ph_nrun = g_ph_runcap = 0;
+    free(g_ph_pre_bits); g_ph_pre_bits = NULL; g_ph_pre_words = 0;
+    g_ph_loaded = g_ph_on = g_ph_dirty = 0;
+    g_ph_spent = g_ph_hit_n = g_ph_last_save_frame = 0;
+    os_unfair_lock_unlock(&g_ph_lk);
+}
+static void ph_record_tex(const tex_t *t) {
+    const char *e = getenv("DM_POOL_HOT");
+    if ((e && !strcmp(e, "0")) || !t->serial || !ph_file_path()) return;
+    uint64_t fp = ph_fp(t); if (!fp) return;
+    tp_kf k; tp_key(t, &k, fp);
+    uint64_t ser = t->serial;
+    os_unfair_lock_lock(&g_ph_lk);
+    if (!g_ph_loaded) ph_load_locked();
+    if (!nvn_hm_get(&g_ph_rec_ser, &ser) && g_ph_nrun < POOL_HOT_MAX_ENTRIES) {
+        if (g_ph_nrun == g_ph_runcap) {
+            uint32_t nc = g_ph_runcap ? g_ph_runcap * 2 : 128;
+            tp_kf *q = realloc(g_ph_run, nc * sizeof *q); if (q) { g_ph_run = q; g_ph_runcap = nc; }
+        }
+        if (g_ph_nrun < g_ph_runcap) {
+            g_ph_run[g_ph_nrun++] = k;
+            nvn_hm_put(&g_ph_rec_ser, &ser, (void *)1);
+            g_ph_dirty = 1;
+        }
+    }
+    os_unfair_lock_unlock(&g_ph_lk);
+}
+static uint64_t ph_prewarm_limit(int id_, int rw) {
+    if (id_ <= 0 || id_ >= g_ntreg || !g_treg[id_].ok || g_treg[id_].view) return 0;
+    const treg_t *r = &g_treg[id_];
+    os_unfair_lock_lock(&g_ph_lk);
+    if (!g_ph_loaded) ph_load_locked();
+    int on = g_ph_on && g_ph_keys.n && g_ph_spent < POOL_HOT_MAX_BYTES;
+    os_unfair_lock_unlock(&g_ph_lk);
+    if (!on) return 0;
+    if (r->gone || !tex_storage_live(r) || tex_get(r->t.serial)) return 0;
+    tp_kf mk; tp_key(&r->t, &mk, 0);
+    os_unfair_lock_lock(&g_ph_lk);
+    int meta_ok = g_ph_keys.n && nvn_hm_get(&g_ph_keys, &mk) != NULL;
+    os_unfair_lock_unlock(&g_ph_lk);
+    if (!meta_ok) return 0;
+    uint64_t sz = pool_tex_size(&r->t);
+    if (!rw && pool_unwritten_target(&r->t)) return 0;
+    uint64_t avail = 0; int has = mem_avail(&avail);
+    uint64_t flr = pool_avail_floor(mem_margin(), tex_reclaim_low());
+    if (has && (avail <= flr || avail - flr < sz)) return 0;
+    uint64_t cap = (uint64_t)g_dev.recommendedMaxWorkingSetSize / 2, gpu = s2a_gpu_alloc_bytes();
+    if (gpu >= cap || gpu + sz > cap || g_ph_spent + sz > POOL_HOT_MAX_BYTES) return 0;
+    uint64_t fp = ph_fp(&r->t); if (!fp) return 0;
+    tp_kf k = mk; k.fp = fp;
+    os_unfair_lock_lock(&g_ph_lk);
+    uintptr_t left = (uintptr_t)nvn_hm_get(&g_ph_want, &k);
+    if (left) {
+        nvn_hm_put(&g_ph_want, &k, (void *)(left - 1));
+        if (left == 1) nvn_hm_del(&g_ph_want, &k);
+    }
+    os_unfair_lock_unlock(&g_ph_lk);
+    return left ? sz : 0;
+}
+
 // The read bitmap a table's shaders set (dm_pool_mark: bit = the table's own index, not the ID): a table based at 0 sets the global bitmap (first POOL_SEEN_WORDS words,
 //   indexed by ID) directly; a table at another base (nvn_dpool_base: a game with several texture pools) has a slice of its own after it, folded into the global one by
 //   base + index at each submission (pool_seen_fold). With one shared bitmap such a table's bits named the wrong IDs and the IDs it read were never made for the read —
@@ -13278,13 +13467,17 @@ static void pool_seen_word(unsigned i, int recheck, int sg_chg, uint64_t sg) {
             for (uint32_t k = 0; k < DROP_RING && k < g_drop_next; k++) { uint32_t j = (g_drop_next - 1 - k) % DROP_RING; if (g_drop_ring[j].ser == ser) { dwhy = g_drop_ring[j].why; dframe = g_drop_ring[j].frame; break; } }
             pthread_mutex_unlock(&g_smu); }
         pool_tex_update(id_, 0); g_pool_upd_seen++;
-        if (unmade && (g_treg[id_].view || tex_get(g_treg[id_].t.serial))) {
-            g_pool_seen_late++;
-            // The first cases one by one (#2269): which way each was missed — waiting in the budget queue, or not there (a registration path that never looked it up)
-            if (g_pool_seen_late <= 32) MLOG("pool tables: made only once a shader read the dummy, case %llu: ID %d %ux%u format %#x %llu KB, %s (%s), table entry %s, serial %s (frame %llu); made this frame so far %llu MB (up-front budget %u MB), frame %llu",
-                (unsigned long long)g_pool_seen_late, id_, g_treg[id_].t.d.width, g_treg[id_].t.d.height, g_treg[id_].t.d.format,
-                (unsigned long long)(pool_tex_size(&g_treg[id_].t) >> 10), in_left ? "waiting in the budget queue" : "not in the budget queue", k_pool_miss[why], dummy ? "the dummy" : "still the texture it had", k_drop[dwhy], (unsigned long long)dframe,
-                (unsigned long long)(spent >> 20), POOL_FRAME_BYTES >> 20, (unsigned long long)atomic_load(&g_cur_frame));
+        int was_hot_pre = !unmade && ph_pre_take(id_);
+        if ((unmade && (g_treg[id_].view || tex_get(g_treg[id_].t.serial))) || was_hot_pre) {
+            if (!g_treg[id_].gone && tex_storage_live(&g_treg[id_])) ph_record_tex(&g_treg[id_].t);
+            if (unmade) {
+                g_pool_seen_late++;
+                // The first cases one by one (#2269): which way each was missed — waiting in the budget queue, or not there (a registration path that never looked it up)
+                if (g_pool_seen_late <= 32) MLOG("pool tables: made only once a shader read the dummy, case %llu: ID %d %ux%u format %#x %llu KB, %s (%s), table entry %s, serial %s (frame %llu); made this frame so far %llu MB (up-front budget %u MB), frame %llu",
+                    (unsigned long long)g_pool_seen_late, id_, g_treg[id_].t.d.width, g_treg[id_].t.d.height, g_treg[id_].t.d.format,
+                    (unsigned long long)(pool_tex_size(&g_treg[id_].t) >> 10), in_left ? "waiting in the budget queue" : "not in the budget queue", k_pool_miss[why], dummy ? "the dummy" : "still the texture it had", k_drop[dwhy], (unsigned long long)dframe,
+                    (unsigned long long)(spent >> 20), POOL_FRAME_BYTES >> 20, (unsigned long long)atomic_load(&g_cur_frame));
+            }
         }
     }
     if (recheck) for (uint32_t bits = g_seen_done[i] & ~g_seen_todo[i]; bits; bits &= bits - 1) {
@@ -13324,6 +13517,7 @@ static void pool_seen_scan(void) {
             pool_seen_word(i, 1, sg_chg, sg);
         }
     }
+    if (g_ph_dirty) ph_save_maybe(0, 0);
 }
 // Once a frame, while there is room: the textures the budget left out, in the order they were left out (first in, first made). Made smallest first, a stream of small new
 //   textures took each frame's room and a large one waited until a shader read it, the dummy that submission (#2269: 1920x1920 BC textures of 14 MB on Ocarina of Time at 60 Hz,
@@ -13413,12 +13607,18 @@ static int pool_tab_new(int samp, int dtt, int dpf, int rw, int base) {   // the
     for (uint32_t i = 0; i <= (uint32_t)n; i++) e[i] = t->dummy;
     // Nothing made up front for the table (#2269): of the tens of thousands of IDs it covers shaders read a few hundred (made when read: pool_seen_word), and those it leaves out
     //   are not queued for later either — queued, pool_left_scan made every cold texture 32 MB a frame (0400486024DEC000: 50,244 textures / 26.9 GB in 3 minutes, 15.4 GB in all)
-    int real = 0, left = 0; const uint64_t limit = 0;
+    int real = 0, left = 0;
     for (int i = 0; i < n; i++) {
         int id_ = base + i; uint64_t rid = 0; void *o = NULL; int lft = 0;
         if (samp) o = pool_samp_obj(id_, &rid);
         else if (id_ > 0 && id_ < g_ntreg && g_treg[id_].ok && g_treg[id_].tt1 && g_treg[id_].tt1 - 1 != dtt) {}   // an ID of another texture type, seen before: nothing to look up or charge
-        else { o = pool_tex_obj(id_, limit, &lft, &rid, rw); o = pool_fit(t, id_, o, &rid); }
+        else {
+            uint64_t ilim = ph_prewarm_limit(id_, rw);
+            int was_unmade = ilim && !tex_get(g_treg[id_].t.serial);
+            o = pool_tex_obj(id_, ilim, &lft, &rid, rw);
+            if (ilim && was_unmade && tex_get(g_treg[id_].t.serial)) { g_ph_spent += ilim; g_ph_hit_n++; ph_pre_set(id_); }
+            o = pool_fit(t, id_, o, &rid);
+        }
         if (lft == 1) left++; else if (lft == 2) pool_dset_add(&g_punwritten, id_);
         if (o) { pool_ent_put(ti, (uint32_t)i, o, rid); real++; }
     }

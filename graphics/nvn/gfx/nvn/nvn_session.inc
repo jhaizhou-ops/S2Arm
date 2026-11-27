@@ -132,6 +132,7 @@ static int nvn_be_shutdown_session_body(void) {
     free(g_gone); g_gone = NULL; g_gone_n = g_gone_cap = 0;
     if (g_alias_set) CFSetRemoveAllValues(g_alias_set);
     nvn_hm_clear(&g_cpu_tex, NULL);
+    ph_session_reset();
     // Atomic texture upgrades use the same serial/alias owners above. Their
     // weak usage registry and queued descriptor ids belong to this session.
     pthread_mutex_lock(&g_atomic_mu); g_atomic_images = nil; pthread_mutex_unlock(&g_atomic_mu);
