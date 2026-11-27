@@ -3551,6 +3551,44 @@ static nvn_hmap g_alias_wrote = {.klen = sizeof(alias_key)};   // key → g_fenc
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
 static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
+typedef struct { alias_key k; uint64_t size; } alias_pool_ent;
+typedef struct { alias_pool_ent *e; uint32_t n, cap; } alias_pool_list;
+static nvn_hmap g_alias_pool = {.klen = 8};   // pool pointer -> alias_pool_list * (under g_smu)
+static void alias_pool_free_cb(void *v) { alias_pool_list *pl = v; free(pl->e); free(pl); }
+static void alias_pool_clear_locked(void) { nvn_hm_clear(&g_alias_pool, alias_pool_free_cb); }
+static void alias_pool_add_locked(const alias_key *k) {
+    nvn_texlayout L; nvn_tex_layout(&k->d, &L);
+    alias_pool_list *pl = nvn_hm_get(&g_alias_pool, &k->pool);
+    if (!pl) { pl = calloc(1, sizeof *pl); if (!pl) abort(); nvn_hm_put(&g_alias_pool, &k->pool, pl); }
+    if (pl->n == pl->cap) {
+        uint32_t nc = pl->cap ? pl->cap * 2 : 8;
+        alias_pool_ent *ne = realloc(pl->e, nc * sizeof *ne); if (!ne) abort();
+        pl->e = ne; pl->cap = nc;
+    }
+    pl->e[pl->n++] = (alias_pool_ent){*k, L.size};
+}
+static void alias_pool_remove_locked(const alias_key *k) {
+    alias_pool_list *pl = nvn_hm_get(&g_alias_pool, &k->pool);
+    if (!pl) return;
+    for (uint32_t i = 0; i < pl->n; i++) {
+        if (!memcmp(&pl->e[i].k, k, sizeof *k)) { pl->e[i] = pl->e[--pl->n]; break; }
+    }
+    if (!pl->n) { alias_pool_free_cb(pl); nvn_hm_del(&g_alias_pool, &k->pool); }
+}
+static void alias_put_locked(const alias_key *k, id o) {
+    if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
+    void *old = nvn_hm_put(&g_alias, k, (void *)CFBridgingRetain(o));
+    if (old) CFRelease(old); else alias_pool_add_locked(k);
+    CFSetAddValue(g_alias_set, (__bridge const void *)o);
+}
+static void *alias_del_locked(const alias_key *k) {
+    void *old = nvn_hm_del(&g_alias, k);
+    if (!old) return NULL;
+    nvn_hm_del(&g_alias_seen, k); nvn_hm_del(&g_alias_wrote, k);
+    if (g_alias_set) CFSetRemoveValue(g_alias_set, old);
+    alias_pool_remove_locked(k);
+    return old;
+}
 // On memory pool Finalize, evict the textures built on that pool from the sharing table (collect the keys first, then delete: deletion shifts entries back). The sharing table used not to evict: Mario's pools stay for good, so entries are bounded;
 // Engage frees pools on scene changes and rebuilds on new ones, so the old pools' render targets and other private textures stayed in the table forever (about 0.8 GB more GPU memory over 850 s of the title demo), and linear textures built directly on a pool also kept the whole pool buffer alive.
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
@@ -3578,25 +3616,25 @@ void nvn_be_alias_drop_pool(const void *pool) {
         } else i++;
     }
     atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
-    uint32_t n = 0; alias_key *ks = NULL;
-    for (uint32_t i = 0; i < g_alias.cap; i++) {
-        if (!g_alias.vals[i]) continue;
-        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
-        if (k.pool != (uint64_t)(uintptr_t)pool) continue;
-        alias_key *nk = realloc(ks, (n + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[n++] = k;
-    }
-    for (uint32_t j = 0; j < n; j++) {
-        void *old = nvn_hm_del(&g_alias, &ks[j]);
-        if (!old) continue;
-        nvn_hm_del(&g_alias_seen, &ks[j]); nvn_hm_del(&g_alias_wrote, &ks[j]);
-        id o = CFBridgingRelease(old);
-        if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
-        defer_obj_release(o);
+    uint64_t pk = (uint64_t)(uintptr_t)pool;
+    alias_pool_list *pl = nvn_hm_del(&g_alias_pool, &pk);
+    uint32_t n = 0;
+    if (pl) {
+        for (uint32_t j = 0; j < pl->n; j++) {
+            const alias_key *k = &pl->e[j].k;
+            void *old = nvn_hm_del(&g_alias, k);
+            if (!old) continue;
+            nvn_hm_del(&g_alias_seen, k); nvn_hm_del(&g_alias_wrote, k);
+            id o = CFBridgingRelease(old);
+            if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+            defer_obj_release(o);
+            n++;
+        }
+        alias_pool_free_cb(pl);
     }
     if (n) { g_ser_gen++; g_alias_evicted += n; }
     pthread_mutex_unlock(&g_smu);
     pthread_mutex_unlock(&g_wb_mu);
-    free(ks);
     treg_drop_pool_views(pool);   // outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
     bcal_drop_pool(pool);
     pool_gpuw_drop(pool);   // first-use storage rule (tex_cpu_content): the pool's GPU-written mark and its uncompressed textures taken from storage
@@ -3612,9 +3650,80 @@ enum { ALIAS_IDLE = 16 };
 static uint64_t g_alias_taken;   // shared textures evicted when another texture took over their storage (for the memory report)
 static nvn_hmap g_ghost;   // defined below (finalized texture serials)
 static nvn_hmap g_ghost_active = {.klen = 8};   // finalized serials resolved while the current submission is encoded (serial → retained object), under g_smu; see ghost_finish_submission
+enum { SR_LIVE = 0, SR_GHOST = 1, SR_ACTIVE = 2, SR_N = 3 };
+typedef struct { uint32_t n, cap; uint64_t *s; } rev_list;
+static nvn_hmap g_rev[SR_N] = {{.klen = 8}, {.klen = 8}, {.klen = 8}};   // tex_ptr -> tagged single serial ((ser<<1)|1) or rev_list * (under g_smu)
+static void rev_val_free_cb(void *v) { if (!((uintptr_t)v & 1)) { rev_list *rl = v; free(rl->s); free(rl); } }
+static void rev_clear_locked(int tbl) { nvn_hm_clear(&g_rev[tbl], rev_val_free_cb); }
+static int rev_tbl(const nvn_hmap *m) { return m == &g_by_serial ? SR_LIVE : m == &g_ghost ? SR_GHOST : SR_ACTIVE; }
+static void rev_add_ptr_locked(int tbl, uint64_t ser, void *tp) {
+    if (!tp) return;
+    void *cur = nvn_hm_get(&g_rev[tbl], &tp);
+    if (!cur) {
+        if (!(ser >> 63)) { nvn_hm_put(&g_rev[tbl], &tp, (void *)(uintptr_t)((ser << 1) | 1)); return; }
+        rev_list *rl = malloc(sizeof *rl); if (!rl) abort();
+        rl->n = 1; rl->cap = 4; rl->s = malloc(4 * sizeof *rl->s); if (!rl->s) abort();
+        rl->s[0] = ser;
+        nvn_hm_put(&g_rev[tbl], &tp, rl);
+        return;
+    }
+    if ((uintptr_t)cur & 1) {
+        uint64_t first = (uint64_t)(uintptr_t)cur >> 1;
+        if (first == ser) return;
+        rev_list *rl = malloc(sizeof *rl); if (!rl) abort();
+        rl->n = 2; rl->cap = 4; rl->s = malloc(4 * sizeof *rl->s); if (!rl->s) abort();
+        rl->s[0] = first; rl->s[1] = ser;
+        nvn_hm_put(&g_rev[tbl], &tp, rl);
+        return;
+    }
+    rev_list *rl = cur;
+    for (uint32_t i = 0; i < rl->n; i++) if (rl->s[i] == ser) return;
+    if (rl->n == rl->cap) {
+        uint32_t nc = rl->cap * 2;
+        uint64_t *ns = realloc(rl->s, nc * sizeof *ns); if (!ns) abort();
+        rl->s = ns; rl->cap = nc;
+    }
+    rl->s[rl->n++] = ser;
+}
+static void rev_del_ptr_locked(int tbl, uint64_t ser, void *tp) {
+    if (!tp) return;
+    void *cur = nvn_hm_get(&g_rev[tbl], &tp);
+    if (!cur) return;
+    if ((uintptr_t)cur & 1) {
+        if (((uint64_t)(uintptr_t)cur >> 1) == ser) nvn_hm_del(&g_rev[tbl], &tp);
+        return;
+    }
+    rev_list *rl = cur;
+    for (uint32_t i = 0; i < rl->n; i++) {
+        if (rl->s[i] == ser) {
+            rl->s[i] = rl->s[--rl->n];
+            if (!rl->n) { free(rl->s); free(rl); nvn_hm_del(&g_rev[tbl], &tp); }
+            return;
+        }
+    }
+}
+static void *rev_tex_key(id o);
+static void ser_map_put_locked(int tbl, nvn_hmap *m, uint64_t k, id o) {
+    void *old = nvn_hm_get(m, &k);
+    if (old == (__bridge void *)o) return;
+    if (old) rev_del_ptr_locked(tbl, k, rev_tex_key((__bridge id)old));
+    hm_put_id(m, &k, o);
+    rev_add_ptr_locked(tbl, k, rev_tex_key(o));
+}
+static void ser_map_del_locked(int tbl, nvn_hmap *m, uint64_t k) {
+    void *old = nvn_hm_del(m, &k);
+    if (!old) return;
+    rev_del_ptr_locked(tbl, k, rev_tex_key((__bridge id)old));
+    CFRelease(old);
+}
 static id pkg_tex_of(id o);
 static int pkg_unshare(id o);   // caller holds g_smu: an NvPkg (live, finalized or active serial) whose texture is o stops sharing it; 1 if any
-static int serial_holds(nvn_hmap *m, id o) { for (uint32_t i = 0; i < m->cap; i++) if (m->vals[i] && (m->vals[i] == (__bridge void *)o || pkg_tex_of((__bridge id)m->vals[i]) == o)) return 1; return 0; }
+static int serial_holds(nvn_hmap *m, id o) {
+    if (!o) return 0;
+    if (m == &g_alias) return alias_has(o);
+    void *tp = rev_tex_key(o);
+    return tp && nvn_hm_get(&g_rev[rev_tbl(m)], &tp) != NULL;
+}
 // Storage written over by another texture (Switch / Ryujinx semantics: textures over the same memory share its bytes; once another texture's GPU write lands there, the
 //   earlier one's content is gone, and Ryujinx's texture cache drops the overlapped host texture). 11-05 Ocarina of Time on Switch 2: its shadow map changes size nearly
 //   every frame and each size is a new live texture object over the same storage (429 depth textures 961x961..1280x1280 at one pool offset in a 120 s Mac run, 6 MB of
@@ -3626,12 +3735,12 @@ static uint64_t *g_alias_dead_ser; static uint32_t g_alias_dead_n, g_alias_dead_
 static uint64_t *g_held_dead_ser; static uint32_t g_held_dead_n, g_held_dead_cap;
 static uint64_t g_held_reclaim_n, g_held_reclaim_b;   // pool-held textures idle reclaim let go, and their bytes (pool tables stat line)   // pool-held serials idle reclaim let go this submission (alias_dead_views)
 static int alias_overwritten(const alias_key *a, int64_t lo, int64_t hi, uint64_t seen) {   // caller holds g_smu
-    for (uint32_t i = 0; i < g_alias_wrote.cap; i++) {
-        if (!g_alias_wrote.vals[i]) continue;
-        alias_key k; memcpy(&k, g_alias_wrote.keys + (size_t)i * g_alias_wrote.klen, sizeof k);
-        if (k.pool != a->pool || !memcmp(&k, a, sizeof k) || k.off >= hi) continue;
-        nvn_texlayout kl; nvn_tex_layout(&k.d, &kl);
-        if (k.off + (int64_t)kl.size > lo && (uint64_t)(uintptr_t)g_alias_wrote.vals[i] > seen) return 1;
+    alias_pool_list *pl = nvn_hm_get(&g_alias_pool, &a->pool);
+    if (!pl) return 0;
+    for (uint32_t i = 0; i < pl->n; i++) {
+        const alias_pool_ent *e = &pl->e[i];
+        if (e->k.off >= hi || e->k.off + (int64_t)e->size <= lo || !memcmp(&e->k, a, sizeof *a)) continue;
+        if ((uint64_t)(uintptr_t)nvn_hm_get(&g_alias_wrote, &e->k) > seen) return 1;
     }
     return 0;
 }
@@ -3647,39 +3756,56 @@ static void evict_note(id o);
 static void alias_take_over(const alias_key *nk) {
     nvn_texlayout L; nvn_tex_layout(&nk->d, &L);
     if (!L.size) return;
+    alias_pool_list *pl = nvn_hm_get(&g_alias_pool, &nk->pool);
+    if (!pl || !pl->n) return;
     int64_t lo = nk->off, hi = nk->off + (int64_t)L.size;
     uint32_t n = 0; alias_key ks[16];
-    for (uint32_t i = 0; i < g_alias.cap && n < 16; i++) {
-        if (!g_alias.vals[i]) continue;
-        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
-        if (k.pool == nk->pool && k.off == nk->off && memcmp(&k, nk, sizeof k)) {   // same storage start, another key: name the fields that keep them two textures (#427: what the key should leave out)
-            static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 32) { const nvn_texdesc *a = &k.d, *b = &nk->d;
+    for (uint32_t i = 0; i < pl->n && n < 16; i++) {
+        const alias_pool_ent *e = &pl->e[i];
+        const alias_key *k = &e->k;
+        if (k->off == nk->off && memcmp(k, nk, sizeof *nk)) {   // same storage start, another key: name the fields that keep them two textures (#427: what the key should leave out)
+            static _Atomic int nm; if (atomic_fetch_add(&nm, 1) < 32) { const nvn_texdesc *a = &k->d, *b = &nk->d;
                 MLOG("[alias] near-miss pool=%#llx off=%#llx a=[t%d f%d %ux%ux%u lv%u s%d stride%u pkg%d flags%#x] b=[t%d f%d %ux%ux%u lv%u s%d stride%u pkg%d flags%#x] differ=%s%s%s%s%s%s%s%s%s",
-                     (unsigned long long)k.pool, (unsigned long long)k.off, a->target, a->format, a->width, a->height, a->depth, a->levels, a->samples, a->stride, a->pkg_layout, a->flags,
+                     (unsigned long long)k->pool, (unsigned long long)k->off, a->target, a->format, a->width, a->height, a->depth, a->levels, a->samples, a->stride, a->pkg_layout, a->flags,
                      b->target, b->format, b->width, b->height, b->depth, b->levels, b->samples, b->stride, b->pkg_layout, b->flags,
                      a->target != b->target ? "target " : "", a->format != b->format ? "format " : "", a->width != b->width || a->height != b->height || a->depth != b->depth ? "size " : "",
                      a->levels != b->levels ? "levels " : "", a->samples != b->samples ? "samples " : "", a->stride != b->stride ? "stride " : "", a->pkg_layout != b->pkg_layout ? "pkg " : "",
                      a->flags != b->flags ? "flags " : "", "");
             } }
-        if (k.pool != nk->pool || !memcmp(&k, nk, sizeof k) || k.off >= hi) continue;
-        nvn_texlayout kl; nvn_tex_layout(&k.d, &kl);
-        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
-        if (k.off + (int64_t)kl.size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE)) continue;
-        if (serial_holds(&g_by_serial, (__bridge id)g_alias.vals[i])) {   // a live object's content stays unless it is idle and another texture wrote over it since its own last use / write
-            uint64_t own = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_wrote, &k), last = MAX(seen, own);   // a live object resolves through the serial table (no lookup here): its own GPU writes say it is in use
-            if ((own && g_fence + 1 - own < ALIAS_IDLE) || !alias_overwritten(&k, k.off, k.off + (int64_t)kl.size, last)) continue; }
-        ks[n++] = k;
+        if (!memcmp(k, nk, sizeof *nk) || k->off >= hi) continue;
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k);
+        if (k->off + (int64_t)e->size <= lo || (seen && g_fence + 1 - seen < ALIAS_IDLE)) continue;
+        id av = hm_get_id(&g_alias, k);
+        if (serial_holds(&g_by_serial, av)) {   // a live object's content stays unless it is idle and another texture wrote over it since its own last use / write
+            uint64_t own = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_wrote, k), last = MAX(seen, own);   // a live object resolves through the serial table (no lookup here): its own GPU writes say it is in use
+            if ((own && g_fence + 1 - own < ALIAS_IDLE) || !alias_overwritten(k, k->off, k->off + (int64_t)e->size, last)) continue; }
+        ks[n++] = *k;
     }
     for (uint32_t j = 0; j < n; j++) {
-        void *old = nvn_hm_del(&g_alias, &ks[j]);
+        void *old = alias_del_locked(&ks[j]);
         if (!old) continue;
-        nvn_hm_del(&g_alias_seen, &ks[j]); nvn_hm_del(&g_alias_wrote, &ks[j]);
         id o = CFBridgingRelease(old);
-        if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
-        for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i] == (__bridge void *)o) {   // live objects over overwritten storage: their next use makes the texture anew (tex_mtl_)
-            uint64_t sk; memcpy(&sk, g_by_serial.keys + (size_t)i * g_by_serial.klen, sizeof sk); defer_obj_unref(o); hm_del_id(&g_by_serial, &sk); drop_note(sk, DR_TAKEOVER); i = (uint32_t)-1; g_alias_dead++;   // deletion shifts entries: rescan
-            if (g_alias_dead_n == g_alias_dead_cap) { uint32_t c = g_alias_dead_cap ? 2 * g_alias_dead_cap : 64; uint64_t *q = realloc(g_alias_dead_ser, c * sizeof *q); if (q) { g_alias_dead_ser = q; g_alias_dead_cap = c; } }
-            if (g_alias_dead_n < g_alias_dead_cap) g_alias_dead_ser[g_alias_dead_n++] = sk; }   // its texture-ID views go at the end of the submission (alias_dead_views: they need g_rmu, taken before g_smu)
+        void *kp = (__bridge void *)o;
+        void *rv = nvn_hm_get(&g_rev[SR_LIVE], &kp);
+        if (rv) {
+            if ((uintptr_t)rv & 1) {
+                uint64_t sk = (uint64_t)(uintptr_t)rv >> 1;
+                if (nvn_hm_get(&g_by_serial, &sk) == kp) {
+                    defer_obj_unref(o); ser_map_del_locked(SR_LIVE, &g_by_serial, sk); drop_note(sk, DR_TAKEOVER); g_alias_dead++;
+                    if (g_alias_dead_n == g_alias_dead_cap) { uint32_t c = g_alias_dead_cap ? 2 * g_alias_dead_cap : 64; uint64_t *q = realloc(g_alias_dead_ser, c * sizeof *q); if (q) { g_alias_dead_ser = q; g_alias_dead_cap = c; } }
+                    if (g_alias_dead_n < g_alias_dead_cap) g_alias_dead_ser[g_alias_dead_n++] = sk;
+                }
+            } else {
+                rev_list *rl = rv;
+                for (uint32_t i = rl->n; i > 0; i--) {   // reverse: swap-with-last removal only moves indices >= i - 1 (already visited); frees on last item
+                    uint64_t sk = rl->s[i - 1];
+                    if (nvn_hm_get(&g_by_serial, &sk) != kp) continue;
+                    defer_obj_unref(o); ser_map_del_locked(SR_LIVE, &g_by_serial, sk); drop_note(sk, DR_TAKEOVER); g_alias_dead++;
+                    if (g_alias_dead_n == g_alias_dead_cap) { uint32_t c = g_alias_dead_cap ? 2 * g_alias_dead_cap : 64; uint64_t *q = realloc(g_alias_dead_ser, c * sizeof *q); if (q) { g_alias_dead_ser = q; g_alias_dead_cap = c; } }
+                    if (g_alias_dead_n < g_alias_dead_cap) g_alias_dead_ser[g_alias_dead_n++] = sk;
+                }
+            }
+        }
         @autoreleasepool { evict_note(o); }
         // A GPU-written packaged texture's own texture (gpw_mark registered it) stays its NvPkg's: only the table's reference goes, the NvPkg removes it from the residency set when it
         //   goes (its dealloc, tex_shared cleared here). Retiring it here took it out of the residency set while its serial still drew with it (#1911 review)
@@ -3721,13 +3847,11 @@ static CFMutableSetRef alias_held(void) {   // caller holds g_rmu and g_smu: wha
     return held;
 }
 static uint64_t alias_orph_drop(const alias_key *k, int why) {   // caller holds g_smu; why 0 never GPU-written, 1 rewritten, 2 pressure; returns the bytes let go
-    void *old = nvn_hm_del(&g_alias, k);
-    if (!old) return 0;
     uint64_t wf = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_wrote, k);   // #674: the writeback reads only after this fence is done (the write may still be on the main queue)
-    nvn_hm_del(&g_alias_seen, k); nvn_hm_del(&g_alias_wrote, k);
+    void *old = alias_del_locked(k);
+    if (!old) return 0;
     id o = CFBridgingRelease(old); uint64_t b = res_bytes(o);
     if (why == 0) { g_alias_orph_cache++; g_alias_orph_cache_b += b; } else if (why == 1) { g_alias_orph_rw++; g_alias_orph_rw_b += b; } else { g_alias_orph_valve++; g_alias_orph_valve_b += b; }
-    if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
     int queued = 0;
     if (why == 2 && alias_wb_eligible(k, o)) {
         if (g_alias_wb_n == g_alias_wb_cap) {
@@ -3802,8 +3926,8 @@ static void alias_orphan_pass(void) {
     free(cache); free(wr);
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
-static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }
-static void serial_del_why(uint64_t k, int why) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); hm_del_id(&g_by_serial, &k); g_ser_gen++; drop_note(k, why); } pthread_mutex_unlock(&g_smu); }
+static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } ser_map_put_locked(SR_LIVE, &g_by_serial, k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }
+static void serial_del_why(uint64_t k, int why) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); ser_map_del_locked(SR_LIVE, &g_by_serial, k); g_ser_gen++; drop_note(k, why); } pthread_mutex_unlock(&g_smu); }
 static void serial_del(uint64_t k) { serial_del_why(k, DR_OTHER); }   // nothing to drop: the texture ID caches stay valid
 // Texture serials owned by a live NVN texture object (TextureInitialize until Finalize or re-initialization, hle_nvn.c). Command records and texture pool registrations snapshot the
 // texture object (tex_snap in hle_nvn.c, nvn_be_reg_tex), so replay can resolve a texture the game has already finalized: Breath of the Wild records each frame's transient render targets
@@ -3837,7 +3961,7 @@ static __unsafe_unretained id tex_get(uint64_t k) {
     pthread_mutex_lock(&g_smu);
     __unsafe_unretained id o = hm_get_id(&g_by_serial, &k);
     if (!o && g_ghost_active.n) o = hm_get_id(&g_ghost_active, &k);
-    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k)) && g_cb && on_sub_thread()) hm_put_id(&g_ghost_active, &k, o);
+    if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &k)) && g_cb && on_sub_thread()) ser_map_put_locked(SR_ACTIVE, &g_ghost_active, k, o);
     pthread_mutex_unlock(&g_smu);
     return o;
 }
@@ -3850,11 +3974,11 @@ static void tex_put_locked(uint64_t k, id o) {   // caller owns g_smu
     if (old) { if (old != o) obj_drop(old); }
     else if (m == &g_ghost) {
         uint64_t *slot = &g_ghost_ring[g_ghost_next++ % NGHOST];
-        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev && ev != hm_get_id(&g_ghost_active, slot)) obj_drop(ev); hm_del_id(&g_ghost, slot); }   // still used by this submission: dropped when it ends
+        if (*slot) { id ev = hm_get_id(&g_ghost, slot); if (ev && ev != hm_get_id(&g_ghost_active, slot)) obj_drop(ev); ser_map_del_locked(SR_GHOST, &g_ghost, *slot); }   // still used by this submission: dropped when it ends
         *slot = k; g_ghost_puts++;
     }
-    hm_put_id(m, &k, o); g_ser_gen++;
-    if (m == &g_ghost && (active || (g_cb && on_sub_thread()))) hm_put_id(&g_ghost_active, &k, o);
+    ser_map_put_locked(rev_tbl(m), m, k, o); g_ser_gen++;
+    if (m == &g_ghost && (active || (g_cb && on_sub_thread()))) ser_map_put_locked(SR_ACTIVE, &g_ghost_active, k, o);
 }
 static void tex_put(uint64_t k, id o) {
     pthread_mutex_lock(&g_smu);
@@ -3872,7 +3996,7 @@ static void ghost_finish_submission(void) {
         void *v = g_ghost_active.vals[i]; if (!v) continue;
         if (nvn_hm_get(&g_ghost, g_ghost_active.keys + (size_t)i * g_ghost_active.klen) != v) { obj_drop((__bridge id)v); dropped++; }
     }
-    if (g_ghost_active.n) nvn_hm_clear(&g_ghost_active, hm_rel);
+    if (g_ghost_active.n) { nvn_hm_clear(&g_ghost_active, hm_rel); rev_clear_locked(SR_ACTIVE); }
     if (dropped) { g_ser_gen++; g_ghost_kept += (uint64_t)dropped; }
     pthread_mutex_unlock(&g_smu);
 }
@@ -3920,11 +4044,85 @@ static void stex_pkg_free(void *s);   // nvn_stex.inc 胶水（pkg_upload_ 之�
 @implementation NvPkg
 - (void)dealloc { if (!tex_shared) res_remove(tex); if (spare) res_remove(spare); ph_free(ph, nph); free(pgpu); free(runs); if (stex) stex_pkg_free(stex); }
 @end
+static Class g_nvpkg_cls;
+static void *rev_tex_key(id o) {
+    if (!o) return NULL;
+    if (!g_nvpkg_cls) g_nvpkg_cls = [NvPkg class];
+    if (object_getClass(o) == g_nvpkg_cls) return (__bridge void *)((NvPkg *)o)->tex;
+    return (__bridge void *)o;
+}
 static id pkg_tex_of(id o) { return [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : nil; }
 static int pkg_unshare(id o) {
-    int n = 0; nvn_hmap *hm[] = {&g_by_serial, &g_ghost, &g_ghost_active};
-    for (int t = 0; t < 3; t++) for (uint32_t i = 0; i < hm[t]->cap; i++) { id v = (__bridge id)hm[t]->vals[i];
-        if (v && [v isKindOfClass:[NvPkg class]] && ((NvPkg *)v)->tex == o) { ((NvPkg *)v)->tex_shared = 0; n = 1; } }
+    int n = 0; void *kp = (__bridge void *)o;
+    if (!g_nvpkg_cls) g_nvpkg_cls = [NvPkg class];
+    nvn_hmap *hm[] = {&g_by_serial, &g_ghost, &g_ghost_active};
+    for (int t = 0; t < SR_N; t++) {
+        void *rv = nvn_hm_get(&g_rev[t], &kp);
+        if (!rv) continue;
+        if ((uintptr_t)rv & 1) {
+            uint64_t sk = (uint64_t)(uintptr_t)rv >> 1; id v = hm_get_id(hm[t], &sk);
+            if (v && object_getClass(v) == g_nvpkg_cls && ((NvPkg *)v)->tex == o) { ((NvPkg *)v)->tex_shared = 0; n = 1; }
+        } else {
+            rev_list *rl = rv;
+            for (uint32_t i = 0; i < rl->n; i++) { id v = hm_get_id(hm[t], &rl->s[i]);
+                if (v && object_getClass(v) == g_nvpkg_cls && ((NvPkg *)v)->tex == o) { ((NvPkg *)v)->tex_shared = 0; n = 1; } }
+        }
+    }
+    return n;
+}
+static void rev_pkg_rebind_locked(id pkg, id<MTLTexture> old_t, id<MTLTexture> new_t) {
+    void *okp = (__bridge void *)old_t, *nkp = (__bridge void *)new_t;
+    if (!pkg || okp == nkp) return;
+    nvn_hmap *hm[] = {&g_by_serial, &g_ghost, &g_ghost_active};
+    for (int t = 0; t < SR_N; t++) {
+        void *rv = nvn_hm_get(&g_rev[t], &okp);
+        if (!rv) continue;
+        if ((uintptr_t)rv & 1) {
+            uint64_t sk = (uint64_t)(uintptr_t)rv >> 1;
+            if (nvn_hm_get(hm[t], &sk) == (__bridge void *)pkg) { rev_del_ptr_locked(t, sk, okp); rev_add_ptr_locked(t, sk, nkp); }
+        } else {
+            rev_list *rl = rv;
+            for (uint32_t i = rl->n; i > 0; i--) {
+                uint64_t sk = rl->s[i - 1];
+                if (nvn_hm_get(hm[t], &sk) == (__bridge void *)pkg) { rev_del_ptr_locked(t, sk, okp); rev_add_ptr_locked(t, sk, nkp); }
+            }
+        }
+    }
+}
+static int tex_swap_locked(id<MTLTexture> base, id<MTLTexture> w, int do_pkg, uint64_t check_ser, int *named_out) {
+    nvn_hmap *ms[] = {&g_by_serial, &g_ghost, &g_ghost_active};
+    void *bp = (__bridge void *)base, *wp = (__bridge void *)w;
+    int n = 0;
+    if (!g_nvpkg_cls) g_nvpkg_cls = [NvPkg class];
+    for (int m = 0; m < SR_N; m++) {
+        void *rv = nvn_hm_get(&g_rev[m], &bp);
+        if (!rv) continue;
+        uint32_t cnt = ((uintptr_t)rv & 1) ? 1 : ((rev_list *)rv)->n;
+        uint64_t sbuf[16]; uint64_t *sers = cnt <= 16 ? sbuf : malloc(cnt * sizeof *sers); if (!sers) abort();
+        if ((uintptr_t)rv & 1) sers[0] = (uint64_t)(uintptr_t)rv >> 1;
+        else memcpy(sers, ((rev_list *)rv)->s, cnt * sizeof *sers);
+        uint8_t kbuf[16]; uint8_t *kind = cnt <= 16 ? kbuf : malloc(cnt); if (!kind) abort();
+        for (uint32_t i = 0; i < cnt; i++) {
+            void *v = nvn_hm_get(ms[m], &sers[i]);
+            if (v == bp) kind[i] = 1;
+            else if (do_pkg && m == SR_LIVE && v && object_getClass((__bridge id)v) == g_nvpkg_cls && ((__bridge NvPkg *)v)->tex == base) kind[i] = 2;
+            else kind[i] = 0;
+        }
+        for (uint32_t i = 0; i < cnt; i++) {
+            if (!kind[i]) continue;
+            if (kind[i] == 1) { hm_put_id(ms[m], &sers[i], w); if (named_out && sers[i] == check_ser) *named_out = 1; }
+            else { NvPkg *pk = (__bridge NvPkg *)nvn_hm_get(ms[m], &sers[i]); pk->tex = w; }
+            rev_del_ptr_locked(m, sers[i], bp); rev_add_ptr_locked(m, sers[i], wp);
+            n++;
+        }
+        if (sers != sbuf) free(sers);
+        if (kind != kbuf) free(kind);
+    }
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (g_alias.vals[i] != bp) continue;
+        void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(w); CFRelease(old); n++;
+    }
+    if (g_alias_set && CFSetContainsValue(g_alias_set, bp)) { CFSetRemoveValue(g_alias_set, bp); CFSetAddValue(g_alias_set, wp); }
     return n;
 }
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_miss, g_pkg_same, g_pkg_gpu_writes, g_pkg_gpu_kept, g_pkg_partial;
@@ -4175,7 +4373,13 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
             enc_b_copy_texture(b, base, s, l, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), upgraded, s, l, MTLOriginMake(0, 0, 0));
     }
     id<MTLTexture> upgraded_view = nil;
-    if ([holder isKindOfClass:[NvPkg class]]) { id<MTLTexture> old = ((NvPkg *)holder)->tex; ((NvPkg *)holder)->tex = upgraded; defer_obj_release(old); g_ser_gen++;
+    if ([holder isKindOfClass:[NvPkg class]]) {
+        id<MTLTexture> old = ((NvPkg *)holder)->tex;
+        pthread_mutex_lock(&g_smu);
+        ((NvPkg *)holder)->tex = upgraded;
+        rev_pkg_rebind_locked(holder, old, upgraded);
+        pthread_mutex_unlock(&g_smu);
+        defer_obj_release(old); g_ser_gen++;
         if (((NvPkg *)holder)->view) { defer_obj_unref(((NvPkg *)holder)->view); ((NvPkg *)holder)->view = nil; ((NvPkg *)holder)->vbase = 0; } }   // a sparse texture's view of the old one: bound whole until its next upload
     else {
         // Every name of the old texture moves to the upgraded one (upstream reference implementation, MIT, PR #107, with 92f223a7): other serials over the same storage (live in g_by_serial,
@@ -4183,17 +4387,8 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         //   went to the new one, and the old texture stayed in g_alias_set, so an sRGB / linear view of it was never seen as stale (tex_mtl_). Slots are replaced in place (no insert, no
         //   resize during the walk); the old texture is retired once the submissions that used it complete, the view caches follow g_ser_gen
         pthread_mutex_lock(&g_smu);
-        nvn_hmap *tables[] = {&g_by_serial, &g_ghost, &g_ghost_active}; int named = 0, shared = 0;
-        for (unsigned j = 0; j < sizeof tables / sizeof *tables; j++) for (uint32_t i = 0; i < tables[j]->cap; i++) {
-            if (tables[j]->vals[i] != (__bridge void *)base) continue;
-            uint64_t serial; memcpy(&serial, tables[j]->keys + (size_t)i * tables[j]->klen, sizeof serial);
-            void *old = tables[j]->vals[i]; tables[j]->vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); named |= serial == t->serial;
-        }
-        for (uint32_t i = 0; i < g_alias.cap; i++) {
-            if (g_alias.vals[i] != (__bridge void *)base) continue;
-            void *old = g_alias.vals[i]; g_alias.vals[i] = (void *)CFBridgingRetain(upgraded); CFRelease(old); shared = 1;
-        }
-        if (shared) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)upgraded); }
+        int named = 0;
+        tex_swap_locked(base, upgraded, 0, t->serial, &named);
         g_ser_gen++;
         pthread_mutex_unlock(&g_smu);
         if (view) {
@@ -5587,9 +5782,8 @@ static void bcal_sweep_overwritten(void) {
         //   共享存储表同一个键上挂的就是它：这一项也过期了（同存储接管 alias_take_over 的判据：字节已被别的贴图写过），一并摘掉（下次同描述的贴图按游戏内存新建）；
         //   挂在别的键上的照样算被点名、只放引用
         if (!live[nd] && nvn_hm_get(&g_alias, &k) == e->wtex) {
-            void *old = nvn_hm_del(&g_alias, &k); nvn_hm_del(&g_alias_seen, &k); nvn_hm_del(&g_alias_wrote, &k);
-            if (g_alias_set) CFSetRemoveValue(g_alias_set, old);
-            CFRelease(old); g_ser_gen++; g_bcal_dropped_alias++;   // 引用在 drop 里还有一份（下面 defer_obj_release 等那次提交做完才放）
+            void *old = alias_del_locked(&k);
+            if (old) CFRelease(old); g_ser_gen++; g_bcal_dropped_alias++;   // 引用在 drop 里还有一份（下面 defer_obj_release 等那次提交做完才放）
         } else if (!live[nd]) live[nd] = (uint8_t)serial_holds(&g_alias, wo);
         drop[nd++] = e->wtex; e->wtex = NULL;
         atomic_fetch_add(&e->seq, 1); for (int l = 0; l < 16; l++) atomic_store(&e->lgen[l], 0); atomic_fetch_add(&e->seq, 1); }
@@ -5615,11 +5809,10 @@ static void gpw_mark(const tex_t *t, unsigned level, unsigned layer0, unsigned n
         if (mt && !pk->sparse && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL)) {
             alias_key ak; alias_key_of(&ak, t);
             pthread_mutex_lock(&g_smu);
-            if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
             __unsafe_unretained id ex = hm_get_id(&g_alias, &ak);
             if (!ex) {   // only an empty key: another texture under it is someone's (replacing it here released it at once, outside the deferred retirement)
                 alias_take_over(&ak);
-                hm_put_id(&g_alias, &ak, mt); CFSetAddValue(g_alias_set, (__bridge const void *)mt);
+                alias_put_locked(&ak, mt);
                 pk->tex_shared = 1; ex = mt;
             }
             if (ex == mt) { nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); nvn_hm_put(&g_alias_wrote, &ak, (void *)(uintptr_t)(g_fence + 1)); }
@@ -6166,9 +6359,16 @@ static void cpu_unc_drop(void) {
         ser[n++] = s; nvn_hm_del(&g_cpu_unc, &s); if (g_cpu_tex.klen) nvn_hm_del(&g_cpu_tex, &s);
     }
     pthread_mutex_unlock(&g_cpu_tex_mu);
-    for (uint32_t i = 0; i < n; i++) {
-        __unsafe_unretained id o = tex_get(ser[i]);
-        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; id<MTLTexture> mt = pk->view ? nil : pk->tex; if (mt) { pk->tex = nil; tex_put(ser[i], mt); } }
+    if (n) {
+        pthread_mutex_lock(&g_smu);
+        for (uint32_t i = 0; i < n; i++) {
+            __unsafe_unretained id o = hm_get_id(&g_by_serial, &ser[i]);
+            if (!o && g_ghost_active.n) o = hm_get_id(&g_ghost_active, &ser[i]);
+            if (!o && g_ghost.n && (o = hm_get_id(&g_ghost, &ser[i])) && g_cb && on_sub_thread()) ser_map_put_locked(SR_ACTIVE, &g_ghost_active, ser[i], o);
+            if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = o; id<MTLTexture> mt = pk->view ? nil : pk->tex;
+                if (mt) { rev_pkg_rebind_locked(pk, mt, nil); pk->tex = nil; tex_put_locked(ser[i], mt); } }
+        }
+        pthread_mutex_unlock(&g_smu);
     }
     if (n) { pthread_mutex_lock(&g_smu); g_ser_gen++; pthread_mutex_unlock(&g_smu);
         static int nl; if (nl++ < 8) MLOG("a pool's first GPU write: %u uncompressed textures taken from its storage are GPU textures from now on", n); }
@@ -6509,11 +6709,16 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             }
             uint64_t st, vg = nvn_sparse_gen(), *nh = NULL; uint32_t nn = 0; id<MTLTexture> nt = pkg_upload(t, &st, reuse, &nh, &nn, 0);
             if (!nt) ph_free(nh, nn);   // the hashes stay those of the content still uploaded
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; ph_free(pk->ph, pk->nph); pk->ph = nh; pk->nph = nn; free(pk->pgpu); pk->pgpu = NULL;   // the new texture holds guest memory only
+            if (nt) { id<MTLTexture> old = pk->tex;
+                pthread_mutex_lock(&g_smu);
+                pk->tex = nt;
+                rev_pkg_rebind_locked(pk, old, nt);
                 if (pk->tex_shared) {   // its GPU-written texture was the sharing table's (gpw_mark): the CPU rewrote the storage, so that entry is stale; the NvPkg keeps the texture (as spare)
-                    alias_key ak; alias_key_of(&ak, t); pthread_mutex_lock(&g_smu);
-                    if (hm_get_id(&g_alias, &ak) == old) { if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)old); hm_del_id(&g_alias, &ak); nvn_hm_del(&g_alias_seen, &ak); nvn_hm_del(&g_alias_wrote, &ak); g_ser_gen++; }
-                    pthread_mutex_unlock(&g_smu); pk->tex_shared = 0; }
+                    alias_key ak; alias_key_of(&ak, t);
+                    if (hm_get_id(&g_alias, &ak) == old) { void *ao = alias_del_locked(&ak); if (ao) CFRelease(ao); g_ser_gen++; }
+                    pk->tex_shared = 0; }
+                pthread_mutex_unlock(&g_smu);
+                ph_free(pk->ph, pk->nph); pk->ph = nh; pk->nph = nn; free(pk->pgpu); pk->pgpu = NULL;   // the new texture holds guest memory only
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
@@ -6597,8 +6802,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                 id wo = CFBridgingRelease(g_alias_wb[i].o);
                 g_alias_wb[i] = g_alias_wb[--g_alias_wb_n];
                 atomic_store_explicit(&g_alias_wb_cnt, g_alias_wb_n, memory_order_release);
-                if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
-                hm_put_id(&g_alias, &ak, wo); CFSetAddValue(g_alias_set, (__bridge const void *)wo);
+                alias_put_locked(&ak, wo);
                 nvn_hm_put(&g_alias_wrote, &ak, (void *)(uintptr_t)(g_fence + 1));
                 shared = wo;
                 break;
@@ -6664,9 +6868,8 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (getenv("DM_NVN_TEXCPU") && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) MLOG("non-swizzled texture on a CPU-visible pool ser=%llu %ux%ux%u format %#x target %d levels %u texture flags %#x pool flags %#x storage %p", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, t->d.flags, t->pool->flags, (void *)t->mem);
     res_add(mt);
     pthread_mutex_lock(&g_smu);
-    if (!g_alias_set) g_alias_set = CFSetCreateMutable(NULL, 0, NULL);
     alias_take_over(&ak);
-    hm_put_id(&g_alias, &ak, mt); CFSetAddValue(g_alias_set, (__bridge const void *)mt); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
+    alias_put_locked(&ak, mt); nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1));
     pthread_mutex_unlock(&g_smu);
     tex_put(t->serial, mt);
     return mt;
@@ -6940,7 +7143,7 @@ void nvn_be_tex_release(tex_t *t) {
         //   (late / in flight). Dropping it from g_by_serial made tex_get re-create it from the all-zero guest storage (BotW's 100x56 / 400x225 R8 masks:
         //   one-frame light / dark flashes on iPad). Keep the GPU result under the existing bounded ghost-ring lifetime instead, as tex_put does for evicted ones
         tex_put_locked(t->serial, holder);
-        hm_del_id(&g_by_serial, &t->serial); drop_note(t->serial, DR_FINALIZED);   // borrow-safe: the ghost ring keeps holder (tex_put_locked above), so a replay borrowing it this submission still has it
+        ser_map_del_locked(SR_LIVE, &g_by_serial, t->serial); drop_note(t->serial, DR_FINALIZED);   // borrow-safe: the ghost ring keeps holder (tex_put_locked above), so a replay borrowing it this submission still has it
     }
     pthread_mutex_unlock(&g_smu);
     tex_final_drop(t->serial);
@@ -7534,16 +7737,9 @@ static const char *tex_widen_why(const tex_t *t) {
 //   the old storage leaves the residency set once the submissions that used it complete. Returns the entries moved. tex_widen and the internal resolution (rs_rescale) use it
 static int tex_swap_storage(id<MTLTexture> base, id<MTLTexture> w) {
     pthread_mutex_lock(&g_smu);
-    nvn_hmap *ms[] = {&g_by_serial, &g_ghost, &g_ghost_active, &g_alias}; int n = 0;
     // 打包贴图（NvPkg）表里存的是 NvPkg 对象，贴图在它的 tex 里：同样换掉。原先只有 tex_widen 自己换，内部分辨率（rs_rescale）换不到——新存储没人持有，
     //   打包颜色目标仍是原尺寸、同遍深度缩到一半（11-09 #312 暗黑地牢2，S2A_RES_SCALE=0.5：同遍附件尺寸不一，iPhone 上闪粉色块）
-    for (int m = 0; m < 4; m++)
-        for (uint32_t i = 0; i < ms[m]->cap; i++) {
-            void *v = ms[m]->vals[i]; if (!v) continue;
-            if (v == (__bridge void *)base) { CFRelease(v); ms[m]->vals[i] = (void *)CFBridgingRetain(w); n++; }
-            else if (m == 0) { __unsafe_unretained id o = (__bridge id)v; if ([o isKindOfClass:[NvPkg class]] && ((NvPkg *)o)->tex == base) { ((NvPkg *)o)->tex = w; n++; } }
-        }
-    if (g_alias_set && CFSetContainsValue(g_alias_set, (__bridge const void *)base)) { CFSetRemoveValue(g_alias_set, (__bridge const void *)base); CFSetAddValue(g_alias_set, (__bridge const void *)w); }
+    int n = tex_swap_locked(base, w, 1, 0, NULL);
     g_ser_gen++;
     pthread_mutex_unlock(&g_smu);
     defer_obj_release(base);   // out of the residency set once the submissions that used it complete
@@ -9694,7 +9890,7 @@ static void tex_idle_reclaim(void) {
         uint32_t k = 0; for (uint32_t j = 1; j < m; j++) if (c[j].used < c[k].used) k = j;   // least recently used first
         cand_t x = c[k]; c[k] = c[--m];
         id o = hm_get_id(&g_by_serial, &x.ser); if ((__bridge void *)o != x.o) continue;   // replaced or finalized meanwhile
-        if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); hm_del_id(&g_by_serial, &x.ser); drop_note(x.ser, DR_RECLAIM);   // as serial_del (deferred, borrow-safe): a shared texture stays in the sharing table (unreferenced now, alias_orphan_pass)
+        if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); ser_map_del_locked(SR_LIVE, &g_by_serial, x.ser); drop_note(x.ser, DR_RECLAIM);   // as serial_del (deferred, borrow-safe): a shared texture stays in the sharing table (unreferenced now, alias_orphan_pass)
         freed += x.bytes; cnt++;
         if (nvn_hm_get(&g_pool_held, &x.ser)) {   // pool-held: its table entries go to the dummy at the end of the submission, not looked up again (that made it again at once)
             if (g_held_dead_n == g_held_dead_cap) { uint32_t cc = g_held_dead_cap ? 2 * g_held_dead_cap : 64; uint64_t *q = realloc(g_held_dead_ser, cc * sizeof *q); if (q) { g_held_dead_ser = q; g_held_dead_cap = cc; } }

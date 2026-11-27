@@ -57,6 +57,29 @@ int main(void) {
         for (int i = 0; i <= ALIAS_IDLE; i++) { use(&tg, 1); submit(); }
         use(&ti, 0); submit();
         CHECK(tex_get(tg.serial) == g0, "③ G 每次提交都在写：留着");
+        // ④ 逆序与按池索引在 20,000 个无关存活序号下的接管与一致性压力验证
+        static tex_t U0, U1; make(&U0, 24 << 20, 512); make(&U1, 24 << 20, 520);
+        id<MTLTexture> u0 = use(&U0, 1); submit();
+        MTLTextureDescriptor *ud = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+        id<MTLTexture> dummy_live = [g_dev newTextureWithDescriptor:ud]; REQUIRE(dummy_live);
+        for (int i = 0; i < 20000; i++) {
+            uint64_t ext = (1ull << 62) + (uint64_t)i + 1;
+            tex_put(ext, dummy_live);   // 把 g_by_serial 填到 20k+ 无关存活项（O(N) 扫描会直接暴露耗时）
+        }
+        uint64_t extra_u0 = (1ull << 62) + 99999ull;
+        tex_put(extra_u0, u0);   // 并额外验证多序号同指 u0 的逆向索引一致性
+        use(&U0, 1); submit(); idle();
+        uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), dead1 = g_alias_dead;
+        use(&U1, 0); submit();
+        uint64_t dt_us = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000;
+        CHECK(tex_get(U0.serial) != nil && dt_us < 50000, "④ U0 没被他人写过：20k 无关存活序号下建 U1 保留且耗时 %llu us", (unsigned long long)dt_us);
+        use(&U1, 1); submit(); idle();
+        static tex_t U2; make(&U2, 24 << 20, 528);
+        dead1 = g_alias_dead; t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        use(&U2, 0); submit();
+        dt_us = (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0) / 1000;
+        CHECK(tex_get(U0.serial) == nil && tex_get(extra_u0) == nil && tex_get((1ull << 62) + 1) == dummy_live && g_alias_dead == dead1 + 2 && dt_us < 50000,
+              "④ U0+同纹理 extra 序号被覆写放掉 (+%llu)、20k 无关序号保留，耗时 %llu us", (unsigned long long)(g_alias_dead - dead1), (unsigned long long)dt_us);
         nvn_be_drain();
         printf("%s t_nvn_alias_overwrite: %u checks %u failures; backend Metal%d\n", failures ? "✗" : "✓", checks, failures, g_m3 ? 3 : 4);
         return failures != 0;
