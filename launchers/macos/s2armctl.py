@@ -387,8 +387,18 @@ def dctl(args, timeout=90):
     full = ([exe] if exe == DEVICECTL else ['xcrun', 'devicectl']) + args
     return subprocess.run(full, capture_output=True, text=True, timeout=timeout)
 
+# 手机总控台里一款游戏的状态（/state phoneConsole[].games[].state）
+GAME_STATE_TEXT = {"present": "已在手机上", "latest": "已是最新", "suggested": "建议更新", "notPushed": "未在此容器安装", "pending": "已发送，待导入"}
+
+def shared_ready(s, gid):
+    """这款装进通用 S2Arm（共享 App 模式）：iPhone 版已出好但没有这款自己的 ipa（#2333：共享模式的 ipa 任务不记 ipaPath，原先一律当成「还没出包」）"""
+    g = next((x for x in s.get('games') or [] if (x.get('id') or '').upper() == gid.upper()), None)
+    return not ipa_of(s, gid) and bool(g and g.get('iphoneReady'))
+
 def game_bundle(gid):
     s = call('GET', '/state'); ipa = ipa_of(s, gid)
+    if not ipa and shared_ready(s, gid):
+        sys.exit(f'{gid} 装在通用 S2Arm 里（共享 App 模式），没有这款自己的 App 包：资源随 s2armctl install {gid} --device <设备> 一起推（s2armctl targets 列设备）')
     if not ipa: sys.exit(f'{gid} 还没出 iPhone 包：s2armctl next {gid}')
     import zipfile, plistlib
     with zipfile.ZipFile(ipa) as z:
@@ -411,6 +421,17 @@ def container_match(installed, placeholder):
     return installed == placeholder or installed.startswith(placeholder + '.')
 
 def device(gid):
+    s = call('GET', '/state')
+    if shared_ready(s, gid):   # 共享 App 模式：按启动器手机总控台读每台上这款的状态（同界面）
+        phones = s.get('phoneConsole') or []
+        if not phones:
+            print(f'这款的 iPhone 版已出好（装进通用 S2Arm）；启动器还没读到手机：请玩家用数据线连上并解锁，再 s2armctl install-check {gid} --device <设备>（s2armctl targets 列设备）'); sys.exit(2)
+        for p in phones:
+            bundle = (p.get('installed') or {}).get('bundleId')
+            game = next((x for x in p.get('games') or [] if (x.get('gameId') or '').upper() == gid.upper()), {})
+            print(f'iPhone「{p.get("device")}」：' + (f'已装 {bundle}；这款游戏：{GAME_STATE_TEXT.get(game.get("state"), "暂时无法确认")}' if bundle
+                                                    else '装着不止一个 S2Arm、还没选用哪个：请在启动器手机总控台选' if p.get('needsChoice') else '没装 S2Arm：s2armctl install-check ' + gid))
+        sys.exit(0)
     ipa, bid = game_bundle(gid); ds = iphone()
     if not ds: print(f'没连 iPhone：请玩家用数据线连上并解锁、在手机上点「信任」。包 {ipa}（应用身份 {bid}）'); sys.exit(2)
     for d in ds:
@@ -433,8 +454,7 @@ def device(gid):
             target = (phone.get('installed') or {}).get('bundleId') or ""
             if target.startswith("lc:"):
                 game = next((g for g in phone.get('games') or [] if g.get('gameId') == gid.upper()), {})
-                status = {"present": "已在手机上", "latest": "已是最新", "suggested": "建议更新",
-                          "notPushed": "未在此容器安装", "pending": "已发送，待导入"}.get(game.get("state"), "暂时无法确认")
+                status = GAME_STATE_TEXT.get(game.get("state"), "暂时无法确认")
                 if "removed" in (game.get("reasons") or []):
                     status = "已从手机删除"
                 print(f'iPhone「{name}」（{u}）：已装 LiveContainer 内部 S2Arm；这款游戏：{status}')

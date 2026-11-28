@@ -139,6 +139,12 @@ import AppKit
         XCTAssertEqual(((t?["diagnostics"] as? [[String: Any]])?.first)?["code"] as? String, "signing_failed")
     }
 
+    // #2333：共享 App 模式下出 iPhone 包的任务不记 ipaPath，s2armctl next / device 只能靠每款的 iphoneReady 认「已出好」；缺这个字段时一律误报「还没出 iPhone 版」
+    func testGameStateCarriesIphoneReady() {
+        XCTAssertEqual(S2ArmControl.gameJSON(GameSummary(id: "g", name: "G", iphoneReady: true))["iphoneReady"] as? Bool, true)
+        XCTAssertEqual(S2ArmControl.gameJSON(GameSummary(id: "h", name: "H"))["iphoneReady"] as? Bool, false)
+    }
+
     func testAIControlSwitchPersistsAndStopsPort() throws {
         control.stop(); control = nil
         model.setAIControl(true)
