@@ -7682,6 +7682,16 @@ static VkFormat srgb_twin(VkFormat f) {
     case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
     case VK_FORMAT_A8B8G8R8_UNORM_PACK32: return VK_FORMAT_A8B8G8R8_SRGB_PACK32;
     case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case VK_FORMAT_BC2_UNORM_BLOCK: return VK_FORMAT_BC2_SRGB_BLOCK;
+    case VK_FORMAT_BC2_SRGB_BLOCK: return VK_FORMAT_BC2_UNORM_BLOCK;
+    case VK_FORMAT_BC3_UNORM_BLOCK: return VK_FORMAT_BC3_SRGB_BLOCK;
+    case VK_FORMAT_BC3_SRGB_BLOCK: return VK_FORMAT_BC3_UNORM_BLOCK;
+    case VK_FORMAT_BC7_UNORM_BLOCK: return VK_FORMAT_BC7_SRGB_BLOCK;
+    case VK_FORMAT_BC7_SRGB_BLOCK: return VK_FORMAT_BC7_UNORM_BLOCK;
+    case VK_FORMAT_ASTC_4x4_UNORM_BLOCK: return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+    case VK_FORMAT_ASTC_4x4_SRGB_BLOCK: return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
     default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -8001,10 +8011,25 @@ static nvn_gpu_rc view_create(nvn_gpu_tex th, const view_t *v, int color_attachm
         if (v->set_levels) { base_level = v->base_level; levels = v->nlevels ? v->nlevels : 1; }
         if (v->set_layers) { base_layer = v->min_layer; layers = v->nlayers ? v->nlayers : 1; }
         if (v->set_format && (uint32_t)v->format != t->nvn_format) {
-            if (t->bc_decoded) return fail(err, NVN_GPU_E_UNSUPPORTED, "BC 解码贴图的不同格式视图未实现");
-            VkFormat of = nvn_vk_tex_format((uint32_t)v->format);
-            if (of == VK_FORMAT_UNDEFINED) return fail(err, NVN_GPU_E_ARG, "视图格式 0x%x 无映射", v->format);
-            fmt = of;
+            if (t->bc_decoded) {
+                char why[192] = {0};
+                VkFormat of = VK_FORMAT_UNDEFINED;
+                if (nvn_vk_bc_decoded_view_ok(t->format, t->nvn_format, (uint32_t)v->format, &of, why, sizeof why) != 0)
+                    return fail(err, NVN_GPU_E_UNSUPPORTED, "%s", why);
+                VkFormatProperties fp;
+                vkGetPhysicalDeviceFormatProperties(g.phys, of, &fp);
+                VkFormatFeatureFlags need = 0;
+                if (t->usage & VK_IMAGE_USAGE_SAMPLED_BIT) need |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+                if (t->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) need |= VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+                if (t->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) need |= VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+                if ((fp.optimalTilingFeatures & need) != need)
+                    return fail(err, NVN_GPU_E_UNSUPPORTED, "BC 解码贴图视图格式 0x%x（VkFormat %d）设备不支持所需用途", v->format, (int)of);
+                fmt = of;
+            } else {
+                VkFormat of = nvn_vk_tex_format((uint32_t)v->format);
+                if (of == VK_FORMAT_UNDEFINED) return fail(err, NVN_GPU_E_ARG, "视图格式 0x%x 无映射", v->format);
+                fmt = of;
+            }
         }
     }
     // P0-6：立方体兼容的二维数组按立方体（数组）读。视图决策（与旧层共用）只把立方体目标的图当立方体兼容，这里按立方体数组目标问它；
