@@ -388,6 +388,66 @@ int nvn_vk_format_texview_ok(VkFormat base, uint32_t tex_nvn_format, uint32_t vi
     return nvn_vk_format_override_ok(base, view_nvn_format, out, why, why_size);
 }
 
+static int bc_decoded_same_family_bc(uint32_t tex_nvn, uint32_t view_nvn, int *view_is_srgb) {
+    *view_is_srgb = 0;
+    switch (tex_nvn) {
+    case NVN_FORMAT_RGB_DXT1:
+    case NVN_FORMAT_RGB_DXT1_SRGB:
+        if (view_nvn == NVN_FORMAT_RGB_DXT1) return 1;
+        if (view_nvn == NVN_FORMAT_RGB_DXT1_SRGB) { *view_is_srgb = 1; return 1; }
+        return 0;
+    case NVN_FORMAT_RGBA_DXT1:
+    case NVN_FORMAT_RGBA_DXT1_SRGB:
+        if (view_nvn == NVN_FORMAT_RGBA_DXT1 || view_nvn == NVN_FORMAT_RGB_DXT1) return 1;
+        if (view_nvn == NVN_FORMAT_RGBA_DXT1_SRGB || view_nvn == NVN_FORMAT_RGB_DXT1_SRGB) { *view_is_srgb = 1; return 1; }
+        return 0;
+    case NVN_FORMAT_RGBA_DXT3:
+    case NVN_FORMAT_RGBA_DXT3_SRGB:
+        if (view_nvn == NVN_FORMAT_RGBA_DXT3) return 1;
+        if (view_nvn == NVN_FORMAT_RGBA_DXT3_SRGB) { *view_is_srgb = 1; return 1; }
+        return 0;
+    case NVN_FORMAT_RGBA_DXT5:
+    case NVN_FORMAT_RGBA_DXT5_SRGB:
+        if (view_nvn == NVN_FORMAT_RGBA_DXT5) return 1;
+        if (view_nvn == NVN_FORMAT_RGBA_DXT5_SRGB) { *view_is_srgb = 1; return 1; }
+        return 0;
+    case NVN_FORMAT_BPTC_UNORM:
+    case NVN_FORMAT_BPTC_UNORM_SRGB:
+        if (view_nvn == NVN_FORMAT_BPTC_UNORM) return 1;
+        if (view_nvn == NVN_FORMAT_BPTC_UNORM_SRGB) { *view_is_srgb = 1; return 1; }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+int nvn_vk_bc_decoded_view_ok(VkFormat storage_fmt, uint32_t tex_nvn_format, uint32_t view_nvn_format,
+                              VkFormat *out, char *why, size_t why_size) {
+    const int astc = storage_fmt == VK_FORMAT_ASTC_4x4_UNORM_BLOCK || storage_fmt == VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+    if (view_nvn_format >= NVN_FORMAT_RGB_DXT1 && view_nvn_format <= NVN_FORMAT_BPTC_UFLOAT) {
+        int view_srgb = 0;
+        if (!bc_decoded_same_family_bc(tex_nvn_format, view_nvn_format, &view_srgb)) {
+            if (why && why_size) snprintf(why, why_size,
+                "BC 解码贴图 0x%x 不支持跨族/改符号视图格式 0x%x", tex_nvn_format, view_nvn_format);
+            return -1;
+        }
+        if (astc) {
+            if (out) *out = view_srgb ? VK_FORMAT_ASTC_4x4_SRGB_BLOCK : VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+            return 0;
+        }
+        if (storage_fmt == VK_FORMAT_R8G8B8A8_UNORM) {
+            if (out) *out = view_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+            return 0;
+        }
+        if (why && why_size) snprintf(why, why_size,
+            "BC 解码贴图存储格式 %d 不支持 BC 视图 0x%x", (int)storage_fmt, view_nvn_format);
+        return -1;
+    }
+    // 非压缩视图的纹素对应原始 BC 压缩块，不能按解码后的纹素字节数解释。
+    if (why && why_size) snprintf(why, why_size, "BC 解码贴图的不同格式视图未实现");
+    return -1;
+}
+
 // sRGB → 线性：规范分段公式在 8 位输入上逐值预计算（与固定功能顶点获取同一数学定义；
 // 本文件刻意不进 libm，powf/ldexpf 会让宿主纯函数单测多一条链接依赖）。
 static const float vattr_srgb_lut[256] = {
