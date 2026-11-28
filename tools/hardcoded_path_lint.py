@@ -4,7 +4,8 @@
 """写死机器路径检查（11-27）：代码里（注释、Python 文档字符串不算）不许把某一台出包机的路径当缺省值或常量写死，要走环境变量或配置。
 起因：launchers/windows/bundle_runtime_win.py 的 zstd 目录缺省写死一台出包机的 R: 盘，换出包机后发版 Windows 组装整段红；只给那一个文件加断言防不住下一处。
 规则：
-  ① 全仓：盘符 + 出包机布局目录 s2a（如 D:\\s2a、R:/s2a、U:\\s2a_resident）
+  ① 全仓：盘符 + 出包机布局目录 s2a（如 D:\\s2a、R:/s2a、U:\\s2a_resident）；macOS 本机用户临时目录 /private/var/folders/<两位>/<随机段>
+     （每台机器、每个用户不同；11-28 私有工具 safe_rm 18 处写死换机前那台的，换机后临时目录清扫与测试沙箱里的删除全被拒）
   ② 非测试代码：R: / T: / U: 盘开头的绝对路径（出包机专用盘，玩家机和系统都不用）；/Users/<名字>（放行 player、synthetic 等占位名）
   ③ 私有规则表（环境变量 S2A_PRIVATE_SCAN_RULES 或 ~/.config/s2arm/scan_private_rules.json 的 machine_path_rules：正则列表，如出包机用户名）：全仓；
      表不在就跳过这一条（公开仓不写具体用户名），打一行提示
@@ -25,6 +26,7 @@ EXT = (".py", ".sh", ".cs", ".swift", ".m", ".mm", ".c", ".h", ".cpp", ".js", ".
 SKIP = ("compat/tree/", "third_party/")
 SELF_FIXTURES = ("tests/hardcoded_path_lint_test.sh",)   # 本检查自己的正反夹具（heredoc 里故意写的坏路径），同 public_repo_scan 的 scanner_synthetic
 LAYOUT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]{1,2}s2a(?=[\\/_]|\b)")
+USER_TEMP = re.compile(r"/(?:private/)?var/folders/[A-Za-z0-9_+-]{2}/[A-Za-z0-9_+-]{20,}")   # 改走 getconf DARWIN_USER_TEMP_DIR / tempfile.gettempdir()
 PLACEHOLDER = r"Shared|player|players|synthetic|user|username|name|me|you|someone|test|tester|example|foo|bar|alice|bob|private|nobody|demo|dev|runner"
 WEAK = re.compile(r"(?<![A-Za-z0-9])[RTU]:[\\/]{1,2}[A-Za-z]|/Users/(?!(?:" + PLACEHOLDER + r")\b)[A-Za-z][A-Za-z0-9_.-]*")
 LINE_COMMENT = {".py": "#", ".sh": "#", ".mk": "#", ".yml": "#", ".yaml": "#", ".toml": "#", ".ps1": "#", ".cmd": "::", ".bat": "::"}
@@ -72,7 +74,7 @@ def py_code(text):
 def scan(rel, text, priv):
     ext = os.path.splitext(rel)[1]
     lines = py_code(text) if ext == ".py" else None
-    pats = [LAYOUT, *priv] + ([] if is_test(rel) else [WEAK])
+    pats = [LAYOUT, USER_TEMP, *priv] + ([] if is_test(rel) else [WEAK])
     out = []
     for i, raw in enumerate(text.split("\n"), 1):
         if OK in raw:
