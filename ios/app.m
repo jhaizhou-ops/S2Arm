@@ -1201,7 +1201,19 @@ static __weak UIWindow *g_lib_window;
 int s2a_import_state_game_quick(const char *proc_docs, const char *gid);   // pack_apply.c
 static int game_pack_state(const char *gid) { char d[1024]; s2a_container_docs(d, sizeof d); return s2a_import_state_game_quick(d, gid); }
 static void test_picker(void);
-void s2a_shell_library_appeared(void) { static int once; if (!once++) { BOOT_MARK("游戏库界面可操作"); test_picker(); } }
+// 库界面一出现就给装着的各款补取云端管线种子（11-28：原先只在导入 .s2arm 时、或点开始那一刻才取；电脑推送装的款首装时种子起局后十几秒才到，
+//   本局清单已定，开局 2–3 分钟进新场景时约 550 条首遇一条条现编、出图停住 30 秒）。在库里停几秒，首装第一次点开始时清单就是满的；
+//   来不及下完的由直连层把中途到的种子另起一批后台预热兜底（nvn_mtl.m s2a_warm_cloud_arrived）。已有种子 / 下载站记过没有的款 s2a_cloud_seed_fetch 自己跳过（force 0）
+static void cloud_seed_prefetch(void) {
+    char root[1024], d[1024]; if (s2a_program_games_root(root, sizeof root, getenv("HOME"))) return;
+    s2a_container_docs(d, sizeof d); int n = 0;
+    for (NSString *g in [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(root) error:nil]) {
+        if (g.length != 16 || [g rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"].invertedSet].location != NSNotFound) continue;
+        s2a_cloud_seed_fetch(d, g.UTF8String, 0); n++;
+    }
+    LOG("云端管线种子：游戏库出现，%d 款按需补取（已有的、下载站没有的不再取）", n);
+}
+void s2a_shell_library_appeared(void) { static int once; if (!once++) { BOOT_MARK("游戏库界面可操作"); test_picker(); cloud_seed_prefetch(); } }
 int s2a_game_install_state(const char *proc_docs, const char *gid);   // pack_apply.c
 int s2a_shell_game_install_state(const char *gid) {
 #if !TARGET_OS_TV

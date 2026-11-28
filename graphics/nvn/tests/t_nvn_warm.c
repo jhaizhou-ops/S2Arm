@@ -10,6 +10,12 @@ static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("✗ "); printf(__VA_ARGS__); putchar('\n'); } } while (0)
 #define S(x) ((uint64_t)((x) * 1e9))
 int main(void) {
+    // 中途到的云端种子（warm_cloud_late_due，期望按规则手写）：没起过 → 0；起了清单未定 → -1；清单里已有 → 0；不是本款 → 0；起了、清单已定、没有这份、是本款 → 1
+    CHECK(warm_cloud_late_due(0, 0, 0, 1) == 0, "云端种子：本局预热没起过 → 0（warm_start 自己读）");
+    CHECK(warm_cloud_late_due(1, 0, 0, 1) == -1, "云端种子：起了、清单还没定 → -1（等）");
+    CHECK(warm_cloud_late_due(1, 1, 1, 1) == 0, "云端种子：清单里已有这份 → 0");
+    CHECK(warm_cloud_late_due(1, 1, 0, 0) == 0, "云端种子：不是本款（多款容器）→ 0");
+    CHECK(warm_cloud_late_due(1, 1, 0, 1) == 1, "云端种子：起了、清单已定、没有这份、是本款 → 1（另起一批）");
     CHECK(warm_hold_why(S(1), S(30), 1, S(600), S(20)) == WARM_WHY_PLAYER, "玩家点了先开始玩：优先于卡住");
     CHECK(warm_hold_why(S(30), S(20), 0, S(600), S(20)) == WARM_WHY_STALL, "20 秒没进展：交还（卡住）");
     CHECK(warm_hold_why(S(30), S(19.9), 0, S(600), S(20)) == WARM_WHY_NONE, "19.9 秒没进展：继续等");

@@ -13299,6 +13299,7 @@ static int warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
     return 1;
 }
 // The prewarm lists: DM_PSO_MANIFEST (off = none), else the package's seed beside the shader map, the cloud seed beside the user list (pso_cloud.tsv) and this device's user list, each when it exists. nil = none. say: log why
+static _Atomic int g_warm_listed, g_warm_had_cloud;   // 本局清单定了没有、那时有没有云端种子（s2a_warm_cloud_arrived 判要不要另起一批）
 static NSArray<NSString *> *warm_paths(int say) {
     const char *e = getenv("DM_PSO_MANIFEST");
     if (e && !strcmp(e, "off")) return nil;
@@ -13315,7 +13316,7 @@ static NSArray<NSString *> *warm_paths(int say) {
     //   g/<号> 的管线种子（ios/cloud_seed.m），原样存在本机清单旁的 pso_cloud.tsv。行格式同 pso_user.tsv，别的版本的键、旧结构的行由 warm_parse 按本包库滤掉
     //   （第 1 代键经 key_alias.tsv 换代），与包里种子表、本机清单的重复行只建一次
     NSString *cloud = user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_cloud.tsv"] : nil;
-    if (cloud && [NSFileManager.defaultManager fileExistsAtPath:cloud]) [all addObject:cloud];
+    if (cloud && [NSFileManager.defaultManager fileExistsAtPath:cloud]) { [all addObject:cloud]; if (say) atomic_store(&g_warm_had_cloud, 1); }
     if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
     else if (say) MLOG("pipeline prewarm: this device's user list %s%s", user ? "does not exist yet: " : "has no path (neither DM_PSO_USER nor DM_SAVE is set)", user ? user.UTF8String : "");
     return all.count ? all : nil;
@@ -13340,7 +13341,7 @@ static void warm_start(void) {
     // 混合管线的随包首查预热（nvn_hybrid.inc hybrid_pkg_warm）：进程里第一次从 Metal 4 归档查中有一次性初始化，开局在后台付掉，不落在提交线程的第一次首遇上
     if (@available(macOS 26.0, iOS 26.0, *)) if (hybrid_on()) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { if (@available(macOS 26.0, iOS 26.0, *)) hybrid_pkg_warm(); } });
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ pso_user_seen_load(); });   // the record's dedupe set, off the submit thread (pso_user_seen_load)
-    NSArray<NSString *> *paths = warm_paths(1);
+    NSArray<NSString *> *paths = warm_paths(1); atomic_store(&g_warm_listed, 1);
     if (!paths) return;
     if (!g_warm_items) g_warm_items = [NSMutableArray array];
     g_warm_t0 = bp_now(); atomic_store(&g_wp_t0, g_warm_t0);
@@ -13362,6 +13363,45 @@ static void warm_start(void) {
             for (;;) { long i = warm_pick(&next, n); if (i < 0 || dm_gfx_session_stopping()) break; warm_task(ts[(NSUInteger)i]); }
         });
         dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ warm_finish(); }); } });
+}
+// 本局中途到的云端管线种子（11-28 时之笛首装：种子起局后约十几秒才下到，本局清单已定、没用它；开局 2–3 分钟进新场景时约 550 条首遇全不在清单里，
+//   一条条在提交线程上现编、合计 30 秒，出图停住。3 局清缓存首装 3 局都停）：种子写好就另起一批后台预热——等本局这一批收尾（工人与急件索引是一批一份），
+//   再按种子的顺序（录制局首次用到的先后）先建拉取基础管线、后编精确管线，同 warm_prepare 放行后那一段；游戏登记程序时这批照样插队（warm_bump）。
+//   判要不要起见 nvn_warm.h warm_cloud_late_due。编完照常 warm_finish（整张编完记「本包已完整预热」）
+__attribute__((visibility("default"))) void s2a_warm_cloud_arrived(const char *path) {
+    if (!path || !*path) return;
+    NSString *got = @(path);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool {
+        NSString *user = pso_user_path(), *mine = user ? [user.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"pso_cloud.tsv"] : nil;
+        int same = mine && [mine.stringByStandardizingPath isEqualToString:got.stringByStandardizingPath], due;
+        while ((due = warm_cloud_late_due(g_warm_started > 0, atomic_load(&g_warm_listed), atomic_load(&g_warm_had_cloud), same)) < 0 && !dm_gfx_session_stopping()) usleep(100000);
+        if (due <= 0 || !prepare_on()) return;
+        while (atomic_load(&g_warm_running) && !dm_gfx_session_stopping()) usleep(200000);   // 本局这一批（多半是本机清单）先收尾
+        if (dm_gfx_session_stopping()) return;
+        atomic_store(&g_warm_had_cloud, 1);   // 一局只起一次
+        long lines = 0; NSArray<WarmTask *> *ts = warm_parse(@[got], &lines);
+        if (!lines) { MLOG("pipeline prewarm: the cloud seed arrived during this run but holds nothing to build here"); return; }
+        warm_urgent_index(ts);
+        g_warm_t0 = bp_now(); atomic_store(&g_wp_t0, g_warm_t0); atomic_store(&g_wp_total, lines);
+        atomic_store(&g_warm_running, 1); atomic_store(&g_wp_why, WARM_WHY_CONFIG); atomic_store(&g_wp_phase, WARM_BG);
+        const char *e = getenv("DM_PSO_BG_THREADS"); int workers = e && atoi(e) > 0 ? atoi(e) : 2; long n = (long)ts.count;
+        int base_first = hybrid_on();
+        MLOG("pipeline prewarm: the cloud seed arrived during this run: %ld lines in the background on %d workers%s", lines, workers,
+             base_first ? ", the pulling bases of their pairs first, then the exact pipelines" : "");
+        __block _Atomic long next = 0, bnext = 0; __block _Atomic int base_left = base_first ? workers : 0; uint64_t bt0 = bp_now();
+        dispatch_group_t g = dispatch_group_create();
+        for (int w = 0; w < workers; w++) dispatch_group_async(g, dispatch_get_global_queue(WARM_BG_QOS, 0), ^{
+            if (base_first) {
+                for (;;) { warm_yield(); if (dm_gfx_session_stopping()) break;
+                    long u = warm_pick_urgent(); if (u >= 0) { warm_task(ts[(NSUInteger)u]); continue; }
+                    long j = atomic_fetch_add(&bnext, 1); if (j >= n) break; warm_task_base(ts[(NSUInteger)j]); }
+                if (atomic_fetch_sub(&base_left, 1) == 1) MLOG("pipeline prewarm: cloud seed pulling bases done in %.1f s: %llu from the package, %llu built, %llu failed; the exact pipelines follow",
+                    (bp_now() - bt0) / 1e9, (unsigned long long)atomic_load(&g_hy_pb_pkg), (unsigned long long)atomic_load(&g_hy_pb_built), (unsigned long long)atomic_load(&g_hy_pb_fail));
+            }
+            for (;;) { long i = warm_pick(&next, n); if (i < 0 || dm_gfx_session_stopping()) break; warm_task(ts[(NSUInteger)i]); }
+        });
+        dispatch_group_notify(g, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ warm_finish(); });
+    } });
 }
 // S2Arm pso harvest (S2A_PSO_HARVEST=<folder>, Mac only, shader line 10-26): the pack builds the package's pipeline archives without running the game ("no trial run at pack
 //   time"): initialize Metal, load the shader map and the package's seed list (DM_NVN_SHMAP / DM_MSL_DIR as for a run), set the game's depth mode, run the prepare step on every

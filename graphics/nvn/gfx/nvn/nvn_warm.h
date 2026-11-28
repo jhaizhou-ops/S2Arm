@@ -21,6 +21,16 @@ enum { WARM_NONE, WARM_FRONT, WARM_BG, WARM_DONE };
 enum { WARM_WHY_NONE, WARM_WHY_PLAYER, WARM_WHY_STALL, WARM_WHY_LIMIT, WARM_WHY_CONFIG, WARM_WHY_TAIL, WARM_WHY_LATER, WARM_WHY_FRONT };   // FRONT（11-28）：加载页前端放行（原因在它自己的「加载页：不再等预热（…）」行：首装开局那一段到点 / 长时间没进展等），原先一律记成 PLAYER   // LATER（11-27）：之后的启动、前端说本包已完整预热过，首帧前不等（nvn_mtl.m warm_prepare）；TAIL（11-06）：清单都已领走、只剩在编的几条，不再挡首帧（nvn_mtl.m warm_prepare）；CONFIG：DM_PSO_PREPARE=0（11-05 起缺省开、上限 15 s；11-02–11-05 曾缺省不开）一开始就在后台
 
 int s2a_warm_progress(s2a_warm_state *out);   // 1 = 填好；out 为空返回 0
+void s2a_warm_cloud_arrived(const char *path);  // ios/cloud_seed.m：云端管线种子写好时调（path = 写下的 pso_cloud.tsv）
+
+// 本局中途到的云端管线种子要不要另起一批后台预热（11-28 时之笛首装：种子起局后才下到，本局清单已定、没用它，进新场景时约 550 条首遇一条条现编、出图停 30 秒）：
+//   started = 本局预热起过（warm_start）；listed = 起的时候清单已定（warm_paths 取过）；had = 那时清单里已有这份种子；same = 写下的是本款的那份（多款容器别的款不算）。
+//   没起过 → 0（warm_start 会自己读到）；起了但清单还没定 → -1（等清单定了再判）；清单里已有 / 不是本款 → 0；其余 → 1
+static inline int warm_cloud_late_due(int started, int listed, int had, int same) {
+    if (!same || !started) return 0;
+    if (!listed) return -1;
+    return had ? 0 : 1;
+}
 void s2a_warm_play_now(void);                // 玩家点了「先开始玩」：加载页结束，剩下的转后台
 
 // 加载页该不该交还宿主：优先玩家；其次长时间没进展（idle = 距上次完成数变化）；最后总时长。0 = 继续等
