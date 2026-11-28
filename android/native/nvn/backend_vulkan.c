@@ -899,7 +899,15 @@ static uint32_t g_seg_ncmd, g_seg_ndesc; static uint64_t g_seg_hit_cmd, g_seg_hi
 static int g_seg_closed;   // 会话收尾已经清过表：之后再还回来的一律直接销毁（持 g_seg_mu 读写）
 static pthread_mutex_t g_seg_mu = PTHREAD_MUTEX_INITIALIZER;
 static int seg_reuse_on(void) { static int cur = -1; static uint32_t k; int c = __atomic_load_n(&cur, __ATOMIC_RELAXED); if (c < 0 || !(__atomic_add_fetch(&k, 1, __ATOMIC_RELAXED) & 63)) { c = nvn_plat_flag("nvk_seg_reuse", 1) != 0; __atomic_store_n(&cur, c, __ATOMIC_RELAXED); } return c; }
+// 命令段固定成本读数（每 5 秒随回放分时行打，见 rp_present.c）：开段次数与墙钟、其中取池 + vkResetCommandPool 的墙钟、交段次数与墙钟、
+//   时间戳查询池新建 / 复用次数。只是计数与取时钟，不改行为。
+enum { SEGC_BEGIN_N, SEGC_BEGIN_NS, SEGC_RESET_NS, SEGC_NEWPOOL_N, SEGC_COMMIT_N, SEGC_COMMIT_NS, SEGC_QNEW, SEGC_QREUSE, SEGC_N };
+static uint64_t g_segc[SEGC_N];
+void nvn_gpu_seg_cost_take(uint64_t out[SEGC_N]);
+void nvn_gpu_seg_cost_take(uint64_t out[SEGC_N]) { for (int i = 0; i < SEGC_N; i++) out[i] = __atomic_exchange_n(&g_segc[i], 0, __ATOMIC_RELAXED); }
+static uint64_t now_ns(void);
 static int seg_take_cmd(VkCommandPool *pool, VkCommandBuffer *cb, VkCommandBuffer *init_cb) {
+    const uint64_t t0 = now_ns();
     int ok = 0;
     pthread_mutex_lock(&g_seg_mu);
     if (g_seg_ncmd) { g_seg_ncmd--; *pool = g_seg_cmd[g_seg_ncmd].pool; *cb = g_seg_cmd[g_seg_ncmd].cb; *init_cb = g_seg_cmd[g_seg_ncmd].init_cb; g_seg_hit_cmd++; ok = 1; }
@@ -907,6 +915,7 @@ static int seg_take_cmd(VkCommandPool *pool, VkCommandBuffer *cb, VkCommandBuffe
     // 重置放在取用的这一刻、由要用它的线程做：放回时（完成线程）就重置的话，两条线程会在驱动里抢同一把锁，
     // 真机上「交后端」从 0.4 涨到 1.5–2.2 毫秒 / 帧
     if (ok && vkResetCommandPool(g.d, *pool, 0) != VK_SUCCESS) { vkDestroyCommandPool(g.d, *pool, NULL); *pool = VK_NULL_HANDLE; *cb = VK_NULL_HANDLE; *init_cb = VK_NULL_HANDLE; ok = 0; }
+    __atomic_fetch_add(&g_segc[SEGC_RESET_NS], now_ns() - t0, __ATOMIC_RELAXED);
     return ok;
 }
 static void seg_give_cmd(VkCommandPool pool, VkCommandBuffer cb, VkCommandBuffer init_cb) {   // 这一段已经做完（或被放弃），池里没有在用的命令缓冲
@@ -953,7 +962,7 @@ static int g_seg_stg_std = 1;   // 只留标准大小（开会话时读 nvk_stg_
 // 暂存写读数（开会话清零，原子累加）：0 写缓冲笔数；1 写入字节；2 拷贝命令条数；3 一笔超过一个标准块的笔数；4 新建暂存块个数；5 新建暂存块字节
 static uint64_t g_stg_wr[6];
 static uint64_t g_seg_stg_hit, g_seg_stg_miss, g_seg_stg_kept, g_seg_stg_rej, g_seg_stg_full;   // 取用命中 / 没命中；放回留下 / 因非标准大小没留 / 因表满没留（持 g_seg_mu 读写；会话读数，不随 take 清零）
-static struct { VkQueryPool q; uint32_t n; } g_seg_q[SEGPOOL_Q_N]; static uint32_t g_seg_nq;
+static struct { VkQueryPool q; uint32_t n; VkQueryType t; } g_seg_q[SEGPOOL_Q_N]; static uint32_t g_seg_nq;   // 按（查询数、类型）配：同数量的时间戳池与遮挡池不能混用
 static struct nvn_gpu_buf_s *seg_take_stg(uint64_t bytes) {
     struct nvn_gpu_buf_s *b = NULL;
     pthread_mutex_lock(&g_seg_mu);
@@ -973,19 +982,19 @@ static int seg_give_stg(struct nvn_gpu_buf_s *b) {   // 1 = 留下了；0 = 没�
     pthread_mutex_unlock(&g_seg_mu);
     return kept;
 }
-static VkQueryPool seg_take_q(uint32_t n) {
+static VkQueryPool seg_take_q(uint32_t n, VkQueryType t) {
     VkQueryPool q = VK_NULL_HANDLE;
     pthread_mutex_lock(&g_seg_mu);
-    for (uint32_t i = 0; i < g_seg_nq; i++) if (g_seg_q[i].n == n) { q = g_seg_q[i].q; g_seg_q[i] = g_seg_q[--g_seg_nq]; break; }
+    for (uint32_t i = 0; i < g_seg_nq; i++) if (g_seg_q[i].n == n && g_seg_q[i].t == t) { q = g_seg_q[i].q; g_seg_q[i] = g_seg_q[--g_seg_nq]; break; }
     pthread_mutex_unlock(&g_seg_mu);
     return q;
 }
-static void seg_give_q(VkQueryPool q, uint32_t n) {
+static void seg_give_q(VkQueryPool q, uint32_t n, VkQueryType t) {
     if (!q) return;
     int kept = 0;
     if (n && seg_reuse_on()) {
         pthread_mutex_lock(&g_seg_mu);
-        if (!g_seg_closed && g_seg_nq < SEGPOOL_Q_N) { g_seg_q[g_seg_nq].q = q; g_seg_q[g_seg_nq].n = n; g_seg_nq++; kept = 1; }
+        if (!g_seg_closed && g_seg_nq < SEGPOOL_Q_N) { g_seg_q[g_seg_nq].q = q; g_seg_q[g_seg_nq].n = n; g_seg_q[g_seg_nq].t = t; g_seg_nq++; kept = 1; }
         pthread_mutex_unlock(&g_seg_mu);
     }
     if (!kept) vkDestroyQueryPool(g.d, q, NULL);
@@ -1991,10 +2000,10 @@ static void finish_cmd(struct nvn_gpu_cmd_s *c, int executed) {
     for (uint32_t i = 0; i < c->ndpools_full; i++) seg_give_desc(c->dpools_full[i]);
     free(c->dpools_full);
     dset_release(c, executed);   // 按布局回收的描述符组：执行过的段放回空闲串，放弃的段还给池（#1096）
-    if (c->report_ts) vkDestroyQueryPool(g.d, c->report_ts, NULL);
+    seg_give_q(c->report_ts, NVN_GPU_TIMESTAMP_SLOTS, VK_QUERY_TYPE_TIMESTAMP);   // 段已完成或放弃，GPU 不再写它；取用方照新建同样重置
     if (c->tsq) vkDestroyQueryPool(g.d, c->tsq, NULL);
-        seg_give_q(c->qpool, c->qcount);
-    for (uint32_t k = 0; k < c->qnchunk; k++) seg_give_q(c->qchunk[k], OCC_CHUNK);   // 续段块：同大小的池回收表里再用
+        seg_give_q(c->qpool, c->qcount, VK_QUERY_TYPE_OCCLUSION);
+    for (uint32_t k = 0; k < c->qnchunk; k++) seg_give_q(c->qchunk[k], OCC_CHUNK, VK_QUERY_TYPE_OCCLUSION);   // 续段块：同大小的池回收表里再用
     free(c->qchunk); free(c->q_owner);
     free(c->q_used);
     // 段内解码资源在 nvn_vk_bcdec.c 里销毁，那边的 vkDestroy* 不走两级回放的包装（不先清空录制队列）：
@@ -6356,7 +6365,7 @@ static int occl_spare_reserve(struct nvn_gpu_cmd_s *c, int32_t slot, struct occl
             if (!t) return occl_lost(c, slot);
             c->qchunk = t; c->qchunk_cap = ncap;
         }
-        VkQueryPool q = seg_reuse_on() ? seg_take_q(OCC_CHUNK) : VK_NULL_HANDLE;
+        VkQueryPool q = seg_reuse_on() ? seg_take_q(OCC_CHUNK, VK_QUERY_TYPE_OCCLUSION) : VK_NULL_HANDLE;
         if (!q) {
             VkQueryPoolCreateInfo qi; memset(&qi, 0, sizeof qi);
             qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO; qi.queryType = VK_QUERY_TYPE_OCCLUSION; qi.queryCount = OCC_CHUNK;
@@ -9120,8 +9129,12 @@ void nvn_gpu_timestamp(nvn_gpu_cmd ch, uint32_t slot, uint32_t type) {
     if (!c->report_ts) {
         VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
             .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = NVN_GPU_TIMESTAMP_SLOTS };
-        VkResult r = vkCreateQueryPool(g.d, &qi, NULL, &c->report_ts);
-        if (r != VK_SUCCESS) { set_sticky(c, NVN_GPU_E_DEVICE, "时间戳：查询池创建失败 (%d)", r); return; }
+        c->report_ts = seg_reuse_on() ? seg_take_q(NVN_GPU_TIMESTAMP_SLOTS, VK_QUERY_TYPE_TIMESTAMP) : VK_NULL_HANDLE;
+        if (!c->report_ts) {
+            VkResult r = vkCreateQueryPool(g.d, &qi, NULL, &c->report_ts);
+            if (r != VK_SUCCESS) { c->report_ts = VK_NULL_HANDLE; set_sticky(c, NVN_GPU_E_DEVICE, "时间戳：查询池创建失败 (%d)", r); return; }
+            __atomic_fetch_add(&g_segc[SEGC_QNEW], 1, __ATOMIC_RELAXED);
+        } else __atomic_fetch_add(&g_segc[SEGC_QREUSE], 1, __ATOMIC_RELAXED);
         if (g.host_query_reset) {
             g.host_query_reset(g.d, c->report_ts, 0, NVN_GPU_TIMESTAMP_SLOTS);
             c->report_ts_host_reset = 1;
@@ -9154,6 +9167,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
     if (failed) return fail(err, NVN_GPU_E_FAILED, "时间线已进入失败终态（恢复只能关会话重开）");
     if (lost) return fail(err, NVN_GPU_E_DEVICE, "设备已丢失");
 
+    const uint64_t segc_t0 = now_ns();
     struct nvn_gpu_cmd_s *c = calloc(1, sizeof *c);
     if (!c) return fail(err, NVN_GPU_E_OOM, "cmd 分配失败");
     memset(c->desc_sets, 0, sizeof c->desc_sets); c->desc_layout = VK_NULL_HANDLE; c->desc_dirty = 0xfu;
@@ -9163,7 +9177,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
     pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
     pci.queueFamilyIndex = g.dev->queue_family;
     if (!seg_reuse_on() || !seg_take_cmd(&c->pool, &c->cb, &c->init_cb)) {   // 空闲表里没有：新建一个池和它的命令缓冲
-    OC(OC_CPOOL);
+    OC(OC_CPOOL); __atomic_fetch_add(&g_segc[SEGC_NEWPOOL_N], 1, __ATOMIC_RELAXED);
     if (vkCreateCommandPool(g.d, &pci, NULL, &c->pool) != VK_SUCCESS) {
         free(c);
         return fail(err, NVN_GPU_E_OOM, "vkCreateCommandPool 失败");
@@ -9210,7 +9224,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
         VkQueryPoolCreateInfo qi; memset(&qi, 0, sizeof qi);
         qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO; qi.queryType = VK_QUERY_TYPE_OCCLUSION; qi.queryCount = d->occlusion_slots;
         c->q_used = calloc(d->occlusion_slots, 1);
-        if (c->q_used && seg_reuse_on()) c->qpool = seg_take_q(d->occlusion_slots);
+        if (c->q_used && seg_reuse_on()) c->qpool = seg_take_q(d->occlusion_slots, VK_QUERY_TYPE_OCCLUSION);
         if (!c->q_used || (!c->qpool && vkCreateQueryPool(g.d, &qi, NULL, &c->qpool) != VK_SUCCESS)) {
             free(c->q_used); vkDestroyCommandPool(g.d, c->pool, NULL); free(c);
             return fail(err, NVN_GPU_E_OOM, "遮挡查询池（%u 槽）创建失败", d->occlusion_slots);
@@ -9243,6 +9257,7 @@ nvn_gpu_rc nvn_gpu_cmd_begin(const nvn_gpu_cmd_desc *d, nvn_gpu_cmd *out, nvn_gp
     g.live = c;
     pthread_mutex_unlock(&g_mu);
     *out = c;
+    __atomic_fetch_add(&g_segc[SEGC_BEGIN_N], 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_segc[SEGC_BEGIN_NS], now_ns() - segc_t0, __ATOMIC_RELAXED);
     return rc(NVN_GPU_OK);
 }
 
@@ -9480,7 +9495,9 @@ nvn_gpu_rc nvn_gpu_cmd_commit(nvn_gpu_cmd ch, uint64_t signal, nvn_gpu_done_fn d
     c->live_next = NULL;
     g.commit_active++;
     pthread_mutex_unlock(&g_mu);
+    const uint64_t segc_t0 = now_ns();
     nvn_gpu_rc r = commit_impl(ch, signal, done, user, err);
+    __atomic_fetch_add(&g_segc[SEGC_COMMIT_N], 1, __ATOMIC_RELAXED); __atomic_fetch_add(&g_segc[SEGC_COMMIT_NS], now_ns() - segc_t0, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_mu);
     g.commit_active--;
     pthread_cond_broadcast(&g_cv);

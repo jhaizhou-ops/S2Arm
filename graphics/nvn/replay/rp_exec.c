@@ -333,6 +333,7 @@ static nvn_gpu_cmd occ_first_reset_cut(nvn_gpu_cmd c) {
     if (g_occ_seg || !g_sub || !c || c != g_cmd) return c;
     if (g_mid >= SUB_STEP - 4) { nvn_unimpl("occl", "first_reset_not_counted", NULL); return c; }
     rp_pass_flush(c);
+    pf_add(RP_PERF_SEG_CUT_OCC, 1);
     seg_cut(1);
     return g_cmd;
 }
@@ -440,6 +441,7 @@ static void sub_split(void) {
     uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns);
     if (nd - g_split_base < (uint64_t)thr) return;
     g_split_base = nd;
+    pf_add(RP_PERF_SEG_CUT_DRAWS, 1);
     seg_cut(g_occ_seg);
 }
 // 超长通道中途先交（开关 nvk_split_pass = 每段笔数，0 = 关）：上面只在通道外交，一个通道上千笔（3D 场景的 G-buffer 通道一个就三千多笔）
@@ -460,12 +462,14 @@ static void pass_split(void) {
     rp_pass_end(g_cmd);
     pf_add(RP_PERF_P_CUT_LONG, 1); g_pass_cuts++;
     { uint64_t nd = 0, ns = 0; rp_draw_stats(&nd, &ns); g_split_base = nd; }
+    pf_add(RP_PERF_SEG_CUT_PASS, 1);
     seg_cut(0);
 }
 static void submit_pre(nvn_gpu_err *err) {
     if (!g_pre) return;
     nvn_gpu_cmd pc = g_pre;
     g_pre = NULL;
+    pf_add(RP_PERF_SEG_PRE, 1);
     if (!nvn_gpu_ok(nvn_gpu_cmd_commit(pc, g_fence + ++g_mid, pre_done, pre_note_make(), err))) {
         rp_res_xfer_aborted(g_sub_serial);
         red("前置段提交失败：%s", err->why);
@@ -517,6 +521,7 @@ static uint64_t sub_commit_body(void) {
         nvn_gpu_err err = {0}; nvn_gpu_cmd_desc d = {0, "nvn submit (light fence)"}; nvn_gpu_cmd ec = NULL;
         if (!nvn_gpu_ok(nvn_gpu_cmd_begin(&d, &ec, &err)) || !ec) { static int said; if (!said++) red("开段失败后补点亮栅栏的空段也开不出来（之后同样的失败不再逐条报）：%s", err.why); }
         else if (!nvn_gpu_ok(nvn_gpu_cmd_commit(ec, f, light_done, NULL, &err))) red("补点亮栅栏的空段提交失败：%s", err.why);
+        else pf_add(RP_PERF_SEG_LIGHT, 1);
         g_fence = f;
         return g_fence;
     }
@@ -535,6 +540,7 @@ static uint64_t sub_commit_body(void) {
     rc_commit(f);
     sub_record_readback(s, c);
     if (!nvn_gpu_ok(nvn_gpu_cmd_commit(c, f, sub_done, s, &err))) red("提交失败：%s", err.why);
+    pf_add(RP_PERF_SEG_MAIN, 1);
     pf_add(RP_PERF_COMMIT_NS, now_ns() - t0); pf_add(RP_PERF_SUBS, 1);
     g_fence = f;
     rp_debug_dump_poll(&g_fence);   // 调试开关 nvk_dump：有登记才做事
@@ -570,6 +576,7 @@ uint64_t rp_side_commit(nvn_gpu_cmd c) {
     nvn_gpu_err err = {0};
     g_fence = f;   // 先推进：提交失败时后端也已按这个值记了失败段，下一次提交必须取更大的值
     if (!nvn_gpu_ok(nvn_gpu_cmd_commit(c, f, side_done, (void *)(uintptr_t)f, &err))) { red("旁路段提交失败：%s", err.why); return 0; }
+    pf_add(RP_PERF_SEG_SIDE, 1);
     return f;
 }
 uint64_t rp_sub_fence(void) { return g_fence + SUB_STEP; }   // 正在回放的这次提交最后一段的栅栏值（它中途先交的段取的值都比这个小）
