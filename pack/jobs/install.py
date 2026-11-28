@@ -4441,7 +4441,7 @@ def _install(c):
     scheme = downstream.requested(c, dict(id=gid))   # 下游深度方案出的是独立 App：自己的包名，不进容器（pack/jobs/downstream.py）
     if scheme:
         if wants_export(c):   # 导出自签包只组 S2Arm 容器；独立 App 的资源靠推送进去，玩家自签装上也拿不到资源——说清楚，不悄悄改成连手机装机
-            raise Failure(f"这款用的是 {scheme['name']} 方案（独立 App），现在只能「推到 iPhone」，还不能导出自签包。", code="downstream_export_unsupported")
+            raise Failure(f"这款用的是 {scheme['name']} 方案（独立 App），资源要由电脑推进手机，不能导出到文件夹：用数据线连上 iPhone，点「导出…」，在确认页勾上这台 iPhone 再开始。", code="downstream_export_unsupported")
         return downstream.install_ios(c, next((g for g in c.catalog()["games"] if g["id"].upper() == gid.upper()), dict(id=gid)), scheme)
     ios_pack(c, gid)
     if wants_export(c):   # 独立 App：ipa + .s2arm + .img + README 全进这款的游戏文件夹；通用壳：一款导出成小游戏包 .s2arm + 资源本体原位（两件套）
