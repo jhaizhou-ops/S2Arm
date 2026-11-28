@@ -147,6 +147,7 @@ enum { RP_PERF_SUBMIT_NS, RP_PERF_COMMIT_NS, RP_PERF_SUBS, RP_PERF_WAIT_NS, RP_P
        RP_PERF_MIRROR_HOIST, RP_PERF_MIRROR_OVERLAP, RP_PERF_MIRROR_FALLBACK,   // 原本会关遍的镜像同步：前移、确认重叠、不具备前移条件
        RP_PERF_TEX_BYTE_EQUAL, RP_PERF_TEX_BYTE_CHANGED, RP_PERF_TEX_BYTE_SKIPPED,
        RP_PERF_MIRROR_FB_GW, RP_PERF_MIRROR_FB_LAND, RP_PERF_MIRROR_FB_OVERFLOW, RP_PERF_MIRROR_FB_UNKNOWN, RP_PERF_MIRROR_FB_OTHER,
+       RP_PERF_SEG_MAIN, RP_PERF_SEG_PRE, RP_PERF_SEG_CUT_DRAWS, RP_PERF_SEG_CUT_PASS, RP_PERF_SEG_CUT_OCC, RP_PERF_SEG_SIDE, RP_PERF_SEG_LIGHT,   // 命令段按种类计：每次提交的主段 / 前置传输段 / 中途交段（按笔数、超长通道、第一次遮挡复位）/ 旁路段 / 补点亮栅栏的空段
        RP_PERF_N };   // P_CONT：同目标续接命中的 SET_RT 次数；P_CLEARONLY：一笔绘制都没有的通道数；P_PARK：记进挂起表的待折清除条数；BIND_FAST：整组绑定直接沿用没重建；TEX_EPOCH：贴图内容检查按纪元跳过的次数；PC_HIT/MISS：后端开通道缓存命中 / 新建   /* FX_*：做完时要写回游戏内存的提交数，和各类回写的个数（事件 / 计数器报告 / 遮挡事件 / 显卡写缓冲） */   // TEX_UP_*：贴图整张上传的次数与千字节；BUF_SYNC_KB：池镜像同步的千字节   // P_*：通道的构成（见 rp_pass.c rp_pass_end）   // D_*：一笔绘制里各步（见 rp_draw.c）
 void rp_perf_add(int i, uint64_t v);
 // 分时读数抽样（#1103）：一笔绘制取 10 次时钟 + 9 次原子加、一次贴图解析取 3 次、一个通道取 5 次，世界稳态每帧合计约 2.2 万次取时钟，占回放线程约 3%。
@@ -206,6 +207,8 @@ int rp_post_gpu_write(uint64_t addr, uint64_t len);                       // 登
 int rp_post_gpu_write_rows(uint64_t addr, uint64_t row_bytes, uint64_t row_stride, uint64_t image_stride, uint32_t rows, uint32_t images);
 // [addr, addr + len) 有没有还没落地的 GPU 写（登记中或正在锁外拷回）：1 有、0 没有、-1 地址不在登记过的池里。线程：[提交]。
 int rp_buf_gpu_write_pending(uint64_t addr, uint64_t len);
+// CPU 快照来源：0 可读地址待调用方验证，1 有在途 GPU 写，-1 越界或别名不能证明连续。
+int rp_buf_cpu_read_source(uint64_t addr, uint64_t len, const uint8_t **source);
 uint64_t rp_buf_gpu_write_note(uint64_t addr, uint64_t len, uint64_t *pool_key); void rp_buf_gpu_write_land(uint64_t pool_key, uint64_t id, int ok);
 struct rp_gpu_write_ref { uint64_t pool_key, id; uint32_t index; };
 void rp_buf_gpu_write_snapshot(const struct rp_gpu_write_ref *refs, uint32_t count, nvn_gpu_readback_span *spans);

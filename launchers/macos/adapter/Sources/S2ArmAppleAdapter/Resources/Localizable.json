@@ -10504,12 +10504,12 @@
   "en": "S2Arm.ipa in the library folder wasn't updated this time ({0}). This game's iPhone version is ready and will be assembled as usual when you install to iPhone."
  },
  {
-  "source": "这款选的下游方案是独立 App，资源要由电脑推进去：连上手机后点「推到 iPhone」；想导出自签包就在确认页改选「仍用原版方案」。",
-  "en": "The port chosen for this game is a separate app whose resources are copied over from your computer: connect your phone and click Push to iPhone. To export a self-sign package instead, choose Keep the standard route on the confirmation page."
+  "source": "这款选的下游方案是独立 App，资源要由电脑推进去：用数据线连上设备，点「导出…」，在确认页勾上这台设备再开始；想导出自签包就在确认页改选「仍用原版方案」。",
+  "en": "The port chosen for this game is a separate app whose resources are copied over from your computer: connect the device with a cable, click Export…, tick it on the confirmation page, then start. To export a self-sign package instead, choose Keep the standard route on the confirmation page."
  },
  {
-  "source": "这款用的是 {0} 方案（独立 App），现在只能「推到 iPhone」，还不能导出自签包。",
-  "en": "This game uses {0} (a separate app): for now it can only be installed with Push to iPhone, not exported as a self-sign package."
+  "source": "这款用的是 {0} 方案（独立 App），资源要由电脑推进设备，不能导出到文件夹：用数据线连上设备，点「导出…」，在确认页勾上这台设备再开始。",
+  "en": "This game uses {0} (a separate app): its resources are copied to the device from your computer, so it can't be exported to a folder. Connect the device with a cable, click Export…, tick it on the confirmation page, then start."
  },
  {
   "source": "Impactor 里还没登录 Apple ID：在导出页点「打开 Impactor」→「设置」→「添加账号」，用你的 Apple ID 登录（邮箱、密码、手机上的验证码，输入前切到英文输入法）；已经存了几个账号的，选中要用的那个（或移除后重新添加）。然后回来点这台的「重试」。密码只在 Impactor 里输，S2Arm 不经手。",

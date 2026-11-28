@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import sys
 import os
 from pathlib import Path
 
@@ -223,11 +224,20 @@ def game_defaults(c, gid, caps):
     """这款 Mac 版的逐款测过的缺省（launchers/shared/game_defaults.v1.tsv，tools/game_defaults.py）：{设置 id: 值}。
     程序号 = 游戏号，构建号读 Mac 运行版本的随行表（同宿主 runtime/src/gdefaults.c）；这款没有那个杠杆的不算（画质 MetalFX / FSR 要走直连，
     具体帧率档要清单有帧率来源），与宿主同一判法。还没出 Mac 版（读不到构建号）只认 * 行"""
-    import importlib.util   # 模块与本文件同在引擎快照（tools/ 与 pack/jobs/ 一起收，launchers/macos/bundle_engine.py INPUTS）
-    spec = importlib.util.spec_from_file_location("s2a_game_defaults", Path(__file__).resolve().parents[2] / "tools/game_defaults.py")
-    gd = importlib.util.module_from_spec(spec); spec.loader.exec_module(gd)
+    import importlib.util
     engine = getattr(c, "engine", None)
-    rows = gd.load(Path(engine) / "launchers/shared/game_defaults.v1.tsv") if engine else []   # 引擎快照里没有这张表 = 没有逐款值
+    if not engine:
+        return {}
+    # 模块从引擎快照取（tools/ 随快照收，launchers/macos/bundle_engine.py INPUTS），不按本文件位置推：
+    # 发布包里本文件在 Resources/Jobs/，不在快照的 pack/jobs/ 下，按 __file__ 往上推会落到 Contents/tools/
+    mod = Path(engine) / "tools/game_defaults.py"
+    try:
+        spec = importlib.util.spec_from_file_location("s2a_game_defaults", mod)
+        gd = importlib.util.module_from_spec(spec); spec.loader.exec_module(gd)
+        rows = gd.load(Path(engine) / "launchers/shared/game_defaults.v1.tsv")   # 引擎快照里没有这张表 = 没有逐款值
+    except (OSError, SyntaxError, ImportError, ValueError) as e:   # 读不到只是少了「本款推荐」，不拦整页设置
+        print(f"game_defaults: 跳过逐款缺省（{mod}）：{e}", file=sys.stderr)
+        return {}
     if not rows:
         return {}
     items = {k: it for k, it in settings_table(c).items() if it.get("env")}

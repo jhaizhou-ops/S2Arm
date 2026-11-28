@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "nvn_backend.h"
 #include "nvn_plat.h"
@@ -182,10 +183,10 @@ static void stats_cb(void *u, const char *name, uint64_t v) {
     else if (!strcmp(name, "query_init_cb_saved")) { s->init_cb_saved = v; s->seen++; }
 }
 
-static int run_query_seg(nvn_gpu_tex tex, nvn_gpu_view view, nvn_gpu_buf rb, nvn_gpu_pipe pipe,
-                         uint64_t signal, int has_ts_cap, struct done_rec *out_rec, uint8_t rgba[BYTES]) {
+static int run_query_seg_n(nvn_gpu_tex tex, nvn_gpu_view view, nvn_gpu_buf rb, nvn_gpu_pipe pipe,
+                         uint64_t signal, int has_ts_cap, struct done_rec *out_rec, uint8_t rgba[BYTES], uint32_t slots) {
     nvn_gpu_err err = {0};
-    nvn_gpu_cmd_desc cd = {.occlusion_slots = 4};
+    nvn_gpu_cmd_desc cd = {.occlusion_slots = slots};
     nvn_gpu_cmd cmd = NULL;
     GPU(nvn_gpu_cmd_begin(&cd, &cmd, &err));
     nvn_gpu_pass_desc pass = {
@@ -215,8 +216,14 @@ static int run_query_seg(nvn_gpu_tex tex, nvn_gpu_view view, nvn_gpu_buf rb, nvn
     GPU(nvn_gpu_cmd_commit(cmd, signal, on_done, out_rec, &err));
     GPU(nvn_gpu_fence_wait(signal, 5000000000ull, &err));
     memcpy(rgba, nvn_gpu_buf_cpu(rb), BYTES);
+    { struct timespec ts = {0, 20000000}; nanosleep(&ts, NULL); }   // 栅栏到了之后完成线程才把段的查询池放回回收表：留 20 ms，下一段才取得到（复用断言要确定）
     return 0;
 }
+static int run_query_seg(nvn_gpu_tex tex, nvn_gpu_view view, nvn_gpu_buf rb, nvn_gpu_pipe pipe,
+                         uint64_t signal, int has_ts_cap, struct done_rec *out_rec, uint8_t rgba[BYTES]) {
+    return run_query_seg_n(tex, view, rb, pipe, signal, has_ts_cap, out_rec, rgba, 4);
+}
+void nvn_gpu_seg_cost_take(uint64_t out[8]);   // 后端命令段成本读数：[6] 时间戳查询池新建 [7] 复用
 
 static int check_solid(const uint8_t rgba[BYTES], uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     for (unsigned i = 0; i < W * H; i++) {
@@ -303,6 +310,7 @@ int main(int argc, char **argv) {
     GPU(nvn_gpu_buf_create(BYTES, NVN_GPU_MEM_SHARED, NULL, &rb, &err));
 
     // 段 1：预热图像首次转布局（g_newimg=1 会走 init_cb）
+    { uint64_t z[8]; nvn_gpu_seg_cost_take(z); }   // 清零
     struct done_rec r1 = {0}, r2 = {0}, r3 = {0};
     uint8_t img1[BYTES], img2[BYTES], img3[BYTES];
     REQUIRE(run_query_seg(tex, view, rb, pipe, 1, has_ts_cap, &r1, img1) == 0);
@@ -323,6 +331,16 @@ int main(int argc, char **argv) {
         REQUIRE(r2.nts >= 2 && r2.ts[0].valid && r2.ts[1].valid && r2.ts[1].host_ns >= r2.ts[0].host_ns);
         REQUIRE(r3.nts >= 2 && r3.ts[0].valid && r3.ts[1].valid && r3.ts[1].host_ns >= r3.ts[0].host_ns);
     }
+
+    // 时间戳查询池走回收表：段 1 新建，段 2、3 取回段 1 / 段 2 放回的同一类池（复用的池要和新建的一样重置，时间戳照样有效、递增——上面已断言）
+    uint64_t segc[8] = {0}; nvn_gpu_seg_cost_take(segc);
+    if (has_ts_cap) REQUIRE(segc[6] == 1 && segc[7] == 2);
+    // 段 4：声明 64 个遮挡槽（与时间戳池同为 64 个查询）、不写时间戳。回收表按（数量、类型）配：不能把时间戳池当遮挡池给出去，
+    //   给错了遮挡读数不会是 256 / 0（同步校验开着时还会报 VUID）
+    struct done_rec r4 = {0}; uint8_t img4[BYTES];
+    REQUIRE(run_query_seg_n(tex, view, rb, pipe, 4, 0, &r4, img4, 64) == 0);
+    REQUIRE(r4.status == NVN_GPU_DONE_OK && r4.nocc >= 2 && r4.occ[0] == W * H && r4.occ[1] == 0);
+    printf("host-query-reset ts-pool reuse: new=%llu reused=%llu\n", (unsigned long long)segc[6], (unsigned long long)segc[7]);
 
     struct hqr_stats st = {0};
     nvn_gpu_stats(stats_cb, &st, 0);

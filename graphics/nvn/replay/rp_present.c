@@ -16,6 +16,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+// 弱链接[replay]：nvn_gpu_seg_cost_take
+void nvn_gpu_seg_cost_take(uint64_t out[8]) __attribute__((weak));   // 后端命令段成本读数（安卓 Vulkan 后端提供；没有就全 0）
 
 // 弱链接登记（tools/weak_link_decl.py，场合 replay = 回放核心宿主单测）：后端 / 首用模块的可选件，缺实现时地址为空、走不到调用
 // 弱链接[replay]：rp_shader_live_compile_take
@@ -293,6 +295,15 @@ static uint64_t present_impl(const tex_t *t, double period_s, const int crop[4])
                                       (double)pf[RP_PERF_WAIT_ALREADY_N] / f, (double)pf[RP_PERF_WAIT_FAKED_N] / f, (double)pf[RP_PERF_GPU_BUSY_NS] / 1e6 / f,
                                       (double)pf[RP_PERF_PASSES] / f, (double)pf[RP_PERF_PRESENT_NS] / 1e6 / f);
                 nvn_plat_log(NVN_PLAT_LOG_INFO, "present", b);
+                {   // 命令段固定成本（剖面 11-28：开段 / 交段约占回放线程 17%）：各种段每帧几个、开段与交段的墙钟、其中取池重置、时间戳查询池新建 / 复用
+                    uint64_t sc[8] = {0}; if (nvn_gpu_seg_cost_take) nvn_gpu_seg_cost_take(sc);
+                    char sb[512]; snprintf(sb, sizeof sb, "分时（命令段，每帧）：主段 %.1f、前置传输段 %.1f、中途交段 按笔数 %.1f / 超长通道 %.1f / 遮挡复位 %.1f、旁路段 %.2f、补点亮 %.2f；"
+                        "后端 开段 %.1f 次共 %.2f 毫秒（新建命令池 %.2f 个、取池加重置 %.2f 毫秒）、交段 %.1f 次共 %.2f 毫秒；时间戳查询池 新建 %.2f / 复用 %.2f 个",
+                        (double)pf[RP_PERF_SEG_MAIN] / f, (double)pf[RP_PERF_SEG_PRE] / f, (double)pf[RP_PERF_SEG_CUT_DRAWS] / f, (double)pf[RP_PERF_SEG_CUT_PASS] / f, (double)pf[RP_PERF_SEG_CUT_OCC] / f,
+                        (double)pf[RP_PERF_SEG_SIDE] / f, (double)pf[RP_PERF_SEG_LIGHT] / f,
+                        (double)sc[0] / f, (double)sc[1] / 1e6 / f, (double)sc[3] / f, (double)sc[2] / 1e6 / f, (double)sc[4] / f, (double)sc[5] / 1e6 / f, (double)sc[6] / f, (double)sc[7] / f);
+                    nvn_plat_log(NVN_PLAT_LOG_INFO, "present", sb);
+                }
                 {   // 上屏线程 CPU（见 rp_present_tc_note）：每样本 = 相邻两次上屏
                     uint64_t tc[4]; rp_present_tc_take(tc); const double tn = tc[2] ? (double)tc[2] : 1.0;
                     snprintf(b, sizeof b, "分时（上屏线程 CPU，每帧）：两次上屏之间墙钟 %.1f 毫秒、本线程 CPU %.1f 毫秒（占 %.0f%%）；同线程样本 %llu、跨线程样本 %llu（不计）",

@@ -530,6 +530,26 @@ int rp_buf_gpu_write_pending(uint64_t addr, uint64_t len) {
     pthread_mutex_unlock(&g_bmu);
     return hit;
 }
+int rp_buf_cpu_read_source(uint64_t addr, uint64_t len, const uint8_t **source) {
+    if (!len || len > UINT64_MAX - addr || !rp_pool_find(addr, len, NULL, NULL)) return -1;
+    // 整段必须在同一份后备里，不能把跨映射的读降成虚拟池字节而漏掉物理池的在途写。
+    if (__atomic_load_n(&aliases_live, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&g_bmu);
+        const size_t i = alias_lower_bound(addr);
+        if (i < alias_count && aliases[i].lo < addr + len) {
+            const struct buf_alias *alias = &aliases[i];
+            if (addr < alias->lo || len > alias->hi - addr) {
+                pthread_mutex_unlock(&g_bmu);
+                return -1;
+            }
+            addr = alias->phys + (addr - alias->lo);
+        }
+        pthread_mutex_unlock(&g_bmu);
+    }
+    const int pending = rp_buf_gpu_write_pending(addr, len);
+    if (!pending) *source = (const uint8_t *)(uintptr_t)addr;
+    return pending;
+}
 // 在途可以用多个登记的并集盖住一页，撤掉其中任一段就要重新检查。池首尾的半个宿主页也可能在途免同步。
 static void land_restale(struct shadow *s, int mi, uint64_t off, uint64_t len) {
     struct mirror *m = &s->m[mi];
