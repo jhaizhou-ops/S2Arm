@@ -116,6 +116,44 @@ class MacSettings(unittest.TestCase):
         s = community.mac_settings(c, PID)
         self.assertEqual((s["quality"]["value"], s["quality"].get("recommended")), ("Bilinear", None))  # 没走直连：MetalFX 逐款值不算
 
+    def test_bundle_layout_jobs_outside_engine(self):
+        """发布包里任务脚本在 Contents/Resources/Jobs/，引擎快照在 Resources/Engine/：模块按引擎目录取，不按任务脚本位置往上推"""
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
+        app = tmp / "S2Arm.app/Contents"
+        shutil.copytree(ROOT / "pack/jobs", app / "Resources/Jobs", ignore=shutil.ignore_patterns("__pycache__", "tests"))
+        eng = app / "Resources/Engine"
+        for rel in ("tools/game_defaults.py", "launchers/shared/game_settings.v1.json"):
+            (eng / rel).parent.mkdir(parents=True, exist_ok=True); shutil.copy(ROOT / rel, eng / rel)
+        shutil.copy(FIX, eng / "launchers/shared/game_defaults.v1.tsv")
+        code = f"""
+import sys; sys.path.insert(0, {str(app / "Resources/Jobs")!r})
+from pathlib import Path
+import community, layout
+sys.path.append({str(ROOT / "pack/jobs/tests")!r}); import jobcase
+assert Path(community.__file__).resolve().parent == Path({str(app / "Resources/Jobs")!r}).resolve()
+c = jobcase.fake_context(Path({str(tmp)!r}), engine=Path({str(eng)!r}))
+mac = layout.image_mac(c, {PID!r}); mac.mkdir(parents=True, exist_ok=True); (mac / "main.fixups.tsv").write_text("# BUILD_ID\\t2222222222222222\\n")
+(mac / "s2a_caps.tsv").write_text("direct\\t0\\n")
+s = community.mac_settings(c, {PID!r})
+print(s["docked"]["value"], s["docked"].get("recommended"))
+"""
+        r = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split(), ["handheld", "True"])   # 读到了本款推荐（旧写法在这里 FileNotFoundError，整页设置出不来）
+
+    def test_missing_module_keeps_the_page(self):
+        """引擎快照缺逐款缺省模块：只是没有「本款推荐」，设置页照常出来"""
+        sys.path.insert(0, str(ROOT / "pack/jobs")); sys.path.insert(0, str(ROOT / "pack/jobs/tests"))
+        import jobcase, community, layout
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
+        eng = tmp / "engine"
+        (eng / "launchers/shared").mkdir(parents=True); shutil.copy(ROOT / "launchers/shared/game_settings.v1.json", eng / "launchers/shared")
+        shutil.copy(FIX, eng / "launchers/shared/game_defaults.v1.tsv")
+        c = jobcase.fake_context(tmp, engine=eng)
+        mac = layout.image_mac(c, PID); mac.mkdir(parents=True, exist_ok=True); (mac / "main.fixups.tsv").write_text("# BUILD_ID\t2222222222222222\n")
+        s = community.mac_settings(c, PID)
+        self.assertNotIn("recommended", s["docked"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
