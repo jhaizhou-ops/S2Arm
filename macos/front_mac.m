@@ -24,6 +24,7 @@
 __attribute__((constructor)) static void cheats_register_host(void) { void (*f)(void) = (void (*)(void))dlsym(RTLD_DEFAULT, "s2a_cheats_host_enable"); if (f) f(); }
 #include "ns2_controller.h"
 #include "hid_pad.h"
+#include "rumble_session.h"
 #include "pad_activity.h"
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #include "ns2_relay.h"
@@ -670,7 +671,7 @@ static void sample_home_quit(GCExtendedGamepad *pad) {
 #define MAC_RUMBLE_BASE 0x534d000000000000ull
 static dispatch_queue_t g_rumble_q;
 static _Atomic uint64_t g_rumble_epoch;          // 0 = 没有能震的手柄 / 玩家关了震动
-static uint64_t g_rumble_counter;                // 主线程：换一次手柄加一
+static _Atomic uint64_t g_rumble_counter;           // 主线程换手柄与服务线程补建会话共用，原子递增
 static GCController *g_rumble_main;              // 主线程：当前手柄
 // 一只系统手柄的震动（只在 g_rumble_q 上碰）：GCDeviceHaptics 建一个 CHHapticEngine，连续事件循环播放、按游戏给的两侧振幅取大调强度，1 秒没新帧自动停；
 //   失败退避 / 判死同 ios/haptic_retry.h。P1 一份（g_rumble_main_rumbler，跟 rumble_select 换手柄）；P1 以外的系统手柄各一份（#520 E，s2a_pad_set_rumble_slot）
@@ -783,6 +784,7 @@ static void rumbler_play(S2ARumbler *r, s2a_pad_vibration pair[2]) {
     if (!r->device.haptics) {   // 一代任天堂手柄：macOS 不给 haptics，走 HID（#520 E：每位玩家的手柄都要能震）；HID 那边本来就分左右
         int mask = gen1_rumble_mask(r->device);
         if (mask) { s2a_joycon_rumble(mask, pair); return; }
+        if (s2a_mac_hid_pad_rumble(r->device.vendorName.UTF8String, pair)) return;
         rumbler_stop(r); return;
     }
     if (r->split < 0) {
@@ -828,7 +830,8 @@ static void rumble_select(GCController *device) {
     if (device == g_rumble_main) return;
     g_rumble_main = device;
     if (!g_rumble_q) g_rumble_q = dispatch_queue_create("dev.s2arm.mac-rumble", DISPATCH_QUEUE_SERIAL);
-    atomic_store(&g_rumble_epoch, (device.haptics || gen1_rumble_mask(device)) && !rumble_off() ? ++g_rumble_counter : 0);   // 一代任天堂手柄没 haptics 也能震（HID）
+    BOOL hidRumble = s2a_mac_hid_pad_has_pro(device.vendorName.UTF8String);
+    atomic_store(&g_rumble_epoch, (device.haptics || gen1_rumble_mask(device) || hidRumble) && !rumble_off() ? atomic_fetch_add_explicit(&g_rumble_counter, 1, memory_order_relaxed) + 1 : 0);   // 一代任天堂 / 第三方 Pro 没 haptics 也能走 HID
     dispatch_async(g_rumble_q, ^{ rumble_reset_on_queue(); S2ARumbler *r = [S2ARumbler new]; r->device = device; g_rumble_main_rumbler = r; });
 }
 // 会话号高 16 位是 MAC_RUMBLE_BASE 的走系统手柄（CoreHaptics），其余是 Switch 2 Pro（macos/ns2_controller.c，#277）的
@@ -847,7 +850,8 @@ static uint64_t rumble_session(void) {
     if (p1_gen1_rumble(NULL)) return GEN1_P1_SESSION;   // P1 是一代 Joy-Con 单元：走 HID 震动
     uint64_t ns2 = atomic_load(&g_slot0_ns2) ? s2a_mac_ns2_rumble_session() : 0;   // NS2 手柄是玩家 1 且在前台：震动交给它
     if (ns2) return ns2;
-    uint64_t epoch = atomic_load(&g_rumble_epoch);
+    int has_pro = g_rumble_main && s2a_mac_hid_pad_has_pro(g_rumble_main.vendorName.UTF8String);
+    uint64_t epoch = s2a_mac_rumble_claim_epoch(&g_rumble_epoch, &g_rumble_counter, has_pro, rumble_off());
     return epoch ? (MAC_RUMBLE_BASE | epoch) : 0;
 }
 // 没有能震的那一路也回非 0（只给体感的会话，motion_power.h）：改前回 0，服务层不建反馈对象、六轴从不打开，关了震动体感也跟着没了（#1671）

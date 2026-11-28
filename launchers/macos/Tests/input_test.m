@@ -1463,6 +1463,26 @@ int main(int argc, const char **argv) {
         expect(g1 == 16334 && g2 == 32767 && g.xmax == 1200 && g3 == 16383 && g4 == -22868 && g.xmin == 1003,
                "Pro stick without factory calibration: range starts at 1003 and grows to the farthest reading");
         expect(s2a_pro_player_lights(0) == 0x1 && s2a_pro_player_lights(1) == 0x3 && s2a_pro_player_lights(3) == 0xF, "Pro player lights: first n lit for player n");
+        // 第三方 Pro 无 CoreHaptics 时发标准 49 字节 HID 震动报告：中性值手写，非中性逐字节对照已单测的左右编码。
+        uint8_t rumble[49]; s2a_pad_vibration zero[2] = {{0}};
+        s2a_pro_rumble_packet(zero, 0x1f, rumble);
+        const uint8_t neutral[8] = {0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
+        expect(rumble[0] == 0x01 && rumble[1] == 0x0f && memcmp(rumble + 2, neutral, sizeof neutral) == 0, "Pro HID rumble packet: report id, sequence and neutral motors");
+        int tail_zero = 1; for (int i = 10; i < 49; i++) if (rumble[i]) tail_zero = 0;
+        expect(tail_zero, "Pro HID rumble packet has no subcommand payload");
+        s2a_pad_vibration active[2] = {{.3f, 160, .8f, 320}, {1, 160, .2f, 320}};
+        s2a_pro_rumble_packet(active, 0xa4, rumble); uint8_t encoded[4];
+        s2a_joycon1_rumble_encode(active[0], encoded); expect(rumble[1] == 0x04 && memcmp(rumble + 2, encoded, 4) == 0, "Pro HID rumble packet encodes left motor");
+        s2a_joycon1_rumble_encode(active[1], encoded); expect(memcmp(rumble + 6, encoded, 4) == 0, "Pro HID rumble packet encodes right motor");
+        // 真实调用点：震动开启时保留已有 epoch；S2A_RUMBLE=0 时 rumble_session 必须回 0。
+        char *savedRumble = getenv("S2A_RUMBLE") ? strdup(getenv("S2A_RUMBLE")) : NULL;
+        uint64_t savedEpoch = atomic_load(&g_rumble_epoch);
+        unsetenv("S2A_RUMBLE"); atomic_store(&g_rumble_epoch, 5);
+        expect(rumble_session() == (MAC_RUMBLE_BASE | 5), "Mac rumble session keeps an existing epoch while rumble is enabled");
+        setenv("S2A_RUMBLE", "0", 1);
+        expect(rumble_session() == 0, "Mac rumble session is off when S2A_RUMBLE=0");
+        atomic_store(&g_rumble_epoch, savedEpoch);
+        if (savedRumble) { setenv("S2A_RUMBLE", savedRumble, 1); free(savedRumble); } else unsetenv("S2A_RUMBLE");
         // Xbox 有线手柄 GIP 协议纯函数验证（#1406）
         expect(s2a_is_xbox_gip(0x045E, 0x02D1) == 1, "Xbox GIP: 0x045E:0x02D1 (Xbox One)");
         expect(s2a_is_xbox_gip(0x045E, 0x0B12) == 1, "Xbox GIP: 0x045E:0x0B12 (Xbox Series)");
