@@ -363,13 +363,20 @@ def community_patches(run, x, tid, target):
     sys.path.insert(0, str(R / 'pack/jobs'))
     import types
     import patches
+    ns = types.SimpleNamespace(private=str(run.out / 'community'), r={})
     try:
-        dirs = patches.index_dirs(types.SimpleNamespace(private=str(run.out / 'community'), r={}), {'id': tid}, str(x / 'exefs'), 'ios' if target == 'ios' else 'mac')
+        dirs = patches.index_dirs(ns, {'id': tid}, str(x / 'exefs'), 'ios' if target == 'ios' else 'mac')
     except Exception as e:   # 查库是附加：任何意外都不挡出包（同 patches.prepare）
         return run.say(f'【黄】社区补丁：取统一包出错，这次不带：{type(e).__name__}: {e}')
     if dirs:
         os.environ['S2A_CPATCH_DIRS'] = os.pathsep.join(dirs)
     run.say(f'社区补丁：统一包 {len(dirs)} 类索引' + (f'（{"、".join(Path(d).name for d in dirs)}）交改写阶段' if dirs else '，这一款没有对得上本包构建号的条目'))
+    # 管线种子（统一包 kind=pso）：index_dirs 只把它落到 <缓存>/games/<程序号>/pso/，要交 S2A_PSO_SOURCES_EXTRA 种子阶段才读得到
+    #   （同启动器 patches.prepare → seed_sources 的云端那份；11-28：本道原先没交，出包机道的包随包 pso_manifest.tsv 0 行，启动器出的玩家包约 4.7 万行）
+    seed = patches.pso_dir(ns, {'id': tid})
+    if seed:
+        os.environ['S2A_PSO_SOURCES_EXTRA'] = os.pathsep.join([p for p in os.environ.get('S2A_PSO_SOURCES_EXTRA', '').split(os.pathsep) if p] + [seed])
+    run.say(f'管线种子：统一包 {len(list(Path(seed).glob("*.tsv")))} 份交种子阶段' if seed else '管线种子：统一包这一款没有')
 
 
 def from_extract(run, d):   # --from-extract：已解好的目录 → (x, 程序号, 原件目录)；原件目录指向不存在的路径（同 Mac：追加内容阶段按「本机没原件」跳过）
