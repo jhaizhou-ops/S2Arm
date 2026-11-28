@@ -8256,7 +8256,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (rt_range_on()) dirty0=nvn_dirty_now();
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     MTL4RenderPassDescriptor *pd = pass_desc();
-    int any = 0;
+    int any = 0, lp_clear = 0;   // lp_clear: the load probe (DM_NVN_LOADPROBE) set a Clear below
     // 同一张贴图的后一个槽被清除：清的是那张贴图，交给更早的槽 j（它若自己也清，以它的为准）；影子随 j 的起点（rtdup_attach）
     memset(g_rtdup_why, 0, sizeof g_rtdup_why);
     for (int i = 1; i < R.rt.n && i < 8; i++) if (R.clear_c[i]) { int j = rt_dup_src(&R.rt, i); if (j >= 0 && !R.clear_c[j]) { R.clear_c[j] = 1; R.cc[j] = R.cc[i]; } }
@@ -8279,7 +8279,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         if (!R.clear_c[i] && (g_fd_dw || g_fd_di) && !cov) PD("Q %llu c%d load cannot be skipped why=%d", g_stat_pass + 1, i, g_fd_why);
         if (cov) {
             static int probe = -1; if (probe < 0) { probe = getenv("DM_NVN_LOADPROBE") ? atoi(getenv("DM_NVN_LOADPROBE")) : 0; if (probe) MLOG("DM_NVN_LOADPROBE: attachments whose load can be skipped are cleared to a sentinel color and read back to check"); }
-            if (probe) { pd.colorAttachments[i].loadAction = MTLLoadActionClear; int pm = probe == 1 && pf_is_float(pd.colorAttachments[i].texture.pixelFormat) ? 3 : probe;   // Float formats use a NaN sentinel by default: a fixed sentinel value can be hit by real output (it has been hit in practice)
+            if (probe) { pd.colorAttachments[i].loadAction = MTLLoadActionClear; lp_clear = 1; int pm = probe == 1 && pf_is_float(pd.colorAttachments[i].texture.pixelFormat) ? 3 : probe;   // Float formats use a NaN sentinel by default: a fixed sentinel value can be hit by real output (it has been hit in practice)
                 pd.colorAttachments[i].clearColor = pm == 3 ? MTLClearColorMake(NAN, NAN, NAN, NAN) : probe == 2 ? MTLClearColorMake(0.777, 0.222, 0.555, 0.888) : MTLClearColorMake(0.123, 0.456, 0.789, 0.321);
                 if (!g_lp) g_lp = [NSMutableArray array];
                 [g_lp addObject:@[pd.colorAttachments[i].texture, @(pd.colorAttachments[i].level), @(pd.colorAttachments[i].slice), @(g_stat_pass + 1), @(i), @(R.rt.color[i]->serial), @(pm)]]; }
@@ -8320,8 +8320,13 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
             if (R.clear_d && (!pd.stencilAttachment.texture || R.clear_s)) rt_fresh_mark(R.rt.depth);
         }
     }
-    if (!g_rp_layered) layer_clears(pd);   // a clear of a target view with several layers, in a pass that is not layered: every layer, in a pass of its own (see layer_clears)
-    size_clears(pd);   // a clear of an attachment larger than the pass: the whole attachment, in a pass of its own (see size_clears)
+    // Both look only at attachments whose load action is Clear, which the code above sets only from R.clear_c / R.clear_d / R.clear_s (and the load probe, lp_clear): with none
+    //   of them they have nothing to do, so they are not entered (#2303: walking every attachment's descriptor properties twice per pass was ~3% of the submit thread)
+    int any_clear = R.clear_d || R.clear_s || lp_clear; for (int i = 0; i < R.rt.n && i < 8 && !any_clear; i++) any_clear = R.clear_c[i];
+    if (any_clear) {
+        if (!g_rp_layered) layer_clears(pd);   // a clear of a target view with several layers, in a pass that is not layered: every layer, in a pass of its own (see layer_clears)
+        size_clears(pd);   // a clear of an attachment larger than the pass: the whole attachment, in a pass of its own (see size_clears)
+    }
     // The attachments this pass writes (gpw_mark: their guest bytes go stale); the attached level, the attached layer (a layered pass: every layer from it)
     for (int i = 0; i < R.rt.n && i < 8; i++) if (R.rt.color[i] && pd.colorAttachments[i].texture) gpw_mark_view(R.rt.color[i], &R.rt.cview[i], R.rt.has_cview[i], g_rp_layered);
     if (R.rt.depth && (pd.depthAttachment.texture || pd.stencilAttachment.texture)) gpw_mark_view(R.rt.depth, &R.rt.dview, R.rt.has_dview, g_rp_layered);
@@ -17932,7 +17937,11 @@ static int dsnap_hits_tex(const tex_t *t) {
         if (a < b + t->L.size && b < a + g_dsnap.size) return 1;
     }
     id h = tex_get(t->serial);
-    if (h && [h conformsToProtocol:@protocol(MTLTexture)]) {
+    // Conformance is a property of the class: asked once per class (#2303: conformsToProtocol walking the protocol lists was nearly all of this check, ~1% of the submit thread).
+    //   Submit thread only (its callers are the replay and fb_prepare), so the cached pair is not shared
+    static __unsafe_unretained Class last; static int last_tex;
+    if (h && object_getClass(h) != last) { last = object_getClass(h); last_tex = [h conformsToProtocol:@protocol(MTLTexture)]; }
+    if (h && last_tex) {
         id<MTLTexture> mt = (id<MTLTexture>)h;
         if ((mt.parentTexture ? mt.parentTexture : mt) == g_dsnap.base) return 1;
     }
