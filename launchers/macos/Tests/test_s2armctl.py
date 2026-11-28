@@ -394,6 +394,36 @@ def game(identifier, name, base_bytes, buildable=True, ready=False, missing=()):
     return {"id": identifier, "name": name, "baseBytes": base_bytes, "buildable": buildable, "ready": ready, "missing": list(missing)}
 
 
+class SharedAppDeviceTests(unittest.TestCase):
+    """#2333：共享 App 模式（这款装进通用 S2Arm）出包任务不记 ipaPath；device / push-pack 原先一律报「还没出 iPhone 包」"""
+    GID = "0100AD80208A8000"
+    def st(self, phones):
+        ipa = {"id": "t", "operation": "ipa", "state": "completed", "gameId": self.GID, "ipaPath": None, "ended": 5}
+        return {"games": [{"id": self.GID, "iphoneReady": True}], "tasks": [ipa], "phoneConsole": phones}
+    def run_cmd(self, fn, state):
+        out = io.StringIO()
+        with mock.patch.object(ctl, "call", return_value=state), contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            fn(self.GID)
+        return e.exception.code, out.getvalue()
+    def test_device_reads_the_phone_console(self):
+        code, out = self.run_cmd(ctl.device, self.st([{"device": "甲", "installed": {"bundleId": "io.s2arm.games.T"}, "needsChoice": False,
+                                                       "games": [{"gameId": self.GID, "state": "latest", "reasons": []}]}]))
+        self.assertEqual(code, 0)
+        self.assertIn("iPhone「甲」：已装 io.s2arm.games.T；这款游戏：已是最新", out)
+        self.assertNotIn("还没出", out)
+    def test_device_without_phone_says_package_is_ready(self):
+        code, out = self.run_cmd(ctl.device, self.st([]))
+        self.assertEqual(code, 2)
+        self.assertIn("iPhone 版已出好", out)
+    def test_push_pack_points_to_install(self):
+        code, _ = self.run_cmd(ctl.push_pack, self.st([]))
+        self.assertIn("共享 App 模式", str(code)); self.assertIn("s2armctl install " + self.GID, str(code))
+    def test_not_built_is_still_reported(self):
+        st = self.st([]); st["games"][0]["iphoneReady"] = False
+        code, _ = self.run_cmd(ctl.device, st)
+        self.assertIn("还没出 iPhone 包", str(code))
+
+
 class NextStepTests(unittest.TestCase):
     """AI 代操作入口 next（10-26）：期望按规则手写——每种状态推出的 step / who / 命令"""
 

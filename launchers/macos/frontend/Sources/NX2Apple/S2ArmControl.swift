@@ -129,7 +129,11 @@ import S2ArmAppleAdapter
             }
         case ("POST", "/installCheck"):
             guard let g = game() else { return .bad("没有这个 gameId") }
-            model.checkInstall(g.id, device: str("device")); return .ok()   // device：查哪一台（s2armctl install-check --device），不给按界面上选中的那台
+            // device：查哪一台（s2armctl install-check --device），不给按界面上选中的那台；界面还没查过设备（控制口 target probe 查到的在 probe 里，
+            //   界面的设备列表另算，#2333 玩家实测连着手机仍报「没说要装到哪台设备」）时同界面「没选过就是显示的那台」一个规则：有线的优先，否则第一台。只读清单，/install 照旧要明说
+            let probed = S2ArmLauncherModel.pickDevice(probe["connected"] as? [[String: Any]] ?? [], chosen: nil)
+            let fallback = model.installDeviceID == nil ? ((probed?["udid"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? probed?["id"] as? String) : nil
+            model.checkInstall(g.id, device: str("device") ?? fallback); return .ok()
         case ("POST", "/install"):
             guard let g = game() else { return .bad("没有这个 gameId") }
             if let b = phoneBusy() { return b }
@@ -422,10 +426,7 @@ import S2ArmAppleAdapter
             "checkingEnvironment": m.checking || (m.checks.isEmpty && m.environmentError == nil),
             "checks": m.checks.map { ["name": $0.name, "ok": $0.ok, "message": $0.message, "group": $0.group, "action": $0.action ?? NSNull()] as [String: Any] },
             "fontsDir": NSNull(), "library": m.provider.client.environment.library,
-            "games": m.games.map { g -> [String: Any] in
-                ["id": g.id, "name": g.name, "customName": g.customName, "customCover": g.customCover, "cover": g.cover ?? "", "display": g.display, "compatibility": g.compatibility, "ready": g.playable, "iphoneRestorable": g.iphoneRestorable,
-                 "needsPreparation": g.needsPreparation, "needsKeys": g.needsKeys, "buildable": g.buildable, "missing": g.missing,
-                 "baseBytes": g.packages.filter { $0.type == "base" }.reduce(Int64(0)) { $0 + $1.size }, "bytes": g.totalBytes] },
+            "games": m.games.map(Self.gameJSON),
             "session": session, "busy": m.busy, "libraryLoading": m.loading, "phoneSession": phoneSession, "mainBusy": m.mainBusy, "phoneBusy": m.phoneBusy,
             "playSession": playSession, "playBusy": m.playBusy,
             "phoneQueue": m.phoneQueue.map { $0.gameID ?? "" },
@@ -461,6 +462,13 @@ import S2ArmAppleAdapter
 
     /// GET /state 的 phoneConsole：[{device, installed: {bundleId, by: s2arm | other | null}, actions: [...], needsChoice, candidates: [{bundleId, team, byThisLauncher, identityTeam}]}]，
     ///   actions 与界面同一个来源 consoleActions
+    /// /state 里的一款游戏。iphoneReady：iPhone 版已出好（s2armctl next / device 认它；共享 App 模式的 ipa 任务不记 ipaPath，#2333 缺这个字段时一律当「还没出包」）
+    static func gameJSON(_ g: GameSummary) -> [String: Any] {
+        ["id": g.id, "name": g.name, "customName": g.customName, "customCover": g.customCover, "cover": g.cover ?? "", "display": g.display, "compatibility": g.compatibility, "ready": g.playable, "iphoneReady": g.iphoneReady, "iphoneRestorable": g.iphoneRestorable,
+         "needsPreparation": g.needsPreparation, "needsKeys": g.needsKeys, "buildable": g.buildable, "missing": g.missing,
+         "baseBytes": g.packages.filter { $0.type == "base" }.reduce(Int64(0)) { $0 + $1.size }, "bytes": g.totalBytes]
+    }
+
     static func phoneConsole(_ o: PhoneOverview, model m: S2ArmLauncherModel) -> [[String: Any]] {
         o.phones.map { p in
             let by: Any = p.installedBy.map { $0 == .launcher ? "s2arm" : "other" } ?? NSNull()
