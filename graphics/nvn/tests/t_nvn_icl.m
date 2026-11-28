@@ -74,6 +74,6 @@ int main(void) {
         for (int k = 0; k < 3; k++) { seen7 |= ids[k] == 7; seen8 |= ids[k] == 8; seen10 |= ids[k] == 10; }
         CK(st[0] == 3 && seen7 && seen8 && seen10, "计数：夹了 A / B / D 三笔（实得 %u），记下的任务号 = {7, 8, 10}（实得 %u %u %u）；C / E / F / G 不计", st[0], ids[0], ids[1], ids[2]);
     }
-    printf(bad ? "🔴 t_nvn_icl：%d 项不符\n" : "🟢 t_nvn_icl：全过\n", bad);
+    if (bad) printf("✗ t_nvn_icl：%d 项不符\n", bad); else printf("✓ t_nvn_icl：8 项全过（夹 A / B / D、原样 C / G、计数 0 整条拷 0 的 F、反证 E、计数与任务号）\n");
     return bad ? 1 : 0;
 }
