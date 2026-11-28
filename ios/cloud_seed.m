@@ -9,6 +9,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <zlib.h>
 #include "cloud_seed.h"
+#include <dlfcn.h>
 
 #ifndef S2A_UNIT_TEST
 #include "../runtime/src/native.h"
@@ -99,6 +100,8 @@ void s2a_cloud_seed_fetch(const char *docs, const char *gid, int force) {
         if (s2a_cloud_seed_build(data, gs.UTF8String, &tsv, &n)) { LOG("【黄】云端管线种子：%s 的包解不开，不收", gs.UTF8String); return; }
         BOOL ok = write_atomic(path, tsv);
         LOG("云端管线种子：%s 收 %d 条（%lu 字节）%s %s", gs.UTF8String, n, (unsigned long)tsv.length, ok ? "→" : "【红】写不进", path.UTF8String);
+        // 本局已在跑时种子才到（首装：起局后十几秒）：交给直连层另起一批后台预热（graphics/nvn nvn_mtl.m s2a_warm_cloud_arrived；没链直连层 / 本局没起 = 不做，下次起局清单自然带上）
+        if (ok) { void (*arrived)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "s2a_warm_cloud_arrived"); if (arrived) arrived(path.fileSystemRepresentation); }
     }] resume];
     [s finishTasksAndInvalidate];
 }
