@@ -19,10 +19,6 @@
 #include <stdio.h>
 #include <string.h>
 
-// 带非一致分代镜像的后端可提供原子粒度，缺该接口时按字节保护。
-uint64_t nvn_gpu_mirror_version_atom(nvn_gpu_buf b) __attribute__((weak));
-// 弱链接[replay]：nvn_gpu_mirror_version_atom
-
 // off/len 是镜像持有的完整区间；copy_len 是从 off 起需要回写到客体的字节数。只在同次提交、同一镜像内合并。
 struct gpu_write { uint64_t off, len, id; uint8_t mi, landing; uint64_t sub, copy_len; };
 // 一份镜像。synced[i]：第 i 页上次同步取的脏页代号，0 = 从没同步；sub[i]：那次同步所在的提交序号；
@@ -637,17 +633,7 @@ static int mirror_sync_class(const struct shadow *s, const struct mirror *m, uin
         if (lo >= hi || hi > s->size) return RP_PERF_MIRROR_FB_UNKNOWN;
         // 完成线程登记区间后才释放 g_bmu、开始拷客体内存。同步也持这把锁。
         if (landing_hit(s, lo, hi)) return RP_PERF_MIRROR_FB_LAND;
-        if (s->ngw) {
-            uint64_t a = lo, b = hi;
-            const uint64_t atom = nvn_gpu_mirror_version_atom ? nvn_gpu_mirror_version_atom(m->buf) : 0;
-            if (atom) {
-                // 分代非一致镜像的在途保护按完整原子算，并裁到池尾。
-                a &= ~(atom - 1);
-                const uint64_t pad = (0 - b) & (atom - 1);
-                b += pad < s->size - b ? pad : s->size - b;
-            }
-            if (gpu_write_hit(s, a, b)) return RP_PERF_MIRROR_FB_GW;
-        }
+        if (gpu_write_hit(s, lo, hi)) return RP_PERF_MIRROR_FB_GW;
         const unsigned first = exact_first_range(x, lo, 0);
         if (first < x->n && x->ranges[first].lo < hi) return RP_PERF_MIRROR_OVERLAP;
         if (x->incomplete || exact_coarse_hit(x, lo, hi)) return RP_PERF_MIRROR_FB_OVERFLOW;

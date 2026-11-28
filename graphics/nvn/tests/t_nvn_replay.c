@@ -48,7 +48,6 @@ static int g_flag_binst_hoist = -1;   // 用例设：开关 nvk_binst_hoist（-1
 static int g_flag_clear_only_attachments;
 static int g_flag_mirror_disjoint = -1;
 static int g_flag_mirror_exact_guard;
-static uint64_t g_test_version_atom;
 static int g_flag_state_keep = 1, g_flag_rt_cont = 1, g_flag_clear_park = 1, g_flag_pass_area = 1;   // 用例设：开关 nvk_state_keep / nvk_rt_cont / nvk_clear_park / nvk_pass_area 的值（缺省同产品：都开）
 static int g_flag_pool_memo = 1;   // 用例设：开关 nvk_pool_memo 的值（缺省同产品：开）；备忘每 4096 次查找才重读一次，换值后要用 pm_flag() 推一下
 static int g_flag_land_merge = 1;  // 用例设：开关 nvk_land_merge 的值（缺省同产品：开）；每 256 次登记才重读一次，换值后要用 rp_test_gw_merge_reload() 推一下
@@ -338,7 +337,6 @@ int nvn_gpu_view_access_span(nvn_gpu_view v, nvn_gpu_access_span *out) {
 }
 static uint8_t *g_buf_cpu_fake;   // 用例要「GPU 写过镜像」时把它指到一块等大的内存；NULL = 这种缓冲 CPU 读不到
 uint8_t *nvn_gpu_buf_cpu(nvn_gpu_buf b) { return b && b->cpu ? b->cpu : g_buf_cpu_fake; }
-uint64_t nvn_gpu_mirror_version_atom(nvn_gpu_buf b) { return b && b->cpu ? g_test_version_atom : 0; }
 static const void *g_rel_log[64]; static int g_rel_n;   // 放过的缓冲指针（只比对、不解引用）：「放过的句柄又被录制」用例查它（用例开头清零，指针复用只在用例内比）
 static int rel_log_has(const void *p) { for (int i = 0; i < g_rel_n; i++) if (g_rel_log[i] == p) return 1; return 0; }
 void nvn_gpu_buf_release(nvn_gpu_buf b, nvn_gpu_retired_fn retired, void *user) { (void)retired; (void)user; g_buf_releases++; if (g_rel_n < 64) g_rel_log[g_rel_n++] = b; free(b->cpu); free(b); }
@@ -6992,7 +6990,7 @@ static void mirror_draw_at(stream *s, uint64_t addr) {
 static void t_mirror_disjoint(void) {
     enum { DEFAULT_OFF, GAP, OVERLAP, PENDING, UNKNOWN, ALIAS, OVERFLOW, REMAP, PRE_OOM,
            EXACT_GROWN_GAP, EXACT_GROWN_HIT, EXACT_PENDING_GAP, EXACT_PENDING_HIT,
-           EXACT_COARSE_GAP, EXACT_COARSE_HIT, EXACT_ATOM, EXACT_UNKNOWN, EXACT_PRE_OOM,
+           EXACT_COARSE_GAP, EXACT_COARSE_HIT, EXACT_UNKNOWN, EXACT_PRE_OOM,
 #ifdef S2A_GPU_LAND_TEST
            EXACT_LANDING_GAP, EXACT_LANDING_HIT,
 #endif
@@ -7000,7 +6998,7 @@ static void t_mirror_disjoint(void) {
     static const char *const names[NCASE] = {
         "default", "gap", "overlap", "pending", "unknown", "alias", "overflow", "remap", "pre-oom",
         "exact-grown-gap", "exact-grown-hit", "exact-pending-gap", "exact-pending-hit",
-        "exact-coarse-gap", "exact-coarse-hit", "exact-atom-hit", "exact-unknown", "exact-pre-oom",
+        "exact-coarse-gap", "exact-coarse-hit", "exact-unknown", "exact-pre-oom",
 #ifdef S2A_GPU_LAND_TEST
         "exact-landing-gap", "exact-landing-hit",
 #endif
@@ -7016,15 +7014,9 @@ static void t_mirror_disjoint(void) {
         g_block_mem = (uint8_t *)(((uintptr_t)g_block_arena + BLOCK_TEST_ALIGN - 1) & ~(uintptr_t)(BLOCK_TEST_ALIGN - 1));
         memset(g_block_mem, 0x11, BLOCK_TEST_PAGES * PG); memset(g_block_gen, 0, sizeof g_block_gen);
         g_dirty_now = 100; ++g_dirty_map; g_block_unreliable = 0;
-        // A host page boundary can fall inside a mirror's cache atom because
-        // the mirror starts at the pool base, which need not be page aligned.
-        const uint64_t skew = kind == EXACT_ATOM ? 16 : 0;
-        void *const pool = g_block_mem + skew;
-        const uint64_t base = (uintptr_t)pool;
-        const uint64_t target = (uintptr_t)g_block_mem + 3 * PG;
-        const uint64_t target_off = target - base;
-        nvn_be_pool_add(pool, BLOCK_TEST_PAGES * PG - skew);
-        g_test_version_atom = kind == EXACT_ATOM ? 64 : 0;
+        const uint64_t base = (uintptr_t)g_block_mem;
+        const uint64_t target = base + 3 * PG;
+        nvn_be_pool_add(g_block_mem, BLOCK_TEST_PAGES * PG);
         // The small pool overlaps the upload, but cannot satisfy the draw's entire binding.
         if (kind == ALIAS) nvn_be_pool_add(g_block_mem + 3 * PG + 160, 16);
         int landing = 0, landing_overlap = 0;
@@ -7039,7 +7031,7 @@ static void t_mirror_disjoint(void) {
         nvn_gpu_buf b = NULL;
         nvn_be_sub_begin(); CHECK(rp_buf_resolve(&g_fake_cmd, base, warm_bytes, &b, NULL) && b && b->cpu);
         stream warm = {0}; q_env(&warm); q_draw(&warm); end(&warm); nvn_be_exec(warm.b);
-        if (kind == EXACT_PENDING_GAP || kind == EXACT_PENDING_HIT || kind == EXACT_ATOM || landing) {
+        if (kind == EXACT_PENDING_GAP || kind == EXACT_PENDING_HIT || landing) {
             // Keep an earlier submission's write outstanding (or land it via
             // the paused callback below). The current range union cannot see it.
             // Test adjacency and an overlap outside the new draw's binding.
@@ -7109,8 +7101,8 @@ static void t_mirror_disjoint(void) {
         const int hoisted = kind == GAP || kind == EXACT_GROWN_GAP || kind == EXACT_PENDING_GAP ||
                             kind == EXACT_COARSE_GAP || (landing && !landing_overlap);
         const int known_overlap = kind == OVERLAP || kind == EXACT_GROWN_HIT;
-        const int gw_fb = kind == EXACT_PENDING_HIT || kind == EXACT_ATOM;
-        CHECK(g_nbw == 1 && g_bw[0].off == target_off && g_bw[0].len == (pending_overlap ? PG - 16 : PG));
+        const int gw_fb = kind == EXACT_PENDING_HIT;
+        CHECK(g_nbw == 1 && g_bw[0].off == 3 * PG && g_bw[0].len == (pending_overlap ? PG - 16 : PG));
         CHECK(perf[RP_PERF_MIRROR_HOIST] == (uint64_t)hoisted);
         CHECK(perf[RP_PERF_MIRROR_OVERLAP] == (uint64_t)known_overlap);
         CHECK(perf[RP_PERF_MIRROR_FALLBACK] ==
@@ -7182,10 +7174,10 @@ static void t_mirror_disjoint(void) {
             nvn_be_sub_commit(); fake_complete(NVN_GPU_DONE_OK);
         }
         if (kind == ALIAS) nvn_be_pool_del(g_block_mem + 3 * PG + 160);
-        nvn_be_pool_del(pool); g_block_mem = NULL; pass_fresh();
+        nvn_be_pool_del(g_block_mem); g_block_mem = NULL; pass_fresh();
     }
     g_buf_cpu_auto = 0; g_log_fake_on = 0; g_flag_buf_dirtylog = g_dirtylog_dflt; g_flag_mirror_disjoint = -1;
-    g_flag_mirror_exact_guard = 0; g_test_version_atom = 0;
+    g_flag_mirror_exact_guard = 0;
     rp_split_draws = old_split;
 }
 
